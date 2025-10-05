@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 from platoon.utils.llm_client import LLMClient
-from importlib import import_module
-from typing import Any
-from areal.api.cli_args import InferenceEngineConfig
 from areal.experimental.openai import ArealOpenAI
 from areal.utils.hf_utils import load_hf_tokenizer
 from areal.utils.data import concat_padded_tensors
@@ -16,19 +13,9 @@ from typing import Any
 from platoon.episode.context import current_trajectory
 
 areal_llm_clients: ContextVar[dict[str, ArealLLMClient]] = ContextVar("areal_llm_clients", default={})
-# Global client registry to share the client with forked workers.
-GLOBAL_AREAL_LLM_CLIENT: ArealLLMClient | None = None
-
-def set_global_areal_llm_client(client: "ArealLLMClient") -> None:
-    global GLOBAL_AREAL_LLM_CLIENT
-    GLOBAL_AREAL_LLM_CLIENT = client
-
-def get_global_areal_llm_client() -> "ArealLLMClient | None":
-    return GLOBAL_AREAL_LLM_CLIENT
 
 class ArealLLMClient(LLMClient): #TODO: Decide if we want to add this to create_llm_client or not.
-    def __init__(self, model: str, engine: object):
-        self.model = model
+    def __init__(self, model: str, engine: str):
         self.engine = engine
         self.tokenizer = load_hf_tokenizer(model)
         self.async_client = ArealOpenAI(engine=engine, tokenizer=self.tokenizer)
@@ -53,33 +40,6 @@ class ArealLLMClient(LLMClient): #TODO: Decide if we want to add this to create_
 
     def fork(self) -> ArealLLMClient:
         return ArealLLMClient(model=self.model, engine=self.engine)
-
-
-def import_from_string(class_path: str) -> type:
-    module_path, _, class_name = class_path.partition(":")
-    if not class_name:
-        # allow dotted style: package.module.Class
-        module_path, _, class_name = module_path.rpartition(".")
-    module = import_module(module_path)
-    return getattr(module, class_name)
-
-
-def build_areal_engine_from_spec(class_path: str, config: dict[str, Any] | InferenceEngineConfig, initialize_kwargs: dict[str, Any] | None = None) -> object:
-    EngineClass = import_from_string(class_path)
-    # Convert dict config to the expected dataclass for the engine
-    if isinstance(config, dict):
-        cfg_obj = InferenceEngineConfig(**config)
-    else:
-        cfg_obj = config
-    engine = EngineClass(cfg_obj)
-    if hasattr(engine, "initialize"):
-        if not initialize_kwargs:
-            engine.initialize()
-        else:
-            # drop None values to avoid unexpected signature issues
-            init_kwargs = {k: v for k, v in initialize_kwargs.items() if v is not None}
-            engine.initialize(**init_kwargs)
-    return engine
 
 
 class ArealEventSink(TrajectoryEventHandler):

@@ -16,14 +16,9 @@ from platoon.episode.loop import run_episode
 from platoon.episode.context import current_trajectory_collection
 from platoon.episode.trajectory import TrajectoryCollection
 from platoon.utils.llm_client import LLMClient
-from platoon.generators.types import RolloutGeneratorConfig, LLMClientSpec
+from platoon.generators.types import RolloutGeneratorConfig
 from platoon.visualization.event_sinks import JsonlFileSink
-from platoon.train.areal_integration import (
-    ArealEventSink,
-    ArealLLMClient,
-    get_global_areal_llm_client,
-    build_areal_engine_from_spec,
-)
+from platoon.train.areal_integration import ArealEventSink, ArealLLMClient
 
 def run_single_rollout_process(args: tuple[str, dict]) -> dict:
     task_id, config_dict = args
@@ -43,32 +38,8 @@ def run_single_rollout_process(args: tuple[str, dict]) -> dict:
             executor = AppWorldCodeExecutor(task, local_mode=True)
             env = AppWorldEnv(task, code_executor=executor)
             
-            llm_client = None
-            # Prefer building from spec to avoid passing non-picklable clients across processes
-            if hasattr(config, 'llm_client_spec') and config.llm_client_spec is not None:
-                spec: LLMClientSpec = config.llm_client_spec
-                if spec.kind == "areal":
-                    # Prefer using global inherited client when present; otherwise spawn-safe build
-                    global_client = get_global_areal_llm_client()
-                    if global_client is not None:
-                        llm_client = global_client
-                    elif getattr(spec, "areal_engine_spec", None) is not None:
-                        engine_spec = spec.areal_engine_spec
-                        engine = build_areal_engine_from_spec(
-                            engine_spec.class_path,
-                            engine_spec.config,
-                            engine_spec.initialize_kwargs,
-                        )
-                        llm_client = ArealLLMClient(model=spec.model_name, engine=engine)
-                    else:
-                        if spec.engine is None:
-                            raise ValueError("Provide areal_engine_spec for spawn or an engine string for fork")
-                        llm_client = ArealLLMClient(model=spec.model_name, engine=spec.engine)
-                else:
-                    llm_client = LLMClient(model=spec.model_name, base_url=spec.base_url)
-            elif hasattr(config, 'llm_client') and config.llm_client is not None:
-                # Fallback for legacy path when a picklable client happens to be provided
-                llm_client = config.llm_client
+            if hasattr(config, 'llm_client') and config.llm_client is not None: # TODO: Consider a cleaner way to pass training args.
+                llm_client = config.llm_client  
             else:
                 llm_client = LLMClient(model=config.model_name, base_url=config.model_endpoint)
             
@@ -147,28 +118,7 @@ def run_single_recursive_rollout_process(args: tuple[str, dict]) -> dict:
             executor = AppWorldRecursiveCodeExecutor(task, local_mode=True)
             env = AppWorldEnv(task, code_executor=executor)
 
-            llm_client = None
-            if hasattr(config, 'llm_client_spec') and config.llm_client_spec is not None:
-                spec: LLMClientSpec = config.llm_client_spec
-                if spec.kind == "areal":
-                    global_client = get_global_areal_llm_client()
-                    if global_client is not None:
-                        llm_client = global_client
-                    elif getattr(spec, "areal_engine_spec", None) is not None:
-                        engine_spec = spec.areal_engine_spec
-                        engine = build_areal_engine_from_spec(
-                            engine_spec.class_path,
-                            engine_spec.config,
-                            engine_spec.initialize_kwargs,
-                        )
-                        llm_client = ArealLLMClient(model=spec.model_name, engine=engine)
-                    else:
-                        if spec.engine is None:
-                            raise ValueError("Provide areal_engine_spec for spawn or an engine string for fork")
-                        llm_client = ArealLLMClient(model=spec.model_name, engine=spec.engine)
-                else:
-                    llm_client = LLMClient(model=spec.model_name, base_url=spec.base_url)
-            elif hasattr(config, 'llm_client') and config.llm_client is not None:
+            if hasattr(config, 'llm_client') and config.llm_client is not None: # TODO: Consider a cleaner way to pass training args.
                 llm_client = config.llm_client
             else:
                 llm_client = LLMClient(model=config.model_name, base_url=config.model_endpoint)
