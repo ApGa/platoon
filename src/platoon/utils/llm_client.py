@@ -131,6 +131,7 @@ class LLMClient:
                     message["content"] = [{"type": "text", "text": message["content"]}]
             messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
+        print("LLMClient async_chat_completion")
         try:
             response: ChatCompletion = await self.async_client.chat.completions.create(
                 model=self.model,
@@ -141,11 +142,13 @@ class LLMClient:
             )
 
             if not response.choices:
+                print("No response choices received from OpenAI API")
                 raise Exception("No response choices received from OpenAI API")
 
             return response
 
         except Exception as e:
+            print(f"LLMClient async_chat_completion failed: {str(e)}")
             raise Exception(f"OpenAI API call failed: {str(e)}")
 
     def simple_completion(

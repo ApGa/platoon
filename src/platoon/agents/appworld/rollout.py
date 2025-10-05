@@ -136,6 +136,7 @@ def run_single_recursive_rollout_process(args: tuple[str, dict]) -> dict:
             )
 
             if isinstance(llm_client, ArealLLMClient):
+                print("Registering ArealEventSink for recursive rollout")
                 traj_collection.register_event_handlers(ArealEventSink())
 
             if config.verbose:

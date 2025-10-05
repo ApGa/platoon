@@ -20,7 +20,7 @@ class AppWorldArealWorkflow:
         #     pass
     
     async def arun_episode(self, engine, data):
-        client = ArealLLMClient(model=self.config.model_name, engine=engine)
+        client = ArealLLMClient(model=self.config['model_name'], engine=engine)
         
         loop = asyncio.get_event_loop()
         executor = ProcessPoolExecutor(max_workers=1)
@@ -35,7 +35,7 @@ class AppWorldArealWorkflow:
         
         areal_completion_data_list = []
         for trajectory in results['trajectories'].values():
-            areal_completion_data_list.append(trajectory.misc['areal_completion_data'])
+            areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
             
         return concat_padded_tensors(areal_completion_data_list)
     
@@ -58,6 +58,9 @@ class AppWorldArealRecursiveWorkflow(AppWorldArealWorkflow):
         
         areal_completion_data_list = []
         for trajectory in results['trajectories'].values():
-            areal_completion_data_list.append(trajectory.misc['areal_completion_data'])
-        
+            if 'areal_completion_data' in trajectory['misc']:
+                areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
+                print(f"Areal completion data found for trajectory {trajectory['id']}")
+            else:
+                print(f"No areal_completion_data found for trajectory {trajectory['id']}")
         return concat_padded_tensors(areal_completion_data_list)

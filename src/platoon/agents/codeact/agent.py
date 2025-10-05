@@ -44,7 +44,6 @@ class CodeActAgent:
         self.llm_client = llm_client
         self.stuck_in_loop_threshold = stuck_in_loop_threshold
         self.stuck_in_loop_window = stuck_in_loop_window
-        print("Reached agent init")
     
     def _stuck_in_loop(self, obs: CodeActObservation) -> bool:
         if len(obs.history) < self.stuck_in_loop_threshold:
@@ -85,9 +84,7 @@ class CodeActAgent:
             return self._stuck_in_loop_action()
         
         prompt = self.prompt_builder.build_messages(obs)
-        print("Reached agent before LLM call")
         response = await self.llm_client.async_chat_completion(prompt, stop=["</python>"])
-        print("Reached agent after LLM call")
         response_text = response.choices[0].message.content
         # NOTE: We only do this conditionally, because with Areal, stop words are not supported.
         # And so we might already have the stop word in the response.

@@ -108,7 +108,8 @@ class TrajectoryCollection:
         for handler in self.event_handlers:
             try:
                 handler.on_trajectory_step_added(self.trajectories[trajectory_id], step)
-            except Exception:
+            except Exception as e:
+                print(f"Error in on_trajectory_step_added for trajectory {trajectory_id}: {str(e)}")
                 pass
 
     def set_trajectory_task(self, trajectory_id: str, task: Task | None) -> None:
@@ -117,7 +118,8 @@ class TrajectoryCollection:
         for handler in self.event_handlers:
             try:
                 handler.on_trajectory_task_set(trajectory, task)
-            except Exception:
+            except Exception as e:
+                print(f"Error in on_trajectory_task_set for trajectory {trajectory_id}: {str(e)}")
                 pass
 
     def finish_trajectory(
@@ -130,8 +132,9 @@ class TrajectoryCollection:
         for handler in self.event_handlers:
             try:
                 handler.on_trajectory_finished(trajectory)
-            except Exception:
+            except Exception as e:
                 # Best-effort: do not let handlers break rollout
+                print(f"Error in on_trajectory_finished for trajectory {trajectory_id}: {str(e)}")
                 pass
 
     def to_dict(self) -> dict[str, Any]:
