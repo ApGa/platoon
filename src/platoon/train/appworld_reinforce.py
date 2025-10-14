@@ -1,19 +1,21 @@
 import os
 import sys
 from copy import deepcopy
+from typing import Any, Dict
 
+import torch
 import torch.distributed as dist
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from areal.api.alloc_mode import AllocationMode
 from areal.api.cli_args import GRPOConfig, load_expr_config
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
-from areal.dataset import get_custom_dataset
 from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.sglang_remote import RemoteSGLangEngine
 from areal.platforms import current_platform
 from areal.utils import seeding, stats_tracker
 from areal.utils.data import (
+    all_gather_tensor_container,
     broadcast_tensor_container,
     cycle_dataloader,
     tensor_container_to,
@@ -24,16 +26,67 @@ from areal.utils.hf_utils import load_hf_tokenizer
 from areal.utils.recover import RecoverHandler
 from areal.utils.saver import Saver
 from areal.utils.stats_logger import StatsLogger
-from areal.workflow.rlvr import RLVRWorkflow
 from appworld import load_task_ids
 from datasets import Dataset
 from platoon.agents.appworld.areal_workflow import AppWorldArealWorkflow, AppWorldArealRecursiveWorkflow
 from dataclasses import field, dataclass
+from areal.api.cli_args import InferenceEngineConfig
+from areal.utils.data import concat_padded_tensors
 
+@dataclass
+class VariableBatchInferenceEngineConfig(InferenceEngineConfig):
+    shuffle_cross_task: bool = field(default=True)
+    ensure_batch_divisible_by: int = field(default=1)
 
 @dataclass
 class AppWorldReinforcePlusPlusConfig(GRPOConfig):
     workflow_config: dict = field(default_factory=dict)
+    rollout: VariableBatchInferenceEngineConfig = field(default_factory=VariableBatchInferenceEngineConfig)
+
+
+def post_process_and_redistribute_tensor_container(batch: Dict[str, Any], shuffle: bool = True, ensure_divisible_by: int = 1, group: dist.ProcessGroup = None) -> Dict[str, Any]:
+    all_data = all_gather_tensor_container(batch, group=group)
+    batch_tensors = concat_padded_tensors(all_data)
+    
+    # Determine batch size from a reliable 2D tensor key
+    if "attention_mask" in batch_tensors and torch.is_tensor(batch_tensors["attention_mask"]) and batch_tensors["attention_mask"].ndim >= 2:
+        batch_size = batch_tensors["attention_mask"].shape[0]
+        index_device = batch_tensors["attention_mask"].device
+    elif "input_ids" in batch_tensors and torch.is_tensor(batch_tensors["input_ids"]) and batch_tensors["input_ids"].ndim >= 2:
+        batch_size = batch_tensors["input_ids"].shape[0]
+        index_device = batch_tensors["input_ids"].device
+    else:
+        # Fallback to first tensor-like entry
+        first_key = next(k for k, v in batch_tensors.items() if torch.is_tensor(v) and v.ndim >= 1)
+        batch_size = batch_tensors[first_key].shape[0]
+        index_device = batch_tensors[first_key].device
+
+    # Build indices once: optionally shuffle, then trim for divisibility
+    indices = torch.arange(batch_size, device=index_device)
+    if shuffle:
+        print(f"Shuffling batch of size {batch_size}")
+        perm = torch.randperm(batch_size, device=index_device)
+        indices = indices[perm]
+
+    if ensure_divisible_by > 1:
+        ensure = ensure_divisible_by
+        remainder = batch_size % ensure
+        if remainder != 0 and batch_size >= ensure:
+            print(f"Batch size {batch_size} is not divisible by {ensure}, trimming to {batch_size - remainder}")
+            indices = indices[:-remainder]
+            
+    rank = dist.get_rank(group=group)
+    indices = indices[rank * batch_size // dist.get_world_size(group): (rank + 1) * batch_size // dist.get_world_size(group)]
+            
+    
+    # Apply indexing only to tensors whose first dim equals batch size
+    def _maybe_index(x):
+        if torch.is_tensor(x) and x.ndim >= 1 and x.shape[0] == batch_size:
+            return x[indices]
+        return x
+
+    batch_tensors = {k: _maybe_index(v) for k, v in batch_tensors.items()}
+    return batch_tensors
 
 os.environ["APPWORLD_ROOT"] = "/mnt/efs/platoon/src/platoon/envs/appworld"
 
@@ -53,15 +106,27 @@ def main(args):
     actor = FSDPPPOActor(config=config.actor)
     actor.create_process_group(parallel_strategy=parallel_strategy)
 
-    train_dataset = Dataset.from_list(
-        [{"task_id": x} for x in load_task_ids(dataset_name="train")]
-    )
-    
-    valid_dataset = Dataset.from_list(
-        [{"task_id": x} for x in load_task_ids(dataset_name="dev")]
-    )
+    # Shard datasets by data-parallel rank to avoid duplication across DP ranks
+    dp_rank = actor.data_parallel_rank
+    dp_world_size = actor.data_parallel_world_size
 
-    # Create dataset and dataloaders
+    train_ids = load_task_ids(dataset_name="train")
+    train_index_remainder = len(train_ids) % dp_world_size
+    if train_index_remainder != 0:
+        train_ids = train_ids[:-train_index_remainder]
+        #train_ids = train_ids[:12] # debugging
+    train_ids = [x for i, x in enumerate(train_ids) if i % dp_world_size == dp_rank]
+    train_dataset = Dataset.from_list([{ "task_id": x } for x in train_ids])
+
+    valid_ids = load_task_ids(dataset_name="dev")
+    valid_index_remainder = len(valid_ids) % dp_world_size
+    if valid_index_remainder != 0:
+        valid_ids = valid_ids[:-valid_index_remainder]
+        #valid_ids = valid_ids[:12] # debugging
+    valid_ids = [x for i, x in enumerate(valid_ids) if i % dp_world_size == dp_rank]
+    valid_dataset = Dataset.from_list([{ "task_id": x } for x in valid_ids])
+
+    # Create dataset and dataloaderss
     train_dataloader = StatefulDataLoader(
         train_dataset,
         batch_size=config.train_dataset.batch_size // actor.data_parallel_world_size,
@@ -86,7 +151,7 @@ def main(args):
 
     # Initialize inference engine
     rollout = RemoteSGLangEngine(config.rollout)
-    rollout.initialize(train_data_parallel_size=1) #parallel_strategy.dp_size)
+    rollout.initialize(train_data_parallel_size=parallel_strategy.dp_size) #1)
     eval_rollout = RemoteSGLangEngine(deepcopy(config.rollout))
     # NOTE: eval does not have any offpolicyness control
     eval_rollout.config.max_head_offpolicyness = int(1e12)
@@ -103,20 +168,20 @@ def main(args):
     # but `WeightUpdateMeta.from_fsdp_xccl` has to be executed on all ranks
     # due to `engine.get_param_specs()`.
     # Therefore, we create weight update meta on all ranks, then broadcast the one on rank 0.
-    # weight_update_meta = [
-    #     WeightUpdateMeta.from_fsdp_xccl(
-    #         AllocationMode.from_str(config.allocation_mode), actor
-    #     )
-    # ]
-    # dist.broadcast_object_list(weight_update_meta, src=0)
-    # weight_update_meta = weight_update_meta[0]
+    weight_update_meta = [
+        WeightUpdateMeta.from_fsdp_xccl(
+            AllocationMode.from_str(config.allocation_mode), actor
+        )
+    ]
+    dist.broadcast_object_list(weight_update_meta, src=0)
+    weight_update_meta = weight_update_meta[0]
 
-    weight_update_meta = WeightUpdateMeta.from_disk(
-        config.saver.experiment_name,
-        config.saver.trial_name,
-        config.saver.fileroot,
-        use_lora=True,
-    )
+    # weight_update_meta = WeightUpdateMeta.from_disk(
+    #     config.saver.experiment_name,
+    #     config.saver.trial_name,
+    #     config.saver.fileroot,
+    #     use_lora=True,
+    # )
 
     # Create rollout workflow
     if tokenizer.pad_token_id not in config.gconfig.stop_token_ids:
@@ -183,6 +248,10 @@ def main(args):
                         should_accept=lambda sample: True,
                     )
                 batch = tensor_container_to(batch, actor.device)
+                
+                if config.rollout.shuffle_cross_task or config.rollout.ensure_batch_divisible_by > 1:
+                    batch = post_process_and_redistribute_tensor_container(batch, shuffle=config.rollout.shuffle_cross_task, ensure_divisible_by=config.rollout.ensure_batch_divisible_by, group=actor.data_parallel_group)
+            
             batch = broadcast_tensor_container(
                 batch,
                 src_rank=actor.current_data_parallel_head(),
@@ -195,12 +264,29 @@ def main(args):
         if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
             with stats_tracker.record_timing("recompute_logp"):
                 logp = actor.compute_logp(batch)
+                # Ensure prox_logp token width matches attention_mask for proper microbatch splitting
+                attn_len = batch["attention_mask"].shape[1]
+                if torch.is_tensor(logp) and logp.ndim == 2 and logp.shape[1] != attn_len:
+                    if logp.shape[1] < attn_len:
+                        pad_width = attn_len - logp.shape[1]
+                        logp = torch.nn.functional.pad(logp, (0, pad_width), value=0.0)
+                    else:
+                        logp = logp[:, :attn_len]
                 batch["prox_logp"] = logp
                 log_gpu_stats("recompute logp")
 
         if ref is not None:
             with stats_tracker.record_timing("ref_logp"):
-                batch["ref_logp"] = ref.compute_logp(batch)
+                ref_logp = ref.compute_logp(batch)
+                # Align ref_logp token width with attention_mask as well
+                attn_len = batch["attention_mask"].shape[1]
+                if torch.is_tensor(ref_logp) and ref_logp.ndim == 2 and ref_logp.shape[1] != attn_len:
+                    if ref_logp.shape[1] < attn_len:
+                        pad_width = attn_len - ref_logp.shape[1]
+                        ref_logp = torch.nn.functional.pad(ref_logp, (0, pad_width), value=0.0)
+                    else:
+                        ref_logp = ref_logp[:, :attn_len]
+                batch["ref_logp"] = ref_logp
                 log_gpu_stats("ref logp")
 
         with stats_tracker.record_timing("compute_advantage"):
@@ -248,25 +334,25 @@ def main(args):
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
 
-        with stats_tracker.record_timing("eval"):
+        # with stats_tracker.record_timing("eval"):
 
-            def evaluate_fn():
-                if actor.is_data_parallel_head():
-                    cnt = 0
-                    for data in valid_dataloader:
-                        for item in data:
-                            eval_rollout.submit(item, eval_workflow)
-                            cnt += 1
-                    eval_rollout.wait(cnt, timeout=None)
-                dist.barrier(device_ids=[actor.device.index])
-                current_platform.synchronize()
+        #     def evaluate_fn():
+        #         if actor.is_data_parallel_head():
+        #             cnt = 0
+        #             for data in valid_dataloader:
+        #                 for item in data:
+        #                     eval_rollout.submit(item, eval_workflow)
+        #                     cnt += 1
+        #             eval_rollout.wait(cnt, timeout=None)
+        #         dist.barrier(device_ids=[actor.device.index])
+        #         current_platform.synchronize()
 
-            evaluator.evaluate(
-                evaluate_fn,
-                epoch,
-                step,
-                global_step,
-            )
+        #     evaluator.evaluate(
+        #         evaluate_fn,
+        #         epoch,
+        #         step,
+        #         global_step,
+        #     )
 
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()

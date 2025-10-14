@@ -1,5 +1,5 @@
-experiment_name: appworld-recursive-reinforce++
-trial_name: trialreinforce1
+experiment_name: appworld-recursive-reinforce
+trial_name: trialreinforce8
 
 seed: 1
 total_train_epochs: 10
@@ -19,11 +19,13 @@ allocation_mode: sglang.d4p1t1+d4p1t1 #sglang:d2+fsdp:d3c2 #sglang.d2p1t1+d6p1t1
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 10 #40
+  max_concurrent_rollouts: 12 #40
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 1
   enable_rollout_tracing: false
+  shuffle_cross_task: true
+  ensure_batch_divisible_by: 4
 
 gconfig:
   n_samples: 1
@@ -35,7 +37,7 @@ gconfig:
 workflow_config:
   model_name: ${actor.path}
   max_steps_per_rollout: 50
-  output_dir: /mnt/efs/tmp/areal/experiments/trialreinforce1
+  output_dir: /mnt/efs/tmp/areal/experiments/trialreinforce8
   verbose: null
   per_rollout_timeout_seconds: null
   model_endpoint: null
@@ -44,14 +46,14 @@ workflow_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-8b-recursive_latest #Qwen/Qwen2.5-7B-Instruct #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-gemma3-4b-recursive_latest
+  path: /mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-8b-recursive_latest/checkpoint-138 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-8b-recursive_latest #Qwen/Qwen2.5-7B-Instruct #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-gemma3-4b-recursive_latest
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    n_mbs: 10
-    #max_tokens_per_mb: 8000
+    #n_mbs: 10
+    max_tokens_per_mb: 45000 #8000
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -75,19 +77,19 @@ actor:
   use_decoupled_loss: true
   behav_imp_weight_cap: 5.0
   dynamic_sampling: false
-  reward_norm:
-    mean_level: null
-    std_level: null
+  # reward_norm:
+  #   mean_level: null
+  #   std_level: null
   adv_norm:
-    mean_level: null #batch
-    std_level: null #batch
+    mean_level: batch
+    std_level: batch
   max_new_tokens: ${gconfig.max_new_tokens}
   # lora
-  use_lora: true
-  peft_type: lora
-  lora_rank: 32
-  lora_alpha: 16
-  target_modules: [all-linear]
+  # use_lora: true
+  # peft_type: lora
+  # lora_rank: 32
+  # lora_alpha: 16
+  # target_modules: [all-linear]
 
 ref:
   experiment_name: ${experiment_name}
@@ -98,7 +100,7 @@ ref:
   dtype: ${actor.dtype}
   mb_spec:
     #n_mbs: 10
-    max_tokens_per_mb: 100000 #8000 #10240
+    max_tokens_per_mb: 45000 #100000 #8000 #10240
   optimizer: null
   backend: fsdp
 
@@ -112,10 +114,10 @@ sglang:
   context_length: 40000
   mem_fraction_static: 0.8
   # lora
-  enable_lora: ${actor.use_lora}
-  max_lora_rank: ${actor.lora_rank}
-  lora_target_modules: ${actor.target_modules}
-  schedule_policy: fcfs
+  # enable_lora: ${actor.use_lora}
+  # max_lora_rank: ${actor.lora_rank}
+  # lora_target_modules: ${actor.target_modules}
+  # schedule_policy: fcfs
 
 # datasets
 train_dataset:
@@ -160,7 +162,6 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: online
-    wandb_api_key: 93f6db135311821611eb307ca970d0def172c1c0
     project: recursive-agents
 
 launcher:
