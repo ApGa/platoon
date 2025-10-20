@@ -1,5 +1,5 @@
 experiment_name: appworld-recursive-reinforce
-trial_name: trialreinforce8
+trial_name: reinforcevanilladebug
 
 seed: 1
 total_train_epochs: 10
@@ -37,7 +37,7 @@ gconfig:
 workflow_config:
   model_name: ${actor.path}
   max_steps_per_rollout: 50
-  output_dir: /mnt/efs/tmp/areal/experiments/trialreinforce8
+  output_dir: /mnt/efs/tmp/areal/experiments/reinforcevanilladebug
   verbose: null
   per_rollout_timeout_seconds: null
   model_endpoint: null
@@ -77,12 +77,12 @@ actor:
   use_decoupled_loss: true
   behav_imp_weight_cap: 5.0
   dynamic_sampling: false
-  # reward_norm:
-  #   mean_level: null
-  #   std_level: null
+  reward_norm:
+    mean_level: null
+    std_level: null
   adv_norm:
-    mean_level: batch
-    std_level: batch
+    mean_level: null #batch
+    std_level: null #batch
   max_new_tokens: ${gconfig.max_new_tokens}
   # lora
   # use_lora: true

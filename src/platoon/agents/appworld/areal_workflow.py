@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
+import torch
 
 class AppWorldArealWorkflow:
     def __init__(self, config):
@@ -37,8 +38,7 @@ class AppWorldArealWorkflow:
         areal_completion_data_list = []
         for trajectory in results['trajectories'].values():
             areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
-            
-        return concat_padded_tensors(areal_completion_data_list)
+        return concat_padded_tensors(areal_completion_data_list) | {'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0)}
     
 
 class AppWorldArealRecursiveWorkflow(AppWorldArealWorkflow):
@@ -65,4 +65,4 @@ class AppWorldArealRecursiveWorkflow(AppWorldArealWorkflow):
                 print(f"Areal completion data found for trajectory {trajectory['id']}")
             else:
                 print(f"No areal_completion_data found for trajectory {trajectory['id']}")
-        return concat_padded_tensors(areal_completion_data_list)
+        return concat_padded_tensors(areal_completion_data_list) | {'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0)}

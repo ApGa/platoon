@@ -44,7 +44,65 @@ class AppWorldReinforcePlusPlusConfig(GRPOConfig):
     rollout: VariableBatchInferenceEngineConfig = field(default_factory=VariableBatchInferenceEngineConfig)
 
 
+def _canonicalize_container_keys(x: Any) -> Any:
+    """Recursively sort dict keys to enforce stable collective ordering across ranks.
+
+    Lists are preserved as-is; tensors and other leaf types are returned unchanged.
+    """
+    if isinstance(x, dict):
+        return {k: _canonicalize_container_keys(x[k]) for k in sorted(x.keys())}
+    if isinstance(x, list):
+        return [ _canonicalize_container_keys(v) for v in x ]
+    return x
+
+
 def post_process_and_redistribute_tensor_container(batch: Dict[str, Any], shuffle: bool = True, ensure_divisible_by: int = 1, group: dist.ProcessGroup = None) -> Dict[str, Any]:
+    # 1) Drop keys not shared by all ranks (for dicts outside lists)
+    def _extract_dict_schema(x: Any, prefix: tuple[str, ...] = ()) -> Dict[tuple[str, ...], set]:
+        schema: Dict[tuple[str, ...], set] = {}
+        if isinstance(x, dict):
+            keys = set(x.keys())
+            schema[prefix] = keys
+            for k in keys:
+                v = x[k]
+                # Only traverse into nested dicts; do not attempt per-index across lists
+                if isinstance(v, dict):
+                    schema.update(_extract_dict_schema(v, prefix + (k,)))
+        return schema
+
+    if isinstance(batch, dict):
+        local_schema = _extract_dict_schema(batch)
+        world_size = dist.get_world_size(group)
+        schemas = [None for _ in range(world_size)]
+        dist.all_gather_object(schemas, local_schema, group=group)
+
+        # Compute paths present on all ranks
+        common_paths = set.intersection(*[set(s.keys()) for s in schemas]) if schemas else set()
+        # For each common path, compute the intersection of keys
+        shared_schema: Dict[tuple[str, ...], set] = {}
+        for p in common_paths:
+            inter_keys = set.intersection(*[s[p] for s in schemas])
+            shared_schema[p] = inter_keys
+
+        def _prune_by_schema(x: Any, prefix: tuple[str, ...] = ()) -> Any:
+            if not isinstance(x, dict):
+                return x
+            if prefix not in shared_schema:
+                return {}
+            allowed = shared_schema[prefix]
+            pruned: Dict[str, Any] = {}
+            for k in sorted(x.keys()):
+                if k in allowed:
+                    v = x[k]
+                    if isinstance(v, dict):
+                        v = _prune_by_schema(v, prefix + (k,))
+                    pruned[k] = v
+            return pruned
+
+        batch = _prune_by_schema(batch)
+
+    # 2) Ensure deterministic dict traversal order for nested structures before collectives
+    batch = _canonicalize_container_keys(batch)
     all_data = all_gather_tensor_container(batch, group=group)
     batch_tensors = concat_padded_tensors(all_data)
     
@@ -109,12 +167,13 @@ def main(args):
     # Shard datasets by data-parallel rank to avoid duplication across DP ranks
     dp_rank = actor.data_parallel_rank
     dp_world_size = actor.data_parallel_world_size
+    
 
     train_ids = load_task_ids(dataset_name="train")
     train_index_remainder = len(train_ids) % dp_world_size
     if train_index_remainder != 0:
         train_ids = train_ids[:-train_index_remainder]
-        #train_ids = train_ids[:12] # debugging
+        #train_ids = train_ids[:4] # debugging
     train_ids = [x for i, x in enumerate(train_ids) if i % dp_world_size == dp_rank]
     train_dataset = Dataset.from_list([{ "task_id": x } for x in train_ids])
 
@@ -334,25 +393,36 @@ def main(args):
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
 
-        # with stats_tracker.record_timing("eval"):
+        with stats_tracker.record_timing("eval"):
 
-        #     def evaluate_fn():
-        #         if actor.is_data_parallel_head():
-        #             cnt = 0
-        #             for data in valid_dataloader:
-        #                 for item in data:
-        #                     eval_rollout.submit(item, eval_workflow)
-        #                     cnt += 1
-        #             eval_rollout.wait(cnt, timeout=None)
-        #         dist.barrier(device_ids=[actor.device.index])
-        #         current_platform.synchronize()
+            def evaluate_fn():
+                if actor.is_data_parallel_head():
+                    print(f"Evaluating...")
+                    cnt = 0
+                    for data in valid_dataloader:
+                        for item in data:
+                            eval_rollout.submit(item, eval_workflow)
+                            cnt += 1
+                    results = eval_rollout.wait(cnt, timeout=3600) # TODO: Make the eval timeout configurable.
+                    
+                    print(f"Evaluated {cnt} tasks")
+                    print(f"Task Rewards: {results['task_reward']}")
+                    
+                    tr = torch.as_tensor(results['task_reward'], dtype=torch.float32, device=actor.device)
+                    mask = torch.ones_like(tr, dtype=torch.bool)
 
-        #     evaluator.evaluate(
-        #         evaluate_fn,
-        #         epoch,
-        #         step,
-        #         global_step,
-        #     )
+                    stats_tracker.get("eval").denominator(task_reward_mask=mask)
+                    stats_tracker.get("eval").stat("task_reward_mask", task_reward=tr)  # default: AVG/MIN/MAX
+                    
+                dist.barrier(device_ids=[actor.device.index])
+                current_platform.synchronize()
+
+            evaluator.evaluate(
+                evaluate_fn,
+                epoch,
+                step,
+                global_step,
+            )
 
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()

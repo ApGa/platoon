@@ -317,6 +317,11 @@ class ArealEventSink(TrajectoryEventHandler):
                 count_found_areal_completion_data += 1
                 step_completion_data = step.misc['action_misc']['areal_completion_data']
                 step_completion_data['rewards'] = torch.tensor([trajectory.reward])
+                # Make rewards 2D [1, seq_len] so it is split/packed per-token with the batch
+                seq_len = step_completion_data['attention_mask'].shape[1]
+                step_completion_data['token_rewards'] = torch.full(
+                    (1, seq_len), float(trajectory.reward), dtype=torch.float32
+                )
                 areal_completion_data_list.append(step_completion_data)
         print(f"Found {count_found_areal_completion_data} / {len(trajectory.steps)} areal completion data for trajectory {trajectory.id}")
         trajectory.misc['areal_completion_data'] = concat_padded_tensors(areal_completion_data_list)
