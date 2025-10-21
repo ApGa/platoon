@@ -109,11 +109,11 @@ class CodeActEnv(Protocol):
 
 class IPythonCodeExecutor(CodeExecutor):
     # TODO: Separate actions and modules? Use this info to build action space description?
-    def __init__(self, task: Task, actions: Sequence[Callable] = (finish, asyncio), timeout_seconds: int = 30):
+    def __init__(self, task: Task, actions: Sequence[Callable] = (finish, asyncio)):
         self.task = task
         self.actions = actions
         self.shell = self._create_shell()
-        self.timeout_seconds = timeout_seconds
+        #self.timeout_seconds = timeout_seconds
         
     def _create_shell(self) -> InteractiveShellEmbed:
         original_excepthook = sys.excepthook
@@ -126,7 +126,7 @@ class IPythonCodeExecutor(CodeExecutor):
             shell.user_ns[action.__name__] = action
         return shell
 
-    # TODO: Can make this more robust and have better error handling + sandboxing.
+    # TODO: Can make this more robust and have better error handling + sandboxing + timeouts.
     async def run(self, code: str) -> CodeActStep:
         code = code.strip()
 
@@ -147,7 +147,7 @@ class IPythonCodeExecutor(CodeExecutor):
             return CodeActStep(code=code, error="No code available to execute.")
 
         with ShellCapture() as capture:
-            await self.shell.run_cell_async(code, timeout_seconds=self.timeout_seconds)
+            await self.shell.run_cell_async(code)
 
         cap_stdout = strip_ansi_escape_sequences(capture.pop_stdout())
         cap_stderr = strip_ansi_escape_sequences(capture.pop_stderr())

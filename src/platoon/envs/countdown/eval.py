@@ -56,7 +56,6 @@ def compute_score(
         print(f"--------------------------------")
         print(f"Target: {target} | Numbers: {numbers}")
         print(f"Extracted equation: {equation}")
-        print(f"Solution string: {solution_str}")
 
     if equation is None:
         if do_print:
