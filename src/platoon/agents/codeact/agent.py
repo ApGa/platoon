@@ -84,7 +84,7 @@ class CodeActAgent:
             return self._stuck_in_loop_action()
         
         prompt = self.prompt_builder.build_messages(obs)
-        response = await self.llm_client.async_chat_completion(prompt, stop=["</python>"])
+        response = await self.llm_client.async_chat_completion(prompt, stop=["</python>"], temperature=1.0)
         response_text = response.choices[0].message.content
         # NOTE: We only do this conditionally, because with Areal, stop words are not supported.
         # And so we might already have the stop word in the response.

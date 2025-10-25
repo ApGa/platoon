@@ -40,6 +40,14 @@ from areal.api.cli_args import PPOActorConfig
 from areal.utils import stats_tracker
 
 
+def set_expandable_segments(enable: bool) -> None:
+    """Enable or disable expandable segments for cuda.
+    Args:
+        enable (bool): Whether to enable expandable segments. Used to avoid OOM.
+    """
+    torch.cuda.memory._set_allocator_settings(f"expandable_segments:{enable}")
+
+
 def reinforce_loss_fn(logits, data, temperature: float = 1.0):
     input_ids = data["input_ids"]
     loss_mask = data["loss_mask"].bool()
@@ -119,7 +127,7 @@ def _canonicalize_container_keys(x: Any) -> Any:
     return x
 
 
-def post_process_and_redistribute_tensor_container(batch: Dict[str, Any], shuffle: bool = True, ensure_divisible_by: int = 1, group: dist.ProcessGroup = None) -> Dict[str, Any]:
+def post_process_and_redistribute_tensor_container(batch: Dict[str, Any], shuffle: bool = True, ensure_divisible_by: int = 1, group: dist.ProcessGroup = None, local_sample_ratio: float = 1.0) -> Dict[str, Any]:
     # 1) Drop keys not shared by all ranks (for dicts outside lists)
     def _extract_dict_schema(x: Any, prefix: tuple[str, ...] = ()) -> Dict[tuple[str, ...], set]:
         schema: Dict[tuple[str, ...], set] = {}
@@ -165,7 +173,7 @@ def post_process_and_redistribute_tensor_container(batch: Dict[str, Any], shuffl
         batch = _prune_by_schema(batch)
 
     # 2) Ensure deterministic dict traversal order for nested structures before collectives
-    batch = _canonicalize_container_keys(batch)
+    #batch = _canonicalize_container_keys(batch)
     all_data = all_gather_tensor_container(batch, group=group)
     batch_tensors = concat_padded_tensors(all_data)
     
@@ -295,6 +303,8 @@ def main(args):
     # NOTE: eval does not have any offpolicyness control
     eval_rollout.config.max_head_offpolicyness = int(1e12)
     eval_rollout.initialize()
+    
+    set_expandable_segments(True)
 
     actor.initialize(None, ft_spec)
     ref = None
@@ -389,10 +399,16 @@ def main(args):
                     
                 batch = tensor_container_to(batch, actor.device)
             
-                mask = torch.ones_like(batch['task_reward'], dtype=torch.bool)
+                reward_mask = torch.ones_like(batch['task_reward'], dtype=torch.bool)
+                output_token_mask = torch.ones_like(batch['num_output_tokens'], dtype=torch.bool)
+                input_token_mask = torch.ones_like(batch['num_input_tokens'], dtype=torch.bool)
 
-                stats_tracker.get('reinforce_actor').denominator(task_reward_mask=mask)
+                stats_tracker.get('reinforce_actor').denominator(task_reward_mask=reward_mask, num_output_tokens_mask=output_token_mask, num_input_tokens_mask=input_token_mask)
                 stats_tracker.get('reinforce_actor').stat(task_reward=batch['task_reward'], denominator="task_reward_mask")
+                stats_tracker.get('reinforce_actor').stat(num_output_tokens=batch['num_output_tokens'], denominator="num_output_tokens_mask")
+                stats_tracker.get('reinforce_actor').stat(num_input_tokens=batch['num_input_tokens'], denominator="num_input_tokens_mask")
+                
+                torch.cuda.empty_cache()
                 
                 if config.rollout.shuffle_cross_task or config.rollout.ensure_batch_divisible_by > 1:
                     batch = post_process_and_redistribute_tensor_container(batch, shuffle=config.rollout.shuffle_cross_task, ensure_divisible_by=config.rollout.ensure_batch_divisible_by, group=actor.data_parallel_group)
@@ -402,6 +418,8 @@ def main(args):
                 src_rank=actor.current_data_parallel_head(),
                 group=actor.context_and_model_parallel_group,
             )
+            
+        torch.cuda.empty_cache()
         # Create barrier to synchronize all rollout processes.
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
@@ -444,6 +462,7 @@ def main(args):
                 tokenizer=tokenizer,
             )
 
+        torch.cuda.empty_cache()
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
 
@@ -458,7 +477,7 @@ def main(args):
                             eval_rollout.submit(item, eval_workflow)
                             cnt += 1
                     try:
-                        results = eval_rollout.wait(cnt, timeout=1500) # TODO: Make the eval timeout configurable.
+                        results = eval_rollout.wait(cnt, timeout=1800) # TODO: Make the eval timeout configurable.
                         print(f"Evaluated {cnt} tasks")
                         print(f"Task Rewards: {results['task_reward']}")
                         

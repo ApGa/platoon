@@ -11,5 +11,5 @@ class CountDownEnv(CodeActEnv):
     async def evaluate(self) -> tuple[float, dict]:
         score, reward_misc = 0., {}
         if self._state.finished:
-            score = compute_score(finish_message.get(), self._task.misc)
+            score = compute_score(finish_message.get(), self._task.misc, format_score=0.0)
         return score, reward_misc

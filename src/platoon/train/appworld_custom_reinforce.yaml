@@ -1,8 +1,8 @@
 experiment_name: appworld-linear-reinforce
-trial_name: reinforcelinearcustom3
+trial_name: reinforcecustom-linear-qwen3-4b-trial11
 
 seed: 343
-total_train_epochs: 50
+total_train_epochs: 100
 tokenizer_path: ${actor.path}
 async_training: false
 
@@ -14,7 +14,7 @@ cluster:
     type: nfs
     nfs_record_root: /mnt/efs/tmp/areal/name_resolve
 
-allocation_mode: sglang.d4p1t1+d4p1t1 #sglang:d2+fsdp:d3c2 #sglang.d2p1t1+d6p1t1
+allocation_mode: sglang.d4p1t1+d4p1t1
 
 rollout:
   experiment_name: ${experiment_name}
@@ -32,12 +32,12 @@ gconfig: #TODO: Remove this from config and use workflow_config as the source of
   min_new_tokens: 0
   max_new_tokens: 1024 # This is ignored in our setup since we use our own agent scaffold. True value set in code.
   greedy: false # This is also ignored.
-  temperature: 0.7
+  temperature: 1.0 #0.7
 
 workflow_config:
   model_name: ${actor.path}
-  max_steps_per_rollout: 50
-  output_dir: /mnt/efs/tmp/areal/experiments/reinforcelinearcustom3
+  max_steps_per_rollout: 35 #50
+  output_dir: /mnt/efs/tmp/areal/experiments/reinforcecustom-linear-qwen3-4b-trial11
   verbose: null
   per_rollout_timeout_seconds: null
   model_endpoint: null
@@ -46,7 +46,7 @@ workflow_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-8b-linear_latest/checkpoint-142 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-8b-recursive_latest #Qwen/Qwen2.5-7B-Instruct #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-gemma3-4b-recursive_latest
+  path:  /mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-linear_latest/checkpoint-142 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-linear_latest/checkpoint-71 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-8b-recursive_latest #Qwen/Qwen2.5-7B-Instruct #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-gemma3-4b-recursive_latest
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -109,7 +109,7 @@ sglang:
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 40000
+  context_length: 40001
   mem_fraction_static: 0.8
   # lora
   # enable_lora: ${actor.use_lora}
@@ -119,12 +119,12 @@ sglang:
 
 # datasets
 train_dataset:
-  batch_size: 24
+  batch_size: 44
   type: rl
   path: ""
 
 valid_dataset:
-  batch_size: 24
+  batch_size: 44
   type: rl
   path: ""
 
@@ -138,7 +138,7 @@ saver:
   freq_secs: null
 
 recover:
-  mode: disabled
+  mode: resume #disabled
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
@@ -150,8 +150,8 @@ evaluator:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 1
-  freq_steps: null
+  freq_epochs: null
+  freq_steps: 4
   freq_secs: null
 
 stats_logger:
@@ -163,7 +163,7 @@ stats_logger:
     project: recursive-agents
 
 launcher:
-  inference_server_cpus_per_gpu: 4
+  inference_server_cpus_per_gpu: 32
   inference_server_mem_per_gpu: 32768
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 32768

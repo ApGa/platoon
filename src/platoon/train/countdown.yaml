@@ -1,5 +1,5 @@
 experiment_name: countdown-reinforce
-trial_name: 0
+trial_name: 2
 
 seed: 1
 total_train_epochs: 10
@@ -32,12 +32,12 @@ gconfig: #TODO: Remove this from config and use workflow_config as the source of
   min_new_tokens: 0
   max_new_tokens: 1024 # This is ignored in our setup since we use our own agent scaffold. True value set in code.
   greedy: false # This is also ignored.
-  temperature: 0.7
+  temperature: 1.0
 
 workflow_config:
   model_name: ${actor.path}
   max_steps_per_rollout: 1
-  output_dir: /mnt/efs/tmp/areal/experiments/countdown-reinforce-0
+  output_dir: /mnt/efs/tmp/areal/experiments/countdown-platoon-reinforce-2
   verbose: null
   per_rollout_timeout_seconds: null
   model_endpoint: null
@@ -46,13 +46,13 @@ workflow_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen2.5-3B-Instruct
+  path: Qwen/Qwen2.5-7B-Instruct
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 45000
+    max_tokens_per_mb: 40000
   optimizer:
     type: adam
     lr: 5e-6
@@ -92,7 +92,7 @@ ref: # This is not used because kl_ctl is 0.
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 45000
+    max_tokens_per_mb: 40000
   optimizer: null
   backend: fsdp
 
@@ -103,7 +103,7 @@ sglang:
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 40000
+  context_length: 1000
   mem_fraction_static: 0.8
 
 # datasets
@@ -123,7 +123,7 @@ saver:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: 1
-  freq_steps: null
+  freq_steps: 20
   freq_secs: null
 
 recover:
@@ -139,8 +139,8 @@ evaluator:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 1
-  freq_steps: 10
+  freq_epochs: null #1
+  freq_steps: null #10
   freq_secs: null
 
 stats_logger:
@@ -149,10 +149,10 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: online
-    project: recursive-agents
+    project: countdown-platoon
 
 launcher:
-  inference_server_cpus_per_gpu: 4
+  inference_server_cpus_per_gpu: 32
   inference_server_mem_per_gpu: 32768
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 32768

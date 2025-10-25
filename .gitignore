@@ -218,3 +218,5 @@ logs.md
 logs*.md
 .vscode/
 countdown*.md
+
+nohup*.out

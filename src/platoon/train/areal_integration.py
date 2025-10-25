@@ -334,7 +334,8 @@ class ArealLLMClient(LLMClient): #TODO: Decide if we want to add this to create_
         return await self.async_client.chat.completions.create(
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=40000, #TODO: hack. max_tokens,
+            #max_completion_tokens=1024, # TODO: Make this configurable, temp hack!
             **kwargs,
         )
             
@@ -374,6 +375,8 @@ class ArealEventSink(TrajectoryEventHandler):
             logprobs=torch.tensor(logprobs).unsqueeze(0),
             versions=torch.tensor(versions).unsqueeze(0),
             attention_mask=torch.ones(len(seq), dtype=torch.bool).unsqueeze(0),
+            num_input_tokens=torch.tensor(areal_completion.input_len, dtype=torch.float32).unsqueeze(0),
+            num_output_tokens=torch.tensor(areal_completion.output_len, dtype=torch.float32).unsqueeze(0),
         )
         
         
