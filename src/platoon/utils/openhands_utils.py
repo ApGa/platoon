@@ -1,10 +1,13 @@
     
 from typing import Sequence
-from openhands.sdk.event.base import Event
-from openhands.sdk.event.llm_convertible.action import ActionEvent
-from openhands.sdk.event import EventID
+from openhands.sdk.event import ActionEvent, Event, EventID, MessageEvent
 from openhands.sdk.conversation.base import ConversationStateProtocol
 from openhands.sdk.conversation.state import AgentExecutionStatus
+
+
+def is_action(event: Event) -> bool:
+    return isinstance(event, ActionEvent) \
+        or (isinstance(event, MessageEvent) and event.source == "agent")
 
 
 # TODO: Need to consider LLM agent message to user as an action event.
@@ -18,7 +21,7 @@ def get_actions_for_last_obs(events: Sequence[Event], last_step_obs_id: EventID 
     for event in reversed(events):
         if event.id == last_step_obs_id:
             break
-        if not isinstance(event, Event):
+        if not isinstance(event, ActionEvent):
             new_actions.clear()
             at_least_one_future_obs_seen = True
             if hasattr(event, "action_id"):
