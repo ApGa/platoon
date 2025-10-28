@@ -25,19 +25,20 @@ class OpenHandsEnv:
         self._workspace = workspace
     
     async def reset(self) -> OpenHandsObservation:
-        self._conversation: BaseConversation = Conversation(agent=self._agent, workspace=self._workspace)
+        self._conversation: BaseConversation = Conversation(agent=self._agent, workspace=self._workspace, visualize=False)
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
         self._conversation.send_message(self._task.goal)
-        threading.Thread(target=self._conversation.run, daemon=True).start() # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
+        # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
+        threading.Thread(target=self._conversation.run, daemon=True).start() 
 
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
         traj_collection.set_trajectory_task(traj.id, self._state.task)
         traj.reward = 0.0
-        obs_events = get_obs_for_last_action(self._state.conversation_state, None)
+        obs_events = get_obs_for_last_action(self._state)
         while not obs_events:
             await asyncio.sleep(1)
-            obs_events = get_obs_for_last_action(self._state.conversation_state, None)
+            obs_events = get_obs_for_last_action(self._state)
         traj_collection.add_trajectory_step(traj.id, OpenHandsTrajectoryStep(
             observation_events=obs_events,
         ))
@@ -48,12 +49,14 @@ class OpenHandsEnv:
         return 0., {}
 
     async def step(self, action: OpenHandsAction) -> OpenHandsObservation:
-        self._state.last_step_action_id = action.action_events[-1].id
-        obs_events = get_obs_for_last_action(self._state.conversation_state, self._state.last_step_action_id)
-        while not obs_events:
-            await asyncio.sleep(1)
-            obs_events = get_obs_for_last_action(self._state.conversation_state, self._state.last_step_action_id)
-        self._state.last_step_observation_id = obs_events[-1].id
+        if action.action_events:
+            self._state.last_step_action_id = action.action_events[-1].id
+        obs_events = get_obs_for_last_action(self._state)
+        while not obs_events and not is_finished(self._state):
+            await asyncio.sleep(0.2)
+            obs_events = get_obs_for_last_action(self._state)
+        if obs_events:
+            self._state.last_step_observation_id = obs_events[-1].id
         step = OpenHandsTrajectoryStep(
             action_events=action,
             observation_events=obs_events,
@@ -62,7 +65,7 @@ class OpenHandsEnv:
         step.misc['reward_misc'] = await self.evaluate()
         self._state.reward += step.reward
         
-        if is_finished(self._state.conversation_state):
+        if is_finished(self._state):
             self._state.finished = True
             finish_message.set(self._conversation.agent_final_response())
             self._state.misc["finish_message"] = finish_message.get()

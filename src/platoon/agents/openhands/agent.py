@@ -7,6 +7,7 @@ from src.platoon.envs.openhands.types import OpenHandsObservation
 from src.platoon.utils.openhands_utils import get_actions_for_last_obs
 from copy import deepcopy
 from src.platoon.envs.openhands.types import OpenHandsAction
+from platoon.utils.openhands_utils import is_finished
 
 
 class OpenHandsAgent:
@@ -15,15 +16,13 @@ class OpenHandsAgent:
 
     async def act(self, obs: OpenHandsObservation) -> OpenHandsAction:
         step_actions = get_actions_for_last_obs(
-            obs.conversation_state.events, 
-            obs.last_step_observation_id, 
+            obs, 
             require_same_llm_call_id=True
         )
-        while not step_actions:
-            await asyncio.sleep(1)
+        while not step_actions and not is_finished(obs):
+            await asyncio.sleep(0.2)
             step_actions = get_actions_for_last_obs(
-                obs.conversation_state.events,
-                obs.last_step_observation_id, 
+                obs, 
                 require_same_llm_call_id=True
             )
         
