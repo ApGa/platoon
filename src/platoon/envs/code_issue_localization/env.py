@@ -12,15 +12,23 @@ def f1_reward_function(predicted_files, true_files):
         return 1.0
     return 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
 
-def reward_function(final_message, instance):
-    predicted_files = set(ast.literal_eval(final_message.split("<file-list>")[1].split("</file-list>")[0]))
+def reward_function(final_message: str, instance: dict) -> tuple[float, set[str], set[str]]:
     true_files = set(x[0] for x in ast.literal_eval(instance["target"]))
-    return f1_reward_function(predicted_files, true_files), predicted_files, true_files
+    score = 0.0
+    try:
+        predicted_files = set(ast.literal_eval(final_message.split("<file-list>")[1].split("</file-list>")[0]))
+        score = f1_reward_function(predicted_files, true_files)
+    except Exception as e:
+        print(f"Error parsing final message: {e}")
+        return 0.0, set(), true_files
+    
+    return score, predicted_files, true_files
 
 class CodeIssueLocalizationEnv(OpenHandsEnv):
     async def evaluate(self) -> tuple[float, dict]:
         if is_finished(await self.observe()):
             finish_message = get_agent_final_response(self._conversation.state.events)
+            print(f"Finish message: {finish_message}")
             reward, predicted_files, true_files = reward_function(finish_message, self.task.misc)
             return reward, {"predicted_files": predicted_files, "true_files": true_files}
         return 0.0, {}

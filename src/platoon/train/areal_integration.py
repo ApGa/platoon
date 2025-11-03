@@ -38,14 +38,12 @@ _ENGINE_RPC_SERVERS_BY_ID: Dict[int, "_EngineRPCServer"] = {}
 _OPENAI_COMPAT_SERVERS: Dict[tuple, "_OpenAICompatServer"] = {}
 
 
-def flatten_messages(messages: list[dict]):
-    flattened_messages = []
-    for message in messages:
-        role = message['role']
-        text = '\n\n'.join(c['text'] for c in message['content'])
-        flattened_messages.append({'role': role, 'content': text})
-    return flattened_messages
-
+def get_completion_from_openai_compat_servers(completion_id: str) -> dict:
+    for server in _OPENAI_COMPAT_SERVERS.values():
+        completion = server._areal_client.get_completions(completion_id=completion_id)
+        if completion is not None:
+            return completion
+    return None
 
 
 def _find_free_port() -> int:
@@ -84,7 +82,7 @@ class _EngineRPCServer:
                 gcfg_dict = payload["gconfig"]
                 gconfig = GenerationHyperparameters(
                     n_samples=gcfg_dict.get("n_samples", 1),
-                    temperature=gcfg_dict.get("temperature", 0.0),
+                    temperature=gcfg_dict.get("temperature", 1.0),
                     max_new_tokens=gcfg_dict.get("max_new_tokens", 1),
                     top_p=gcfg_dict.get("top_p", 1.0),
                     top_k=gcfg_dict.get("top_k", 0),
@@ -92,7 +90,7 @@ class _EngineRPCServer:
                     greedy=gcfg_dict.get("greedy", False),
                     frequency_penalty=gcfg_dict.get("frequency_penalty", 0.0),
                     stop_token_ids=gcfg_dict.get("stop_token_ids", []),
-                    max_tokens=gcfg_dict.get("max_tokens", 16384),
+                    max_tokens=gcfg_dict.get("max_tokens", 40000),
                 )
 
                 # Build ModelRequest. We do not forward tokenizer/processor to avoid non-serializables.
@@ -477,7 +475,7 @@ class _RPCProxyEngine:
             "greedy": gcfg.greedy,
             "frequency_penalty": getattr(gcfg, "frequency_penalty", 0.0),
             "stop_token_ids": gcfg.stop_token_ids,
-            "max_tokens": getattr(gcfg, "max_tokens", len(req.input_ids) + gcfg.max_new_tokens),
+            "max_tokens": 40000 #getattr(gcfg, "max_tokens", len(req.input_ids) + gcfg.max_new_tokens), TODO: Hack
         }
         payload = {
             "input_ids": list(req.input_ids),
@@ -599,7 +597,7 @@ class ArealLLMClient(LLMClient): #TODO: Decide if we want to add this to create_
         return await self.async_client.chat.completions.create(
             messages=messages,
             temperature=temperature,
-            max_tokens=2000, #40000, #TODO: hack. max_tokens,
+            max_tokens=40000, #TODO: hack. max_tokens,
             #max_completion_tokens=1024, # TODO: Make this configurable, temp hack!
             **kwargs,
         )
@@ -627,7 +625,12 @@ class ArealEventSink(TrajectoryEventHandler):
         if client is None:
             raise ValueError(f"ArealLLMClient not found for trajectory {trajectory.id}")
         
-        areal_completion = client.async_client.get_completions(completion_id=completion_id).response
+        areal_completion = None
+        if _OPENAI_COMPAT_SERVERS:
+            areal_completion = get_completion_from_openai_compat_servers(completion_id).response
+        if areal_completion is None:
+            areal_completion = client.async_client.get_completions(completion_id=completion_id).response
+            
         seq = areal_completion.input_tokens + areal_completion.output_tokens
         logprobs = [0.0] * areal_completion.input_len + areal_completion.output_logprobs
         loss_mask = [0] * areal_completion.input_len + [1] * areal_completion.output_len

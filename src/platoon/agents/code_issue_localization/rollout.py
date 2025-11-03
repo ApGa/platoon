@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from openhands.sdk import LLM
 from platoon.train.areal_integration import ArealLLMClient
-from platoon.train.areal_integration import get_or_start_openai_compat_server
+from platoon.train.areal_integration import get_or_start_openai_compat_server, ArealEventSink
 from pydantic import SecretStr
 from platoon.episode.trajectory import TrajectoryCollection
 from platoon.visualization.event_sinks import JsonlFileSink
@@ -130,6 +130,9 @@ Only use grep to find and please output your answer as just a list of the releva
             traj_collection.register_event_handlers(
                 JsonlFileSink(events_path, collection_id=traj_collection.id, process_id=os.getpid())
             )
+            
+            if isinstance(llm_client, ArealLLMClient):
+                traj_collection.register_event_handlers(ArealEventSink())
 
             if config.verbose:
                 print(f"Process {os.getpid()}: Starting rollout for task {task['id']}")

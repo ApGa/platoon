@@ -1,6 +1,7 @@
 from platoon.train.areal_integration import ArealLLMClient
 from platoon.agents.code_issue_localization.rollout import run_single_rollout_process
 from areal.utils.data import concat_padded_tensors
+from platoon.train.areal_integration import areal_llm_clients
 
 import asyncio
 from copy import deepcopy
@@ -23,6 +24,7 @@ class CodeIssueLocalizationArealWorkflow:
         # Use spawn context to avoid forking when AReaL's workflow thread/event loop is active
         with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as executor:
             results = await loop.run_in_executor(executor, run_single_rollout_process, args)
+        #results = await asyncio.to_thread(run_single_rollout_process, args)
         
         areal_completion_data_list = []
         for trajectory in results['trajectories'].values():

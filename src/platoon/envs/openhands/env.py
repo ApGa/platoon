@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from platoon.envs.base import Task
 from platoon.envs.openhands.types import OpenHandsObservation
+from openhands.sdk.conversation import get_agent_final_response
 from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.workspace.base import BaseWorkspace
@@ -65,12 +66,13 @@ class OpenHandsEnv:
             observation_events=obs_events,
         )
         step.misc['action_misc'] = action.misc
-        step.misc['reward_misc'] = await self.evaluate()
+        step.reward, reward_info = await self.evaluate()
+        step.misc['reward_misc'] = reward_info
         self._state.reward += step.reward
         
         if is_finished(self._state):
             self._state.finished = True
-            finish_message.set(self._conversation.agent_final_response())
+            finish_message.set(get_agent_final_response(self._conversation.state.events))
             self._state.misc["finish_message"] = finish_message.get()
             if self._state.conversation_state.agent_status == AgentExecutionStatus.STUCK:
                 error_message.set("Agent got stuck")

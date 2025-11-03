@@ -1,5 +1,5 @@
 experiment_name: code-localization-reinforce
-trial_name: reinforce-code-localization-trial2
+trial_name: reinforce-code-localization-trial11
 
 seed: 343
 total_train_epochs: 100
@@ -30,14 +30,14 @@ rollout:
 gconfig: #TODO: Remove this from config and use workflow_config as the source of truth.
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 1024 # This is ignored in our setup since we use our own agent scaffold. True value set in code.
+  max_new_tokens: 40000 # This is ignored in our setup since we use our own agent scaffold. True value set in code.
   greedy: false # This is also ignored.
   temperature: 1.0 #0.7
 
 workflow_config:
   model_name: ${actor.path}
   max_steps_per_rollout: 35 #50
-  output_dir: /mnt/efs/tmp/areal/experiments/reinforce-code-localization-trial2`
+  output_dir: /mnt/efs/tmp/areal/experiments/reinforce-code-localization-trial11
   verbose: null
   per_rollout_timeout_seconds: null
   model_endpoint: null
@@ -151,7 +151,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 4
+  freq_steps: null
   freq_secs: null
 
 stats_logger:
