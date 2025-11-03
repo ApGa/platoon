@@ -26,6 +26,8 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
         if not is_action(event):
             new_actions.clear()
             at_least_one_future_obs_seen = True
+            # NOTE: All events of type ObservationEvent have their action_id set to action_event.id
+            # TODO: action_id is not set for AgentErrorEvent, the code will get stuck when trying to get the next action since this action will not be in seen_action_ids
             if hasattr(event, "action_id"):
                 seen_action_ids.add(event.action_id)
             continue

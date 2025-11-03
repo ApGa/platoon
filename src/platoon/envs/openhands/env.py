@@ -29,6 +29,7 @@ class OpenHandsEnv:
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
         self._conversation.send_message(self._task.goal)
         # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
+        # TODO: should daemon be True? Do we want the main process to wait for this thread to finish before exiting?
         threading.Thread(target=self._conversation.run, daemon=True).start() 
 
         traj_collection = current_trajectory_collection.get()
