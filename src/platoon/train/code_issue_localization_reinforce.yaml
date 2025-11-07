@@ -1,7 +1,7 @@
 experiment_name: code-localization-reinforce
-trial_name: reinforce-code-localization-trial11
+trial_name: reinforce-code-localization-trial17
 
-seed: 343
+seed: 4
 total_train_epochs: 100
 tokenizer_path: ${actor.path}
 async_training: false
@@ -22,7 +22,7 @@ rollout:
   max_concurrent_rollouts: 24
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
-  max_head_offpolicyness: 0 #1
+  max_head_offpolicyness: 0
   enable_rollout_tracing: false
   shuffle_cross_task: true
   ensure_batch_divisible_by: 4
@@ -37,7 +37,7 @@ gconfig: #TODO: Remove this from config and use workflow_config as the source of
 workflow_config:
   model_name: ${actor.path}
   max_steps_per_rollout: 35 #50
-  output_dir: /mnt/efs/tmp/areal/experiments/reinforce-code-localization-trial11
+  output_dir: /mnt/efs/tmp/areal/experiments/reinforce-code-localization-trial16
   verbose: null
   per_rollout_timeout_seconds: null
   model_endpoint: null

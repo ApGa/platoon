@@ -14,13 +14,13 @@ def f1_reward_function(predicted_files, true_files):
 
 def reward_function(final_message: str, instance: dict) -> tuple[float, set[str], set[str]]:
     true_files = set(x[0] for x in ast.literal_eval(instance["target"]))
+    predicted_files = set()
     score = 0.0
     try:
         predicted_files = set(ast.literal_eval(final_message.split("<file-list>")[1].split("</file-list>")[0]))
         score = f1_reward_function(predicted_files, true_files)
     except Exception as e:
         print(f"Error parsing final message: {e}")
-        return 0.0, set(), true_files
     
     return score, predicted_files, true_files
 
