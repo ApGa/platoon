@@ -26,6 +26,8 @@ import traceback
 
 from areal.api.cli_args import GenerationHyperparameters
 from areal.api.io_struct import ModelRequest, ModelResponse
+import urllib.request
+import urllib.error
 
 areal_llm_clients: ContextVar[dict[str, ArealLLMClient]] = ContextVar("areal_llm_clients", default={})
 
@@ -74,6 +76,15 @@ class _EngineRPCServer:
 
         async def health_handler(_request: web.Request) -> web.Response:
             return web.json_response({"ok": True})
+
+        async def version_handler(_request: web.Request) -> web.Response:
+            try:
+                version_value = self._engine.get_version()
+                if version_value is None:
+                    version_value = "unknown"
+                return web.json_response({"version": str(version_value)})
+            except Exception:
+                return web.json_response({"version": "unknown"})
 
         async def agenerate_handler(request: web.Request) -> web.Response:
             try:
@@ -161,6 +172,7 @@ class _EngineRPCServer:
                 return web.json_response(body, status=500)
 
         app.router.add_get("/health", health_handler)
+        app.router.add_get("/version", version_handler)
         app.router.add_post("/agenerate", agenerate_handler)
         return app
 
@@ -461,6 +473,28 @@ class _RPCProxyEngine:
     def __init__(self, base_url: str, request_timeout: float = 60.0):
         self.base_url = base_url.rstrip("/")
         self.request_timeout = request_timeout
+        self._cached_version: str | None = None
+
+    def get_version(self) -> str:
+        return self.version
+
+    @property
+    def version(self) -> str:
+        if self._cached_version is not None:
+            return self._cached_version
+        # Fetch once and cache. Use stdlib to avoid adding deps.
+        url = f"{self.base_url}/version"
+        try:
+            with urllib.request.urlopen(url, timeout=self.request_timeout) as resp:
+                raw = resp.read()
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    data = {}
+                self._cached_version = str(data.get("version", "unknown"))
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
+            self._cached_version = "unknown"
+        return self._cached_version
 
     async def agenerate(self, req: ModelRequest) -> ModelResponse:
         # Convert GenerationHyperparameters to dict

@@ -30,7 +30,10 @@ class CodeIssueLocalizationArealWorkflow:
             areal_completion_data_list = []
             for trajectory in results['trajectories'].values():
                 areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
-            return concat_padded_tensors(areal_completion_data_list) | {'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0)}
+            return concat_padded_tensors(areal_completion_data_list) | {
+                'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0),
+                'num_steps': torch.tensor([float(len(trajectory['steps'])) for trajectory in results['trajectories'].values()])
+            }
         except Exception as e:
             print(f"Error in areal workflow: {e}")
             return None

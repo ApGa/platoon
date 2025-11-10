@@ -1,6 +1,6 @@
     
 from typing import Sequence
-from openhands.sdk.event import ActionEvent, Event, EventID, MessageEvent
+from openhands.sdk.event import ActionEvent, AgentErrorEvent, Event, EventID, MessageEvent
 from openhands.sdk.conversation.base import ConversationStateProtocol
 from openhands.sdk.conversation.state import AgentExecutionStatus
 from platoon.envs.openhands.types import OpenHandsObservation
@@ -10,7 +10,7 @@ def is_action(event: Event) -> bool:
     return isinstance(event, ActionEvent) \
         or (isinstance(event, MessageEvent) and event.source == "agent")
 
-
+# TODO: Logic can probably be simplified now, by looking at changes in llm_response_id. Anytime llm_response_id changes, we can consider it as a new action.
 def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm_call_id: bool = False) -> list[Event]:
     """Collect Event(s) we consider as actions that immediately follow a past ObservationEvent and are
     fully observed by a subsequent ObservationBaseEvent referencing them.
@@ -20,6 +20,7 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
     new_actions_candidates: list[Event] = list()
     seen_action_ids: set[EventID] = set()
     at_least_one_future_obs_seen = False
+    at_least_one_future_error_event_seen = False
     for event in reversed(events):
         if event.id == observation.last_step_observation_id:
             break
@@ -28,13 +29,15 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
             at_least_one_future_obs_seen = True
             if hasattr(event, "action_id"):
                 seen_action_ids.add(event.action_id)
+            if isinstance(event, AgentErrorEvent):
+                at_least_one_future_error_event_seen = True
             continue
         else:
             new_actions.append(event)
             new_actions_candidates.append(event)
 
     last_event_seen = new_actions[-1].id if new_actions else None
-    if not is_finished(observation, last_event_seen=last_event_seen):
+    if not is_finished(observation, last_event_seen=last_event_seen) and not at_least_one_future_error_event_seen:
         for action in new_actions:
             if isinstance(action, ActionEvent) and action.id not in seen_action_ids:
                 new_actions.clear()

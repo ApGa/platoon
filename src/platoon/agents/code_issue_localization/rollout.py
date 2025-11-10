@@ -97,7 +97,7 @@ Consider the following issue description:
 
 Act as a code search agent to find the relevant files where we need to make changes so that <issue_description> is met?
 NOTE: You do not need to solve the issue, all you need to do is find the relevant files. Your output will be used to guide another agent to solve the issue.
-Only use grep to find and please output your answer as just a list of the relevant files that are directly related to the <issue_description> in the format <file-list>['file1', 'file2', ...]</file-list>."""
+You can use tools such as grep to help with this. Please output your answer as just a list of the relevant files that are directly related to the <issue_description> in the format <file-list>['file1', 'file2', ...]</file-list>."""
 
             if not status:
                 raise ValueError(f"Failed to clone instance {instance_id} for task {task['id']}")
@@ -123,7 +123,7 @@ Only use grep to find and please output your answer as just a list of the releva
             traj_collection = TrajectoryCollection()
             current_trajectory_collection.set(traj_collection)
             # Stream events to a JSONL file under a common directory for live TUI consumption
-            events_dir = os.path.join(config.output_dir, "events")
+            events_dir = os.path.join(config.output_dir, "events", engine.get_version())
             events_path = os.path.join(
                 events_dir, f"events_{task.id}_{traj_collection.id}.jsonl"
             )

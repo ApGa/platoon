@@ -36,12 +36,14 @@ from areal.api.cli_args import InferenceEngineConfig
 from areal.utils.data import concat_padded_tensors
 from areal.api.engine_api import TrainEngine
 from areal.utils.functional import gather_logprobs_entropy
-from areal.api.cli_args import PPOActorConfig
+from platoon.train.aent.actor import FSDPAEntPPOActor
+from platoon.train.aent.aent_args import AEntGRPOConfig, AEntPPOActorConfig
 from areal.utils import stats_tracker
 import pandas as pd
 from platoon.envs.base import Task
 from random import shuffle
 from dataclasses import asdict
+import datetime
 
 
 def set_expandable_segments(enable: bool) -> None:
@@ -101,7 +103,7 @@ class ReinforceActor:
         return all_stats
 
 class FSDPReinforceActor(FSDPPPOActor):
-    def __init__(self, config: PPOActorConfig):
+    def __init__(self, config: AEntPPOActorConfig):
         super().__init__(config=config)
         self.actor = ReinforceActor(self)
 
@@ -114,9 +116,10 @@ class VariableBatchInferenceEngineConfig(InferenceEngineConfig):
     ensure_batch_divisible_by: int = field(default=1)
 
 @dataclass
-class AppWorldReinforcePlusPlusConfig(GRPOConfig):
+class CodeIssueLocalizationReinforcePlusPlusConfig(GRPOConfig):
     workflow_config: dict = field(default_factory=dict)
     rollout: VariableBatchInferenceEngineConfig = field(default_factory=VariableBatchInferenceEngineConfig)
+    actor: AEntPPOActorConfig = field(default_factory=AEntPPOActorConfig)
 
 
 def _canonicalize_container_keys(x: Any) -> Any:
@@ -239,8 +242,8 @@ def post_process_and_redistribute_tensor_container(batch: Dict[str, Any], shuffl
 
 
 def main(args):
-    config, _ = load_expr_config(args, AppWorldReinforcePlusPlusConfig)
-    config: AppWorldReinforcePlusPlusConfig
+    config, _ = load_expr_config(args, CodeIssueLocalizationReinforcePlusPlusConfig)
+    config: CodeIssueLocalizationReinforcePlusPlusConfig
 
     rank = int(os.getenv("RANK"))
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
@@ -251,9 +254,12 @@ def main(args):
     assert parallel_strategy is not None
 
     # Initialize train engine
-    #actor = FSDPPPOActor(config=config.actor)
-    actor = FSDPReinforceActor(config=config.actor)
+
+    #actor = FSDPReinforceActor(config=config.actor)
+    actor = FSDPAEntPPOActor(config=config.actor)
     actor.create_process_group(parallel_strategy=parallel_strategy)
+    
+    dist.distributed_c10d._set_pg_timeout(datetime.timedelta(seconds=7200), actor.data_parallel_group)
 
     # Shard datasets by data-parallel rank to avoid duplication across DP ranks
     dp_rank = actor.data_parallel_rank
@@ -426,13 +432,45 @@ def main(args):
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
 
+        if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
+            with stats_tracker.record_timing("recompute_logp"):
+                logp = actor.compute_logp(batch)
+                # Ensure prox_logp token width matches attention_mask for proper microbatch splitting
+                attn_len = batch["attention_mask"].shape[1]
+                if torch.is_tensor(logp) and logp.ndim == 2 and logp.shape[1] != attn_len:
+                    if logp.shape[1] < attn_len:
+                        pad_width = attn_len - logp.shape[1]
+                        logp = torch.nn.functional.pad(logp, (0, pad_width), value=0.0)
+                    else:
+                        logp = logp[:, :attn_len]
+                batch["prox_logp"] = logp
+                log_gpu_stats("recompute logp")
+
+        if ref is not None:
+            with stats_tracker.record_timing("ref_logp"):
+                ref_logp = ref.compute_logp(batch)
+                # Align ref_logp token width with attention_mask as well
+                attn_len = batch["attention_mask"].shape[1]
+                if torch.is_tensor(ref_logp) and ref_logp.ndim == 2 and ref_logp.shape[1] != attn_len:
+                    if ref_logp.shape[1] < attn_len:
+                        pad_width = attn_len - ref_logp.shape[1]
+                        ref_logp = torch.nn.functional.pad(ref_logp, (0, pad_width), value=0.0)
+                    else:
+                        ref_logp = ref_logp[:, :attn_len]
+                batch["ref_logp"] = ref_logp
+                log_gpu_stats("ref logp")
+
+        with stats_tracker.record_timing("compute_advantage"):
+            actor.compute_advantages(batch)
+            log_gpu_stats("compute advantages")
+
         with (
             stats_tracker.record_timing("train_step"),
-            stats_tracker.scope("reinforce_actor"),
+            stats_tracker.scope("grpo_actor"),
         ):
-            stats = actor.train_reinforce(batch)
+            stats = actor.aent_ppo_update(batch, global_step)
             actor.step_lr_scheduler()
-            log_gpu_stats("reinforce update")
+            log_gpu_stats("ppo update")
 
         # pause inference for updating weights, save, and evaluation
         rollout.pause()
