@@ -49,6 +49,11 @@ def run_single_rollout_process(args: tuple[str, dict]) -> dict:
             current_trajectory_collection.set(traj_collection)
             # Stream events to a JSONL file under a common directory for live TUI consumption
             events_dir = os.path.join(config.output_dir, "events")
+            
+            if isinstance(llm_client, ArealLLMClient):
+                engine = llm_client.proxy_engine
+                events_dir = os.path.join(config.output_dir, "events", engine.get_version())
+            
             events_path = os.path.join(
                 events_dir, f"events_{task_id}_{traj_collection.id}.jsonl"
             )

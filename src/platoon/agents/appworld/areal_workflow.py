@@ -22,47 +22,60 @@ class AppWorldArealWorkflow:
         #     pass
     
     async def arun_episode(self, engine, data):
-        client = ArealLLMClient(model=self.config['model_name'], engine=engine)
-        
-        loop = asyncio.get_event_loop()
-        
-        config = deepcopy(self.config)
-        config['llm_client'] = client # TODO: Need to think of a more explicit arg passing story.
-        task_id = data['task_id']
-        
-        args = (task_id, config)
-        # Use spawn context to avoid forking when AReaL's workflow thread/event loop is active
-        with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as executor:
-            results = await loop.run_in_executor(executor, run_single_rollout_process, args)
-        
-        areal_completion_data_list = []
-        for trajectory in results['trajectories'].values():
-            areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
-        return concat_padded_tensors(areal_completion_data_list) | {'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0)}
-    
+        try:
+            client = ArealLLMClient(model=self.config['model_name'], engine=engine)
+            
+            loop = asyncio.get_event_loop()
+            
+            config = deepcopy(self.config)
+            config['llm_client'] = client # TODO: Need to think of a more explicit arg passing story.
+            task_id = data['task_id']
+            
+            args = (task_id, config)
+            # Use spawn context to avoid forking when AReaL's workflow thread/event loop is active
+            with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as executor:
+                results = await loop.run_in_executor(executor, run_single_rollout_process, args)
+            
+            areal_completion_data_list = []
+            for trajectory in results['trajectories'].values():
+                areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
+            return concat_padded_tensors(areal_completion_data_list) | {
+                'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0),
+                'num_steps': torch.tensor([float(len(trajectory['steps'])) for trajectory in results['trajectories'].values()])
+            }
+        except Exception as e:
+            print(f"Error in areal workflow: {e}")
+            return None
 
 class AppWorldArealRecursiveWorkflow(AppWorldArealWorkflow):
     def __init__(self, config):
         super().__init__(config)
         
     async def arun_episode(self, engine, data):
-        client = ArealLLMClient(model=self.config['model_name'], engine=engine)
-        loop = asyncio.get_event_loop()
-        
-        config = deepcopy(self.config)
-        config['llm_client'] = client # TODO: Need to think of a more explicit arg passing story.
-        task_id = data['task_id']
-        
-        args = (task_id, config)
-        # Use spawn context to avoid forking issues
-        with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as executor:
-            results = await loop.run_in_executor(executor, run_single_recursive_rollout_process, args)
-        
-        areal_completion_data_list = []
-        for trajectory in results['trajectories'].values():
-            if 'areal_completion_data' in trajectory['misc']:
-                areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
-                print(f"Areal completion data found for trajectory {trajectory['id']}")
-            else:
-                print(f"No areal_completion_data found for trajectory {trajectory['id']}")
-        return concat_padded_tensors(areal_completion_data_list) | {'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0)}
+        try: 
+            client = ArealLLMClient(model=self.config['model_name'], engine=engine)
+            loop = asyncio.get_event_loop()
+            
+            config = deepcopy(self.config)
+            config['llm_client'] = client # TODO: Need to think of a more explicit arg passing story.
+            task_id = data['task_id']
+            
+            args = (task_id, config)
+            # Use spawn context to avoid forking issues
+            with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as executor:
+                results = await loop.run_in_executor(executor, run_single_recursive_rollout_process, args)
+            
+            areal_completion_data_list = []
+            for trajectory in results['trajectories'].values():
+                if 'areal_completion_data' in trajectory['misc']:
+                    areal_completion_data_list.append(trajectory['misc']['areal_completion_data'])
+                    print(f"Areal completion data found for trajectory {trajectory['id']}")
+                else:
+                    print(f"No areal_completion_data found for trajectory {trajectory['id']}")
+            return concat_padded_tensors(areal_completion_data_list) | {
+                'task_reward': torch.tensor(list(results['trajectories'].values())[0]['reward']).unsqueeze(0),
+                'num_steps': torch.tensor([float(len(trajectory['steps'])) for trajectory in results['trajectories'].values()])
+            }
+        except Exception as e:
+            print(f"Error in areal workflow: {e}")
+            return None

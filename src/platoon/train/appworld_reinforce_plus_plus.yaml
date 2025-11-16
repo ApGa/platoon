@@ -1,0 +1,183 @@
+experiment_name: appworld-recursive-reinforce-plus-plus
+trial_name: reinforce-appworld-recursive-plus-plus-trial4
+
+seed: 343 #4
+total_train_epochs: 100
+tokenizer_path: ${actor.path}
+async_training: true
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 8
+  fileroot: /mnt/efs/tmp/areal/experiments
+  name_resolve:
+    type: nfs
+    nfs_record_root: /mnt/efs/tmp/areal/name_resolve
+
+allocation_mode: sglang.d4p1t1+d4p1t1
+
+rollout:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  max_concurrent_rollouts: 11
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 3
+  enable_rollout_tracing: false
+  shuffle_cross_task: true
+  ensure_batch_divisible_by: 4
+
+gconfig: #TODO: Remove this from config and use workflow_config as the source of truth.
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 40000 # This is ignored in our setup since we use our own agent scaffold. True value set in code.
+  greedy: false # This is also ignored.
+  temperature: 1.0 #0.7
+
+workflow_config:
+  model_name: ${actor.path}
+  max_steps_per_rollout: 50
+  output_dir: /mnt/efs/tmp/areal/experiments/reinforce-appworld-recursive-plus-plus-trial4
+  verbose: null
+  per_rollout_timeout_seconds: null
+  model_endpoint: null
+  max_parallel_processes: null
+
+actor:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path:  /mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-linear_latest/checkpoint-142
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 45000
+  optimizer:
+    type: adam
+    lr: 1e-6
+    weight_decay: 0.017
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  backend: fsdp
+  group_size: ${gconfig.n_samples}
+  eps_clip: 0.20
+  eps_clip_higher: 0.26
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0 #10.0
+  reward_bias: 0.0 #0.5
+  aent:
+    # effective coeff should be divided by reward_scaling
+    entropy_coeff: 0.0002
+    entropy_clamp: 0.4
+    adaptive_coeff: True
+    # following params are disabled if adaptive_coeff==False
+    entropy_high: 0.23
+    entropy_low: 0.05
+    coeff_lr: 0.001
+    coeff_box_high: 0.003
+    coeff_box_low: 1e-5
+    warmup_steps: 10
+  kl_ctl: 0.0
+  kl_estimator: k1
+  ppo_n_minibatches: 1
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behav_imp_weight_cap: null #5.0
+  dynamic_sampling: false
+  reward_norm:
+    mean_level: batch
+    std_level: null
+  adv_norm:
+    mean_level: null
+    std_level: null
+  max_new_tokens: ${gconfig.max_new_tokens}
+  # lora
+  # use_lora: true
+  # peft_type: lora
+  # lora_rank: 32
+  # lora_alpha: 16
+  # target_modules: [all-linear]
+
+ref: # This is not used because kl_ctl is 0.
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 45000
+  optimizer: null
+  backend: fsdp
+
+# SGLang
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: null
+  context_length: 40001
+  mem_fraction_static: 0.8
+  # lora
+  # enable_lora: ${actor.use_lora}
+  # max_lora_rank: ${actor.lora_rank}
+  # lora_target_modules: ${actor.target_modules}
+  # schedule_policy: fcfs
+
+# datasets
+train_dataset:
+  batch_size: 44
+  type: rl
+  path: ""
+
+valid_dataset:
+  batch_size: 44
+  type: rl
+  path: ""
+  drop_last: false
+
+# Utilities
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 2
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: auto #disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 2
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: online
+    project: appworld-platoon
+
+launcher:
+  inference_server_cpus_per_gpu: 32
+  inference_server_mem_per_gpu: 32768
+  trainer_cpus_per_gpu: 4
+  trainer_mem_per_gpu: 32768

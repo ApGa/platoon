@@ -160,5 +160,12 @@ You can use tools such as grep to help with this. Please output your answer as j
                 await env.close()
             
             return current_trajectory_collection.get().to_dict()
-
-    return asyncio.run(run_rollout())
+        
+    try:
+        return asyncio.run(asyncio.wait_for(run_rollout(), timeout=600)) # TODO: Make configurable.
+    except asyncio.TimeoutError:
+        print(f"Process {os.getpid()}: Rollout timed out for task {task.id}")
+        return None
+    except Exception as e:
+        print(f"Process {os.getpid()}: Failed rollout for task {task.id}: {e}")
+        return None

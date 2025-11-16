@@ -1,5 +1,5 @@
 experiment_name: code-localization-reinforce-plus-plus
-trial_name: reinforce-code-localization-plus-plus-trial5
+trial_name: reinforce-code-localization-plus-plus-trial7
 
 seed: 343 #4
 total_train_epochs: 100
@@ -37,7 +37,7 @@ gconfig: #TODO: Remove this from config and use workflow_config as the source of
 workflow_config:
   model_name: ${actor.path}
   max_steps_per_rollout: 35 #50
-  output_dir: /mnt/efs/tmp/areal/experiments/reinforce-code-localization-plus-plus-trial5
+  output_dir: /mnt/efs/tmp/areal/experiments/reinforce-code-localization-plus-plus-trial7
   verbose: null
   per_rollout_timeout_seconds: null
   model_endpoint: null
@@ -46,7 +46,7 @@ workflow_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path:  Qwen/Qwen3-4B
+  path:  Qwen/Qwen3-8B
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -150,7 +150,7 @@ saver:
   freq_secs: null
 
 recover:
-  mode: resume #disabled
+  mode: auto #disabled
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
