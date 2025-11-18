@@ -1,5 +1,5 @@
 from areal.utils.data import concat_padded_tensors
-from .rollout import run_rollout
+from .rollout import run_rollout, run_recursive_rollout
 from .tasks import get_task
 from copy import deepcopy
 from platoon.train.rl import WorkflowConfig
@@ -108,7 +108,7 @@ class TextCraftArealWorkflow(RolloutWorkflow):
                     str(engine.get_version()),
                 )
                 
-                results = await asyncio.create_task(run_rollout(task, config.rollout_config))
+                results = await asyncio.create_task(run_recursive_rollout(task, config.rollout_config))
                 
                 completions = self.proxy_server.session_cache[session.session_id].completions
                 train_data = get_train_data_for_trajectory_collection(results, completions, task_id)
