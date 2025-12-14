@@ -1,6 +1,6 @@
 from .env import NumberSearchEnv
 from .agent import NumberSearchAgent
-from platoon.train.rl import RolloutConfig
+from platoon.episode.config import RolloutConfig
 from platoon.utils.llm_client import LLMClient
 from platoon.episode.context import current_trajectory_collection
 from platoon.episode.loop import run_episode

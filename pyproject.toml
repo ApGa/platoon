@@ -9,7 +9,9 @@ readme = "README.md"
 requires-python = "~=3.12.0"
 dependencies = [
     "ai-rubric>=0.2.2",
-    "areal[cuda]",
+    #"areal[cuda]",
+    "skyrl-train",
+    "vllm==0.11.0",
     "ipython>=9.4.0",
     "pandas>=2.3.3",
     "pyarrow>=22.0.0",
@@ -22,13 +24,13 @@ dependencies = [
 
 [tool.uv]
 override-dependencies = [
-    "fastapi[standard]>=0.115.0",
-    "openai==1.99.6",
-    "xgrammar==0.1.24",
-    "outlines-core==0.1.26",
-    "pyarrow==20.0.0",
-    "huggingface_hub==0.34",
-    "datasets==4.3.0",
+    #"fastapi[standard]>=0.115.0",
+    #"openai==1.99.6",
+    #"xgrammar==0.1.24",
+    #"outlines-core==0.1.26",
+    #"pyarrow==20.0.0",
+    #"huggingface_hub==0.34",
+    #"datasets==4.3.0",
     "networkx==3.3.0" # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
 ]
 no-build-isolation-package = ['flash-attn']
@@ -36,6 +38,7 @@ no-build-isolation-package = ['flash-attn']
 [tool.uv.sources]
 appworld = { git = "https://github.com/stonybrooknlp/appworld" }
 areal = { git = "https://github.com/inclusionAI/AReaL.git", rev = "4ae2536474dc2d53a23d8f10cb4e90007906c607" }
+skyrl-train ={ git = "https://github.com/NovaSky-AI/SkyRL.git", subdirectory = "skyrl-train" }
 
 [build-system]
 requires = ["hatchling"]

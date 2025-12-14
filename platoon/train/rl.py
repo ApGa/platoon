@@ -30,23 +30,10 @@ from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.ppo.actor import PPOActorConfig
 from platoon.train.aent.actor import FSDPAEntPPOActor
 from copy import deepcopy
+from platoon.episode.config import RolloutConfig
 
 logger = logging.getLogger("Platoon RL Trainer")
 
-
-# TODO: We should make this customizable with a factory.
-@dataclass
-class RolloutConfig:
-    model_name: str | None = None
-    model_endpoint: str | None = None
-    model_api_key: str | None = None
-    train: bool = False
-    max_steps: int | None = None
-    output_dir: str = 'rollout_results'
-    verbose: bool = True
-    timeout: int | None = None
-    return_dict: bool = False
-    
 @dataclass
 class WorkflowConfig:
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)

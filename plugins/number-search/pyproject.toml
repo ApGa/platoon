@@ -13,13 +13,13 @@ no-build-isolation-package = ['flash-attn']
 
 [tool.uv]
 override-dependencies = [
-    "fastapi[standard]>=0.115.0",
-    "openai==1.99.6",
-    "xgrammar==0.1.24",
-    "outlines-core==0.1.26",
-    "pyarrow==20.0.0",
-    "huggingface_hub==0.34",
-    "datasets==4.3.0",
+    #"fastapi[standard]>=0.115.0",
+    #"openai==1.99.6",
+    #"xgrammar==0.1.24",
+    #"outlines-core==0.1.26",
+    #"pyarrow==20.0.0",
+    #"huggingface_hub==0.34",
+    #"datasets==4.3.0",
     "networkx==3.3.0" # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
 ]
 no-build-isolation-package = ['flash-attn']
