@@ -1,10 +1,10 @@
-experiment_name: number-search-reinforce-plus-plus
-trial_name: trial22
+experiment_name: number-search-grpo
+trial_name: grpo-trial3
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
-enable_offload: false
+#enable_offload: false
 
 
 cluster:
@@ -20,7 +20,7 @@ allocation_mode: sglang:d4p1t1+d2p1t1c2
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 32
+  max_concurrent_rollouts: 64
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -36,8 +36,8 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 30
-    output_dir: /mnt/efs/tmp/areal/experiments/number-search-reinforce-plus-plus-trial22
+    max_steps: 10
+    output_dir: /mnt/efs/tmp/areal/experiments/number-search-grpo-trial3
     verbose: True
     train: true
     timeout: 600
@@ -45,7 +45,7 @@ workflow_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-0.6B
+  path: Qwen/Qwen3-4B-Instruct-2507
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -116,7 +116,7 @@ sglang:
 
 # datasets
 train_dataset:
-  batch_size: 32  
+  batch_size: 32
   type: rl
   path: ""
 

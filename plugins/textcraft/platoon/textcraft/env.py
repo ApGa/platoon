@@ -193,8 +193,22 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
             
             if info["can_craft"]:
                 for recipe in self.recipe_db.get_recipes_for_item(item):
+                    # Expand tag-based ingredients to show concrete item options
+                    expanded_ingredients = {}
+                    for ing, count in recipe.ingredients.items():
+                        if ing.startswith("tag:"):
+                            tag_name = ing.replace("tag:", "")
+                            concrete_items = self.recipe_db.get_items_for_tag(tag_name)
+                            # Show both the tag and its concrete options
+                            expanded_ingredients[ing] = {
+                                "count": count,
+                                "use_one_of": concrete_items
+                            }
+                        else:
+                            expanded_ingredients[ing] = count
+                    
                     info["recipes"].append({
-                        "ingredients": recipe.ingredients,
+                        "ingredients": expanded_ingredients,
                         "result_count": recipe.result_count
                     })
             
@@ -257,6 +271,12 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
 4. view_inventory() -> dict
    - View your current inventory
    - Example: inv = view_inventory()
+
+IMPORTANT - Tag-based Ingredients:
+Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
+When crafting, you must provide a CONCRETE item from that category, NOT the tag name itself.
+Use get_info() to see which concrete items satisfy each tag. Check your inventory for available items.
+Example: If a recipe needs "tag:planks", use "oak_planks", "acacia_planks", "birch_planks", etc.
 """
     
     async def reset(self) -> 'TextCraftCodeExecutor':
@@ -304,6 +324,12 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
 5. view_inventory() -> dict
    - View your current inventory
    - Example: inv = view_inventory()
+
+IMPORTANT - Tag-based Ingredients:
+Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
+When crafting, you must provide a CONCRETE item from that category, NOT the tag name itself.
+Use get_info() to see which concrete items satisfy each tag. Check your inventory for available items.
+Example: If a recipe needs "tag:planks", use "oak_planks", "acacia_planks", "birch_planks", etc.
 
 Note that asyncio has already been imported for you. You can launch subagents using `await launch_subagent` or `asyncio.create_task` + `await asyncio.gather` to launch multiple subagents concurrently.
 """

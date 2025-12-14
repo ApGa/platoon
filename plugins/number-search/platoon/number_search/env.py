@@ -10,7 +10,7 @@ def guess_factory(target: int):
         elif number < target:
             return f"Too low, try again."
         else:
-            return "Too high"
+            return "Too high, try again."
     return guess
 
 class NumberSearchEnv(CodeActEnv):

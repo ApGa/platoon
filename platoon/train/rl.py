@@ -217,6 +217,9 @@ class PlatoonStepWiseRLTrainer:
                     should_accept_fn=lambda sample: True,
                 )
 
+                # NOTE: Temporary adv calculation experiment
+                #batch['rewards'] = batch['rewards'] - torch.mean(batch['task_reward'])
+
  
             if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
                 with stats_tracker.record_timing("recompute_logp"):

@@ -115,8 +115,43 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         self.rollout_fn = rollout_fn
         self.get_task_fn = get_task_fn
         self.filter_errors = filter_errors
-        
+
     async def arun_episode(self, engine: InferenceEngine, data: dict) -> dict | None:
+
+        results = await asyncio.gather(
+            *[self.arun_episode_single(engine, data, i) for i in range(8)] #range(self.config.rollout_config.num_rollouts)]
+        )
+        results = [result for result in results if result is not None]
+        if not results:
+            print(f"No results found for task {data['task_id']}")
+            return None
+        
+        train_data = concat_padded_tensors(results)
+
+        # NOTE: Temporary adv calculation experiment
+        train_data['rewards'] = train_data['rewards'] - torch.mean(train_data['task_reward'])
+
+        tracker = stats_tracker.get(self.stats_scope)
+        
+        reward_mask = torch.ones_like(train_data['task_reward'], dtype=torch.bool).to(self.device)
+        output_token_mask = torch.ones_like(train_data['num_output_tokens'], dtype=torch.bool).to(self.device)
+        input_token_mask = torch.ones_like(train_data['num_input_tokens'], dtype=torch.bool).to(self.device)
+        num_steps_mask = torch.ones_like(train_data['num_steps'], dtype=torch.bool).to(self.device)
+        
+        tracker.denominator(task_reward_mask=reward_mask, num_output_tokens_mask=output_token_mask, num_input_tokens_mask=input_token_mask, num_steps_mask=num_steps_mask)
+        tracker.stat(task_reward=train_data['task_reward'].to(self.device), denominator="task_reward_mask")
+        tracker.stat(num_output_tokens=train_data['num_output_tokens'].to(self.device), denominator="num_output_tokens_mask")
+        tracker.stat(num_input_tokens=train_data['num_input_tokens'].to(self.device), denominator="num_input_tokens_mask")
+        tracker.stat(num_steps=train_data['num_steps'].to(self.device), denominator="num_steps_mask")
+
+        mean_reward = torch.mean(train_data['rewards'])
+        if train_data['rewards'].max() == train_data['rewards'].min() and len(results) > 1:
+            print(f"All rewards are the same for task {data['task_id']}: {mean_reward.item():.2f}")
+            return None
+
+        return train_data
+
+    async def arun_episode_single(self, engine: InferenceEngine, data: dict, rollout_number: int) -> dict | None:
         
         config = deepcopy(self.config)
         try:
@@ -137,34 +172,21 @@ class StepWiseArealWorkflow(RolloutWorkflow):
                 results = await asyncio.create_task(self.rollout_fn(task, config.rollout_config))
                 
                 if not results['trajectories']:
-                    print(f"No trajectories found for task {task_id}")
+                    print(f"No trajectories found for task {task_id} and rollout {rollout_number}")
                     return None
                 
+
                 # TODO: This needs to only be done when training. Maybe we can make proxy server optional and only use it when training.
                 completions = self.proxy_server.session_cache[session.session_id].completions
                 train_data = get_train_data_for_trajectory_collection(results, completions, task_id, self.filter_errors)
                 
                 if train_data is None:
-                    print(f"No train data found for task {task_id}")
+                    print(f"No train data found for task {task_id} and rollout {rollout_number}")
                     return None
-               
-            
-            tracker = stats_tracker.get(self.stats_scope)
-            
-            reward_mask = torch.ones_like(train_data['task_reward'], dtype=torch.bool).to(self.device)
-            output_token_mask = torch.ones_like(train_data['num_output_tokens'], dtype=torch.bool).to(self.device)
-            input_token_mask = torch.ones_like(train_data['num_input_tokens'], dtype=torch.bool).to(self.device)
-            num_steps_mask = torch.ones_like(train_data['num_steps'], dtype=torch.bool).to(self.device)
-            
-            tracker.denominator(task_reward_mask=reward_mask, num_output_tokens_mask=output_token_mask, num_input_tokens_mask=input_token_mask, num_steps_mask=num_steps_mask)
-            tracker.stat(task_reward=train_data['task_reward'].to(self.device), denominator="task_reward_mask")
-            tracker.stat(num_output_tokens=train_data['num_output_tokens'].to(self.device), denominator="num_output_tokens_mask")
-            tracker.stat(num_input_tokens=train_data['num_input_tokens'].to(self.device), denominator="num_input_tokens_mask")
-            tracker.stat(num_steps=train_data['num_steps'].to(self.device), denominator="num_steps_mask")
             
             
             return train_data
             
         except Exception as e:
-            print(f"Error in areal workflow: {e}\n{traceback.format_exc()}")
+            print(f"Error in areal workflow for task {task_id} and rollout {rollout_number}: {e}\n{traceback.format_exc()}")
             return None
