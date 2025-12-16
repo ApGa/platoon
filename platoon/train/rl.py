@@ -46,6 +46,7 @@ class RolloutConfig:
     verbose: bool = True
     timeout: int | None = None
     return_dict: bool = False
+    group_size: int = 1
     
 @dataclass
 class WorkflowConfig:
@@ -182,7 +183,7 @@ class PlatoonStepWiseRLTrainer:
         )
         
         # TODO: should do this for other groups as well? Make configurable
-        #dist.distributed_c10d._set_pg_timeout(datetime.timedelta(seconds=7200), self.actor.data_parallel_group)
+        dist.distributed_c10d._set_pg_timeout(datetime.timedelta(seconds=7200), self.actor.data_parallel_group)
             
     def train(
         self,
@@ -217,7 +218,8 @@ class PlatoonStepWiseRLTrainer:
                     should_accept_fn=lambda sample: True,
                 )
 
-                # NOTE: Temporary adv calculation experiment
+                # NOTE: Uncomment for approximate batch-wise mean-centering. 
+                # Approximation because this is a subset of the batch assigned to each worker.
                 #batch['rewards'] = batch['rewards'] - torch.mean(batch['task_reward'])
 
  

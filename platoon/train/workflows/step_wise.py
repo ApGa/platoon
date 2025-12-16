@@ -119,7 +119,7 @@ class StepWiseArealWorkflow(RolloutWorkflow):
     async def arun_episode(self, engine: InferenceEngine, data: dict) -> dict | None:
 
         results = await asyncio.gather(
-            *[self.arun_episode_single(engine, data, i) for i in range(8)] #range(self.config.rollout_config.num_rollouts)]
+            *[self.arun_episode_single(engine, data, i) for i in range(self.config.rollout_config.group_size)]
         )
         results = [result for result in results if result is not None]
         if not results:
@@ -128,7 +128,9 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         
         train_data = concat_padded_tensors(results)
 
-        # NOTE: Temporary adv calculation experiment
+        mean_unprocessed_reward = torch.mean(train_data['rewards'])
+
+        # TODO: Make this configurable.
         train_data['rewards'] = train_data['rewards'] - torch.mean(train_data['task_reward'])
 
         tracker = stats_tracker.get(self.stats_scope)
@@ -143,10 +145,17 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         tracker.stat(num_output_tokens=train_data['num_output_tokens'].to(self.device), denominator="num_output_tokens_mask")
         tracker.stat(num_input_tokens=train_data['num_input_tokens'].to(self.device), denominator="num_input_tokens_mask")
         tracker.stat(num_steps=train_data['num_steps'].to(self.device), denominator="num_steps_mask")
+        
+        # task_reward @ K metrics (computed per-task across K rollouts)
+        task_rewards = train_data['task_reward'].to(self.device)
+        task_reward_at_k_mask = torch.ones(1, dtype=torch.bool).to(self.device)
+        tracker.denominator(task_reward_at_k_mask=task_reward_at_k_mask)
+        tracker.stat(task_reward_at_k_mean=torch.mean(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
+        tracker.stat(task_reward_at_k_max=torch.max(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
+        tracker.stat(task_reward_at_k_min=torch.min(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
 
-        mean_reward = torch.mean(train_data['rewards'])
         if train_data['rewards'].max() == train_data['rewards'].min() and len(results) > 1:
-            print(f"All rewards are the same for task {data['task_id']}: {mean_reward.item():.2f}")
+            print(f"All rewards are the same for task {data['task_id']}: {mean_unprocessed_reward.item():.2f}")
             return None
 
         return train_data

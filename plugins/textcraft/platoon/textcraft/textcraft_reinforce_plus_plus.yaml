@@ -1,10 +1,10 @@
 experiment_name: textcraft-reinforce-plus-plus
-trial_name: recursive-trial25
+trial_name: grpo-trial1
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
-enable_offload: false
+#enable_offload: false
 
 
 cluster:
@@ -20,7 +20,7 @@ allocation_mode: sglang:d4p1t1+d2p1t1c2
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 32
+  max_concurrent_rollouts: 64
   queue_size: null 
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -38,16 +38,17 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 50
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-reinforce-plus-plus-recursive-trial25
+    max_steps: 25
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-grpo-trial1
     verbose: True
     train: true
-    timeout: 300
+    timeout: 900
+    group_size: 8
 
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B #Qwen/Qwen3-VL-8B-Instruct
+  path: Qwen/Qwen3-4B-Instruct-2507
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -118,12 +119,12 @@ sglang:
 
 # datasets
 train_dataset:
-  batch_size: 64
+  batch_size: 32
   type: rl
   path: ""
 
 valid_dataset:
-  batch_size: 64
+  batch_size: 32
   type: rl
   path: ""
 
@@ -141,8 +142,8 @@ recover:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 5
-  freq_steps: null
+  freq_epochs: 1
+  freq_steps: 5
   freq_secs: 3600
 
 evaluator:
