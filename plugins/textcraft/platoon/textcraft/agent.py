@@ -12,6 +12,7 @@ class TextCraftPromptBuilder(CodeActPromptBuilder):
         return """You are an agent in a crafting game. Your goal is to craft items by combining ingredients.
 You can perform an action by writing a block of code. You will get multiple steps to complete the task.
 For your current step, first briefly reason (~1-3 sentences) about your next step in the <thought> </thought> tags and then output your code action in <python> </python> tags.
+Craft ingredients if they are not already in your inventory.
 """
 
 class TextCraftAgent(CodeActAgent):
@@ -29,7 +30,7 @@ class TextCraftRecursivePromptBuilder(TextCraftPromptBuilder):
         return """You are an agent in a crafting game. Your goal is to craft items by combining ingredients.
 You can perform an action by writing a block of code. You will get multiple steps to complete the task.
 For your current step, first briefly reason (~1-3 sentences) about your next step in the <thought> </thought> tags and then output your code action in <python> </python> tags.
-It is highly recommended to use subagents to parallelize (with asyncio) and craft intermediate items if needed.
+Craft ingredients if they are not already in your inventory. It is **highly recommended** to use subagents to craft ingredients if they are not already in your inventory.
 """
 
 class TextCraftRecursiveAgent(TextCraftAgent):

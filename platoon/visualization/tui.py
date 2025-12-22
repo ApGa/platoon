@@ -490,6 +490,10 @@ class TrajectoryTree(Static):
         self.traj_rewards: Dict[str, float] = {}
         # Track whether a trajectory is finished (finish_message or error_message present)
         self.traj_finished: Dict[str, bool] = {}
+        # Track which trajectories are currently expanded (for efficient collapse_all_except)
+        self.expanded_trajs: set[str] = set()
+        # Bulk loading mode - when True, don't expand new trajectory nodes
+        self.bulk_loading: bool = False
         # Search functionality
         self.search_results: List[TreeNode[str]] = []
         self.current_search_index: int = -1
@@ -515,6 +519,8 @@ class TrajectoryTree(Static):
         self.step_nodes.clear()
         self.traj_rewards.clear()
         self.traj_finished.clear()
+        self.expanded_trajs.clear()
+        self.bulk_loading = False
         self.search_results.clear()
         self.current_search_index = -1
         self.current_search_query = ""
@@ -760,12 +766,16 @@ class SplitDivider(Static):
         *,
         label: Optional[str] = None,
         parent: Optional[TreeNode[str]] = None,
+        expand: bool = True,
     ) -> TreeNode[str]:
         """Return (and create if necessary) the tree node for *traj_id*.
 
         If *parent* is supplied, the trajectory node will be created as a child
         of that parent instead of at the tree root.  Subsequent calls will
         return the same node regardless of *parent*.
+        
+        If *expand* is True (default), the node will be expanded when created.
+        Set to False during bulk loading for better performance.
         """
         assert self.tree_widget is not None
 
@@ -773,8 +783,10 @@ class SplitDivider(Static):
             target_parent: TreeNode[str] = parent if parent is not None else self.tree_widget.root
             node = target_parent.add(label or f"traj:{traj_id}")
             # New trajectory nodes should start expanded so that children (steps)
-            # are visible immediately.
-            node.expand()
+            # are visible immediately (unless bulk loading).
+            if expand:
+                node.expand()
+                self.expanded_trajs.add(traj_id)
             self.traj_nodes[traj_id] = node
 
         return self.traj_nodes[traj_id]
@@ -861,7 +873,7 @@ class SplitDivider(Static):
             except Exception:
                 self.traj_finished[traj_id] = False
             label = self._format_traj_label(traj_id)
-            node = self.ensure_traj_node(traj_id, label=label, parent=group_node)
+            node = self.ensure_traj_node(traj_id, label=label, parent=group_node, expand=not self.bulk_loading)
             node.data = {"type": "trajectory", "payload": traj}
             # Render forks as a dedicated child under the child trajectory for clarity
             if parent_info:
@@ -879,7 +891,7 @@ class SplitDivider(Static):
         elif event.type == "trajectory_task_set":
             traj_id = event.data["trajectory_id"]
             task = event.data.get("task")
-            node = self.ensure_traj_node(traj_id, parent=group_node)
+            node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
             task_label = f"task: {task.get('goal')}" if task else "task: None"
             task_node = node.add(task_label)
             task_node.data = {"type": "task", "payload": task} if task else None
@@ -888,7 +900,7 @@ class SplitDivider(Static):
             traj_id = event.data["trajectory_id"]
             step_index = event.data.get("step_index")
             step = event.data.get("step")
-            node = self.ensure_traj_node(traj_id, parent=group_node)
+            node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
             # Update cached reward from event if available; fallback to existing value
             new_reward = event.data.get("reward")
             if isinstance(new_reward, (int, float)):
@@ -955,7 +967,7 @@ class SplitDivider(Static):
 
         elif event.type == "trajectory_finished":
             traj_id = event.data["trajectory_id"]
-            node = self.ensure_traj_node(traj_id, parent=group_node)
+            node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
             # Update cached reward and terminal status
             try:
                 new_reward = event.data.get("reward")
@@ -1080,26 +1092,33 @@ class SplitDivider(Static):
             return
 
     def collapse_all_except(self, keep_traj_id: str) -> None:
-        # Collapse all trajectory nodes except the active one to reduce clutter
-        for tid, tnode in list(self.traj_nodes.items()):
-            if tid == keep_traj_id:
-                try:
-                    tnode.expand()
-                except Exception:
-                    pass
-                # Also try to expand steps under the kept trajectory
-                steps_node = self.traj_steps_nodes.get(tid)
-                if steps_node is not None:
-                    try:
-                        steps_node.expand()
-                    except Exception:
-                        pass
-                continue
+        # Collapse only currently expanded trajectory nodes (O(k) where k = expanded, not O(n) total)
+        # First, expand the one we want to keep
+        tnode = self.traj_nodes.get(keep_traj_id)
+        if tnode is not None:
             try:
-                tnode.collapse()
+                tnode.expand()
             except Exception:
                 pass
-
+            self.expanded_trajs.add(keep_traj_id)
+            # Also expand steps under the kept trajectory
+            steps_node = self.traj_steps_nodes.get(keep_traj_id)
+            if steps_node is not None:
+                try:
+                    steps_node.expand()
+                except Exception:
+                    pass
+        
+        # Collapse all other expanded trajectories
+        to_collapse = [tid for tid in self.expanded_trajs if tid != keep_traj_id]
+        for tid in to_collapse:
+            tnode = self.traj_nodes.get(tid)
+            if tnode is not None:
+                try:
+                    tnode.collapse()
+                except Exception:
+                    pass
+            self.expanded_trajs.discard(tid)
 
 
 # Bind methods accidentally nested under SplitDivider back onto TrajectoryTree
@@ -1356,12 +1375,14 @@ class TrajectoryViewer(App):
         - If the file is truncated (size < current position), seek to start.
         - If the file is replaced (inode change), reopen and seek to start.
         - If start_at_end is True on first open, seek to end; otherwise, begin at start.
+        - Uses bulk loading for existing content to avoid per-record UI refresh.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         last_inode: Optional[int] = None
         pos: int = 0
         file_obj: Optional[object] = None
         first_open: bool = True
+        bulk_load_done: bool = False
 
         while True:
             try:
@@ -1382,13 +1403,48 @@ class TrajectoryViewer(App):
                 file_obj = path.open("r")
                 if first_open and start_at_end:
                     file_obj.seek(0, 2)  # type: ignore[attr-defined]
+                    bulk_load_done = True  # No bulk load needed if starting at end
                 else:
                     file_obj.seek(0)  # type: ignore[attr-defined]
                 pos = file_obj.tell()  # type: ignore[attr-defined]
                 last_inode = inode
                 first_open = False
 
-            # Read a line
+            # Bulk load existing content on first open (without per-record refresh)
+            if not bulk_load_done:
+                records_loaded = 0
+                if self.tree_widget is not None:
+                    self.tree_widget.bulk_loading = True
+                while True:
+                    line = file_obj.readline()  # type: ignore[attr-defined]
+                    if not line:
+                        break
+                    pos = file_obj.tell()  # type: ignore[attr-defined]
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    # Ingest without full UI refresh
+                    await self._handle_record_bulk(record)
+                    records_loaded += 1
+                    # Yield periodically to keep UI responsive
+                    if records_loaded % 100 == 0:
+                        await asyncio.sleep(0)
+                # Single refresh after bulk load
+                if self.tree_widget is not None:
+                    self.tree_widget.bulk_loading = False
+                    # Expand root and collection nodes so trajectories are visible
+                    try:
+                        self.tree_widget.tree_widget.root.expand()
+                        for group_node in self.tree_widget.group_nodes.values():
+                            group_node.expand()
+                    except Exception:
+                        pass
+                    self.tree_widget.refresh()
+                bulk_load_done = True
+                continue
+
+            # Normal tailing mode: read a line
             line = file_obj.readline()  # type: ignore[attr-defined]
             if line:
                 pos = file_obj.tell()  # type: ignore[attr-defined]
@@ -1430,6 +1486,7 @@ class TrajectoryViewer(App):
                         pass
                     file_obj = None
                     last_inode = None
+                bulk_load_done = False  # Re-do bulk load on truncation
             else:
                 # Idle briefly before next poll
                 await asyncio.sleep(0.2)
@@ -1541,8 +1598,30 @@ class TrajectoryViewer(App):
             except Exception:
                 continue
         all_records.sort(key=lambda r: r.get("ts", 0.0))
-        for rec in all_records:
-            await self._handle_record(rec)
+        # Bulk load without per-record refresh
+        if self.tree_widget is not None:
+            self.tree_widget.bulk_loading = True
+        for i, rec in enumerate(all_records):
+            await self._handle_record_bulk(rec)
+            # Yield periodically to keep UI responsive
+            if i % 100 == 0:
+                await asyncio.sleep(0)
+        # Single refresh after all records loaded
+        if self.tree_widget is not None:
+            self.tree_widget.bulk_loading = False
+            # Expand root and collection nodes so trajectories are visible
+            try:
+                self.tree_widget.tree_widget.root.expand()
+                for group_node in self.tree_widget.group_nodes.values():
+                    group_node.expand()
+            except Exception:
+                pass
+            self.tree_widget.refresh()
+
+    async def _handle_record_bulk(self, record: Dict[str, Any]) -> None:
+        """Handle a record during bulk loading - ingest only, no refresh or auto-expand."""
+        ev = Event(type=record.get("type", "unknown"), data=record)
+        self.tree_widget.ingest(ev)
 
     async def _handle_record(self, record: Dict[str, Any]) -> None:
         ev = Event(type=record.get("type", "unknown"), data=record)
@@ -1569,12 +1648,14 @@ class TrajectoryViewer(App):
                         except Exception:
                             pass
                         cur = getattr(cur, "parent", None)
+                    # Track this trajectory as expanded
+                    self.tree_widget.expanded_trajs.add(traj_id)
                     # If a step event, focus that step, center it, and briefly highlight.
                     # Also collapse other trajectories to reduce clutter.
                     if ev.type == "trajectory_step_added":
                         step_index = record.get("step_index")
                         if isinstance(step_index, int):
-                            # Collapse other trajectories to keep the active one in focus
+                            # Collapse is now O(k) where k = expanded trajectories, not O(n) total
                             try:
                                 self.tree_widget.collapse_all_except(traj_id)
                             except Exception:

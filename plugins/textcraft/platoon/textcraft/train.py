@@ -7,6 +7,16 @@ from platoon.textcraft.tasks import get_task_ids, get_task
 from platoon.textcraft.rollout import run_rollout, run_recursive_rollout
 from platoon.train.workflows.step_wise import StepWiseArealWorkflow
 
+def reward_processor(traj: dict) -> tuple[float, dict]:
+    rewards_dict = dict()
+    for step in traj['steps']:
+        for reward_key, reward_value in step['misc']['reward_misc'].items():
+            if reward_key.startswith('reward/'):
+                if reward_key not in rewards_dict:
+                    rewards_dict[reward_key] = 0.0
+                rewards_dict[reward_key] += reward_value
+    score = sum(rewards_dict.values())
+    return score, rewards_dict
 
 def main(args):
     config, _ = load_expr_config(args, PlatoonStepWiseRLTrainerConfig)
@@ -24,10 +34,8 @@ def main(args):
     ) as trainer:
     
         proxy_server = trainer.proxy_server
-        #workflow = TextCraftArealWorkflow(config.workflow_config, proxy_server, 'train_rollout', trainer.actor.device)
-        #eval_workflow = TextCraftArealWorkflow(config.workflow_config, proxy_server, 'eval_rollout', trainer.actor.device)
-        workflow = StepWiseArealWorkflow(run_rollout, get_task, config.workflow_config, proxy_server, 'train_rollout', trainer.actor.device, filter_errors=True)
-        eval_workflow = StepWiseArealWorkflow(run_rollout, get_task, config.workflow_config, proxy_server, 'eval_rollout', trainer.actor.device)
+        workflow = StepWiseArealWorkflow(run_recursive_rollout, get_task, config.workflow_config, proxy_server, 'train_rollout', trainer.actor.device, filter_errors=True, reward_processor=reward_processor)
+        eval_workflow = StepWiseArealWorkflow(run_recursive_rollout, get_task, config.workflow_config, proxy_server, 'eval_rollout', trainer.actor.device, reward_processor=reward_processor)
         
         trainer.train(
             workflow=workflow,

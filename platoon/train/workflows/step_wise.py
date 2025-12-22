@@ -13,7 +13,7 @@ from areal.experimental.openai.client import InteractionWithTokenLogpReward
 import asyncio
 from typing import Callable
 from platoon.envs.base import Task
-    
+
 def get_train_data_for_step(
     step: dict,
     completions: dict[str, InteractionWithTokenLogpReward],
@@ -26,7 +26,7 @@ def get_train_data_for_step(
         return None
     
     # Only filter error steps from trajectories with reward 1 (successful trajectories)
-    if filter_errors and trajectory_reward == 1 and (('error' in step and step['error']) or ('output' in step and step['output'] and 'traceback' in step['output'].lower())):
+    if filter_errors and trajectory_reward >= 1 and (('error' in step and step['error']) or ('output' in step and step['output'] and 'traceback' in step['output'].lower())):
         error_info = step.get('error') or step.get('output', 'Unknown error')
         print(f"Filtering Step: Error in step for task {task_id}: {error_info}")
         return None
@@ -58,19 +58,22 @@ def get_train_data_for_trajectory(
     task_id: str,
     trajectory_id: str,
     filter_errors: bool = False,
+    reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj['reward'], {})
     ) -> dict | None:
     train_data = []
     count_found_train_data = 0
-    trajectory_reward = trajectory['reward']
+
+    trajectory_reward, trajectory_rewards_dict = reward_processor(trajectory)
+
     for i, step in enumerate(trajectory['steps']):
         step_train_data = get_train_data_for_step(step, completions, task_id, filter_errors, trajectory_reward)
         if step_train_data:
             count_found_train_data += 1
-            step_train_data['rewards'] = torch.tensor([trajectory['reward']])
+            step_train_data['rewards'] = torch.tensor([trajectory_reward])
             # Make rewards 2D [1, seq_len] so it is split/packed per-token with the batch
             seq_len = step_train_data['attention_mask'].shape[1]
             step_train_data['token_rewards'] = torch.full(
-                (1, seq_len), float(trajectory['reward']), dtype=torch.float32
+                (1, seq_len), float(trajectory_reward), dtype=torch.float32
             )
             train_data.append(step_train_data)
         else:
@@ -82,31 +85,48 @@ def get_train_data_for_trajectory(
         print(f"No train data found for trajectory {trajectory_id} for task {task_id}")
         return None
     
-    return concat_padded_tensors(train_data) | { 'num_steps': torch.tensor([float(len(trajectory['steps']))]) }
+    return concat_padded_tensors(train_data) | { 
+        'num_steps': torch.tensor([float(len(trajectory['steps']))]),
+        **{key: torch.tensor(value).unsqueeze(0) for key, value in trajectory_rewards_dict.items()}
+    }
 
 def get_train_data_for_trajectory_collection(
     trajectory_collection: dict, 
     completions: dict[str, InteractionWithTokenLogpReward],
     task_id: str,
     filter_errors: bool = False,
+    reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj['reward'], {})
     ) -> dict | None:
     
     train_data = []
     for trajectory_id, trajectory in trajectory_collection['trajectories'].items():
-        trajectory_data = get_train_data_for_trajectory(trajectory, completions, task_id, trajectory_id, filter_errors)
+        trajectory_data = get_train_data_for_trajectory(trajectory, completions, task_id, trajectory_id, filter_errors, reward_processor)
         if trajectory_data is not None:
             train_data.append(trajectory_data)
     
     if not train_data:
         print(f"No train data found for any trajectory for task {task_id}")
         return None
+
+    root_reward, root_rewards_dict = reward_processor(list(trajectory_collection['trajectories'].values())[0])
     
     return concat_padded_tensors(train_data) | {
-        'task_reward': torch.tensor(list(trajectory_collection['trajectories'].values())[0]['reward']).unsqueeze(0)
+        'task_reward': torch.tensor(root_reward).unsqueeze(0),
+        **{f'root_{key}': torch.tensor(value).unsqueeze(0) for key, value in root_rewards_dict.items()}
     }
 
 class StepWiseArealWorkflow(RolloutWorkflow):
-    def __init__(self, rollout_fn: Callable[[Task, dict], dict], get_task_fn: Callable[[str], Task], config: WorkflowConfig, proxy_server: ProxyServer, stats_scope: str, device: torch.device, filter_errors: bool = False):
+    def __init__(
+        self,
+        rollout_fn: Callable[[Task, dict], dict],
+        get_task_fn: Callable[[str], Task],
+        config: WorkflowConfig,
+        proxy_server: ProxyServer,
+        stats_scope: str,
+        device: torch.device,
+        filter_errors: bool = False,
+        reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj['reward'], {})
+    ):
         self.config = config
         self.config.rollout_config.return_dict = True
         self.config.rollout_config.train = True
@@ -118,6 +138,7 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         self.rollout_fn = rollout_fn
         self.get_task_fn = get_task_fn
         self.filter_errors = filter_errors
+        self.reward_processor = reward_processor
 
     async def arun_episode(self, engine: InferenceEngine, data: dict) -> dict | None:
 
@@ -138,17 +159,17 @@ class StepWiseArealWorkflow(RolloutWorkflow):
 
         tracker = stats_tracker.get(self.stats_scope)
         
-        reward_mask = torch.ones_like(train_data['task_reward'], dtype=torch.bool).to(self.device)
+        task_reward_mask = torch.ones_like(train_data['task_reward'], dtype=torch.bool).to(self.device)
         output_token_mask = torch.ones_like(train_data['num_output_tokens'], dtype=torch.bool).to(self.device)
         input_token_mask = torch.ones_like(train_data['num_input_tokens'], dtype=torch.bool).to(self.device)
         num_steps_mask = torch.ones_like(train_data['num_steps'], dtype=torch.bool).to(self.device)
         
-        tracker.denominator(task_reward_mask=reward_mask, num_output_tokens_mask=output_token_mask, num_input_tokens_mask=input_token_mask, num_steps_mask=num_steps_mask)
+        tracker.denominator(task_reward_mask=task_reward_mask, num_output_tokens_mask=output_token_mask, num_input_tokens_mask=input_token_mask, num_steps_mask=num_steps_mask)
         tracker.stat(task_reward=train_data['task_reward'].to(self.device), denominator="task_reward_mask")
         tracker.stat(num_output_tokens=train_data['num_output_tokens'].to(self.device), denominator="num_output_tokens_mask")
         tracker.stat(num_input_tokens=train_data['num_input_tokens'].to(self.device), denominator="num_input_tokens_mask")
         tracker.stat(num_steps=train_data['num_steps'].to(self.device), denominator="num_steps_mask")
-        
+
         # task_reward @ K metrics (computed per-task across K rollouts)
         task_rewards = train_data['task_reward'].to(self.device)
         task_reward_at_k_mask = torch.ones(1, dtype=torch.bool).to(self.device)
@@ -156,6 +177,18 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         tracker.stat(task_reward_at_k_mean=torch.mean(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
         tracker.stat(task_reward_at_k_max=torch.max(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
         tracker.stat(task_reward_at_k_min=torch.min(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
+
+
+        for key, value in train_data.items():
+            if key.startswith('root_'):
+                tracker.stat(**{key: value.to(self.device)}, denominator="task_reward_mask")
+                tracker.stat(**{f"{key}_at_k_mean": torch.mean(value).unsqueeze(0).to(self.device)}, denominator="task_reward_at_k_mask")
+                tracker.stat(**{f"{key}_at_k_max": torch.max(value).unsqueeze(0).to(self.device)}, denominator="task_reward_at_k_mask")
+                tracker.stat(**{f"{key}_at_k_min": torch.min(value).unsqueeze(0).to(self.device)}, denominator="task_reward_at_k_mask")
+            elif key.startswith('reward/'):        
+                reward_mask = torch.ones_like(value, dtype=torch.bool).to(self.device)
+                tracker.denominator(**{f"{key}_mask": reward_mask})
+                tracker.stat(**{key: value.to(self.device)}, denominator=f"{key}_mask")
 
         if train_data['rewards'].max() == train_data['rewards'].min() and len(results) > 1:
             print(f"All rewards are the same for task {data['task_id']}: {mean_unprocessed_reward.item():.2f}")
@@ -190,7 +223,7 @@ class StepWiseArealWorkflow(RolloutWorkflow):
 
                 # TODO: This needs to only be done when training. Maybe we can make proxy server optional and only use it when training.
                 completions = self.proxy_server.session_cache[session.session_id].completions
-                train_data = get_train_data_for_trajectory_collection(results, completions, task_id, self.filter_errors)
+                train_data = get_train_data_for_trajectory_collection(results, completions, task_id, self.filter_errors, self.reward_processor)
                 
                 if train_data is None:
                     print(f"No train data found for task {task_id} and rollout {rollout_number}")

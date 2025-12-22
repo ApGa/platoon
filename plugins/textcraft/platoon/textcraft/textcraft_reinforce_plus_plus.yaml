@@ -1,5 +1,5 @@
 experiment_name: textcraft-reinforce-plus-plus
-trial_name: grpo-linear-trial2
+trial_name: grpo-recursive-trial1
 
 seed: 343
 total_train_epochs: 10
@@ -39,7 +39,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 50
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-grpo-linear-trial2
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-grpo-recursive-trial1
     verbose: True
     train: true
     timeout: 900

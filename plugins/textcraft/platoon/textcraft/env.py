@@ -398,6 +398,7 @@ class TextCraftEnv(CodeActEnv):
                 reward_misc["success"] = False
                 reward_misc["error"] = "Episode ended without calling finish() - likely timeout or max steps reached"
         
+        reward_misc["reward/success"] = score
         return score, reward_misc
     
     async def reset(self) -> CodeActObservation:
@@ -466,7 +467,14 @@ class TextCraftEnv(CodeActEnv):
 class TextCraftRecursiveEnv(TextCraftEnv):
     """Environment for TextCraft crafting tasks with recursive agent spawning."""
     
-    def __init__(self, task: Task, recipes_dir: Optional[Path] = None, initial_inventory: Optional[Dict[str, int]] = None, _share_inventory: bool = False):
+    def __init__(
+        self, 
+        task: Task, 
+        recipes_dir: Optional[Path] = None, 
+        initial_inventory: Optional[Dict[str, int]] = None, 
+        _share_inventory: bool = False,
+        subagent_launch_reward: float = 0.0,
+    ):
         super().__init__(task, recipes_dir, initial_inventory, _share_inventory=_share_inventory)
         # Use self._recipes_dir and self._initial_inventory which were set by parent class
         # (parent applies defaults: recipes_dir from __file__, inventory from task.misc)
@@ -476,3 +484,49 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             self._code_executor.inventory,  # Use parent's executor inventory (already shared if _share_inventory=True)
             _share_inventory=True  # Always share since we're using parent's inventory dict
         )
+        self._subagent_launch_reward = subagent_launch_reward
+
+    def _current_step_launched_subagent(self) -> bool:
+        """Check if the current step successfully launched a subagent."""
+        if not self._state.history:
+            return False
+        current_step = self._state.history[-1]
+        return current_step.output and "Budget used by subagent" in current_step.output
+
+    async def evaluate(self) -> Tuple[float, dict]:
+        score, reward_misc = await super().evaluate()
+        
+        # Add reward for each step that successfully launches a subagent
+        if self._subagent_launch_reward > 0 and self._current_step_launched_subagent():
+            score += self._subagent_launch_reward
+            reward_misc["subagent_launched"] = True
+            reward_misc["reward/subagent_launch"] = self._subagent_launch_reward
+        else:
+            reward_misc["subagent_launched"] = False
+            reward_misc["reward/subagent_launch"] = 0.0
+        
+        return score, reward_misc
+    
+    async def fork(self, task: Task) -> 'TextCraftRecursiveEnv':
+        """Fork the environment for a subagent."""
+        # Parse the goal string to extract targets if it's a crafting task
+        targets = self._parse_craft_targets_from_goal(task.goal)
+        
+        if targets:
+            # Update task.misc with TextCraft-specific data
+            task.misc = task.misc.copy() if task.misc else {}
+            task.misc.update({
+                "target_items": targets,
+                "initial_inventory": self._code_executor.inventory,
+            })
+        
+        # Create forked environment sharing the same inventory reference
+        # Note: subagent_launch_reward is NOT propagated - each trajectory is evaluated independently
+        forked_env = TextCraftRecursiveEnv(
+            task=task,
+            recipes_dir=self._recipes_dir,
+            initial_inventory=self._code_executor.inventory,
+            _share_inventory=True,
+        )
+        
+        return forked_env

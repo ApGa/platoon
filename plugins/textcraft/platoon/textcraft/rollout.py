@@ -83,7 +83,7 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             base_url=config.model_endpoint,
             api_key=config.model_api_key
         )
-        env = TextCraftRecursiveEnv(task)
+        env = TextCraftRecursiveEnv(task, subagent_launch_reward=0.2)
         agent = TextCraftRecursiveAgent(llm_client=llm_client)
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
