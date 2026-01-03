@@ -28,12 +28,20 @@ import sys
 import time
 from typing import Sequence
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [RESTART-WRAPPER] %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+# Use a dedicated logger that doesn't affect the root logger
+# This prevents interference when restart_wrapper is imported by subprocess code
+logger = logging.getLogger("platoon.restart_wrapper")
+
+
+def _configure_restart_wrapper_logging():
+    """Configure logging for restart wrapper. Only call when running as main script."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [RESTART-WRAPPER] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 def run_with_restart(
@@ -118,6 +126,8 @@ def run_with_restart(
 
 
 def main():
+    _configure_restart_wrapper_logging()
+    
     parser = argparse.ArgumentParser(
         description="Restart training on watchdog timeout",
         formatter_class=argparse.RawDescriptionHelpFormatter,
