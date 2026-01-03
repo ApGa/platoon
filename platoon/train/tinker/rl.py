@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 import signal
+import sys
+import threading
 import time
 import tinker
 from dataclasses import dataclass
@@ -11,7 +13,7 @@ from datasets import Dataset
 from tinker_cookbook import checkpoint_utils
 from platoon.train.tinker.proxy import register_tinker_llm, ModelInfo
 from platoon.train.tinker.workflows.base import RolloutWorkflow
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, TrainEventTriggerConfig
+from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, TrainEventTriggerConfig, WatchdogConfig
 from platoon.utils.stats_tracker import StatsTracker, get as get_tracker
 from platoon.utils.stats_logger import StatsLogger
 
@@ -19,6 +21,93 @@ logger = logging.getLogger(__name__)
 
 # Global flag to track if we've already received a shutdown signal
 _SHUTDOWN_REQUESTED = False
+
+
+class Watchdog:
+    """Background thread that monitors for hangs and forcibly exits if no activity.
+     If Tinker hangs, the only recovery is to forcibly exit the process.
+    
+    Usage:
+        watchdog = Watchdog(timeout_seconds=1800)  # 30 min timeout
+        watchdog.start()
+        
+        # In your main loop:
+        watchdog.heartbeat()  # Call periodically to reset the timer
+        
+        # When done:
+        watchdog.stop()
+    """
+    
+    def __init__(
+        self,
+        timeout_seconds: float = 1800,  # 30 minutes default
+        exit_code: int = 2,
+        on_timeout_callback: callable = None,
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.exit_code = exit_code
+        self.on_timeout_callback = on_timeout_callback
+        self._last_heartbeat = time.time()
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+    
+    def heartbeat(self):
+        """Call this periodically to indicate the process is making progress."""
+        with self._lock:
+            self._last_heartbeat = time.time()
+    
+    def start(self):
+        """Start the watchdog monitoring thread."""
+        if self._running:
+            return
+        
+        self._running = True
+        self._last_heartbeat = time.time()
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+        logger.info(f"Watchdog started with {self.timeout_seconds}s timeout")
+    
+    def stop(self):
+        """Stop the watchdog thread."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        logger.info("Watchdog stopped")
+    
+    def _monitor_loop(self):
+        """Background thread that checks for hangs."""
+        check_interval = min(60.0, self.timeout_seconds / 10)  # Check every minute or less
+        
+        while self._running:
+            time.sleep(check_interval)
+            
+            with self._lock:
+                elapsed = time.time() - self._last_heartbeat
+            
+            if elapsed > self.timeout_seconds:
+                logger.error(
+                    f"WATCHDOG: No heartbeat for {elapsed:.0f}s (timeout={self.timeout_seconds}s). "
+                    f"Process appears hung. Forcing exit with code {self.exit_code}."
+                )
+                
+                # Call optional callback (e.g., to save state)
+                if self.on_timeout_callback:
+                    try:
+                        self.on_timeout_callback()
+                    except Exception as e:
+                        logger.error(f"Watchdog callback failed: {e}")
+                
+                # Force immediate exit - this bypasses all cleanup
+                os._exit(self.exit_code)
+            
+            elif elapsed > self.timeout_seconds * 0.75:
+                # Warn when approaching timeout
+                logger.warning(
+                    f"WATCHDOG: No heartbeat for {elapsed:.0f}s "
+                    f"(timeout in {self.timeout_seconds - elapsed:.0f}s)"
+                )
 
 class TerminateTrainLoop(Exception):
     """Exception raised to terminate the train loop."""
@@ -75,6 +164,7 @@ class TrainLoopSharedState:
     model_info: ModelInfo
     stats_logger: StatsLogger
     train_tracker: StatsTracker
+    watchdog: Watchdog | None = None
     
     def _get_event_frequency(self, config: TrainEventTriggerConfig) -> int:
         """Normalize the event frequency to the number of training steps.
@@ -247,6 +337,10 @@ class PlatoonTinkerRLTrainer:
                 logger.warning(f"Rollout for task {task_id} took {elapsed:.1f}s (very slow)")
             elif elapsed > 60.0:
                 logger.info(f"Rollout for task {task_id} took {elapsed:.1f}s (slow)")
+            
+            # Heartbeat after each completed rollout
+            if shared_state.watchdog:
+                shared_state.watchdog.heartbeat()
                 
             rollout_result_queue.put_nowait(rollout)
 
@@ -432,6 +526,10 @@ class PlatoonTinkerRLTrainer:
             
             shared_state.train_step += 1
             shared_state.sampling_client_step += 1
+            
+            # Heartbeat after completing a train step
+            if shared_state.watchdog:
+                shared_state.watchdog.heartbeat()
             
             # Signal eval loop that sampling client has been updated
             shared_state.sampling_client_updated_event.set()
@@ -676,6 +774,15 @@ class PlatoonTinkerRLTrainer:
         if self.eval_dataset is not None:
             eval_dataloader = PlatoonTinkerDataloader(self.eval_dataset, batch_size=1, shuffle_seed=None, drop_last=False)
 
+        # Initialize watchdog if enabled
+        watchdog = None
+        if self.config.watchdog.enabled:
+            watchdog = Watchdog(
+                timeout_seconds=self.config.watchdog.timeout_seconds,
+                exit_code=self.config.watchdog.exit_code,
+            )
+            watchdog.start()
+
         shared_state = TrainLoopSharedState(
             config=self.config,
             shutdown_event=shutdown_event,
@@ -691,6 +798,7 @@ class PlatoonTinkerRLTrainer:
             eval_dataloader=eval_dataloader,
             stats_logger=self._stats_logger,
             train_tracker=self._train_tracker,
+            watchdog=watchdog,
         )
 
         end_batch = shared_state.num_train_batches
@@ -707,6 +815,10 @@ class PlatoonTinkerRLTrainer:
         except* (KeyboardInterrupt, asyncio.CancelledError):
             interrupted = True
             logger.info("Training interrupted. Saving checkpoint before exit...")
+        finally:
+            # Stop watchdog
+            if watchdog:
+                watchdog.stop()
 
         # Save checkpoint
         current_step = shared_state.train_step

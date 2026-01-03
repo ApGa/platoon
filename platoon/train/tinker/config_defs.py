@@ -81,6 +81,14 @@ class StatsConfig:
 
 
 @dataclass
+class WatchdogConfig:
+    """Configuration for the watchdog that monitors for hangs."""
+    enabled: bool = True
+    timeout_seconds: float = 900 # 15 minutes default
+    exit_code: int = 2  # Exit code when watchdog kills process
+
+
+@dataclass
 class PlatoonTinkerRLTrainerConfig:
     train: TrainConfig
     eval: EvalConfig
@@ -88,3 +96,4 @@ class PlatoonTinkerRLTrainerConfig:
     tinker_base_url: str | None = None  # Tinker service URL
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
+    watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)

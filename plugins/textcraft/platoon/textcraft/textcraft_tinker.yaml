@@ -8,7 +8,7 @@ train:
   num_epochs: 30
   num_minibatches: 1
   num_microbatches: 1
-  max_staleness: 3
+  max_staleness: 2
   lora_rank: 32
   loss_fn: cispo
   loss_fn_config:
@@ -26,7 +26,7 @@ train:
       output_dir: ./rollout_results
       verbose: true
       timeout: 900
-  num_concurrent_rollout_workflow_workers: 8
+  num_concurrent_rollout_workflow_workers: 32
 
 # Eval configuration
 eval:
@@ -54,7 +54,7 @@ tinker_base_url: null
 # Stats and WandB configuration
 stats:
   experiment_name: textcraft-platoon-tinker
-  trial_name: grpo-trial4
+  trial_name: grpo-linear-trial0
   wandb:
     mode: online
     project: textcraft-platoon-tinker

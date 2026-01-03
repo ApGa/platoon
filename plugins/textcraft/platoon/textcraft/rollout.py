@@ -54,8 +54,11 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             if config.verbose:
                 logger.error(f"Process {os.getpid()}: Rollout timed out for task {task.id}")
             rollout_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await rollout_task
+            # Don't wait indefinitely - tinker's sample_async may not be cancellable
+            try:
+                await asyncio.wait_for(rollout_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning(f"Process {os.getpid()}: Task cancellation did not complete in 5s for {task.id}, abandoning")
             raise
         
         if config.return_dict:
@@ -113,8 +116,11 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             if config.verbose:
                 logger.error(f"Process {os.getpid()}: Rollout timed out for task {task.id}")
             rollout_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await rollout_task
+            # Don't wait indefinitely - tinker's sample_async may not be cancellable
+            try:
+                await asyncio.wait_for(rollout_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning(f"Process {os.getpid()}: Task cancellation did not complete in 5s for {task.id}, abandoning")
             raise
         
         if config.return_dict:

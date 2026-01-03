@@ -49,7 +49,7 @@ checkpoint:
 
 # Logging
 log_path: ./logs
-tinker_base_url: null
+tinker_base_url: http://ec2-18-219-33-38.us-east-2.compute.amazonaws.com:8000
 
 # Stats and WandB configuration
 stats:
