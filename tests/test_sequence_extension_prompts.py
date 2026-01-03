@@ -206,6 +206,56 @@ class TestPromptModeDefault:
         """CodeActPromptBuilder should default to sequence_extension."""
         builder = CodeActPromptBuilder()
         assert builder.prompt_mode == "sequence_extension"
+
+
+class TestIncludeReasoning:
+    """Test the include_reasoning flag."""
+    
+    def test_default_is_include_reasoning(self):
+        """CodeActPromptBuilder should default to include_reasoning=True."""
+        builder = CodeActPromptBuilder()
+        assert builder.include_reasoning is True
+        
+    def test_include_reasoning_true_has_thought_in_history(self):
+        """With include_reasoning=True, history should include thought tags."""
+        builder = SimplePromptBuilder(prompt_mode="sequence_extension", include_reasoning=True)
+        
+        obs = create_test_observation(1)
+        msgs = builder.build_messages(obs)
+        
+        # Find the assistant message (action)
+        assistant_msg = next(m for m in msgs if m["role"] == "assistant")
+        assert "<thought>" in assistant_msg["content"], "Should include <thought> tag"
+        assert "</thought>" in assistant_msg["content"], "Should include </thought> tag"
+        
+    def test_include_reasoning_false_no_thought_in_history(self):
+        """With include_reasoning=False, history should NOT include thought tags."""
+        builder = SimplePromptBuilder(prompt_mode="sequence_extension", include_reasoning=False)
+        
+        obs = create_test_observation(1)
+        msgs = builder.build_messages(obs)
+        
+        # Find the assistant message (action)
+        assistant_msg = next(m for m in msgs if m["role"] == "assistant")
+        assert "<thought>" not in assistant_msg["content"], "Should NOT include <thought> tag"
+        assert "</thought>" not in assistant_msg["content"], "Should NOT include </thought> tag"
+        # But should still have python tag
+        assert "<python>" in assistant_msg["content"], "Should include <python> tag"
+        
+    def test_sequence_extension_with_no_reasoning_is_prefix(self):
+        """Prompts with include_reasoning=False should still maintain prefix property."""
+        builder = SimplePromptBuilder(prompt_mode="sequence_extension", include_reasoning=False)
+        
+        obs_0 = create_test_observation(0)
+        obs_1 = create_test_observation(1)
+        obs_2 = create_test_observation(2)
+        
+        text_0 = messages_to_text(builder.build_messages(obs_0))
+        text_1 = messages_to_text(builder.build_messages(obs_1))
+        text_2 = messages_to_text(builder.build_messages(obs_2))
+        
+        assert_is_char_prefix(text_0, text_1, "Step 0 should be prefix of Step 1")
+        assert_is_char_prefix(text_1, text_2, "Step 1 should be prefix of Step 2")
         
 
 if __name__ == "__main__":

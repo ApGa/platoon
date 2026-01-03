@@ -10,3 +10,7 @@ Each backend provides:
 - Workflow implementations
 """
 
+# Re-export common configurations for convenience
+from platoon.config_defs import RolloutConfig
+
+__all__ = ['RolloutConfig']

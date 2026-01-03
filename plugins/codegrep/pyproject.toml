@@ -1,7 +1,7 @@
 [project]
 name = "platoon-codegrep"
 version = "0.1.0"
-description = "Platoon plugin for training agents for code search and localization, inspired by Cognitions's swe-grep."
+description = "Platoon plugin for training agents for code search and localization, inspired by Cognition's swe-grep."
 requires-python = "~=3.12.0"
 authors = [
     {name = "Apurva Gandhi", email = "apurvag@cs.cmu.edu"}
@@ -10,9 +10,30 @@ dependencies = [
     "platoon >= 0.1.0",
     "platoon-openhands >= 0.1.0"
 ]
-no-build-isolation-package = ['flash-attn']
 
+[project.optional-dependencies]
+# Training backends - install one of these for training
+tinker = [
+    "platoon[tinker]",
+]
+# NOTE: areal backend requires uv for installation (not available on PyPI)
+areal = [
+    "platoon[areal]",
+]
+# Logging integrations
+wandb = [
+    "platoon[wandb]",
+]
+
+# uv-specific configuration
 [tool.uv]
+# tinker and areal backends are mutually exclusive
+conflicts = [
+    [
+        { extra = "tinker" },
+        { extra = "areal" },
+    ],
+]
 override-dependencies = [
     "fastapi[standard]>=0.115.0",
     "openai==1.99.6",
@@ -21,13 +42,13 @@ override-dependencies = [
     "pyarrow==20.0.0",
     "huggingface_hub==0.34",
     "datasets==4.3.0",
-    "networkx==3.3.0" # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
+    "networkx==3.3.0", # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
 ]
 no-build-isolation-package = ['flash-attn']
 
 [tool.uv.sources]
 platoon = { path = "../..", editable = true }
-platoon-openhands = { path = "../openhands", editable = true}
+platoon-openhands = { path = "../openhands", editable = true }
 
 [tool.ruff]
 line-length = 100

@@ -9,6 +9,7 @@ readme = "README.md"
 requires-python = "~=3.12.0"
 dependencies = [
     "ai-rubric>=0.2.2",
+    "datasets",
     "ipython>=9.4.0",
     "litellm",
     "pandas>=2.3.3",
@@ -23,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 tinker = [
     "tinker",
-    "tinker-cookbook>=0.1.0",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@5ab4301db4543b5aeac49cb672880146146ec278",
 ]
 # NOTE: areal backend requires uv for installation (not available on PyPI)
 # Install with: uv pip install -e ".[areal]"
@@ -35,9 +36,16 @@ wandb = [
     "wandb>=0.19.0",
 ]
 
-# uv-specific configuration for areal backend
+# uv-specific configuration
 # These settings are ignored by pip and only apply when using uv
 [tool.uv]
+# tinker and areal backends are mutually exclusive
+conflicts = [
+    [
+        { extra = "tinker" },
+        { extra = "areal" },
+    ],
+]
 override-dependencies = [
     "fastapi[standard]>=0.115.0",
     "openai==1.99.6",
@@ -56,6 +64,9 @@ areal = { git = "https://github.com/inclusionAI/AReaL.git", rev = "35b57e2d2743f
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["platoon"]

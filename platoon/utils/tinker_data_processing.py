@@ -7,6 +7,7 @@ Sequence accumulation implementation is inspired by tinker_cookbook.rl.data_proc
 https://raw.githubusercontent.com/thinking-machines-lab/tinker-cookbook/refs/heads/main/tinker_cookbook/rl/data_processing.py
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -14,11 +15,49 @@ import tinker
 import torch
 
 from tinker import TensorData
-from tinker_cookbook.supervised.common import (
-    create_rightshifted_model_input_and_leftshifted_targets,
-)
 
 from platoon.train.tinker.proxy import TinkerLLMInteraction
+
+logger = logging.getLogger(__name__)
+
+
+def create_rightshifted_model_input_and_leftshifted_targets(
+    chunks: list[tinker.ModelInputChunk],
+) -> tuple[tinker.ModelInput, list[int]]:
+    """
+    Given a full sequence of model input chunks, create
+     "inputs" (with last token removed); these are also list[ModelInputChunk] because text+images
+     "targets" (with first token removed); these are list[int] text tokens
+
+     Taken from https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/supervised/common.py
+    """
+    assert len(chunks) >= 1, "must have at least one chunk"
+
+    last_chunk = chunks[-1]
+    if not isinstance(last_chunk, tinker.types.EncodedTextChunk):
+        raise ValueError(
+            "The last chunk must be a text chunk. This is because images are 0-loss anyways, so we should remove them beforehand."
+        )
+
+    total_length = sum(c.length for c in chunks)
+    if total_length < 2:
+        raise ValueError("need at least 2 tokens for input/target split")
+
+    # Build input chunks: all but last, then append truncated last chunk
+    input_chunks: list[tinker.ModelInputChunk] = list(chunks[:-1])
+    if last_chunk.length > 1:
+        input_chunks.append(tinker.types.EncodedTextChunk(tokens=last_chunk.tokens[:-1]))
+
+    # Build target tokens: collect all tokens, then slice off first
+    all_tokens: list[int] = []
+    for chunk in chunks:
+        if isinstance(chunk, tinker.types.EncodedTextChunk):
+            all_tokens.extend(chunk.tokens)
+        else:
+            all_tokens.extend([0] * chunk.length)
+    target_tokens = all_tokens[1:]
+
+    return tinker.ModelInput(chunks=input_chunks), target_tokens
 
 
 @dataclass
@@ -140,9 +179,9 @@ def make_datum_from_accumulator(
             "logprobs": TensorData.from_torch(torch.tensor(sampled_logprobs_T)),
             "advantages": TensorData.from_torch(torch.tensor(advantages_T)),
             "mask": TensorData.from_torch(torch.tensor(mask_T)),
+            # Store checkpoint_version for staleness checking (will be stripped before forward_backward)
+            "checkpoint_version": TensorData.from_torch(torch.tensor([checkpoint_version])),
         },
-        # Store checkpoint_version for staleness checking (will be stripped before forward_backward)
-        checkpoint_version=checkpoint_version,
     )
 
 
@@ -203,7 +242,7 @@ def trajectory_to_data(
         
         completion_id = step['misc']['action_misc']['completion_id']
         if completion_id not in interactions:
-            print(f"Completion ID {completion_id} not found in interactions for task {task_id}")
+            logger.warning(f"Completion ID {completion_id} not found in interactions for task {task_id}")
             continue
         
         interaction = interactions[completion_id]
@@ -250,7 +289,7 @@ def trajectory_to_data(
     if accumulator.full_sequence:
         data.append(make_datum_from_accumulator(accumulator, checkpoint_version))
     
-    print(f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}")
+    logger.debug(f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}")
     
     return TrajectoryDataResult(
         datums=data,
@@ -328,7 +367,7 @@ def get_train_data_for_trajectory_collection(
         is_first = False
     
     if not train_data:
-        print(f"No train data found for any trajectory for task {task_id}")
+        logger.warning(f"No train data found for any trajectory for task {task_id}")
     
     return TrajectoryCollectionResult(
         datums=train_data,

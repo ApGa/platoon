@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+from platoon.config_defs import RolloutConfig
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
 
@@ -10,20 +11,6 @@ class AdamParams:
     beta1: float = 0.9
     beta2: float = 0.95
     eps: float = 1e-8
-
-
-@dataclass
-class RolloutConfig:
-    """Configuration for rollout execution."""
-    model_name: str | None = None
-    model_endpoint: str | None = None
-    model_api_key: str | None = None
-    train: bool = False
-    max_steps: int | None = None
-    output_dir: str = 'rollout_results'
-    verbose: bool = True
-    timeout: int | None = None
-    return_dict: bool = False
 
 
 @dataclass

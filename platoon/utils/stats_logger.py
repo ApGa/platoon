@@ -25,6 +25,7 @@ class WandBConfig:
     notes: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    resume_run_id: str | None = None  # WandB run ID to resume
 
 
 @dataclass  
@@ -103,9 +104,14 @@ class StatsLogger:
                 # exp_config might not be a dataclass
                 config_dict = {"exp_config": str(self.exp_config)}
         
-        # Initialize wandb
+        # Initialize wandb with resume support
+        # If resume_run_id is provided, we'll resume that run
+        resume_id = self.config.wandb.resume_run_id
+        resume_mode = "must" if resume_id else "allow"
+        
         try:
             self._wandb_run = wandb.init(
+                id=resume_id,  # Use provided ID or let wandb generate one
                 mode=self.config.wandb.mode,
                 project=self.config.wandb.project or self.config.experiment_name,
                 entity=self.config.wandb.entity,
@@ -115,9 +121,9 @@ class StatsLogger:
                 notes=self.config.wandb.notes,
                 config=config_dict,
                 dir=self._get_log_path(),
-                resume="allow",
+                resume=resume_mode,
             )
-            logger.info(f"WandB initialized: {wandb.run.url if wandb.run else 'offline'}")
+            logger.info(f"WandB initialized (id={wandb.run.id}): {wandb.run.url if wandb.run else 'offline'}")
         except Exception as e:
             logger.warning(f"Failed to initialize WandB: {e}")
             self._wandb_run = None
@@ -129,6 +135,17 @@ class StatsLogger:
             self.config.experiment_name,
             self.config.trial_name,
         )
+
+    @property
+    def wandb_run_id(self) -> str | None:
+        """Get the current WandB run ID for checkpointing."""
+        if self._wandb_run is not None:
+            try:
+                import wandb
+                return wandb.run.id if wandb.run else None
+            except Exception:
+                return None
+        return None
     
     def log(
         self,
@@ -136,6 +153,7 @@ class StatsLogger:
         stats: dict[str, float],
         epoch: int | None = None,
         prefix: str = "",
+        force: bool = False,
     ):
         """Log statistics for a training step.
         
@@ -144,9 +162,10 @@ class StatsLogger:
             stats: Dictionary of metric name -> value.
             epoch: Optional epoch number.
             prefix: Optional prefix for metric names.
+            force: If True, skip the log_interval check and always log.
         """
-        # Check log interval
-        if step - self._last_log_step < self.config.log_interval:
+        # Check log interval (skip if force=True)
+        if not force and step - self._last_log_step < self.config.log_interval:
             return
         self._last_log_step = step
         

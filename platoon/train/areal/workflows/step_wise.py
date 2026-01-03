@@ -170,10 +170,10 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         self.reward_processor = reward_processor
 
     async def arun_episode(self, engine: InferenceEngine, data: dict) -> dict | None:
-        """Run multiple rollouts for a task and return training data."""
+        """Run multiple rollouts for a ßtask and return training data."""
         results = await asyncio.gather(
             *[self.arun_episode_single(engine, data, i) 
-              for i in range(self.config.rollout_config.group_size)]
+              for i in range(self.config.group_size)]
         )
         results = [result for result in results if result is not None]
         if not results:

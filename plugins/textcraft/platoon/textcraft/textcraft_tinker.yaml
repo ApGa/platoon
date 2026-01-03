@@ -2,10 +2,10 @@
 
 # Training configuration
 train:
-  model_name: Qwen/Qwen3-4B
-  renderer_name: qwen3
+  model_name: Qwen/Qwen3-30B-A3B-Instruct-2507
+  renderer_name: qwen3_instruct
   batch_size: 32
-  num_epochs: 10
+  num_epochs: 30
   num_minibatches: 1
   num_microbatches: 1
   max_staleness: 3
@@ -15,9 +15,9 @@ train:
     clip_low_threshold: 0.0
     clip_high_threshold: 5.0
   optimizer:
-    learning_rate: 1e-6
+    learning_rate: 3e-5
     beta1: 0.9
-    beta2: 0.999
+    beta2: 0.95
     eps: 1e-8
   workflow_config:
     group_size: 8
@@ -26,13 +26,13 @@ train:
       output_dir: ./rollout_results
       verbose: true
       timeout: 900
-  num_concurrent_rollout_workflow_workers: 64
+  num_concurrent_rollout_workflow_workers: 8
 
 # Eval configuration
 eval:
-  strategy: epoch
-  every: 1
-  num_concurrent_rollout_workflow_workers: 32
+  strategy: step
+  every: 20
+  num_concurrent_rollout_workflow_workers: 5
   workflow_config:
     group_size: 1
     rollout_config:
@@ -44,7 +44,7 @@ eval:
 # Checkpoint configuration
 checkpoint:
   strategy: epoch
-  every: 5
+  every: 20
   load_checkpoint_path: null
 
 # Logging
@@ -53,11 +53,11 @@ tinker_base_url: null
 
 # Stats and WandB configuration
 stats:
-  experiment_name: textcraft-tinker
-  trial_name: grpo-trial1
+  experiment_name: textcraft-platoon-tinker
+  trial_name: grpo-trial4
   wandb:
     mode: online
-    project: textcraft-tinker
+    project: textcraft-platoon-tinker
     entity: null
     tags:
       - textcraft

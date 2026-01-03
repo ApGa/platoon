@@ -5,27 +5,14 @@ from dataclasses import dataclass, field
 from areal.api.cli_args import GRPOConfig
 from areal.engine.ppo.actor import PPOActorConfig
 
+from platoon.config_defs import RolloutConfig
 from platoon.utils.train import VariableBatchInferenceEngineConfig
-
-
-@dataclass
-class RolloutConfig:
-    """Configuration for rollout execution."""
-    model_name: str | None = None
-    model_endpoint: str | None = None
-    model_api_key: str | None = None
-    train: bool = False
-    max_steps: int | None = None
-    output_dir: str = 'rollout_results'
-    verbose: bool = True
-    timeout: int | None = None
-    return_dict: bool = False
-    group_size: int = 1
     
 
 @dataclass
 class WorkflowConfig:
     """Configuration for the rollout workflow."""
+    group_size: int = 1
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)
 
 

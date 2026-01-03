@@ -1,7 +1,7 @@
 from .env import TextCraftEnv, TextCraftRecursiveEnv
 from .agent import TextCraftAgent, TextCraftRecursiveAgent
-from platoon.train.areal.config_defs import RolloutConfig
-from platoon.utils.llm_client import LLMClient
+from platoon.config_defs import RolloutConfig
+from platoon.utils.llm_client import LLMClient, LiteLLMClient
 from platoon.episode.context import current_trajectory_collection
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import TrajectoryCollection
@@ -19,10 +19,10 @@ logger = getLogger("platoon.textcraft.rollout")
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
     try:
-        llm_client = LLMClient(
+        llm_client = LiteLLMClient(
             model=config.model_name,
-            base_url=config.model_endpoint,
-            api_key=config.model_api_key
+            #base_url=config.model_endpoint,
+            #api_key=config.model_api_key
         )
         env = TextCraftEnv(task)
         agent = TextCraftAgent(llm_client=llm_client)
@@ -78,10 +78,10 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
 async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
     try:
-        llm_client = LLMClient(
+        llm_client = LiteLLMClient(
             model=config.model_name,
-            base_url=config.model_endpoint,
-            api_key=config.model_api_key
+            #base_url=config.model_endpoint,
+            #api_key=config.model_api_key
         )
         env = TextCraftRecursiveEnv(task, subagent_launch_reward=0.2)
         agent = TextCraftRecursiveAgent(llm_client=llm_client)

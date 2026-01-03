@@ -6,17 +6,27 @@ Usage:
 """
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
 from datasets import Dataset
 
+
 from platoon.number_search.tasks import get_task_ids, get_task
 from platoon.number_search.rollout import run_rollout
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.workflows import GroupCenteredRolloutWorkflow
+from platoon.train.tinker.workflows import GroupRolloutWorkflow
 from platoon.utils.config import load_config
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logging.getLogger("platoon").setLevel(logging.DEBUG)
 
 
 async def main(args: list[str]):
@@ -44,21 +54,23 @@ async def main(args: list[str]):
     )
     
     async with trainer:
-        # Create workflows
-        train_workflow = GroupCenteredRolloutWorkflow(
+        # Create workflows - use trainer.run_log_path for run-specific output
+        train_workflow = GroupRolloutWorkflow(
             rollout_fn=run_rollout,
             get_task_fn=get_task,
             config=config.train.workflow_config,
             model_info=trainer.model_info,
+            log_path=trainer.run_log_path,
             stats_scope="train",
             filter_errors=False,
         )
         
-        eval_workflow = GroupCenteredRolloutWorkflow(
+        eval_workflow = GroupRolloutWorkflow(
             rollout_fn=run_rollout,
             get_task_fn=get_task,
             config=config.eval.workflow_config,
             model_info=trainer.model_info,
+            log_path=trainer.run_log_path,
             stats_scope="eval",
             filter_errors=False,
         )

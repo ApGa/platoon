@@ -41,7 +41,7 @@ workflow_config:
     verbose: True
     train: true
     timeout: 600
-    group_size: 8
+  group_size: 8
 
 actor:
   experiment_name: ${experiment_name}

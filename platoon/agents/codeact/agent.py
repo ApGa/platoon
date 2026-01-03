@@ -47,9 +47,11 @@ class CodeActAgent:
     
     Args:
         prompt_builder: Custom prompt builder. If not provided, uses CodeActPromptBuilder
-            with the specified prompt_mode.
+            with the specified prompt_mode and include_reasoning.
         prompt_mode: The prompt format to use. Only used if prompt_builder is not provided.
             Default is "sequence_extension".
+        include_reasoning: If True, prompts instruct the agent to include <thought> tags.
+            If False, only <python> tags are expected. Default is True.
         llm_client: LLM client for inference.
         stuck_in_loop_threshold: Number of repetitions to detect a loop.
         stuck_in_loop_window: Window size for loop detection.
@@ -59,17 +61,22 @@ class CodeActAgent:
         self, 
         prompt_builder: CodeActPromptBuilder | None = None, 
         prompt_mode: PromptMode = "sequence_extension",
+        include_reasoning: bool = True,
         llm_client: LLMClient | None = None, 
         stuck_in_loop_threshold: int = 4, 
         stuck_in_loop_window: int = 3
     ):
         if prompt_builder is None:
-            prompt_builder = CodeActPromptBuilder(prompt_mode=prompt_mode)
+            prompt_builder = CodeActPromptBuilder(
+                prompt_mode=prompt_mode,
+                include_reasoning=include_reasoning
+            )
         if llm_client is None:
             llm_client = LLMClient()
 
         self.prompt_builder = prompt_builder
         self.llm_client = llm_client
+        self.include_reasoning = include_reasoning
         self.stuck_in_loop_threshold = stuck_in_loop_threshold
         self.stuck_in_loop_window = stuck_in_loop_window
     
@@ -113,7 +120,7 @@ class CodeActAgent:
         
         prompt = self.prompt_builder.build_messages(obs)
         # TODO: Make inference params configurable.
-        response = await self.llm_client.async_chat_completion(prompt, stop=["</python>"], temperature=1.0, top_p=1, max_tokens=32000)
+        response = await self.llm_client.async_chat_completion(prompt, stop=["</python>"], temperature=1.0, top_p=1, max_completion_tokens=4096)
         response_text = response.choices[0].message.content
         # NOTE: We only do this conditionally, because with Areal, stop words are not supported.
         # And so we might already have the stop word in the response.
@@ -131,6 +138,7 @@ class CodeActAgent:
     async def fork(self, task: Task) -> CodeActAgent:
         return type(self)(
             prompt_builder=self.prompt_builder,
+            include_reasoning=self.include_reasoning,
             llm_client=self.llm_client.fork(),
             stuck_in_loop_threshold=self.stuck_in_loop_threshold,
             stuck_in_loop_window=self.stuck_in_loop_window,

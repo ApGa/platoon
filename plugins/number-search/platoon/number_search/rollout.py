@@ -1,7 +1,7 @@
 from .env import NumberSearchEnv
 from .agent import NumberSearchAgent
-from platoon.train.areal.config_defs import RolloutConfig
-from platoon.utils.llm_client import LLMClient
+from platoon.config_defs import RolloutConfig
+from platoon.utils.llm_client import LLMClient, LiteLLMClient
 from platoon.episode.context import current_trajectory_collection
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import TrajectoryCollection
@@ -19,13 +19,13 @@ logger = getLogger("platoon.number_search.rollout")
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
     try:
-        llm_client = LLMClient(
+        llm_client = LiteLLMClient(
             model=config.model_name,
-            base_url=config.model_endpoint,
-            api_key=config.model_api_key
+            # base_url=config.model_endpoint,
+            # api_key=config.model_api_key
         )
         env = NumberSearchEnv(task)
-        agent = NumberSearchAgent(llm_client=llm_client)
+        agent = NumberSearchAgent(llm_client=llm_client, include_reasoning=False)
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
        

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, cast, TypeAlias, TypedDict
 
+import litellm
 from openai import OpenAI, AsyncOpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
@@ -274,3 +275,71 @@ def create_llm_client(
         A configured LLMClient instance.
     """
     return LLMClient(api_key=api_key, model=model, base_url=base_url)
+
+
+class LiteLLMClient:
+    """Client for making LLM calls through LiteLLM.
+    
+    This client routes calls through LiteLLM, enabling use of custom providers
+    like the Tinker proxy. Use this instead of LLMClient when you need to use
+    custom LiteLLM providers.
+    """
+
+    def __init__(self, model: str):
+        """Initialize the LiteLLM client.
+
+        Args:
+            model: The model identifier (e.g., "platoon-tinker/Qwen/Qwen3-4B-Instruct-2507").
+        """
+        self.model = model
+
+    async def async_chat_completion(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        auto_add_cache_control: bool = False,
+        **kwargs: Any,
+    ) -> ChatCompletion:
+        """Make an async chat completion request through LiteLLM.
+
+        Args:
+            messages: List of message dictionaries with 'role' and 'content' keys.
+            temperature: Controls randomness in the response (0.0 to 2.0).
+            max_tokens: Maximum number of tokens to generate.
+            auto_add_cache_control: Ignored for LiteLLM (not supported).
+            **kwargs: Additional arguments to pass to the LiteLLM API.
+
+        Returns:
+            The generated chat completion.
+
+        Raises:
+            Exception: If the API call fails.
+        """
+        try:
+            response = await litellm.acompletion(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+
+            if not response.choices:
+                print("No response choices received from LiteLLM")
+                raise Exception("No response choices received from LiteLLM")
+
+            # LiteLLM returns ModelResponse, convert to ChatCompletion format
+            return cast(ChatCompletion, response)
+
+        except Exception as e:
+            print(f"LiteLLMClient async_chat_completion failed: {str(e)}")
+            raise Exception(f"LiteLLM API call failed: {str(e)}")
+
+    async def aclose(self) -> None:
+        """Close the client connection (no-op for LiteLLM)."""
+        pass
+
+    def fork(self) -> "LiteLLMClient":
+        """Create a copy of this client."""
+        return LiteLLMClient(model=self.model)

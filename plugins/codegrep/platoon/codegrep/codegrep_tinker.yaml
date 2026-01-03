@@ -26,13 +26,13 @@ train:
       output_dir: ./rollout_results
       verbose: true
       timeout: 600
-  num_concurrent_rollout_workflow_workers: 64
+  num_concurrent_rollout_workflow_workers: 32
 
 # Eval configuration
 eval:
   strategy: epoch
   every: 1
-  num_concurrent_rollout_workflow_workers: 32
+  num_concurrent_rollout_workflow_workers: 50
   workflow_config:
     group_size: 1
     rollout_config:

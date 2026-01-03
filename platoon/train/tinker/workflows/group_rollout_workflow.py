@@ -4,14 +4,16 @@ This module provides a workflow that runs multiple rollouts per task (group_size
 computes group-centered advantages, and produces training data in tinker.Datum format.
 """
 
+import asyncio
+import logging
+import os
 from copy import deepcopy
 from typing import Callable
 
-import asyncio
-import os
 import tinker
 import torch
-import traceback
+
+logger = logging.getLogger(__name__)
 
 from tinker import TensorData
 
@@ -26,7 +28,7 @@ from platoon.utils.tinker_data_processing import (
 from platoon.utils.stats_tracker import get as get_tracker
 
 
-class GroupCenteredRolloutWorkflow:
+class GroupRolloutWorkflow:
     """Workflow that runs multiple rollouts per task and computes group-centered advantages.
     
     1. Runs `group_size` rollouts for each task in parallel
@@ -36,11 +38,12 @@ class GroupCenteredRolloutWorkflow:
     """
     
     def __init__(
-        self,
+        self, 
         rollout_fn: Callable[[Task, RolloutConfig], dict],
         get_task_fn: Callable[[str], Task],
         config: WorkflowConfig,
         model_info: ModelInfo,
+        log_path: str | None = None,
         stats_scope: str = "train",
         filter_errors: bool = False,
         reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj['reward'], {}),
@@ -52,6 +55,8 @@ class GroupCenteredRolloutWorkflow:
             get_task_fn: Function that returns a Task given a task_id.
             config: Workflow configuration (contains group_size and rollout_config).
             model_info: Model information for the tinker LLM.
+            log_path: Base log directory for the training run. If provided, rollout results
+                      will be stored at {log_path}/rollouts/{stats_scope}/.
             stats_scope: Name for the stats tracker scope (e.g., "train" or "eval").
             filter_errors: Whether to filter out error steps from successful trajectories.
             reward_processor: Function to process trajectory rewards.
@@ -60,6 +65,7 @@ class GroupCenteredRolloutWorkflow:
         self.get_task_fn = get_task_fn
         self.config = config
         self.model_info = model_info
+        self.log_path = log_path
         self.stats_scope = stats_scope
         self.filter_errors = filter_errors
         self.reward_processor = reward_processor
@@ -73,6 +79,11 @@ class GroupCenteredRolloutWorkflow:
         config.model_api_key = self.model_info.api_key
         config.return_dict = True
         config.train = True
+        
+        # If log_path is provided, use it as the base for rollout output
+        if self.log_path is not None:
+            config.output_dir = os.path.join(self.log_path, "rollouts", self.stats_scope)
+        
         return config
 
     async def arun_episode(self, data: dict) -> list[tinker.Datum] | None:
@@ -102,32 +113,11 @@ class GroupCenteredRolloutWorkflow:
                 all_root_rewards_dicts.append(result.root_rewards_dict)
         
         if not all_data:
-            print(f"No results found for task {data['task_id']}")
+            logger.warning(f"No results found for task {data['task_id']}")
             return None
         
-        # Compute group-centered advantages
-        mean_task_reward = sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
-        
-        # Check if all rewards are the same (no learning signal)
-        if len(task_rewards) > 1 and max(task_rewards) == min(task_rewards):
-            print(f"All rewards are the same for task {data['task_id']}: {mean_task_reward:.2f}")
-            return None
-        
-        # Center advantages: new_adv = old_adv - mean_reward
-        # The old_adv was set to trajectory_reward, so this gives us (reward - mean_reward)
-        for datum in all_data:
-            old_advantages = datum.loss_fn_inputs["advantages"].to_torch()
-            # The mask tells us which tokens were action tokens (advantage != 0)
-            mask = datum.loss_fn_inputs["mask"].to_torch()
-            # Subtract mean_task_reward from non-zero advantages
-            new_advantages = torch.where(
-                mask > 0,
-                old_advantages - mean_task_reward,
-                old_advantages
-            )
-            datum.loss_fn_inputs["advantages"] = TensorData.from_torch(new_advantages)
-        
-        # === Track stats ===
+        # === Track stats BEFORE early returns ===
+        # This ensures we track stats even for groups that get filtered out
         
         # Per-trajectory stats (num_steps, num_tokens are tracked per trajectory)
         num_steps_per_traj = torch.tensor([float(s.num_steps) for s in all_trajectory_stats])
@@ -211,6 +201,30 @@ class GroupCenteredRolloutWorkflow:
             self.tracker.denominator(**{f"{key}_mask": reward_mask})
             self.tracker.stat(**{key: values}, denominator=f"{key}_mask")
         
+        # === Now compute advantages and filter ===
+        
+        # Compute group-centered advantages
+        mean_task_reward = sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
+        
+        # Check if all rewards are the same (no learning signal)
+        if len(task_rewards) > 1 and max(task_rewards) == min(task_rewards):
+            logger.debug(f"All rewards are the same for task {data['task_id']}: {mean_task_reward:.2f}")
+            return None
+        
+        # Center advantages: new_adv = old_adv - mean_reward
+        # The old_adv was set to trajectory_reward, so this gives us (reward - mean_reward)
+        for datum in all_data:
+            old_advantages = datum.loss_fn_inputs["advantages"].to_torch()
+            # The mask tells us which tokens were action tokens (advantage != 0)
+            mask = datum.loss_fn_inputs["mask"].to_torch()
+            # Subtract mean_task_reward from non-zero advantages
+            new_advantages = torch.where(
+                mask > 0,
+                old_advantages - mean_task_reward,
+                old_advantages
+            )
+            datum.loss_fn_inputs["advantages"] = TensorData.from_torch(new_advantages)
+        
         return all_data
 
     async def arun_episode_single(
@@ -250,7 +264,7 @@ class GroupCenteredRolloutWorkflow:
                 results = await asyncio.create_task(self.rollout_fn(task, rollout_config))
                 
                 if not results.get('trajectories'):
-                    print(f"No trajectories found for task {task_id} and rollout {rollout_number}")
+                    logger.warning(f"No trajectories found for task {task_id} and rollout {rollout_number}")
                     return None
                 
                 # Get the llm interactions recorded during this session
@@ -267,12 +281,11 @@ class GroupCenteredRolloutWorkflow:
                 )
                 
                 if not result.datums:
-                    print(f"No train data found for task {task_id} and rollout {rollout_number}")
+                    logger.warning(f"No train data found for task {task_id} and rollout {rollout_number}")
                     return None
                 
                 return result
                 
         except Exception as e:
-            print(f"Error in tinker workflow for task {task_id} and rollout {rollout_number}: "
-                  f"{e}\n{traceback.format_exc()}")
+            logger.exception(f"Error in tinker workflow for task {task_id} and rollout {rollout_number}: {e}")
             return None

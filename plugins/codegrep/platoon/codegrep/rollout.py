@@ -11,7 +11,7 @@ from platoon.visualization.event_sinks import JsonlFileSink
 from platoon.episode.context import current_trajectory_collection
 from platoon.openhands.agent import OpenHandsAgent
 from openhands.tools.preset.default import get_default_agent
-from platoon.train.areal.config_defs import RolloutConfig
+from platoon.config_defs import RolloutConfig
 import asyncio
 from contextlib import suppress
 from platoon.episode.loop import run_episode

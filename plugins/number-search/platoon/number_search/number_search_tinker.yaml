@@ -2,10 +2,10 @@
 
 # Training configuration
 train:
-  model_name: Qwen/Qwen3-4B
-  renderer_name: qwen3
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
   batch_size: 32
-  num_epochs: 10
+  num_epochs: 5
   num_minibatches: 1
   num_microbatches: 1
   max_staleness: 3
@@ -15,28 +15,28 @@ train:
     clip_low_threshold: 0.0
     clip_high_threshold: 5.0
   optimizer:
-    learning_rate: 1e-6
+    learning_rate: 3e-5
     beta1: 0.9
-    beta2: 0.999
+    beta2: 0.95
     eps: 1e-8
   workflow_config:
     group_size: 8
     rollout_config:
-      max_steps: 20
+      max_steps: 10
       output_dir: ./rollout_results
       verbose: true
       timeout: 300
-  num_concurrent_rollout_workflow_workers: 64
+  num_concurrent_rollout_workflow_workers: 32
 
 # Eval configuration
 eval:
-  strategy: epoch
-  every: 1
-  num_concurrent_rollout_workflow_workers: 32
+  strategy: step
+  every: 10
+  num_concurrent_rollout_workflow_workers: 50
   workflow_config:
     group_size: 1
     rollout_config:
-      max_steps: 20
+      max_steps: 10
       output_dir: ./eval_results
       verbose: false
       timeout: 300
@@ -53,11 +53,11 @@ tinker_base_url: null
 
 # Stats and WandB configuration
 stats:
-  experiment_name: number-search-tinker
-  trial_name: grpo-trial1
+  experiment_name: number-search-platoon-tinker
+  trial_name: skyrl-tx-grpo-trial0
   wandb:
     mode: online
-    project: number-search-tinker
+    project: number-search-platoon-tinker
     entity: null
     tags:
       - number-search

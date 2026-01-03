@@ -20,17 +20,25 @@ class CodeActPromptBuilder:
     - "no_sequence_extension": Uses a single user message with the full action 
       history embedded. This is the legacy format that rebuilds the entire prompt 
       each step.
+    
+    Args:
+        prompts_dir: Directory containing prompt templates.
+        prompt_mode: The prompt format to use.
+        include_reasoning: If True, prompts instruct the agent to include <thought> tags.
+            If False, only <python> tags are expected. Default is True.
     """
 
     def __init__(
         self, 
         prompts_dir: str | Path | None = None,
         prompt_mode: PromptMode = "sequence_extension",
+        include_reasoning: bool = True,
     ):
         if prompts_dir is None:
             prompts_dir = Path(__file__).parent / "prompts"
         self.retriever = PromptRetriever(prompts_dir=prompts_dir)
         self.prompt_mode = prompt_mode
+        self.include_reasoning = include_reasoning
         
     # TODO: We need to refactor this to be more general.
     def build_messages_from_traj_dump(self, traj_collection_dump: dict, reward_threshold: float) -> list[ConversationWithMetadata]:
@@ -144,10 +152,11 @@ class CodeActPromptBuilder:
     def _format_action_for_history(self, step) -> str:
         """Format a historical action for the assistant turn.
         
-        Reconstructs the action in the standard <thought>...</thought><python>...</python> format.
+        Reconstructs the action in the standard format. If include_reasoning is True,
+        uses <thought>...</thought><python>...</python> format. Otherwise, just <python>...</python>.
         """
         parts = []
-        if hasattr(step, 'thought') and step.thought:
+        if self.include_reasoning and hasattr(step, 'thought') and step.thought:
             parts.append(f"<thought>{step.thought}</thought>")
         if hasattr(step, 'code') and step.code:
             parts.append(f"<python>{step.code}</python>")
@@ -194,10 +203,18 @@ class CodeActPromptBuilder:
     
     # TODO: Revisit whether we want to use obs inside or pass from outside.
     def build_next_action_str(self, obs: CodeActObservation, **context) -> str:
-        return self.retriever.get_prompt("user-next-action-str", **context)
+        return self.retriever.get_prompt(
+            "user-next-action-str",
+            include_reasoning=self.include_reasoning,
+            **context
+        )
 
     def build_system_prompt(self, obs: CodeActObservation, **context) -> str:
-        return self.retriever.get_prompt("system", **context)
+        return self.retriever.get_prompt(
+            "system",
+            include_reasoning=self.include_reasoning,
+            **context
+        )
     
     def build_user_prompt(self, obs: CodeActObservation, **context) -> str:
         return self.retriever.get_prompt("user", **context)

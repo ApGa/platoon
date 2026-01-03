@@ -99,7 +99,7 @@ class TinkerLLM(CustomLLM):
         renderer: Renderer,
         tokenizer: PreTrainedTokenizer,
         sampling_client: tinker.SamplingClient,
-        max_tokens: int = 32000,
+        max_tokens: int = 128000,
         temperature: float = 1.0,
         top_k: int = -1,
         top_p: float = 1.0,
@@ -151,8 +151,13 @@ class TinkerLLM(CustomLLM):
             self.increment_version()
 
     def _canonicalize_messages(self, messages: Any) -> List[TinkerMessage]:
-        return TypeAdapter(List[TinkerMessage]).validate_python(messages)
-        # Exception will be raised if validation fails
+        # Note: We avoid using TypeAdapter for strict validation because TinkerMessage
+        # contains ImagePart which has PIL.Image.Image that Pydantic can't handle.
+        # Instead, we cast directly since we expect the messages to already be in 
+        # the correct format (coming from LiteLLM or manually constructed).
+        if not isinstance(messages, list):
+            raise ValueError(f"Expected list of messages, got {type(messages)}")
+        return cast(List[TinkerMessage], messages)
 
     def _validate_role(self, role: str) -> TypeGuard[Literal["assistant", "user", "system", "tool", "function"]]:
         if role not in ["assistant", "user", "system", "tool", "function"]:
@@ -186,7 +191,12 @@ class TinkerLLM(CustomLLM):
                 # Handle parameterized generics like list[str] by extracting the origin type
                 origin = get_origin(expected_type)
                 check_type = origin if origin is not None else expected_type
-                if not isinstance(value, check_type):
+                # Allow int for float params (e.g., top_p=1 instead of top_p=1.0)
+                if check_type is float:
+                    if not isinstance(value, (int, float)):
+                        raise ValueError(f"Invalid {key} type: {type(value)}")
+                    value = float(value)  # Convert int to float
+                elif not isinstance(value, check_type):
                     raise ValueError(f"Invalid {key} type: {type(value)}")
                 if not validate_fn(value):
                     raise ValueError(f"Invalid {key}. Did not pass validation: {value}")
@@ -281,6 +291,8 @@ class TinkerLLM(CustomLLM):
 
     async def acompletion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
         """Main entrypoint for LiteLLM to call."""
+        import time
+        import asyncio
         max_tokens = self._get_optional_params(
             kwargs, ["max_completion_tokens", "max_tokens"], int, lambda x: x >= 0, self.max_tokens
         )
@@ -300,7 +312,26 @@ class TinkerLLM(CustomLLM):
             seed=seed,
             stop=stop_sequences,
         )
-        result = await self.sampling_client.sample_async(prompt=model_input, sampling_params=params, num_samples=1)
+        start_time = time.perf_counter()
+        
+        # Timeout for sample_async to prevent infinite hangs (10 minutes)
+        SAMPLE_TIMEOUT_SECONDS = 600
+        try:
+            result = await asyncio.wait_for(
+                self.sampling_client.sample_async(prompt=model_input, sampling_params=params, num_samples=1),
+                timeout=SAMPLE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.perf_counter() - start_time
+            logger.error(f"sample_async timed out after {elapsed:.1f}s (timeout={SAMPLE_TIMEOUT_SECONDS}s)")
+            raise TimeoutError(f"Tinker sample_async timed out after {SAMPLE_TIMEOUT_SECONDS}s")
+        except Exception as e:
+            elapsed = time.perf_counter() - start_time
+            logger.exception(f"sample_async failed after {elapsed:.1f}s: {e}")
+            raise
+        elapsed = time.perf_counter() - start_time
+        if elapsed > 30.0:
+            logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
         final_response = self._parse_response(model_input, result)
         self._record_interaction(model_input, final_response)
         return final_response
@@ -371,7 +402,7 @@ class ModelInfo:
 def register_tinker_llm(
     model_name: str,
     renderer_name: str,
-) -> TinkerLLM:
+) -> ModelInfo:
     """
     Register the TinkerLLMProxy as a custom provider in LiteLLM.
 
