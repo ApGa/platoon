@@ -651,6 +651,7 @@ class PlatoonTinkerRLTrainer:
         steps_completed = i_batch - start_batch + 1
         if steps_completed % save_every == 0:
             # Save a full checkpoint with loop state
+            logger.info(f"Saving checkpoint at batch {i_batch} (steps_completed={steps_completed}, save_every={save_every})")
             path_dict = await checkpoint_utils.save_checkpoint_async(
                 training_client=training_client,
                 name=f"{i_batch:06d}",
@@ -661,9 +662,13 @@ class PlatoonTinkerRLTrainer:
                 },
                 kind="both",
             )
+            logger.debug(f"Checkpoint saved, creating sampling client from {path_dict['sampler_path']}")
             return training_client.create_sampling_client(path_dict["sampler_path"])
         else:
-            return await training_client.save_weights_and_get_sampling_client_async()
+            logger.debug(f"Skipping checkpoint at batch {i_batch} (steps_completed={steps_completed}, save_every={save_every}), saving weights only")
+            sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+            logger.debug(f"Weights saved and sampling client created")
+            return sampling_client
 
     async def _create_training_client(self, service_client: tinker.ServiceClient, resume_info: dict | None) -> tinker.TrainingClient:
         if resume_info:
