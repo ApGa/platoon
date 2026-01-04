@@ -286,22 +286,42 @@ class PlatoonTinkerRLTrainer:
         coro,
         name: str,
         heartbeat_interval: float = 60.0,
+        watchdog: Watchdog | None = None,
+        total_timeout: float | None = None,
     ):
         """Await a coroutine with periodic heartbeat logging.
         
         Useful for long-running async operations where we want visibility
-        that we're still waiting.
+        that we're still waiting. Also sends watchdog heartbeats to prevent
+        the process from being killed during long operations.
+        
+        Args:
+            coro: The coroutine to await
+            name: Name for logging purposes
+            heartbeat_interval: Seconds between heartbeat logs
+            watchdog: Optional watchdog to send heartbeats to
+            total_timeout: Optional total timeout in seconds (raises TimeoutError if exceeded)
         """
         start_time = time.perf_counter()
         task = asyncio.ensure_future(coro)
         
         while not task.done():
+            # Check total timeout
+            if total_timeout is not None:
+                elapsed = time.perf_counter() - start_time
+                if elapsed >= total_timeout:
+                    task.cancel()
+                    raise TimeoutError(f"{name} timed out after {elapsed:.0f}s (limit: {total_timeout}s)")
+            
             try:
                 # Wait for either the task to complete or the heartbeat interval
                 await asyncio.wait_for(asyncio.shield(task), timeout=heartbeat_interval)
             except asyncio.TimeoutError:
                 elapsed = time.perf_counter() - start_time
                 logger.info(f"Still waiting for {name}... ({elapsed:.0f}s elapsed)")
+                # Send watchdog heartbeat to prevent timeout during long operations
+                if watchdog is not None:
+                    watchdog.heartbeat()
         
         return task.result()
 
@@ -474,10 +494,13 @@ class PlatoonTinkerRLTrainer:
                     logger.debug(f"Waiting for forward_backward result (microbatch {microbatch_num})")
                     try:
                         # Use a wrapper to log periodic "still waiting" messages
+                        # Timeout after 15 min to detect hung Tinker operations
                         forward_backward_result = await self._await_with_heartbeat(
                             forward_backward_future.result_async(),
                             name=f"forward_backward (microbatch {microbatch_num})",
                             heartbeat_interval=60.0,
+                            watchdog=shared_state.watchdog,
+                            total_timeout=900.0,
                         )
                     except Exception as e:
                         logger.exception(f"forward_backward result_async failed after {time.perf_counter() - result_start:.1f}s: {e}")
@@ -493,10 +516,13 @@ class PlatoonTinkerRLTrainer:
                 logger.debug("Waiting for optim_step result")
                 optim_result_start = time.perf_counter()
                 try:
+                    # Timeout after 5 min for optimizer step (should be fast)
                     await self._await_with_heartbeat(
                         optim_future.result_async(),
                         name="optim_step",
                         heartbeat_interval=60.0,
+                        watchdog=shared_state.watchdog,
+                        total_timeout=300.0,
                     )
                 except Exception as e:
                     logger.exception(f"optim_step result_async failed after {time.perf_counter() - optim_result_start:.1f}s: {e}")
@@ -513,12 +539,14 @@ class PlatoonTinkerRLTrainer:
             
             # Update sampling client with timing
             update_start = time.perf_counter()
+            logger.info(f"Calling _save_checkpoint_and_get_sampling_client for batch {shared_state.train_step}")
             sampling_client = await self._save_checkpoint_and_get_sampling_client(
                 training_client=shared_state.training_client,
                 i_batch=shared_state.train_step,
                 save_every=shared_state.save_every,
                 start_batch=start_batch,
             )
+            logger.info(f"_save_checkpoint_and_get_sampling_client returned, updating LLM sampling client")
             shared_state.model_info.llm.update_sampling_client(sampling_client)
             shared_state.sampling_client = sampling_client
             update_elapsed = time.perf_counter() - update_start
@@ -651,22 +679,39 @@ class PlatoonTinkerRLTrainer:
         steps_completed = i_batch - start_batch + 1
         if steps_completed % save_every == 0:
             # Save a full checkpoint with loop state
-            logger.info(f"Saving checkpoint at batch {i_batch} (steps_completed={steps_completed}, save_every={save_every})")
-            path_dict = await checkpoint_utils.save_checkpoint_async(
-                training_client=training_client,
-                name=f"{i_batch:06d}",
-                log_path=self.run_log_path,
-                loop_state={
-                    "batch": i_batch,
-                    "wandb_run_id": self._stats_logger.wandb_run_id,
-                },
-                kind="both",
-            )
-            logger.debug(f"Checkpoint saved, creating sampling client from {path_dict['sampler_path']}")
-            return training_client.create_sampling_client(path_dict["sampler_path"])
+            # Checkpoint name and batch are i_batch + 1 because this checkpoint contains
+            # weights AFTER training on batch i_batch, so resume should start from i_batch + 1
+            next_batch = i_batch + 1
+            logger.info(f"Saving checkpoint {next_batch:06d} after completing batch {i_batch} (steps_completed={steps_completed}, save_every={save_every})")
+            try:
+                path_dict = await checkpoint_utils.save_checkpoint_async(
+                    training_client=training_client,
+                    name=f"{next_batch:06d}",
+                    log_path=self.run_log_path,
+                    loop_state={
+                        "batch": next_batch,
+                        "wandb_run_id": self._stats_logger.wandb_run_id,
+                    },
+                    kind="both",
+                )
+            except Exception as e:
+                logger.exception(f"save_checkpoint_async failed: {e}")
+                raise
+            logger.info(f"Checkpoint async completed. Creating sampling client from {path_dict['sampler_path']}")
+            try:
+                sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
+            except Exception as e:
+                logger.exception(f"create_sampling_client failed: {e}")
+                raise
+            logger.info(f"Sampling client created successfully")
+            return sampling_client
         else:
             logger.debug(f"Skipping checkpoint at batch {i_batch} (steps_completed={steps_completed}, save_every={save_every}), saving weights only")
-            sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+            try:
+                sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+            except Exception as e:
+                logger.exception(f"save_weights_and_get_sampling_client_async failed: {e}")
+                raise
             logger.debug(f"Weights saved and sampling client created")
             return sampling_client
 

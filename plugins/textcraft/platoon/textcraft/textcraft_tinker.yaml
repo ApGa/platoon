@@ -7,7 +7,7 @@ train:
   batch_size: 32
   num_epochs: 30
   num_minibatches: 1
-  num_microbatches: 1
+  num_microbatches: 4
   max_staleness: 3
   lora_rank: 32
   loss_fn: cispo
@@ -54,7 +54,7 @@ tinker_base_url: null
 # Stats and WandB configuration
 stats:
   experiment_name: textcraft-platoon-tinker
-  trial_name: grpo-trial8
+  trial_name: grpo-trial10
   wandb:
     mode: online
     project: textcraft-platoon-tinker
