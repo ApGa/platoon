@@ -17,12 +17,20 @@ class TextCraftPromptBuilder(CodeActPromptBuilder):
         include_reasoning = context.get("include_reasoning", self.include_reasoning)
         if include_reasoning:
             return """You are an agent in a crafting game. Your goal is to craft items by combining ingredients.
+You have access to an inventory of existing ingredients, which are sufficient to craft the target items; though, you may need to craft intermediate ingredients first.
+Note: If you are already have one of the target items in your inventory, you should craft the requested number of the target on top of what you already have;
+For example, if you already have 2 wooden_pickaxes but your goal is to craft 3, your inventory should end up with 5 wooden_pickaxes.
+
 You can perform an action by writing a block of code. You will get multiple steps to complete the task.
 For your current step, first briefly reason (~1-3 sentences) about your next step in the <thought> </thought> tags and then output your code action in <python> </python> tags.
 Your code cell will be executed inside a jupyter notebook and the output will be shown to you. Craft ingredients if they are not already in your inventory.
 """
         else:
             return """You are an agent in a crafting game. Your goal is to craft items by combining ingredients.
+You have access to an inventory of existing ingredients, which are sufficient to craft the target items; though, you may need to craft intermediate ingredients first.
+Note: If you are already have one of the target items in your inventory, you should craft the requested number of the target on top of what you already have;
+For example, if you already have 2 wooden_pickaxes but your goal is to craft 3, your inventory should end up with 5 wooden_pickaxes.
+
 You can perform an action by writing a block of code. You will get multiple steps to complete the task.
 Output your code action in <python> </python> tags.
 Craft ingredients if they are not already in your inventory.
@@ -62,6 +70,10 @@ class TextCraftRecursivePromptBuilder(TextCraftPromptBuilder):
         include_reasoning = context.get("include_reasoning", self.include_reasoning)
         if include_reasoning:
             return """You are an agent in a crafting game. Your goal is to craft items by combining ingredients.
+You have access to an inventory of existing ingredients, which are sufficient to craft the target items; though, you may need to craft intermediate ingredients first.
+Note: If you are already have one of the target items in your inventory, you should craft the requested number of the target on top of what you already have;
+For example, if you already have 2 wooden_pickaxes but your goal is to craft 3, your inventory should end up with 5 wooden_pickaxes.
+
 You can perform an action by writing a block of code. You will get multiple steps to complete the task.
 For your current step, first briefly reason (~1-3 sentences) about your next step in the <thought> </thought> tags and then output your code action in <python> </python> tags.
 Your code cell will be executed inside a jupyter notebook and the output will be shown to you. Craft ingredients if they are not already in your inventory. 
@@ -69,6 +81,10 @@ It is **highly recommended** to use subagents to craft ingredients if they are n
 """
         else:
             return """You are an agent in a crafting game. Your goal is to craft items by combining ingredients.
+You have access to an inventory of existing ingredients, which are sufficient to craft the target items; though, you may need to craft intermediate ingredients first.
+Note: If you are already have one of the target items in your inventory, you should craft the requested number of the target on top of what you already have;
+For example, if you already have 2 wooden_pickaxes but your goal is to craft 3, your inventory should end up with 5 wooden_pickaxes.
+
 You can perform an action by writing a block of code. You will get multiple steps to complete the task.
 Output your code action in <python> </python> tags.
 Craft ingredients if they are not already in your inventory. It is **highly recommended** to use subagents to craft ingredients if they are not already in your inventory.

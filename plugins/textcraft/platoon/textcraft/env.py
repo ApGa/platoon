@@ -1,16 +1,15 @@
 """TextCraft environment for recursive agent spawning in crafting tasks."""
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
-from platoon.envs.codeact import CodeActEnv, CodeActObservation, CodeActAction, CodeActStep, IPythonCodeExecutor, ForkableCodeExecutor
-from platoon.envs.base import Task, SubTask
+from platoon.envs.codeact import CodeActEnv, CodeActObservation, IPythonCodeExecutor, ForkableCodeExecutor
+from platoon.envs.base import Task
 from platoon.agents.actions.common import finish
 from platoon.agents.actions.subagent import launch_subagent as _launch_subagent
 from platoon.episode.context import finish_message
-from .recipe_loader import RecipeDatabase, Recipe
+from .recipe_loader import RecipeDatabase
 from platoon.envs.codeact import safe_asyncio
 
 
@@ -262,21 +261,19 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
 
 2. def get_info(items: list) -> list[dict]
    - Get information about items (recipes, whether they can be crafted, etc.)
-   - Example: get_info(["yellow_dye", "yellow_terracotta", "tag:planks"])
+   - Example: get_info(["yellow_dye", "yellow_terracotta"])
+   - IMPORTANT - Tag-based Ingredients:
+        Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
+        If an ingredient in a recipe is a tag, concrete items that satisfy the tag will also be listed. 
+        When crafting with a tag-based ingredient, you must provide a CONCRETE item from that category, NOT the tag name itself. 
 
-3. def finish(message: str) -> str
+3. def view_inventory() -> dict
+   - View your current inventory to see available ingredients.
+   - Example: inv = view_inventory()
+   
+4. def finish(message: str) -> str
    - Complete the task with a message
    - Example: finish("Successfully crafted all required items")
-
-4. def view_inventory() -> dict
-   - View your current inventory
-   - Example: inv = view_inventory()
-
-IMPORTANT - Tag-based Ingredients:
-Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
-When crafting, you must provide a CONCRETE item from that category, NOT the tag name itself.
-Use get_info(["tag:X"]) to see which concrete items satisfy tag:X. Check your inventory for available items.
-Example: If a recipe needs "tag:planks", use "oak_planks", "acacia_planks", "birch_planks", etc.
 """
     
     async def reset(self) -> 'TextCraftCodeExecutor':
@@ -353,13 +350,21 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
 
 2. def get_info(items: list) -> list[dict]
    - Get information about items (recipes, whether they can be crafted, etc.)
-   - Example: get_info(["yellow_dye", "yellow_terracotta", "tag:planks"])
+   - Example: get_info(["yellow_dye", "yellow_terracotta"])
+   - IMPORTANT - Tag-based Ingredients:
+        Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
+        If an ingredient in a recipe is a tag, concrete items that satisfy the tag will also be listed. 
+        When crafting with a tag-based ingredient, you must provide a CONCRETE item from that category, NOT the tag name itself. 
 
-3. def finish(message: str) -> str
+3. def view_inventory() -> dict
+   - View your current inventory to see available ingredients.
+   - Example: inv = view_inventory()
+   
+4. def finish(message: str) -> str
    - Complete the task with a message
    - Example: finish("Successfully crafted all required items")
 
-4. async def launch_subagent(targets: dict, num_steps: int, context: str = "") -> str
+5. async def launch_subagent(targets: dict, num_steps: int, context: str = "") -> str
    - Launch a subagent to craft specific targets
    - Example: await launch_subagent({"yellow_dye": 1, "stick": 2}, 20)
    - The subagent will have access to the same inventory and recipes
@@ -367,16 +372,6 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
    - Returns the subagent's finish message
    - You optionally can provide a context string to the subagent with a summary of any useful context you have gathered for its task,
         to help reduce redundant actions.
-
-5. def view_inventory() -> dict
-   - View your current inventory
-   - Example: inv = view_inventory()
-
-IMPORTANT - Tag-based Ingredients:
-Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
-When crafting, you must provide a CONCRETE item from that category, NOT the tag name itself.
-Use get_info(["tag:X"]) to see which concrete items satisfy tag:X. Check your inventory for available items.
-Example: If a recipe needs "tag:planks", use "oak_planks", "acacia_planks", "birch_planks", etc.
 
 Note that asyncio has already been imported for you. You can launch subagents using `await launch_subagent` or `asyncio.create_task` + `await asyncio.gather` to launch multiple subagents concurrently.
 """
@@ -430,24 +425,29 @@ class TextCraftEnv(CodeActEnv):
                 
                 inventory = self._code_executor.inventory
                 
-                # Check if all target items are in inventory with sufficient counts
+                # Check if all target items were CRAFTED (difference from initial inventory)
+                # This prevents giving credit for items that were already in starting inventory
                 all_met = True
                 missing_items = {}
                 for item, required_count in target_items.items():
-                    available = inventory.get(item, 0)
-                    if available < required_count:
+                    current_count = inventory.get(item, 0)
+                    initial_count = self._initial_inventory.get(item, 0)
+                    crafted_count = current_count - initial_count
+                    if crafted_count < required_count:
                         all_met = False
-                        missing_items[item] = required_count - available
+                        missing_items[item] = required_count - crafted_count
                 
                 if all_met:
                     score = 1.0
                     reward_misc["success"] = True
                     reward_misc["target_items"] = target_items
+                    reward_misc["initial_inventory"] = dict(self._initial_inventory)
                     reward_misc["final_inventory"] = dict(inventory)
                 else:
                     reward_misc["success"] = False
                     reward_misc["missing_items"] = missing_items
                     reward_misc["target_items"] = target_items
+                    reward_misc["initial_inventory"] = dict(self._initial_inventory)
                     reward_misc["final_inventory"] = dict(inventory)
             else:
                 # Episode finished but agent didn't call finish() - timeout/max steps
