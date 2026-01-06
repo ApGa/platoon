@@ -400,8 +400,9 @@ class TextCraftEnv(CodeActEnv):
         code_executor = TextCraftCodeExecutor(task, recipes_dir, initial_inventory, _share_inventory=_share_inventory)
         super().__init__(task, code_executor)
         self._recipes_dir = recipes_dir
-        # Only copy for bookkeeping if not sharing
-        self._initial_inventory = initial_inventory if _share_inventory else (initial_inventory.copy() if initial_inventory else {})
+        # Always copy initial inventory for bookkeeping (to compare against for evaluation)
+        # This is separate from whether the working inventory is shared with parent
+        self._initial_inventory = initial_inventory.copy() if initial_inventory else {}
 
     
     async def evaluate(self) -> Tuple[float, dict]:
