@@ -32,9 +32,9 @@ def create_task_from_instance(x: dict) -> Task:
     return task
 
 def load_data():
-    global data_loaded, train_data_map, val_data
+    global data_loaded, train_data_map, val_data_map
     if data_loaded:
-        return
+        return train_data_map, val_data_map
     data_path = os.path.join(os.path.dirname(__file__), "train.parquet") #NOTE: make it huggingface dataset if possible
     dataset = pd.read_parquet(data_path)
     np.random.seed(42)

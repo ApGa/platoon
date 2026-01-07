@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from platoon.envs.base import Task
-from .types import OpenHandsObservation, OpenHandsTrajectoryStep, OpenHandsAction
+from platoon.openhands.types import OpenHandsObservation, OpenHandsTrajectoryStep, OpenHandsAction
 from openhands.sdk.conversation import get_agent_final_response
 from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.agent.base import AgentBase
