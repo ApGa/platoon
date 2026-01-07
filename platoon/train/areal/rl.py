@@ -14,7 +14,6 @@ from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 from areal.api.alloc_mode import AllocationMode
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
 from areal.api.workflow_api import RolloutWorkflow
-from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.sglang_remote import RemoteSGLangEngine
 from areal.experimental.openai.client import ArealOpenAI
 from areal.experimental.openai.proxy import ProxyServer
@@ -28,6 +27,7 @@ from areal.utils.recover import RecoverHandler
 from areal.utils.saver import Saver
 from areal.utils.stats_logger import StatsLogger
 
+from platoon.train.areal.actor import create_actor
 from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig
 from platoon.utils.train import set_expandable_segments
 
@@ -69,7 +69,10 @@ class PlatoonArealRLTrainer:
         parallel_strategy = allocation_mode.train
         assert parallel_strategy is not None
         
-        self.actor = FSDPPPOActor(config=config.actor)
+        self.actor = create_actor(
+            config=config.actor,
+            loss_fn_config=config.loss_fn_config,
+        )
         self.actor.create_process_group(parallel_strategy=parallel_strategy)
         
         # Create dataloaders
@@ -121,8 +124,10 @@ class PlatoonArealRLTrainer:
         self.actor.connect_engine(self.rollout, self.weight_update_meta)
     
         # Optional reference model for KL
+        # Reference model uses standard FSDPPPOActor (no custom loss function needed)
         self.ref = None
         if config.actor.kl_ctl > 0 and config.ref is not None:
+            from areal.engine.fsdp_engine import FSDPPPOActor
             self.ref = FSDPPPOActor(config=config.ref)
             self.ref.create_process_group(parallel_strategy=parallel_strategy)
             self.ref.initialize(None, self.ft_spec)
