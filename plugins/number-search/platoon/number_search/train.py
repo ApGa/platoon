@@ -7,7 +7,6 @@ from platoon.number_search.rollout import run_rollout
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
 from platoon.train.areal.workflows import StepWiseArealWorkflow
 
-
 def main(args):
     config, _ = load_expr_config(args, PlatoonArealRLTrainerConfig)
     config: PlatoonArealRLTrainerConfig = config
