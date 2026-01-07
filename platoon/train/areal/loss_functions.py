@@ -1,9 +1,12 @@
 """Loss functions for AReaL RL training.
 
 This module provides a registry of loss functions that can be used with the AReaL backend.
-Each loss function follows the same interface:
-    - Inputs: logprobs, entropy, input_data, **config_kwargs
-    - Returns: (loss: Tensor, stat: dict)
+Each loss function follows AReaL's train_batch interface:
+    - Inputs: logits, input_data, **config_kwargs
+    - Returns: loss Tensor (scalar)
+
+The loss functions compute logprobs internally from logits using gather_logprobs_entropy.
+Stats are logged directly via stats_tracker inside each loss function.
 
 To add a new loss function:
     1. Define the function following the interface
@@ -16,6 +19,7 @@ from typing import Callable
 import torch
 
 from areal.utils import stats_tracker
+from areal.utils.functional import gather_logprobs_entropy
 
 # Import LossFnConfig from config_defs to avoid duplication
 from platoon.train.areal.config_defs import LossFnConfig
@@ -106,14 +110,14 @@ def _compute_sequence_level_ratio_and_advantages(
 
 @register_loss_fn("cispo")
 def cispo_loss_fn(
-    logprobs: torch.Tensor,
-    entropy: torch.Tensor,
+    logits: torch.Tensor,
     input_data: dict,
+    temperature: float = 1.0,
     clip_low_threshold: float = 0.0,
     clip_high_threshold: float = 5.0,
     importance_sampling_level: str = "token",
     **kwargs,
-) -> tuple[torch.Tensor, dict]:
+) -> torch.Tensor:
     """Clipped Importance Sampling Policy Optimization (CISPO) loss function.
     
     CISPO clips the importance sampling weights and uses them to weight the policy gradient,
@@ -127,28 +131,38 @@ def cispo_loss_fn(
         A = advantage
     
     Args:
-        logprobs: Current policy log probabilities [batch, seq] or [total_tokens]
-        entropy: Token entropy (detached, for logging)
+        logits: Model output logits [batch, seq, vocab] or [total_tokens, vocab]
         input_data: Dict containing:
-            - "logprobs": Old policy log probabilities
+            - "input_ids" or "rolled_input_ids": Token labels for logprob computation
+            - "logprobs": Old policy log probabilities  
             - "advantages": Advantage values
             - "loss_mask": Boolean mask for valid tokens
             - "cu_seqlens": (optional) Cumulative sequence lengths for packed format
+        temperature: Sampling temperature (default 1.0)
         clip_low_threshold: Lower clipping bound for importance ratio (default 0)
         clip_high_threshold: Upper clipping bound for importance ratio (default 5)
         importance_sampling_level: "token" for per-token, "sequence" for sequence-level
         **kwargs: Ignored extra arguments for compatibility
     
     Returns:
-        Tuple of (loss, statistics dict)
+        Scalar loss tensor
     """
+    # Get labels for computing logprobs (same as areal's grpo_loss_fn)
+    labels = input_data.get(
+        "rolled_input_ids",
+        torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
+    )
+    
+    # Compute logprobs and entropy from logits
+    logprobs, entropy = gather_logprobs_entropy(logits, labels, temperature)
+    entropy = entropy.detach()
+    
     old_logprobs = input_data["logprobs"]
     advantages = input_data["advantages"].detach()
-    loss_mask = input_data["loss_mask"].bool()
+    loss_mask = input_data.get("full_loss_mask", input_data["loss_mask"]).bool()
     cu_seqlens = input_data.get("cu_seqlens")
     
     loss_mask_count = loss_mask.count_nonzero() or 1
-    entropy = entropy.detach()
     
     # Compute log ratio and importance weight
     log_ratio = logprobs - old_logprobs
@@ -180,42 +194,59 @@ def cispo_loss_fn(
     clip_high_mask = (ratio > clip_high_threshold).logical_and(loss_mask)
     clip_mask = clip_low_mask.logical_or(clip_high_mask)
     
-    # Statistics dict compatible with PPO logging
-    stat = dict(
-        loss=logging_loss,
-        importance_weight=ratio.detach(),
-        approx_kl=log_ratio.detach(),
-        clip_mask=clip_mask,
-        dual_clip_mask=torch.zeros_like(clip_mask),  # CISPO doesn't use dual clipping
-        clipped_ratio=clipped_ratio.detach(),
-        clip_low_mask=clip_low_mask,
-        clip_high_mask=clip_high_mask,
+    # Log training statistics (matching areal's grpo_loss_fn pattern)
+    stats_tracker.denominator(
+        n_tokens=torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device),
+        n_valid_tokens=loss_mask.bool(),
+        clipped_tokens=clip_mask,
+        dual_clipped_tokens=torch.zeros_like(clip_mask),
     )
     
-    return pg_loss, stat
+    stats_tracker.stat(
+        importance_weight=ratio.detach(),
+        approx_kl=log_ratio.detach(),
+        new_logp=logprobs.detach(),
+        old_logp=old_logprobs,
+        entropy=entropy.float(),
+        actor_loss=logging_loss,
+        denominator="n_valid_tokens",
+    )
+    
+    return pg_loss
 
 
 @register_loss_fn("grpo")
 def grpo_loss_fn(
-    logprobs: torch.Tensor,
-    entropy: torch.Tensor,
+    logits: torch.Tensor,
     input_data: dict,
+    temperature: float = 1.0,
     eps_clip: float = 0.2,
     eps_clip_higher: float | None = None,
     c_clip: float | None = None,
     behav_imp_weight_cap: float | None = None,
+    m2_threshold: float | None = None,
     importance_sampling_level: str = "token",
     **kwargs,
-) -> tuple[torch.Tensor, dict]:
+) -> torch.Tensor:
     """GRPO/PPO loss function with standard clipping.
     
-    This is a wrapper that calls into the AReaL ppo_actor_loss_fn.
+    This matches areal's grpo_loss_fn interface (logits, input_data).
     """
     from areal.utils.functional import ppo_actor_loss_fn
     
+    # Get labels for computing logprobs
+    labels = input_data.get(
+        "rolled_input_ids",
+        torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
+    )
+    
+    # Compute logprobs and entropy from logits
+    logprobs, entropy = gather_logprobs_entropy(logits, labels, temperature)
+    entropy = entropy.detach()
+    
     old_logprobs = input_data["logprobs"]
     advantages = input_data["advantages"]
-    loss_mask = input_data["loss_mask"].bool()
+    loss_mask = input_data.get("full_loss_mask", input_data["loss_mask"]).bool()
     prox_logp = input_data.get("prox_logp", old_logprobs)
     cu_seqlens = input_data.get("cu_seqlens")
     
@@ -233,127 +264,26 @@ def grpo_loss_fn(
         cu_seqlens=cu_seqlens,
     )
     
-    return loss, stat
-
-
-# Alias for backwards compatibility
-register_loss_fn("ppo")(grpo_loss_fn)
-
-
-@register_loss_fn("sapo")
-def sapo_loss_fn_wrapper(
-    logprobs: torch.Tensor,
-    entropy: torch.Tensor,
-    input_data: dict,
-    sapo_tau_pos: float = 1.0,
-    sapo_tau_neg: float = 1.05,
-    importance_sampling_level: str = "token",
-    **kwargs,
-) -> tuple[torch.Tensor, dict]:
-    """SAPO (Soft Adaptive Policy Optimization) loss function wrapper.
-    
-    SAPO replaces PPO clipping with soft sigmoid gates.
-    """
-    from areal.utils.functional import sapo_loss_fn
-    
-    old_logprobs = input_data["logprobs"]
-    advantages = input_data["advantages"]
-    loss_mask = input_data["loss_mask"].bool()
-    cu_seqlens = input_data.get("cu_seqlens")
-    
-    loss, stat = sapo_loss_fn(
-        logprobs=logprobs,
-        old_logprobs=old_logprobs,
-        advantages=advantages,
-        tau_pos=sapo_tau_pos,
-        tau_neg=sapo_tau_neg,
-        loss_mask=loss_mask,
-        importance_sampling_level=importance_sampling_level,
-        cu_seqlens=cu_seqlens,
-    )
-    
-    return loss, stat
-
-
-def compute_loss_with_stats(
-    loss_fn_name: str,
-    logprobs: torch.Tensor,
-    entropy: torch.Tensor,
-    input_data: dict,
-    config: LossFnConfig | dict,
-) -> tuple[torch.Tensor, dict]:
-    """Compute loss and log statistics using the specified loss function.
-    
-    This is the main entry point for computing losses. It handles:
-    1. Looking up the loss function by name
-    2. Extracting relevant config parameters
-    3. Computing the loss
-    4. Logging statistics to the stats tracker
-    
-    Args:
-        loss_fn_name: Name of the loss function to use
-        logprobs: Current policy log probabilities
-        entropy: Token entropy
-        input_data: Dict with training data (advantages, old_logprobs, etc.)
-        config: LossFnConfig or dict with loss function parameters
-    
-    Returns:
-        Tuple of (loss, statistics dict)
-    """
-    loss_fn = get_loss_fn(loss_fn_name)
-    
-    # Convert config to dict if needed
-    if isinstance(config, LossFnConfig):
-        config_dict = {
-            k: getattr(config, k) 
-            for k in config.__dataclass_fields__ 
-            if hasattr(config, k)
-        }
-    else:
-        config_dict = config
-    
-    # Call the loss function
-    loss, stat = loss_fn(
-        logprobs=logprobs,
-        entropy=entropy,
-        input_data=input_data,
-        **config_dict,
-    )
-    
-    # Log statistics
-    loss_mask = input_data["loss_mask"].bool()
-    
+    # Log training statistics (matching areal's grpo_loss_fn pattern)
     stats_tracker.denominator(
-        n_tokens=torch.ones_like(loss_mask, dtype=torch.bool, device=logprobs.device),
-        n_valid_tokens=loss_mask,
-        clipped_tokens=stat.get("clip_mask", torch.zeros_like(loss_mask)),
+        n_tokens=torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device),
+        n_valid_tokens=loss_mask.bool(),
+        clipped_tokens=stat["clip_mask"],
+        dual_clipped_tokens=stat["dual_clip_mask"],
     )
     
     stats_tracker.stat(
         importance_weight=stat["importance_weight"],
         approx_kl=stat["approx_kl"],
         new_logp=logprobs.detach(),
-        old_logp=input_data["logprobs"],
+        old_logp=old_logprobs,
         entropy=entropy.float(),
         actor_loss=stat["loss"],
-        clip_ratio=stat.get("clip_mask", torch.zeros_like(loss_mask)).float(),
         denominator="n_valid_tokens",
     )
     
-    # Log loss-function-specific stats
-    if "clipped_ratio" in stat:
-        stats_tracker.stat(
-            clipped_ratio=stat["clipped_ratio"],
-            denominator="n_valid_tokens",
-        )
-    
-    if "behave_imp_weight" in stat:
-        stats_tracker.denominator(unclipped_behave_tokens=stat["behave_mask"])
-        stats_tracker.stat(
-            behave_imp_weight=stat["behave_imp_weight"],
-            behave_approx_kl=stat["behave_approx_kl"],
-            denominator="unclipped_behave_tokens",
-        )
-    
-    return loss, stat
+    return loss
 
+
+# Alias for backwards compatibility
+register_loss_fn("ppo")(grpo_loss_fn)

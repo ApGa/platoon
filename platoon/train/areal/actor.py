@@ -11,7 +11,7 @@ from typing import Any
 import torch
 
 from areal.api.cli_args import MicroBatchSpec
-from areal.engine.fsdp_engine import FSDPPPOActor
+from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.ppo.actor import PPOActorConfig
 from areal.utils import stats_tracker
 from areal.utils.data import split_padded_tensor_dict_into_mb_list
@@ -21,7 +21,6 @@ from platoon.train.areal.config_defs import LossFnConfig
 from platoon.train.areal.loss_functions import (
     cispo_loss_fn,
     grpo_loss_fn,
-    sapo_loss_fn_wrapper,
     get_loss_fn,
 )
 
@@ -35,8 +34,7 @@ def create_loss_fn_for_areal(
     """Create a loss function compatible with AReaL's train_batch interface.
     
     AReaL's train_batch expects a loss function with signature:
-        loss_fn(logprobs, entropy, input_data, vocab_min_logits, vocab_max_logits)
-        -> (loss, stat)
+        loss_fn(logits, input_data) -> (loss, stat)
     
     This function creates a partial that binds all configuration parameters.
     
@@ -49,27 +47,25 @@ def create_loss_fn_for_areal(
     Returns:
         A callable compatible with AReaL's train_batch loss_fn interface
     """
+    temperature = getattr(actor_config, 'temperature', 1.0)
+    
     if loss_fn_name == "cispo":
         return functools.partial(
             cispo_loss_fn,
+            temperature=temperature,
             clip_low_threshold=loss_fn_config.clip_low_threshold,
             clip_high_threshold=loss_fn_config.clip_high_threshold,
-            importance_sampling_level=getattr(actor_config, 'importance_sampling_level', 'token'),
-        )
-    elif loss_fn_name == "sapo":
-        return functools.partial(
-            sapo_loss_fn_wrapper,
-            sapo_tau_pos=loss_fn_config.sapo_tau_pos,
-            sapo_tau_neg=loss_fn_config.sapo_tau_neg,
             importance_sampling_level=getattr(actor_config, 'importance_sampling_level', 'token'),
         )
     elif loss_fn_name in ("grpo", "ppo"):
         return functools.partial(
             grpo_loss_fn,
+            temperature=temperature,
             eps_clip=actor_config.eps_clip,
             eps_clip_higher=getattr(actor_config, 'eps_clip_higher', None),
             c_clip=getattr(actor_config, 'c_clip', None),
             behav_imp_weight_cap=getattr(actor_config, 'behav_imp_weight_cap', None),
+            m2_threshold=getattr(actor_config, 'm2_threshold', None),
             importance_sampling_level=getattr(actor_config, 'importance_sampling_level', 'token'),
         )
     else:
@@ -171,7 +167,7 @@ class PlatoonPPOActor(FSDPPPOActor):
         scalars = dict(
             mask_no_eos_with_zero=self.config.mask_no_eos_with_zero,
             eps_clip=self.config.eps_clip,
-            loss_fn=self._loss_fn_name,
+            # Note: loss_fn is a string, can't be logged as scalar
         )
         if self.config.c_clip is not None:
             scalars["c_clip"] = self.config.c_clip
@@ -189,8 +185,8 @@ class PlatoonPPOActor(FSDPPPOActor):
             )
         # ===== End logging code =====
 
-        # Pop keys that are no longer needed
-        for key in ["rewards", "tot_rewards", "kl_rewards"]:
+        # Pop keys that are no longer needed (matching areal's ppo_update)
+        for key in ["rewards", "tot_rewards", "kl_rewards", "versions"]:
             data.pop(key, None)
             
         # Enable gradient checkpointing

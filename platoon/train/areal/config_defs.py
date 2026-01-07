@@ -1,7 +1,6 @@
 """Configuration definitions for AReaL RL training."""
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 from areal.api.cli_args import GRPOConfig
 from areal.engine.ppo.actor import PPOActorConfig
@@ -22,12 +21,11 @@ class LossFnConfig:
     """Configuration for the loss function.
     
     This allows switching between different policy optimization loss functions
-    (GRPO/PPO, CISPO, SAPO) while maintaining consistent training infrastructure.
+    (GRPO/PPO, CISPO) while maintaining consistent training infrastructure.
     
     Loss functions available:
     - "grpo" / "ppo": Standard PPO with clipped objective
     - "cispo": Clipped Importance Sampling Policy Optimization
-    - "sapo": Soft Adaptive Policy Optimization
     
     Example usage:
         # Use CISPO with custom clipping thresholds
@@ -36,26 +34,16 @@ class LossFnConfig:
             clip_low_threshold=0.0,
             clip_high_threshold=5.0,
         )
-        
-        # Use SAPO with custom temperature
-        loss_fn_config = LossFnConfig(
-            loss_fn="sapo",
-            sapo_tau_pos=1.0,
-            sapo_tau_neg=1.05,
-        )
     """
-    # Loss function selection
-    loss_fn: Literal["grpo", "ppo", "cispo", "sapo"] = "grpo"
+    # Loss function selection (valid values: "grpo", "ppo", "cispo")
+    # Note: Using str instead of Literal for OmegaConf compatibility
+    loss_fn: str = "grpo"
     
     # CISPO-specific parameters
     # CISPO clips the importance sampling ratio directly, then uses detach(clip(ρ)) * A * log π
     # This ensures gradients always flow through log π, maintaining signal to all tokens
     clip_low_threshold: float = 0.0   # Lower bound for importance ratio (default: no lower bound)
     clip_high_threshold: float = 5.0  # Upper bound for importance ratio (default: 5)
-    
-    # SAPO-specific parameters (SAPO uses soft sigmoid gates instead of hard clipping)
-    sapo_tau_pos: float = 1.0   # Temperature for positive advantages (higher = sharper gate)
-    sapo_tau_neg: float = 1.05  # Temperature for negative advantages (higher = sharper gate)
 
 
 @dataclass

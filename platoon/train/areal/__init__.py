@@ -16,7 +16,6 @@ from platoon.train.areal.config_defs import (
 from platoon.train.areal.loss_functions import (
     cispo_loss_fn,
     grpo_loss_fn,
-    sapo_loss_fn_wrapper,
     get_loss_fn,
     register_loss_fn,
     list_loss_fns,
@@ -43,8 +42,7 @@ __all__ = [
     "ArealProxySession",
     # Loss functions
     "cispo_loss_fn",
-    "grpo_loss_fn", 
-    "sapo_loss_fn_wrapper",
+    "grpo_loss_fn",
     "get_loss_fn",
     "register_loss_fn",
     "list_loss_fns",

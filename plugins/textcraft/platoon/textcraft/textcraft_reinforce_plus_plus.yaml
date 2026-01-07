@@ -1,5 +1,5 @@
 experiment_name: textcraft-reinforce-plus-plus
-trial_name: grpo-8b-instruct-recursive-trial-0
+trial_name: cispo-4b-recursive-trial-0
 
 seed: 343
 total_train_epochs: 10
@@ -18,9 +18,9 @@ cluster:
 allocation_mode: sglang:d6p1t1+d2p1t1
 
 rollout:
-  experiment_name: ${experiment_name}
+  experiment_name: ${experiment_name}`
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 36
+  max_concurrent_rollouts: 32
   queue_size: null 
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -39,16 +39,22 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 50
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-grpo-8b-instruct-recursive-trial-0
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-cispo-4b-recursive-trial-0
     verbose: True
     train: true
     timeout: 900
   group_size: 8
 
+# CISPO loss function configuration (matches tinker settings)
+loss_fn_config:
+  loss_fn: cispo
+  clip_low_threshold: 0.0
+  clip_high_threshold: 5.0
+
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /mnt/efs/custom_models/Qwen-8B-Instruct #OpenPipe/Qwen3-14B-Instruct
+  path: Qwen/Qwen3-4B-Instruct-2507 #OpenPipe/Qwen3-14B-Instruct
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -60,7 +66,7 @@ actor:
     lr: 3e-6
     weight_decay: 0.017
     beta1: 0.9
-    beta2: 0.999
+    beta2: 0.95
     eps: 1e-8
     lr_scheduler_type: constant
     gradient_clipping: 1.0
@@ -85,7 +91,7 @@ actor:
   kl_estimator: k1
   ppo_n_minibatches: 1
   recompute_logprob: true
-  use_decoupled_loss: true
+  use_decoupled_loss: false #true
   behav_imp_weight_cap: null
   dynamic_sampling: false
   reward_norm:

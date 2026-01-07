@@ -127,7 +127,7 @@ class PlatoonArealRLTrainer:
         # Reference model uses standard FSDPPPOActor (no custom loss function needed)
         self.ref = None
         if config.actor.kl_ctl > 0 and config.ref is not None:
-            from areal.engine.fsdp_engine import FSDPPPOActor
+            from areal.engine.ppo.actor import FSDPPPOActor
             self.ref = FSDPPPOActor(config=config.ref)
             self.ref.create_process_group(parallel_strategy=parallel_strategy)
             self.ref.initialize(None, self.ft_spec)
