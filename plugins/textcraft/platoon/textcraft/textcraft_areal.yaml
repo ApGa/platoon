@@ -1,5 +1,5 @@
 experiment_name: textcraft-reinforce-plus-plus
-trial_name: cispo-4b-recursive-trial-0
+trial_name: cispo-4b-lora-recursive-trial-3
 
 seed: 343
 total_train_epochs: 10
@@ -18,7 +18,7 @@ cluster:
 allocation_mode: sglang:d6p1t1+d2p1t1
 
 rollout:
-  experiment_name: ${experiment_name}`
+  experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   max_concurrent_rollouts: 32
   queue_size: null 
@@ -39,7 +39,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 50
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-cispo-4b-recursive-trial-0
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-cispo-4b-lora-recursive-trial-3
     verbose: True
     train: true
     timeout: 900
@@ -63,7 +63,7 @@ actor:
     max_tokens_per_mb: 40000
   optimizer:
     type: adam
-    lr: 3e-6
+    lr: 3e-5
     weight_decay: 0.017
     beta1: 0.9
     beta2: 0.95
@@ -90,7 +90,7 @@ actor:
   kl_ctl: 0.0
   kl_estimator: k1
   ppo_n_minibatches: 1
-  recompute_logprob: true
+  recompute_logprob: false #true
   use_decoupled_loss: false #true
   behav_imp_weight_cap: null
   dynamic_sampling: false
@@ -101,6 +101,12 @@ actor:
     mean_level: null
     std_level: null
   max_new_tokens: ${gconfig.max_new_tokens}
+  # lora
+  use_lora: true
+  peft_type: lora
+  lora_rank: 32
+  lora_alpha: 16
+  target_modules: [all-linear]
 
 ref:
   experiment_name: ${experiment_name}
@@ -122,6 +128,9 @@ sglang:
   max_running_requests: null
   context_length: 40001
   mem_fraction_static: 0.8
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  lora_target_modules: ${actor.target_modules}
 
 # datasets
 train_dataset:

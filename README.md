@@ -138,7 +138,7 @@ cd plugins/textcraft  # or number-search, codegrep
 
 uv run python3 -m areal.launcher.local \
     platoon/textcraft/train.py \
-    --config platoon/textcraft/textcraft_reinforce_plus_plus.yaml \
+    --config platoon/textcraft/textcraft_areal.yaml \
     experiment_name=textcraft-reinforce \
     trial_name=trial0
 ```

@@ -29,7 +29,7 @@ from areal.utils.stats_logger import StatsLogger
 
 from platoon.train.areal.actor import create_actor
 from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig
-from platoon.utils.train import bcast_and_split_from_rank0, set_expandable_segments
+from platoon.utils.train import bcast_and_split_from_rank0, set_expandable_segments, tensor_container_to
 
 logger = logging.getLogger("Platoon AReaL RL Trainer")
 
@@ -70,7 +70,7 @@ class PlatoonArealRLTrainer:
         assert parallel_strategy is not None
         
         # LoRA-specific validation
-        self.use_lora = config.use_lora
+        self.use_lora = config.actor.use_lora
         if self.use_lora:
             if parallel_strategy.data_parallel_size != parallel_strategy.world_size:
                 raise ValueError("LoRA does not support parallelism other than FSDP.")
@@ -232,11 +232,11 @@ class PlatoonArealRLTrainer:
                             self.train_dataloader,
                             workflow=workflow,
                             should_accept_fn=lambda sample: True,
-                            group_size=config.gconfig.n_samples,
                         )
+                        batch = tensor_container_to(batch, self.actor.device)
                     batch = bcast_and_split_from_rank0(
                         batch,
-                        granularity=config.gconfig.n_samples,
+                        granularity=1,
                         device=self.actor.device,
                     )
                 else:

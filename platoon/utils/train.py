@@ -46,6 +46,7 @@ def bcast_and_split_from_rank0(
         The local shard of the batch for this rank
     """
     batch = broadcast_tensor_container(batch, src_rank=0)
+    # Ensure batch is on the target device after broadcast (for non-rank-0 receivers)
     if device is not None:
         batch = tensor_container_to(batch, device)
     bs = get_batch_size(batch)
