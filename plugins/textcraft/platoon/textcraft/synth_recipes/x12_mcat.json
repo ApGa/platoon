@@ -1,0 +1,34 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:m1_i9_9"
+    },
+    {
+      "item": "synth:c1_i9_9"
+    },
+    {
+      "item": "synth:c1_i9_9"
+    },
+    {
+      "item": "synth:a3_i9_9"
+    },
+    {
+      "item": "synth:a3_i9_9"
+    },
+    {
+      "item": "synth:t1_i9_9"
+    },
+    {
+      "item": "synth:t1_i9_9"
+    }
+  ],
+  "result": {
+    "item": "synth:x12_mcat",
+    "count": 1
+  },
+  "synth_metadata": {
+    "depth": 12,
+    "domain": "metal"
+  }
+}

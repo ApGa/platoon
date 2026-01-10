@@ -1,0 +1,69 @@
+# TextCraft-Synth Tinker Training Configuration
+# Uses synthetic crafting recipes with deeper hierarchies and difficulty tagging
+
+# Training configuration
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 32
+  num_epochs: 30
+  max_training_steps: 100
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 3
+  lora_rank: 32
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 3e-5
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    grad_clip_norm: 1e12
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      max_steps: 75  # Fixed budget for all synth tasks
+      output_dir: ./rollout_results
+      verbose: true
+      timeout: 900  # Higher timeout for deeper tasks
+  num_concurrent_rollout_workflow_workers: 32
+
+# Eval configuration
+eval:
+  strategy: step
+  every: 20
+  num_concurrent_rollout_workflow_workers: 32
+  workflow_config:
+    group_size: 1
+    rollout_config:
+      max_steps: 75  # Fixed budget for all synth tasks
+      output_dir: ./eval_results
+      verbose: false
+      timeout: 900
+
+# Checkpoint configuration
+checkpoint:
+  strategy: step
+  every: 5
+  load_checkpoint_path: null
+
+# Logging
+log_path: ./logs
+tinker_base_url: null
+
+# Stats and WandB configuration
+stats:
+  experiment_name: textcraft-synth-platoon-tinker
+  trial_name: synth-grpo-4b-trial1
+  wandb:
+    mode: online
+    project: textcraft-synth-platoon-tinker
+    entity: null
+    tags:
+      - textcraft-synth
+      - tinker
+      - grpo
+      - deep-hierarchy

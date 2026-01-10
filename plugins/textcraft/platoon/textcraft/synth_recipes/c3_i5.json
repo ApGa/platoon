@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:c5_i3"
+    },
+    {
+      "item": "synth:c0_i3"
+    }
+  ],
+  "result": {
+    "item": "synth:c3_i5",
+    "count": 2
+  },
+  "synth_metadata": {
+    "depth": 5,
+    "domain": "crystal"
+  }
+}

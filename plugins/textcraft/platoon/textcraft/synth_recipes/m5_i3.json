@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:m6_i2"
+    },
+    {
+      "item": "synth:m5_i1"
+    }
+  ],
+  "result": {
+    "item": "synth:m5_i3",
+    "count": 2
+  },
+  "synth_metadata": {
+    "depth": 3,
+    "domain": "metal"
+  }
+}

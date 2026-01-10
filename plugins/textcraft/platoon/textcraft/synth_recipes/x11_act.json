@@ -1,0 +1,22 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:a5_i8_8"
+    },
+    {
+      "item": "synth:c3_i8_8"
+    },
+    {
+      "item": "synth:t4_i8_8"
+    }
+  ],
+  "result": {
+    "item": "synth:x11_act",
+    "count": 1
+  },
+  "synth_metadata": {
+    "depth": 11,
+    "domain": "arcane"
+  }
+}

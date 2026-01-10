@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:o7_i1"
+    },
+    {
+      "item": "synth:o7_i1"
+    },
+    {
+      "item": "synth:raw_o4"
+    },
+    {
+      "item": "synth:raw_o4"
+    }
+  ],
+  "result": {
+    "item": "synth:o4_i2",
+    "count": 2
+  },
+  "synth_metadata": {
+    "depth": 2,
+    "domain": "organic"
+  }
+}

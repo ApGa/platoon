@@ -1,7 +1,7 @@
 """TextCraft environment for recursive agent spawning in crafting tasks."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 
 from platoon.envs.codeact import CodeActEnv, CodeActObservation, IPythonCodeExecutor, ForkableCodeExecutor
@@ -14,11 +14,44 @@ from platoon.envs.codeact import safe_asyncio
 
 
 class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
-    """Code executor for TextCraft with crafting actions."""
+    """Code executor for TextCraft with crafting actions.
     
-    def __init__(self, task: Task, recipes_dir: Path, inventory: Optional[Dict[str, int]] = None, _share_inventory: bool = False):
-        self.recipes_dir = Path(recipes_dir)
-        self.recipe_db = RecipeDatabase(self.recipes_dir)
+    Supports both original Minecraft recipes and synthetic recipes.
+    """
+    
+    def __init__(
+        self, 
+        task: Task, 
+        recipes_dir: Optional[Path] = None,
+        recipe_db: Optional[Any] = None,
+        inventory: Optional[Dict[str, int]] = None, 
+        _share_inventory: bool = False,
+        use_synth: bool = False,
+    ):
+        """Initialize the TextCraft code executor.
+        
+        Args:
+            task: The task to execute
+            recipes_dir: Path to recipes directory (for original Minecraft recipes)
+            recipe_db: Pre-initialized recipe database (for synthetic recipes or custom DBs)
+            inventory: Initial inventory
+            _share_inventory: If True, share inventory reference with subagents
+            use_synth: If True, use synthetic recipe examples in action space
+        """
+        # Initialize recipe database from either recipe_db or recipes_dir
+        if recipe_db is not None:
+            self.recipe_db = recipe_db
+            self.recipes_dir = None
+        elif recipes_dir is not None:
+            self.recipes_dir = Path(recipes_dir)
+            self.recipe_db = RecipeDatabase(self.recipes_dir)
+        else:
+            # Default to original Minecraft recipes
+            self.recipes_dir = Path(__file__).parent / "recipes"
+            self.recipe_db = RecipeDatabase(self.recipes_dir)
+        
+        self.use_synth = use_synth
+        
         # When _share_inventory=True, use the inventory dict directly (for subagent propagation)
         # When False (default), make a copy to avoid unintended mutations
         if _share_inventory and inventory is not None:
@@ -249,8 +282,49 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
         
         return result
     
-    async def describe_action_space(self) -> str:
-        return """Available Actions:
+    def _get_action_space_parts(self, include_subagent: bool = False) -> str:
+        """Build action space description with appropriate examples for synth vs regular mode."""
+        if self.use_synth:
+            actions = """Available Actions:
+1. def craft(ingredients: dict, target: tuple[str, int]) -> str
+   - Craft an item using ingredients dictionary and target (item_name, total_count)
+   - target_count MUST be evenly divisible by the recipe's result count
+   - Example: craft({"m0_i1": 2, "m1_i1": 1}, ("m2_i2", 1))
+
+2. def get_info(items: list) -> list[dict]
+   - Get information about items (recipes, crafting depth, inventory count)
+   - Returns crafting_depth which indicates how many steps are needed to craft from base
+   - Example: get_info(["m2_i2", "raw_m0"])
+
+3. def view_inventory() -> dict
+   - View your current inventory
+   - Example: inv = view_inventory()
+   
+4. def finish(message: str) -> str
+   - Complete the task with a message
+   - Example: finish("Successfully crafted all required items")
+"""
+            if include_subagent:
+                actions += """
+5. async def launch_subagent(targets: dict, num_steps: int, context: str = "") -> str
+   - Launch a subagent to craft specific targets
+   - Example: await launch_subagent({"m0_i2": 4, "m1_i1": 2}, 20)
+   - The subagent will have access to the same inventory and recipes
+   - Make sure to provide sufficient num_steps budget to the subagent to complete the task
+   - Returns the subagent's finish message
+   - You can optionally provide a context string with useful info for the subagent
+
+Note: asyncio is already imported. Use `await launch_subagent(...)` or batch with `asyncio.gather`.
+"""
+            actions += """
+IMPORTANT: You have a limited step budget. To maximize efficiency:
+- Batch multiple get_info() calls: get_info(["item1", "item2", "item3", ...])
+- Batch multiple craft() calls in the same code block
+- Plan your crafting sequence before executing to minimize steps
+- Each code block you submit counts as one step, regardless of how many actions it contains
+"""
+        else:
+            actions = """Available Actions:
 1. def craft(ingredients: dict, target: tuple[str, int]) -> str
    - Craft an item using ingredients dictionary and target (item_name, total_count)
    - target_count is the TOTAL number of items to produce (not recipe executions)
@@ -275,6 +349,29 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
    - Complete the task with a message
    - Example: finish("Successfully crafted all required items")
 """
+            if include_subagent:
+                actions += """
+5. async def launch_subagent(targets: dict, num_steps: int, context: str = "") -> str
+   - Launch a subagent to craft specific targets
+   - Example: await launch_subagent({"yellow_dye": 1, "stick": 2}, 20)
+   - The subagent will have access to the same inventory and recipes
+   - Make sure to provide sufficient num_steps budget to the subagent to complete the task
+   - Returns the subagent's finish message
+   - You can optionally provide a context string with useful info for the subagent
+
+Note: asyncio is already imported. Use `await launch_subagent(...)` or batch with `asyncio.gather`.
+"""
+            actions += """
+IMPORTANT: You have a limited step budget. To maximize efficiency:
+- Batch multiple get_info() calls: get_info(["item1", "item2", "item3", ...])
+- Batch multiple craft() calls in the same code block
+- Plan your crafting sequence before executing to minimize steps
+- Each code block you submit counts as one step, regardless of how many actions it contains
+"""
+        return actions
+    
+    async def describe_action_space(self) -> str:
+        return self._get_action_space_parts(include_subagent=False)
     
     async def reset(self) -> 'TextCraftCodeExecutor':
         # Reset inventory to initial state if needed
@@ -285,14 +382,24 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
         return TextCraftCodeExecutor(
             task=task,
             recipes_dir=self.recipes_dir,
+            recipe_db=self.recipe_db,
             inventory=self.inventory,
-            _share_inventory=True  # Share inventory by reference for subagent propagation
+            _share_inventory=True,  # Share inventory by reference for subagent propagation
+            use_synth=self.use_synth,
         )
 
 
 class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
-    def __init__(self, task: Task, recipes_dir: Path, inventory: Optional[Dict[str, int]] = None, _share_inventory: bool = False):
-        super().__init__(task, recipes_dir, inventory, _share_inventory)
+    def __init__(
+        self, 
+        task: Task, 
+        recipes_dir: Optional[Path] = None,
+        recipe_db: Optional[Any] = None,
+        inventory: Optional[Dict[str, int]] = None, 
+        _share_inventory: bool = False,
+        use_synth: bool = False,
+    ):
+        super().__init__(task, recipes_dir=recipes_dir, recipe_db=recipe_db, inventory=inventory, _share_inventory=_share_inventory, use_synth=use_synth)
         # Track subagent outcomes for current step: (launched_count, success_count)
         self._subagent_stats_this_step: tuple[int, int] = (0, 0)
     
@@ -339,67 +446,65 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
         return result
     
     async def describe_action_space(self) -> str:
-        return """Available Actions:
-1. def craft(ingredients: dict, target: tuple[str, int]) -> str
-   - Craft an item using ingredients dictionary and target (item_name, total_count)
-   - target_count is the TOTAL number of items to produce (not recipe executions)
-   - target_count MUST be evenly divisible by the recipe's result count
-   - If multiple recipes exist for an item, all are tried until one succeeds
-   - Example: craft({"stick": 2, "oak_planks": 3}, ("wooden_pickaxe", 1))
-   - Example: craft({"oak_log": 4}, ("oak_planks", 16))  # 4 logs → 16 planks (4 items per craft)
-
-2. def get_info(items: list) -> list[dict]
-   - Get information about items (recipes, whether they can be crafted, etc.)
-   - Example: get_info(["yellow_dye", "yellow_terracotta"])
-   - IMPORTANT - Tag-based Ingredients:
-        Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
-        If an ingredient in a recipe is a tag, concrete items that satisfy the tag will also be listed. 
-        When crafting with a tag-based ingredient, you must provide a CONCRETE item from that category, NOT the tag name itself. 
-
-3. def view_inventory() -> dict
-   - View your current inventory to see available ingredients.
-   - Example: inv = view_inventory()
-   
-4. def finish(message: str) -> str
-   - Complete the task with a message
-   - Example: finish("Successfully crafted all required items")
-
-5. async def launch_subagent(targets: dict, num_steps: int, context: str = "") -> str
-   - Launch a subagent to craft specific targets
-   - Example: await launch_subagent({"yellow_dye": 1, "stick": 2}, 20)
-   - The subagent will have access to the same inventory and recipes
-   - Make sure to provide sufficient num_steps budget to the subagent to complete the task.
-   - Returns the subagent's finish message
-   - You optionally can provide a context string to the subagent with a summary of any useful context you have gathered for its task,
-        to help reduce redundant actions.
-
-Note that asyncio has already been imported for you. You can launch subagents using `await launch_subagent` or `asyncio.create_task` + `await asyncio.gather` to launch multiple subagents concurrently.
-"""
+        return self._get_action_space_parts(include_subagent=True)
     
     async def fork(self, task: Task) -> 'TextCraftRecursiveCodeExecutor':
         """Fork the executor for a subagent."""
         return TextCraftRecursiveCodeExecutor(
             task=task,
             recipes_dir=self.recipes_dir,
+            recipe_db=self.recipe_db,
             inventory=self.inventory,
-            _share_inventory=True
+            _share_inventory=True,
+            use_synth=self.use_synth,
         )
 
 
 class TextCraftEnv(CodeActEnv):
-    """Environment for TextCraft crafting tasks with recursive agent spawning."""
+    """Environment for TextCraft crafting tasks with recursive agent spawning.
     
-    def __init__(self, task: Task, recipes_dir: Optional[Path] = None, initial_inventory: Optional[Dict[str, int]] = None, _share_inventory: bool = False):
-        if recipes_dir is None:
+    Supports both original Minecraft recipes and synthetic recipes.
+    """
+    
+    def __init__(
+        self, 
+        task: Task, 
+        recipes_dir: Optional[Path] = None, 
+        recipe_db: Optional[Any] = None,
+        initial_inventory: Optional[Dict[str, int]] = None, 
+        _share_inventory: bool = False,
+        use_synth: bool = False,
+    ):
+        """Initialize the TextCraft environment.
+        
+        Args:
+            task: The task to execute
+            recipes_dir: Path to recipes directory (for original Minecraft recipes)
+            recipe_db: Pre-initialized recipe database (for synthetic recipes)
+            initial_inventory: Initial inventory
+            _share_inventory: If True, share inventory reference with subagents
+            use_synth: If True, use synthetic recipe examples in action space
+        """
+        # Default to original recipes if neither is provided
+        if recipe_db is None and recipes_dir is None:
             recipes_dir = Path(__file__).parent / "recipes"
         
         # Get initial inventory from task if not provided
         if initial_inventory is None and task.misc.get("initial_inventory"):
             initial_inventory = task.misc["initial_inventory"]
         
-        code_executor = TextCraftCodeExecutor(task, recipes_dir, initial_inventory, _share_inventory=_share_inventory)
+        code_executor = TextCraftCodeExecutor(
+            task, 
+            recipes_dir=recipes_dir, 
+            recipe_db=recipe_db,
+            inventory=initial_inventory, 
+            _share_inventory=_share_inventory,
+            use_synth=use_synth,
+        )
         super().__init__(task, code_executor)
         self._recipes_dir = recipes_dir
+        self._recipe_db = recipe_db
+        self._use_synth = use_synth
         # Always copy initial inventory for bookkeeping (to compare against for evaluation)
         # This is separate from whether the working inventory is shared with parent
         self._initial_inventory = initial_inventory.copy() if initial_inventory else {}
@@ -486,8 +591,10 @@ class TextCraftEnv(CodeActEnv):
         forked_env = TextCraftEnv(
             task=task,
             recipes_dir=self._recipes_dir,
+            recipe_db=self._recipe_db,
             initial_inventory=self._code_executor.inventory,
-            _share_inventory=True  # Share inventory by reference for subagent propagation
+            _share_inventory=True,  # Share inventory by reference for subagent propagation
+            use_synth=self._use_synth,
         )
         
         return forked_env
@@ -531,19 +638,24 @@ class TextCraftRecursiveEnv(TextCraftEnv):
         self, 
         task: Task, 
         recipes_dir: Optional[Path] = None, 
+        recipe_db: Optional[Any] = None,
         initial_inventory: Optional[Dict[str, int]] = None, 
         _share_inventory: bool = False,
+        use_synth: bool = False,
         per_step_subagent_success_reward: float = 0.0,
         per_step_subagent_reward_ceiling: float = float('inf'),
     ):
-        super().__init__(task, recipes_dir, initial_inventory, _share_inventory=_share_inventory)
+        super().__init__(task, recipes_dir=recipes_dir, recipe_db=recipe_db, initial_inventory=initial_inventory, _share_inventory=_share_inventory, use_synth=use_synth)
         # Use self._recipes_dir and self._initial_inventory which were set by parent class
         # (parent applies defaults: recipes_dir from __file__, inventory from task.misc)
         # Replace executor with Recursive version, sharing the same inventory reference
         self._code_executor = TextCraftRecursiveCodeExecutor(
-            task, self._recipes_dir, 
-            self._code_executor.inventory,  # Use parent's executor inventory (already shared if _share_inventory=True)
-            _share_inventory=True  # Always share since we're using parent's inventory dict
+            task, 
+            recipes_dir=self._recipes_dir, 
+            recipe_db=self._recipe_db,
+            inventory=self._code_executor.inventory,  # Use parent's executor inventory (already shared if _share_inventory=True)
+            _share_inventory=True,  # Always share since we're using parent's inventory dict
+            use_synth=self._use_synth,
         )
         self._per_step_subagent_success_reward = per_step_subagent_success_reward
         self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
@@ -593,8 +705,56 @@ class TextCraftRecursiveEnv(TextCraftEnv):
         forked_env = TextCraftRecursiveEnv(
             task=task,
             recipes_dir=self._recipes_dir,
+            recipe_db=self._recipe_db,
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,
+            use_synth=self._use_synth,
         )
         
         return forked_env
+
+
+# Factory functions for synthetic recipes
+def create_synth_env(task: Task, **kwargs) -> TextCraftEnv:
+    """Create a TextCraftEnv with synthetic recipes.
+    
+    Args:
+        task: The task to execute
+        **kwargs: Additional arguments passed to TextCraftEnv
+    
+    Returns:
+        TextCraftEnv configured for synthetic recipes
+    """
+    from .synth_recipe_loader import SynthRecipeLoader
+    recipe_db = SynthRecipeLoader()
+    return TextCraftEnv(task, recipe_db=recipe_db, use_synth=True, **kwargs)
+
+
+def create_synth_recursive_env(
+    task: Task,
+    per_step_subagent_success_reward: float = 0.0,
+    per_step_subagent_reward_ceiling: float = float('inf'),
+    **kwargs
+) -> TextCraftRecursiveEnv:
+    """Create a TextCraftRecursiveEnv with synthetic recipes.
+    
+    Args:
+        task: The task to execute
+        per_step_subagent_success_reward: Reward per successful subagent
+        per_step_subagent_reward_ceiling: Maximum subagent reward per step
+        **kwargs: Additional arguments passed to TextCraftRecursiveEnv
+    
+    Returns:
+        TextCraftRecursiveEnv configured for synthetic recipes
+    """
+    from .synth_recipe_loader import SynthRecipeLoader
+    recipe_db = SynthRecipeLoader()
+    return TextCraftRecursiveEnv(
+        task, 
+        recipe_db=recipe_db, 
+        use_synth=True,
+        per_step_subagent_success_reward=per_step_subagent_success_reward,
+        per_step_subagent_reward_ceiling=per_step_subagent_reward_ceiling,
+        **kwargs
+    )
+    

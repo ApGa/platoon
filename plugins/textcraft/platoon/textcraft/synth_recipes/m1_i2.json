@@ -1,0 +1,22 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:m1_ore"
+    },
+    {
+      "item": "synth:m1_ore"
+    },
+    {
+      "item": "synth:m6_ore"
+    }
+  ],
+  "result": {
+    "item": "synth:m1_i2",
+    "count": 2
+  },
+  "synth_metadata": {
+    "depth": 2,
+    "domain": "metal"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:raw_t5"
+    }
+  ],
+  "result": {
+    "item": "synth:t7_i1",
+    "count": 2
+  },
+  "synth_metadata": {
+    "depth": 1,
+    "domain": "tech"
+  }
+}

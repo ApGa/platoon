@@ -6,6 +6,7 @@ train:
   renderer_name: qwen3_instruct
   batch_size: 32
   num_epochs: 30
+  max_training_steps: 100
   num_minibatches: 1
   num_microbatches: 1 #4
   max_staleness: 3
@@ -19,6 +20,7 @@ train:
     beta1: 0.9
     beta2: 0.95
     eps: 1e-8
+    grad_clip_norm: 1e12
   workflow_config:
     group_size: 8
     rollout_config:

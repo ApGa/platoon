@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:c6_ore"
+    },
+    {
+      "item": "synth:c6_ore"
+    }
+  ],
+  "result": {
+    "item": "synth:c6_i1",
+    "count": 3
+  },
+  "synth_metadata": {
+    "depth": 1,
+    "domain": "crystal"
+  }
+}

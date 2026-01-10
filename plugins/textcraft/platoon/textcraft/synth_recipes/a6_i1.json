@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:raw_a2"
+    }
+  ],
+  "result": {
+    "item": "synth:a6_i1",
+    "count": 4
+  },
+  "synth_metadata": {
+    "depth": 1,
+    "domain": "arcane"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [
+    {
+      "item": "synth:t3_i7_7"
+    },
+    {
+      "item": "synth:t4_i7_7"
+    },
+    {
+      "item": "synth:t0_i7_7"
+    },
+    {
+      "item": "synth:t4_i8_8"
+    }
+  ],
+  "result": {
+    "item": "synth:t2_i9_9",
+    "count": 1
+  },
+  "synth_metadata": {
+    "depth": 9,
+    "domain": "tech"
+  }
+}
