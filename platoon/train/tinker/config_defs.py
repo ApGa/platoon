@@ -11,6 +11,10 @@ class AdamParams:
     beta1: float = 0.9
     beta2: float = 0.95
     eps: float = 1e-8
+    weight_decay: float = 0.0
+    # Set to a large value (e.g., 1e12) to enable grad_norm logging without clipping.
+    # When > 0, tinker returns grad_norm in OptimStepResponse.metrics.
+    grad_clip_norm: float = 0.0
 
 
 @dataclass
@@ -27,7 +31,9 @@ class TrainConfig:
     model_name: str  # HuggingFace model identifier
     renderer_name: str  # Renderer type for prompt formatting
     batch_size: int = 32
-    num_epochs: int = 1
+    # Training duration: specify num_epochs, max_training_steps, or both (takes max)
+    num_epochs: int | None = None
+    max_training_steps: int | None = None
     # Number of minibatches per batch. Batch must be divisible by num_minibatches.
     # Results in num_minibatches weight updates per batch.
     num_minibatches: int = 1

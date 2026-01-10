@@ -4,13 +4,16 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 import threading
 import time
+from typing import Any
+
 import tinker
+import torch
 from dataclasses import dataclass
 from datasets import Dataset
 from tinker_cookbook import checkpoint_utils
+from tinker_cookbook.rl.metrics import compute_kl_sample_train
 from platoon.train.tinker.proxy import register_tinker_llm, ModelInfo
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, TrainEventTriggerConfig, WatchdogConfig
@@ -21,6 +24,88 @@ logger = logging.getLogger(__name__)
 
 # Global flag to track if we've already received a shutdown signal
 _SHUTDOWN_REQUESTED = False
+
+
+def compute_training_metrics(
+    datums: list[tinker.Datum],
+    forward_backward_result: tinker.ForwardBackwardOutput,
+    loss_fn: str,
+    loss_fn_config: dict[str, Any],
+) -> dict[str, float]:
+    """Compute training metrics from forward_backward results.
+
+    Extracts training logprobs from the forward pass and computes:
+    - KL divergence between sampling and training policies
+    - Entropy (approximated from sampling logprobs)
+    - Importance weight statistics
+    - Clipping statistics (for cispo/ppo loss functions)
+
+    Args:
+        datums: Original datums with mask and sampling logprobs in loss_fn_inputs
+        forward_backward_result: Result from forward_backward containing training logprobs
+        loss_fn: Loss function type ('cispo', 'ppo', 'importance_sampling', etc.)
+        loss_fn_config: Loss function config with clip thresholds
+
+    Returns:
+        Dictionary of training metrics
+    """
+    # Extract training logprobs from forward_backward result
+    training_logprobs_list: list[torch.Tensor] = []
+    for output in forward_backward_result.loss_fn_outputs:
+        training_logprobs = output["logprobs"].to_torch()
+        training_logprobs_list.append(training_logprobs)
+
+    # Use tinker_cookbook's function for KL and entropy
+    kl_metrics = compute_kl_sample_train(datums, training_logprobs_list)
+
+    # Compute importance weight statistics
+    all_importance_weights: list[torch.Tensor] = []
+    all_clipped_low: list[torch.Tensor] = []
+    all_clipped_high: list[torch.Tensor] = []
+
+    for datum, training_logprobs in zip(datums, training_logprobs_list):
+        sampling_logprobs = datum.loss_fn_inputs["logprobs"].to_torch()
+        action_mask = datum.loss_fn_inputs["mask"].to_torch() > 0
+
+        # Extract action token logprobs
+        sampling_logprobs_actions = sampling_logprobs[action_mask]
+        training_logprobs_actions = training_logprobs[action_mask]
+
+        if len(sampling_logprobs_actions) > 0:
+            # Importance weight = exp(new_logprob - old_logprob) = π_new / π_old
+            log_ratio = training_logprobs_actions - sampling_logprobs_actions
+            importance_weights = torch.exp(log_ratio)
+            all_importance_weights.append(importance_weights)
+
+            # Compute clipping stats for cispo/ppo (both use clip_low_threshold/clip_high_threshold)
+            if loss_fn in ('cispo', 'ppo'):
+                clip_low = loss_fn_config.get('clip_low_threshold', 0.0)
+                clip_high = loss_fn_config.get('clip_high_threshold', 5.0)
+
+                clipped_low = importance_weights < clip_low
+                clipped_high = importance_weights > clip_high
+                all_clipped_low.append(clipped_low)
+                all_clipped_high.append(clipped_high)
+
+    metrics = dict(kl_metrics)
+
+    if all_importance_weights:
+        flat_weights = torch.cat(all_importance_weights)
+        metrics["optim/importance_weight_mean"] = flat_weights.mean().item()
+        metrics["optim/importance_weight_std"] = flat_weights.std().item()
+        metrics["optim/importance_weight_min"] = flat_weights.min().item()
+        metrics["optim/importance_weight_max"] = flat_weights.max().item()
+
+        # Clipping stats for cispo/ppo
+        if loss_fn in ('cispo', 'ppo') and all_clipped_low:
+            flat_clipped_low = torch.cat(all_clipped_low)
+            flat_clipped_high = torch.cat(all_clipped_high)
+            total_tokens = len(flat_clipped_low)
+            metrics["optim/clip_frac_low"] = flat_clipped_low.sum().item() / total_tokens
+            metrics["optim/clip_frac_high"] = flat_clipped_high.sum().item() / total_tokens
+            metrics["optim/clip_frac_total"] = (flat_clipped_low | flat_clipped_high).sum().item() / total_tokens
+
+    return metrics
 
 
 class Watchdog:
@@ -195,7 +280,20 @@ class TrainLoopSharedState:
     
     @property
     def num_train_batches(self) -> int:
-        return self.num_train_batches_per_epoch * self.config.train.num_epochs
+        epoch_steps = None
+        if self.config.train.num_epochs is not None:
+            epoch_steps = self.num_train_batches_per_epoch * self.config.train.num_epochs
+
+        max_steps = self.config.train.max_training_steps
+
+        if epoch_steps is not None and max_steps is not None:
+            return min(epoch_steps, max_steps)
+        elif epoch_steps is not None:
+            return epoch_steps
+        elif max_steps is not None:
+            return max_steps
+        else:
+            raise ValueError("Must specify at least one of num_epochs or max_training_steps")
 
 
 class PlatoonTinkerRLTrainer:
@@ -418,7 +516,9 @@ class PlatoonTinkerRLTrainer:
             for minibatch_num in range(self.config.train.num_minibatches):
 
                 forward_backward_futures: list[tinker.APIFuture[tinker.ForwardBackwardOutput]] = []
-                
+                # Keep original datums (with mask and logprobs) for metrics computation
+                original_datums_per_microbatch: list[list[tinker.Datum]] = []
+
                 # Microbatches are used for gradient accumulation. While gradient accumulation may be less important with tinker, this can help performance.
                 # Microbatches are processed as they become available, allowing us to overlap rollout sampling with training even within the same batch.
                 # This is a second-level of pipelining orthogonal to the async/off-policy pipelining at the batch level.
@@ -457,6 +557,8 @@ class PlatoonTinkerRLTrainer:
                     # Filter out mask and checkpoint_version from loss_fn_inputs before forward_backward
                     # Neither is needed in forward_backward computation.
                     # mask is redundant since advantages are 0 for masked tokens.
+                    # Keep original datums for metrics computation (they have mask and logprobs).
+                    original_datums_per_microbatch.append(task_rollout_results)
                     filtered_datums = [
                         tinker.Datum(
                             model_input=datum.model_input,
@@ -488,8 +590,11 @@ class PlatoonTinkerRLTrainer:
                     raise
                 logger.debug(f"optim_step_async submitted in {time.perf_counter() - optim_start:.1f}s")
 
-                # Consume all forward backward results.
-                for microbatch_num, forward_backward_future in enumerate(forward_backward_futures):
+                # Consume all forward backward results and compute training metrics.
+                all_training_metrics: list[dict[str, float]] = []
+                for microbatch_num, (forward_backward_future, original_datums) in enumerate(
+                    zip(forward_backward_futures, original_datums_per_microbatch)
+                ):
                     result_start = time.perf_counter()
                     logger.debug(f"Waiting for forward_backward result (microbatch {microbatch_num})")
                     try:
@@ -510,14 +615,35 @@ class PlatoonTinkerRLTrainer:
                         logger.warning(f"forward_backward result took {result_elapsed:.1f}s (slow)")
                     else:
                         logger.debug(f"forward_backward result received in {result_elapsed:.1f}s")
-                    # TODO: Gather logprob and other metadata from training results for stats logging
+
+                    # Compute training metrics (KL, entropy, importance weights, clipping stats)
+                    try:
+                        microbatch_metrics = compute_training_metrics(
+                            datums=original_datums,
+                            forward_backward_result=forward_backward_result,
+                            loss_fn=self.config.train.loss_fn,
+                            loss_fn_config=self.config.train.loss_fn_config,
+                        )
+                        all_training_metrics.append(microbatch_metrics)
+                    except Exception as e:
+                        logger.warning(f"Failed to compute training metrics for microbatch {microbatch_num}: {e}")
+
+                # Aggregate and log training metrics across microbatches
+                if all_training_metrics:
+                    aggregated_metrics: dict[str, float] = {}
+                    for key in all_training_metrics[0].keys():
+                        values = [m[key] for m in all_training_metrics if key in m]
+                        if values:
+                            aggregated_metrics[key] = sum(values) / len(values)
+                    for key, value in aggregated_metrics.items():
+                        shared_state.train_tracker.scalar(**{key: value})
 
                 # Wait for optimizer step to complete.
                 logger.debug("Waiting for optim_step result")
                 optim_result_start = time.perf_counter()
                 try:
                     # Timeout after 5 min for optimizer step (should be fast)
-                    await self._await_with_heartbeat(
+                    optim_result = await self._await_with_heartbeat(
                         optim_future.result_async(),
                         name="optim_step",
                         heartbeat_interval=60.0,
@@ -532,6 +658,11 @@ class PlatoonTinkerRLTrainer:
                     logger.warning(f"optim_step result took {optim_elapsed:.1f}s (slow)")
                 else:
                     logger.debug(f"optim_step result received in {optim_elapsed:.1f}s")
+
+                # Extract optimizer metrics (e.g., grad_norm if grad_clip_norm is set)
+                if optim_result and optim_result.metrics:
+                    for key, value in optim_result.metrics.items():
+                        shared_state.train_tracker.scalar(**{f"optim/{key}": value})
             
             fwd_bwd_elapsed = time.perf_counter() - fwd_bwd_start
             shared_state.train_tracker.scalar(fwd_bwd_time=fwd_bwd_elapsed)
@@ -819,6 +950,8 @@ class PlatoonTinkerRLTrainer:
             beta1=self.config.train.optimizer.beta1,
             beta2=self.config.train.optimizer.beta2,
             eps=self.config.train.optimizer.eps,
+            weight_decay=self.config.train.optimizer.weight_decay,
+            grad_clip_norm=self.config.train.optimizer.grad_clip_norm,
         )
 
         train_dataloader = PlatoonTinkerDataloader(self.train_dataset, self.config.train.batch_size)
