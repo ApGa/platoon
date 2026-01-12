@@ -9,7 +9,7 @@ from platoon.envs.base import Task
 from platoon.episode.context import current_trajectory_collection
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import TrajectoryCollection
-from platoon.utils.llm_client import LLMClient
+from platoon.utils.llm_client import LLMClient, LiteLLMClient
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from .agent import TextCraftAgent, TextCraftRecursiveAgent
@@ -23,12 +23,12 @@ async def run_synth_rollout(task: Task, config: RolloutConfig) -> dict | Traject
     """Run a rollout for a TextCraft-Synth task."""
     agent = env = None
     try:
-        llm_client = LLMClient(
+        llm_client = LiteLLMClient(
             model=config.model_name,
-            base_url=config.model_endpoint,
-            api_key=config.model_api_key,
+            #base_url=config.model_endpoint,
+            #api_key=config.model_api_key,
             # Disable Qwen3 reasoning/thinking mode for faster inference
-            default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            #default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         env = create_synth_env(task)
         agent = TextCraftAgent(llm_client=llm_client)
@@ -87,12 +87,12 @@ async def run_synth_recursive_rollout(task: Task, config: RolloutConfig) -> dict
     """Run a recursive rollout for a TextCraft-Synth task."""
     agent = env = None
     try:
-        llm_client = LLMClient(
+        llm_client = LiteLLMClient(
             model=config.model_name,
-            base_url=config.model_endpoint,
-            api_key=config.model_api_key,
+            #base_url=config.model_endpoint,
+            #api_key=config.model_api_key,
             # Disable Qwen3 reasoning/thinking mode for faster inference
-            default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            #default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         env = create_synth_recursive_env(task, per_step_subagent_success_reward=0.1, per_step_subagent_reward_ceiling=0.3)
         agent = TextCraftRecursiveAgent(llm_client=llm_client)

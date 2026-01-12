@@ -221,3 +221,5 @@ countdown*.md
 
 nohup*.out
 logs/
+
+slurm-scripts/

@@ -206,10 +206,10 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
     def get_info(self, items: List[str]) -> List[Dict[str, Any]]:
         """
         Get information about items (recipes, whether they can be crafted, etc.)
-        
+
         Args:
             items: List of item names to get info about
-        
+
         Returns:
             List of dictionaries with item information
         """
@@ -220,9 +220,10 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
                 "can_craft": self.recipe_db.can_craft(item),
                 "is_base": self.recipe_db.is_base_item(item),
                 "in_inventory": self.inventory.get(item, 0),
+                "crafting_depth": self.recipe_db.get_crafting_depth(item),
                 "recipes": []
             }
-            
+
             if info["can_craft"]:
                 for recipe in self.recipe_db.get_recipes_for_item(item):
                     # Expand tag-based ingredients to show concrete item options
@@ -238,14 +239,14 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
                             }
                         else:
                             expanded_ingredients[ing] = count
-                    
+
                     info["recipes"].append({
                         "ingredients": expanded_ingredients,
                         "result_count": recipe.result_count
                     })
-            
+
             results.append(info)
-        
+
         return results
     
     def view_inventory(self) -> Dict[str, int]:
@@ -286,87 +287,106 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
         """Build action space description with appropriate examples for synth vs regular mode."""
         if self.use_synth:
             actions = """Available Actions:
+
 1. def craft(ingredients: dict, target: tuple[str, int]) -> str
-   - Craft an item using ingredients dictionary and target (item_name, total_count)
-   - target_count MUST be evenly divisible by the recipe's result count
-   - Example: craft({"m0_i1": 2, "m1_i1": 1}, ("m2_i2", 1))
+   Craft items using ingredients from your inventory.
+   - ingredients: Dict of {item_name: count} to consume
+   - target: (item_name, total_count) where total_count must be divisible by recipe result_count
+   - Example: craft({"m0_i1": 2, "m1_i1": 1}, ("m2_i2", 2))
 
 2. def get_info(items: list) -> list[dict]
-   - Get information about items (recipes, crafting depth, inventory count)
-   - Returns crafting_depth which indicates how many steps are needed to craft from base
+   Get recipe information for items.
+   - Returns: List with {"item": str, "can_craft": bool, "is_base": bool,
+                         "in_inventory": int, "crafting_depth": int, "recipes": [...]}
+   - crafting_depth indicates complexity: 0=base item, 1=direct craft, 2+=needs intermediate steps
+   - Each recipe shows {"ingredients": {...}, "result_count": int}
    - Example: get_info(["m2_i2", "raw_m0"])
 
 3. def view_inventory() -> dict
-   - View your current inventory
+   View your current inventory.
+   - Returns: Dict of {item_name: count}
    - Example: inv = view_inventory()
-   
+
 4. def finish(message: str) -> str
-   - Complete the task with a message
+   Complete the task.
    - Example: finish("Successfully crafted all required items")
 """
             if include_subagent:
                 actions += """
 5. async def launch_subagent(targets: dict, num_steps: int, context: str = "") -> str
-   - Launch a subagent to craft specific targets
-   - Example: await launch_subagent({"m0_i2": 4, "m1_i1": 2}, 20)
-   - The subagent will have access to the same inventory and recipes
-   - Make sure to provide sufficient num_steps budget to the subagent to complete the task
-   - Returns the subagent's finish message
-   - You can optionally provide a context string with useful info for the subagent
+   Launch a subagent to craft specific targets (shares your inventory).
+   - targets: Dict of {item_name: count} to craft
+   - num_steps: Budget for subagent
+     * Use crafting_depth from get_info() to estimate: depth × 6-8 steps
+     * Example: depth=4 needs ~25-30 steps, depth=8 needs ~50-65 steps
+   - context: Optional context string for the subagent
+   - Sequential: await launch_subagent({"m0_i2": 4}, 20)
+   - Parallel: results = await asyncio.gather(
+                 launch_subagent({"m0_i2": 4}, 20),
+                 launch_subagent({"c1_i2": 3}, 15)
+               )
+   - Returns: Subagent's finish message (or list if using gather)
 
-Note: asyncio is already imported. Use `await launch_subagent(...)` or batch with `asyncio.gather`.
+Note: asyncio is already imported. Use gather() to run independent subtasks in parallel.
 """
             actions += """
-IMPORTANT: You have a limited step budget. To maximize efficiency:
-- Batch multiple get_info() calls: get_info(["item1", "item2", "item3", ...])
-- Batch multiple craft() calls in the same code block
-- Plan your crafting sequence before executing to minimize steps
-- Each code block you submit counts as one step, regardless of how many actions it contains
+EFFICIENCY TIPS:
+- Batch multiple actions in one code block (counts as 1 step)
+- Example: get_info(["item1", "item2", "item3"])
+- Each code block submission counts as one step
 """
         else:
             actions = """Available Actions:
+
 1. def craft(ingredients: dict, target: tuple[str, int]) -> str
-   - Craft an item using ingredients dictionary and target (item_name, total_count)
-   - target_count is the TOTAL number of items to produce (not recipe executions)
-   - target_count MUST be evenly divisible by the recipe's result count
-   - If multiple recipes exist for an item, all are tried until one succeeds
+   Craft items using ingredients from your inventory.
+   - ingredients: Dict of {item_name: count} to consume
+   - target: (item_name, total_count) where total_count must be divisible by recipe result_count
+   - For tag-based ingredients (e.g., "tag:planks"), provide a CONCRETE item from that category
    - Example: craft({"stick": 2, "oak_planks": 3}, ("wooden_pickaxe", 1))
-   - Example: craft({"oak_log": 4}, ("oak_planks", 16))  # 4 logs → 16 planks (4 items per craft)
+   - Example: craft({"oak_log": 4}, ("oak_planks", 16))
 
 2. def get_info(items: list) -> list[dict]
-   - Get information about items (recipes, whether they can be crafted, etc.)
+   Get recipe information for items.
+   - Returns: List with {"item": str, "can_craft": bool, "is_base": bool,
+                         "in_inventory": int, "crafting_depth": int, "recipes": [...]}
+   - crafting_depth indicates complexity: 0=base item, 1=direct craft, 2+=needs intermediate steps
+   - Each recipe shows {"ingredients": {...}, "result_count": int}
+   - Tag-based ingredients show {"tag:X": {"count": N, "use_one_of": [concrete items]}}
    - Example: get_info(["yellow_dye", "yellow_terracotta"])
-   - IMPORTANT - Tag-based Ingredients:
-        Some recipes use "tag:X" ingredients (e.g., "tag:planks", "tag:logs"). These are ingredient categories.
-        If an ingredient in a recipe is a tag, concrete items that satisfy the tag will also be listed. 
-        When crafting with a tag-based ingredient, you must provide a CONCRETE item from that category, NOT the tag name itself. 
 
 3. def view_inventory() -> dict
-   - View your current inventory to see available ingredients.
+   View your current inventory.
+   - Returns: Dict of {item_name: count}
    - Example: inv = view_inventory()
-   
+
 4. def finish(message: str) -> str
-   - Complete the task with a message
+   Complete the task.
    - Example: finish("Successfully crafted all required items")
 """
             if include_subagent:
                 actions += """
 5. async def launch_subagent(targets: dict, num_steps: int, context: str = "") -> str
-   - Launch a subagent to craft specific targets
-   - Example: await launch_subagent({"yellow_dye": 1, "stick": 2}, 20)
-   - The subagent will have access to the same inventory and recipes
-   - Make sure to provide sufficient num_steps budget to the subagent to complete the task
-   - Returns the subagent's finish message
-   - You can optionally provide a context string with useful info for the subagent
+   Launch a subagent to craft specific targets (shares your inventory).
+   - targets: Dict of {item_name: count} to craft
+   - num_steps: Budget for subagent
+     * Use crafting_depth from get_info() to estimate: depth × 6-8 steps
+     * Example: depth=4 needs ~25-30 steps, depth=8 needs ~50-65 steps
+   - context: Optional context string for the subagent
+   - Sequential: await launch_subagent({"yellow_dye": 2}, 20)
+   - Parallel: results = await asyncio.gather(
+                 launch_subagent({"yellow_dye": 2}, 15),
+                 launch_subagent({"stick": 4}, 10)
+               )
+   - Returns: Subagent's finish message (or list if using gather)
 
-Note: asyncio is already imported. Use `await launch_subagent(...)` or batch with `asyncio.gather`.
+Note: asyncio is already imported. Use gather() to run independent subtasks in parallel.
 """
             actions += """
-IMPORTANT: You have a limited step budget. To maximize efficiency:
-- Batch multiple get_info() calls: get_info(["item1", "item2", "item3", ...])
-- Batch multiple craft() calls in the same code block
-- Plan your crafting sequence before executing to minimize steps
-- Each code block you submit counts as one step, regardless of how many actions it contains
+EFFICIENCY TIPS:
+- Batch multiple actions in one code block (counts as 1 step)
+- Example: get_info(["item1", "item2", "item3"])
+- Each code block submission counts as one step
 """
         return actions
     
@@ -577,7 +597,7 @@ class TextCraftEnv(CodeActEnv):
         """Fork the environment for a subagent."""
         # Parse the goal string to extract targets if it's a crafting task
         targets = self._parse_craft_targets_from_goal(task.goal)
-        
+
         if targets:
             # Update task.misc with TextCraft-specific data
             task.misc = task.misc.copy() if task.misc else {}
@@ -585,7 +605,7 @@ class TextCraftEnv(CodeActEnv):
                 "target_items": targets,
                 "initial_inventory": self._code_executor.inventory,  # Current state snapshot for display
             })
-        
+
         # Create forked environment sharing the same inventory reference
         # This allows subagent changes to automatically propagate to parent
         forked_env = TextCraftEnv(
@@ -596,7 +616,7 @@ class TextCraftEnv(CodeActEnv):
             _share_inventory=True,  # Share inventory by reference for subagent propagation
             use_synth=self._use_synth,
         )
-        
+
         return forked_env
     
     def _parse_craft_targets_from_goal(self, goal: str) -> Optional[Dict[str, int]]:
@@ -623,8 +643,8 @@ class TextCraftEnv(CodeActEnv):
         
         # Parse "2x stick, 1x oak_planks" format
         targets = {}
-        # Match patterns like "2x stick" or "1x oak_planks"
-        for item_match in re.finditer(r"(\d+)x\s+([a-z_]+)", items_str):
+        # Match patterns like "2x stick" or "1x oak_planks" or "4x c7_i2" (with digits)
+        for item_match in re.finditer(r"(\d+)x\s+([a-z0-9_]+)", items_str):
             count = int(item_match.group(1))
             item_name = item_match.group(2)
             targets[item_name] = count
@@ -691,7 +711,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
         """Fork the environment for a subagent."""
         # Parse the goal string to extract targets if it's a crafting task
         targets = self._parse_craft_targets_from_goal(task.goal)
-        
+
         if targets:
             # Update task.misc with TextCraft-specific data
             task.misc = task.misc.copy() if task.misc else {}
@@ -699,7 +719,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
                 "target_items": targets,
                 "initial_inventory": self._code_executor.inventory,
             })
-        
+
         # Create forked environment sharing the same inventory reference
         # Note: subagent rewards are NOT propagated - each trajectory is evaluated independently
         forked_env = TextCraftRecursiveEnv(
@@ -710,7 +730,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             _share_inventory=True,
             use_synth=self._use_synth,
         )
-        
+
         return forked_env
 
 

@@ -28,7 +28,7 @@ train:
       max_steps: 75  # Fixed budget for all synth tasks
       output_dir: ./rollout_results
       verbose: true
-      timeout: 900  # Higher timeout for deeper tasks
+      timeout: 1500  # Higher timeout for deeper tasks
   num_concurrent_rollout_workflow_workers: 32
 
 # Eval configuration
@@ -42,7 +42,7 @@ eval:
       max_steps: 75  # Fixed budget for all synth tasks
       output_dir: ./eval_results
       verbose: false
-      timeout: 900
+      timeout: 1500
 
 # Checkpoint configuration
 checkpoint:
@@ -51,13 +51,13 @@ checkpoint:
   load_checkpoint_path: null
 
 # Logging
-log_path: ./logs
+log_path: /data/user_data/apurvag/platoon/runs/logs
 tinker_base_url: null
 
 # Stats and WandB configuration
 stats:
   experiment_name: textcraft-synth-platoon-tinker
-  trial_name: synth-grpo-4b-trial1
+  trial_name: synth-grpo-4b-recursive-trial-2
   wandb:
     mode: online
     project: textcraft-synth-platoon-tinker
