@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from platoon.envs.base import Task
-from .types import OpenHandsObservation, OpenHandsTrajectoryStep, OpenHandsAction
+from platoon.openhands.types import OpenHandsObservation, OpenHandsTrajectoryStep, OpenHandsAction
 from openhands.sdk.conversation import get_agent_final_response
 from openhands.sdk.conversation.base import BaseConversation
 from openhands.sdk.agent.base import AgentBase
@@ -75,6 +75,9 @@ class OpenHandsEnv:
             if self._state.conversation_state.agent_status == ConversationExecutionStatus.STUCK:
                 error_message.set("Agent got stuck")
                 self._state.misc["error_message"] = error_message.get()
+            elif self._state.conversation_state.agent_status == ConversationExecutionStatus.ERROR: #TODO: check
+                error_message.set("Agent encountered an error")
+                self._state.misc["error_message"] = error_message.get()
 
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
@@ -88,6 +91,9 @@ class OpenHandsEnv:
         if self._conversation is not None:
             self._conversation.close()
         self._conversation = None
+        # TODO: check if cleaning up workspace manually is required
+        if isinstance(self._workspace, BaseWorkspace):
+            await self._workspace.cleanup()
 
     # TODO: Consider adding a return_copy option here.
     async def observe(self) -> OpenHandsObservation:

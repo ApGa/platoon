@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from platoon.envs.base import Task
-from platoon.openhands.types import OpenHandsObservation, OpenHandsAction
+from .types import OpenHandsObservation, OpenHandsAction
 from platoon.utils.openhands_utils import get_actions_for_last_obs
 from platoon.utils.openhands_utils import is_finished
 
