@@ -78,8 +78,11 @@ uv run python -m platoon.textcraft.train_tinker \
 ### AReaL Backend
 
 ```bash
-uv run python -m platoon.textcraft.train \
-    --config platoon/textcraft/textcraft_reinforce_plus_plus.yaml
+uv run python3 -m areal.launcher.local \
+    platoon/textcraft/train_areal.py \
+    --config platoon/textcraft/textcraft_areal.yaml \
+    experiment_name=textcraft-reinforce \
+    trial_name=trial0
 ```
 
 ## Configuration
@@ -94,7 +97,7 @@ Key configuration options:
 - `workflow.timeout`: Timeout for each rollout (seconds)
 - `stats.wandb.enabled`: Enable WandB logging
 
-### AReaL Config (`textcraft_reinforce_plus_plus.yaml`)
+### AReaL Config (`textcraft_areal.yaml`)
 
 See the config file for available options.
 

@@ -73,8 +73,11 @@ uv run python -m platoon.number_search.train_tinker \
 ### AReaL Backend
 
 ```bash
-uv run python -m platoon.number_search.train \
-    --config platoon/number_search/number_search_reinforce_plus_plus.yaml
+uv run python3 -m areal.launcher.local \
+    platoon/number_search/train.py \
+    --config platoon/number_search/number_search_areal.yaml \
+    experiment_name=number-search-reinforce \
+    trial_name=trial0
 ```
 
 ## Configuration
@@ -89,7 +92,7 @@ Key configuration options:
 - `workflow.timeout`: Timeout for each rollout (seconds)
 - `stats.wandb.enabled`: Enable WandB logging
 
-### AReaL Config (`number_search_reinforce_plus_plus.yaml`)
+### AReaL Config (`number_search_areal.yaml`)
 
 See the config file for available options.
 

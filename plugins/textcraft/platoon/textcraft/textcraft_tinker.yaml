@@ -2,13 +2,13 @@
 
 # Training configuration
 train:
-  model_name: Qwen/Qwen3-4B-Instruct-2507 #Qwen/Qwen3-30B-A3B-Instruct-2507
+  model_name: Qwen/Qwen3-4B-Instruct-2507
   renderer_name: qwen3_instruct
   batch_size: 32
   num_epochs: 30
   max_training_steps: 100
   num_minibatches: 1
-  num_microbatches: 1 #4
+  num_microbatches: 1
   max_staleness: 3
   lora_rank: 32
   loss_fn: cispo
@@ -28,13 +28,13 @@ train:
       output_dir: ./rollout_results
       verbose: true
       timeout: 900
-  num_concurrent_rollout_workflow_workers: 32 #16
+  num_concurrent_rollout_workflow_workers: 32
 
 # Eval configuration
 eval:
   strategy: step
   every: 20
-  num_concurrent_rollout_workflow_workers: 32 #5
+  num_concurrent_rollout_workflow_workers: 32
   workflow_config:
     group_size: 1
     rollout_config:
@@ -46,7 +46,7 @@ eval:
 # Checkpoint configuration
 checkpoint:
   strategy: step
-  every: 5 #1  # Save after every training step
+  every: 5
   load_checkpoint_path: null
 
 # Logging
@@ -64,5 +64,5 @@ stats:
     tags:
       - textcraft
       - tinker
-      - grpo
+
 

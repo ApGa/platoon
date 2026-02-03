@@ -25,11 +25,11 @@ train:
   workflow_config:
     group_size: 8
     rollout_config:
-      max_steps: 200  # Fixed budget for all synth tasks
+      max_steps: 200  
       output_dir: ./rollout_results
       verbose: true
-      timeout: 7200  # 2 hours - trajectory timeout
-      step_timeout: 1500  # 25 min - per-step timeout
+      timeout: 7200
+      step_timeout: 1500
   num_concurrent_rollout_workflow_workers: 16
   context_window_length: 8192
 
@@ -41,17 +41,17 @@ eval:
   workflow_config:
     group_size: 1
     rollout_config:
-      max_steps: 200  # Fixed budget for all synth tasks
+      max_steps: 200  
       output_dir: ./eval_results
       verbose: false
-      timeout: 7200  # 2 hours - trajectory timeout
-      step_timeout: 1500  # 25 min - per-step timeout
+      timeout: 7200
+      step_timeout: 1500
 
 # Checkpoint configuration
 checkpoint:
   strategy: step
   every: 1
-  load_checkpoint_path: null #tinker://45e5a6d8-b2bd-54a4-9dff-d3cdad02ef77:train:0/weights/000055 #tinker://93771e90-9aff-53c9-823d-440eb236b416:train:0/weights/000030 # #null
+  load_checkpoint_path: null
 
 # Logging
 log_path: ./logs/runs
@@ -63,14 +63,13 @@ watchdog:
 
 # Stats and WandB configuration
 stats:
-  experiment_name: recursive-agents #textcraft-synth-platoon-tinker
-  trial_name: textcraft-synth-single-target-ctx8192-cispo-4b-linear-medium-trial-0 #textcraft-synth-grpo-4b-linear-curriculum-medium-trial-0 #synth-grpo-4b-recursive-trial-2
+  experiment_name: recursive-agents
+  trial_name: textcraft-synth-single-target-ctx8192-cispo-4b-linear-medium-trial-0
   wandb:
     mode: online
-    project: recursive-agents #textcraft-synth-platoon-tinker
+    project: recursive-agents
     entity: null
     tags:
       - textcraft-synth
       - tinker
-      - grpo
-      - deep-hierarchy
+  

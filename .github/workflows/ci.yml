@@ -3,10 +3,19 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [opened, edited, synchronize, reopened]
   push:
     branches: [main]
 
 jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   lint:
     runs-on: ubuntu-latest
     steps:

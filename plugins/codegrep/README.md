@@ -73,8 +73,11 @@ uv run python -m platoon.codegrep.train_tinker \
 ### AReaL Backend
 
 ```bash
-uv run python -m platoon.codegrep.train \
-    --config platoon/codegrep/codegrep_reinforce_plus_plus.yaml
+uv run python3 -m areal.launcher.local \
+    platoon/codegrep/train.py \
+    --config platoon/codegrep/codegrep_areal.yaml \
+    experiment_name=codegrep-reinforce \
+    trial_name=trial0
 ```
 
 ## Configuration
@@ -89,7 +92,7 @@ Key configuration options:
 - `workflow.timeout`: Timeout for each rollout (seconds)
 - `stats.wandb.enabled`: Enable WandB logging
 
-### AReaL Config (`codegrep_reinforce_plus_plus.yaml`)
+### AReaL Config (`codegrep_areal.yaml`)
 
 See the config file for available options.
 

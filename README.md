@@ -46,7 +46,11 @@ WandB should be installed alongside your chosen training backend:
 
 ```bash
 # With Tinker backend
+
+# Using uv
 uv sync --extra tinker --extra wandb
+
+# Using pip
 pip install -e ".[tinker,wandb]"
 
 # With AReaL backend (uv only)
@@ -195,13 +199,66 @@ See the dedicated guide: [Trajectory visualization CLI](platoon/visualization/RE
 
 ## Development
 
+### Setup
+
 ```bash
-# Install dev dependencies
-uv sync --group dev
+# Install dev dependencies (include your existing extras to preserve them)
+uv sync --extra tinker --group dev                 # Tinker backend
+uv sync --extra areal --group dev                  # AReaL backend
+uv sync --extra tinker --extra wandb --group dev   # Tinker + WandB
 
-# Run tests
-uv run pytest
-
-# Run linting
-uv run ruff check .
+# Install pre-commit hooks
+uvx pre-commit install
 ```
+
+### Running Tests
+
+```bash
+uv run pytest tests/ -v
+```
+
+### Linting and Type Checking
+
+The project uses [ruff](https://docs.astral.sh/ruff/) for linting/formatting and [ty](https://docs.astral.sh/ty/) for type checking. Both run automatically via pre-commit hooks.
+
+```bash
+# Run all pre-commit checks manually
+uvx pre-commit run --all-files
+
+# Run individual tools
+uv run ruff check .           # Lint
+uv run ruff format .          # Format
+uvx ty check                  # Type check
+```
+
+### Pre-commit Hooks
+
+Pre-commit hooks run automatically on `git commit`. They include:
+- **ruff**: Linting with auto-fix
+- **ruff-format**: Code formatting
+- **ty**: Type checking
+- **conventional-pre-commit**: Validates commit message format
+
+If a hook fails, fix the issues and commit again.
+
+### Commit Messages
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/). Commit messages must follow the format:
+
+```
+type(scope): description
+```
+
+Common types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+
+Examples:
+- `feat: add user authentication`
+- `fix(api): handle null response`
+- `docs: update README`
+
+### CI
+
+Pull requests and pushes to `main` trigger CI checks (see [.github/workflows/ci.yml](.github/workflows/ci.yml)):
+- **pr-title**: Validates PR title follows conventional commit format
+- **lint**: Runs pre-commit hooks (ruff + ty)
+- **test**: Runs pytest

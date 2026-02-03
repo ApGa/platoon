@@ -6,6 +6,12 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.0.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
   - repo: local
     hooks:
       - id: ty
