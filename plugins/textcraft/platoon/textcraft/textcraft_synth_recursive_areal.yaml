@@ -1,5 +1,5 @@
-experiment_name: textcraft-reinforce-plus-plus
-trial_name: cispo-4b-lora-recursive-trial-3
+experiment_name: recursive-agents
+trial_name: textcraft-synth-single-target-areal-ctx8192-cispo-4b-recursive-medium-trial-0
 
 seed: 343
 total_train_epochs: 10
@@ -20,7 +20,7 @@ allocation_mode: sglang:d6p1t1+d2p1t1
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 32
+  max_concurrent_rollouts: 16
   queue_size: null 
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -38,11 +38,12 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 50
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-cispo-4b-lora-recursive-trial-3
+    max_steps: 200
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx8192-cispo-4b-recursive-medium-trial-0
     verbose: True
     train: true
-    timeout: 900
+    timeout: 7200
+    step_timeout: 7200
   group_size: 8
 
 # CISPO loss function configuration (matches tinker settings)
@@ -116,20 +117,21 @@ sglang:
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 40001
+  context_length: 8193
   mem_fraction_static: 0.8
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
   lora_target_modules: ${actor.target_modules}
+  #attention_backend: flashinfer # Uncomment for blackwell GPUs
 
 # datasets
 train_dataset:
-  batch_size: 32
+  batch_size: 16
   type: rl
   path: ""
 
 valid_dataset:
-  batch_size: 32
+  batch_size: 50
   type: rl
   path: ""
 
@@ -165,7 +167,7 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: online
-    project: textcraft-platoon
+    project: recursive-agents
 
 launcher:
   inference_server_cpus_per_gpu: 32

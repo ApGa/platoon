@@ -302,13 +302,15 @@ class LiteLLMClient:
     custom LiteLLM providers.
     """
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, base_url: str | None = None, api_key: str | None = None):
         """Initialize the LiteLLM client.
 
         Args:
             model: The model identifier (e.g., "platoon-tinker/Qwen/Qwen3-4B-Instruct-2507").
         """
         self.model = model
+        self.base_url = base_url
+        self.api_key = api_key
 
     async def async_chat_completion(
         self,
@@ -336,6 +338,8 @@ class LiteLLMClient:
         try:
             response = await litellm.acompletion(
                 model=self.model,
+                api_base=self.base_url,
+                api_key=self.api_key,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -359,4 +363,4 @@ class LiteLLMClient:
 
     def fork(self) -> "LiteLLMClient":
         """Create a copy of this client."""
-        return LiteLLMClient(model=self.model)
+        return LiteLLMClient(model=self.model, base_url=self.base_url, api_key=self.api_key)

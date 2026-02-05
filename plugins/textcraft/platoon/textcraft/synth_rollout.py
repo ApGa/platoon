@@ -24,8 +24,8 @@ async def run_synth_rollout(task: Task, config: RolloutConfig) -> dict | Traject
     try:
         llm_client = LiteLLMClient(
             model=config.model_name,
-            # base_url=config.model_endpoint,
-            # api_key=config.model_api_key,
+            base_url=config.model_endpoint,
+            api_key=config.model_api_key,
             # Disable Qwen3 reasoning/thinking mode for faster inference
             # default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
@@ -82,8 +82,8 @@ async def run_synth_recursive_rollout(task: Task, config: RolloutConfig) -> dict
     try:
         llm_client = LiteLLMClient(
             model=config.model_name,
-            # base_url=config.model_endpoint,
-            # api_key=config.model_api_key,
+            base_url=config.model_endpoint,
+            api_key=config.model_api_key,
             # Disable Qwen3 reasoning/thinking mode for faster inference
             # default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )

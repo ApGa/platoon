@@ -166,8 +166,7 @@ class StepWiseArealWorkflow(RolloutWorkflow):
                 config.rollout_config.model_endpoint = session.session_base_url
                 # Prepend 'openai/' to be compatible with LiteLLM
                 config.rollout_config.model_name = "openai/" + config.rollout_config.model_name
-                if config.rollout_config.model_api_key is None:
-                    config.rollout_config.model_api_key = "None"
+                config.rollout_config.model_api_key = "None"
 
                 config.rollout_config.output_dir = os.path.join(
                     config.rollout_config.output_dir,
