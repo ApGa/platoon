@@ -31,6 +31,10 @@ from platoon.train.areal.workflows import StepWiseArealWorkflow  # noqa: E402
 
 logger = logging.getLogger("platoon.textcraft.train_areal_synth")
 
+class TextCraftSynthArealTrainerConfig(PlatoonArealRLTrainerConfig):
+    train_difficulties: list[str] | None = None
+    eval_difficulties: list[str] | None = None
+    recursive: bool = False
 
 def reward_processor(traj: dict) -> tuple[float, dict]:
     """Process trajectory rewards, extracting individual reward components."""
@@ -86,13 +90,11 @@ def get_filtered_task_ids(
 
 
 def main(args):
-    config, raw_config = load_expr_config(args, PlatoonArealRLTrainerConfig)
-    config: PlatoonArealRLTrainerConfig = config
+    config, raw_config = load_expr_config(args, TextCraftSynthArealTrainerConfig)
+    config: TextCraftSynthArealTrainerConfig = config
 
-    # Get difficulty filter from config (if specified)
-    # Can be set via CLI: train_difficulties='["easy","medium"]'
-    train_difficulties = ["medium"]  # raw_config.get("train_difficulties", None)
-    eval_difficulties = None  # raw_config.get("eval_difficulties", None)
+    train_difficulties = config.train_difficulties
+    eval_difficulties = config.eval_difficulties
 
     # Create datasets with optional difficulty filtering
     train_task_ids = get_filtered_task_ids("train", train_difficulties, num_samples_train=2522)
@@ -109,6 +111,11 @@ def main(args):
     logger.info(f"Train dataset: {len(train_dataset)} tasks")
     logger.info(f"Eval dataset: {len(val_dataset)} tasks")
 
+    if config.recursive:
+        rollout_fn = run_synth_recursive_rollout
+    else:
+        rollout_fn = run_synth_rollout
+
     with PlatoonArealRLTrainer(
         config=config,
         train_dataset=train_dataset,
@@ -117,7 +124,7 @@ def main(args):
         proxy_server = trainer.proxy_server
         eval_proxy_server = trainer.eval_proxy_server
         workflow = StepWiseArealWorkflow(
-            run_synth_rollout,
+            rollout_fn,
             get_synth_task,
             config.workflow_config,
             proxy_server,
@@ -131,7 +138,7 @@ def main(args):
         eval_workflow_config.group_size = 1
         
         eval_workflow = StepWiseArealWorkflow(
-            run_synth_rollout,
+            rollout_fn,
             get_synth_task,
             eval_workflow_config,
             eval_proxy_server,

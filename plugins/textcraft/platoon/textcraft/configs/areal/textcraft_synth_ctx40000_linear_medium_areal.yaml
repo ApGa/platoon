@@ -1,9 +1,12 @@
 experiment_name: recursive-agents
-trial_name: textcraft-synth-single-target-areal-ctx8192-cispo-4b-recursive-medium-trial-0
+trial_name: textcraft-synth-single-target-areal-ctx40000-cispo-4b-linear-medium-trial-0
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
+train_difficulties: ["medium"]
+eval_difficulties: null
+recursive: false
 #enable_offload: false
 
 
@@ -39,7 +42,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 200
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx8192-cispo-4b-recursive-medium-trial-0
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx40000-cispo-4b-linear-medium-trial-0
     verbose: True
     train: true
     timeout: 7200
@@ -107,7 +110,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 4000
   optimizer: null
 
 # SGLang
@@ -117,7 +120,7 @@ sglang:
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 8193
+  context_length: 40001
   mem_fraction_static: 0.8
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}

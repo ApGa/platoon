@@ -1,5 +1,6 @@
 import sys
 
+from copy import deepcopy
 from areal.api.cli_args import load_expr_config
 from datasets import Dataset
 
@@ -32,10 +33,14 @@ def main(args):
             "train_rollout",
             trainer.actor.device,
         )
+        
+        eval_workflow_config = deepcopy(config.workflow_config)
+        eval_workflow_config.group_size = 1
+        
         eval_workflow = StepWiseArealWorkflow(
             run_rollout,
             get_task,
-            config.workflow_config,
+            eval_workflow_config,
             eval_proxy_server,
             "eval_rollout",
             trainer.actor.device,

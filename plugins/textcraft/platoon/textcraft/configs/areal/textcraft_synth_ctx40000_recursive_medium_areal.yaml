@@ -1,0 +1,180 @@
+experiment_name: recursive-agents
+trial_name: textcraft-synth-single-target-areal-ctx40000-cispo-4b-recursive-medium-trial-0
+
+seed: 343
+total_train_epochs: 10
+tokenizer_path: ${actor.path}
+train_difficulties: ["medium"]
+eval_difficulties: null
+recursive: true
+#enable_offload: false
+
+
+cluster:
+  n_nodes: 1  
+  n_gpus_per_node: 8
+  fileroot: /mnt/efs/tmp/areal/experiments
+  name_resolve:
+    type: nfs
+    nfs_record_root: /mnt/efs/tmp/areal/name_resolve
+
+allocation_mode: sglang:d6p1t1+d2p1t1
+
+rollout:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  max_concurrent_rollouts: 16
+  queue_size: null 
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 3
+  enable_rollout_tracing: false
+  #shuffle_cross_task: true
+  #ensure_batch_divisible_by: 4
+
+gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 8192
+  greedy: false
+  temperature: 1.0
+
+workflow_config:
+  rollout_config:
+    model_name: ${actor.path}
+    max_steps: 200
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx40000-cispo-4b-recursive-medium-trial-0
+    verbose: True
+    train: true
+    timeout: 7200
+    step_timeout: 7200
+  group_size: 8
+
+# CISPO loss function configuration (matches tinker settings)
+loss_fn_config:
+  loss_fn: cispo
+  clip_low_threshold: 0.0
+  clip_high_threshold: 5.0
+
+actor:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: Qwen/Qwen3-4B-Instruct-2507 #OpenPipe/Qwen3-14B-Instruct
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 40000
+  optimizer:
+    type: adam
+    lr: 3e-6
+    weight_decay: 0.017
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  group_size: ${gconfig.n_samples}
+  eps_clip: 0.2
+  eps_clip_higher: 0.26
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  kl_estimator: k1
+  ppo_n_minibatches: 1
+  recompute_logprob: false #true
+  use_decoupled_loss: false #true
+  behav_imp_weight_cap: null
+  dynamic_sampling: false
+  reward_norm:
+    mean_level: null
+    std_level: null
+  adv_norm:
+    mean_level: null
+    std_level: null
+  max_new_tokens: ${gconfig.max_new_tokens}
+  # lora
+  use_lora: false
+  peft_type: lora
+  lora_rank: 32
+  lora_alpha: 16
+  target_modules: [all-linear]
+
+ref:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 4000
+  optimizer: null
+
+# SGLang
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: false
+  dtype: ${actor.dtype}
+  max_running_requests: null
+  context_length: 40001
+  mem_fraction_static: 0.8
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  lora_target_modules: ${actor.target_modules}
+  #attention_backend: flashinfer # Uncomment for blackwell GPUs
+
+# datasets
+train_dataset:
+  batch_size: 16
+  type: rl
+  path: ""
+
+valid_dataset:
+  batch_size: 50
+  type: rl
+  path: ""
+
+# Utilities
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 5
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: 5
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 5
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: online
+    project: recursive-agents
+
+launcher:
+  inference_server_cpus_per_gpu: 32
+  inference_server_mem_per_gpu: 32768
+  trainer_cpus_per_gpu: 4
+  trainer_mem_per_gpu: 32768
+
