@@ -163,11 +163,17 @@ class PlatoonArealRLTrainer:
             self.ref.create_process_group(parallel_strategy=parallel_strategy)
             self.ref.initialize(None, self.ft_spec)
 
-        # Setup proxy server
+        # Setup proxy servers
         self.llm_client = ArealOpenAI(engine=self.rollout, tokenizer=self.tokenizer)
         free_port = find_free_ports(1)[0]
         self.proxy_server = ProxyServer(free_port, client=self.llm_client)
         self.proxy_server.start(wait_until_ready=True)
+
+        # Eval proxy uses the eval rollout engine; training rollout is paused during eval.
+        self.eval_llm_client = ArealOpenAI(engine=self.eval_rollout, tokenizer=self.tokenizer)
+        eval_free_port = find_free_ports(1)[0]
+        self.eval_proxy_server = ProxyServer(eval_free_port, client=self.eval_llm_client)
+        self.eval_proxy_server.start(wait_until_ready=True)
 
         all_addresses = [None for _ in range(self.actor.data_parallel_world_size)]
         dist.all_gather_object(all_addresses, self.proxy_server.public_addr, group=self.actor.data_parallel_group)
@@ -362,6 +368,10 @@ class PlatoonArealRLTrainer:
     def close(self):
         """Clean up resources."""
         self.stats_logger.close()
+        if hasattr(self, "eval_proxy_server"):
+            self.eval_proxy_server.close()
+        if hasattr(self, "proxy_server"):
+            self.proxy_server.close()
         self.eval_rollout.destroy()
         self.rollout.destroy()
         if self.ref is not None:

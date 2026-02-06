@@ -1,6 +1,7 @@
 import logging
 import sys
 
+from copy import deepcopy
 from areal.api.cli_args import load_expr_config
 from datasets import Dataset
 
@@ -41,6 +42,7 @@ def main(args):
         val_dataset=val_dataset,
     ) as trainer:
         proxy_server = trainer.proxy_server
+        eval_proxy_server = trainer.eval_proxy_server
         workflow = StepWiseArealWorkflow(
             run_recursive_rollout,
             get_task,
@@ -51,11 +53,15 @@ def main(args):
             filter_errors=True,
             reward_processor=reward_processor,
         )
+        
+        eval_workflow_config = deepcopy(config.workflow_config)
+        eval_workflow_config.group_size = 1
+        
         eval_workflow = StepWiseArealWorkflow(
             run_recursive_rollout,
             get_task,
-            config.workflow_config,
-            proxy_server,
+            eval_workflow_config,
+            eval_proxy_server,
             "eval_rollout",
             trainer.actor.device,
             reward_processor=reward_processor,

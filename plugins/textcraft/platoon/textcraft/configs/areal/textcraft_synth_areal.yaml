@@ -158,7 +158,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 5
   freq_secs: null
 
 stats_logger:
