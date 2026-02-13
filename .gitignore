@@ -223,3 +223,4 @@ nohup*.out
 logs/
 
 slurm-scripts/
+.claude/

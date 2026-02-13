@@ -8,7 +8,10 @@ import asyncio
 import logging
 import os
 from copy import deepcopy
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from concurrent.futures import ProcessPoolExecutor
 
 import torch
 from areal.api.engine_api import InferenceEngine
@@ -49,7 +52,10 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         stats_scope: str,
         device: torch.device,
         filter_errors: bool = False,
-        reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj["reward"], {}),
+        reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (
+            traj["reward"],
+            {},
+        ),
         merge_prefixes: bool = True,
     ):
         self.config = config
@@ -68,9 +74,12 @@ class StepWiseArealWorkflow(RolloutWorkflow):
 
     async def arun_episode(self, engine: InferenceEngine, data: dict) -> dict | None:
         """Run multiple rollouts for a task and return training data."""
-        results = await asyncio.gather(
-            *[self.arun_episode_single(engine, data, i) for i in range(self.config.group_size)]
-        )
+        if self.config.use_subprocesses:
+            results = await self._arun_episode_with_subprocesses(engine, data)
+        else:
+            results = await asyncio.gather(
+                *[self._arun_episode_single(engine, data, i) for i in range(self.config.group_size)]
+            )
         results = [result for result in results if result is not None]
         if not results:
             print(f"[StepWiseWorkflow] No results found for task {data['task_id']}")
@@ -107,22 +116,38 @@ class StepWiseArealWorkflow(RolloutWorkflow):
             avg_input_tokens_per_step_mask=num_steps_mask,
             avg_output_tokens_per_step_mask=num_steps_mask,
         )
-        tracker.stat(task_reward=train_data["task_reward"].to(self.device), denominator="task_reward_mask")
+        tracker.stat(
+            task_reward=train_data["task_reward"].to(self.device),
+            denominator="task_reward_mask",
+        )
         tracker.stat(num_output_tokens=num_output_tokens, denominator="num_output_tokens_mask")
         tracker.stat(num_input_tokens=num_input_tokens, denominator="num_input_tokens_mask")
         tracker.stat(num_steps=num_steps, denominator="num_steps_mask")
-        tracker.stat(avg_input_tokens_per_step=avg_input_tokens_per_step, denominator="avg_input_tokens_per_step_mask")
         tracker.stat(
-            avg_output_tokens_per_step=avg_output_tokens_per_step, denominator="avg_output_tokens_per_step_mask"
+            avg_input_tokens_per_step=avg_input_tokens_per_step,
+            denominator="avg_input_tokens_per_step_mask",
+        )
+        tracker.stat(
+            avg_output_tokens_per_step=avg_output_tokens_per_step,
+            denominator="avg_output_tokens_per_step_mask",
         )
 
         # task_reward @ K metrics (computed per-task across K rollouts)
         task_rewards = train_data["task_reward"].to(self.device)
         task_reward_at_k_mask = torch.ones(1, dtype=torch.bool).to(self.device)
         tracker.denominator(task_reward_at_k_mask=task_reward_at_k_mask)
-        tracker.stat(task_reward_at_k_mean=torch.mean(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
-        tracker.stat(task_reward_at_k_max=torch.max(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
-        tracker.stat(task_reward_at_k_min=torch.min(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
+        tracker.stat(
+            task_reward_at_k_mean=torch.mean(task_rewards).unsqueeze(0),
+            denominator="task_reward_at_k_mask",
+        )
+        tracker.stat(
+            task_reward_at_k_max=torch.max(task_rewards).unsqueeze(0),
+            denominator="task_reward_at_k_mask",
+        )
+        tracker.stat(
+            task_reward_at_k_min=torch.min(task_rewards).unsqueeze(0),
+            denominator="task_reward_at_k_mask",
+        )
 
         # Track root_* and reward/* metrics
         for key, value in train_data.items():
@@ -153,8 +178,151 @@ class StepWiseArealWorkflow(RolloutWorkflow):
 
         return train_data
 
-    async def arun_episode_single(self, engine: InferenceEngine, data: dict, rollout_number: int) -> dict | None:
-        """Run a single rollout and return training data."""
+    def _process_trajectory_result(
+        self,
+        trajectory_data: dict | None,
+        session: ArealProxySession,
+        task_id: str,
+        rollout_number: int,
+    ) -> dict | None:
+        """Process trajectory data into training data.
+
+        Shared by both in-process and subprocess execution paths.
+        Handles None checks, completion retrieval, and data processing.
+
+        Args:
+            trajectory_data: Raw trajectory data from rollout (or None if failed)
+            session: Proxy session used for this rollout
+            task_id: Task identifier
+            rollout_number: Index of this rollout within the group
+
+        Returns:
+            Processed training data dict, or None if processing failed
+        """
+        if trajectory_data is None:
+            print(f"[StepWiseWorkflow] Rollout {rollout_number} returned None for task {task_id}")
+            return None
+
+        if not trajectory_data.get("trajectories"):
+            print(f"[StepWiseWorkflow] No trajectories for task {task_id}, rollout {rollout_number}")
+            return None
+
+        # Get completions from proxy server session cache
+        completions = self.proxy_server.session_cache[session.session_id].completions
+
+        # Process data
+        train_data = get_train_data_for_trajectory_collection(
+            trajectory_data,
+            completions,
+            task_id,
+            self.filter_errors,
+            self.reward_processor,
+            self.merge_prefixes,
+            concat_fn=concat_padded_tensors,
+        )
+
+        if train_data is None:
+            print(f"[StepWiseWorkflow] No train data for task {task_id}, rollout {rollout_number}")
+            return None
+
+        return train_data
+
+    async def _arun_episode_subprocess_single(
+        self,
+        executor: "ProcessPoolExecutor",
+        engine: InferenceEngine,
+        data: dict,
+        session: ArealProxySession,
+        rollout_number: int,
+    ) -> dict | None:
+        """Run a single rollout in a subprocess and process the result.
+
+        Args:
+            executor: ProcessPoolExecutor to submit the rollout task to
+            engine: Inference engine (used for versioning)
+            data: Task data dict with 'task_id' key
+            session: Pre-created proxy session for this rollout
+            rollout_number: Index of this rollout within the group
+
+        Returns:
+            Processed training data dict, or None if rollout/processing failed
+        """
+        from dataclasses import asdict
+
+        from platoon.train.areal.subprocess_worker import run_rollout_subprocess
+
+        task_id = data["task_id"]
+
+        # Prepare config for subprocess
+        config = deepcopy(self.config)
+        config.rollout_config.model_endpoint = session.session_base_url
+        # Prepend 'openai/' to be compatible with LiteLLM
+        config.rollout_config.model_name = "openai/" + config.rollout_config.model_name
+        config.rollout_config.model_api_key = "None"
+        config.rollout_config.output_dir = os.path.join(
+            config.rollout_config.output_dir,
+            str(engine.get_version()),
+            f"rollout_{rollout_number}",
+        )
+
+        # Run rollout in subprocess
+        loop = asyncio.get_event_loop()
+        trajectory_data = await loop.run_in_executor(
+            executor,
+            run_rollout_subprocess,
+            self.rollout_fn.__module__,
+            self.rollout_fn.__name__,
+            self.get_task_fn.__module__,
+            self.get_task_fn.__name__,
+            task_id,
+            asdict(config.rollout_config),  # Serialize config to dict
+        )
+
+        # Process result using shared helper
+        return self._process_trajectory_result(trajectory_data, session, task_id, rollout_number)
+
+    async def _arun_episode_with_subprocesses(self, engine: InferenceEngine, data: dict) -> list[dict | None]:
+        """Run rollouts in subprocess pool for isolation.
+
+        This method provides an alternative to the in-process asyncio.gather() approach
+        by running each rollout in a separate subprocess.
+
+        Args:
+            engine: Inference engine (used for versioning)
+            data: Task data dict with 'task_id' key
+
+        Returns:
+            List of processed training data dicts (or None for failed rollouts)
+        """
+        from concurrent.futures import ProcessPoolExecutor
+
+        # Create sessions in parent process
+        # Sessions are created here so that the proxy server can track them
+        sessions = []
+        for i in range(self.config.group_size):
+            session = ArealProxySession(base_url=self.proxy_url)
+            await session.__aenter__()
+            sessions.append(session)
+
+        try:
+            # Run all rollouts in parallel using shared executor
+            # ProcessPoolExecutor manages subprocess lifecycle
+            with ProcessPoolExecutor(max_workers=self.config.group_size) as executor:
+                results = await asyncio.gather(
+                    *[
+                        self._arun_episode_subprocess_single(executor, engine, data, session, i)
+                        for i, session in enumerate(sessions)
+                    ]
+                )
+
+            return results
+
+        finally:
+            for session in sessions:
+                await session.__aexit__(None, None, None)
+
+    async def _arun_episode_single(self, engine: InferenceEngine, data: dict, rollout_number: int) -> dict | None:
+        """Run a single rollout and return training data (in-process version)."""
         config = deepcopy(self.config)
         try:
             task_id = data["task_id"]
@@ -173,29 +341,9 @@ class StepWiseArealWorkflow(RolloutWorkflow):
                     str(engine.get_version()),
                 )
 
-                results = await asyncio.create_task(self.rollout_fn(task, config.rollout_config))
+                trajectory_data = await asyncio.create_task(self.rollout_fn(task, config.rollout_config))
 
-                if not results["trajectories"]:
-                    print(f"[StepWiseWorkflow] No trajectories found for task {task_id} and rollout {rollout_number}")
-                    return None
-
-                # Get completions from proxy server session cache
-                completions = self.proxy_server.session_cache[session.session_id].completions
-                train_data = get_train_data_for_trajectory_collection(
-                    results,
-                    completions,
-                    task_id,
-                    self.filter_errors,
-                    self.reward_processor,
-                    self.merge_prefixes,
-                    concat_fn=concat_padded_tensors,
-                )
-
-                if train_data is None:
-                    print(f"[StepWiseWorkflow] No train data found for task {task_id} and rollout {rollout_number}")
-                    return None
-
-            return train_data
+                return self._process_trajectory_result(trajectory_data, session, task_id, rollout_number)
 
         except Exception as e:
             import traceback
