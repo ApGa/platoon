@@ -15,6 +15,7 @@ class WorkflowConfig:
 
     group_size: int = 1
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)
+    use_subprocesses: bool = False  # Enable subprocess-based rollouts for isolation
 
 
 @dataclass
