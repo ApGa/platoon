@@ -248,49 +248,52 @@ class PlatoonArealRLTrainer:
                 dist.barrier(device_ids=[self.actor.device.index])
                 current_platform.synchronize()
 
-            if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
-                with stats_tracker.record_timing("recompute_logp"):
-                    logp = self.actor.compute_logp(batch)
-                    batch["prox_logp"] = logp
-                    log_gpu_stats("recompute logp")
+            if batch is not None:
 
+                if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
+                    with stats_tracker.record_timing("recompute_logp"):
+                        logp = self.actor.compute_logp(batch)
+                        batch["prox_logp"] = logp
+                        log_gpu_stats("recompute logp")
+
+                    dist.barrier(device_ids=[self.actor.device.index])
+                    current_platform.synchronize()
+
+                if self.ref is not None:
+                    with stats_tracker.record_timing("ref_logp"):
+                        ref_logp = self.ref.compute_logp(batch)
+                        batch["ref_logp"] = ref_logp
+                        log_gpu_stats("ref logp")
+
+                    dist.barrier(device_ids=[self.actor.device.index])
+                    current_platform.synchronize()
+
+                with stats_tracker.record_timing("compute_advantage"):
+                    self.actor.compute_advantages(batch)
+                    log_gpu_stats("compute advantages")
+
+                torch.cuda.empty_cache()
                 dist.barrier(device_ids=[self.actor.device.index])
                 current_platform.synchronize()
 
-            if self.ref is not None:
-                with stats_tracker.record_timing("ref_logp"):
-                    ref_logp = self.ref.compute_logp(batch)
-                    batch["ref_logp"] = ref_logp
-                    log_gpu_stats("ref logp")
+                with stats_tracker.record_timing("train_step"):
+                    stats = self.actor.ppo_update(batch)
+                    self.actor.step_lr_scheduler()
+                    log_gpu_stats("ppo update")
 
+                torch.cuda.empty_cache()
                 dist.barrier(device_ids=[self.actor.device.index])
                 current_platform.synchronize()
 
-            with stats_tracker.record_timing("compute_advantage"):
-                self.actor.compute_advantages(batch)
-                log_gpu_stats("compute advantages")
+                # Pause inference for updating weights, save, and evaluation
+                self.rollout.pause()
 
-            torch.cuda.empty_cache()
-            dist.barrier(device_ids=[self.actor.device.index])
-            current_platform.synchronize()
-
-            with stats_tracker.record_timing("train_step"):
-                stats = self.actor.ppo_update(batch)
-                self.actor.step_lr_scheduler()
-                log_gpu_stats("ppo update")
-
-            torch.cuda.empty_cache()
-            dist.barrier(device_ids=[self.actor.device.index])
-            current_platform.synchronize()
-
-            # Pause inference for updating weights, save, and evaluation
-            self.rollout.pause()
-
-            with stats_tracker.record_timing("update_weights"):
-                self.actor.update_weights(self.weight_update_meta)
-                self.actor.set_version(global_step + 1)
-                self.rollout.set_version(global_step + 1)
-                self.eval_rollout.set_version(global_step + 1)
+                with stats_tracker.record_timing("update_weights"):
+                    self.actor.update_weights(self.weight_update_meta)
+                    
+            self.actor.set_version(global_step + 1)
+            self.rollout.set_version(global_step + 1)
+            self.eval_rollout.set_version(global_step + 1)
 
             with stats_tracker.record_timing("save"):
                 self.saver.save(self.actor, epoch, step, global_step, tokenizer=self.tokenizer)
