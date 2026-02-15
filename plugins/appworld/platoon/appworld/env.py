@@ -1,0 +1,437 @@
+from __future__ import annotations
+
+from appworld import AppWorld
+from appworld.common.utils import get_stack_trace_from_exception
+from IPython.core.interactiveshell import ExecutionResult
+from IPython.terminal.embed import InteractiveShellEmbed
+from pathlib import Path
+from rubric.core.checklist import RubricChecklistFast
+from textwrap import dedent
+from traitlets.config.loader import Config
+import ast
+import sys
+import asyncio
+import re
+import uuid
+
+from platoon.utils.timeout import async_timeout_call
+from platoon.agents.actions.common import finish
+from platoon.agents.actions.subagent import launch_subagent
+from platoon.envs.base import Task, SubTask
+from platoon.envs.codeact import CodeExecutor, CodeActEnv, safe_asyncio
+from platoon.envs.codeact.env import _make_sandboxed_import
+from platoon.utils.ipython_shell import ShellCapture, strip_ansi_escape_sequences
+from platoon.episode.context import finish_message, error_message
+from platoon.envs.codeact.types import CodeActStep, CodeActObservation
+from platoon.utils.prompt_retriever import PromptRetriever
+from platoon.appworld.agent import AppWorldCodeActPromptBuilder
+
+
+class AppWorldAsync(AppWorld):
+    
+    def __init__(
+        self, 
+        shell_id: str,
+        *args, 
+        allow_silent_success: bool = True,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+       
+        self.allow_silent_success = allow_silent_success
+        self.shells = {}
+        self.register_shell(shell_id)
+        if self.remote_environment_url:
+            raise ValueError("Remote environment is not supported for AppWorldAsync")
+        
+    def get_shell(self, shell_id: str) -> InteractiveShellEmbed:
+        return self.shells[shell_id]
+    
+    def register_shell(self, shell_id: str) -> None:
+        self.shells[shell_id] = self._create_shell()
+    
+    def _create_shell(self) -> InteractiveShellEmbed:
+        original_excepthook = sys.excepthook
+        config = Config()
+        config.HistoryManager.enabled = (
+            False  # history keeps files open preventing making > ~50 envs.
+        )
+        shell = InteractiveShellEmbed(config=config)
+        old_shell = self.shell
+        self.shell = shell
+        self._execute_preamble()
+        self.shell = old_shell
+        sys.excepthook = (
+            original_excepthook  # prevents it from changing traceback format globally
+        )
+        shell.user_ns["finish"] = finish
+        shell.user_ns["launch_subagent"] = launch_subagent
+        shell.user_ns["asyncio"] = safe_asyncio
+        
+        sandboxed_import = _make_sandboxed_import(safe_asyncio)
+        existing_builtins = shell.user_ns.get("__builtins__")
+        if isinstance(existing_builtins, dict):
+            # Create a copy of the builtins dict
+            shell.user_ns["__builtins__"] = {**existing_builtins, "__import__": sandboxed_import}
+        else:
+            # __builtins__ is a module - convert to dict with our custom import
+            shell.user_ns["__builtins__"] = {**vars(existing_builtins), "__import__": sandboxed_import}
+        
+        return shell
+    
+    async def _shell_run_cell(self, shell_id: str, code: str) -> ExecutionResult | None:
+        self._maybe_raise_remote_environment_error("_shell_run_cell")
+        if self.timeout_seconds is None:
+            return await self.get_shell(shell_id).run_cell_async(code)
+        try:
+            return await async_timeout_call(
+                self.shell.run_cell_async, timeout_seconds=self.timeout_seconds, raw_cell=code
+            )
+        except asyncio.TimeoutError:
+            return None
+        
+    async def execute(self, shell_id: str, code: str) -> CodeActStep:
+        
+        if self.raise_on_unsafe_syntax:
+            is_syntax_safe, safety_message = self.safety_guard.is_syntax_safe(code)
+            if not is_syntax_safe:
+                message = "Execution failed. Traceback:\n" + safety_message
+                self.environment_io.append({"input": code, "output": message})
+                return CodeActStep(
+                    code=code,
+                    error=message,
+                )
+        
+        self.requester.reset_request_count()
+        if self.num_interactions >= self.max_interactions:
+            # for proper error message.
+            code = f'raise Exception(f"Maximum number of executions ({self.max_interactions}) reached.")'
+
+        if self.null_patch_unsafe_execution:
+            self.safety_guard.enable()
+
+        code = code.strip()
+
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            message = (
+                "Execution failed. Traceback:\n"
+                + "Syntax error in line:\n"
+                + (e.text or "").rstrip()
+                + "\n"
+                + "Message: "
+                + e.msg
+            )
+            self.environment_io.append({"input": code, "output": message})
+            if self.null_patch_unsafe_execution:
+                self.safety_guard.disable()
+            return CodeActStep(
+                code=code,
+                error=message,
+            )
+
+        if not code:
+            message = "No code available to execute."
+            self.environment_io.append({"input": code, "output": message})
+            if self.null_patch_unsafe_execution:
+                self.safety_guard.disable()
+            return CodeActStep(
+                code=code,
+                error=message,
+            )
+
+        with ShellCapture() as capture:
+            result = await self._shell_run_cell(shell_id, code)
+
+        cap_stdout = strip_ansi_escape_sequences(capture.pop_stdout())
+        cap_stderr = strip_ansi_escape_sequences(capture.pop_stderr())
+
+        # TODO: This might cause unexpected filtering of outputs.
+        # Guard against empty stdout before indexing first line
+        first_line = cap_stdout.splitlines()[0] if cap_stdout.splitlines() else ""
+        if cap_stdout.startswith("Out[") or ("[?7hOut[1]:" in first_line):
+            cap_stdout = "".join(cap_stdout.split(":")[1:]) 
+
+        if result is None:
+            assert self.timeout_seconds is not None
+            message = f"Execution failed. Traceback:\nExecution timed out after {self.timeout_seconds} seconds."
+        elif result.success:
+            message = cap_stdout
+            if not message.strip() and not self.allow_silent_success:
+                message = "Execution successful."
+            cap_stdout = message
+        else:
+            try:
+                result.raise_error()
+                message = ""  # to make mypy happy.
+            except Exception as exception:
+                stack_trace = get_stack_trace_from_exception(
+                    exception, only_ipython=True, add_http_exception_message=True
+                )
+                lines = stack_trace.splitlines()
+                if "ipython-input" not in stack_trace:
+                    # happens for syntax errors.
+                    message_ = stack_trace
+                else:
+                    # happens for runtime errors.
+                    index = next(
+                        index for index, line in enumerate(lines) if "ipython-input" in line
+                    )
+                    message_ = "\n".join(lines[index:])
+                    message_ = re.sub(
+                        r'File "<ipython-input-\d+-\w+>"',
+                        r'File "<python-input>"',
+                        message_,
+                    )
+                message_ = message_.replace("appworld.requester.NumRequestsLimitError", "Exception")
+                message_ = message_.replace(
+                    "appworld.common.utils.TimeoutError: Function run_cell execution",
+                    "Exception: Execution",
+                )
+                message_ = dedent(message_)
+                message = "Execution failed. Traceback:\n" + message_
+                cap_stderr = message_
+                cap_stdout = cap_stdout.replace(", use %tb to see the full traceback.", ".")
+        
+        self.environment_io.append({"input": code, "output": message.rstrip()})
+        if self.null_patch_unsafe_execution:
+            self.safety_guard.disable()
+        self.num_interactions += 1
+
+        self._save_state(self.output_db_home_path_on_disk)
+        self.save_logs()
+
+        # This needs to happen both at the start and end of the execution because one can
+        # call gym.apis from outside of execute as well for building the prompt.
+        self.requester.reset_request_count()
+
+        return CodeActStep(
+            code=code,
+            output=cap_stdout,
+            error=cap_stderr,
+        )
+
+    async def fork(self, shell_id: str) -> AppWorldAsync:
+        self.register_shell(shell_id)
+        return self
+    
+
+class AppWorldCodeExecutor(CodeExecutor):
+    
+    def __init__(
+        self,
+        task: Task,
+        world: AppWorldAsync | None = None,
+        shell_id: str | None = None,
+    ):
+        self.task = task
+        self.shell_id = shell_id
+        
+        if world is None: 
+            self.world = AppWorldAsync(
+                remote_environment_url=None,
+                task_id=task.id,
+                allow_silent_success=True,
+                shell_id=self.shell_id,
+                # This needs to be disabled to allow for writing logs to file when we launch subagents
+                null_patch_unsafe_execution=False, 
+            )
+        else:
+            self.world = world
+        
+        self.task.goal = task.goal or self.world.task.instruction
+        self.prompt_retriever = PromptRetriever(prompts_dir=Path(__file__).parent / "prompts")
+        
+    async def run(self, code: str) -> CodeActStep:
+        return await self.world.execute(self.shell_id, code)
+    
+    async def describe_action_space(self) -> str:
+        return self.prompt_retriever.get_prompt("user-action-space-description", supervisor=self.world.task.supervisor)
+    
+    async def reset(self) -> AppWorldCodeExecutor:
+        return type(self)(self.task, world=self.world, shell_id=self.shell_id)
+    
+    async def close(self) -> None:
+        await self.world.close()
+        
+    async def fork(self, task: Task) -> AppWorldCodeExecutor:
+        shell_id = str(uuid.uuid4())
+        return type(self)(task, world=await self.world.fork(shell_id), shell_id=shell_id)
+    
+
+class AppWorldRecursiveCodeExecutor(AppWorldCodeExecutor):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if isinstance(self.task, SubTask) and self.task.parent_tasks:
+            self.current_task_is_subtask = True
+        else:
+            self.current_task_is_subtask = False
+        # Track subagent outcomes for current step: (launched_count, success_count)
+        self._subagent_stats_this_step: tuple[int, int] = (0, 0)
+
+    def reset_subagent_stats(self) -> None:
+        """Reset subagent tracking for a new step."""
+        self._subagent_stats_this_step = (0, 0)
+
+    def get_subagent_stats(self) -> tuple[int, int]:
+        """Get (launched_count, success_count) for current step."""
+        return self._subagent_stats_this_step
+
+    async def run(self, code: str) -> CodeActStep:
+        """Run code and track subagent launches."""
+        from platoon.episode.context import current_trajectory, current_trajectory_collection
+
+        # Get current trajectory to identify children
+        traj_collection = current_trajectory_collection.get()
+        current_traj = current_trajectory.get()
+
+        # Track trajectories before execution to find new ones
+        traj_ids_before = set(traj_collection.trajectories.keys())
+
+        # Execute the code
+        result = await super().run(code)
+
+        # Check if any new child trajectories were created (subagents launched)
+        launched, succeeded = self._subagent_stats_this_step
+
+        for traj_id, traj in traj_collection.trajectories.items():
+            if traj_id not in traj_ids_before:
+                # This is a new trajectory - check if it's our child
+                if traj.parent_info and traj.parent_info.id == current_traj.id:
+                    launched += 1
+                    # Check the final step's reward_misc for actual task success
+                    # (not traj.reward, which includes subagent bonuses)
+                    if traj.steps:
+                        final_step = traj.steps[-1]
+                        reward_misc = final_step.misc.get("reward_misc", {})
+                        # For AppWorld subtasks, we use the rubric-based evaluation
+                        # Check if evaluation was successful (score > 0)
+                        if reward_misc.get("success", False) or final_step.reward > 0:
+                            succeeded += 1
+
+        self._subagent_stats_this_step = (launched, succeeded)
+        return result
+
+    async def describe_action_space(self) -> str:
+        return self.prompt_retriever.get_prompt(
+            "user-recursive-action-space-description",
+            supervisor=self.world.task.supervisor,
+            current_task_is_subtask=self.current_task_is_subtask,
+        )
+
+class AppWorldEnv(CodeActEnv):
+
+    def __init__(
+        self,
+        task: Task,
+        code_executor: AppWorldCodeExecutor | None = None,
+        per_step_subagent_success_reward: float=0.0,
+        per_step_subagent_reward_ceiling: float=float("inf"),
+        **kwargs,
+    ):
+        if code_executor is None:
+            code_executor = AppWorldCodeExecutor(task)
+
+        self._per_step_subagent_success_reward = per_step_subagent_success_reward
+        self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
+
+        super().__init__(task, code_executor, **kwargs)
+
+    @property
+    def code_executor(self) -> AppWorldCodeExecutor:
+        return self._code_executor
+
+    async def reset(self) -> CodeActObservation:
+        await super().reset()
+        self._state.action_space = await self.code_executor.describe_action_space()
+        return await self.observe()
+
+    async def evaluate(self) -> tuple[float, dict]:
+        score, reward_misc = 0., {}
+
+        if self._state.finished:
+            if isinstance(self._task, SubTask) and self._task.parent_tasks:
+                try:
+                    rubric_checklist = RubricChecklistFast(self._task.goal)
+                    prompt_builder = AppWorldCodeActPromptBuilder()
+                    action_history = prompt_builder.build_action_history_description(await self.observe())
+                    # Pull messages from episode-level context vars first; fall back to last step if available
+                    final_message = finish_message.get() or (self._state.history[-1].misc.get("finish_message") if self._state.history else None)
+                    err_message = error_message.get() or (self._state.history[-1].misc.get("error_message") if self._state.history else None)
+
+                    rubric_context = f"We need to judge the performance of an agent on the task.\n\n# Agent Trajectory Info\n## Action History\n{action_history}\n\n## Final Message\n{final_message}\n\n## Error Message\n{err_message}"
+                    score, reason = rubric_checklist.evaluate(include_reason=True, context=rubric_context)
+
+                    reward_misc["reason"] = reason
+                    reward_misc["rubric_dict"] = rubric_checklist.to_dict()
+
+                except Exception as e:
+                    reward_misc["reason"] = f"Failed rubric-based evaluation: {e}"
+                    score = 0.
+            else:
+                try:
+                    score = float(self.code_executor.world.evaluate(suppress_errors=False).to_dict()["success"])
+                    reward_misc["reason"] = "Trajectory reward provided by AppWorld environment."
+                except Exception as e:
+                    reward_misc["reason"] = f"Failed to evaluate task: {e}"
+
+        reward_misc["reward/success"] = score
+        return score, reward_misc
+
+    async def fork(self, task: Task) -> AppWorldEnv:
+        code_executor = await self.code_executor.fork(task)
+        # Propagate reward settings so nested subagents also get delegation rewards
+        return type(self)(
+            task,
+            code_executor=code_executor,
+            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
+            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
+        )
+    
+
+class AppWorldRecursiveEnv(AppWorldEnv):
+    """Environment for AppWorld tasks with recursive agent spawning and delegation rewards."""
+
+    def __init__(
+        self,
+        task: Task,
+        code_executor: AppWorldRecursiveCodeExecutor | None = None,
+        **kwargs,
+    ):
+        if code_executor is None:
+            code_executor = AppWorldRecursiveCodeExecutor(task)
+        super().__init__(task, code_executor, **kwargs)
+
+    @property
+    def code_executor(self) -> AppWorldRecursiveCodeExecutor:
+        return self._code_executor
+
+    def _get_subagent_stats_and_reset(self) -> tuple[int, int]:
+        """Get (launched_count, success_count) for current step and reset for next step."""
+        stats = self.code_executor.get_subagent_stats()
+        self.code_executor.reset_subagent_stats()
+        return stats
+
+    async def evaluate(self) -> tuple[float, dict]:
+        score, reward_misc = await super().evaluate()
+
+        # Get subagent stats for this step (also resets for next step)
+        launched, succeeded = self._get_subagent_stats_and_reset()
+
+        # Add reward for successful subagents (scaled by count, capped at ceiling)
+        subagent_reward = 0.0
+        if self._per_step_subagent_success_reward > 0 and succeeded > 0:
+            subagent_reward = min(
+                self._per_step_subagent_success_reward * succeeded,
+                self._per_step_subagent_reward_ceiling,
+            )
+            score += subagent_reward
+
+        reward_misc["subagent_launched"] = launched
+        reward_misc["subagent_succeeded"] = succeeded
+        reward_misc["reward/subagent_success"] = subagent_reward
+
+        return score, reward_misc
+    
