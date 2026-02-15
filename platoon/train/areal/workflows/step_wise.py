@@ -58,7 +58,7 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         ),
         merge_prefixes: bool = True,
     ):
-        self.config = config
+        self.config = deepcopy(config)
         self.config.rollout_config.return_dict = True
         self.config.rollout_config.train = True
         self.proxy_server = proxy_server
