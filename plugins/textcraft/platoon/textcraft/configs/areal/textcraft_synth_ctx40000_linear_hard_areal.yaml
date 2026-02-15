@@ -143,8 +143,8 @@ saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 5
-  freq_steps: null
+  freq_epochs: null
+  freq_steps: 25
   freq_secs: null
 
 recover:

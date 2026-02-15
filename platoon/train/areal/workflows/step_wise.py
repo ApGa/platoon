@@ -71,6 +71,8 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         self.filter_errors = filter_errors
         self.reward_processor = reward_processor
         self.merge_prefixes = merge_prefixes
+        
+        self.config.rollout_config.output_dir = os.path.join(self.config.rollout_config.output_dir, self.stats_scope)
 
     async def arun_episode(self, engine: InferenceEngine, data: dict) -> dict | None:
         """Run multiple rollouts for a task and return training data."""
@@ -262,7 +264,6 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         config.rollout_config.output_dir = os.path.join(
             config.rollout_config.output_dir,
             str(engine.get_version()),
-            f"rollout_{rollout_number}",
         )
 
         # Run rollout in subprocess
