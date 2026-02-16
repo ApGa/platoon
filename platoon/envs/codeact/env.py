@@ -184,7 +184,7 @@ class SafeAsyncio:
 safe_asyncio = SafeAsyncio()
 
 
-def make_sandboxed_import(safe_asyncio_instance: SafeAsyncio):
+def _make_sandboxed_import(safe_asyncio_instance: SafeAsyncio):
     """Create a sandboxed import function that intercepts asyncio imports.
 
     This ensures that even if an agent does `import asyncio` or
@@ -290,7 +290,7 @@ class IPythonCodeExecutor(CodeExecutor):
         # IMPORTANT: We must create a COPY of __builtins__ to avoid modifying the global
         # builtins which would cause infinite recursion (since _original_import would
         # then point to our sandboxed version)
-        sandboxed_import = make_sandboxed_import(safe_asyncio)
+        sandboxed_import = _make_sandboxed_import(safe_asyncio)
         existing_builtins = shell.user_ns.get("__builtins__")
         if isinstance(existing_builtins, dict):
             # Create a copy of the builtins dict

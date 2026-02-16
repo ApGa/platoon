@@ -28,9 +28,12 @@ overrides = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
     { name = "huggingface-hub", specifier = "==0.34" },
     { name = "networkx", specifier = "==3.3.0" },
+    { name = "numpy", specifier = "<2.3" },
     { name = "openai", specifier = "==1.99.6" },
     { name = "outlines-core", specifier = "==0.1.26" },
     { name = "pyarrow", specifier = "==20.0.0" },
+    { name = "torch", specifier = "==2.8.0" },
+    { name = "torchvision", specifier = "==0.23.0" },
     { name = "xgrammar", specifier = "==0.1.24" },
 ]
 
@@ -40,12 +43,12 @@ version = "1.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "psutil" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4a/8e/ac2a9566747a93f8be36ee08532eb0160558b07630a081a6056a9f89bf1d/accelerate-1.12.0.tar.gz", hash = "sha256:70988c352feb481887077d2ab845125024b2a137a5090d6d7a32b57d03a45df6", size = 398399, upload-time = "2025-11-21T11:27:46.973Z" }
 wheels = [
@@ -292,7 +295,7 @@ wheels = [
 [[package]]
 name = "appworld"
 version = "0.2.0.dev0"
-source = { git = "https://github.com/StonyBrookNLP/appworld.git?lfs=true#3f2d53c1a096805adc86bd05227463683cdc5154" }
+source = { git = "https://github.com/StonyBrookNLP/appworld.git?lfs=true&rev=58d1c7807a3dd2870f45da716f572909a0d33511#58d1c7807a3dd2870f45da716f572909a0d33511" }
 dependencies = [
     { name = "cryptography" },
     { name = "email-validator" },
@@ -410,10 +413,10 @@ dependencies = [
     { name = "tensorboardx" },
     { name = "tensordict" },
     { name = "timeout-decorator" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "torchaudio" },
     { name = "torchdata" },
-    { name = "torchvision", version = "0.23.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torchvision" },
     { name = "tqdm" },
     { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
     { name = "uvicorn" },
@@ -917,7 +920,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "frozendict" },
     { name = "pydantic" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b8/99/3fdabfc95609d6efdf02fa7f1ed0245524cb1209d3d4a17109d3205d2eed/compressed_tensors-0.11.0.tar.gz", hash = "sha256:95ddf19699f775df6494dd864e5f52e8a24f8015496520190c1a22c6cfc44b1f", size = 187566, upload-time = "2025-08-19T18:59:31.854Z" }
@@ -930,7 +933,7 @@ name = "contourpy"
 version = "1.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/01/1253e6698a07380cd31a736d248a3f2a50a7c88779a1813da27503cadc2a/contourpy-1.3.3.tar.gz", hash = "sha256:083e12155b210502d0bca491432bb04d56dc3432f95a979b429f2848c3dbe880", size = 13466174, upload-time = "2025-07-26T12:03:12.549Z" }
 wheels = [
@@ -1007,32 +1010,8 @@ wheels = [
 
 [[package]]
 name = "cuda-bindings"
-version = "12.9.4"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "cuda-pathfinder", marker = "(sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/c2/65bfd79292b8ff18be4dd7f7442cea37bcbc1a228c1886f1dea515c45b67/cuda_bindings-12.9.4-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:694ba35023846625ef471257e6b5a4bc8af690f961d197d77d34b1d1db393f56", size = 11760260, upload-time = "2025-10-21T14:51:40.79Z" },
-    { url = "https://files.pythonhosted.org/packages/a9/c1/dabe88f52c3e3760d861401bb994df08f672ec893b8f7592dc91626adcf3/cuda_bindings-12.9.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fda147a344e8eaeca0c6ff113d2851ffca8f7dfc0a6c932374ee5c47caa649c8", size = 12151019, upload-time = "2025-10-21T14:51:43.167Z" },
-    { url = "https://files.pythonhosted.org/packages/df/6b/9c1b1a6c01392bfdd758e9486f52a1a72bc8f49e98f9355774ef98b5fb4e/cuda_bindings-12.9.4-cp312-cp312-win_amd64.whl", hash = "sha256:696ca75d249ddf287d01b9a698b8e2d8a05046495a9c051ca15659dc52d17615", size = 11586961, upload-time = "2025-10-21T14:51:45.394Z" },
-]
-
-[[package]]
-name = "cuda-bindings"
 version = "13.1.1"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'darwin'",
-    "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
 dependencies = [
     { name = "cuda-pathfinder" },
 ]
@@ -1055,7 +1034,7 @@ name = "cuda-python"
 version = "13.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-bindings", version = "13.1.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "cuda-bindings" },
     { name = "cuda-pathfinder" },
 ]
 wheels = [
@@ -1068,7 +1047,7 @@ version = "13.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastrlock", marker = "sys_platform != 'darwin'" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
+    { name = "numpy", marker = "sys_platform != 'darwin'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/12/c5/7e7fc4816d0de0154e5d9053242c3a08a0ca8b43ee656a6f7b3b95055a7b/cupy_cuda12x-13.6.0-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:a6970ceefe40f9acbede41d7fe17416bd277b1bd2093adcde457b23b578c5a59", size = 127334633, upload-time = "2025-08-18T08:24:43.065Z" },
@@ -1111,8 +1090,7 @@ dependencies = [
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "multiprocess" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -1153,7 +1131,7 @@ name = "decord"
 version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/11/79/936af42edf90a7bd4e41a6cac89c913d4b47fa48a26b042d5129a9242ee3/decord-0.6.0-py3-none-manylinux2010_x86_64.whl", hash = "sha256:51997f20be8958e23b7c4061ba45d0efcd86bffd5fe81c695d0befee0d442976", size = 13602299, upload-time = "2021-06-14T21:30:55.486Z" },
@@ -1169,12 +1147,12 @@ dependencies = [
     { name = "hjson" },
     { name = "msgpack" },
     { name = "ninja" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "psutil" },
     { name = "py-cpuinfo" },
     { name = "pydantic" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fc/45/861baf605f6388c81109b1228ea211da62fb59b7a5b2606f90bd98f4b99e/deepspeed-0.18.6.tar.gz", hash = "sha256:dae0d4285c7badce3a76cab33b29080665bb57926ef9649bd227551f1955ee54", size = 1640973, upload-time = "2026-02-12T23:22:30.354Z" }
@@ -1518,7 +1496,7 @@ version = "2.8.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz", hash = "sha256:1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d", size = 8447812, upload-time = "2025-08-15T08:28:12.911Z" }
 
@@ -1530,13 +1508,13 @@ dependencies = [
     { name = "click" },
     { name = "einops" },
     { name = "ninja" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "nvidia-cudnn-frontend" },
     { name = "packaging" },
     { name = "pynvml" },
     { name = "requests" },
     { name = "tabulate" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ba/71/dd3001b8be8174d90561764a5f3be4ca219517bde2841189ea6973a3873f/flashinfer_python-0.3.1.tar.gz", hash = "sha256:992017d193dfbbc62e67401a6d5416629bf90b640872d14b7863de45e9371446", size = 3817118, upload-time = "2025-09-05T06:21:45.229Z" }
@@ -1655,7 +1633,7 @@ name = "gguf"
 version = "0.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "pyyaml" },
     { name = "tqdm" },
 ]
@@ -1775,7 +1753,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "farama-notifications" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/59/653a9417d98ed3e29ef9734ba52c3495f6c6823b8d5c0c75369f25111708/gymnasium-1.2.3.tar.gz", hash = "sha256:2b2cb5b5fbbbdf3afb9f38ca952cc48aa6aa3e26561400d940747fda3ad42509", size = 829230, upload-time = "2025-12-18T16:51:10.234Z" }
@@ -1810,7 +1788,7 @@ name = "h5py"
 version = "3.15.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4d/6a/0d79de0b025aa85dc8864de8e97659c94cf3d23148394a954dc5ca52f8c8/h5py-3.15.1.tar.gz", hash = "sha256:c86e3ed45c4473564de55aa83b6fc9e5ead86578773dfbd93047380042e26b69", size = 426236, upload-time = "2025-10-16T10:35:27.404Z" }
 wheels = [
@@ -2049,7 +2027,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "mmh3" },
     { name = "nest-asyncio2" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "platformdirs" },
     { name = "psutil" },
     { name = "pydantic" },
@@ -2752,7 +2730,7 @@ dependencies = [
     { name = "cycler" },
     { name = "fonttools" },
     { name = "kiwisolver" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "pillow" },
     { name = "pyparsing" },
@@ -2816,8 +2794,8 @@ name = "megatron-core"
 version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
+    { name = "torch" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/40/4d/b4dd9e069142ffabc9d89ae6fbe4c70bb616cbc1b0ce077c33744f223725/megatron_core-0.13.1.tar.gz", hash = "sha256:45f63f5c66e4d83e05bad44557b8bb25de6615739a994176acd800055055c94c", size = 743557, upload-time = "2025-08-12T18:34:07.357Z" }
 
@@ -2827,7 +2805,7 @@ version = "1.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonschema" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pydantic-extra-types", extra = ["pycountry"], marker = "extra == 'extra-16-platoon-appworld-areal'" },
@@ -2880,7 +2858,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2", marker = "sys_platform == 'darwin'" },
     { name = "mlx", marker = "sys_platform == 'darwin'" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "numpy", marker = "sys_platform == 'darwin'" },
     { name = "protobuf", marker = "sys_platform == 'darwin'" },
     { name = "pyyaml", marker = "sys_platform == 'darwin'" },
     { name = "sentencepiece", marker = "sys_platform == 'darwin'" },
@@ -3201,7 +3179,7 @@ version = "0.61.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "llvmlite" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/a0/e21f57604304aa03ebb8e098429222722ad99176a4f979d34af1d1ee80da/numba-0.61.2.tar.gz", hash = "sha256:8750ee147940a6637b80ecf7f95062185ad8726c8c28a2295b8ec1160a196f7d", size = 2820615, upload-time = "2025-04-09T02:58:07.659Z" }
 wheels = [
@@ -3216,14 +3194,6 @@ wheels = [
 name = "numpy"
 version = "1.26.4"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'darwin'",
-    "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
 sdist = { url = "https://files.pythonhosted.org/packages/65/6e/09db70a523a96d25e115e71cc56a6f9031e7b8cd166c1ac8438307c14058/numpy-1.26.4.tar.gz", hash = "sha256:2a02aba9ed12e4ac4eb3ea9421c420301a0c6460d9830d74a9df87efa4912010", size = 15786129, upload-time = "2024-02-06T00:26:44.495Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/95/12/8f2020a8e8b8383ac0177dc9570aad031a3beb12e38847f7129bacd96228/numpy-1.26.4-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:b3ce300f3644fb06443ee2222c2201dd3a89ea6040541412b8fa189341847218", size = 20335901, upload-time = "2024-02-05T23:55:32.801Z" },
@@ -3234,31 +3204,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/76/8c/2ba3902e1a0fc1c74962ea9bb33a534bb05984ad7ff9515bf8d07527cadd/numpy-1.26.4-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:1dda2e7b4ec9dd512f84935c5f126c8bd8b9f2fc001e9f54af255e8c5f16b0e0", size = 17786643, upload-time = "2024-02-05T23:57:56.585Z" },
     { url = "https://files.pythonhosted.org/packages/28/4a/46d9e65106879492374999e76eb85f87b15328e06bd1550668f79f7b18c6/numpy-1.26.4-cp312-cp312-win32.whl", hash = "sha256:50193e430acfc1346175fcbdaa28ffec49947a06918b7b92130744e81e640110", size = 5677803, upload-time = "2024-02-05T23:58:08.963Z" },
     { url = "https://files.pythonhosted.org/packages/16/2e/86f24451c2d530c88daf997cb8d6ac622c1d40d19f5a031ed68a4b73a374/numpy-1.26.4-cp312-cp312-win_amd64.whl", hash = "sha256:08beddf13648eb95f8d867350f6a018a4be2e5ad54c8d8caed89ebca558b2818", size = 15517754, upload-time = "2024-02-05T23:58:36.364Z" },
-]
-
-[[package]]
-name = "numpy"
-version = "2.4.2"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'linux'",
-    "sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
-sdist = { url = "https://files.pythonhosted.org/packages/57/fd/0005efbd0af48e55eb3c7208af93f2862d4b1a56cd78e84309a2d959208d/numpy-2.4.2.tar.gz", hash = "sha256:659a6107e31a83c4e33f763942275fd278b21d095094044eb35569e86a21ddae", size = 20723651, upload-time = "2026-01-31T23:13:10.135Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/6e/6f394c9c77668153e14d4da83bcc247beb5952f6ead7699a1a2992613bea/numpy-2.4.2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:21982668592194c609de53ba4933a7471880ccbaadcc52352694a59ecc860b3a", size = 16667963, upload-time = "2026-01-31T23:10:52.147Z" },
-    { url = "https://files.pythonhosted.org/packages/1f/f8/55483431f2b2fd015ae6ed4fe62288823ce908437ed49db5a03d15151678/numpy-2.4.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:40397bda92382fcec844066efb11f13e1c9a3e2a8e8f318fb72ed8b6db9f60f1", size = 14693571, upload-time = "2026-01-31T23:10:54.789Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/20/18026832b1845cdc82248208dd929ca14c9d8f2bac391f67440707fff27c/numpy-2.4.2-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:b3a24467af63c67829bfaa61eecf18d5432d4f11992688537be59ecd6ad32f5e", size = 5203469, upload-time = "2026-01-31T23:10:57.343Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/33/2eb97c8a77daaba34eaa3fa7241a14ac5f51c46a6bd5911361b644c4a1e2/numpy-2.4.2-cp312-cp312-macosx_14_0_x86_64.whl", hash = "sha256:805cc8de9fd6e7a22da5aed858e0ab16be5a4db6c873dde1d7451c541553aa27", size = 6550820, upload-time = "2026-01-31T23:10:59.429Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/91/b97fdfd12dc75b02c44e26c6638241cc004d4079a0321a69c62f51470c4c/numpy-2.4.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6d82351358ffbcdcd7b686b90742a9b86632d6c1c051016484fa0b326a0a1548", size = 15663067, upload-time = "2026-01-31T23:11:01.291Z" },
-    { url = "https://files.pythonhosted.org/packages/f5/c6/a18e59f3f0b8071cc85cbc8d80cd02d68aa9710170b2553a117203d46936/numpy-2.4.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9e35d3e0144137d9fdae62912e869136164534d64a169f86438bc9561b6ad49f", size = 16619782, upload-time = "2026-01-31T23:11:03.669Z" },
-    { url = "https://files.pythonhosted.org/packages/b7/83/9751502164601a79e18847309f5ceec0b1446d7b6aa12305759b72cf98b2/numpy-2.4.2-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:adb6ed2ad29b9e15321d167d152ee909ec73395901b70936f029c3bc6d7f4460", size = 17013128, upload-time = "2026-01-31T23:11:05.913Z" },
-    { url = "https://files.pythonhosted.org/packages/61/c4/c4066322256ec740acc1c8923a10047818691d2f8aec254798f3dd90f5f2/numpy-2.4.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:8906e71fd8afcb76580404e2a950caef2685df3d2a57fe82a86ac8d33cc007ba", size = 18345324, upload-time = "2026-01-31T23:11:08.248Z" },
-    { url = "https://files.pythonhosted.org/packages/ab/af/6157aa6da728fa4525a755bfad486ae7e3f76d4c1864138003eb84328497/numpy-2.4.2-cp312-cp312-win32.whl", hash = "sha256:ec055f6dae239a6299cace477b479cca2fc125c5675482daf1dd886933a1076f", size = 5960282, upload-time = "2026-01-31T23:11:10.497Z" },
-    { url = "https://files.pythonhosted.org/packages/92/0f/7ceaaeaacb40567071e94dbf2c9480c0ae453d5bb4f52bea3892c39dc83c/numpy-2.4.2-cp312-cp312-win_amd64.whl", hash = "sha256:209fae046e62d0ce6435fcfe3b1a10537e858249b3d9b05829e2a05218296a85", size = 12314210, upload-time = "2026-01-31T23:11:12.176Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/a3/56c5c604fae6dd40fa2ed3040d005fca97e91bd320d232ac9931d77ba13c/numpy-2.4.2-cp312-cp312-win_arm64.whl", hash = "sha256:fbde1b0c6e81d56f5dccd95dd4a711d9b95df1ae4009a60887e56b27e8d903fa", size = 10220171, upload-time = "2026-01-31T23:11:14.684Z" },
 ]
 
 [[package]]
@@ -3407,24 +3352,9 @@ wheels = [
 name = "nvidia-nccl-cu12"
 version = "2.27.3"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4b/7b/8354b784cf73b0ba51e566b4baba3ddd44fe8288a3d39ef1e06cd5417226/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9ddf1a245abc36c550870f26d537a9b6087fb2e2e3d6e0ef03374c6fd19d984f", size = 322397768, upload-time = "2025-06-03T21:57:30.234Z" },
     { url = "https://files.pythonhosted.org/packages/5c/5b/4e4fff7bad39adf89f735f2bc87248c81db71205b62bcc0d5ca5b606b3c3/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:adf27ccf4238253e0b826bce3ff5fa532d65fc42322c8bfdfaf28024c0fbe039", size = 322364134, upload-time = "2025-06-03T21:58:04.013Z" },
-]
-
-[[package]]
-name = "nvidia-nccl-cu12"
-version = "2.27.5"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform == 'linux'",
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bb/1c/857979db0ef194ca5e21478a0612bcdbbe59458d7694361882279947b349/nvidia_nccl_cu12-2.27.5-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:31432ad4d1fb1004eb0c56203dc9bc2178a1ba69d1d9e02d64a6938ab5e40e7a", size = 322400625, upload-time = "2025-06-26T04:11:04.496Z" },
-    { url = "https://files.pythonhosted.org/packages/6e/89/f7a07dc961b60645dbbf42e80f2bc85ade7feb9a491b11a1e973aa00071f/nvidia_nccl_cu12-2.27.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ad730cf15cb5d25fe849c6e6ca9eb5b76db16a80f13f425ac68d8e2e55624457", size = 322348229, upload-time = "2025-06-26T04:11:28.385Z" },
 ]
 
 [[package]]
@@ -3435,15 +3365,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f6/74/86a07f1d0f42998ca31312f998bd3b9a7eff7f52378f4f270c8679c77fb9/nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:81ff63371a7ebd6e6451970684f916be2eab07321b73c9d244dc2b4da7f73b88", size = 39254836, upload-time = "2025-03-07T01:49:55.661Z" },
     { url = "https://files.pythonhosted.org/packages/2a/a2/8cee5da30d13430e87bf99bb33455d2724d0a4a9cb5d7926d80ccb96d008/nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:adccd7161ace7261e01bb91e44e88da350895c270d23f744f0820c818b7229e7", size = 38386204, upload-time = "2025-03-07T01:49:43.612Z" },
     { url = "https://files.pythonhosted.org/packages/ed/d7/34f02dad2e30c31b10a51f6b04e025e5dd60e5f936af9045a9b858a05383/nvidia_nvjitlink_cu12-12.8.93-py3-none-win_amd64.whl", hash = "sha256:bd93fbeeee850917903583587f4fc3a4eafa022e34572251368238ab5e6bd67f", size = 268553710, upload-time = "2025-03-07T01:56:24.13Z" },
-]
-
-[[package]]
-name = "nvidia-nvshmem-cu12"
-version = "3.4.5"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/6a/03aa43cc9bd3ad91553a88b5f6fb25ed6a3752ae86ce2180221962bc2aa5/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:0b48363fc6964dede448029434c6abed6c5e37f823cb43c3bcde7ecfc0457e15", size = 138936938, upload-time = "2025-09-06T00:32:05.589Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/09/6ea3ea725f82e1e76684f0708bbedd871fc96da89945adeba65c3835a64c/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:042f2500f24c021db8a06c5eec2539027d57460e1c1a762055a6554f72c369bd", size = 139103095, upload-time = "2025-09-06T00:32:31.266Z" },
 ]
 
 [[package]]
@@ -3539,7 +3460,7 @@ name = "opencv-python-headless"
 version = "4.11.0.86"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/36/2f/5b2b3ba52c864848885ba988f24b7f105052f68da9ab0e693cc7c25b0b30/opencv-python-headless-4.11.0.86.tar.gz", hash = "sha256:996eb282ca4b43ec6a3972414de0e2331f5d9cda2b41091a49739c19fb843798", size = 95177929, upload-time = "2025-01-16T13:53:40.22Z" }
 wheels = [
@@ -3653,13 +3574,13 @@ dependencies = [
     { name = "jsonschema" },
     { name = "lark", version = "1.2.2", source = { registry = "https://pypi.org/simple" } },
     { name = "nest-asyncio" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "outlines-core" },
     { name = "pycountry" },
     { name = "pydantic" },
     { name = "referencing" },
     { name = "requests" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
@@ -3700,8 +3621,7 @@ name = "pandas"
 version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
+    { name = "numpy" },
     { name = "python-dateutil" },
     { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
 ]
@@ -3793,12 +3713,12 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "accelerate" },
     { name = "huggingface-hub" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "psutil" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "tqdm" },
     { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
 ]
@@ -3953,7 +3873,7 @@ wandb = [
 
 [package.metadata]
 requires-dist = [
-    { name = "appworld", git = "https://github.com/StonyBrookNLP/appworld.git?lfs=true" },
+    { name = "appworld", git = "https://github.com/StonyBrookNLP/appworld.git?lfs=true&rev=58d1c7807a3dd2870f45da716f572909a0d33511" },
     { name = "platoon", editable = "../../" },
     { name = "platoon", extras = ["areal"], marker = "extra == 'areal'", editable = "../../" },
     { name = "platoon", extras = ["tinker"], marker = "extra == 'tinker'", editable = "../../" },
@@ -4936,8 +4856,7 @@ name = "scipy"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-tinker'" },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/56/3e/9cca699f3486ce6bc12ff46dc2031f1ec8eb9ccc9a320fdaf925f1417426/scipy-1.17.0.tar.gz", hash = "sha256:2591060c8e648d8b96439e111ac41fd8342fdeff1876be2e19dea3fe8930454e", size = 30396830, upload-time = "2026-01-10T21:34:23.009Z" }
 wheels = [
@@ -4959,7 +4878,7 @@ version = "0.13.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "matplotlib" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "pandas" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/86/59/a451d7420a77ab0b98f7affa3a1d78a313d2f7281a57afb1a34bae8ab412/seaborn-0.13.2.tar.gz", hash = "sha256:93e60a40988f4d65e9f4885df477e2fdaff6b73a9ded434c1ab356dd57eefff7", size = 1457696, upload-time = "2024-01-25T13:21:52.551Z" }
@@ -5079,7 +4998,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "ipython" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "requests" },
     { name = "setproctitle" },
     { name = "tqdm" },
@@ -5128,11 +5047,11 @@ all = [
     { name = "soundfile" },
     { name = "tiktoken" },
     { name = "timm" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "torch-memory-saver" },
     { name = "torchao" },
     { name = "torchaudio" },
-    { name = "torchvision", version = "0.23.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torchvision" },
     { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
     { name = "uvicorn" },
     { name = "uvloop" },
@@ -5233,7 +5152,7 @@ version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cffi" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e1/41/9b873a8c055582859b239be17902a85339bec6a30ad162f98c9b0288a2cc/soundfile-0.13.1.tar.gz", hash = "sha256:b2c68dab1e30297317080a5b43df57e302584c49e2942defdde0acccc53f0e5b", size = 46156, upload-time = "2025-01-25T09:17:04.831Z" }
 wheels = [
@@ -5260,7 +5179,7 @@ name = "soxr"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/7e/f4b461944662ad75036df65277d6130f9411002bfb79e9df7dff40a31db9/soxr-1.0.0.tar.gz", hash = "sha256:e07ee6c1d659bc6957034f4800c60cb8b98de798823e34d2a2bba1caa85a4509", size = 171415, upload-time = "2025-09-07T13:22:21.317Z" }
 wheels = [
@@ -5427,7 +5346,7 @@ name = "tensorboardx"
 version = "2.6.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "protobuf" },
 ]
@@ -5443,13 +5362,11 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "importlib-metadata" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
+    { name = "numpy" },
     { name = "orjson" },
     { name = "packaging" },
     { name = "pyvers" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
+    { name = "torch" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/7c/6b47df6f8749e873d5bcd3260a78a8c5de0d92fff4aaf2739de29c6e7089/tensordict-0.11.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:683840259eb7d29836751bff48249c2ee36b7f1ccff50dcaed843d96915d768a", size = 815976, upload-time = "2026-01-26T11:36:07.452Z" },
@@ -5588,8 +5505,8 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "torchvision", version = "0.23.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
+    { name = "torchvision" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/94/f6/4d7a8c261341fa6ad281920618739f2a650f41043afcedb570f24e99a776/timm-1.0.16.tar.gz", hash = "sha256:a3b8130dd2cb8dc3b9f5e3d09ab6d677a6315a8695fd5264eb6d52a4a46c1044", size = 2339999, upload-time = "2025-06-26T17:09:44.208Z" }
 wheels = [
@@ -5605,7 +5522,7 @@ dependencies = [
     { name = "click" },
     { name = "distro" },
     { name = "httpx", extra = ["http2"], marker = "extra == 'extra-16-platoon-appworld-tinker'" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "pydantic" },
     { name = "rich", version = "14.3.2", source = { registry = "https://pypi.org/simple" } },
     { name = "sniffio" },
@@ -5629,7 +5546,7 @@ dependencies = [
     { name = "datasets" },
     { name = "inspect-ai" },
     { name = "math-verify" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "pillow" },
     { name = "pylatexenc" },
     { name = "pytest" },
@@ -5640,8 +5557,8 @@ dependencies = [
     { name = "textarena" },
     { name = "tiktoken" },
     { name = "tinker" },
-    { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "torchvision", version = "0.25.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
+    { name = "torchvision" },
     { name = "transformers", version = "5.1.0", source = { registry = "https://pypi.org/simple" } },
 ]
 
@@ -5687,87 +5604,36 @@ wheels = [
 name = "torch"
 version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'darwin'",
-    "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "fsspec", marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "jinja2", marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "networkx", marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cufile-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-nccl-cu12", version = "2.27.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "jinja2" },
+    { name = "networkx" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cufile-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
     { name = "setuptools", version = "79.0.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "sympy", marker = "extra == 'extra-16-platoon-appworld-areal'" },
-    { name = "triton", version = "3.4.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "typing-extensions", marker = "extra == 'extra-16-platoon-appworld-areal'" },
+    { name = "setuptools", version = "82.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
+    { name = "sympy" },
+    { name = "triton", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "typing-extensions" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/0c/2fd4df0d83a495bb5e54dca4474c4ec5f9c62db185421563deeb5dabf609/torch-2.8.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:e2fab4153768d433f8ed9279c8133a114a034a61e77a3a104dcdf54388838705", size = 101906089, upload-time = "2025-08-06T14:53:52.631Z" },
     { url = "https://files.pythonhosted.org/packages/99/a8/6acf48d48838fb8fe480597d98a0668c2beb02ee4755cc136de92a0a956f/torch-2.8.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:b2aca0939fb7e4d842561febbd4ffda67a8e958ff725c1c27e244e85e982173c", size = 887913624, upload-time = "2025-08-06T14:56:44.33Z" },
     { url = "https://files.pythonhosted.org/packages/af/8a/5c87f08e3abd825c7dfecef5a0f1d9aa5df5dd0e3fd1fa2f490a8e512402/torch-2.8.0-cp312-cp312-win_amd64.whl", hash = "sha256:2f4ac52f0130275d7517b03a33d2493bab3693c83dcfadf4f81688ea82147d2e", size = 241326087, upload-time = "2025-08-06T14:53:46.503Z" },
     { url = "https://files.pythonhosted.org/packages/be/66/5c9a321b325aaecb92d4d1855421e3a055abd77903b7dab6575ca07796db/torch-2.8.0-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:619c2869db3ada2c0105487ba21b5008defcc472d23f8b80ed91ac4a380283b0", size = 73630478, upload-time = "2025-08-06T14:53:57.144Z" },
-]
-
-[[package]]
-name = "torch"
-version = "2.10.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'linux'",
-    "sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
-dependencies = [
-    { name = "cuda-bindings", version = "12.9.4", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "filelock", marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
-    { name = "fsspec", marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
-    { name = "jinja2", marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
-    { name = "networkx", marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
-    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cufile-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-nccl-cu12", version = "2.27.5", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-nvshmem-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "setuptools", version = "82.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
-    { name = "sympy", marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
-    { name = "triton", version = "3.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
-    { name = "typing-extensions", marker = "extra == 'extra-16-platoon-appworld-tinker' or extra != 'extra-16-platoon-appworld-areal'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/54/a2ba279afcca44bbd320d4e73675b282fcee3d81400ea1b53934efca6462/torch-2.10.0-2-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:13ec4add8c3faaed8d13e0574f5cd4a323c11655546f91fbe6afa77b57423574", size = 79498202, upload-time = "2026-02-10T21:44:52.603Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/af/758e242e9102e9988969b5e621d41f36b8f258bb4a099109b7a4b4b50ea4/torch-2.10.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:5fd4117d89ffd47e3dcc71e71a22efac24828ad781c7e46aaaf56bf7f2796acf", size = 145996088, upload-time = "2026-01-21T16:24:44.171Z" },
-    { url = "https://files.pythonhosted.org/packages/23/8e/3c74db5e53bff7ed9e34c8123e6a8bfef718b2450c35eefab85bb4a7e270/torch-2.10.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:787124e7db3b379d4f1ed54dd12ae7c741c16a4d29b49c0226a89bea50923ffb", size = 915711952, upload-time = "2026-01-21T16:23:53.503Z" },
-    { url = "https://files.pythonhosted.org/packages/6e/01/624c4324ca01f66ae4c7cd1b74eb16fb52596dce66dbe51eff95ef9e7a4c/torch-2.10.0-cp312-cp312-win_amd64.whl", hash = "sha256:2c66c61f44c5f903046cc696d088e21062644cbe541c7f1c4eaae88b2ad23547", size = 113757972, upload-time = "2026-01-21T16:24:39.516Z" },
-    { url = "https://files.pythonhosted.org/packages/c9/5c/dee910b87c4d5c0fcb41b50839ae04df87c1cfc663cf1b5fca7ea565eeaa/torch-2.10.0-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:6d3707a61863d1c4d6ebba7be4ca320f42b869ee657e9b2c21c736bf17000294", size = 79498198, upload-time = "2026-01-21T16:24:34.704Z" },
 ]
 
 [[package]]
@@ -5793,7 +5659,7 @@ name = "torchaudio"
 version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/cc/c2e2a3eb6ee956f73c68541e439916f8146170ea9cc61e72adea5c995312/torchaudio-2.8.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:ddef94bf181e6447cbb05f38beaca8f6c5bb8d2b9ddced1aa3452025b9fc70d3", size = 1856736, upload-time = "2025-08-06T14:58:36.3Z" },
@@ -5808,7 +5674,7 @@ version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "urllib3" },
 ]
 wheels = [
@@ -5819,46 +5685,16 @@ wheels = [
 name = "torchvision"
 version = "0.23.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'darwin'",
-    "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "pillow" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/1d/0ea0b34bde92a86d42620f29baa6dcbb5c2fc85990316df5cb8f7abb8ea2/torchvision-0.23.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:e0e2c04a91403e8dd3af9756c6a024a1d9c0ed9c0d592a8314ded8f4fe30d440", size = 1856885, upload-time = "2025-08-06T14:58:06.503Z" },
     { url = "https://files.pythonhosted.org/packages/e2/00/2f6454decc0cd67158c7890364e446aad4b91797087a57a78e72e1a8f8bc/torchvision-0.23.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:6dd7c4d329a0e03157803031bc856220c6155ef08c26d4f5bbac938acecf0948", size = 2396614, upload-time = "2025-08-06T14:58:03.116Z" },
     { url = "https://files.pythonhosted.org/packages/e4/b5/3e580dcbc16f39a324f3dd71b90edbf02a42548ad44d2b4893cc92b1194b/torchvision-0.23.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:4e7d31c43bc7cbecbb1a5652ac0106b436aa66e26437585fc2c4b2cf04d6014c", size = 8627108, upload-time = "2025-08-06T14:58:12.956Z" },
     { url = "https://files.pythonhosted.org/packages/82/c1/c2fe6d61e110a8d0de2f94276899a2324a8f1e6aee559eb6b4629ab27466/torchvision-0.23.0-cp312-cp312-win_amd64.whl", hash = "sha256:a2e45272abe7b8bf0d06c405e78521b5757be1bd0ed7e5cd78120f7fdd4cbf35", size = 1600723, upload-time = "2025-08-06T14:57:57.986Z" },
-]
-
-[[package]]
-name = "torchvision"
-version = "0.25.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'linux'",
-    "sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
-dependencies = [
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "pillow" },
-    { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" } },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/3a/6ea0d73f49a9bef38a1b3a92e8dd455cea58470985d25635beab93841748/torchvision-0.25.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c2abe430c90b1d5e552680037d68da4eb80a5852ebb1c811b2b89d299b10573b", size = 1874920, upload-time = "2026-01-21T16:27:45.348Z" },
-    { url = "https://files.pythonhosted.org/packages/51/f8/c0e1ef27c66e15406fece94930e7d6feee4cb6374bbc02d945a630d6426e/torchvision-0.25.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:b75deafa2dfea3e2c2a525559b04783515e3463f6e830cb71de0fb7ea36fe233", size = 2344556, upload-time = "2026-01-21T16:27:40.125Z" },
-    { url = "https://files.pythonhosted.org/packages/68/2f/f24b039169db474e8688f649377de082a965fbf85daf4e46c44412f1d15a/torchvision-0.25.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:f25aa9e380865b11ea6e9d99d84df86b9cc959f1a007cd966fc6f1ab2ed0e248", size = 8072351, upload-time = "2026-01-21T16:27:21.074Z" },
-    { url = "https://files.pythonhosted.org/packages/ad/16/8f650c2e288977cf0f8f85184b90ee56ed170a4919347fc74ee99286ed6f/torchvision-0.25.0-cp312-cp312-win_amd64.whl", hash = "sha256:f9c55ae8d673ab493325d1267cbd285bb94d56f99626c00ac4644de32a59ede3", size = 4303059, upload-time = "2026-01-21T16:27:11.08Z" },
 ]
 
 [[package]]
@@ -5916,7 +5752,7 @@ resolution-markers = [
 dependencies = [
     { name = "filelock" },
     { name = "huggingface-hub" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -5942,7 +5778,7 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "huggingface-hub" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -5960,26 +5796,12 @@ wheels = [
 name = "triton"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-]
 dependencies = [
     { name = "setuptools", version = "79.0.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-16-platoon-appworld-areal') or (platform_machine == 'aarch64' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker') or (sys_platform != 'linux' and extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
+    { name = "setuptools", version = "82.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-16-platoon-appworld-areal') or (extra == 'extra-16-platoon-appworld-areal' and extra == 'extra-16-platoon-appworld-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/66/b1eb52839f563623d185f0927eb3530ee4d5ffe9d377cdaf5346b306689e/triton-3.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:31c1d84a5c0ec2c0f8e8a072d7fd150cab84a9c239eaddc6706c081bfae4eb04", size = 155560068, upload-time = "2025-07-30T19:58:37.081Z" },
-]
-
-[[package]]
-name = "triton"
-version = "3.6.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform == 'linux'",
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/17/5d/08201db32823bdf77a0e2b9039540080b2e5c23a20706ddba942924ebcd6/triton-3.6.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:374f52c11a711fd062b4bfbb201fd9ac0a5febd28a96fb41b4a0f51dde3157f4", size = 176128243, upload-time = "2026-01-20T16:16:07.857Z" },
-    { url = "https://files.pythonhosted.org/packages/ab/a8/cdf8b3e4c98132f965f88c2313a4b493266832ad47fb52f23d14d4f86bb5/triton-3.6.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:74caf5e34b66d9f3a429af689c1c7128daba1d8208df60e81106b115c00d6fca", size = 188266850, upload-time = "2026-01-20T16:00:43.041Z" },
 ]
 
 [[package]]
@@ -6175,7 +5997,7 @@ dependencies = [
     { name = "msgspec" },
     { name = "ninja" },
     { name = "numba" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "openai" },
     { name = "openai-harmony" },
     { name = "opencv-python-headless" },
@@ -6202,9 +6024,9 @@ dependencies = [
     { name = "six" },
     { name = "tiktoken" },
     { name = "tokenizers" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "torchaudio" },
-    { name = "torchvision", version = "0.23.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torchvision" },
     { name = "tqdm" },
     { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
     { name = "typing-extensions" },
@@ -6390,8 +6212,8 @@ name = "xformers"
 version = "0.0.32.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "numpy", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "torch", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6f/33/3b9c4d3d5b2da453d27de891df4ad653ac5795324961aa3a5c15b0353fe6/xformers-0.0.32.post1.tar.gz", hash = "sha256:1de84a45c497c8d92326986508d81f4b0a8c6be4d3d62a29b8ad6048a6ab51e1", size = 12106196, upload-time = "2025-08-14T18:07:45.486Z" }
 wheels = [
@@ -6406,11 +6228,11 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "ninja" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
     { name = "pydantic" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch" },
     { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "triton", version = "3.4.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "triton", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/f6/97dd630f73b6d800f12fb0e9157fbd0cd87f7de5ec63f427be11a01a295a/xgrammar-0.1.24.tar.gz", hash = "sha256:ba1b6bf87535d79db64588a75cb0f563f8a693286e02fac29449bdf874bdafc8", size = 2269893, upload-time = "2025-09-04T08:34:05.54Z" }

@@ -7,7 +7,7 @@ from platoon.envs.base import Task
 from platoon.episode.context import current_trajectory_collection
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import TrajectoryCollection
-from platoon.utils.llm_client import LLMClient
+from platoon.utils.llm_client import LiteLLMClient
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from .agent import AppWorldAgent, AppWorldRecursiveAgent
@@ -19,12 +19,10 @@ logger = getLogger("platoon.textcraft.rollout")
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
     try:
-        llm_client = LLMClient(
+        llm_client = LiteLLMClient(
             model=config.model_name,
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
-            # Disable Qwen3 reasoning/thinking mode for faster inference
-            default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         env = AppWorldEnv(task)
         agent = AppWorldAgent(llm_client=llm_client)
@@ -76,14 +74,12 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
 async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
     try:
-        llm_client = LLMClient(
+        llm_client = LiteLLMClient(
             model=config.model_name,
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
-            # Disable Qwen3 reasoning/thinking mode for faster inference
-            default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )  
-        env = AppWorldRecursiveEnv(task, per_step_subagent_success_reward=0.1, per_step_subagent_reward_ceiling=0.3)
+        )
+        env = AppWorldRecursiveEnv(task, per_step_subagent_success_reward=0.2, per_step_subagent_reward_ceiling=0.4)
         agent = AppWorldRecursiveAgent(llm_client=llm_client)
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)

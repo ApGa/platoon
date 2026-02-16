@@ -43,12 +43,15 @@ override-dependencies = [
     "huggingface_hub==0.34",
     "datasets==4.3.0",
     "networkx==3.3.0", # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
+    "torch==2.8.0",  # Match areal's torch version requirement
+    "torchvision==0.23.0",  # Compatible with torch 2.8.0
+    "numpy<2.3",  # Numba requires NumPy 2.2 or less
 ]
 no-build-isolation-package = ['flash-attn']
 
 [tool.uv.sources]
 platoon = { path = "../..", editable = true }
-appworld = { git = "https://github.com/StonyBrookNLP/appworld.git", lfs = true }
+appworld = { git = "https://github.com/StonyBrookNLP/appworld.git", rev = "58d1c7807a3dd2870f45da716f572909a0d33511", lfs = true }
 
 [tool.ruff]
 line-length = 120

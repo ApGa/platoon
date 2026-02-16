@@ -30,14 +30,23 @@ from platoon.appworld.agent import AppWorldCodeActPromptBuilder
 class AppWorldAsync(AppWorld):
     
     def __init__(
-        self, 
+        self,
         shell_id: str,
-        *args, 
+        *args,
         allow_silent_success: bool = True,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
-       
+        try:
+            super().__init__(*args, **kwargs)
+        except IndexError as e:
+            # Handle freezegun race condition when multiple AppWorld instances
+            # are initialized concurrently and try to clean up shared state
+            if "pop from empty list" in str(e):
+                # Retry initialization once - the close_all() should have completed by now
+                super().__init__(*args, **kwargs)
+            else:
+                raise
+
         self.allow_silent_success = allow_silent_success
         self.shells = {}
         self.register_shell(shell_id)
@@ -81,22 +90,29 @@ class AppWorldAsync(AppWorld):
     
     async def _shell_run_cell(self, shell_id: str, code: str) -> ExecutionResult | None:
         self._maybe_raise_remote_environment_error("_shell_run_cell")
+        shell = self.get_shell(shell_id)
         if self.timeout_seconds is None:
-            return await self.get_shell(shell_id).run_cell_async(code)
+            return await shell.run_cell_async(code)
         try:
             return await async_timeout_call(
-                self.shell.run_cell_async, timeout_seconds=self.timeout_seconds, raw_cell=code
+                shell.run_cell_async, timeout_seconds=self.timeout_seconds, raw_cell=code
             )
         except asyncio.TimeoutError:
             return None
         
     async def execute(self, shell_id: str, code: str) -> CodeActStep:
         
+        code = code.replace("import asyncio\n", "")
+        
         if self.raise_on_unsafe_syntax:
             is_syntax_safe, safety_message = self.safety_guard.is_syntax_safe(code)
             if not is_syntax_safe:
                 message = "Execution failed. Traceback:\n" + safety_message
-                self.environment_io.append({"input": code, "output": message})
+                self.environment_io.append({
+                    "number": self.num_interactions + 1,
+                    "input": code,
+                    "output": message
+                })
                 return CodeActStep(
                     code=code,
                     error=message,
@@ -123,7 +139,11 @@ class AppWorldAsync(AppWorld):
                 + "Message: "
                 + e.msg
             )
-            self.environment_io.append({"input": code, "output": message})
+            self.environment_io.append({
+                "number": self.num_interactions + 1,
+                "input": code,
+                "output": message
+            })
             if self.null_patch_unsafe_execution:
                 self.safety_guard.disable()
             return CodeActStep(
@@ -133,7 +153,11 @@ class AppWorldAsync(AppWorld):
 
         if not code:
             message = "No code available to execute."
-            self.environment_io.append({"input": code, "output": message})
+            self.environment_io.append({
+                "number": self.num_interactions + 1,
+                "input": code,
+                "output": message
+            })
             if self.null_patch_unsafe_execution:
                 self.safety_guard.disable()
             return CodeActStep(
@@ -194,7 +218,11 @@ class AppWorldAsync(AppWorld):
                 cap_stderr = message_
                 cap_stdout = cap_stdout.replace(", use %tb to see the full traceback.", ".")
         
-        self.environment_io.append({"input": code, "output": message.rstrip()})
+        self.environment_io.append({
+            "number": self.num_interactions + 1,  # AppWorld expects a 'number' field for logging
+            "input": code,
+            "output": message.rstrip()
+        })
         if self.null_patch_unsafe_execution:
             self.safety_guard.disable()
         self.num_interactions += 1
@@ -224,18 +252,24 @@ class AppWorldCodeExecutor(CodeExecutor):
         task: Task,
         world: AppWorldAsync | None = None,
         shell_id: str | None = None,
+        experiment_name: str | None = None,
     ):
         self.task = task
         self.shell_id = shell_id
-        
-        if world is None: 
+
+        if world is None:
+            # Generate unique experiment name for parallel rollouts
+            if experiment_name is None:
+                experiment_name = f"platoon-appworld-{task.id}-{uuid.uuid4().hex[:8]}"
+
             self.world = AppWorldAsync(
                 remote_environment_url=None,
                 task_id=task.id,
+                experiment_name=experiment_name,
                 allow_silent_success=True,
                 shell_id=self.shell_id,
                 # This needs to be disabled to allow for writing logs to file when we launch subagents
-                null_patch_unsafe_execution=False, 
+                null_patch_unsafe_execution=False,
             )
         else:
             self.world = world
@@ -253,7 +287,7 @@ class AppWorldCodeExecutor(CodeExecutor):
         return type(self)(self.task, world=self.world, shell_id=self.shell_id)
     
     async def close(self) -> None:
-        await self.world.close()
+        self.world.close()  # AppWorld.close() is synchronous, not async
         
     async def fork(self, task: Task) -> AppWorldCodeExecutor:
         shell_id = str(uuid.uuid4())

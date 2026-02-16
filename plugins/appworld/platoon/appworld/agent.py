@@ -55,7 +55,12 @@ class AppWorldAgent(CodeActAgent):
     ):
         if prompt_builder is None:
             prompt_builder = AppWorldCodeActPromptBuilder(prompt_mode=prompt_mode, include_reasoning=include_reasoning, prompts_dir=prompts_dir)
-        super().__init__(prompt_builder=prompt_builder, prompt_mode=prompt_mode, include_reasoning=include_reasoning, prompts_dir=prompts_dir)
+        super().__init__(
+            prompt_builder=prompt_builder,
+            prompt_mode=prompt_mode,
+            include_reasoning=include_reasoning,
+            **kwargs,
+        )
         
 class AppWorldRecursiveAgent(AppWorldAgent):
 
@@ -69,10 +74,15 @@ class AppWorldRecursiveAgent(AppWorldAgent):
     ):
         if prompt_builder is None:
             prompt_builder = AppWorldRecursiveCodeActPromptBuilder(prompt_mode=prompt_mode, include_reasoning=include_reasoning, prompts_dir=prompts_dir)
-        super().__init__(prompt_builder=prompt_builder, prompt_mode=prompt_mode, include_reasoning=include_reasoning, prompts_dir=prompts_dir)
+        super().__init__(
+            prompt_builder=prompt_builder,
+            prompt_mode=prompt_mode,
+            include_reasoning=include_reasoning,
+            **kwargs,
+        )
 
-    async def fork(self, task: Task) -> AppWorldRecursiveCodeActAgent:
-        return AppWorldRecursiveCodeActAgent(
+    async def fork(self, task: Task) -> AppWorldRecursiveAgent:
+        return AppWorldRecursiveAgent(
             prompt_builder=self.prompt_builder,
             prompt_mode=self.prompt_builder.prompt_mode,
             include_reasoning=self.include_reasoning,
