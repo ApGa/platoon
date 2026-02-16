@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(top:*)"
+      "Bash(top:*)",
+      "Bash(.venv/bin/pip list:*)"
     ]
   }
 }
