@@ -37,6 +37,7 @@ class RolloutConfig:
     timeout: int | None = None  # Trajectory timeout (entire rollout)
     step_timeout: int = 300  # Per-step timeout (agent.act + env.step)
     return_dict: bool = False
+    use_subagent_step_heuristic: bool = False
     inference_params: InferenceParams = field(default_factory=InferenceParams)
 
     def __post_init__(self) -> None:

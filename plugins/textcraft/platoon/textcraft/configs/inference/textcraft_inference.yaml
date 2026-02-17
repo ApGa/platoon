@@ -18,6 +18,7 @@ inference:
       verbose: true
       timeout: 900
       step_timeout: 300
+      use_subagent_step_heuristic: false
 
 dataset_split: val
 num_tasks: 100

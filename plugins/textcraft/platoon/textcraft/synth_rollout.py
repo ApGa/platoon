@@ -91,7 +91,10 @@ async def run_synth_recursive_rollout(task: Task, config: RolloutConfig) -> dict
             # default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         env = create_synth_recursive_env(
-            task, per_step_subagent_success_reward=0.2, per_step_subagent_reward_ceiling=0.4
+            task,
+            per_step_subagent_success_reward=0.2,
+            per_step_subagent_reward_ceiling=0.4,
+            use_subagent_step_heuristic=config.use_subagent_step_heuristic,
         )
         agent = TextCraftRecursiveAgent(
             llm_client=llm_client,

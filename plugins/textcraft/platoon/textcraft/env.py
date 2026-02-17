@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,6 +35,7 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
         inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
+        use_subagent_step_heuristic: bool = False,
     ):
         """Initialize the TextCraft code executor.
 
@@ -44,6 +46,8 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
             inventory: Initial inventory
             _share_inventory: If True, share inventory reference with subagents
             use_synth: If True, use synthetic recipe examples in action space
+            use_subagent_step_heuristic: If True, override model-proposed
+                subagent budgets with a target-aware heuristic.
         """
         # Initialize recipe database from either recipe_db or recipes_dir
         if recipe_db is not None:
@@ -65,6 +69,7 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
             self.inventory = inventory
         else:
             self.inventory = inventory.copy() if inventory else {}
+        self.use_subagent_step_heuristic = use_subagent_step_heuristic
         self.subagent_results: Dict[str, Dict[str, int]] = {}  # subagent_id -> {item: count}
         super().__init__(
             task,
@@ -77,6 +82,47 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
                 safe_asyncio,
             ),
         )
+
+    def estimate_subagent_steps_old(self, targets: Dict[str, int]) -> int:
+        """Estimate subagent budget from target complexity.
+
+        Heuristic components per target:
+        - crafting depth (dominant term)
+        - quantity gap against current inventory
+        - recipe branching (number of ingredients)
+        """
+        if not targets:
+            return 12
+
+        total_steps = 0
+        for item, requested_count in targets.items():
+            requested = max(0, int(requested_count))
+            have = max(0, int(self.inventory.get(item, 0)))
+            missing = max(0, requested - have)
+
+            depth = max(0, int(self.recipe_db.get_crafting_depth(item)))
+            depth_steps = (depth + 1) * 9
+
+            quantity_steps = max(0, missing - 1) * 2
+
+            recipe_steps = 0
+            if self.recipe_db.can_craft(item):
+                recipes = self.recipe_db.get_recipes_for_item(item)
+                if recipes:
+                    max_ingredients = max(len(recipe.ingredients) for recipe in recipes)
+                    recipe_steps = min(8, max_ingredients * 2)
+
+            per_target_steps = 4 + depth_steps + quantity_steps + recipe_steps
+            if missing <= 0:
+                # If already satisfied, keep a small planning/verification budget.
+                per_target_steps = max(4, per_target_steps // 3)
+            total_steps += per_target_steps
+
+        # Small discount for shared planning when multiple targets are delegated together.
+        if len(targets) > 1:
+            total_steps -= (len(targets) - 1) * 3
+
+        return max(12, int(math.ceil(total_steps)))
 
     def craft(self, ingredients: Dict[str, int], target: Tuple[str, int]) -> str:
         """
@@ -297,9 +343,18 @@ class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
         if context:
             goal += f"\n\nContext provided from parent agent: {context}"
 
+        requested_steps = num_steps
+        if self.use_subagent_step_heuristic:
+            num_steps = self._estimate_subagent_steps(targets)
+
         # Use the general launch_subagent function
         # Inventory is shared by reference, so changes propagate automatically
         result = await _launch_subagent(goal=goal, max_steps=num_steps)
+        if self.use_subagent_step_heuristic:
+            return (
+                f"[Subagent budget heuristic] Requested {requested_steps} step(s); "
+                f"using {num_steps} based on targets {targets}.\n{result}"
+            )
 
         return result
 
@@ -416,6 +471,7 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
             inventory=self.inventory,
             _share_inventory=True,  # Share inventory by reference for subagent propagation
             use_synth=self.use_synth,
+            use_subagent_step_heuristic=self.use_subagent_step_heuristic,
         )
 
 
@@ -428,6 +484,7 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
         inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
+        use_subagent_step_heuristic: bool = False,
     ):
         super().__init__(
             task,
@@ -436,6 +493,7 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
             inventory=inventory,
             _share_inventory=_share_inventory,
             use_synth=use_synth,
+            use_subagent_step_heuristic=use_subagent_step_heuristic,
         )
         # Track subagent outcomes for current step: (launched_count, success_count)
         self._subagent_stats_this_step: tuple[int, int] = (0, 0)
@@ -494,6 +552,7 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
             inventory=self.inventory,
             _share_inventory=True,
             use_synth=self.use_synth,
+            use_subagent_step_heuristic=self.use_subagent_step_heuristic,
         )
 
 
@@ -511,6 +570,7 @@ class TextCraftEnv(CodeActEnv):
         initial_inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
+        use_subagent_step_heuristic: bool = False,
     ):
         """Initialize the TextCraft environment.
 
@@ -521,6 +581,8 @@ class TextCraftEnv(CodeActEnv):
             initial_inventory: Initial inventory
             _share_inventory: If True, share inventory reference with subagents
             use_synth: If True, use synthetic recipe examples in action space
+            use_subagent_step_heuristic: If True, override model-proposed
+                subagent budgets with a target-aware heuristic.
         """
         # Default to original recipes if neither is provided
         if recipe_db is None and recipes_dir is None:
@@ -539,11 +601,13 @@ class TextCraftEnv(CodeActEnv):
             inventory=initial_inventory,
             _share_inventory=_share_inventory,
             use_synth=use_synth,
+            use_subagent_step_heuristic=use_subagent_step_heuristic,
         )
         super().__init__(task, code_executor)
         self._recipes_dir = recipes_dir
         self._recipe_db = recipe_db
         self._use_synth = use_synth
+        self._use_subagent_step_heuristic = use_subagent_step_heuristic
         # Always copy initial inventory for bookkeeping (to compare against for evaluation)
         # This is separate from whether the working inventory is shared with parent
         self._initial_inventory = initial_inventory.copy() if initial_inventory else {}
@@ -635,6 +699,7 @@ class TextCraftEnv(CodeActEnv):
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,  # Share inventory by reference for subagent propagation
             use_synth=self._use_synth,
+            use_subagent_step_heuristic=self._use_subagent_step_heuristic,
         )
 
         return forked_env
@@ -683,6 +748,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
         initial_inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
+        use_subagent_step_heuristic: bool = False,
         per_step_subagent_success_reward: float = 0.0,
         per_step_subagent_reward_ceiling: float = float("inf"),
     ):
@@ -693,6 +759,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             initial_inventory=initial_inventory,
             _share_inventory=_share_inventory,
             use_synth=use_synth,
+            use_subagent_step_heuristic=use_subagent_step_heuristic,
         )
         # Use self._recipes_dir and self._initial_inventory which were set by parent class
         # (parent applies defaults: recipes_dir from __file__, inventory from task.misc)
@@ -704,6 +771,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             inventory=self._code_executor.inventory,  # Use parent's executor inventory
             _share_inventory=True,  # Always share since we're using parent's inventory dict
             use_synth=self._use_synth,
+            use_subagent_step_heuristic=self._use_subagent_step_heuristic,
         )
         self._per_step_subagent_success_reward = per_step_subagent_success_reward
         self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
@@ -759,6 +827,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,
             use_synth=self._use_synth,
+            use_subagent_step_heuristic=self._use_subagent_step_heuristic,
             per_step_subagent_success_reward=self._per_step_subagent_success_reward,
             per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
         )

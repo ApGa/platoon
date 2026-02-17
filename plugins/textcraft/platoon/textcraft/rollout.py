@@ -86,7 +86,12 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             # Disable Qwen3 reasoning/thinking mode for faster inference
             default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        env = TextCraftRecursiveEnv(task, per_step_subagent_success_reward=0.1, per_step_subagent_reward_ceiling=0.3)
+        env = TextCraftRecursiveEnv(
+            task,
+            per_step_subagent_success_reward=0.1,
+            per_step_subagent_reward_ceiling=0.3,
+            use_subagent_step_heuristic=config.use_subagent_step_heuristic,
+        )
         agent = TextCraftRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
