@@ -29,8 +29,8 @@ finish(message=<finish-reason>)
 {% endif %}
 
 ## You can also delegate a task to a subagent using the async `launch_subagent` function.
-task1 = launch_subagent(goal="What is the password for my Spotify account? Here is some context that we have gathered so far that you may find useful: ...", max_steps=10)
-task2 = launch_subagent(goal="What is the password for my Venmo account? Here is some context that we have gathered so far that you may find useful: ...", max_steps=10)
+task1 = launch_subagent(goal="What is the password for my Spotify account? Here is some context that we have gathered so far that you may find useful: ...", max_steps=30)
+task2 = launch_subagent(goal="What is the password for my Venmo account? Here is some context that we have gathered so far that you may find useful: ...", max_steps=30)
 results = await asyncio.gather(task1, task2, return_exceptions=True)
 for i, result in enumerate(results):
     if isinstance(result, Exception):
@@ -39,7 +39,7 @@ for i, result in enumerate(results):
         print(f"Task {i+1} completed: {result}")
 
 ## If delegating more involved tasks, you may want to allocate more budget to the subagent.
-result = await launch_subagent(goal="Provide a list of all the orders I have made on Amazon in the last month", max_steps=30)
+result = await launch_subagent(goal="Provide a list of all the orders I have made on Amazon in the last month", max_steps=45)
 print(f"Subagent result: {result}")
 
 

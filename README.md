@@ -145,6 +145,33 @@ uv run python3 -m areal.launcher.local \
 
 See AReaL documentation for distributed training setup.
 
+## Inference Benchmarking
+
+Use the standalone inference workflow to benchmark a model endpoint on a dataset and generate a final report.
+
+```bash
+cd plugins/textcraft
+
+# Uses OpenAI-compatible endpoint settings from config
+uv run python -m platoon.textcraft.run_inference \
+    --config platoon/textcraft/configs/inference/textcraft_inference.yaml
+
+cd ../appworld
+uv run python -m platoon.appworld.run_inference \
+    --config platoon/appworld/configs/inference/appworld_inference.yaml
+```
+
+Outputs are written under `inference.output_dir` from config, including:
+- `rollouts/` with raw trajectory collections per task and rollout
+- `reports/task_results.jsonl` with per-task benchmark records
+- `reports/final_report.json` with aggregate metrics (success, success@k, reward@k, step/time stats)
+
+The benchmarking workflow supports:
+- **Two stages**: collect rollouts first, then generate reports from saved rollouts
+- **Resume**: interrupted runs can continue from completed rollout artifacts
+- **Subprocess isolation**: enable for environments that require isolated rollouts
+- **Single-task quick run**: set `task_id` in config (or CLI override) to benchmark one task
+
 ## Configuration
 
 ### Tinker Config Structure

@@ -6,11 +6,14 @@ Use the visualization CLI via the module entrypoint. Examples use `uv run` as pr
 uv run -m platoon.visualization.cli --help | cat
 ```
 
-- **Tail live events**: Watch one or more JSONL event files (non-recursive).
+- **Tail live events**: Watch one or more JSONL event files.
 
 ```
 # Tail a directory of JSONL event logs
 uv run -m platoon.visualization.cli tail --dir /path/to/logs
+
+# Tail JSONL event logs recursively from a directory root
+uv run -m platoon.visualization.cli tail --rdir /path/to/logs
 
 # Tail specific files
 uv run -m platoon.visualization.cli tail /path/to/run1.jsonl /path/to/run2.jsonl

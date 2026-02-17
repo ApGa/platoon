@@ -25,7 +25,10 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             api_key=config.model_api_key,
         )
         env = AppWorldEnv(task)
-        agent = AppWorldAgent(llm_client=llm_client)
+        agent = AppWorldAgent(
+            llm_client=llm_client,
+            inference_params=config.inference_params,
+        )
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
 
@@ -80,7 +83,10 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             api_key=config.model_api_key,
         )
         env = AppWorldRecursiveEnv(task, per_step_subagent_success_reward=0.2, per_step_subagent_reward_ceiling=0.4)
-        agent = AppWorldRecursiveAgent(llm_client=llm_client)
+        agent = AppWorldRecursiveAgent(
+            llm_client=llm_client,
+            inference_params=config.inference_params,
+        )
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
 

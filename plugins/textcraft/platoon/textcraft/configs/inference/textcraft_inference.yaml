@@ -1,0 +1,31 @@
+# TextCraft inference benchmark config.
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  model_endpoint: null
+  model_api_key: null
+  output_dir: ./inference_results/textcraft
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 16
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 50
+      output_dir: ./inference_results/textcraft/rollouts
+      verbose: true
+      timeout: 900
+      step_timeout: 300
+
+dataset_split: val
+num_tasks: 100
+use_recursive_agent: true
+task_id: null
+# full: run rollouts + report
+# rollouts: only write rollouts to disk (resume-friendly)
+# report: only read existing rollouts and generate report
+stage: full
+shuffle_tasks: false
+seed: 42

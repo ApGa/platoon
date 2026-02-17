@@ -26,7 +26,11 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             # api_key=config.model_api_key
         )
         env = NumberSearchEnv(task)
-        agent = NumberSearchAgent(llm_client=llm_client, include_reasoning=False)
+        agent = NumberSearchAgent(
+            llm_client=llm_client,
+            include_reasoning=False,
+            inference_params=config.inference_params,
+        )
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
 

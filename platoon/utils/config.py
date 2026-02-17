@@ -9,7 +9,7 @@ import logging
 import sys
 from dataclasses import MISSING, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Type, TypeVar
+from typing import Any, Type, TypeVar, get_type_hints
 
 import yaml
 
@@ -34,13 +34,21 @@ def _dataclass_from_dict(cls: Type[T], data: dict) -> T:
     if not is_dataclass(cls):
         return data
 
+    # Resolve postponed annotations (from __future__ import annotations)
+    # so nested dataclass fields are correctly recognized.
+    try:
+        type_hints = get_type_hints(cls)
+    except Exception:
+        type_hints = {}
+
     field_values = {}
     for f in fields(cls):
+        field_type = type_hints.get(f.name, f.type)
         if f.name in data:
             value = data[f.name]
             # Handle nested dataclasses
-            if is_dataclass(f.type) and isinstance(value, dict):
-                field_values[f.name] = _dataclass_from_dict(f.type, value)
+            if is_dataclass(field_type) and isinstance(value, dict):
+                field_values[f.name] = _dataclass_from_dict(field_type, value)
             else:
                 field_values[f.name] = value
         elif f.default is not MISSING:

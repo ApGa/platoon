@@ -87,6 +87,7 @@ class AppWorldRecursiveAgent(AppWorldAgent):
             prompt_mode=self.prompt_builder.prompt_mode,
             include_reasoning=self.include_reasoning,
             llm_client=self.llm_client,
+            inference_params=self.inference_params,
             stuck_in_loop_threshold=self.stuck_in_loop_threshold,
             stuck_in_loop_window=self.stuck_in_loop_window,
         )

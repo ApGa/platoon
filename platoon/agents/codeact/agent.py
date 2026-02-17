@@ -5,6 +5,7 @@ from typing import cast
 
 from openai.types.chat import ChatCompletionMessageParam
 
+from platoon.config_defs import InferenceParams
 from platoon.agents.codeact.prompt_builder import CodeActPromptBuilder, PromptMode
 from platoon.envs.base import Task
 from platoon.envs.codeact import CodeActAction, CodeActObservation
@@ -66,6 +67,7 @@ class CodeActAgent:
         prompt_mode: PromptMode = "sequence_extension",
         include_reasoning: bool = True,
         llm_client: LLMClient | None = None,
+        inference_params: InferenceParams | None = None,
         stuck_in_loop_threshold: int = 4,
         stuck_in_loop_window: int = 3,
     ):
@@ -77,6 +79,7 @@ class CodeActAgent:
         self.prompt_builder = prompt_builder
         self.llm_client = llm_client
         self.include_reasoning = include_reasoning
+        self.inference_params = inference_params or InferenceParams()
         self.stuck_in_loop_threshold = stuck_in_loop_threshold
         self.stuck_in_loop_window = stuck_in_loop_window
 
@@ -122,13 +125,19 @@ class CodeActAgent:
             return self._stuck_in_loop_action()
 
         prompt = cast(list[ChatCompletionMessageParam], self.prompt_builder.build_messages(obs))
-        # TODO: Make inference params configurable.
+        request_kwargs = {
+            "stop": ["</python>"],
+            "max_completion_tokens": self.inference_params.max_completion_tokens,
+        }
+        if self.inference_params.temperature is not None:
+            request_kwargs["temperature"] = self.inference_params.temperature
+        if self.inference_params.top_p is not None:
+            request_kwargs["top_p"] = self.inference_params.top_p
+
         response = await self.llm_client.async_chat_completion(
             prompt,
-            stop=["</python>"],
-            temperature=1.0,
-            top_p=1,
-            max_completion_tokens=512,
+            # Stop sequence is agent-level behavior, not a global rollout knob.
+            **request_kwargs,
         )
         response_text = response.choices[0].message.content or ""
         # NOTE: We only do this conditionally, because with Areal, stop words are not supported.
@@ -149,6 +158,7 @@ class CodeActAgent:
             prompt_builder=self.prompt_builder,
             include_reasoning=self.include_reasoning,
             llm_client=self.llm_client.fork(),
+            inference_params=self.inference_params,
             stuck_in_loop_threshold=self.stuck_in_loop_threshold,
             stuck_in_loop_window=self.stuck_in_loop_window,
         )

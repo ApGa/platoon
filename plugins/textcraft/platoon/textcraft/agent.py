@@ -184,6 +184,7 @@ class TextCraftRecursiveAgent(TextCraftAgent):
             include_reasoning=self.include_reasoning,
             prompt_builder=self.prompt_builder,
             llm_client=self.llm_client.fork(),
+            inference_params=self.inference_params,
             stuck_in_loop_threshold=self.stuck_in_loop_threshold,
             stuck_in_loop_window=self.stuck_in_loop_window,
         )

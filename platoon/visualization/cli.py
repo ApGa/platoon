@@ -17,6 +17,12 @@ def main() -> None:
     tail_p = subparsers.add_parser("tail", help="Tail one or more JSONL event files")
     tail_p.add_argument("paths", nargs="*", help="JSONL files to tail; multiple supported")
     tail_p.add_argument("--dir", dest="dir", default=None, help="Directory of JSONL files to watch (non-recursive)")
+    tail_p.add_argument(
+        "--rdir",
+        dest="rdir",
+        default=None,
+        help="Directory root to recursively find JSONL files to watch",
+    )
 
     # Replay one or more JSONL files with a fixed delay between events
     replay_p = subparsers.add_parser("replay", help="Replay JSONL events from the start with a delay")
@@ -111,10 +117,14 @@ def main() -> None:
             d = Path(args.dir)
             if d.is_dir():
                 paths.extend(sorted(p for p in d.iterdir() if p.suffix.lower() == ".jsonl"))
+        if args.rdir:
+            d = Path(args.rdir)
+            if d.is_dir():
+                paths.extend(sorted(p for p in d.rglob("*.jsonl") if p.is_file()))
         if args.paths:
             paths.extend(Path(p) for p in args.paths)
         if not paths:
-            parser.error("tail: provide at least one path or --dir with JSONL files")
+            parser.error("tail: provide at least one path, --dir, or --rdir with JSONL files")
         run_viewer_from_jsonls(paths)
 
     elif args.cmd == "replay":

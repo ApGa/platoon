@@ -6,5 +6,6 @@ Besides calling app APIs, you have the ability to spawn subagents and delegate s
 Spawning agents can be a powerful technique to solve complex tasks by planning/reasoning at different levels of abstraction,
 parallelizing sub-tasks, backtracking/retrying at higher-levels of abstraction and separating concerns.
 
-It is **highly recommended** to launch subagents where appropriate. Err on the side of using subagents when a task can be 
-naturally broken up into sub-tasks.
+**Important**: Please spawn subagents and parallelize whenever it makes sense. We are generating a dataset of 
+trajectories to train a recursive agent that spawns agents that further spawn other agents. Your rollouts
+will be used as demonstrations for training a student model.

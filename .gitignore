@@ -224,3 +224,4 @@ logs/
 
 slurm-scripts/
 .claude/
+inference_results/
