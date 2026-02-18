@@ -45,7 +45,7 @@ class AppWorldCodeActPromptBuilder(CodeActPromptBuilder):
             with open(task_specs_path, "r") as f:
                 task_specs = json.load(f)
             supervisor = Supervisor(**task_specs["supervisor"])
-            appworld_env_prompts_path = Path(__file__).parent.parent.parent / "envs" / "appworld" / "prompts"
+            appworld_env_prompts_path = Path(__file__).parent / "prompts"
             action_space_description = get_prompt("user-action-space-description", prompts_dir=appworld_env_prompts_path, supervisor=supervisor)
             task = None
             if traj["task"] is not None:
@@ -82,12 +82,12 @@ class AppWorldCodeActPromptBuilder(CodeActPromptBuilder):
                     parsed_thought=step.thought,
                 )
                 if self.prompt_mode == "sequence_extension" and i < len(traj["steps"]) - 1:
+                    obs.history.append(step)
                     continue
                 messages.append(ConversationWithMetadata(
                     messages=self.build_messages(obs, agent_action),
                     misc=step.misc
                 ))
-                obs.history.append(step)
             
         return messages
 
@@ -130,7 +130,7 @@ class AppWorldRecursiveCodeActPromptBuilder(AppWorldCodeActPromptBuilder):
                 else:
                     task = Task.from_dict(traj["task"])
             
-            appworld_env_prompts_path = Path(__file__).parent.parent.parent / "envs" / "appworld" / "prompts"
+            appworld_env_prompts_path = Path(__file__).parent / "prompts"
             action_space_description = get_prompt(
                 "user-recursive-action-space-description",
                 prompts_dir=appworld_env_prompts_path,
@@ -167,12 +167,12 @@ class AppWorldRecursiveCodeActPromptBuilder(AppWorldCodeActPromptBuilder):
                 )
                 if traj["reward"] >= reward_threshold:
                     if self.prompt_mode == "sequence_extension" and i < len(traj["steps"]) - 1:
+                        obs.history.append(step)
                         continue
                     messages.append(ConversationWithMetadata(
                         messages=self.build_messages(obs, agent_action),
                         misc=step.misc
                     ))
-                obs.history.append(step)
             
         return messages
 
