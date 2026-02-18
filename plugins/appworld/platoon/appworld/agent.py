@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
+import json
+
 from platoon.agents.codeact import CodeActAgent, CodeActPromptBuilder, PromptMode
-from platoon.envs.base import Task
-from platoon.envs.codeact import CodeActObservation
-from platoon.utils.prompt_retriever import PromptRetriever
+from platoon.envs.base import SubTask, Task
+from platoon.envs.codeact import CodeActObservation, CodeActStep, CodeActAction
+from platoon.utils.llm_client import ConversationWithMetadata
+from platoon.utils.prompt_retriever import PromptRetriever, get_prompt
+
 
 @dataclass
 class Supervisor:
@@ -28,22 +33,148 @@ class AppWorldCodeActPromptBuilder(CodeActPromptBuilder):
         if "env_specific_system_context" not in context:
             context["env_specific_system_context"] = self.appworld_prompt_retriever.get_prompt("system-env-specific-system-context")
         return super().build_system_prompt(obs, **context)
+    
+    def build_messages_from_traj_dump(self, traj_collection_dump: dict, reward_threshold: float) -> list[ConversationWithMetadata]:
+        messages: list[ConversationWithMetadata] = []
+        
+        for traj in traj_collection_dump["trajectories"].values():
+            if traj["reward"] < reward_threshold:
+                    continue
+            task_id = traj["task"]["id"]
+            task_specs_path = Path(os.environ["APPWORLD_ROOT"]) / "data" / "tasks" / task_id / "specs.json"
+            with open(task_specs_path, "r") as f:
+                task_specs = json.load(f)
+            supervisor = Supervisor(**task_specs["supervisor"])
+            appworld_env_prompts_path = Path(__file__).parent.parent.parent / "envs" / "appworld" / "prompts"
+            action_space_description = get_prompt("user-action-space-description", prompts_dir=appworld_env_prompts_path, supervisor=supervisor)
+            task = None
+            if traj["task"] is not None:
+                if "parent_tasks" in traj["task"]:
+                    task = SubTask.from_dict(traj["task"])
+                else:
+                    task = Task.from_dict(traj["task"])
+            reward = traj["reward"]
+            misc = traj["misc"]
+            history = []
+            
+            obs = CodeActObservation(
+                task=task,
+                reward=reward,
+                misc=misc,
+                history=history,
+                action_space=action_space_description
+            )
+            
+            traj_misc = {
+                "id": traj["id"],
+                "task": traj["task"],
+                "parent_info": traj["parent_info"],
+                "reward": traj["reward"],
+                **traj["misc"],
+            }
+            
+            for i, step_dict in enumerate(traj["steps"]):
+                step = CodeActStep(**step_dict)
+                step.misc["traj_misc"] = traj_misc
+                step.misc["step_num"] = len(obs.history)
+                agent_action = CodeActAction(
+                    parsed_code=step.code,
+                    parsed_thought=step.thought,
+                )
+                if self.prompt_mode == "sequence_extension" and i < len(traj["steps"]) - 1:
+                    continue
+                messages.append(ConversationWithMetadata(
+                    messages=self.build_messages(obs, agent_action),
+                    misc=step.misc
+                ))
+                obs.history.append(step)
+            
+        return messages
 
 class AppWorldRecursiveCodeActPromptBuilder(AppWorldCodeActPromptBuilder):
     def __init__(self, 
         prompt_mode: PromptMode = "sequence_extension", 
         include_reasoning: bool = True, 
         prompts_dir: str | Path | None = None,
-        use_parent_state: bool = False,
     ):
         super().__init__(prompt_mode=prompt_mode, include_reasoning=include_reasoning, prompts_dir=prompts_dir)
         self.appworld_prompt_retriever = PromptRetriever(prompts_dir=Path(__file__).parent / "prompts")
-        self.use_parent_state = use_parent_state
         
     def build_system_prompt(self, obs: CodeActObservation, **context) -> str:
         if "env_specific_system_context" not in context:
             context["env_specific_system_context"] = self.appworld_prompt_retriever.get_prompt("system-recursive-env-specific-system-context")
         return super().build_system_prompt(obs, **context)
+    
+    def build_messages_from_traj_dump(self, traj_collection_dump: dict, reward_threshold: float) -> list[ConversationWithMetadata]:
+        messages: list[ConversationWithMetadata] = []
+        
+        supervisor = None
+
+        for i, traj in enumerate(traj_collection_dump["trajectories"].values()):
+            if i == 0:
+                task_id = traj["task"]["id"]
+                task_specs_path = Path(os.environ["APPWORLD_ROOT"]) / "data" / "tasks" / task_id / "specs.json"
+                with open(task_specs_path, "r") as f:
+                    task_specs = json.load(f)
+                supervisor = Supervisor(**task_specs["supervisor"])
+            
+            if traj["reward"] < reward_threshold:
+                    continue
+            
+            task = None
+            current_task_is_subtask = False
+            if traj["task"] is not None:
+                if "parent_tasks" in traj["task"] and len(traj["task"]["parent_tasks"]) > 0:
+                    task = SubTask.from_dict(traj["task"])
+                    current_task_is_subtask = True
+                else:
+                    task = Task.from_dict(traj["task"])
+            
+            appworld_env_prompts_path = Path(__file__).parent.parent.parent / "envs" / "appworld" / "prompts"
+            action_space_description = get_prompt(
+                "user-recursive-action-space-description",
+                prompts_dir=appworld_env_prompts_path,
+                supervisor=supervisor,
+                current_task_is_subtask=current_task_is_subtask
+            )
+            reward = traj["reward"]
+            misc = traj["misc"]
+            history = []
+            
+            obs = CodeActObservation(
+                task=task,
+                reward=reward,
+                misc=misc,
+                history=history,
+                action_space=action_space_description
+            )
+            
+            traj_misc = {
+                "id": traj["id"],
+                "task": traj["task"],
+                "parent_info": traj["parent_info"],
+                "reward": traj["reward"],
+                **traj["misc"],
+            }
+
+            for i, step_dict in enumerate(traj["steps"]):
+                step = CodeActStep(**step_dict)
+                step.misc["traj_misc"] = traj_misc
+                step.misc["step_num"] = len(obs.history)
+                agent_action = CodeActAction(
+                    parsed_code=step.code,
+                    parsed_thought=step.thought,
+                )
+                if traj["reward"] >= reward_threshold:
+                    if self.prompt_mode == "sequence_extension" and i < len(traj["steps"]) - 1:
+                        continue
+                    messages.append(ConversationWithMetadata(
+                        messages=self.build_messages(obs, agent_action),
+                        misc=step.misc
+                    ))
+                obs.history.append(step)
+            
+        return messages
 
 class AppWorldAgent(CodeActAgent):
     def __init__(self,
@@ -68,7 +199,6 @@ class AppWorldRecursiveAgent(AppWorldAgent):
         prompt_mode: PromptMode = "sequence_extension", 
         include_reasoning: bool = True, 
         prompts_dir: str | Path | None = None,
-        use_parent_state: bool = False,
         prompt_builder: AppWorldRecursiveCodeActPromptBuilder | None = None,
         **kwargs,
     ):
