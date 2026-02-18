@@ -27,6 +27,33 @@ from platoon.utils.prompt_retriever import PromptRetriever
 from platoon.appworld.agent import AppWorldCodeActPromptBuilder
 
 
+def _patch_freezegun_idempotent_stop() -> None:
+    """Make freeze_time.stop() idempotent to handle stale Requester entries.
+
+    When a task finishes and AppWorld.close() is called, time freezers are
+    stopped. However, class-level Requester state may still hold references to
+    those stopped freezers. When the next task calls AppWorld.close_all() during
+    initialize(), it attempts to stop already-stopped freezers, causing
+    freeze_factories.pop() to raise IndexError on an empty list. Making stop()
+    silently ignore that case fixes sequential task execution in subprocess
+    workers without modifying the appworld library.
+    """
+    from appworld.common.time import freeze_time as _AppWorldFreezeTime
+
+    original_stop = _AppWorldFreezeTime.stop
+
+    def _safe_stop(self: _AppWorldFreezeTime) -> None:
+        try:
+            original_stop(self)
+        except IndexError:
+            pass  # Freezer was already stopped; treat as a no-op.
+
+    _AppWorldFreezeTime.stop = _safe_stop  # type: ignore[method-assign]
+
+
+_patch_freezegun_idempotent_stop()
+
+
 class AppWorldAsync(AppWorld):
     
     def __init__(
@@ -58,7 +85,51 @@ class AppWorldAsync(AppWorld):
     
     def register_shell(self, shell_id: str) -> None:
         self.shells[shell_id] = self._create_shell()
+
+    def unregister_shell(self, shell_id: str | None) -> None:
+        if shell_id is None:
+            return
+        shell = self.shells.pop(shell_id, None)
+        if shell is None:
+            return
+        # Best-effort cleanup of shell state for forked subagent contexts.
+        shell.user_ns.clear()
     
+    def _run_shell_preamble(self, shell: "InteractiveShellEmbed") -> None:
+        """Run the lightweight import/print/input preamble in a new shell.
+
+        Replicates the shell.run_cell(preamble) part of _execute_preamble()
+        but skips ApiCollection.load().  This avoids expensive set_local_dbs()
+        + freeze creation on every shell (primary and all subagent forks).
+        All AppWorldAsync shells share the primary apis/requester that was
+        set up by AppWorld.initialize().
+        """
+        import os as _os
+
+        from appworld.environment import TRUE_AVAILABLE_IMPORTS
+
+        preamble = TRUE_AVAILABLE_IMPORTS + "\n\n"
+        if self.import_utils:
+            from appworld.common.utils import read_file
+
+            file_path = _os.path.join("generate", "tasks", "task_generators", "imports.py")
+            utils_import_code = read_file(file_path).strip()
+            preamble += utils_import_code
+        preamble += dedent(
+            """
+    def print(*args, **kwargs):
+        if not kwargs and len(args) == 1 and isinstance(args[0], (list, tuple, dict)):
+            indent = 1 if len(json.dumps(args[0])) >= 100 else None
+            builtins.print(json.dumps(args[0], indent=indent))
+        else:
+            builtins.print(*args, **kwargs)
+
+    def input(*args, **kwargs):
+        raise Exception("input(..) is not allowed. All decisions must be made autonomously.")
+    """
+        )
+        shell.run_cell(preamble)
+
     def _create_shell(self) -> InteractiveShellEmbed:
         original_excepthook = sys.excepthook
         config = Config()
@@ -66,26 +137,37 @@ class AppWorldAsync(AppWorld):
             False  # history keeps files open preventing making > ~50 envs.
         )
         shell = InteractiveShellEmbed(config=config)
-        old_shell = self.shell
-        self.shell = shell
-        self._execute_preamble()
-        self.shell = old_shell
+        # Run only the lightweight preamble (imports + print/input overrides).
+        # All AppWorldAsync shells share the primary apis/requester set up by
+        # AppWorld.initialize().  Calling _execute_preamble() here would run
+        # the expensive ApiCollection.load() + set_local_dbs() and start a new
+        # time freeze for every shell (primary shell + every subagent fork),
+        # all of which would be immediately discarded.
+        self._run_shell_preamble(shell)
+        shell.user_ns["apis"] = self.apis
+        shell.user_ns["requester"] = self.requester
+        if self.include_direct_functions:
+            separator = self.direct_function_separator
+            sub_codes = [
+                f"{app_name}{separator}{api_name} = apis.{app_name}.{api_name}"
+                for app_name, info in self.apis.items()
+                for api_name in info.keys()
+            ]
+            shell.run_cell("\n".join(sub_codes))
         sys.excepthook = (
             original_excepthook  # prevents it from changing traceback format globally
         )
         shell.user_ns["finish"] = finish
         shell.user_ns["launch_subagent"] = launch_subagent
         shell.user_ns["asyncio"] = safe_asyncio
-        
+
         sandboxed_import = _make_sandboxed_import(safe_asyncio)
         existing_builtins = shell.user_ns.get("__builtins__")
         if isinstance(existing_builtins, dict):
-            # Create a copy of the builtins dict
             shell.user_ns["__builtins__"] = {**existing_builtins, "__import__": sandboxed_import}
         else:
-            # __builtins__ is a module - convert to dict with our custom import
             shell.user_ns["__builtins__"] = {**vars(existing_builtins), "__import__": sandboxed_import}
-        
+
         return shell
     
     async def _shell_run_cell(self, shell_id: str, code: str) -> ExecutionResult | None:
@@ -253,6 +335,7 @@ class AppWorldCodeExecutor(CodeExecutor):
         world: AppWorldAsync | None = None,
         shell_id: str | None = None,
         experiment_name: str | None = None,
+        owns_world: bool | None = None,
     ):
         self.task = task
         self.shell_id = shell_id
@@ -271,8 +354,10 @@ class AppWorldCodeExecutor(CodeExecutor):
                 # This needs to be disabled to allow for writing logs to file when we launch subagents
                 null_patch_unsafe_execution=False,
             )
+            self.owns_world = True if owns_world is None else owns_world
         else:
             self.world = world
+            self.owns_world = False if owns_world is None else owns_world
         
         self.task.goal = task.goal or self.world.task.instruction
         self.prompt_retriever = PromptRetriever(prompts_dir=Path(__file__).parent / "prompts")
@@ -284,14 +369,29 @@ class AppWorldCodeExecutor(CodeExecutor):
         return self.prompt_retriever.get_prompt("user-action-space-description", supervisor=self.world.task.supervisor)
     
     async def reset(self) -> AppWorldCodeExecutor:
-        return type(self)(self.task, world=self.world, shell_id=self.shell_id)
+        return type(self)(
+            self.task,
+            world=self.world,
+            shell_id=self.shell_id,
+            owns_world=self.owns_world,
+        )
     
     async def close(self) -> None:
-        self.world.close()  # AppWorld.close() is synchronous, not async
+        if self.owns_world:
+            self.world.close()  # AppWorld.close() is synchronous, not async
+        else:
+            self.world.unregister_shell(self.shell_id)
         
     async def fork(self, task: Task) -> AppWorldCodeExecutor:
         shell_id = str(uuid.uuid4())
-        return type(self)(task, world=await self.world.fork(shell_id), shell_id=shell_id)
+        return type(
+            self
+        )(
+            task,
+            world=await self.world.fork(shell_id),
+            shell_id=shell_id,
+            owns_world=False,
+        )
     
 
 class AppWorldRecursiveCodeExecutor(AppWorldCodeExecutor):

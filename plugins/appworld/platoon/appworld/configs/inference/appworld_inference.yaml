@@ -3,24 +3,24 @@ inference:
   model_name: litellm_proxy/neulab/claude-opus-4-5-20251101
   model_endpoint: https://cmu.litellm.ai
   model_api_key: null
-  output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-recursive
+  output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-recursivev3
   resume: true
   workflow:
     num_rollouts_per_task: 1
-    num_concurrent_workers: 8
+    num_concurrent_workers: 4
     success_threshold: 1.0
     fail_fast: false
     use_subprocesses: true
     subprocess_max_workers: 10
     rollout_config:
       max_steps: 75
-      output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-recursive/rollouts
+      output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-recursivev3/rollouts
       verbose: true
       timeout: 1800
       step_timeout: 1800
       codeact_inference_params:
         temperature: 0.7
-        max_completion_tokens: 1024
+        max_completion_tokens: 2048
 
 dataset_split: train
 num_tasks: 90

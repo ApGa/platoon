@@ -317,7 +317,7 @@ class LiteLLMClient:
         messages: list[ChatCompletionMessageParam],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        auto_add_cache_control: bool = False,
+        auto_add_cache_control: bool = True,
         **kwargs: Any,
     ) -> ChatCompletion:
         """Make an async chat completion request through LiteLLM.
@@ -335,6 +335,13 @@ class LiteLLMClient:
         Raises:
             Exception: If the API call fails.
         """
+        
+        if auto_add_cache_control:
+            for message in messages:
+                if isinstance(message["content"], str):
+                    message["content"] = [{"type": "text", "text": message["content"]}]
+            messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+        
         try:
             response = await litellm.acompletion(
                 model=self.model,

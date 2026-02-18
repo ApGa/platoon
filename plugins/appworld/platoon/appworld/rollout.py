@@ -18,6 +18,7 @@ logger = getLogger("platoon.textcraft.rollout")
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
+    episode_started = False
     try:
         llm_client = LiteLLMClient(
             model=config.model_name,
@@ -42,6 +43,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             logger.info(f"Process {os.getpid()}: Starting rollout for task {task.id}")
 
         rollout_task = asyncio.create_task(run_episode(agent, env, timeout=config.step_timeout))
+        episode_started = True
 
         try:
             _ = await asyncio.wait_for(rollout_task, timeout=config.timeout)
@@ -68,14 +70,18 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             print(f"Error running rollout for task {task.id}: {e}")
         raise
     finally:
-        if agent is not None:
-            await agent.close()
-        if env is not None:
-            await env.close()
+        # run_episode() owns agent/env shutdown once started.
+        # We only clean up here if startup failed before run_episode was launched.
+        if not episode_started:
+            if agent is not None:
+                await agent.close()
+            if env is not None:
+                await env.close()
 
 
 async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
+    episode_started = False
     try:
         llm_client = LiteLLMClient(
             model=config.model_name,
@@ -100,6 +106,7 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             logger.info(f"Process {os.getpid()}: Starting rollout for task {task.id}")
 
         rollout_task = asyncio.create_task(run_episode(agent, env, timeout=config.step_timeout))
+        episode_started = True
 
         try:
             _ = await asyncio.wait_for(rollout_task, timeout=config.timeout)
@@ -126,7 +133,10 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             print(f"Error running rollout for task {task.id}: {e}")
         raise
     finally:
-        if agent is not None:
-            await agent.close()
-        if env is not None:
-            await env.close()
+        # run_episode() owns agent/env shutdown once started.
+        # We only clean up here if startup failed before run_episode was launched.
+        if not episode_started:
+            if agent is not None:
+                await agent.close()
+            if env is not None:
+                await env.close()
