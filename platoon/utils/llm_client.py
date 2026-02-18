@@ -317,7 +317,7 @@ class LiteLLMClient:
         messages: list[ChatCompletionMessageParam],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        auto_add_cache_control: bool = True,
+        auto_add_cache_control: bool = False,
         **kwargs: Any,
     ) -> ChatCompletion:
         """Make an async chat completion request through LiteLLM.
