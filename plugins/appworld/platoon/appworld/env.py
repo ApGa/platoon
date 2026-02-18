@@ -442,8 +442,9 @@ class AppWorldRecursiveCodeExecutor(AppWorldCodeExecutor):
                         reward_misc = final_step.misc.get("reward_misc", {})
                         # For AppWorld subtasks, we use the rubric-based evaluation
                         # Check if evaluation was successful (score > 0)
-                        if reward_misc.get("success", False) or final_step.reward > 0:
-                            succeeded += 1
+                        # if reward_misc.get("success", False) or final_step.reward > 0:
+                        #     succeeded += 1
+                        succeeded = final_step.reward
 
         self._subagent_stats_this_step = (launched, succeeded)
         return result
