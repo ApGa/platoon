@@ -25,18 +25,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
         )
-        # AppWorldEnv.__init__ calls AppWorld() synchronously, which starts REST API
-        # servers and databases. Running it in an executor keeps the event loop
-        # responsive so asyncio timeouts can still fire during initialization.
-        loop = asyncio.get_running_loop()
-        try:
-            env = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: AppWorldEnv(task)),
-                timeout=120.0,
-            )
-        except asyncio.TimeoutError:
-            print(f"[AppWorldRollout] AppWorld init timeout (120s) for task {task.id} — aborting rollout")
-            raise
+        env = AppWorldEnv(task)
         agent = AppWorldAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
@@ -99,25 +88,7 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
         )
-        # AppWorldRecursiveEnv.__init__ calls AppWorld() synchronously, which starts REST
-        # API servers and databases. Running it in an executor keeps the event loop
-        # responsive so asyncio timeouts can still fire during initialization.
-        loop = asyncio.get_running_loop()
-        try:
-            env = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: AppWorldRecursiveEnv(
-                        task,
-                        per_step_subagent_success_reward=0.2,
-                        per_step_subagent_reward_ceiling=0.4,
-                    ),
-                ),
-                timeout=120.0,
-            )
-        except asyncio.TimeoutError:
-            print(f"[AppWorldRollout] AppWorld init timeout (120s) for task {task.id} — aborting rollout")
-            raise
+        env = AppWorldRecursiveEnv(task, per_step_subagent_success_reward=0.2, per_step_subagent_reward_ceiling=0.4)
         agent = AppWorldRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
