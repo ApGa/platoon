@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, TypeAlias, TypedDict, cast
 
 import litellm
@@ -312,6 +313,18 @@ class LiteLLMClient:
         self.base_url = base_url
         self.api_key = api_key
 
+    @staticmethod
+    def _sanitize_error_message(err: Exception, max_len: int = 800) -> str:
+        """Collapse oversized payload dumps in exception text to keep logs readable."""
+        msg = str(err)
+        # Replace huge token dumps like {'input_ids': [...]} with a short marker.
+        msg = re.sub(r"'input_ids':\s*\[[^\]]*\]", "'input_ids': [<omitted>]", msg)
+        # Avoid printing entire request payload blobs when providers include them in errors.
+        msg = re.sub(r"Payload:\s*\{.*\}\s*$", "Payload: <omitted>", msg, flags=re.DOTALL)
+        if len(msg) > max_len:
+            msg = f"{msg[:max_len]}... [truncated]"
+        return msg
+
     async def async_chat_completion(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -341,7 +354,11 @@ class LiteLLMClient:
                 if isinstance(message["content"], str):
                     message["content"] = [{"type": "text", "text": message["content"]}]
             messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
-        
+
+        # Disable LiteLLM internal retries by default to prevent long rollout slot blocking.
+        # Callers can still override by explicitly passing num_retries in kwargs.
+        kwargs.setdefault("num_retries", 0)
+
         try:
             response = await litellm.acompletion(
                 model=self.model,
@@ -361,8 +378,9 @@ class LiteLLMClient:
             return cast(ChatCompletion, response)
 
         except Exception as e:
-            print(f"LiteLLMClient async_chat_completion failed: {str(e)}")
-            raise Exception(f"LiteLLM API call failed: {str(e)}")
+            sanitized = self._sanitize_error_message(e)
+            print(f"LiteLLMClient async_chat_completion failed: {sanitized}")
+            raise RuntimeError(f"LiteLLM API call failed: {sanitized}") from e
 
     async def aclose(self) -> None:
         """Close the client connection (no-op for LiteLLM)."""

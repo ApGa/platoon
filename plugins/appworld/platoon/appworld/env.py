@@ -343,7 +343,7 @@ class AppWorldCodeExecutor(CodeExecutor):
         if world is None:
             # Generate unique experiment name for parallel rollouts
             if experiment_name is None:
-                experiment_name = f"platoon-appworld-{task.id}-{uuid.uuid4().hex[:8]}"
+                experiment_name = f"platoon-appworld-{task.id}-{uuid.uuid4().hex}"
 
             self.world = AppWorldAsync(
                 remote_environment_url=None,
@@ -378,7 +378,18 @@ class AppWorldCodeExecutor(CodeExecutor):
     
     async def close(self) -> None:
         if self.owns_world:
-            self.world.close()  # AppWorld.close() is synchronous, not async
+            # AppWorld.close() is synchronous and can block indefinitely (e.g.
+            # database teardown or freezegun cleanup after a cancelled rollout).
+            # Run it in a thread so asyncio.wait_for can impose a deadline.
+            # If it times out, the subprocess will be killed by SIGALRM anyway.
+            loop = asyncio.get_running_loop()
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, self.world.close),
+                    timeout=30.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass  # Best-effort; SIGALRM will clean up the subprocess
         else:
             self.world.unregister_shell(self.shell_id)
         

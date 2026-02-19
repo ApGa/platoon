@@ -121,7 +121,20 @@ def patch_proxy_chat_template_kwargs():
                 )
                 return completion
             except ValueError as e:
-                raise HTTPException(status_code=500, detail=str(e))
+                # Keep request-validation/type errors as explicit client-facing failures.
+                raise HTTPException(status_code=400, detail=str(e))
+            except RuntimeError as e:
+                # Convert engine/runtime failures (e.g. context overflow after retries)
+                # into a structured HTTP error instead of an uncaught ASGI exception.
+                detail = str(e)
+                status_code = 400 if "maximum context length" in detail.lower() else 502
+                raise HTTPException(status_code=status_code, detail=detail)
+            except Exception as e:
+                logger.exception("Unexpected proxy chat completion failure for session %s", session_id)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Unexpected proxy chat completion failure: {e}",
+                )
 
         return app
 

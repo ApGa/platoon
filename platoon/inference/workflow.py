@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
@@ -224,7 +225,7 @@ class DefaultInferenceGroupWorkflow:
     def _get_or_create_process_pool(self) -> ProcessPoolExecutor:
         if self._process_pool is None:
             max_workers = self.config.subprocess_max_workers or self.config.num_concurrent_workers
-            self._process_pool = ProcessPoolExecutor(max_workers=max_workers)
+            self._process_pool = ProcessPoolExecutor(max_workers=max_workers, mp_context=mp.get_context("spawn"))
         return self._process_pool
 
     async def arun_rollout(self, data: dict[str, Any], rollout_index: int, output_dir: str) -> InferenceRolloutRecord:

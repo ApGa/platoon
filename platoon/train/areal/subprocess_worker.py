@@ -10,7 +10,25 @@ to run rollouts in isolation. The worker:
 
 import asyncio
 import importlib
+import os
+import signal
 from typing import Any
+
+
+def _hard_timeout_handler(_signum, _frame):
+    """SIGALRM handler: kill the subprocess process group when it hangs past the deadline.
+
+    AppWorld spawns child processes (REST API servers, database services) that must
+    be killed alongside the subprocess worker. Using os.killpg() instead of os._exit()
+    ensures the entire process group (worker + all AppWorld children) is killed.
+    This prevents orphaned AppWorld processes from blocking ports/resources and
+    causing subsequent rollouts to hang during initialization.
+    """
+    print("[SubprocessWorker] Hard timeout exceeded — killing subprocess process group")
+    try:
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    except Exception:
+        os._exit(1)
 
 
 def run_rollout_subprocess(
@@ -29,6 +47,14 @@ def run_rollout_subprocess(
     - Running async rollout in subprocess's event loop
     - Exception handling and logging
 
+    A SIGALRM hard timeout is set to guarantee the subprocess exits even if
+    synchronous blocking code (AppWorld __init__ or close()) prevents the
+    internal asyncio timeouts from firing.
+
+    The subprocess is placed in its own process group so that SIGALRM kills
+    the worker AND all AppWorld child processes (REST API servers, databases),
+    preventing orphaned processes from blocking resources for subsequent rollouts.
+
     Args:
         rollout_fn_module: Module path for the rollout function (e.g., "platoon.textcraft.rollout")
         rollout_fn_name: Name of the rollout function (e.g., "run_rollout")
@@ -41,6 +67,24 @@ def run_rollout_subprocess(
         Trajectory data dict with "trajectories" key, or None if rollout failed.
         The rollout function's internal timeouts are respected.
     """
+    # Place this worker in its own process group so SIGALRM can kill the entire
+    # group (worker + AppWorld child processes) without affecting the parent.
+    try:
+        os.setpgrp()
+    except Exception:
+        pass
+
+    # Hard timeout = rollout timeout + AppWorld init budget (120s) + cleanup grace (60s).
+    # This fires via SIGALRM if synchronous blocking code (AppWorld init/close)
+    # prevents the asyncio-level timeouts from working.
+    hard_timeout = int(
+        (config_dict.get("timeout") or 900)
+        + 120  # AppWorld init budget (matches asyncio.wait_for in rollout.py)
+        + 60   # cleanup grace
+    )
+    old_handler = signal.signal(signal.SIGALRM, _hard_timeout_handler)
+    signal.alarm(hard_timeout)
+
     try:
         # Dynamic imports - allows subprocess to work with any plugin
         rollout_module = importlib.import_module(rollout_fn_module)
@@ -73,3 +117,7 @@ def run_rollout_subprocess(
 
         traceback.print_exc()
         return None
+
+    finally:
+        signal.alarm(0)  # Cancel the alarm if we finish normally
+        signal.signal(signal.SIGALRM, old_handler)

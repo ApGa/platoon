@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from concurrent.futures import ProcessPoolExecutor
 
 import torch
+import multiprocessing as mp
 from areal.api.engine_api import InferenceEngine
 from areal.api.workflow_api import RolloutWorkflow
 from areal.experimental.openai.proxy import ProxyServer
@@ -266,18 +267,42 @@ class StepWiseArealWorkflow(RolloutWorkflow):
             str(engine.get_version()),
         )
 
-        # Run rollout in subprocess
-        loop = asyncio.get_event_loop()
-        trajectory_data = await loop.run_in_executor(
-            executor,
-            run_rollout_subprocess,
-            self.rollout_fn.__module__,
-            self.rollout_fn.__name__,
-            self.get_task_fn.__module__,
-            self.get_task_fn.__name__,
-            task_id,
-            asdict(config.rollout_config),  # Serialize config to dict
-        )
+        # Hard timeout in the parent: rollout timeout + AppWorld init budget (120s)
+        # + grace for cleanup (60s). AppWorldEnv.__init__ runs synchronously and
+        # can take up to 120s; this budget ensures the subprocess has time to
+        # complete init + run the full rollout before the parent gives up.
+        # If the subprocess is still stuck after this, SIGALRM will force-kill it.
+        hard_timeout = (self.config.rollout_config.timeout or 900) + 120 + 60
+
+        # Run rollout in subprocess. If subprocess/executor-level failures happen
+        # (e.g. BrokenProcessPool), treat them as a failed rollout and continue.
+        try:
+            loop = asyncio.get_running_loop()
+            trajectory_data = await asyncio.wait_for(
+                loop.run_in_executor(
+                    executor,
+                    run_rollout_subprocess,
+                    self.rollout_fn.__module__,
+                    self.rollout_fn.__name__,
+                    self.get_task_fn.__module__,
+                    self.get_task_fn.__name__,
+                    task_id,
+                    asdict(config.rollout_config),  # Serialize config to dict
+                ),
+                timeout=hard_timeout,
+            )
+        except asyncio.TimeoutError:
+            print(
+                f"[StepWiseWorkflow] Subprocess hard timeout ({hard_timeout}s) for task {task_id}, "
+                f"rollout {rollout_number} — subprocess will self-terminate via SIGALRM"
+            )
+            return None
+        except Exception as e:
+            print(
+                f"[StepWiseWorkflow] Subprocess execution failed for task {task_id}, "
+                f"rollout {rollout_number}: {e}"
+            )
+            return None
 
         # Process result using shared helper
         return self._process_trajectory_result(trajectory_data, session, task_id, rollout_number)
@@ -305,20 +330,24 @@ class StepWiseArealWorkflow(RolloutWorkflow):
             await session.__aenter__()
             sessions.append(session)
 
+        # Create the executor manually (not via `with`) so we can call
+        # shutdown(wait=False): the context-manager form uses wait=True, which
+        # would block here if any subprocess is stuck past its asyncio timeout.
+        # Orphaned subprocesses will self-terminate via the SIGALRM set in
+        # run_rollout_subprocess.
+        executor = ProcessPoolExecutor(max_workers=self.config.group_size, mp_context=mp.get_context("spawn"))
         try:
-            # Run all rollouts in parallel using shared executor
-            # ProcessPoolExecutor manages subprocess lifecycle
-            with ProcessPoolExecutor(max_workers=self.config.group_size) as executor:
-                results = await asyncio.gather(
-                    *[
-                        self._arun_episode_subprocess_single(executor, engine, data, session, i)
-                        for i, session in enumerate(sessions)
-                    ]
-                )
+            results = await asyncio.gather(
+                *[
+                    self._arun_episode_subprocess_single(executor, engine, data, session, i)
+                    for i, session in enumerate(sessions)
+                ]
+            )
 
             return results
 
         finally:
+            executor.shutdown(wait=False, cancel_futures=True)
             for session in sessions:
                 await session.__aexit__(None, None, None)
 
