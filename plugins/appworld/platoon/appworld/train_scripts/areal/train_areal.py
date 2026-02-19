@@ -59,7 +59,7 @@ def main(args):
             "train_rollout",
             trainer.actor.device,
             reward_processor=reward_processor,
-            filter_errors=True,
+            filter_errors=False,
         )
         
         eval_workflow_config = deepcopy(config.workflow_config)
@@ -73,7 +73,7 @@ def main(args):
             "eval_rollout",
             trainer.actor.device,
             reward_processor=reward_processor,
-            filter_errors=True,
+            filter_errors=False,
         )
 
         trainer.train(

@@ -40,8 +40,8 @@ workflow_config:
     output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-14b-linear-trial-0
     verbose: True
     train: true
-    timeout: 7200
-    step_timeout: 7200
+    timeout: 900
+    step_timeout: 600
     inference_params:
       temperature: 1.0
       max_completion_tokens: 2048
