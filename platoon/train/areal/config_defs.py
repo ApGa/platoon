@@ -16,6 +16,8 @@ class WorkflowConfig:
     group_size: int = 1
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)
     use_subprocesses: bool = False  # Enable subprocess-based rollouts for isolation
+    leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
+    depth_level_weighting: bool = False  # Weight trajectories inversely by depth-level frequency
 
 
 @dataclass
