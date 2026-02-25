@@ -1,10 +1,13 @@
-from .agent import TextCraftAgent, TextCraftPromptBuilder
+from .agent import TextCraftAgent, TextCraftDepthAwareAgent, TextCraftPromptBuilder
 from .env import (
     TextCraftCodeExecutor,
+    TextCraftDepthAwareCodeExecutor,
+    TextCraftDepthAwareEnv,
     TextCraftEnv,
     TextCraftRecursiveCodeExecutor,
     TextCraftRecursiveEnv,
     # Factory functions for synthetic recipes
+    create_synth_depth_aware_env,
     create_synth_env,
     create_synth_recursive_env,
 )
@@ -30,6 +33,10 @@ __all__ = [
     "TextCraftCodeExecutor",
     "TextCraftRecursiveEnv",
     "TextCraftRecursiveCodeExecutor",
+    # Depth-aware recursive (independent per-agent budgets, depth-capped)
+    "TextCraftDepthAwareAgent",
+    "TextCraftDepthAwareCodeExecutor",
+    "TextCraftDepthAwareEnv",
     "get_task",
     "get_task_ids",
     "load_task_from_disk",
@@ -38,6 +45,7 @@ __all__ = [
     # Use these factory functions to create envs with synth recipes
     "create_synth_env",
     "create_synth_recursive_env",
+    "create_synth_depth_aware_env",
     "get_synth_task",
     "get_synth_task_ids",
     "get_synth_task_ids_by_difficulty",

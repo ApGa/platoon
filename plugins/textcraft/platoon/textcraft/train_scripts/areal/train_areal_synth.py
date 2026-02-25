@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.WARNING)  # Quiet by default
 logging.getLogger("platoon.train.areal.workflows").setLevel(logging.DEBUG)
 logging.getLogger("httpx").setLevel(logging.WARNING)  # Silence httpx spam
 
-from platoon.textcraft.synth_rollout import run_synth_rollout, run_synth_recursive_rollout  # noqa: E402
+from platoon.textcraft.synth_rollout import run_synth_rollout, run_synth_recursive_rollout, run_synth_depth_aware_rollout  # noqa: E402
 from platoon.textcraft.synth_tasks import (  # noqa: E402
     Difficulty,
     get_synth_task,
@@ -38,6 +38,7 @@ class TextCraftSynthArealTrainerConfig(PlatoonArealRLTrainerConfig):
     train_difficulties: list[str] | None = None
     eval_difficulties: list[str] | None = None
     recursive: bool = False
+    depth_aware: bool = False
 
 def reward_processor(traj: dict) -> tuple[float, dict]:
     """Process trajectory rewards, extracting individual reward components."""
@@ -114,7 +115,9 @@ def main(args):
     logger.info(f"Train dataset: {len(train_dataset)} tasks")
     logger.info(f"Eval dataset: {len(val_dataset)} tasks")
 
-    if config.recursive:
+    if config.depth_aware:
+        rollout_fn = run_synth_depth_aware_rollout
+    elif config.recursive:
         rollout_fn = run_synth_recursive_rollout
     else:
         rollout_fn = run_synth_rollout

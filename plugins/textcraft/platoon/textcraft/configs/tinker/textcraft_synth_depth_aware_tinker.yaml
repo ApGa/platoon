@@ -1,0 +1,77 @@
+# TextCraft-Synth Depth-Aware Tinker Training Configuration
+# Uses DepthAwareStepBudgetTracker: each agent gets 25 independent steps,
+# subagent steps do NOT consume parent budget, tree depth capped at 12.
+
+# Training configuration
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 16
+  num_epochs: 30
+  max_training_steps: 100
+  num_minibatches: 1
+  num_microbatches: 2
+  max_staleness: 3
+  lora_rank: 32
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 3e-5
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    grad_clip_norm: 1e12
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      max_steps: 200
+      output_dir: ./rollout_results
+      verbose: true
+      timeout: 7200
+      step_timeout: 7200
+  num_concurrent_rollout_workflow_workers: 16
+  context_window_length: 8192
+
+
+# Eval configuration
+eval:
+  strategy: step
+  every: 5
+  num_concurrent_rollout_workflow_workers: 32
+  workflow_config:
+    group_size: 1
+    rollout_config:
+      max_steps: 200
+      output_dir: ./eval_results
+      verbose: false
+      timeout: 7200
+      step_timeout: 7200
+
+# Checkpoint configuration
+checkpoint:
+  strategy: step
+  every: 1
+  load_checkpoint_path: null
+
+# Logging
+log_path: ./logs/runs
+tinker_base_url: null
+
+# Watchdog configuration
+watchdog:
+  timeout_seconds: 7200
+
+# Stats and WandB configuration
+stats:
+  experiment_name: recursive-agents
+  trial_name: textcraft-synth-depth-aware-ctx8192-cispo-4b-medium-trial-0
+  wandb:
+    mode: online
+    project: recursive-agents
+    entity: null
+    tags:
+      - textcraft-synth
+      - tinker
+      - depth-aware

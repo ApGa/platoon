@@ -766,6 +766,252 @@ class TextCraftRecursiveEnv(TextCraftEnv):
         return forked_env
 
 
+class TextCraftDepthAwareCodeExecutor(TextCraftRecursiveCodeExecutor):
+    """Code executor for depth-aware budget tracking.
+
+    Subagent budget is fixed at construction time — the agent does not
+    specify ``num_steps`` when calling ``launch_subagent``.
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        subagent_max_steps: int = 25,
+        recipes_dir: Optional[Path] = None,
+        recipe_db: Optional[Any] = None,
+        inventory: Optional[Dict[str, int]] = None,
+        _share_inventory: bool = False,
+        use_synth: bool = False,
+    ):
+        self._subagent_max_steps = subagent_max_steps
+        super().__init__(
+            task,
+            recipes_dir=recipes_dir,
+            recipe_db=recipe_db,
+            inventory=inventory,
+            _share_inventory=_share_inventory,
+            use_synth=use_synth,
+        )
+
+    # ------------------------------------------------------------------
+    # Override launch_subagent: drop num_steps from the signature
+    # ------------------------------------------------------------------
+    async def launch_subagent(self, targets: Dict[str, int], context: str = "") -> str:
+        """Launch a subagent to craft the specified targets.
+
+        The subagent budget is fixed and does not need to be specified.
+
+        Args:
+            targets: Dictionary mapping item names to target counts.
+            context: Optional context string for the subagent.
+
+        Returns:
+            Message from the subagent indicating success or failure.
+        """
+        from platoon.episode.context import current_trajectory, current_trajectory_collection
+
+        target_str = ", ".join([f"{count}x {item}" for item, count in targets.items()])
+        goal = f"Craft the following items: {target_str}"
+        if context:
+            goal += f"\n\nContext provided from parent agent: {context}"
+
+        # Track trajectories before launch to find the new child
+        traj_collection = current_trajectory_collection.get()
+        current_traj = current_trajectory.get()
+        traj_ids_before = set(traj_collection.trajectories.keys())
+
+        result = await _launch_subagent(goal=goal, max_steps=self._subagent_max_steps)
+
+        # --- subagent success tracking (same logic as TextCraftRecursiveCodeExecutor) ---
+        launched, succeeded = self._subagent_stats_this_step
+        launched += 1
+        for traj_id, traj in traj_collection.trajectories.items():
+            if traj_id not in traj_ids_before:
+                if traj.parent_info and traj.parent_info.id == current_traj.id:
+                    if traj.steps:
+                        final_step = traj.steps[-1]
+                        reward_misc = final_step.misc.get("reward_misc", {})
+                        if reward_misc.get("success", False):
+                            succeeded += 1
+                    break
+        self._subagent_stats_this_step = (launched, succeeded)
+        return result
+
+    # ------------------------------------------------------------------
+    # Action space description — no budget / num_steps references
+    # ------------------------------------------------------------------
+    def _get_action_space_parts(self, include_subagent: bool = False) -> str:
+        if self.use_synth:
+            actions = """Available Actions (python functions):
+
+1. def craft(ingredients: dict, target: tuple[str, int]) -> str
+   Craft items using ingredients from your inventory.
+   - ingredients: Dict of {item_name: count} to consume
+   - target: (item_name, total_count) where total_count must be divisible by recipe result_count
+   - Example: craft({"m0_i1": 2, "m1_i1": 1}, ("m2_i2", 2))
+
+2. def get_info(items: list) -> list[dict]
+   Get recipe information for items.
+   - Returns: List with {"item": str, "can_craft": bool, "is_base": bool,
+                         "in_inventory": int, "crafting_depth": int, "recipes": [...]}
+   - crafting_depth indicates complexity: 0=base item, 1=direct craft, 2+=needs intermediate steps
+   - Each recipe shows {"ingredients": {...}, "result_count": int}
+   - Example: get_info(["m2_i2", "raw_m0"])
+
+3. def view_inventory() -> dict
+   View your current inventory.
+   - Returns: Dict of {item_name: count}
+   - Example: inv = view_inventory()
+
+4. def finish(message: str) -> str
+   Complete the task.
+   - Example: finish("Successfully crafted all required items")
+"""
+            if include_subagent:
+                actions += """
+5. async def launch_subagent(targets: dict, context: str = "") -> str
+   Launch a subagent to craft specific targets (shares your inventory).
+   - targets: Dict of {item_name: count} to craft
+   - context: Optional context string for the subagent
+   - Sequential: await launch_subagent({"m0_i2": 4})
+   - Parallel: results = await asyncio.gather(
+                 launch_subagent({"m0_i2": 4}),
+                 launch_subagent({"c1_i2": 3})
+               )
+   - Returns: Subagent's finish message (or list if using gather)
+
+Note: `asyncio` is already imported. Use `await asyncio.gather(...)` to run subtasks in parallel
+or `await launch_subagent()` for a single subtask. **Do not forget to await** the results.
+"""
+        else:
+            actions = """Available Actions (python functions):
+
+1. def craft(ingredients: dict, target: tuple[str, int]) -> str
+   Craft items using ingredients from your inventory.
+   - ingredients: Dict of {item_name: count} to consume
+   - target: (item_name, total_count) where total_count must be divisible by recipe result_count
+   - For tag-based ingredients (e.g., "tag:planks"), provide a CONCRETE item from that category
+   - Example: craft({"stick": 2, "oak_planks": 3}, ("wooden_pickaxe", 1))
+   - Example: craft({"oak_log": 4}, ("oak_planks", 16))
+
+2. def get_info(items: list) -> list[dict]
+   Get recipe information for items.
+   - Returns: List with {"item": str, "can_craft": bool, "is_base": bool,
+                         "in_inventory": int, "crafting_depth": int, "recipes": [...]}
+   - crafting_depth indicates complexity: 0=base item, 1=direct craft, 2+=needs intermediate steps
+   - Each recipe shows {"ingredients": {...}, "result_count": int}
+   - Tag-based ingredients show {"tag:X": {"count": N, "use_one_of": [concrete items]}}
+   - Example: get_info(["yellow_dye", "yellow_terracotta"])
+
+3. def view_inventory() -> dict
+   View your current inventory.
+   - Returns: Dict of {item_name: count}
+   - Example: inv = view_inventory()
+
+4. def finish(message: str) -> str
+   Complete the task.
+   - Example: finish("Successfully crafted all required items")
+"""
+            if include_subagent:
+                actions += """
+5. async def launch_subagent(targets: dict, context: str = "") -> str
+   Launch a subagent to craft specific targets (shares your inventory).
+   - targets: Dict of {item_name: count} to craft
+   - context: Optional context string for the subagent
+   - Sequential: await launch_subagent({"yellow_dye": 2})
+   - Parallel: results = await asyncio.gather(
+                 launch_subagent({"yellow_dye": 2}),
+                 launch_subagent({"stick": 4})
+               )
+   - Returns: Subagent's finish message (or list if using gather)
+
+Note: `asyncio` is already imported. Use `await asyncio.gather(...)` to run subtasks in parallel
+or `await launch_subagent()` for a single subtask. **Do not forget to await** the results.
+"""
+        return actions
+
+    async def describe_action_space(self) -> str:
+        return self._get_action_space_parts(include_subagent=True)
+
+    async def fork(self, task: Task) -> "TextCraftDepthAwareCodeExecutor":
+        return TextCraftDepthAwareCodeExecutor(
+            task=task,
+            subagent_max_steps=self._subagent_max_steps,
+            recipes_dir=self.recipes_dir,
+            recipe_db=self.recipe_db,
+            inventory=self.inventory,
+            _share_inventory=True,
+            use_synth=self.use_synth,
+        )
+
+
+class TextCraftDepthAwareEnv(TextCraftRecursiveEnv):
+    """Environment for depth-aware recursive TextCraft training.
+
+    Uses ``TextCraftDepthAwareCodeExecutor`` so agents do not specify
+    ``num_steps`` when delegating.
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        subagent_max_steps: int = 25,
+        recipes_dir: Optional[Path] = None,
+        recipe_db: Optional[Any] = None,
+        initial_inventory: Optional[Dict[str, int]] = None,
+        _share_inventory: bool = False,
+        use_synth: bool = False,
+        per_step_subagent_success_reward: float = 0.0,
+        per_step_subagent_reward_ceiling: float = float("inf"),
+    ):
+        # Let the parent chain set up defaults (recipes_dir, initial_inventory, etc.)
+        super().__init__(
+            task,
+            recipes_dir=recipes_dir,
+            recipe_db=recipe_db,
+            initial_inventory=initial_inventory,
+            _share_inventory=_share_inventory,
+            use_synth=use_synth,
+            per_step_subagent_success_reward=per_step_subagent_success_reward,
+            per_step_subagent_reward_ceiling=per_step_subagent_reward_ceiling,
+        )
+        self._subagent_max_steps = subagent_max_steps
+
+        # Replace the executor with the depth-aware version
+        self._code_executor = TextCraftDepthAwareCodeExecutor(
+            task,
+            subagent_max_steps=subagent_max_steps,
+            recipes_dir=self._recipes_dir,
+            recipe_db=self._recipe_db,
+            inventory=self._code_executor.inventory,
+            _share_inventory=True,
+            use_synth=self._use_synth,
+        )
+
+    async def fork(self, task: Task) -> "TextCraftDepthAwareEnv":
+        targets = self._parse_craft_targets_from_goal(task.goal)
+        if targets:
+            task.misc = task.misc.copy() if task.misc else {}
+            task.misc.update(
+                {
+                    "target_items": targets,
+                    "initial_inventory": self._code_executor.inventory,
+                }
+            )
+
+        return TextCraftDepthAwareEnv(
+            task=task,
+            subagent_max_steps=self._subagent_max_steps,
+            recipes_dir=self._recipes_dir,
+            recipe_db=self._recipe_db,
+            initial_inventory=self._code_executor.inventory,
+            _share_inventory=True,
+            use_synth=self._use_synth,
+            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
+            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
+        )
+
+
 # Factory functions for synthetic recipes
 def create_synth_env(task: Task, items_per_domain_tier: int = 25, **kwargs) -> TextCraftEnv:
     """Create a TextCraftEnv with synthetic recipes.
@@ -808,6 +1054,45 @@ def create_synth_recursive_env(
     recipe_db = SynthRecipeLoader(items_per_domain_tier=items_per_domain_tier)
     return TextCraftRecursiveEnv(
         task,
+        recipe_db=recipe_db,
+        use_synth=True,
+        per_step_subagent_success_reward=per_step_subagent_success_reward,
+        per_step_subagent_reward_ceiling=per_step_subagent_reward_ceiling,
+        **kwargs,
+    )
+
+
+def create_synth_depth_aware_env(
+    task: Task,
+    subagent_max_steps: int = 25,
+    per_step_subagent_success_reward: float = 0.0,
+    per_step_subagent_reward_ceiling: float = float("inf"),
+    items_per_domain_tier: int = 25,
+    **kwargs,
+) -> TextCraftDepthAwareEnv:
+    """Create a TextCraftDepthAwareEnv with synthetic recipes.
+
+    Each agent (root and subagents) gets an independent step budget of
+    *subagent_max_steps*.  The agent does not need to specify the budget
+    when delegating.
+
+    Args:
+        task: The task to execute
+        subagent_max_steps: Fixed step budget per agent (root and subagents)
+        per_step_subagent_success_reward: Reward per successful subagent
+        per_step_subagent_reward_ceiling: Maximum subagent reward per step
+        items_per_domain_tier: Number of items per domain per tier (must match dataset generation)
+        **kwargs: Additional arguments passed to TextCraftDepthAwareEnv
+
+    Returns:
+        TextCraftDepthAwareEnv configured for synthetic recipes
+    """
+    from .synth_recipe_loader import SynthRecipeLoader
+
+    recipe_db = SynthRecipeLoader(items_per_domain_tier=items_per_domain_tier)
+    return TextCraftDepthAwareEnv(
+        task,
+        subagent_max_steps=subagent_max_steps,
         recipe_db=recipe_db,
         use_synth=True,
         per_step_subagent_success_reward=per_step_subagent_success_reward,

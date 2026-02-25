@@ -155,6 +155,24 @@ class TrajectoryCollection:
 
 # TODO: This is minimal for now on purpose, to better understand needs.
 # We can consider expanding the protocol later to add more informative methods for the user to query about the budget.
+
+
+class BudgetExceededError(ValueError):
+    """Raised when a budget limit would be exceeded.
+
+    Attributes:
+        reason: A short tag identifying the kind of budget that was exceeded
+                (e.g. ``"step_budget"`` or ``"depth"``).
+        guidance: An actionable suggestion for the caller describing how to
+                  work around the limitation.
+    """
+
+    def __init__(self, message: str, *, reason: str = "step_budget", guidance: str = ""):
+        super().__init__(message)
+        self.reason = reason
+        self.guidance = guidance
+
+
 @runtime_checkable
 class BudgetTracker(Protocol):
     def reserve_budget(self, requested_budget: float, raise_on_failure: bool = False) -> bool: ...
@@ -221,8 +239,15 @@ class StepBudgetTracker(BudgetTracker):
         curr_traj_id = current_trajectory.get().id
         if self.remaining_budget() < requested_budget:
             if raise_on_failure:
-                raise ValueError(
-                    f"Requested step budget {requested_budget} exceeds remaining budget {self.remaining_budget()}."
+                raise BudgetExceededError(
+                    f"Requested step budget {requested_budget} exceeds remaining budget {self.remaining_budget()}.",
+                    reason="step_budget",
+                    guidance=(
+                        "Note: launch_subagent will automatically reserve max_steps + 1 steps "
+                        "since you will need one or more steps to process the result of the "
+                        "subagent and complete the task. "
+                        "You could try requesting a smaller budget or perform the task yourself."
+                    ),
                 )
             return False
         self.reserved_trajectory_budgets[curr_traj_id] += requested_budget
@@ -233,3 +258,64 @@ class StepBudgetTracker(BudgetTracker):
         self.reserved_trajectory_budgets[curr_traj_id] -= amount_to_release
         if self.reserved_trajectory_budgets[curr_traj_id] < 0:
             self.reserved_trajectory_budgets[curr_traj_id] = 0
+
+
+@dataclass
+class DepthAwareStepBudgetTracker(BudgetTracker):
+    """A budget tracker where subagent steps do NOT consume parent budget.
+
+    Each trajectory is independently bounded by its own ``task.max_steps``.
+    Optionally, the maximum depth of the hierarchical trajectory tree can be
+    capped via *max_depth* (root trajectory is at depth 0).
+    """
+
+    max_depth: int | None = None
+
+    # ---- internal helpers ----
+
+    def _allocated_budget(self, trajectory_id: str) -> float:
+        traj = current_trajectory_collection.get().trajectories[trajectory_id]
+        return traj.task.max_steps or float("inf")
+
+    def _trajectory_depth(self, trajectory_id: str) -> int:
+        """Return the depth of *trajectory_id* in the tree (root = 0)."""
+        collection = current_trajectory_collection.get()
+        depth = 0
+        traj = collection.trajectories[trajectory_id]
+        while traj.parent_info is not None:
+            depth += 1
+            traj = collection.trajectories[traj.parent_info.id]
+        return depth
+
+    # ---- BudgetTracker interface ----
+
+    def used_budget_for(self, trajectory_id: str) -> float:
+        """Only the trajectory's own steps count towards its budget."""
+        collection = current_trajectory_collection.get()
+        return len(collection.trajectories[trajectory_id].steps)
+
+    def remaining_budget_for(self, trajectory_id: str) -> float:
+        return self._allocated_budget(trajectory_id) - self.used_budget_for(trajectory_id)
+
+    def reserve_budget(self, requested_budget: float, raise_on_failure: bool = False) -> bool:
+        """Check depth constraint only; subagent steps are not reserved from the parent."""
+        if self.max_depth is not None:
+            curr_traj_id = current_trajectory.get().id
+            current_depth = self._trajectory_depth(curr_traj_id)
+            if current_depth + 1 > self.max_depth:
+                if raise_on_failure:
+                    raise BudgetExceededError(
+                        f"Launching a subagent from depth {current_depth} would exceed "
+                        f"the maximum allowed depth of {self.max_depth}.",
+                        reason="depth",
+                        guidance=(
+                            "The maximum depth for hierarchical delegation has been reached. "
+                            "You should perform the task yourself instead of delegating."
+                        ),
+                    )
+                return False
+        return True
+
+    def release_budget(self, amount_to_release: float) -> None:
+        """No-op: subagent steps do not consume parent budget."""
+        pass
