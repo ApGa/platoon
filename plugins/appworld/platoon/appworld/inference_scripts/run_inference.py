@@ -61,8 +61,10 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
                 continue
             rewards_dict[reward_key] = rewards_dict.get(reward_key, 0.0) + float(reward_value)
 
+    rewards_dict.setdefault("reward/success", 0.0)
+
     # Match AppWorld training behavior: keep auxiliary reward bounded.
-    success_reward = rewards_dict.get("reward/success", 0.0)
+    success_reward = rewards_dict["reward/success"]
     other_rewards = min(sum(rewards_dict.values()) - success_reward, 0.4)
     score = success_reward + other_rewards
     if not rewards_dict:
