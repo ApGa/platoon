@@ -23,7 +23,8 @@ class OpenHandsAgent:
                 obs, 
                 require_same_llm_call_id=True
             )
-        
+        # if is_finished(obs):
+        #     print("Agent detected finished conversation in agent.act", flush=True)
         action = OpenHandsAction(action_events=step_actions)
 
         if step_actions:

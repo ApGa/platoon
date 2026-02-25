@@ -7,11 +7,7 @@ authors = [
     {name = "Apurva Gandhi", email = "apurvag@cs.cmu.edu"}
 ]
 dependencies = [
-    "platoon >= 0.1.0",
-    "openhands-sdk",
-    "openhands-tools",
-    "openhands-workspace",
-    "openhands-agent-server"
+    "platoon >= 0.1.0"
 ]
 no-build-isolation-package = ['flash-attn']
 

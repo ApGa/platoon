@@ -4,18 +4,16 @@ from __future__ import annotations
 
 from platoon.envs.base import Task
 from platoon.openhands.types import OpenHandsObservation, OpenHandsTrajectoryStep, OpenHandsAction
-from openhands.sdk.conversation import get_agent_final_response
-from openhands.sdk.conversation.base import BaseConversation
-from openhands.sdk.agent.base import AgentBase
-from openhands.sdk.workspace.base import BaseWorkspace
+from openhands.sdk.conversation import get_agent_final_response, BaseConversation, Conversation, ConversationExecutionStatus, RemoteConversation
+from openhands.sdk.agent import AgentBase
+from openhands.sdk.workspace import BaseWorkspace
 from copy import deepcopy
-from openhands.sdk.conversation.conversation import Conversation
 from platoon.episode.context import current_trajectory_collection, current_trajectory, finish_message, error_message
 from platoon.utils.openhands_utils import get_obs_for_last_action
 from platoon.utils.openhands_utils import is_finished
-from openhands.sdk.conversation.state import ConversationExecutionStatus
 import threading
 import asyncio
+import concurrent.futures
 
 class OpenHandsEnv:
     def __init__(self, task: Task, agent: AgentBase, workspace: str | BaseWorkspace):
@@ -25,22 +23,30 @@ class OpenHandsEnv:
             workspace = str(workspace)
         self._workspace = workspace
         self._conversation = None
+        self._run_thread: threading.Thread | None = None
     
     async def reset(self) -> OpenHandsObservation:
-        self._conversation: BaseConversation = Conversation(agent=self._agent, workspace=self._workspace, visualizer=None, max_iteration_per_run=self._task.max_steps)
+        self._conversation: BaseConversation = Conversation(agent=self._agent, visualizer=None, workspace=self._workspace, max_iteration_per_run=self._task.max_steps)
+        if isinstance(self._conversation, RemoteConversation):
+            self._conversation.delete_on_close = True
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
         self._conversation.send_message(self._task.goal)
         # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
-        threading.Thread(target=self._conversation.run, daemon=True).start() 
+        # Set a 5-min timeout and pass it to conversation.run
+        # self._run_thread = threading.Thread(target=self._conversation.run, kwargs={'timeout': 300}, daemon=True)
+        self._run_thread = threading.Thread(target=self._conversation.run, daemon=True)
+        self._run_thread.start()
 
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
         traj_collection.set_trajectory_task(traj.id, self._state.task)
         traj.reward = 0.0
+        # print(f"Starting env.reset, last step action id: {self._state.last_step_action_id}")
         obs_events = get_obs_for_last_action(self._state)
         while not obs_events:
             await asyncio.sleep(1)
             obs_events = get_obs_for_last_action(self._state)
+        # print(f"env.reset adding observation events: {[e.kind for e in obs_events]} for last step action id: {self._state.last_step_action_id}")
         traj_collection.add_trajectory_step(traj.id, OpenHandsTrajectoryStep(
             observation_events=obs_events,
         ))
@@ -57,8 +63,12 @@ class OpenHandsEnv:
         while not obs_events and not is_finished(self._state):
             await asyncio.sleep(0.2)
             obs_events = get_obs_for_last_action(self._state)
+        
+        # Update last_step_observation_id to the last event we collected
+        # This includes all trailing system events when conversation finishes
         if obs_events:
             self._state.last_step_observation_id = obs_events[-1].id
+        
         step = OpenHandsTrajectoryStep(
             action_events=action,
             observation_events=obs_events,
@@ -69,13 +79,17 @@ class OpenHandsEnv:
         self._state.reward += step.reward
         
         if is_finished(self._state):
+            print("Environment detected finished conversation in env.step", flush=True)
             self._state.finished = True
-            finish_message.set(get_agent_final_response(self._conversation.state.events))
+            agent_final_msg: str | None = get_agent_final_response(self._conversation.state.events)
+            if agent_final_msg is None or agent_final_msg.strip() == "":
+                agent_final_msg = "No final response from agent."
+            finish_message.set(agent_final_msg)
             self._state.misc["finish_message"] = finish_message.get()
-            if self._state.conversation_state.agent_status == ConversationExecutionStatus.STUCK:
+            if self._state.conversation_state.execution_status == ConversationExecutionStatus.STUCK:
                 error_message.set("Agent got stuck")
                 self._state.misc["error_message"] = error_message.get()
-            elif self._state.conversation_state.agent_status == ConversationExecutionStatus.ERROR: #TODO: check
+            elif self._state.conversation_state.execution_status == ConversationExecutionStatus.ERROR: #TODO: check
                 error_message.set("Agent encountered an error")
                 self._state.misc["error_message"] = error_message.get()
 
@@ -89,11 +103,51 @@ class OpenHandsEnv:
     
     async def close(self) -> None:
         if self._conversation is not None:
-            self._conversation.close()
-        self._conversation = None
-        # TODO: check if cleaning up workspace manually is required
-        if isinstance(self._workspace, BaseWorkspace):
-            await self._workspace.cleanup()
+            conversation = self._conversation
+            self._conversation = None
+            # Fire-and-forget: submit close() to a thread pool so the DELETE
+            # request completes even if this coroutine is cancelled by
+            # asyncio.wait_for() or CancelledError from the parent task.
+            # We use a standalone executor submit (not awaited) so cancellation
+            # of this coroutine cannot prevent the HTTP DELETE from being sent.
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(self._close_conversation_sync, conversation)
+            try:
+                # Give it a reasonable amount of time, but don't block forever
+                loop = asyncio.get_event_loop()
+                await asyncio.wait_for(
+                    asyncio.wrap_future(future),
+                    timeout=20
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
+                # Even if we're cancelled or timed out, the thread-pool task
+                # will still finish in the background (the DELETE gets sent).
+                print(f"env.close() interrupted ({type(e).__name__}: {e}), "
+                      f"cleanup thread will finish in background", flush=True)
+            finally:
+                # Don't call executor.shutdown(wait=True) which would block;
+                # let the daemon thread finish on its own.
+                executor.shutdown(wait=False)
+        # Wait briefly for the run-polling thread to notice the conversation
+        # was deleted and exit on its own.
+        if self._run_thread is not None:
+            self._run_thread.join(timeout=5)
+            if self._run_thread.is_alive():
+                print("Warning: conversation run thread still alive after close()", flush=True)
+            self._run_thread = None
+        # TODO: check if cleaning up workspace manually is required -- causes errors -- check this later
+        # if isinstance(self._workspace, BaseWorkspace):
+        #     await self._workspace.cleanup()
+
+    @staticmethod
+    def _close_conversation_sync(conversation: BaseConversation) -> None:
+        """Synchronous helper that calls conversation.close() in a background thread.
+        This runs outside the asyncio event loop so it cannot be cancelled by
+        CancelledError. The DELETE request will always be sent."""
+        try:
+            conversation.close()
+        except Exception as e:
+            print(f"Error in background conversation.close(): {e}", flush=True)
 
     # TODO: Consider adding a return_copy option here.
     async def observe(self) -> OpenHandsObservation:

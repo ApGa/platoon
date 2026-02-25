@@ -16,27 +16,27 @@ from platoon.episode.loop import run_episode
 from platoon.episode.context import current_trajectory_collection
 from pydantic import SecretStr
 from platoon.visualization.event_sinks import JsonlFileSink
-from .tasks import EVAL_AGENT_SERVER_IMAGE, SDK_SHORT_SHA, ENV_SETUP_COMMANDS, PROMPT_FILENAME
+from .tasks import EVAL_AGENT_SERVER_IMAGE, SDK_SHORT_SHA, ENV_SETUP_COMMANDS, PROMPT_FILENAME, APPTAINER_CACHE_DIR
 from platoon.openhands.agent import OpenHandsAgent
 import platform
 logger = get_logger(__name__)
 
 # TODO: consider pre-building all docker images, and adding their names in instance on Huggingface dataset for simpler code here
-def get_official_docker_image(
-    instance_id: str,
-    docker_image_prefix="docker.io/xingyaoww/", #NOTE: default changed to match SWE-Gym
-    # dataset: str = "swe-gym" #TODO: add dataset parameter in future
-) -> str:
-    # Official SWE-Bench image
-    # swebench/sweb.eval.x86_64.django_1776_django-11333:v1
-    # SWE-Gym image: docker.io/xingyaoww/sweb.eval.x86_64.project-monai_s_monai-6969
-    image_name = 'sweb.eval.x86_64.' + instance_id
-    image_name = image_name.replace('__', '_s_')  # to comply with docker image naming convention
-    official_image_name = (docker_image_prefix.rstrip('/') + '/' + image_name).lower()
-    logger.info(f"Official {docker_image_prefix} image: {official_image_name}")
-    return official_image_name
+# def get_official_docker_image(
+#     instance_id: str,
+#     docker_image_prefix="docker.io/xingyaoww/", #NOTE: default changed to match SWE-Gym
+#     # dataset: str = "swe-gym" #TODO: add dataset parameter in future
+# ) -> str:
+#     # Official SWE-Bench image
+#     # swebench/sweb.eval.x86_64.django_1776_django-11333:v1
+#     # SWE-Gym image: docker.io/xingyaoww/sweb.eval.x86_64.project-monai_s_monai-6969
+#     image_name = 'sweb.eval.x86_64.' + instance_id
+#     image_name = image_name.replace('__', '_s_')  # to comply with docker image naming convention
+#     official_image_name = (docker_image_prefix.rstrip('/') + '/' + image_name).lower()
+#     logger.info(f"Official {docker_image_prefix} image: {official_image_name}")
+#     return official_image_name
 
-# NOTE: the below function is for SWE-Bench.
+# # NOTE: the below function is for SWE-Bench.
 # def get_official_docker_image(
 #     instance_id: str,
 #     docker_image_prefix="docker.io/swebench/",
@@ -48,6 +48,19 @@ def get_official_docker_image(
 #     official_image_name += f"/sweb.eval.x86_64.{repo}_1776_{name}:latest".lower()
 #     logger.debug(f"Official SWE-Bench image: {official_image_name}")
 #     return official_image_name
+
+# NOTE: the below function is for SWE-Smith.
+def get_official_docker_image(
+    instance: dict,
+) -> str:
+    # Official SWE-Bench image
+    # swebench/sweb.eval.x86_64.django_1776_django-11333:v1
+    image_name: str = instance["image_name"]
+    official_image_name: str = image_name.lower().strip()
+    if not official_image_name.startswith("docker.io"):
+        official_image_name = f"docker.io/{official_image_name}"
+    logger.debug(f"Official SWE-Bench image: {official_image_name}")
+    return official_image_name
 
 def extract_custom_tag(base_image: str) -> str:
     """
@@ -75,7 +88,7 @@ def get_instruction(
 ) -> str:
     """Generate user instruction for the agent for SWE-Bench-style tasks."""
     # Set up Jinja2 environment
-    # NOTE: Template will not work for SWE-Smith as its base commit is None
+    # NOTE: Jinja template will not work for SWE-Smith as its base commit is None
     prompts_dir = os.path.dirname(prompt_path)
     template_name = os.path.basename(prompt_path)
     env = Environment(loader=FileSystemLoader(prompts_dir))
@@ -85,16 +98,16 @@ def get_instruction(
     # Prepare context for rendering
     context = {
         "instance": instance,
-        "actual_workspace_path": workspace_path,
+        # "actual_workspace_path": workspace_path,
     }
-    context["test_instructions"] = ""
+    # context["test_instructions"] = ""
 
     # Render the instruction
     instruction = template.render(context)
     return instruction
 
-def prepare_workspace(instance: dict, task: Task) -> BaseWorkspace:
-    official_docker_image: str = get_official_docker_image(instance["instance_id"])
+def prepare_workspace(instance: dict) -> BaseWorkspace:
+    official_docker_image: str = get_official_docker_image(instance)
     build_target: str = "source-minimal" #NOTE: no other targets work, so this is hard-coded for the time being
     custom_tag: str = extract_custom_tag(official_docker_image)
     suffix: str = f"-{build_target}" if build_target != "binary" else ""
@@ -107,6 +120,8 @@ def prepare_workspace(instance: dict, task: Task) -> BaseWorkspace:
             server_image=agent_server_image,
             working_dir="/workspace",
             platform=detect_platform(),
+            cache_dir=os.environ.get("APPTAINER_CACHEDIR", APPTAINER_CACHE_DIR),
+            detach_logs=False
         )
     elif workspace_type == "remote":
         # TODO: check if the environment variables are passed till this point by AReaL
@@ -133,13 +148,17 @@ def prepare_workspace(instance: dict, task: Task) -> BaseWorkspace:
     instance["repo_path"] = repo_path
     
     cp_testbed_repo = workspace.execute_command(
-        (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}")
+        (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}"), timeout=900
     )
     assert cp_testbed_repo.exit_code == 0, (
         f"cp_testbed_repo failed: {cp_testbed_repo.stderr}"
     )
-    git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
-    assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+    patch_str = instance["patch"]
+    # apply this patch to the repository in the remote workspace.
+    apply_patch = workspace.execute_command(f"cd {repo_path} && git apply <<'EOF'\n{patch_str}\nEOF", timeout=900)
+    assert apply_patch.exit_code == 0, f"apply_patch failed: {apply_patch.stderr}"
+    # git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
+    # assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
     return workspace
 
 def prepare_llm(config: RolloutConfig) -> LLM:
@@ -149,15 +168,19 @@ def prepare_llm(config: RolloutConfig) -> LLM:
         temperature = 1.0
     else:
         temperature = 0.6
-    
+    model_name = config.model_name
+    if not model_name.startswith("openai/") and not model_name.startswith("litellm_proxy/"):
+        model_name = "openai/" + model_name
     return LLM(
             usage_id="agent",
-            model=config.model_name,
+            model=model_name,
+            # log_completions=True, #this may result in new events, check closely
+            # log_completions_folder = "/home/adityabs/platoon/logs/",
             base_url=config.model_endpoint,
-            api_key=SecretStr(config.model_api_key) if config.model_api_key is not None else None,
+            api_key=SecretStr(config.model_api_key) if config.model_api_key is not None else SecretStr("api_key"),
             temperature=temperature,
             litellm_extra_body={
-                # "return_token_ids": True,
+                # "return_token_ids": True, # this will result in TokenEvents in event stream
                 "include_stop_str_in_output": False,
                 "add_generation_prompt": True,
                 "chat_template_kwargs": {
@@ -172,16 +195,33 @@ def prepare_agent(llm: LLM) -> AgentBase:
     return get_default_agent(llm=llm, cli_mode=True) # browser is added iff cli_mode is False
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
-    agent = env = None
+    agent = env = agent_wrapper_platoon = None
+    WORKSPACE_SETUP_TIMEOUT = 1200  # 20 minutes max for workspace setup
     try:
         """
         Steps:
             1. Create a new workspace (apptainer/remote/docker), openhands agent, and initialize env
             2. Create trajectory collection and register event handlers
         """
-        instance: dict = task.misc # SWE-Bench styled instance, with extra keys: "workspace_type", "docker_image_prefix", "dataset_type", etc.
-        workspace: BaseWorkspace = prepare_workspace(instance)
+        curr = "initial"
+        if config.verbose:
+            print(f"[run_rollout] Process {os.getpid()}: Starting rollout for task {task.id}", flush=True)
         
+        instance: dict = task.misc # SWE-Bench styled instance, with optional extra keys: "workspace_type", "docker_image_prefix", "dataset_type", etc.
+            
+        loop = asyncio.get_event_loop()
+        try:
+            workspace: BaseWorkspace = await asyncio.wait_for(
+                loop.run_in_executor(None, prepare_workspace, instance),
+                timeout=WORKSPACE_SETUP_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"Workspace setup timed out after {WORKSPACE_SETUP_TIMEOUT}s for task {task.id}"
+            )
+        if config.verbose:
+            print(f"[run_rollout] Process {os.getpid()}: Workspace ready for task {task.id}", flush=True)
+            curr = "workspace ready"        
         # Get task-specific instruction and configure task parameters
         prompt_filename = instance.get("prompt_filename", PROMPT_FILENAME) #NOTE: make sure the instance dict has this key if customized prompt is desired
         prompt_dir = (Path(__file__).parent / "prompts").resolve()
@@ -193,10 +233,15 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         task.goal = instruction
         task.max_steps = config.max_steps if config.max_steps is not None else 100
 
+        if config.verbose:
+            print(f"[run_rollout] Process {os.getpid()}: Preparing LLM and agent for task {task.id}", flush=True)
         llm: LLM = prepare_llm(config)
         agent: AgentBase = prepare_agent(llm)
         agent_wrapper_platoon: OpenHandsAgent = OpenHandsAgent()
         env: OpenHandsRLEnv = OpenHandsRLEnv(task=task, agent=agent, workspace=workspace)
+        if config.verbose:
+            print(f"[run_rollout] Process {os.getpid()}: LLM and agent ready for task {task.id}", flush=True)
+            curr = "agent and env ready"
 
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
@@ -216,21 +261,23 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         )
 
         if config.verbose:
-            logger.info(f"Process {os.getpid()}: Starting rollout for task {task.id}")
+            print(f"[run_rollout] Process {os.getpid()}: Starting episode execution for task {task.id}", flush=True)
+            curr = "episode execution started"
 
-        rollout_task = asyncio.create_task(run_episode(agent_wrapper_platoon, env)) #NOTE: run_episode only calls agent_act which will check the event stream for new actions/observations from the agent-sdk's conversation state
-        
+        # Create the rollout task with a hard deadline
+        # Using a shield to ensure we can still clean up even if cancelled
+        rollout_task = asyncio.create_task(run_episode(agent_wrapper_platoon, env, timeout=300))
         try:
-            _ = await asyncio.wait_for(rollout_task, timeout=config.timeout)
+            # Apply a hard timeout to the entire rollout, not just individual steps
+            _ = await asyncio.wait_for(rollout_task, timeout=330)
         except asyncio.TimeoutError:
             if config.verbose:
-                logger.error(f"Process {os.getpid()}: Rollout timed out for task {task.id}")
-            rollout_task.cancel()
-            # Don't wait indefinitely - tinker's sample_async may not be cancellable
-            try:
-                await asyncio.wait_for(rollout_task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                logger.warning(f"Process {os.getpid()}: Task cancellation did not complete in 5s for {task.id}, abandoning")
+                print(f"Process {os.getpid()}: Rollout timed out for task {task.id}. State: {curr}", flush=True)
+            # The task should already be cancelled by wait_for, but let's be explicit
+            raise
+        except Exception as e:
+            if config.verbose:
+                print(f"Process {os.getpid()}: Rollout failed for task {task.id}: {e}. State: {curr}", flush=True)
             raise      
         if config.return_dict:
             return current_trajectory_collection.get().to_dict()
@@ -238,10 +285,20 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             return current_trajectory_collection.get() 
     except Exception as e:
         if config.verbose:
-            print(f"Error running rollout for task {task.id}: {e}")
+            print(f"Error running rollout for task {task.id}: {e}", flush=True)
         raise
     finally:
-        if agent_wrapper_platoon is not None:
-            await agent_wrapper_platoon.close()
+        # Safety-net cleanup: ensure env is closed even if run_episode never ran
+        # (e.g. error during workspace setup after env was created).
+        # env.close() is idempotent — if run_episode already called it,
+        # self._conversation will be None and this is a no-op.
         if env is not None:
-            await env.close()
+            try:
+                await asyncio.wait_for(env.close(), timeout=30)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
+                print(f"Warning: safety-net env.close() in run_rollout: {type(e).__name__}: {e}", flush=True)
+        if agent_wrapper_platoon is not None:
+            try:
+                await asyncio.wait_for(agent_wrapper_platoon.close(), timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
+                print(f"Warning: safety-net agent.close() in run_rollout: {type(e).__name__}: {e}", flush=True)

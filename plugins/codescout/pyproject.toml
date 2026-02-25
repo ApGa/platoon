@@ -1,10 +1,10 @@
 [project]
-name = "platoon-openhands-rl"
+name = "platoon-codescout"
 version = "0.1.0"
-description = "Platoon plugin for intermediate rewards with the openhands software agent sdk."
+description = "Platoon plugin for training OSS models with RL for repo-level code localization."
 requires-python = "~=3.12.0"
 authors = [
-    {name = "Aditya Soni", email = "adityabs@cs.cmu.edu"}
+    {name = "Aditya Bharat Soni", email = "adityabs@cs.cmu.edu"}
 ]
 dependencies = [
     "platoon >= 0.1.0",
@@ -50,10 +50,10 @@ override-dependencies = [
 [tool.uv.sources]
 platoon = { path = "../..", editable = true }
 platoon-openhands = { path = "../openhands", editable = true }
-openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "b498a69908f7d06feb3921ffe05ff7e781a6f108", subdirectory = "openhands-sdk" }
-openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "b498a69908f7d06feb3921ffe05ff7e781a6f108", subdirectory = "openhands-tools" }
-openhands-workspace = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "b498a69908f7d06feb3921ffe05ff7e781a6f108", subdirectory = "openhands-workspace" }
-openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "b498a69908f7d06feb3921ffe05ff7e781a6f108", subdirectory = "openhands-agent-server" }
+openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-sdk" }
+openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-tools" }
+openhands-workspace = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-workspace" }
+openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-agent-server" }
 
 [tool.ruff]
 line-length = 100

@@ -128,7 +128,7 @@ class PlatoonArealRLTrainer:
             self.ref.initialize(None, self.ft_spec)
         
         # Setup proxy server
-        self.llm_client = ArealOpenAI(engine=self.rollout, tokenizer=self.tokenizer)
+        self.llm_client = ArealOpenAI(engine=self.rollout, tokenizer=self.tokenizer, tool_call_parser="qwen25")
         free_port = find_free_ports(1)[0]
         self.proxy_server = ProxyServer(free_port, client=self.llm_client)
         self.proxy_server.start(wait_until_ready=True)

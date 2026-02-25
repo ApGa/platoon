@@ -3,11 +3,14 @@ import pandas as pd
 import os
 from typing import Dict, Literal, Optional, List
 import numpy as np
+from datasets import load_dataset
 
-EVAL_AGENT_SERVER_IMAGE = "ghcr.io/openhands/eval-agent-server"
-SDK_SHORT_SHA = "main"
+EVAL_AGENT_SERVER_IMAGE = "docker.io/adityasoni8/eval-agent-server"
+SDK_SHORT_SHA = "b498a69"
 ENV_SETUP_COMMANDS = ["export PIP_CACHE_DIR=~/.cache/pip"]
 PROMPT_FILENAME = "default.j2"
+APPTAINER_CACHE_DIR = "/scratch/apptainer_cache"
+
 data_loaded: bool = False
 train_data_map: Optional[Dict[str, Task]] = {}
 val_data_map: Optional[Dict[str, Task]] = {}
@@ -35,17 +38,31 @@ def load_data():
     global data_loaded, train_data_map, val_data_map
     if data_loaded:
         return train_data_map, val_data_map
-    data_path = os.path.join(os.path.dirname(__file__), "train.parquet") #NOTE: make it huggingface dataset if possible
-    dataset = pd.read_parquet(data_path)
+    # data_path = os.path.join(os.path.dirname(__file__), "train.parquet") #NOTE: make it huggingface dataset if possible
+    # dataset = pd.read_parquet(data_path)
+    dataset = load_dataset("SWE-bench/SWE-smith-py", split='train')
+    repo_list = []
+    for instance in dataset:
+        repo_list.append(instance['repo'])
+    import random
+    random.seed(42)
+    random.shuffle(repo_list)
+    repo_list = repo_list[:8]
+    dataset = dataset.to_pandas()
     np.random.seed(42)
     split_indices = np.random.rand(len(dataset)) < 0.8
     train_df = dataset.iloc[split_indices]
     val_df = dataset.iloc[~split_indices]
     for _, row in train_df.iterrows():
-        train_data_map[row['instance_id']] = create_task_from_instance(row.to_dict())
+        if len(row["problem_statement"]) > 0 and row['repo'] in repo_list: #NOTE: optionally filter training instances by repo or other criteria here if needed
+            train_data_map[row['instance_id']] = create_task_from_instance(row.to_dict())
+        # if row['instance_id'] in instance_list:
+        #     train_data_map[row['instance_id']] = create_task_from_instance(row.to_dict())
     for _, row in val_df.iterrows():
-        val_data_map[row['instance_id']] = create_task_from_instance(row.to_dict())
+        if len(row["problem_statement"]) > 0 and row['repo'] in repo_list: #NOTE: optionally filter validation instances by repo or other criteria here if needed
+            val_data_map[row['instance_id']] = create_task_from_instance(row.to_dict())
     data_loaded = True
+    print(f"Loaded {len(train_data_map)} training instances and {len(val_data_map)} validation instances.", flush=True)
     return train_data_map, val_data_map
 
 
