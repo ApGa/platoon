@@ -1,20 +1,20 @@
 # AppWorld inference benchmark config.
 inference:
-  model_name: openai/Qwen/Qwen3-4B-Instruct-2507
+  model_name: openai/qwen3-4b-linear-sft
   model_endpoint: http://127.0.0.1:30000/v1
   model_api_key: null
-  output_dir: ./inference_results/appworld/qwen3-4b-instruct-recursive
+  output_dir: ./inference_results/appworld/qwen3-4b-linear-sft-extended
   resume: true
   workflow:
     num_rollouts_per_task: 1
-    num_concurrent_workers: 4
+    num_concurrent_workers: 32
     success_threshold: 1.0
     fail_fast: false
     use_subprocesses: true
     subprocess_max_workers: 10
     rollout_config:
       max_steps: 75
-      output_dir: ./inference_results/appworld/qwen3-4b-instruct-recursive/rollouts
+      output_dir: ./inference_results/appworld/qwen3-4b-linear-sft-extended/rollouts
       verbose: true
       timeout: 1800
       step_timeout: 1800
@@ -24,7 +24,7 @@ inference:
 
 dataset_split: train
 num_tasks: 90
-use_recursive_agent: true
+use_recursive_agent: false
 task_id: null
 # full: run rollouts + report
 # rollouts: only write rollouts to disk (resume-friendly)
