@@ -20,7 +20,7 @@ from platoon.inference import (
     InferenceBenchmarkConfig,
     InferenceBenchmarkRunner,
 )
-from platoon.textcraft.synth_rollout import run_synth_recursive_rollout, run_synth_rollout
+from platoon.textcraft.synth_rollout import run_synth_recursive_rollout, run_synth_rollout, run_synth_depth_aware_rollout
 from platoon.textcraft.synth_tasks import (
     Difficulty,
     get_synth_task,
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 class TextCraftSynthInferenceConfig:
     inference: InferenceBenchmarkConfig
     dataset_split: Literal["train", "val"] = "val"
-    difficulty: Literal["easy", "medium", "hard", "extreme"] | None = None
+    difficulty: list[Literal["easy", "medium", "hard", "extreme"]] | None = None
     num_tasks: int = 100
     use_recursive_agent: bool = True
     task_id: str | None = None
@@ -73,22 +73,33 @@ def get_dataset_task_ids(config: TextCraftSynthInferenceConfig) -> list[str]:
     if config.task_id is not None:
         return [config.task_id]
 
+    selected_task_ids = []
+
     if config.difficulty is not None:
-        task_ids = get_synth_task_ids_by_difficulty(
-            split=config.dataset_split,
-            difficulty=Difficulty(config.difficulty),
-        )
+        difficulties = config.difficulty 
+        
+        if isinstance(config.difficulty, str):
+            difficulties = [difficulty]
+
+        for d in difficulties:       
+            selected_task_ids.extend(get_synth_task_ids_by_difficulty(
+                    split=config.dataset_split,
+                    difficulty=Difficulty(d),
+                )
+            )
     elif config.dataset_split == "train":
         task_ids = get_synth_task_ids("train", num_samples_train=max(1, config.num_tasks))
     else:
         task_ids = get_synth_task_ids("val", num_samples_val=max(1, config.num_tasks))
 
-    selected_task_ids = list(task_ids[: max(1, config.num_tasks)])
     if config.shuffle_tasks:
         import random
 
         rng = random.Random(config.seed)
         rng.shuffle(selected_task_ids)
+   
+    selected_task_ids = list(selected_task_ids[: max(1, config.num_tasks)])
+   
     return selected_task_ids
 
 
@@ -100,7 +111,7 @@ async def main(args: list[str]) -> None:
         default_config_path=str(default_config),
     )
 
-    rollout_fn = run_synth_recursive_rollout if config.use_recursive_agent else run_synth_rollout
+    rollout_fn = run_synth_depth_aware_rollout if config.use_recursive_agent else run_synth_rollout
     if config.stage == "report":
         dataset = []
     else:
