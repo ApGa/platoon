@@ -268,6 +268,56 @@ class PlatoonArealRLTrainer:
                     dist.barrier(device_ids=[self.actor.device.index])
                     current_platform.synchronize()
 
+                # Apply depth-level inverse-frequency weighting if traj_depth is present.
+                # Weights are inversely proportional to the number of *trajectories*
+                # (not datums) at each depth level across the full batch, so each depth
+                # level gets equal effective trajectory representation.
+                # Counts are computed across all data parallel workers (the full batch).
+                if "traj_depth" in batch:
+                    traj_depth = batch["traj_depth"]
+                    traj_start = batch["traj_start"]
+                    dp_group = self.actor.data_parallel_group
+
+                    # Find the global max depth across all workers
+                    local_max_depth = int(traj_depth.max().item()) if traj_depth.numel() > 0 else 0
+                    max_depth_t = torch.tensor([local_max_depth], device=traj_depth.device, dtype=torch.long)
+                    dist.all_reduce(max_depth_t, op=dist.ReduceOp.MAX, group=dp_group)
+                    global_max_depth = int(max_depth_t.item())
+
+                    # Count trajectories and datums at each depth locally.
+                    # traj_start is 1.0 at the first datum of each trajectory, so
+                    # summing it gives the trajectory count (not datum count).
+                    depth_indices = traj_depth.long()
+                    num_depths = global_max_depth + 1
+                    counts = torch.zeros(2, num_depths, device=traj_depth.device)
+                    for d in range(num_depths):
+                        mask_d = depth_indices == d
+                        counts[0, d] = mask_d.sum().float()           # datum count
+                        counts[1, d] = traj_start[mask_d].sum()       # trajectory count
+                    dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=dp_group)
+                    datum_counts = counts[0]
+                    traj_counts = counts[1]
+
+                    # Inverse-frequency weights based on trajectory counts.
+                    # raw_weight_d = 1 / traj_count_d  (per datum at depth d)
+                    # Normalized so global total weight = global batch size.
+                    total_datums = datum_counts.sum()
+                    raw_weights = torch.where(
+                        traj_counts > 0,
+                        1.0 / traj_counts,
+                        torch.zeros_like(traj_counts),
+                    )
+                    # unnorm_total = Σ_d (datum_count_d * raw_weight_d)
+                    unnorm_total = (datum_counts * raw_weights).sum()
+                    normalization = total_datums / unnorm_total
+                    per_depth_weights = normalization * raw_weights
+
+                    per_datum_weights = per_depth_weights[depth_indices]
+                    batch["rewards"] = batch["rewards"] * per_datum_weights
+                    # Remove depth metadata — no longer needed downstream
+                    del batch["traj_depth"]
+                    del batch["traj_start"]
+
                 with stats_tracker.record_timing("compute_advantage"):
                     self.actor.compute_advantages(batch)
                     log_gpu_stats("compute advantages")

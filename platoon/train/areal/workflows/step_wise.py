@@ -93,7 +93,18 @@ class StepWiseArealWorkflow(RolloutWorkflow):
         mean_unprocessed_reward = torch.mean(train_data["rewards"])
 
         # Center advantages
-        train_data["rewards"] = train_data["rewards"] - torch.mean(train_data["task_reward"])
+        if self.config.leave_one_out_baseline and len(results) > 1:
+            # Leave-one-out: each rollout's baseline is the mean of all other rollouts' rewards
+            task_rewards = train_data["task_reward"]  # shape [N]
+            N = len(task_rewards)
+            total_reward = task_rewards.sum()
+            loo_baselines = (total_reward - task_rewards) / (N - 1)  # shape [N]
+            # Expand per-rollout baselines to per-datum baselines
+            datum_counts = torch.tensor([r["rewards"].shape[0] for r in results])
+            per_datum_baselines = torch.repeat_interleave(loo_baselines, datum_counts)
+            train_data["rewards"] = train_data["rewards"] - per_datum_baselines
+        else:
+            train_data["rewards"] = train_data["rewards"] - torch.mean(train_data["task_reward"])
 
         tracker = stats_tracker.get(self.stats_scope)
 
@@ -222,6 +233,7 @@ class StepWiseArealWorkflow(RolloutWorkflow):
             self.reward_processor,
             self.merge_prefixes,
             concat_fn=concat_padded_tensors,
+            include_traj_depth=self.config.depth_level_weighting,
         )
 
         if train_data is None:

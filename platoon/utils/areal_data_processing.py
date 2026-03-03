@@ -358,6 +358,46 @@ def _get_train_data_for_trajectory_no_merge(
     }
 
 
+def _compute_trajectory_depths(trajectory_collection: dict) -> dict[str, int]:
+    """Compute the depth of each trajectory in the rollout tree.
+
+    Root trajectory is depth 0, its direct children are depth 1, etc.
+    Depth is determined by following parent_info links.
+
+    Args:
+        trajectory_collection: Dict with 'trajectories' key mapping traj_id to traj dict.
+
+    Returns:
+        Dict mapping trajectory_id to its depth in the tree.
+    """
+    trajectories = trajectory_collection.get("trajectories", {})
+    if not trajectories:
+        return {}
+
+    traj_ids = list(trajectories.keys())
+    root_id = traj_ids[0]
+
+    parents: dict[str, str | None] = {}
+    for traj_id, traj in trajectories.items():
+        parent_info = traj.get("parent_info")
+        parent_id = parent_info.get("id") if isinstance(parent_info, dict) else None
+        parents[traj_id] = parent_id
+
+    depth_cache: dict[str, int] = {}
+
+    def _depth_for(traj_id: str) -> int:
+        if traj_id in depth_cache:
+            return depth_cache[traj_id]
+        if traj_id == root_id or parents.get(traj_id) is None or parents[traj_id] not in parents:
+            depth_cache[traj_id] = 0
+            return 0
+        d = _depth_for(parents[traj_id]) + 1
+        depth_cache[traj_id] = d
+        return d
+
+    return {tid: _depth_for(tid) for tid in traj_ids}
+
+
 def get_train_data_for_trajectory_collection(
     trajectory_collection: dict,
     completions: dict[str, CompletionWithResponse],
@@ -366,6 +406,7 @@ def get_train_data_for_trajectory_collection(
     reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj["reward"], {}),
     merge_prefixes: bool = True,
     concat_fn: Callable[[list[dict]], dict] | None = None,
+    include_traj_depth: bool = False,
 ) -> dict | None:
     """Extract training data from all trajectories in a collection.
 
@@ -377,6 +418,7 @@ def get_train_data_for_trajectory_collection(
         reward_processor: Function to process trajectory rewards.
         merge_prefixes: Whether to merge prefix sequences for efficiency.
         concat_fn: Function to concatenate training data dicts (required).
+        include_traj_depth: Whether to include per-datum trajectory depth labels.
 
     Returns:
         Training data dict or None if no valid data found.
@@ -384,12 +426,24 @@ def get_train_data_for_trajectory_collection(
     if concat_fn is None:
         raise ValueError("concat_fn is required for get_train_data_for_trajectory_collection")
 
+    depth_map = _compute_trajectory_depths(trajectory_collection) if include_traj_depth else {}
+
     train_data = []
     for trajectory_id, trajectory in trajectory_collection["trajectories"].items():
         trajectory_data = get_train_data_for_trajectory(
             trajectory, completions, task_id, trajectory_id, filter_errors, reward_processor, merge_prefixes, concat_fn
         )
         if trajectory_data is not None:
+            if include_traj_depth and trajectory_id in depth_map:
+                num_datums = trajectory_data["rewards"].shape[0]
+                trajectory_data["traj_depth"] = torch.full(
+                    (num_datums,), float(depth_map[trajectory_id]), dtype=torch.float32
+                )
+                # Mark the first datum of this trajectory so we can count
+                # distinct trajectories (not datums) at each depth level.
+                traj_start = torch.zeros(num_datums, dtype=torch.float32)
+                traj_start[0] = 1.0
+                trajectory_data["traj_start"] = traj_start
             train_data.append(trajectory_data)
 
     if not train_data:

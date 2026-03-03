@@ -1,13 +1,10 @@
 experiment_name: recursive-agents
-trial_name: textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-medium-trial-3
+trial_name: appworld-ctx40000-cispo-4b-recursive-transfer-trial-0
 
 seed: 343
-total_train_epochs: 10
+total_train_epochs: 100
 tokenizer_path: ${actor.path}
-train_difficulties: ["medium"]
-eval_difficulties: null
-depth_aware: true
-#enable_offload: false
+recursive: true
 
 
 cluster:
@@ -18,7 +15,7 @@ cluster:
     type: nfs
     nfs_record_root: /mnt/efs/tmp/areal/name_resolve
 
-allocation_mode: sglang:d4p1t1+d4p1t1
+allocation_mode: sglang:d4p1t1+d4p1t1c1
 
 rollout:
   experiment_name: ${experiment_name}
@@ -28,8 +25,6 @@ rollout:
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
   enable_rollout_tracing: false
-  #shuffle_cross_task: true
-  #ensure_batch_divisible_by: 4
 
 gconfig:
   n_samples: 1
@@ -41,13 +36,17 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 25
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-medium-trial-3
+    max_steps: 75
+    output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-4b-recursive-transfer-trial-0
     verbose: True
     train: true
-    timeout: 7200
-    step_timeout: 7200
+    timeout: 900
+    step_timeout: 600
+    inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
   group_size: 8
+  use_subprocesses: true
   leave_one_out_baseline: True  # Use leave-one-out baseline for advantage centering
   depth_level_weighting: True  # Weight trajectories inversely by depth-level frequency
 
@@ -60,13 +59,13 @@ loss_fn_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct-2507 #OpenPipe/Qwen3-14B-Instruct
+  path: /mnt/efs/tmp/areal/experiments/checkpoints/ec2-user/recursive-agents/textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-medium-trial-3/default/epoch4epochstep33globalstep249 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-recursive_opus_4_5
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 60000
+    max_tokens_per_mb: 40000
   optimizer:
     type: adam
     lr: 3e-6
@@ -112,7 +111,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 60000
+    max_tokens_per_mb: 4000
   optimizer: null
 
 # SGLang
@@ -163,7 +162,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 5
   freq_secs: null
 
 stats_logger:
@@ -179,3 +178,4 @@ launcher:
   inference_server_mem_per_gpu: 32768
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 32768
+

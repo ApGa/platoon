@@ -1,9 +1,9 @@
 # AppWorld inference benchmark config.
 inference:
-  model_name: openai/Qwen3-4B-Instruct-2507
+  model_name: openai/qwen-4b-recursive-40k
   model_endpoint: http://127.0.0.1:30000/v1
   model_api_key: null
-  output_dir: ./inference_results/appworld/qwen3-4b-recursive
+  output_dir: ./inference_results/appworld/qwen3-4b-textcraft-transfer
   resume: true
   workflow:
     num_rollouts_per_task: 1
@@ -14,7 +14,7 @@ inference:
     subprocess_max_workers: 10
     rollout_config:
       max_steps: 75
-      output_dir: ./inference_results/appworld/qwen3-4b-recursive/rollouts
+      output_dir: ./inference_results/appworld/qwen3-4b-textcraft-transfer/rollouts
       verbose: true
       timeout: 1800
       step_timeout: 1800

@@ -3,7 +3,7 @@ inference:
   model_name: litellm_proxy/neulab/claude-opus-4-5-20251101
   model_endpoint: https://cmu.litellm.ai
   model_api_key: null
-  output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-recursivev3
+  output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-linear
   resume: true
   workflow:
     num_rollouts_per_task: 1
@@ -14,7 +14,7 @@ inference:
     subprocess_max_workers: 10
     rollout_config:
       max_steps: 75
-      output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-recursivev3/rollouts
+      output_dir: ./inference_results/appworld/claude-opus-4-5-20251101-linear/rollouts
       verbose: true
       timeout: 1800
       step_timeout: 1800
@@ -24,7 +24,7 @@ inference:
 
 dataset_split: train
 num_tasks: 90
-use_recursive_agent: true
+use_recursive_agent: false
 task_id: null
 # full: run rollouts + report
 # rollouts: only write rollouts to disk (resume-friendly)
