@@ -580,4 +580,84 @@ class AppWorldRecursiveEnv(AppWorldEnv):
         reward_misc["reward/subagent_success"] = subagent_reward
 
         return score, reward_misc
+
+
+class AppWorldDepthAwareCodeExecutor(AppWorldRecursiveCodeExecutor):
+    """Code executor for depth-aware budget tracking.
+
+    Replaces the shell's ``launch_subagent`` with a wrapper that uses a
+    fixed ``max_steps`` default — the agent does not need to specify
+    ``max_steps`` when calling ``launch_subagent``.
+    """
+
+    def __init__(self, *args, subagent_max_steps: int = 25, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._subagent_max_steps = subagent_max_steps
+        self._inject_depth_aware_launch_subagent()
+
+    def _inject_depth_aware_launch_subagent(self) -> None:
+        """Replace launch_subagent in the shell with a version using fixed max_steps."""
+        max_steps = self._subagent_max_steps
+
+        async def depth_aware_launch_subagent(goal: str) -> str:
+            """Launch a subagent to solve a task.
+
+            Args:
+                goal: The goal of the subagent.
+
+            Returns:
+                Returns the answer or finish message for the goal.
+            """
+            return await launch_subagent(goal=goal, max_steps=max_steps)
+
+        shell = self.world.get_shell(self.shell_id)
+        shell.user_ns["launch_subagent"] = depth_aware_launch_subagent
+
+    async def describe_action_space(self) -> str:
+        return self.prompt_retriever.get_prompt(
+            "user-depth-aware-action-space-description",
+            supervisor=self.world.task.supervisor,
+            current_task_is_subtask=self.current_task_is_subtask,
+        )
+
+    async def fork(self, task: Task) -> "AppWorldDepthAwareCodeExecutor":
+        shell_id = str(uuid.uuid4())
+        return AppWorldDepthAwareCodeExecutor(
+            task,
+            world=await self.world.fork(shell_id),
+            shell_id=shell_id,
+            owns_world=False,
+            subagent_max_steps=self._subagent_max_steps,
+        )
+
+
+class AppWorldDepthAwareEnv(AppWorldRecursiveEnv):
+    """Environment for depth-aware recursive AppWorld training.
+
+    Uses ``AppWorldDepthAwareCodeExecutor`` so agents do not specify
+    ``max_steps`` when delegating.  Paired with
+    ``DepthAwareStepBudgetTracker`` in the rollout function.
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        code_executor: AppWorldDepthAwareCodeExecutor | None = None,
+        subagent_max_steps: int = 25,
+        **kwargs,
+    ):
+        self._subagent_max_steps = subagent_max_steps
+        if code_executor is None:
+            code_executor = AppWorldDepthAwareCodeExecutor(task, subagent_max_steps=subagent_max_steps)
+        super().__init__(task, code_executor, **kwargs)
+
+    async def fork(self, task: Task) -> "AppWorldDepthAwareEnv":
+        code_executor = await self.code_executor.fork(task)
+        return AppWorldDepthAwareEnv(
+            task,
+            code_executor=code_executor,
+            subagent_max_steps=self._subagent_max_steps,
+            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
+            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
+        )
     

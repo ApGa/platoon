@@ -221,3 +221,118 @@ class AppWorldRecursiveAgent(AppWorldAgent):
             stuck_in_loop_threshold=self.stuck_in_loop_threshold,
             stuck_in_loop_window=self.stuck_in_loop_window,
         )
+
+
+class AppWorldDepthAwarePromptBuilder(AppWorldRecursiveCodeActPromptBuilder):
+    """Prompt builder for depth-aware recursive agents.
+
+    Uses ``user-depth-aware-action-space-description`` which removes all
+    budget/max_steps guidance from launch_subagent since each agent has a
+    fixed, pre-configured step budget managed by DepthAwareStepBudgetTracker.
+    """
+
+    def build_messages_from_traj_dump(self, traj_collection_dump: dict, reward_threshold: float) -> list[ConversationWithMetadata]:
+        messages: list[ConversationWithMetadata] = []
+        
+        supervisor = None
+
+        for i, traj in enumerate(traj_collection_dump["trajectories"].values()):
+            if i == 0:
+                task_id = traj["task"]["id"]
+                task_specs_path = Path(os.environ["APPWORLD_ROOT"]) / "data" / "tasks" / task_id / "specs.json"
+                with open(task_specs_path, "r") as f:
+                    task_specs = json.load(f)
+                supervisor = Supervisor(**task_specs["supervisor"])
+            
+            if traj["reward"] < reward_threshold:
+                    continue
+            
+            task = None
+            current_task_is_subtask = False
+            if traj["task"] is not None:
+                if "parent_tasks" in traj["task"] and len(traj["task"]["parent_tasks"]) > 0:
+                    task = SubTask.from_dict(traj["task"])
+                    current_task_is_subtask = True
+                else:
+                    task = Task.from_dict(traj["task"])
+            
+            appworld_env_prompts_path = Path(__file__).parent / "prompts"
+            action_space_description = get_prompt(
+                "user-depth-aware-action-space-description",
+                prompts_dir=appworld_env_prompts_path,
+                supervisor=supervisor,
+                current_task_is_subtask=current_task_is_subtask
+            )
+            reward = traj["reward"]
+            misc = traj["misc"]
+            history = []
+            
+            obs = CodeActObservation(
+                task=task,
+                reward=reward,
+                misc=misc,
+                history=history,
+                action_space=action_space_description
+            )
+            
+            traj_misc = {
+                "id": traj["id"],
+                "task": traj["task"],
+                "parent_info": traj["parent_info"],
+                "reward": traj["reward"],
+                **traj["misc"],
+            }
+
+            for i, step_dict in enumerate(traj["steps"]):
+                step = CodeActStep(**step_dict)
+                step.misc["traj_misc"] = traj_misc
+                step.misc["step_num"] = len(obs.history)
+                agent_action = CodeActAction(
+                    parsed_code=step.code,
+                    parsed_thought=step.thought,
+                )
+                if traj["reward"] >= reward_threshold:
+                    if self.prompt_mode == "sequence_extension" and i < len(traj["steps"]) - 1:
+                        obs.history.append(step)
+                        continue
+                    messages.append(ConversationWithMetadata(
+                        messages=self.build_messages(obs, agent_action),
+                        misc=step.misc
+                    ))
+            
+        return messages
+
+
+class AppWorldDepthAwareAgent(AppWorldRecursiveAgent):
+    """Agent for depth-aware recursive AppWorld training.
+
+    Uses ``AppWorldDepthAwarePromptBuilder`` which omits budget-estimation
+    guidance since each agent has a fixed, pre-configured step budget.
+    """
+
+    def __init__(self,
+        prompt_mode: PromptMode = "sequence_extension",
+        include_reasoning: bool = True,
+        prompts_dir: str | Path | None = None,
+        prompt_builder: AppWorldDepthAwarePromptBuilder | None = None,
+        **kwargs,
+    ):
+        if prompt_builder is None:
+            prompt_builder = AppWorldDepthAwarePromptBuilder(prompt_mode=prompt_mode, include_reasoning=include_reasoning, prompts_dir=prompts_dir)
+        super().__init__(
+            prompt_builder=prompt_builder,
+            prompt_mode=prompt_mode,
+            include_reasoning=include_reasoning,
+            **kwargs,
+        )
+
+    async def fork(self, task: Task) -> "AppWorldDepthAwareAgent":
+        return AppWorldDepthAwareAgent(
+            prompt_builder=self.prompt_builder,
+            prompt_mode=self.prompt_builder.prompt_mode,
+            include_reasoning=self.include_reasoning,
+            llm_client=self.llm_client,
+            inference_params=self.inference_params,
+            stuck_in_loop_threshold=self.stuck_in_loop_threshold,
+            stuck_in_loop_window=self.stuck_in_loop_window,
+        )

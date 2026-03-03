@@ -17,7 +17,7 @@ from typing import Literal
 
 from appworld import load_task_ids
 
-from platoon.appworld.rollout import run_recursive_rollout, run_rollout
+from platoon.appworld.rollout import run_depth_aware_rollout, run_recursive_rollout, run_rollout
 from platoon.appworld.tasks import get_task
 from platoon.inference import (
     DefaultInferenceGroupWorkflow,
@@ -93,7 +93,7 @@ async def main(args: list[str]) -> None:
         default_config_path=str(default_config),
     )
 
-    rollout_fn = run_recursive_rollout if config.use_recursive_agent else run_rollout
+    rollout_fn = run_depth_aware_rollout if config.use_recursive_agent else run_rollout
     if config.stage == "report":
         dataset = []
     else:
