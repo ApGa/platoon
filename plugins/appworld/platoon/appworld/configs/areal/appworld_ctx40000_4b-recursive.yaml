@@ -1,10 +1,10 @@
 experiment_name: recursive-agents
-trial_name: appworld-ctx40000-cispo-4b-recursive-transfer-trial-0
+trial_name: appworld-ctx40000-cispo-4b-mixed-sft-recursive-trial5
 
 seed: 343
 total_train_epochs: 100
 tokenizer_path: ${actor.path}
-recursive: true
+depth_aware: true
 
 
 cluster:
@@ -15,7 +15,7 @@ cluster:
     type: nfs
     nfs_record_root: /mnt/efs/tmp/areal/name_resolve
 
-allocation_mode: sglang:d4p1t1+d4p1t1c1
+allocation_mode: sglang:d6p1t1+d2p1t1c1
 
 rollout:
   experiment_name: ${experiment_name}
@@ -36,12 +36,12 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 75
-    output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-4b-recursive-transfer-trial-0
+    max_steps: 25
+    output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-4b-mixed-sft-recursive-trial5
     verbose: True
     train: true
-    timeout: 900
-    step_timeout: 600
+    timeout: 7200
+    step_timeout: 7200
     inference_params:
         temperature: 1.0
         max_completion_tokens: 2048
@@ -59,13 +59,13 @@ loss_fn_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /mnt/efs/tmp/areal/experiments/checkpoints/ec2-user/recursive-agents/textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-medium-trial-3/default/epoch4epochstep33globalstep249 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-recursive_opus_4_5
+  path: /mnt/efs/LlamaFactory/saves/appworld-sft-qwen3-4b-mix_opus_4_5_v6/checkpoint-22 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-recursive_opus_4_5
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 70000
   optimizer:
     type: adam
     lr: 3e-6
@@ -162,7 +162,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 5
+  freq_steps: 20
   freq_secs: null
 
 stats_logger:

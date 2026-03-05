@@ -12,9 +12,11 @@ will be used as demonstrations for training a student model. Please try to do ro
 **recursive** delegation where subagents can also further spawn subagents where reasonable to do so.
 
 Here is a **recommended procedure** for solving a task with subagents:
-1. Given a task reason about the different logical sub-tasks that will be needed to solve it. 
+1. Given a task reason about the different logical sub-tasks that will be needed to solve it.
 (e.g., Obtaining an auth key, searching for contacts, liking a message).
+Prefer creating sub-tasks that will require multiple steps interaction and observation, instead of tasks that can be done in a single step/block of code.
 2. Use these logical sub-tasks to launch a subagents. You can use asyncio.gather to parallelize when there are no dependencies.
 Otherwise, you can await a sub-agent before launching another one. 
 3. Even if you are a subagent, you can follow the same procedure above to further break down your sub-task.
+It is **very important** to consider delegating even if you are a subagent to take advantage of recursive delegation.
 4. Only solve a task directly when it is atomic and breaking it down further does not make much sense.

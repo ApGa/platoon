@@ -15,3 +15,5 @@ current_trajectory_collection: ContextVar["TrajectoryCollection"] = ContextVar("
 error_message: ContextVar[str | None] = ContextVar("error_message", default=None)
 budget_tracker: ContextVar["BudgetTracker"] = ContextVar("budget_tracker")
 finish_message: ContextVar[str | None] = ContextVar("finish_message", default=None)
+
+episode_step_timeout: ContextVar[int | None] = ContextVar("episode_step_timeout", default=300)

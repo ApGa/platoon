@@ -3,7 +3,7 @@ from typing import cast
 
 from platoon.agents.base import ForkableAgent
 from platoon.envs.base import ForkableEnv
-from platoon.episode.context import budget_tracker, current_agent, current_env
+from platoon.episode.context import budget_tracker, current_agent, current_env, episode_step_timeout
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import BudgetExceededError
 
@@ -36,7 +36,13 @@ async def launch_subagent(goal: str, max_steps: int = 15) -> str:
             msg += " " + guidance
         return msg
 
-    traj = await asyncio.create_task(run_episode(forked_agent, forked_env))
+    traj = await asyncio.create_task(
+        run_episode(
+            forked_agent,
+            forked_env,
+            timeout=episode_step_timeout.get(),
+        )
+    )
 
     budget_tracker.get().release_budget(max_steps + 1)
 

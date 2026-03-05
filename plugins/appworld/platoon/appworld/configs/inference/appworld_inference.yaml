@@ -24,7 +24,7 @@ inference:
 
 dataset_split: train
 num_tasks: 90
-use_recursive_agent: false
+use_recursive_agent: true
 task_id: null
 # full: run rollouts + report
 # rollouts: only write rollouts to disk (resume-friendly)

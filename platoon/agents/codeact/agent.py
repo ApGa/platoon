@@ -128,6 +128,8 @@ class CodeActAgent:
         request_kwargs = {
             "stop": ["</python>"],
             "max_completion_tokens": self.inference_params.max_completion_tokens,
+            "timeout": 1800, # TODO: Make configurable and move to LiteLLM utils?
+            "num_retries": 0
         }
         if self.inference_params.temperature is not None:
             request_kwargs["temperature"] = self.inference_params.temperature

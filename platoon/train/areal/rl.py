@@ -400,7 +400,7 @@ class PlatoonArealRLTrainer:
                         cnt += 1
                 try:
                     # TODO: Make the eval timeout configurable
-                    results = self.eval_rollout.wait(cnt, timeout=1800)
+                    results = self.eval_rollout.wait(cnt, timeout=3600)
                     print(f"Evaluated {cnt} tasks")
                     print(f"Task Rewards: {results['task_reward']}")
 

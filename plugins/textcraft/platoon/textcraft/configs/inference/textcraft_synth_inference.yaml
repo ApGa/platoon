@@ -1,9 +1,9 @@
 # TextCraft-Synth inference benchmark config.
 inference:
-  model_name: openai/qwen-4b-recursive-40k #Qwen/Qwen3-4B-Instruct-2507
+  model_name: openai/satyakic/satyakic/linear-8k-textcraft-medium-step-249 #Qwen/Qwen3-4B-Instruct-2507
   model_endpoint: http://127.0.0.1:30000/v1
   model_api_key: null
-  output_dir: ./inference_results/textcraft_synth/qwen3-ctx40000extended-cispo-4b-depth-aware
+  output_dir: ./inference_results/textcraft_synth_qwen_4b_linear_8K
   resume: true
   workflow:
     num_rollouts_per_task: 1
@@ -13,11 +13,11 @@ inference:
     use_subprocesses: false
     subprocess_max_workers: null
     rollout_config:
-      max_steps: 25
-      output_dir: ./inference_results/textcraft_synth/qwen3-ctx40000extended-cispo-4b-depth-aware/rollouts
+      max_steps: 800
+      output_dir: ./inference_results/textcraft_synth_qwen_4b_linear_8K/rollouts
       verbose: true
-      timeout: 1800    
-      step_timeout: 1800
+      timeout: 1200
+      step_timeout: 300
       inference_params:
         temperature: 0.0
         top_p: null
@@ -26,7 +26,7 @@ inference:
 dataset_split: val
 difficulty: ['easy', 'medium', 'hard']
 num_tasks: 100
-use_recursive_agent: true
+use_recursive_agent: false
 task_id: null
 # full: run rollouts + report
 # rollouts: only write rollouts to disk (resume-friendly)

@@ -9,6 +9,7 @@ from platoon.episode.context import (
     current_env,
     current_trajectory,
     current_trajectory_collection,
+    episode_step_timeout,
     error_message,
     finish_message,
 )
@@ -16,16 +17,16 @@ from platoon.episode.trajectory import StepBudgetTracker, Trajectory, Trajectory
 
 
 # NOTE: Call using asyncio.create_task() to make sure edits to contextvars do not leak to parent context
-async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: int = 300) -> Trajectory:
+async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: int | None = 300) -> Trajectory:
     try:
         step_count = 0
-        set_context_vars(agent, env)
+        set_context_vars(agent, env, timeout=timeout)
         obs = await env.reset()
         while not halt_episode(obs):
             action = await asyncio.wait_for(agent.act(obs), timeout=timeout)
             obs = await asyncio.wait_for(env.step(action), timeout=timeout)
             step_count += 1
-    except Exception as e:
+    except (Exception, asyncio.CancelledError) as e:
         tb_summary = traceback.extract_tb(e.__traceback__)
         origin = ""
         if tb_summary:
@@ -41,8 +42,14 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
             print(detailed_msg)
         error_message.set(detailed_msg)
     finally:
-        await agent.close()
-        await env.close()
+        try:
+            await agent.close()
+        except BaseException:
+            pass
+        try:
+            await env.close()
+        except BaseException:
+            pass
         # Finalize trajectory and emit a finish event to sinks
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
@@ -53,9 +60,10 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
         return traj
 
 
-def set_context_vars(agent: Agent, env: Env):
+def set_context_vars(agent: Agent, env: Env, timeout: int | None):
     finish_message.set(None)
     error_message.set(None)
+    episode_step_timeout.set(timeout)
     current_agent.set(agent)
     current_env.set(env)
 

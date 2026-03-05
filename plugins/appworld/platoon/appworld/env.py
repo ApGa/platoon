@@ -271,6 +271,17 @@ class AppWorldAsync(AppWorld):
             try:
                 result.raise_error()
                 message = ""  # to make mypy happy.
+            except asyncio.CancelledError:
+                # Cancellation typically means the outer episode task timed out
+                # or was otherwise interrupted while this step was running.
+                message_ = (
+                    "asyncio.exceptions.CancelledError\n"
+                    "Step execution was cancelled by an outer timeout/cancellation "
+                    "(e.g., episode step timeout)."
+                )
+                message = "Execution failed. Traceback:\n" + message_
+                cap_stderr = message_
+                cap_stdout = cap_stdout.replace(", use %tb to see the full traceback.", ".")
             except Exception as exception:
                 stack_trace = get_stack_trace_from_exception(
                     exception, only_ipython=True, add_http_exception_message=True
@@ -388,7 +399,7 @@ class AppWorldCodeExecutor(CodeExecutor):
                     loop.run_in_executor(None, self.world.close),
                     timeout=30.0,
                 )
-            except (asyncio.TimeoutError, Exception):
+            except BaseException:
                 pass  # Best-effort; SIGALRM will clean up the subprocess
         else:
             self.world.unregister_shell(self.shell_id)
