@@ -36,7 +36,7 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 75
+    max_steps: 40
     output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-14b-recursive-trial-0
     verbose: True
     train: true

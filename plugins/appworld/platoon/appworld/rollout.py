@@ -153,14 +153,15 @@ _APPWORLD_MAX_DEPTH = 6
 async def run_depth_aware_rollout(
     task: Task,
     config: RolloutConfig,
-    per_agent_max_steps: int = 40,
+    per_subagent_max_steps: int = 25,
     max_depth: int = _APPWORLD_MAX_DEPTH,
 ) -> dict | TrajectoryCollection:
     """Run a depth-aware recursive rollout for an AppWorld task.
 
-    Uses ``DepthAwareStepBudgetTracker``: each agent (root and every
-    subagent) gets an independent budget of *per_agent_max_steps* steps,
-    and the delegation tree depth is capped at *max_depth*.
+    Uses ``DepthAwareStepBudgetTracker`` with the root agent budget taken
+    from ``task.max_steps`` / rollout config, while every spawned subagent
+    gets an independent budget of *per_subagent_max_steps* steps. The
+    delegation tree depth is capped at *max_depth*.
     """
     agent = env = None
     episode_started = False
@@ -171,12 +172,9 @@ async def run_depth_aware_rollout(
             api_key=config.model_api_key,
         )
 
-        # Override the task's max_steps so the root agent also uses per_agent_max_steps
-        task.max_steps = per_agent_max_steps
-
         env = AppWorldDepthAwareEnv(
             task,
-            subagent_max_steps=per_agent_max_steps,
+            subagent_max_steps=per_subagent_max_steps,
             per_step_subagent_success_reward=0.2,
             per_step_subagent_reward_ceiling=0.4,
             timeout_seconds=config.step_timeout,
