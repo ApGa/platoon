@@ -22,6 +22,40 @@ class ConversationWithMetadata(TypedDict):
     misc: dict[str, Any]
 
 
+_LITELLM_SEMAPHORE: "asyncio.Semaphore | None" = None
+_LITELLM_SEMAPHORE_PID: int | None = None
+
+
+def _get_litellm_semaphore():
+    """Create a process-local semaphore when configured via env var.
+
+    Disabled by default so existing workloads keep current behavior unless
+    `PLATOON_LITELLM_MAX_INFLIGHT` is explicitly set.
+    """
+    import asyncio
+
+    global _LITELLM_SEMAPHORE, _LITELLM_SEMAPHORE_PID
+
+    limit_str = os.getenv("PLATOON_LITELLM_MAX_INFLIGHT")
+    if not limit_str:
+        return None
+
+    try:
+        limit = int(limit_str)
+    except ValueError:
+        return None
+
+    if limit <= 0:
+        return None
+
+    pid = os.getpid()
+    if _LITELLM_SEMAPHORE is None or _LITELLM_SEMAPHORE_PID != pid:
+        _LITELLM_SEMAPHORE = asyncio.Semaphore(limit)
+        _LITELLM_SEMAPHORE_PID = pid
+
+    return _LITELLM_SEMAPHORE
+
+
 """LLM client utility for making calls to LLMs compatible with the OpenAI's API."""
 
 
@@ -360,15 +394,28 @@ class LiteLLMClient:
         kwargs.setdefault("num_retries", 0)
 
         try:
-            response = await litellm.acompletion(
-                model=self.model,
-                api_base=self.base_url,
-                api_key=self.api_key,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
+            semaphore = _get_litellm_semaphore()
+            if semaphore is None:
+                response = await litellm.acompletion(
+                    model=self.model,
+                    api_base=self.base_url,
+                    api_key=self.api_key,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+            else:
+                async with semaphore:
+                    response = await litellm.acompletion(
+                        model=self.model,
+                        api_base=self.base_url,
+                        api_key=self.api_key,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **kwargs,
+                    )
 
             if not response.choices:
                 print("No response choices received from LiteLLM")

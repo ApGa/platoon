@@ -54,6 +54,9 @@ def _patch_freezegun_idempotent_stop() -> None:
 _patch_freezegun_idempotent_stop()
 
 
+DEFAULT_APPWORLD_TIMEOUT_SECONDS = 1800
+
+
 class AppWorldAsync(AppWorld):
     
     def __init__(
@@ -347,6 +350,7 @@ class AppWorldCodeExecutor(CodeExecutor):
         shell_id: str | None = None,
         experiment_name: str | None = None,
         owns_world: bool | None = None,
+        timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
     ):
         self.task = task
         self.shell_id = shell_id
@@ -362,6 +366,7 @@ class AppWorldCodeExecutor(CodeExecutor):
                 experiment_name=experiment_name,
                 allow_silent_success=True,
                 shell_id=self.shell_id,
+                timeout_seconds=timeout_seconds,
                 # This needs to be disabled to allow for writing logs to file when we launch subagents
                 null_patch_unsafe_execution=False,
             )
@@ -486,10 +491,11 @@ class AppWorldEnv(CodeActEnv):
         code_executor: AppWorldCodeExecutor | None = None,
         per_step_subagent_success_reward: float=0.0,
         per_step_subagent_reward_ceiling: float=float("inf"),
+        timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
         **kwargs,
     ):
         if code_executor is None:
-            code_executor = AppWorldCodeExecutor(task)
+            code_executor = AppWorldCodeExecutor(task, timeout_seconds=timeout_seconds)
 
         self._per_step_subagent_success_reward = per_step_subagent_success_reward
         self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
@@ -555,10 +561,11 @@ class AppWorldRecursiveEnv(AppWorldEnv):
         self,
         task: Task,
         code_executor: AppWorldRecursiveCodeExecutor | None = None,
+        timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
         **kwargs,
     ):
         if code_executor is None:
-            code_executor = AppWorldRecursiveCodeExecutor(task)
+            code_executor = AppWorldRecursiveCodeExecutor(task, timeout_seconds=timeout_seconds)
         super().__init__(task, code_executor, **kwargs)
 
     @property
@@ -655,11 +662,16 @@ class AppWorldDepthAwareEnv(AppWorldRecursiveEnv):
         task: Task,
         code_executor: AppWorldDepthAwareCodeExecutor | None = None,
         subagent_max_steps: int = 25,
+        timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
         **kwargs,
     ):
         self._subagent_max_steps = subagent_max_steps
         if code_executor is None:
-            code_executor = AppWorldDepthAwareCodeExecutor(task, subagent_max_steps=subagent_max_steps)
+            code_executor = AppWorldDepthAwareCodeExecutor(
+                task,
+                subagent_max_steps=subagent_max_steps,
+                timeout_seconds=timeout_seconds,
+            )
         super().__init__(task, code_executor, **kwargs)
 
     async def fork(self, task: Task) -> "AppWorldDepthAwareEnv":

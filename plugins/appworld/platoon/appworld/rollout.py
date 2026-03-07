@@ -25,7 +25,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
         )
-        env = AppWorldEnv(task)
+        env = AppWorldEnv(task, timeout_seconds=config.step_timeout)
         agent = AppWorldAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
@@ -88,7 +88,12 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
         )
-        env = AppWorldRecursiveEnv(task, per_step_subagent_success_reward=0.2, per_step_subagent_reward_ceiling=0.4)
+        env = AppWorldRecursiveEnv(
+            task,
+            per_step_subagent_success_reward=0.2,
+            per_step_subagent_reward_ceiling=0.4,
+            timeout_seconds=config.step_timeout,
+        )
         agent = AppWorldRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
@@ -148,7 +153,7 @@ _APPWORLD_MAX_DEPTH = 6
 async def run_depth_aware_rollout(
     task: Task,
     config: RolloutConfig,
-    per_agent_max_steps: int = 25,
+    per_agent_max_steps: int = 40,
     max_depth: int = _APPWORLD_MAX_DEPTH,
 ) -> dict | TrajectoryCollection:
     """Run a depth-aware recursive rollout for an AppWorld task.
@@ -174,6 +179,7 @@ async def run_depth_aware_rollout(
             subagent_max_steps=per_agent_max_steps,
             per_step_subagent_success_reward=0.2,
             per_step_subagent_reward_ceiling=0.4,
+            timeout_seconds=config.step_timeout,
         )
         agent = AppWorldDepthAwareAgent(
             llm_client=llm_client,
