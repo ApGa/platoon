@@ -8,7 +8,7 @@ from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import BudgetExceededError
 
 
-async def launch_subagent(goal: str, max_steps: int = 15) -> str:
+async def launch_subagent(goal: str, max_steps: int = 15, task_misc: dict | None = None) -> str:
     """Launch a subagent to solve a task.
 
     Args:
@@ -22,8 +22,8 @@ async def launch_subagent(goal: str, max_steps: int = 15) -> str:
     agent = cast(ForkableAgent, current_agent.get())
     env = cast(ForkableEnv, current_env.get())
     task = env.task
-
-    subtask = task.fork(goal, max_steps)
+    
+    subtask = task.fork(goal, max_steps, task_misc=task_misc)
     forked_agent = await agent.fork(subtask)
     forked_env = await env.fork(subtask)
 

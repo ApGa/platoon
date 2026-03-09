@@ -351,4 +351,5 @@ class IPythonCodeExecutor(CodeExecutor):
         )
 
     async def reset(self) -> CodeExecutor:
+        self.shell = self._create_shell()
         return self

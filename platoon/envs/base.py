@@ -38,13 +38,17 @@ class Task:
         else:
             return f"Your Goal: {self.goal}"
 
-    def fork(self, goal: str, max_steps: int | None = None, **kwargs) -> Task | SubTask:
+    def fork(self, goal: str, max_steps: int | None = None, task_misc: dict | None = None) -> Task | SubTask:
+        
+        if task_misc is None:
+            task_misc = self.misc
+
         if self.fork_strategy == "task":
             return Task(
                 goal=goal,
                 max_steps=max_steps,
                 id=str(uuid.uuid4()),
-                misc=self.misc,
+                misc=task_misc,
                 fork_strategy=self.fork_strategy,
             )
         else:
@@ -53,7 +57,7 @@ class Task:
                 max_steps=max_steps,
                 id=str(uuid.uuid4()),
                 parent_tasks=[self],
-                misc=self.misc,
+                misc=task_misc,
             )
 
     @classmethod

@@ -20,7 +20,7 @@ from platoon.episode.context import finish_message
 from .recipe_loader import RecipeDatabase
 
 
-class TextCraftCodeExecutor(IPythonCodeExecutor, ForkableCodeExecutor):
+class TextCraftCodeExecutor(IPythonCodeExecutor):
     """Code executor for TextCraft with crafting actions.
 
     Supports both original Minecraft recipes and synthetic recipes.

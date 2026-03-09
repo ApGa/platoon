@@ -1,0 +1,40 @@
+# Oolong inference benchmark config.
+inference:
+  model_name: litellm_proxy/neulab/claude-opus-4-5-20251101 #openai/Qwen/Qwen3-4B-Instruct-2507
+  model_endpoint: null #http://127.0.0.1:30000/v1
+  model_api_key: null
+  output_dir: ./inference_results/oolong_synth_claude-opus-4-5-20251101
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 1
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 50
+      output_dir: ./inference_results/oolong_synth_claude-opus-4-5-20251101/rollouts
+      verbose: true
+      timeout: 1200
+      step_timeout: 300
+      inference_params:
+        temperature: 0.0
+        top_p: null
+        max_completion_tokens: 512
+
+# Dataset configuration
+oolong_dataset: synth   # synth or real
+dataset_split: validation  # validation or test
+num_tasks: 5
+use_recursive_agent: true
+task_id: null
+# Filtering options (null means no filter)
+task_group: null   # counting, user, or timeline
+answer_type: null  # NUMERIC, LABEL, COMPARISON, USER, MONTH_YEAR
+# full: run rollouts + report
+# rollouts: only write rollouts to disk (resume-friendly)
+# report: only read existing rollouts and generate report
+stage: full
+shuffle_tasks: true
+seed: 42
