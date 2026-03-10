@@ -57,7 +57,7 @@ wheels = [
 
 [[package]]
 name = "ai-rubric"
-version = "0.2.2"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
@@ -65,9 +65,9 @@ dependencies = [
     { name = "networkx" },
     { name = "plotly" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/e9/d131e3932fd01ec0a820990b983c31860480d47093078a093170aa9dfdbb/ai_rubric-0.2.2.tar.gz", hash = "sha256:ce8aaa222e84ee6495d37b3dfb94174b257f08c3e5ec13b88f816dd6afbcb99e", size = 694896, upload-time = "2025-09-07T04:17:36.265Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/3b/e8fd1ff134c396b4d6e4449f72970ccd6ddc4db01a13b11ecc5ba165e968/ai_rubric-0.2.4.tar.gz", hash = "sha256:2ccf2db3d87a2cc234e0dfa8cbcac45aabb79f359d30c648b0900e84792e9e60", size = 731238, upload-time = "2026-03-09T23:59:07.895Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cd/dc/9d6b7bd939facd39035aea07b28ebf3510d89a5ea9f25b00f9a18a56d6fd/ai_rubric-0.2.2-py3-none-any.whl", hash = "sha256:55f3c8916b6468cca3dd7fde6f5e8c6525966c0e759de5f5c593acbc7d07c544", size = 38770, upload-time = "2025-09-07T04:17:35.16Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/4b/26ac0c1ede93b0e345debbf517d4ea8ac1b8993f33ce88583b5e8624bd8d/ai_rubric-0.2.4-py3-none-any.whl", hash = "sha256:343ec6c29fdc538aa312719eb0a76b611e21d3a633332d4f7cc1b836932946d3", size = 39554, upload-time = "2026-03-09T23:59:06.634Z" },
 ]
 
 [[package]]
@@ -3824,7 +3824,7 @@ wandb = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-rubric", specifier = ">=0.2.2" },
+    { name = "ai-rubric", specifier = ">=0.2.4" },
     { name = "areal", extras = ["cuda"], marker = "extra == 'areal'", git = "https://github.com/inclusionAI/AReaL.git?rev=35b57e2d2743f7158894239acda8b71f7226b955" },
     { name = "datasets" },
     { name = "ipython", specifier = ">=9.4.0" },

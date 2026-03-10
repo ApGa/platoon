@@ -138,7 +138,7 @@ class OolongEnv(CodeActEnv):
                     err_message = error_message.get() or (self._state.history[-1].misc.get("error_message") if self._state.history else None)
 
                     rubric_context = f"We need to judge the performance of an agent on the task.\n\n# Agent Trajectory Info\n## Action History\n{action_history}\n\n## Final Message\n{final_message}\n\n## Error Message\n{err_message}"
-                    score, reason = rubric_checklist.evaluate(include_reason=True, context=rubric_context)
+                    score, reason = await rubric_checklist.aevaluate(include_reason=True, context=rubric_context)
 
                     reward_misc["reason"] = reason
                     reward_misc["rubric_dict"] = rubric_checklist.to_dict()
