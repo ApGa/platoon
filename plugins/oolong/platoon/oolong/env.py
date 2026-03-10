@@ -25,7 +25,8 @@ class OolongCodeExecutor(IPythonCodeExecutor):
             actions=(
                 finish,
                 safe_asyncio
-            )
+            ),
+            detect_unawaited_async_calls=False
         )
 
     async def describe_action_space(self) -> str:
@@ -170,6 +171,7 @@ class OolongRecursiveEnv(OolongEnv):
             task,
             subagent_max_steps=subagent_max_steps
         )
+        self.subagent_max_steps = subagent_max_steps
         self._per_step_subagent_success_reward = per_step_subagent_success_reward
         self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
 

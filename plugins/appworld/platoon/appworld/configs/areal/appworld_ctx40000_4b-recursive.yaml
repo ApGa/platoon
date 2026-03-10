@@ -43,8 +43,8 @@ workflow_config:
     timeout: 7200
     step_timeout: 7200
     inference_params:
-        temperature: 1.0
-        max_completion_tokens: 2048
+      temperature: 1.0
+      max_completion_tokens: 4096
   group_size: 8
   use_subprocesses: true
   leave_one_out_baseline: True  # Use leave-one-out baseline for advantage centering

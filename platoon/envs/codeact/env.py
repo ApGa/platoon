@@ -60,6 +60,7 @@ class CodeActEnv(Protocol):
     async def reset(self) -> CodeActObservation:
         self._code_executor = await self._code_executor.reset()
         self._state = CodeActObservation(task=self._state.task, history=[])
+        self._state.action_space = await self._code_executor.describe_action_space()
         if self._parent_state is not None:
             self._state.misc["parent_state"] = self._parent_state
         traj_collection = current_trajectory_collection.get()
@@ -269,11 +270,13 @@ class IPythonCodeExecutor(CodeExecutor):
         self,
         task: Task,
         actions: tuple[Callable[..., object], ...] | Sequence[Callable[..., object]] = (finish, safe_asyncio),
+        detect_unawaited_async_calls: bool = True,
     ):
         self.task = task
         self.actions = actions
         self.shell = self._create_shell()
         # self.timeout_seconds = timeout_seconds
+        self.detect_unawaited_async_calls = detect_unawaited_async_calls
 
     def _create_shell(self) -> InteractiveShellEmbed:
         original_excepthook = sys.excepthook
@@ -322,10 +325,11 @@ class IPythonCodeExecutor(CodeExecutor):
             return CodeActStep(code=code, error="No code available to execute.")
 
         # Check for unawaited async function calls before execution
-        detector = UnawaitedAsyncCallDetector()
-        detector.visit(tree)
-        if detector.errors:
-            return CodeActStep(code=code, error="\n".join(detector.errors))
+        if self.detect_unawaited_async_calls:
+            detector = UnawaitedAsyncCallDetector()
+            detector.visit(tree)
+            if detector.errors:
+                return CodeActStep(code=code, error="\n".join(detector.errors))
 
         with ShellCapture() as capture:
             await self.shell.run_cell_async(code)

@@ -402,7 +402,7 @@ class LiteLLMClient:
                     api_key=self.api_key,
                     messages=messages,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=max_tokens or kwargs.get("max_completion_tokens", None),
                     **kwargs,
                 )
             else:
@@ -413,7 +413,7 @@ class LiteLLMClient:
                         api_key=self.api_key,
                         messages=messages,
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=max_tokens or kwargs.get("max_completion_tokens", None),
                         **kwargs,
                     )
 

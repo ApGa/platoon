@@ -36,7 +36,10 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             # default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         env = OolongEnv(task)
-        agent = OolongAgent(llm_client=llm_client)
+        agent = OolongAgent(
+            llm_client=llm_client,
+            inference_params=config.inference_params,
+        )
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
 
@@ -111,7 +114,10 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             per_step_subagent_success_reward=0.0,
             per_step_subagent_reward_ceiling=0.0
         )
-        agent = OolongRecursiveAgent(llm_client=llm_client)
+        agent = OolongRecursiveAgent(
+            llm_client=llm_client,
+            inference_params=config.inference_params,
+        )
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
 

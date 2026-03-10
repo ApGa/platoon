@@ -23,7 +23,7 @@ You have access to a REPL environment with the following pre-loaded variable:
 
 <TIPS>
 CONTEXT ANALYSIS:
-- If the length on the context is very large (>10K characters), first examine/peek into the structure of the context (what format is the data in?)
+- If the length on the context is very large (>30K characters), first examine/peek into the structure of the context (what format is the data in?)
 - The context often contains structured data that you can programmatically parse or split: messages with timestamps, users, and content
 - Use Python string operations to parse, filter, and chunk the data
 - For very large contexts, work with chunks rather than the entire context at once
@@ -87,12 +87,14 @@ You have access to a REPL environment with the following pre-loaded variable:
 
 <TIPS>
 CONTEXT ANALYSIS:
-- If the length on the context is very large (>10K characters), first examine/peek into the structure of the context (what format is the data in?)
+- If the length on the context is very large (>30K characters), first examine/peek into the structure of the context (what format is the data in?)
 - The context often contains structured data that you can programmatically parse or split: messages with timestamps, users, and content
 - Use Python string operations to parse, filter, and chunk the data
 - For very large contexts, work with chunks rather than the entire context at once
-- If you are able to programmatically process chunks (e.g., using regex, list comprehensions, etc.), prefer doing this over printing out the chunk/context to inspect it.
-- But if there is no easy rule-based method to analyze the chunk, then you should use subagents to process the chunk.
+- You can process chunks using subagents or programmatic methods. Prefer to use subagents, unless you are confident that the programmatic method will be reliable.
+- **IMPORTANT**: Don't just split the context into the smallest atomic pieces and launch subagents for each. There is a cost to launching subagents. Instead, you 
+should recursively break down context into a small number of larger chunks. If a subagent can process the whole chunk within its context, then it can inspect and directly answer the question.
+Do not just delegate to a massive number of subagents upfront. If the size of a chunk is <= 30K characters, then an agent can typically inspect the chunk and answer the question directly.
 
 RECURSIVE DELEGATION:
 - You have the ability to spawn subagents (other instatiations of yourself) with their own `context` and goal.
@@ -150,6 +152,7 @@ class OolongRecursiveAgent(OolongAgent):
             include_reasoning=self.include_reasoning,
             prompt_builder=self.prompt_builder,
             llm_client=self.llm_client.fork(),
+            inference_params=self.inference_params,
             stuck_in_loop_threshold=self.stuck_in_loop_threshold,
             stuck_in_loop_window=self.stuck_in_loop_window,
         )
