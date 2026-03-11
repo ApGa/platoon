@@ -223,6 +223,8 @@ class StepWiseArealWorkflow(RolloutWorkflow):
 
         # Get completions from proxy server session cache
         completions = self.proxy_server.session_cache[session.session_id].completions
+        use_depth_weighting = self.config.depth_level_weighting
+        use_depth_discount = self.config.depth_level_discount_gamma is not None
 
         # Process data
         train_data = get_train_data_for_trajectory_collection(
@@ -233,7 +235,8 @@ class StepWiseArealWorkflow(RolloutWorkflow):
             self.reward_processor,
             self.merge_prefixes,
             concat_fn=concat_padded_tensors,
-            include_traj_depth=self.config.depth_level_weighting,
+            include_traj_depth=use_depth_weighting or use_depth_discount,
+            include_traj_start=use_depth_weighting,
         )
 
         if train_data is None:

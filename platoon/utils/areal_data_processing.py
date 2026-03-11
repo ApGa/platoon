@@ -407,6 +407,7 @@ def get_train_data_for_trajectory_collection(
     merge_prefixes: bool = True,
     concat_fn: Callable[[list[dict]], dict] | None = None,
     include_traj_depth: bool = False,
+    include_traj_start: bool = False,
 ) -> dict | None:
     """Extract training data from all trajectories in a collection.
 
@@ -419,6 +420,7 @@ def get_train_data_for_trajectory_collection(
         merge_prefixes: Whether to merge prefix sequences for efficiency.
         concat_fn: Function to concatenate training data dicts (required).
         include_traj_depth: Whether to include per-datum trajectory depth labels.
+        include_traj_start: Whether to mark the first datum of each trajectory.
 
     Returns:
         Training data dict or None if no valid data found.
@@ -439,11 +441,12 @@ def get_train_data_for_trajectory_collection(
                 trajectory_data["traj_depth"] = torch.full(
                     (num_datums,), float(depth_map[trajectory_id]), dtype=torch.float32
                 )
-                # Mark the first datum of this trajectory so we can count
-                # distinct trajectories (not datums) at each depth level.
-                traj_start = torch.zeros(num_datums, dtype=torch.float32)
-                traj_start[0] = 1.0
-                trajectory_data["traj_start"] = traj_start
+                if include_traj_start:
+                    # Mark the first datum of this trajectory so we can count
+                    # distinct trajectories (not datums) at each depth level.
+                    traj_start = torch.zeros(num_datums, dtype=torch.float32)
+                    traj_start[0] = 1.0
+                    trajectory_data["traj_start"] = traj_start
             train_data.append(trajectory_data)
 
     if not train_data:
