@@ -503,7 +503,7 @@ class TrajectoryTree(Static):
         self.step_nodes: Dict[tuple[str, int], TreeNode[str]] = {}
         # Track the latest known reward per trajectory for quick label updates
         self.traj_rewards: Dict[str, float] = {}
-        # Track whether a trajectory is finished (finish_message or error_message present)
+        # Track whether a trajectory has reached a terminal state.
         self.traj_finished: Dict[str, bool] = {}
         # Track which trajectories are currently expanded (for efficient collapse_all_except)
         self.expanded_trajs: set[str] = set()
@@ -874,11 +874,11 @@ class SplitDivider(Static):
                 self.traj_rewards[traj_id] = float(traj.get("reward", 0.0))
             except Exception:
                 self.traj_rewards[traj_id] = 0.0
-            # Initialize finished status from payload if present
+            # Initialize terminal status from payload if present.
             try:
                 finish_msg = traj.get("finish_message")
                 error_msg = traj.get("error_message")
-                self.traj_finished[traj_id] = bool(finish_msg) or bool(error_msg)
+                self.traj_finished[traj_id] = finish_msg is not None or error_msg is not None
             except Exception:
                 self.traj_finished[traj_id] = False
             label = self._format_traj_label(traj_id)
@@ -928,9 +928,9 @@ class SplitDivider(Static):
                             payload["finish_message"] = finish_msg
                         if error_msg is not None:
                             payload["error_message"] = error_msg
-                # Update finished map if we received any terminal info
+                # Update terminal status if we received any terminal info.
                 if finish_msg is not None or error_msg is not None:
-                    self.traj_finished[traj_id] = bool(finish_msg) or bool(error_msg)
+                    self.traj_finished[traj_id] = True
             except Exception:
                 pass
             # Update the trajectory node label to reflect latest reward
@@ -996,7 +996,8 @@ class SplitDivider(Static):
                             payload["finish_message"] = finish_msg
                         if error_msg is not None:
                             payload["error_message"] = error_msg
-                self.traj_finished[traj_id] = bool(finish_msg) or bool(error_msg)
+                # A trajectory_finished event is authoritative even when finish_message == "".
+                self.traj_finished[traj_id] = True
             except Exception:
                 pass
             # Refresh label to reflect final reward and status

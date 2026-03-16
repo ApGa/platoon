@@ -43,6 +43,7 @@ override-dependencies = [
     "huggingface_hub==0.34",
     "datasets==4.3.0",
     "networkx==3.3.0", # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
+    "transformers==4.57.3",
 ]
 no-build-isolation-package = ['flash-attn']
 

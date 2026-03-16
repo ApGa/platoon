@@ -121,7 +121,7 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)
 
-        budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=12))
+        budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=2))
 
         events_path = os.path.join(
             config.output_dir,

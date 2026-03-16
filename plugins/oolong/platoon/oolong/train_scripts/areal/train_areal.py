@@ -4,28 +4,29 @@ Usage:
     python -m platoon.oolong.train_areal --config oolong_areal.yaml
 """
 
-from dataclasses import dataclass
-from copy import deepcopy
 import random
 import sys
-import logging
+from copy import deepcopy
+from dataclasses import dataclass
+
 from datasets import Dataset
 from areal.api.cli_args import load_expr_config
 
-# Enable debug logging for platoon workflows
-logging.basicConfig(level=logging.WARNING)  # Quiet by default
-logging.getLogger("platoon.train.areal.workflows").setLevel(logging.DEBUG)
-logging.getLogger("httpx").setLevel(logging.WARNING)  # Silence httpx spam
-
-from platoon.oolong.tasks import get_task_ids, get_task
+from platoon.oolong.tasks import AnswerType, TaskGroup, get_task, get_task_ids
 from platoon.oolong.rollout import run_rollout, run_recursive_rollout
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
 from platoon.train.areal.workflows import StepWiseArealWorkflow
+
 
 @dataclass
 class OolongArealTrainerConfig(PlatoonArealRLTrainerConfig):
     recursive: bool = False
     seed: int = 42
+    oolong_dataset: str = "synth"
+    task_group: str | None = None
+    answer_type: str | None = None
+    min_context_len: int | None = None
+    max_context_len: int | None = None
 
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     """Extract Oolong reward components from trajectory steps."""
@@ -42,15 +43,38 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     return score, rewards_dict
 
 
+def get_filtered_task_ids(config: OolongArealTrainerConfig, split: str) -> list[str]:
+    """Get task IDs for a split using the configured Oolong dataset filters."""
+    filter_kwargs = {}
+    if config.task_group is not None:
+        filter_kwargs["task_group"] = TaskGroup(config.task_group)
+    if config.answer_type is not None:
+        filter_kwargs["answer_type"] = AnswerType(config.answer_type)
+    if config.min_context_len is not None:
+        filter_kwargs["min_context_len"] = config.min_context_len
+    if config.max_context_len is not None:
+        filter_kwargs["max_context_len"] = config.max_context_len
+
+    task_ids = get_task_ids(config.oolong_dataset, split, **filter_kwargs)
+    if not task_ids:
+        raise ValueError(
+            "No Oolong tasks matched the requested filters: "
+            f"dataset={config.oolong_dataset}, split={split}, "
+            f"task_group={config.task_group}, answer_type={config.answer_type}, "
+            f"min_context_len={config.min_context_len}, max_context_len={config.max_context_len}."
+        )
+    return task_ids
+
+
 def main(args):
     config, _ = load_expr_config(args, OolongArealTrainerConfig)
     config: OolongArealTrainerConfig = config
 
-    # Create datasets from oolong-synth
+    # Create datasets from Oolong. There is no train split, so validation is used
+    # for training and test is used for evaluation.
     # Note: oolong has validation and test splits, no train split
-    # We use validation for training and test for evaluation
-    train_task_ids = get_task_ids("synth", "validation")
-    eval_task_ids = get_task_ids("synth", "test")
+    train_task_ids = get_filtered_task_ids(config, "validation")
+    eval_task_ids = get_filtered_task_ids(config, "test")
 
     # Shuffle before truncating to get diverse samples (use seed from config)
     random.seed(config.seed)

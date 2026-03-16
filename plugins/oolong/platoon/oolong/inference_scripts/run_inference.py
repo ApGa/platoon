@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class OolongInferenceConfig:
     inference: InferenceBenchmarkConfig
-    oolong_dataset: Literal["synth", "real"] = "synth"
+    oolong_dataset: Literal["synth", "real", "both"] = "synth"
     dataset_split: Literal["validation", "test"] = "validation"
     num_tasks: int = 100
     use_recursive_agent: bool = False
@@ -49,6 +49,8 @@ class OolongInferenceConfig:
     # Optional filters
     task_group: str | None = None  # counting, user, timeline
     answer_type: str | None = None  # NUMERIC, LABEL, COMPARISON, USER, MONTH_YEAR
+    min_context_len: int | None = None
+    max_context_len: int | None = None
     # full: run rollouts + report
     # rollouts: only collect rollouts
     # report: only build report from existing rollouts
@@ -83,6 +85,10 @@ def get_dataset_task_ids(config: OolongInferenceConfig) -> list[str]:
         filter_kwargs["task_group"] = TaskGroup(config.task_group)
     if config.answer_type is not None:
         filter_kwargs["answer_type"] = AnswerType(config.answer_type)
+    if config.min_context_len is not None:
+        filter_kwargs["min_context_len"] = config.min_context_len
+    if config.max_context_len is not None:
+        filter_kwargs["max_context_len"] = config.max_context_len
 
     task_ids = get_task_ids(
         dataset=config.oolong_dataset,
@@ -98,6 +104,14 @@ def get_dataset_task_ids(config: OolongInferenceConfig) -> list[str]:
 
     if config.num_tasks is not None and config.num_tasks > 0:
         task_ids = task_ids[: config.num_tasks]
+
+    if not task_ids:
+        raise ValueError(
+            "No Oolong tasks matched the requested filters: "
+            f"dataset={config.oolong_dataset}, split={config.dataset_split}, "
+            f"task_group={config.task_group}, answer_type={config.answer_type}, "
+            f"min_context_len={config.min_context_len}, max_context_len={config.max_context_len}."
+        )
 
     return task_ids
 

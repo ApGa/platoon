@@ -23,10 +23,10 @@ You have access to a REPL environment with the following pre-loaded variable:
 
 <TIPS>
 CONTEXT ANALYSIS:
-- If the length on the context is very large (>30K characters), first examine/peek into the structure of the context (what format is the data in?)
+- If the length on the context is very large (>160K characters), first examine/peek into the structure of the context (what format is the data in?)
 - The context often contains structured data that you can programmatically parse or split: messages with timestamps, users, and content
 - Use Python string operations to parse, filter, and chunk the data
-- For very large contexts, work with chunks rather than the entire context at once
+- For very large contexts (i.e., >160K characters), work with chunks rather than the entire context at once
 - If you are able to programmatically process chunks (e.g., using regex, list comprehensions, etc.), prefer doing this over printing out the chunk/context to inspect it.
 - But if there is no easy rule-based method to analyze the chunk, then you may have to print it out to observe it.
 
@@ -87,20 +87,18 @@ You have access to a REPL environment with the following pre-loaded variable:
 
 <TIPS>
 CONTEXT ANALYSIS:
-- If the length on the context is very large (>30K characters), first examine/peek into the structure of the context (what format is the data in?)
-- The context often contains structured data that you can programmatically parse or split: messages with timestamps, users, and content
-- Use Python string operations to parse, filter, and chunk the data
-- For very large contexts, work with chunks rather than the entire context at once
-- You can process chunks using subagents or programmatic methods. Prefer to use subagents, unless you are confident that the programmatic method will be reliable.
-- **IMPORTANT**: Don't just split the context into the smallest atomic pieces and launch subagents for each. There is a cost to launching subagents. Instead, you 
-should recursively break down context into a small number of larger chunks. If a subagent can process the whole chunk within its context, then it can inspect and directly answer the question.
-Do not just delegate to a massive number of subagents upfront. If the size of a chunk is <= 30K characters, then an agent can typically inspect the chunk and answer the question directly.
+- First check if the length on the context is very large (>32K characters) using `len(context)`.
+- For very large contexts (i.e., >32K characters), work with chunks rather than the entire context at once.
+- Use subagents to process chunks and then aggregate the results to produce a final answer. Try not to split the context into too many chunks (32K characters per chunk is a good rule of thumb)
+- If the context <= 32K characters, prefer to process your context by printing out and reading it rather than using programmatic heuristics.
+- **IMPORTANT: DO NOT USE regex, string matching, etc. types of programmatic heuristics. It is important to read the context with `print(context)` to be accurate in your answer.**
 
-RECURSIVE DELEGATION:
-- You have the ability to spawn subagents (other instatiations of yourself) with their own `context` and goal.
-- Use subagents to process chunks and then aggregate the results to produce a final answer.
+SUBAGENT DELEGATION:
+- **IMPORTANT: Do not use subagents if the context you need to process is <= 32K characters. Just print out the context to observe it directly and answer the question by reading the context.**
+- You have the ability to spawn subagents (other instantiations of yourself), by providing them with their own `context`/chunk to process and a goal/instruction for what result it should return.
 - You can use asyncio.gather to process multiple chunks simultaneously.
-- Subagents can further spawn subagents to process even smaller chunks allowing you to process context using recursive divide-and-conquer.
+- Be specific about the format and typein which you expect subagents to return their results.
+- Do not provide the context/chunk as part of the goal. Instead, pass it explicitly as the `context` argument to the `launch_subagent` function.
 
 ANSWER SUBMISSION:
 - You can submit your answer using the `finish` function in the format requested in the user provided goal.
@@ -110,13 +108,13 @@ ANSWER SUBMISSION:
         if include_reasoning:
             return base_instructions + """
 
-You can perform actions by writing Python code blocks. You will get multiple steps to complete the task.
+You can perform printing out or peaking into the context or launching subagents using Python code blocks. You will get multiple steps to complete the task.
 For your current step, first briefly reason (~1-3 sentences) about your recursive strategy in <thought> </thought> tags, then output your code in <python> </python> tags.
 Your code will be executed in a Jupyter notebook and the output will be shown to you."""
         else:
             return base_instructions + """
 
-You can perform actions by writing Python code blocks. You will get multiple steps to complete the task.
+You can perform printing out or peaking into the context or launching subagents using Python code blocks. You will get multiple steps to complete the task.
 Output your code in <python> </python> tags."""
 
 

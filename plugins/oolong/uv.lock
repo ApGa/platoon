@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32' and extra != 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker'",
@@ -31,6 +31,7 @@ overrides = [
     { name = "openai", specifier = "==1.99.6" },
     { name = "outlines-core", specifier = "==0.1.26" },
     { name = "pyarrow", specifier = "==20.0.0" },
+    { name = "transformers", specifier = "==4.57.3" },
     { name = "xgrammar", specifier = "==0.1.24" },
 ]
 
@@ -54,7 +55,7 @@ wheels = [
 
 [[package]]
 name = "ai-rubric"
-version = "0.2.2"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
@@ -62,9 +63,9 @@ dependencies = [
     { name = "networkx" },
     { name = "plotly" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/e9/d131e3932fd01ec0a820990b983c31860480d47093078a093170aa9dfdbb/ai_rubric-0.2.2.tar.gz", hash = "sha256:ce8aaa222e84ee6495d37b3dfb94174b257f08c3e5ec13b88f816dd6afbcb99e", size = 694896, upload-time = "2025-09-07T04:17:36.265Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/3b/e8fd1ff134c396b4d6e4449f72970ccd6ddc4db01a13b11ecc5ba165e968/ai_rubric-0.2.4.tar.gz", hash = "sha256:2ccf2db3d87a2cc234e0dfa8cbcac45aabb79f359d30c648b0900e84792e9e60", size = 731238, upload-time = "2026-03-09T23:59:07.895Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cd/dc/9d6b7bd939facd39035aea07b28ebf3510d89a5ea9f25b00f9a18a56d6fd/ai_rubric-0.2.2-py3-none-any.whl", hash = "sha256:55f3c8916b6468cca3dd7fde6f5e8c6525966c0e759de5f5c593acbc7d07c544", size = 38770, upload-time = "2025-09-07T04:17:35.16Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/4b/26ac0c1ede93b0e345debbf517d4ea8ac1b8993f33ce88583b5e8624bd8d/ai_rubric-0.2.4-py3-none-any.whl", hash = "sha256:343ec6c29fdc538aa312719eb0a76b611e21d3a633332d4f7cc1b836932946d3", size = 39554, upload-time = "2026-03-09T23:59:06.634Z" },
 ]
 
 [[package]]
@@ -372,7 +373,7 @@ dependencies = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.23.0", source = { registry = "https://pypi.org/simple" } },
     { name = "tqdm" },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "uvicorn" },
     { name = "uvloop" },
     { name = "vllm" },
@@ -734,7 +735,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -814,7 +815,7 @@ name = "click"
 version = "8.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/60/6c/8ca2efa64cf75a977a0d7fac081354553ebe483345c734fb6b6515d96bbc/click-8.2.1.tar.gz", hash = "sha256:27c491cc05d968d271d5a1db13e3b5a184636d9d930f148c50b038f0d0646202", size = 286342, upload-time = "2025-05-20T23:19:49.832Z" }
 wheels = [
@@ -880,7 +881,7 @@ dependencies = [
     { name = "frozendict" },
     { name = "pydantic" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b8/99/3fdabfc95609d6efdf02fa7f1ed0245524cb1209d3d4a17109d3205d2eed/compressed_tensors-0.11.0.tar.gz", hash = "sha256:95ddf19699f775df6494dd864e5f52e8a24f8015496520190c1a22c6cfc44b1f", size = 187566, upload-time = "2025-08-19T18:59:31.854Z" }
 wheels = [
@@ -1029,8 +1030,8 @@ name = "cupy-cuda12x"
 version = "13.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "fastrlock" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "fastrlock", marker = "sys_platform != 'darwin'" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/12/c5/7e7fc4816d0de0154e5d9053242c3a08a0ca8b43ee656a6f7b3b95055a7b/cupy_cuda12x-13.6.0-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:a6970ceefe40f9acbede41d7fe17416bd277b1bd2093adcde457b23b578c5a59", size = 127334633, upload-time = "2025-08-18T08:24:43.065Z" },
@@ -1833,7 +1834,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
+    { name = "hf-xet", marker = "platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -1987,7 +1988,7 @@ name = "ipykernel"
 version = "7.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "appnope", marker = "sys_platform == 'darwin'" },
+    { name = "appnope", marker = "sys_platform == 'darwin' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
     { name = "comm" },
     { name = "debugpy" },
     { name = "ipython" },
@@ -2011,12 +2012,12 @@ name = "ipython"
 version = "9.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
     { name = "decorator" },
     { name = "ipython-pygments-lexers" },
     { name = "jedi" },
     { name = "matplotlib-inline" },
-    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pexpect", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'win32' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
     { name = "prompt-toolkit" },
     { name = "pygments" },
     { name = "stack-data" },
@@ -2303,7 +2304,7 @@ dependencies = [
     { name = "nbformat" },
     { name = "packaging" },
     { name = "prometheus-client" },
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'linux'" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux') or (os_name == 'nt' and sys_platform == 'darwin' and extra != 'extra-14-platoon-oolong-areal') or (os_name != 'nt' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'darwin' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
     { name = "pyzmq" },
     { name = "send2trash" },
     { name = "terminado" },
@@ -2321,7 +2322,7 @@ name = "jupyter-server-terminals"
 version = "0.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'linux'" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux') or (os_name == 'nt' and sys_platform == 'darwin' and extra != 'extra-14-platoon-oolong-areal') or (os_name != 'nt' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'darwin' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
     { name = "terminado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f4/a7/bcd0a9b0cbba88986fe944aaaf91bfda603e5a50bda8ed15123f381a3b2f/jupyter_server_terminals-0.5.4.tar.gz", hash = "sha256:bbda128ed41d0be9020349f9f1f2a4ab9952a73ed5f5ac9f1419794761fb87f5", size = 31770, upload-time = "2026-01-14T16:53:20.213Z" }
@@ -2746,13 +2747,13 @@ name = "mlx-lm"
 version = "0.29.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jinja2", marker = "sys_platform != 'linux'" },
+    { name = "jinja2", marker = "sys_platform == 'darwin'" },
     { name = "mlx", marker = "sys_platform == 'darwin'" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
-    { name = "protobuf", marker = "sys_platform != 'linux'" },
-    { name = "pyyaml", marker = "sys_platform != 'linux'" },
-    { name = "sentencepiece", marker = "sys_platform != 'linux'" },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "protobuf", marker = "sys_platform == 'darwin'" },
+    { name = "pyyaml", marker = "sys_platform == 'darwin'" },
+    { name = "sentencepiece", marker = "sys_platform == 'darwin'" },
+    { name = "transformers", marker = "sys_platform == 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e3/62/f46e1355256a114808517947f8e83ad6be310c7288c551db0fa678f47923/mlx_lm-0.29.1.tar.gz", hash = "sha256:b99180d8f33d33a077b814e550bfb2d8a59ae003d668fd1f4b3fff62a381d34b", size = 232302, upload-time = "2025-12-16T16:58:27.959Z" }
 wheels = [
@@ -3165,7 +3166,7 @@ name = "nvidia-cudnn-cu12"
 version = "9.10.2.21"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra != 'extra-14-platoon-oolong-areal') or (sys_platform != 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/41/e79269ce215c857c935fd86bcfe91a451a584dfc27f1e068f568b9ad1ab7/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:c9132cc3f8958447b4910a1720036d9eff5928cc3179b0a51fb6d167c6cc87d8", size = 705026878, upload-time = "2025-06-06T21:52:51.348Z" },
@@ -3188,7 +3189,7 @@ name = "nvidia-cufft-cu12"
 version = "11.3.3.83"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra != 'extra-14-platoon-oolong-areal') or (sys_platform != 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/bc/7771846d3a0272026c416fbb7e5f4c1f146d6d80704534d0b187dd6f4800/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:848ef7224d6305cdb2a4df928759dca7b1201874787083b6e7550dd6765ce69a", size = 193109211, upload-time = "2025-03-07T01:44:56.873Z" },
@@ -3220,9 +3221,9 @@ name = "nvidia-cusolver-cu12"
 version = "11.7.3.90"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-cusparse-cu12", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra != 'extra-14-platoon-oolong-areal') or (sys_platform != 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra != 'extra-14-platoon-oolong-areal') or (sys_platform != 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra != 'extra-14-platoon-oolong-areal') or (sys_platform != 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/32/f7cd6ce8a7690544d084ea21c26e910a97e077c9b7f07bf5de623ee19981/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:db9ed69dbef9715071232caa9b69c52ac7de3a95773c2db65bdba85916e4e5c0", size = 267229841, upload-time = "2025-03-07T01:46:54.356Z" },
@@ -3235,7 +3236,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.5.8.93"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra != 'extra-14-platoon-oolong-areal') or (sys_platform != 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bc/f7/cd777c4109681367721b00a106f491e0d0d15cfa1fd59672ce580ce42a97/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9b6c161cb130be1a07a27ea6923df8141f3c295852f4b260c65f18f3e0a091dc", size = 288117129, upload-time = "2025-03-07T01:47:40.407Z" },
@@ -3562,7 +3563,7 @@ dependencies = [
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-14-platoon-oolong-areal'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-14-platoon-oolong-tinker' or extra != 'extra-14-platoon-oolong-areal'" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2e/0c/b28ed414f080ee0ad153f848586d61d1878f91689950f037f976ce15f6c8/pandas-3.0.1.tar.gz", hash = "sha256:4186a699674af418f655dbd420ed87f50d56b4cd6603784279d9eef6627823c8", size = 4641901, upload-time = "2026-02-17T22:20:16.434Z" }
 wheels = [
@@ -3659,7 +3660,7 @@ dependencies = [
     { name = "safetensors" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
     { name = "tqdm" },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d8/48/147b3ea999560b40a34fd78724c7777aa9d18409c2250bdcaf9c4f2db7fc/peft-0.18.1.tar.gz", hash = "sha256:2dd0d6bfce936d1850e48aaddbd250941c5c02fc8ef3237cd8fd5aac35e0bae2", size = 635030, upload-time = "2026-01-09T13:08:01.136Z" }
 wheels = [
@@ -3671,7 +3672,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'win32' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3740,7 +3741,7 @@ wandb = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-rubric", specifier = ">=0.2.2" },
+    { name = "ai-rubric", specifier = ">=0.2.4" },
     { name = "areal", extras = ["cuda"], marker = "extra == 'areal'", git = "https://github.com/inclusionAI/AReaL.git?rev=35b57e2d2743f7158894239acda8b71f7226b955" },
     { name = "datasets" },
     { name = "ipython", specifier = ">=9.4.0" },
@@ -4396,7 +4397,7 @@ name = "pyzmq"
 version = "27.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "implementation_name == 'pypy'" },
+    { name = "cffi", marker = "implementation_name == 'pypy' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/04/0b/3c9baedbdf613ecaa7aa07027780b8867f57b6293b6ee50de316c9f3222b/pyzmq-27.1.0.tar.gz", hash = "sha256:ac0765e3d44455adb6ddbf4417dcce460fc40a05978c08efdf2948072f6db540", size = 281750, upload-time = "2025-09-08T23:10:18.157Z" }
 wheels = [
@@ -4934,7 +4935,7 @@ all = [
     { name = "torchao" },
     { name = "torchaudio" },
     { name = "torchvision", version = "0.23.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "uvicorn" },
     { name = "uvloop" },
     { name = "xgrammar" },
@@ -5228,8 +5229,8 @@ name = "terminado"
 version = "0.18.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess", marker = "os_name != 'nt'" },
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'linux'" },
+    { name = "ptyprocess", marker = "os_name != 'nt' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux') or (os_name == 'nt' and sys_platform == 'darwin' and extra != 'extra-14-platoon-oolong-areal') or (os_name != 'nt' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'darwin' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform == 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
     { name = "tornado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8a/11/965c6fd8e5cc254f1fe142d547387da17a8ebfd75a3455f637c663fb38a0/terminado-0.18.1.tar.gz", hash = "sha256:de09f2c4b85de4765f7714688fff57d3e75bad1f909b589fde880460c753fd2e", size = 32701, upload-time = "2024-03-12T14:34:39.026Z" }
@@ -5365,7 +5366,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "rich", version = "14.3.3", source = { registry = "https://pypi.org/simple" } },
     { name = "sniffio" },
-    { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/85/95/f354e47dd2f2d675b0978ae5d80c9c5f1230e5363f09a001f2d85c9e00c8/tinker-0.14.0.tar.gz", hash = "sha256:554b30c43d9cf83b41eb07775a2a9f65eb2e77bed2cd79792bd8cd0d7693e717", size = 179845, upload-time = "2026-02-27T05:50:56.415Z" }
@@ -5398,7 +5399,7 @@ dependencies = [
     { name = "tinker" },
     { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" } },
     { name = "torchvision", version = "0.25.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
 ]
 
 [[package]]
@@ -5520,6 +5521,7 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d3/54/a2ba279afcca44bbd320d4e73675b282fcee3d81400ea1b53934efca6462/torch-2.10.0-2-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:13ec4add8c3faaed8d13e0574f5cd4a323c11655546f91fbe6afa77b57423574", size = 79498202, upload-time = "2026-02-10T21:44:52.603Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/7a/abada41517ce0011775f0f4eacc79659bc9bc6c361e6bfe6f7052a6b9363/torch-2.10.0-3-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:98c01b8bb5e3240426dcde1446eed6f40c778091c8544767ef1168fc663a05a6", size = 915622781, upload-time = "2026-03-11T14:17:11.354Z" },
     { url = "https://files.pythonhosted.org/packages/cc/af/758e242e9102e9988969b5e621d41f36b8f258bb4a099109b7a4b4b50ea4/torch-2.10.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:5fd4117d89ffd47e3dcc71e71a22efac24828ad781c7e46aaaf56bf7f2796acf", size = 145996088, upload-time = "2026-01-21T16:24:44.171Z" },
     { url = "https://files.pythonhosted.org/packages/23/8e/3c74db5e53bff7ed9e34c8123e6a8bfef718b2450c35eefab85bb4a7e270/torch-2.10.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:787124e7db3b379d4f1ed54dd12ae7c741c16a4d29b49c0226a89bea50923ffb", size = 915711952, upload-time = "2026-01-21T16:23:53.503Z" },
     { url = "https://files.pythonhosted.org/packages/6e/01/624c4324ca01f66ae4c7cd1b74eb16fb52596dce66dbe51eff95ef9e7a4c/torch-2.10.0-cp312-cp312-win_amd64.whl", hash = "sha256:2c66c61f44c5f903046cc696d088e21062644cbe541c7f1c4eaae88b2ad23547", size = 113757972, upload-time = "2026-01-21T16:24:39.516Z" },
@@ -5641,7 +5643,7 @@ name = "tqdm"
 version = "4.67.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/09/a9/6ba95a270c6f1fbcd8dac228323f2777d886cb206987444e4bce66338dd4/tqdm-4.67.3.tar.gz", hash = "sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb", size = 169598, upload-time = "2026-02-03T17:35:53.048Z" }
 wheels = [
@@ -5659,20 +5661,13 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "4.56.1"
+version = "4.57.3"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'darwin'",
-    "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
 dependencies = [
     { name = "filelock" },
     { name = "huggingface-hub" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-14-platoon-oolong-areal'" },
+    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-14-platoon-oolong-tinker'" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -5681,35 +5676,9 @@ dependencies = [
     { name = "tokenizers" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/89/21/dc88ef3da1e49af07ed69386a11047a31dcf1aaf4ded3bc4b173fbf94116/transformers-4.56.1.tar.gz", hash = "sha256:0d88b1089a563996fc5f2c34502f10516cad3ea1aa89f179f522b54c8311fe74", size = 9855473, upload-time = "2025-09-04T20:47:13.14Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/70/d42a739e8dfde3d92bb2fff5819cbf331fe9657323221e79415cd5eb65ee/transformers-4.57.3.tar.gz", hash = "sha256:df4945029aaddd7c09eec5cad851f30662f8bd1746721b34cc031d70c65afebc", size = 10139680, upload-time = "2025-11-25T15:51:30.139Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/7c/283c3dd35e00e22a7803a0b2a65251347b745474a82399be058bde1c9f15/transformers-4.56.1-py3-none-any.whl", hash = "sha256:1697af6addfb6ddbce9618b763f4b52d5a756f6da4899ffd1b4febf58b779248", size = 11608197, upload-time = "2025-09-04T20:47:04.895Z" },
-]
-
-[[package]]
-name = "transformers"
-version = "5.3.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform == 'linux'",
-    "sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
-]
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "regex" },
-    { name = "safetensors" },
-    { name = "tokenizers" },
-    { name = "tqdm" },
-    { name = "typer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/fc/1a/70e830d53ecc96ce69cfa8de38f163712d2b43ac52fbd743f39f56025c31/transformers-5.3.0.tar.gz", hash = "sha256:009555b364029da9e2946d41f1c5de9f15e6b1df46b189b7293f33a161b9c557", size = 8830831, upload-time = "2026-03-04T17:41:46.119Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/88/ae8320064e32679a5429a2c9ebbc05c2bf32cefb6e076f9b07f6d685a9b4/transformers-5.3.0-py3-none-any.whl", hash = "sha256:50ac8c89c3c7033444fb3f9f53138096b997ebb70d4b5e50a2e810bf12d3d29a", size = 10661827, upload-time = "2026-03-04T17:41:42.722Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/6b/2f416568b3c4c91c96e5a365d164f8a4a4a88030aa8ab4644181fdadce97/transformers-4.57.3-py3-none-any.whl", hash = "sha256:c77d353a4851b1880191603d36acb313411d3577f6e2897814f333841f7003f4", size = 11993463, upload-time = "2025-11-25T15:51:26.493Z" },
 ]
 
 [[package]]
@@ -5720,7 +5689,7 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "setuptools", version = "79.0.1", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-14-platoon-oolong-areal') or (extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
+    { name = "setuptools", version = "79.0.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-14-platoon-oolong-areal') or (platform_machine == 'aarch64' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker') or (sys_platform != 'linux' and extra == 'extra-14-platoon-oolong-areal' and extra == 'extra-14-platoon-oolong-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/66/b1eb52839f563623d185f0927eb3530ee4d5ffe9d377cdaf5346b306689e/triton-3.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:31c1d84a5c0ec2c0f8e8a072d7fd150cab84a9c239eaddc6706c081bfae4eb04", size = 155560068, upload-time = "2025-07-30T19:58:37.081Z" },
@@ -5745,8 +5714,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
     { name = "click" },
-    { name = "rich", version = "13.9.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-14-platoon-oolong-areal'" },
-    { name = "rich", version = "14.3.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-14-platoon-oolong-tinker'" },
+    { name = "rich", version = "13.9.4", source = { registry = "https://pypi.org/simple" } },
     { name = "shellingham" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f5/24/cb09efec5cc954f7f9b930bf8279447d24618bb6758d4f6adf2574c41780/typer-0.24.1.tar.gz", hash = "sha256:e39b4732d65fbdcde189ae76cf7cd48aeae72919dea1fdfc16593be016256b45", size = 118613, upload-time = "2026-02-21T16:54:40.609Z" }
@@ -5951,7 +5919,7 @@ dependencies = [
     { name = "torchaudio" },
     { name = "torchvision", version = "0.23.0", source = { registry = "https://pypi.org/simple" } },
     { name = "tqdm" },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "typing-extensions" },
     { name = "watchfiles" },
     { name = "xformers", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -6124,8 +6092,8 @@ name = "xformers"
 version = "0.0.32.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
-    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6f/33/3b9c4d3d5b2da453d27de891df4ad653ac5795324961aa3a5c15b0353fe6/xformers-0.0.32.post1.tar.gz", hash = "sha256:1de84a45c497c8d92326986508d81f4b0a8c6be4d3d62a29b8ad6048a6ab51e1", size = 12106196, upload-time = "2025-08-14T18:07:45.486Z" }
 wheels = [
@@ -6143,7 +6111,7 @@ dependencies = [
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
     { name = "pydantic" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "triton", version = "3.4.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "typing-extensions" },
 ]
