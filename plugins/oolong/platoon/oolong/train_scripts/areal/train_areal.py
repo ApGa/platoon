@@ -37,7 +37,15 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
             if not reward_key.startswith("reward/"):
                 continue
             rewards_dict[reward_key] = rewards_dict.get(reward_key, 0.0) + float(reward_value)
-    score = float(sum(rewards_dict.values()))
+    
+    score = rewards_dict.get("reward/success", 0.0)
+
+    launched = rewards_dict.get("reward/subagent_launched", 0.0)
+    if launched > 0:
+        subagent_success_rate = rewards_dict["reward/subagent_succeeded"] / launched
+        score += 0.4 * subagent_success_rate
+        rewards_dict["reward/subagent_success_rate"] = subagent_success_rate
+    
     if not rewards_dict:
         score = float(traj.get("reward", 0.0))
     return score, rewards_dict

@@ -307,8 +307,8 @@ class OolongRecursiveEnv(OolongEnv):
             )
             score += subagent_reward
 
-        reward_misc["subagent_launched"] = launched
-        reward_misc["subagent_succeeded"] = succeeded
+        reward_misc["reward/subagent_launched"] = launched
+        reward_misc["reward/subagent_succeeded"] = succeeded
         reward_misc["reward/subagent_success"] = subagent_reward
 
         return score, reward_misc

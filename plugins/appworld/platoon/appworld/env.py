@@ -5,7 +5,7 @@ from appworld.common.utils import get_stack_trace_from_exception
 from IPython.core.interactiveshell import ExecutionResult
 from IPython.terminal.embed import InteractiveShellEmbed
 from pathlib import Path
-from rubric.core.checklist import RubricChecklistFast
+from rubric.core.checklist import RubricChecklistFast 
 from textwrap import dedent
 from traitlets.config.loader import Config
 import ast
@@ -593,8 +593,8 @@ class AppWorldRecursiveEnv(AppWorldEnv):
             )
             score += subagent_reward
 
-        reward_misc["subagent_launched"] = launched
-        reward_misc["subagent_succeeded"] = succeeded
+        reward_misc["reward/subagent_launched"] = launched
+        reward_misc["reward/subagent_succeeded"] = succeeded
         reward_misc["reward/subagent_success"] = subagent_reward
 
         return score, reward_misc

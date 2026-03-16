@@ -1,6 +1,7 @@
 """Task loading for Oolong benchmark from HuggingFace datasets."""
 import argparse
 import json
+from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
@@ -314,11 +315,11 @@ def get_task(task_id: str) -> Task:
     """
     global _TASKS
     if task_id in _TASKS:
-        return _TASKS[task_id]
+        return deepcopy(_TASKS[task_id])
 
     task = load_task_from_hf(task_id)
     _TASKS[task_id] = task
-    return task
+    return deepcopy(task)
 
 
 def create_oolong_datasets(
