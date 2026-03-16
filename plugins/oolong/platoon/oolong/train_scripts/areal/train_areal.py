@@ -44,7 +44,6 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     if launched > 0:
         subagent_success_rate = rewards_dict["reward/subagent_succeeded"] / launched
         score += 0.4 * subagent_success_rate
-        rewards_dict["reward/subagent_success_rate"] = subagent_success_rate
     
     if not rewards_dict:
         score = float(traj.get("reward", 0.0))
