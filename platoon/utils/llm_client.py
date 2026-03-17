@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import Any, TypeAlias, TypedDict, cast
 
 import litellm
@@ -26,6 +27,11 @@ class ConversationWithMetadata(TypedDict):
 
 _LITELLM_SEMAPHORE: "asyncio.Semaphore | None" = None
 _LITELLM_SEMAPHORE_PID: int | None = None
+
+
+def _sanitize_litellm_error_message(message: str) -> str:
+    """Remove verbose request payloads from LiteLLM error strings."""
+    return re.sub(r"Payload:\s*.*", "Payload: [omitted]", message, flags=re.DOTALL)
 
 
 def _get_litellm_semaphore():
@@ -421,8 +427,9 @@ class LiteLLMClient:
             return response
 
         except Exception as e:
-            print(f"LiteLLMClient async_chat_completion failed: {e}")
-            raise RuntimeError(f"LiteLLM API call failed: {e}") from e
+            sanitized_error = _sanitize_litellm_error_message(str(e))
+            print(f"LiteLLMClient async_chat_completion failed: {sanitized_error}")
+            raise RuntimeError(f"LiteLLM API call failed: {sanitized_error}") from e
 
     async def aclose(self) -> None:
         """Close the client connection."""

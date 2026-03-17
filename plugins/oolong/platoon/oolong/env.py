@@ -48,7 +48,7 @@ class OolongCodeExecutor(IPythonCodeExecutor):
 
 class OolongRecursiveCodeExecutor(OolongCodeExecutor):
 
-    def __init__(self, task: Task, subagent_max_steps: int | None = 25):
+    def __init__(self, task: Task, subagent_max_steps: int | None = 15):
         super().__init__(task)
         self.subagent_max_steps = subagent_max_steps
         self.shell.user_ns['context'] = self.context
@@ -241,8 +241,8 @@ class OolongEnv(CodeActEnv):
                                 traj.parent_info.id if traj is not None and traj.parent_info is not None else None
                             ),
                             "action_history_len": len(action_history),
-                            "final_message_len": len(final_message or ""),
-                            "error_message_len": len(err_message or ""),
+                            "final_message_len": len(str(final_message) or ""),
+                            "error_message_len": len(str(err_message) or ""),
                             "rubric_context_len": len(rubric_context),
                         },
                     ):
