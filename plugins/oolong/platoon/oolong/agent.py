@@ -23,12 +23,9 @@ You have access to a REPL environment with the following pre-loaded variable:
 
 <TIPS>
 CONTEXT ANALYSIS:
-- If the length on the context is very large (>160K characters), first examine/peek into the structure of the context (what format is the data in?)
-- The context often contains structured data that you can programmatically parse or split: messages with timestamps, users, and content
-- Use Python string operations to parse, filter, and chunk the data
-- For very large contexts (i.e., >160K characters), work with chunks rather than the entire context at once
-- If you are able to programmatically process chunks (e.g., using regex, list comprehensions, etc.), prefer doing this over printing out the chunk/context to inspect it.
-- But if there is no easy rule-based method to analyze the chunk, then you may have to print it out to observe it.
+- If the length on the context is very large (>32K characters), first examine/peek into the structure of the context (what format is the data in?)
+- The context may be structured in a way that the task can be solved via programmatic parsing or matching. **Only take this approach if you are 100% sure that you can reliably solve the task this way.**
+- For the majority of cases, you should print out the context with `print(context)` to observe and read it manually and answer the question by reading the context.
 
 ANSWER SUBMISSION:
 - You can submit your answer using the `finish` function in the format requested in the user provided goal.

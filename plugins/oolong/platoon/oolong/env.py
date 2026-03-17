@@ -36,6 +36,7 @@ class OolongCodeExecutor(IPythonCodeExecutor):
             detect_while_loops=True,
             detect_interactive_input=True,
         )
+        self.shell.user_ns['context'] = self.context
 
     async def describe_action_space(self) -> str:
         return """Available Actions (python functions):
@@ -44,6 +45,8 @@ class OolongCodeExecutor(IPythonCodeExecutor):
 """
     async def reset(self) -> OolongCodeExecutor:
         await super().reset()
+        # Re-inject bindings that are lost when the shell is recreated.
+        self.shell.user_ns['context'] = self.context
         return self
 
 class OolongRecursiveCodeExecutor(OolongCodeExecutor):
@@ -212,7 +215,8 @@ class OolongEnv(CodeActEnv):
 
                     rubric_system_prompt = (
                         "We need to judge the performance of an agent on a task. The task relates to aggregating some information from a potentially very large context.\n"
-                        "Read the context carefully and see if the agent's answer is accurate. If the agent accidentally got the correct answer (e.g., by using heuristics that happened to work on the context), then do not mark the agent as successful."
+                        "1. Read the context carefully and see if the agent's answer is accurate. 2. Do not mark the agent as successful unless it prints out the context and reads it manually to answer the question.\n"
+                        "For example, if the agent uses regex or string matching/contains logic to answer the question, this is a heuristic that may not be reliable in general and thus should not be marked as successful."
                         "Please provide a reason and success flag (boolean value) in the following format:\n"
                         "```json\n"
                         "{\n"

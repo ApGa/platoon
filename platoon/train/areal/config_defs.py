@@ -18,6 +18,7 @@ class WorkflowConfig:
     use_subprocesses: bool = False  # Enable subprocess-based rollouts for isolation
     leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
     depth_level_weighting: bool = False  # Weight trajectories inversely by depth-level frequency
+    filter_zero_variance_groups: bool = True  # Preserve old behavior by rejecting zero-variance groups
 
 
 @dataclass
