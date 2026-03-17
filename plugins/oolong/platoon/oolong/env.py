@@ -56,7 +56,8 @@ class OolongRecursiveCodeExecutor(OolongCodeExecutor):
         self.subagent_max_steps = subagent_max_steps
         self.shell.user_ns['context'] = self.context
         self.shell.user_ns['launch_subagent'] = self.launch_subagent
-        self._subagent_stats_this_step: tuple[int, int] = (0, 0)
+        self._launched_subagent_ids_this_step: set[str] = set()
+        self._subagent_success_by_child_this_step: dict[str, float] = {}
     
     async def describe_action_space(self) -> str:
         return """Available Actions (python functions):
@@ -84,16 +85,17 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
         # Re-inject bindings that are lost when the shell is recreated
         self.shell.user_ns['context'] = self.context
         self.shell.user_ns['launch_subagent'] = self.launch_subagent
-        self._subagent_stats_this_step = (0, 0)
+        self.reset_subagent_stats()
         return self
 
     def reset_subagent_stats(self) -> None:
         """Reset subagent tracking for a new step."""
-        self._subagent_stats_this_step = (0, 0)
+        self._launched_subagent_ids_this_step.clear()
+        self._subagent_success_by_child_this_step.clear()
 
-    def get_subagent_stats(self) -> tuple[int, int]:
-        """Get (launched_count, success_count) for current step."""
-        return self._subagent_stats_this_step
+    def get_subagent_stats(self) -> tuple[int, float]:
+        """Get (unique launched children, summed child success score) for current step."""
+        return len(self._launched_subagent_ids_this_step), sum(self._subagent_success_by_child_this_step.values())
 
     async def launch_subagent(self, goal: str, context: str="") -> str:
         
@@ -112,16 +114,20 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
             verbose=False
         )
 
-        # --- subagent success tracking ---
-        launched, succeeded = self._subagent_stats_this_step
-        launched += 1
+        # Count each new child trajectory once, even if multiple launch_subagent
+        # coroutines complete concurrently during the same parent step.
         for traj_id, traj in traj_collection.trajectories.items():
             if traj_id not in traj_ids_before:
                 if traj.parent_info and traj.parent_info.id == current_traj.id:
+                    self._launched_subagent_ids_this_step.add(traj_id)
+                    success_reward = 0.0
                     if traj.steps:
                         final_step = traj.steps[-1]
-                        succeeded += final_step.reward
-        self._subagent_stats_this_step = (launched, succeeded)
+                        reward_misc = final_step.misc.get("reward_misc", {})
+                        # Preserve partial-credit success scores; only exclude
+                        # any separate delegation bonus tracked under other keys.
+                        success_reward = float(reward_misc.get("reward/success", 0.0))
+                    self._subagent_success_by_child_this_step[traj_id] = success_reward
 
         return result
 
@@ -293,8 +299,8 @@ class OolongRecursiveEnv(OolongEnv):
         self._per_step_subagent_success_reward = per_step_subagent_success_reward
         self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
     
-    def _get_subagent_stats_and_reset(self) -> tuple[int, int]:
-        """Get (launched_count, success_count) for current step and reset for next step."""
+    def _get_subagent_stats_and_reset(self) -> tuple[int, float]:
+        """Get per-step unique launched children and summed child success score."""
         stats = self._code_executor.get_subagent_stats()
         self._code_executor.reset_subagent_stats()
         return stats
@@ -302,17 +308,17 @@ class OolongRecursiveEnv(OolongEnv):
     async def evaluate(self) -> tuple[float, dict]:
         score, reward_misc = await super().evaluate()
 
-        launched, succeeded = self._get_subagent_stats_and_reset()
+        launched, success_total = self._get_subagent_stats_and_reset()
         subagent_reward = 0.0
-        if self._per_step_subagent_success_reward > 0 and succeeded > 0:
+        if self._per_step_subagent_success_reward > 0 and success_total > 0:
             subagent_reward = min(
-                self._per_step_subagent_success_reward * succeeded,
+                self._per_step_subagent_success_reward * success_total,
                 self._per_step_subagent_reward_ceiling
             )
             score += subagent_reward
 
         reward_misc["reward/subagent_launched"] = launched
-        reward_misc["reward/subagent_succeeded"] = succeeded
+        reward_misc["reward/subagent_succeeded"] = success_total
         reward_misc["reward/subagent_success"] = subagent_reward
 
         return score, reward_misc
