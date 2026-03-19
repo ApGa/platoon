@@ -18,7 +18,7 @@ dependencies = [
     "textual>=5.3.0",
     "notebook>=7.4.4",
     "tenacity",
-    "tensordict"
+    "tensordict",
 ]
 
 [project.optional-dependencies]

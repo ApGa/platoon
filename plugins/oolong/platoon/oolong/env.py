@@ -196,7 +196,9 @@ class OolongRecursiveEnv(OolongEnv):
     async def fork(self, task: Task) -> OolongRecursiveEnv:
         return OolongRecursiveEnv(
             task,
-            subagent_max_steps=self.subagent_max_steps
+            subagent_max_steps=self.subagent_max_steps,
+            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
+            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling
         )
 
 
