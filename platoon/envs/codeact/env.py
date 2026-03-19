@@ -19,6 +19,7 @@ from platoon.episode.context import (
     finish_message,
 )
 from platoon.utils.ipython_shell import ShellCapture, strip_ansi_escape_sequences
+from platoon.utils.span_profile import profile_span
 
 from .types import (
     CodeActAction,
@@ -76,24 +77,34 @@ class CodeActEnv(Protocol):
         return 0.0, {}
 
     async def step(self, action: CodeActAction) -> CodeActObservation:
-        step = await self._code_executor.run(action.parsed_code)
-
-        if finish_message.get(None) is not None or error_message.get(None) is not None:
-            self._state.finished = True
-            self._state.misc["finish_message"] = finish_message.get()
-
-        step.thought = action.parsed_thought
-        step.reward, reward_info = await self.evaluate()
-        step.misc["action_misc"] = action.misc
-        step.misc["reward_misc"] = reward_info
-        self._state.reward += step.reward
-        self._state.history.append(step)
-
-        traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
-        traj_collection.add_trajectory_step(traj.id, self._state.history[-1])
-        if self._state.finished:
-            traj.reward = self._state.reward
+        async with profile_span(
+            "env_step",
+            metadata={
+                "task_id": self._state.task.id,
+                "trajectory_id": traj.id,
+                "parent_trajectory_id": traj.parent_info.id if traj.parent_info is not None else None,
+                "step_index": len(self._state.history),
+                "code_len": len(action.parsed_code or ""),
+            },
+        ):
+            step = await self._code_executor.run(action.parsed_code)
+
+            if finish_message.get(None) is not None or error_message.get(None) is not None:
+                self._state.finished = True
+                self._state.misc["finish_message"] = finish_message.get()
+
+            step.thought = action.parsed_thought
+            step.reward, reward_info = await self.evaluate()
+            step.misc["action_misc"] = action.misc
+            step.misc["reward_misc"] = reward_info
+            self._state.reward += step.reward
+            self._state.history.append(step)
+
+            traj_collection = current_trajectory_collection.get()
+            traj_collection.add_trajectory_step(traj.id, self._state.history[-1])
+            if self._state.finished:
+                traj.reward = self._state.reward
 
         return await self.observe()
 
@@ -264,6 +275,50 @@ class UnawaitedAsyncCallDetector(ast.NodeVisitor):
             self.generic_visit(node)
 
 
+class WhileLoopDetector(ast.NodeVisitor):
+    """AST visitor to detect while loops before execution.
+
+    While loops are easy for the model to misuse in ways that block the single
+    in-process event loop forever. Prefer bounded `for` loops or iteration over
+    concrete collections/ranges instead.
+    """
+
+    def __init__(self):
+        self.errors: list[str] = []
+
+    def visit_While(self, node: ast.While) -> None:
+        condition_src = ast.unparse(node.test) if hasattr(ast, "unparse") else "<condition>"
+        self.errors.append(
+            "ERROR: `while` loops are not allowed in this environment because they can hang the shared "
+            "Python executor. Consider rewriting this as a bounded `for` loop (for example, `for i in range(...)`) "
+            f"or iterate over a concrete collection instead. Detected condition: `{condition_src}`"
+        )
+        self.generic_visit(node)
+
+
+class InteractiveInputDetector(ast.NodeVisitor):
+    """AST visitor to detect blocking interactive input calls before execution."""
+
+    INTERACTIVE_CALLS = {"input"}
+
+    def __init__(self):
+        self.errors: list[str] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+
+        if func_name in self.INTERACTIVE_CALLS:
+            self.errors.append(
+                "ERROR: Interactive input functions like `input()` are not allowed in this environment because "
+                "they block the shared Python executor waiting for terminal input that will never arrive."
+            )
+        self.generic_visit(node)
+
+
 class IPythonCodeExecutor(CodeExecutor):
     # TODO: Separate actions and modules? Use this info to build action space description?
     def __init__(
@@ -271,12 +326,16 @@ class IPythonCodeExecutor(CodeExecutor):
         task: Task,
         actions: tuple[Callable[..., object], ...] | Sequence[Callable[..., object]] = (finish, safe_asyncio),
         detect_unawaited_async_calls: bool = True,
+        detect_while_loops: bool = False,
+        detect_interactive_input: bool = False,
     ):
         self.task = task
         self.actions = actions
         self.shell = self._create_shell()
         # self.timeout_seconds = timeout_seconds
         self.detect_unawaited_async_calls = detect_unawaited_async_calls
+        self.detect_while_loops = detect_while_loops
+        self.detect_interactive_input = detect_interactive_input
 
     def _create_shell(self) -> InteractiveShellEmbed:
         original_excepthook = sys.excepthook
@@ -331,17 +390,39 @@ class IPythonCodeExecutor(CodeExecutor):
             if detector.errors:
                 return CodeActStep(code=code, error="\n".join(detector.errors))
 
-        with ShellCapture() as capture:
-            await self.shell.run_cell_async(code)
+        if self.detect_while_loops:
+            detector = WhileLoopDetector()
+            detector.visit(tree)
+            if detector.errors:
+                return CodeActStep(code=code, error="\n".join(detector.errors))
 
-        cap_stdout = strip_ansi_escape_sequences(capture.pop_stdout())
-        cap_stderr = strip_ansi_escape_sequences(capture.pop_stderr())
+        if self.detect_interactive_input:
+            detector = InteractiveInputDetector()
+            detector.visit(tree)
+            if detector.errors:
+                return CodeActStep(code=code, error="\n".join(detector.errors))
 
-        # TODO: This might cause unexpected filtering of outputs.
-        # Guard against empty stdout before indexing first line
-        first_line = cap_stdout.splitlines()[0] if cap_stdout.splitlines() else ""
-        if cap_stdout.startswith("Out[") or ("[?7hOut[1]:" in first_line):
-            cap_stdout = "".join(cap_stdout.split(":")[1:])
+        traj = current_trajectory.get()
+        async with profile_span(
+            "code_executor_run",
+            metadata={
+                "task_id": self.task.id,
+                "trajectory_id": traj.id,
+                "parent_trajectory_id": traj.parent_info.id if traj.parent_info is not None else None,
+                "code_len": len(code),
+            },
+        ):
+            with ShellCapture() as capture:
+                await self.shell.run_cell_async(code)
+
+            cap_stdout = strip_ansi_escape_sequences(capture.pop_stdout())
+            cap_stderr = strip_ansi_escape_sequences(capture.pop_stderr())
+
+            # TODO: This might cause unexpected filtering of outputs.
+            # Guard against empty stdout before indexing first line
+            first_line = cap_stdout.splitlines()[0] if cap_stdout.splitlines() else ""
+            if cap_stdout.startswith("Out[") or ("[?7hOut[1]:" in first_line):
+                cap_stdout = "".join(cap_stdout.split(":")[1:])
 
         return CodeActStep(
             code=code,

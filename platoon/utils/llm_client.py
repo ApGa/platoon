@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any, TypeAlias, TypedDict, cast
@@ -7,6 +8,8 @@ from typing import Any, TypeAlias, TypedDict, cast
 import litellm
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
+
+from platoon.utils.span_profile import profile_span
 
 
 class ChatMessage(TypedDict):
@@ -26,14 +29,17 @@ _LITELLM_SEMAPHORE: "asyncio.Semaphore | None" = None
 _LITELLM_SEMAPHORE_PID: int | None = None
 
 
+def _sanitize_litellm_error_message(message: str) -> str:
+    """Remove verbose request payloads from LiteLLM error strings."""
+    return re.sub(r"Payload:\s*.*", "Payload: [omitted]", message, flags=re.DOTALL)
+
+
 def _get_litellm_semaphore():
     """Create a process-local semaphore when configured via env var.
 
     Disabled by default so existing workloads keep current behavior unless
     `PLATOON_LITELLM_MAX_INFLIGHT` is explicitly set.
     """
-    import asyncio
-
     global _LITELLM_SEMAPHORE, _LITELLM_SEMAPHORE_PID
 
     limit_str = os.getenv("PLATOON_LITELLM_MAX_INFLIGHT")
@@ -127,6 +133,7 @@ class LLMClient:
                     message["content"] = [{"type": "text", "text": message["content"]}]
             messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
+        inflight = 0
         try:
             response: ChatCompletion = self.client.chat.completions.create(
                 model=self.model,
@@ -347,18 +354,6 @@ class LiteLLMClient:
         self.base_url = base_url
         self.api_key = api_key
 
-    @staticmethod
-    def _sanitize_error_message(err: Exception, max_len: int = 800) -> str:
-        """Collapse oversized payload dumps in exception text to keep logs readable."""
-        msg = str(err)
-        # Replace huge token dumps like {'input_ids': [...]} with a short marker.
-        msg = re.sub(r"'input_ids':\s*\[[^\]]*\]", "'input_ids': [<omitted>]", msg)
-        # Avoid printing entire request payload blobs when providers include them in errors.
-        msg = re.sub(r"Payload:\s*\{.*\}\s*$", "Payload: <omitted>", msg, flags=re.DOTALL)
-        if len(msg) > max_len:
-            msg = f"{msg[:max_len]}... [truncated]"
-        return msg
-
     async def async_chat_completion(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -382,7 +377,6 @@ class LiteLLMClient:
         Raises:
             Exception: If the API call fails.
         """
-        
         if auto_add_cache_control:
             for message in messages:
                 if isinstance(message["content"], str):
@@ -392,45 +386,53 @@ class LiteLLMClient:
         # Disable LiteLLM internal retries by default to prevent long rollout slot blocking.
         # Callers can still override by explicitly passing num_retries in kwargs.
         kwargs.setdefault("num_retries", 0)
-
         try:
-            semaphore = _get_litellm_semaphore()
-            if semaphore is None:
-                response = await litellm.acompletion(
-                    model=self.model,
-                    api_base=self.base_url,
-                    api_key=self.api_key,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **kwargs,
-                )
-            else:
-                async with semaphore:
-                    response = await litellm.acompletion(
-                        model=self.model,
-                        api_base=self.base_url,
-                        api_key=self.api_key,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        **kwargs,
+            async with profile_span(
+                "llm_chat_completion",
+                metadata={
+                    "message_count": len(messages),
+                    "max_tokens": max_tokens,
+                    "model": self.model,
+                    "semaphore_enabled": _get_litellm_semaphore() is not None,
+                    "temperature": temperature,
+                    "timeout": kwargs.get("timeout"),
+                },
+            ):
+                semaphore = _get_litellm_semaphore()
+
+                async def _do_request() -> ChatCompletion:
+                    return cast(
+                        ChatCompletion,
+                        await litellm.acompletion(
+                            model=self.model,
+                            api_base=self.base_url,
+                            api_key=self.api_key,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            **kwargs,
+                        ),
                     )
+
+                if semaphore is None:
+                    response = await _do_request()
+                else:
+                    async with semaphore:
+                        response = await _do_request()
 
             if not response.choices:
                 print("No response choices received from LiteLLM")
                 raise Exception("No response choices received from LiteLLM")
 
-            # LiteLLM returns ModelResponse, convert to ChatCompletion format
-            return cast(ChatCompletion, response)
+            return response
 
         except Exception as e:
-            sanitized = self._sanitize_error_message(e)
-            print(f"LiteLLMClient async_chat_completion failed: {sanitized}")
-            raise RuntimeError(f"LiteLLM API call failed: {sanitized}") from e
+            sanitized_error = _sanitize_litellm_error_message(str(e))
+            print(f"LiteLLMClient async_chat_completion failed: {sanitized_error}")
+            raise RuntimeError(f"LiteLLM API call failed: {sanitized_error}") from e
 
     async def aclose(self) -> None:
-        """Close the client connection (no-op for LiteLLM)."""
+        """Close the client connection."""
         pass
 
     def fork(self) -> "LiteLLMClient":

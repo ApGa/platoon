@@ -5,7 +5,7 @@ from appworld.common.utils import get_stack_trace_from_exception
 from IPython.core.interactiveshell import ExecutionResult
 from IPython.terminal.embed import InteractiveShellEmbed
 from pathlib import Path
-from rubric.core.checklist import RubricChecklistFast
+from rubric.core.checklist import RubricChecklistFast 
 from textwrap import dedent
 from traitlets.config.loader import Config
 import ast
@@ -429,16 +429,17 @@ class AppWorldRecursiveCodeExecutor(AppWorldCodeExecutor):
             self.current_task_is_subtask = True
         else:
             self.current_task_is_subtask = False
-        # Track subagent outcomes for current step: (launched_count, success_count)
-        self._subagent_stats_this_step: tuple[int, int] = (0, 0)
+        self._launched_subagent_ids_this_step: set[str] = set()
+        self._subagent_success_by_child_this_step: dict[str, float] = {}
 
     def reset_subagent_stats(self) -> None:
         """Reset subagent tracking for a new step."""
-        self._subagent_stats_this_step = (0, 0)
+        self._launched_subagent_ids_this_step.clear()
+        self._subagent_success_by_child_this_step.clear()
 
-    def get_subagent_stats(self) -> tuple[int, int]:
-        """Get (launched_count, success_count) for current step."""
-        return self._subagent_stats_this_step
+    def get_subagent_stats(self) -> tuple[int, float]:
+        """Get (unique launched children, summed child success score) for current step."""
+        return len(self._launched_subagent_ids_this_step), sum(self._subagent_success_by_child_this_step.values())
 
     async def run(self, code: str) -> CodeActStep:
         """Run code and track subagent launches."""
@@ -455,25 +456,22 @@ class AppWorldRecursiveCodeExecutor(AppWorldCodeExecutor):
         result = await super().run(code)
 
         # Check if any new child trajectories were created (subagents launched)
-        launched, succeeded = self._subagent_stats_this_step
-
         for traj_id, traj in traj_collection.trajectories.items():
-            if traj_id not in traj_ids_before:
-                # This is a new trajectory - check if it's our child
-                if traj.parent_info and traj.parent_info.id == current_traj.id:
-                    launched += 1
-                    # Check the final step's reward_misc for actual task success
-                    # (not traj.reward, which includes subagent bonuses)
-                    if traj.steps:
-                        final_step = traj.steps[-1]
-                        reward_misc = final_step.misc.get("reward_misc", {})
-                        # For AppWorld subtasks, we use the rubric-based evaluation
-                        # Check if evaluation was successful (score > 0)
-                        # if reward_misc.get("success", False) or final_step.reward > 0:
-                        #     succeeded += 1
-                        succeeded = final_step.reward
+            if traj_id in traj_ids_before:
+                continue
+            if traj_id in self._launched_subagent_ids_this_step:
+                continue
+            if not traj.parent_info or traj.parent_info.id != current_traj.id:
+                continue
 
-        self._subagent_stats_this_step = (launched, succeeded)
+            self._launched_subagent_ids_this_step.add(traj_id)
+            success_reward = 0.0
+            if traj.steps:
+                final_step = traj.steps[-1]
+                reward_misc = final_step.misc.get("reward_misc", {})
+                success_reward = float(reward_misc.get("reward/success", 0.0))
+            self._subagent_success_by_child_this_step[traj_id] = success_reward
+
         return result
 
     async def describe_action_space(self) -> str:
@@ -489,16 +487,11 @@ class AppWorldEnv(CodeActEnv):
         self,
         task: Task,
         code_executor: AppWorldCodeExecutor | None = None,
-        per_step_subagent_success_reward: float=0.0,
-        per_step_subagent_reward_ceiling: float=float("inf"),
         timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
         **kwargs,
     ):
         if code_executor is None:
             code_executor = AppWorldCodeExecutor(task, timeout_seconds=timeout_seconds)
-
-        self._per_step_subagent_success_reward = per_step_subagent_success_reward
-        self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
 
         super().__init__(task, code_executor, **kwargs)
 
@@ -545,12 +538,9 @@ class AppWorldEnv(CodeActEnv):
 
     async def fork(self, task: Task) -> AppWorldEnv:
         code_executor = await self.code_executor.fork(task)
-        # Propagate reward settings so nested subagents also get delegation rewards
         return type(self)(
             task,
             code_executor=code_executor,
-            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
-            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
         )
     
 
@@ -572,8 +562,8 @@ class AppWorldRecursiveEnv(AppWorldEnv):
     def code_executor(self) -> AppWorldRecursiveCodeExecutor:
         return self._code_executor
 
-    def _get_subagent_stats_and_reset(self) -> tuple[int, int]:
-        """Get (launched_count, success_count) for current step and reset for next step."""
+    def _get_subagent_stats_and_reset(self) -> tuple[int, float]:
+        """Get per-step unique launched children and summed child success score."""
         stats = self.code_executor.get_subagent_stats()
         self.code_executor.reset_subagent_stats()
         return stats
@@ -582,20 +572,10 @@ class AppWorldRecursiveEnv(AppWorldEnv):
         score, reward_misc = await super().evaluate()
 
         # Get subagent stats for this step (also resets for next step)
-        launched, succeeded = self._get_subagent_stats_and_reset()
+        launched, success_total = self._get_subagent_stats_and_reset()
 
-        # Add reward for successful subagents (scaled by count, capped at ceiling)
-        subagent_reward = 0.0
-        if self._per_step_subagent_success_reward > 0 and succeeded > 0:
-            subagent_reward = min(
-                self._per_step_subagent_success_reward * succeeded,
-                self._per_step_subagent_reward_ceiling,
-            )
-            score += subagent_reward
-
-        reward_misc["subagent_launched"] = launched
-        reward_misc["subagent_succeeded"] = succeeded
-        reward_misc["reward/subagent_success"] = subagent_reward
+        reward_misc["reward/subagent_launched"] = launched
+        reward_misc["reward/subagent_succeeded"] = success_total
 
         return score, reward_misc
 
@@ -680,7 +660,5 @@ class AppWorldDepthAwareEnv(AppWorldRecursiveEnv):
             task,
             code_executor=code_executor,
             subagent_max_steps=self._subagent_max_steps,
-            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
-            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
         )
     

@@ -114,13 +114,16 @@ def dnd_parse_answer(answer) -> int | str | list[str]:
 
 
 def dnd_parse_response(answer) -> tuple[str, str]:
-    match = re.search(r"\\boxed\{\\text\{([^}]*)\}\}", answer) or re.search(
-        r"\\boxed[\{]+([^}]*)[\}]+", answer
-    )
+    answer = answer.strip()
+    match = re.search(r"\\boxed\{\\text\{([^}]*)\}\}", answer)
+    if not match:
+        match = re.search(r"\\boxed\{([^}]*)\}", answer)
     if match:
         answer = match.group(1)
     else:
-        return answer, "low"
+        if not answer:
+            return answer, "low"
+        return dnd_parse_answer(answer), "med"
     return dnd_parse_answer(answer), "high"
 
 

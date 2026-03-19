@@ -30,11 +30,37 @@ from platoon.train.areal.actor import create_actor
 from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig
 from platoon.utils.train import (
     bcast_and_split_from_rank0,
+    post_process_and_redistribute_tensor_container,
     set_expandable_segments,
     tensor_container_to,
 )
 
 logger = logging.getLogger("Platoon AReaL RL Trainer")
+
+
+def _get_local_batch_size(batch: dict[str, torch.Tensor | list]) -> int:
+    if "attention_mask" in batch and torch.is_tensor(batch["attention_mask"]):
+        return int(batch["attention_mask"].shape[0])
+    if "input_ids" in batch and torch.is_tensor(batch["input_ids"]):
+        return int(batch["input_ids"].shape[0])
+    for value in batch.values():
+        if torch.is_tensor(value) and value.ndim >= 1:
+            return int(value.shape[0])
+    raise ValueError("Unable to infer local batch size from batch contents")
+
+
+def _index_local_batch(batch: dict[str, torch.Tensor | list], keep: torch.Tensor) -> dict[str, torch.Tensor | list]:
+    local_batch_size = _get_local_batch_size(batch)
+    filtered: dict[str, torch.Tensor | list] = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value) and value.ndim >= 1 and value.shape[0] == local_batch_size:
+            filtered[key] = value[keep.to(value.device)]
+        elif isinstance(value, list) and len(value) == local_batch_size:
+            keep_list = keep.cpu().tolist()
+            filtered[key] = [item for item, should_keep in zip(value, keep_list) if should_keep]
+        else:
+            filtered[key] = value
+    return filtered
 
 
 class PlatoonArealRLTrainer:
@@ -247,6 +273,28 @@ class PlatoonArealRLTrainer:
                 # Synchronize after rollout
                 dist.barrier(device_ids=[self.actor.device.index])
                 current_platform.synchronize()
+
+            if batch is not None and "trainable_datums" in batch:
+                trainable_mask = batch.pop("trainable_datums").bool()
+                local_trainable = torch.tensor(
+                    [int(trainable_mask.sum().item())],
+                    device=self.actor.device,
+                    dtype=torch.long,
+                )
+                global_trainable = local_trainable.clone()
+                dist.all_reduce(global_trainable, op=dist.ReduceOp.SUM, group=self.actor.data_parallel_group)
+
+                min_per_step = self.actor.data_parallel_world_size
+                if global_trainable.item() < min_per_step:
+                    batch = None
+                elif not bool(trainable_mask.all()):
+                    batch = _index_local_batch(batch, trainable_mask)
+                    batch = post_process_and_redistribute_tensor_container(
+                        batch,
+                        shuffle=self.config.rollout.shuffle_cross_task,
+                        ensure_divisible_by=self.config.rollout.ensure_batch_divisible_by,
+                        group=self.actor.data_parallel_group,
+                    )
 
             if batch is not None:
 

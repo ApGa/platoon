@@ -36,6 +36,7 @@ logging.basicConfig(
 
 logging.getLogger("platoon").setLevel(logging.DEBUG)
 logger = logging.getLogger("platoon.textcraft.train_synth_depth_aware")
+_TEXTCRAFT_SYNTH_DELEGATION_REWARD_CAP = 0.0
 
 
 def reward_processor(traj: dict) -> tuple[float, dict]:
@@ -50,8 +51,13 @@ def reward_processor(traj: dict) -> tuple[float, dict]:
                 rewards_dict[reward_key] += reward_value
 
     success_reward = rewards_dict.get("reward/success", 0.0)
-    other_rewards = min(sum(rewards_dict.values()) - success_reward, 0.4)
-    score = success_reward + other_rewards
+    score = success_reward
+    launched = rewards_dict.get("reward/subagent_launched", 0.0)
+    if launched > 0:
+        subagent_success_rate = rewards_dict.get("reward/subagent_succeeded", 0.0) / launched
+        score += _TEXTCRAFT_SYNTH_DELEGATION_REWARD_CAP * subagent_success_rate
+    if not rewards_dict:
+        score = float(traj.get("reward", 0.0))
     return score, rewards_dict
 
 

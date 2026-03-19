@@ -61,10 +61,12 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
                 continue
             rewards_dict[reward_key] = rewards_dict.get(reward_key, 0.0) + float(reward_value)
 
-    # Match AppWorld training behavior: keep auxiliary reward bounded.
     success_reward = rewards_dict.get("reward/success", 0.0)
-    other_rewards = min(sum(rewards_dict.values()) - success_reward, 0.4)
-    score = success_reward + other_rewards
+    score = success_reward
+    launched = rewards_dict.get("reward/subagent_launched", 0.0)
+    if launched > 0:
+        subagent_success_rate = rewards_dict.get("reward/subagent_succeeded", 0.0) / launched
+        score += 0.4 * subagent_success_rate
     if not rewards_dict:
         score = float(traj.get("reward", 0.0))
     return float(score), rewards_dict

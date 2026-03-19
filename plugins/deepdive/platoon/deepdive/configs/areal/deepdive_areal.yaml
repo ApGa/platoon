@@ -1,15 +1,17 @@
-experiment_name: recursive-agents
-trial_name: oolong-synth-recursive-trial-0
+experiment_name: deepdive
+trial_name: deepdive-recursive-trial-0
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
-recursive: true 
-#enable_offload: false
-
+recursive: true
+train_split: qa_sft
+eval_split: qa_rl
+train_num_tasks: null
+eval_num_tasks: 100
 
 cluster:
-  n_nodes: 1  
+  n_nodes: 1
   n_gpus_per_node: 8
   fileroot: /mnt/efs/tmp/areal/experiments
   name_resolve:
@@ -22,12 +24,10 @@ rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   max_concurrent_rollouts: 16
-  queue_size: null 
+  queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
   enable_rollout_tracing: false
-  #shuffle_cross_task: true
-  #ensure_batch_divisible_by: 4
 
 gconfig:
   n_samples: 1
@@ -39,18 +39,17 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 200
-    output_dir: /mnt/efs/tmp/areal/experiments/oolong-synth-recursive-trial-0
-    verbose: True
+    max_steps: 50
+    output_dir: /mnt/efs/tmp/areal/experiments/deepdive-recursive-trial-0
+    verbose: true
     train: true
     timeout: 7200
     step_timeout: 7200
     inference_params:
       temperature: 1.0
       max_completion_tokens: 2048
-  group_size: 8
+  group_size: 4
 
-# CISPO loss function configuration (matches tinker settings)
 loss_fn_config:
   loss_fn: cispo
   clip_low_threshold: 0.0
@@ -59,7 +58,7 @@ loss_fn_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct-2507 #OpenPipe/Qwen3-14B-Instruct
+  path: Qwen/Qwen3-4B-Instruct-2507
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -85,8 +84,8 @@ actor:
   kl_ctl: 0.0
   kl_estimator: k1
   ppo_n_minibatches: 1
-  recompute_logprob: false #true
-  use_decoupled_loss: false #true
+  recompute_logprob: false
+  use_decoupled_loss: false
   behav_imp_weight_cap: null
   dynamic_sampling: false
   reward_norm:
@@ -96,7 +95,6 @@ actor:
     mean_level: null
     std_level: null
   max_new_tokens: ${gconfig.max_new_tokens}
-  # lora
   use_lora: false
   peft_type: lora
   lora_rank: 32
@@ -114,7 +112,6 @@ ref:
     max_tokens_per_mb: 4000
   optimizer: null
 
-# SGLang
 sglang:
   model_path: ${actor.path}
   random_seed: ${seed}
@@ -126,20 +123,17 @@ sglang:
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
   lora_target_modules: ${actor.target_modules}
-  #attention_backend: flashinfer # Uncomment for blackwell GPUs
 
-# datasets
 train_dataset:
   batch_size: 16
   type: rl
   path: ""
 
 valid_dataset:
-  batch_size: 50
+  batch_size: 32
   type: rl
   path: ""
 
-# Utilities
 saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
@@ -171,11 +165,10 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: online
-    project: recursive-agents
+    project: deepdive
 
 launcher:
   inference_server_cpus_per_gpu: 32
   inference_server_mem_per_gpu: 32768
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 32768
-

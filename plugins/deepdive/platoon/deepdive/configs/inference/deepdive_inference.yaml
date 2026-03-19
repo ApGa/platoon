@@ -1,0 +1,32 @@
+# DeepDive inference benchmark config.
+inference:
+  model_name: litellm_proxy/azure/gpt-4.1-mini #openai/Qwen/Qwen3-4B-Instruct-2507
+  model_endpoint: https://cmu.litellm.ai #http://127.0.0.1:30000/v1
+  model_api_key: null
+  output_dir: ./inference_results/deepdive_gpt-4.1-mini_recursive
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 1
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 50
+      output_dir: ./inference_results/deepdive_gpt-4.1-mini_recursive/rollouts
+      verbose: true
+      timeout: 7200
+      step_timeout: 7200
+      inference_params:
+        temperature: 1.0
+        top_p: null
+        max_completion_tokens: 2048
+
+dataset_split: qa_rl
+num_tasks: 5
+use_recursive_agent: true
+task_id: null
+stage: full
+shuffle_tasks: true
+seed: 42

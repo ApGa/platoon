@@ -108,8 +108,6 @@ async def run_synth_depth_aware_rollout(
         env = create_synth_depth_aware_env(
             task,
             subagent_max_steps=per_agent_max_steps,
-            per_step_subagent_success_reward=0,
-            per_step_subagent_reward_ceiling=0,
         )
         agent = TextCraftDepthAwareAgent(
             llm_client=llm_client,
@@ -173,9 +171,7 @@ async def run_synth_recursive_rollout(task: Task, config: RolloutConfig) -> dict
             # Disable Qwen3 reasoning/thinking mode for faster inference
             # default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        env = create_synth_recursive_env(
-            task, per_step_subagent_success_reward=0.2, per_step_subagent_reward_ceiling=0.4
-        )
+        env = create_synth_recursive_env(task)
         agent = TextCraftRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
