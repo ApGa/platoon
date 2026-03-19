@@ -19,9 +19,6 @@ from .env import DeepDiveEnv, DeepDiveRecursiveEnv
 
 logger = getLogger("platoon.deepdive.rollout")
 
-_DEFAULT_SUBAGENT_SUCCESS_REWARD = 0.1
-_DEFAULT_SUBAGENT_REWARD_CEILING = 0.3
-
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = None
@@ -94,11 +91,7 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
         )
-        env = DeepDiveRecursiveEnv(
-            task,
-            per_step_subagent_success_reward=_DEFAULT_SUBAGENT_SUCCESS_REWARD,
-            per_step_subagent_reward_ceiling=_DEFAULT_SUBAGENT_REWARD_CEILING,
-        )
+        env = DeepDiveRecursiveEnv(task)
         agent = DeepDiveRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,

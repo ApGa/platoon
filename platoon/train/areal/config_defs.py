@@ -19,6 +19,7 @@ class WorkflowConfig:
     leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
     depth_level_weighting: bool = False  # Legacy inverse-frequency weighting by depth level
     depth_level_discount_gamma: float | None = None  # Multiply rewards by gamma^d for depth d
+    filter_zero_variance_groups: bool = True  # Preserve old behavior by rejecting zero-variance groups
 
 
 @dataclass

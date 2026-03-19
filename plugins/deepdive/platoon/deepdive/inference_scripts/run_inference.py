@@ -26,6 +26,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+_DEEPDIVE_DELEGATION_REWARD_CAP = 0.4
 
 
 @dataclass
@@ -48,7 +49,13 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
             if not reward_key.startswith("reward/"):
                 continue
             rewards_dict[reward_key] = rewards_dict.get(reward_key, 0.0) + float(reward_value)
-    score = float(sum(rewards_dict.values()))
+
+    score = rewards_dict.get("reward/success", 0.0)
+    launched = rewards_dict.get("reward/subagent_launched", 0.0)
+    if launched > 0:
+        subagent_success_rate = rewards_dict.get("reward/subagent_succeeded", 0.0) / launched
+        score += _DEEPDIVE_DELEGATION_REWARD_CAP * subagent_success_rate
+
     if not rewards_dict:
         score = float(traj.get("reward", 0.0))
     return score, rewards_dict

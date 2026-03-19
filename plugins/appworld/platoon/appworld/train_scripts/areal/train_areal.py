@@ -29,8 +29,12 @@ def reward_processor(traj: dict) -> tuple[float, dict]:
                 rewards_dict[reward_key] += reward_value
 
     success_reward = rewards_dict.get("reward/success", 0.0)
-    other_rewards = min(sum(rewards_dict.values()) - success_reward, 0.4)
-    score = success_reward + other_rewards
+    score = success_reward
+
+    launched = rewards_dict.get("reward/subagent_launched", 0.0)
+    if launched > 0:
+        subagent_success_rate = rewards_dict.get("reward/subagent_succeeded", 0.0) / launched
+        score += 0.4 * subagent_success_rate
     return score, rewards_dict
 
 def main(args):

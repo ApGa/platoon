@@ -184,11 +184,22 @@ class StepWiseArealWorkflow(RolloutWorkflow):
                 tracker.denominator(**{f"{key}_mask": reward_mask})
                 tracker.stat(**{key: value.to(self.device)}, denominator=f"{key}_mask")
 
+        if not self.config.filter_zero_variance_groups:
+            train_data["trainable_datums"] = torch.ones_like(
+                train_data["rewards"], dtype=torch.bool
+            )
+
         if train_data["rewards"].max() == train_data["rewards"].min() and len(results) > 1:
+            tracker.scalar(zero_variance_reward_group=1.0)
             print(
                 f"[StepWiseWorkflow] All rewards same for task {data['task_id']}: {mean_unprocessed_reward.item():.2f}"
             )
-            return None
+            if self.config.filter_zero_variance_groups:
+                return None
+            train_data["trainable_datums"] = torch.zeros_like(
+                train_data["rewards"], dtype=torch.bool
+            )
+            return train_data
 
         return train_data
 

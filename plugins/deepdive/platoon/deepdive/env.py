@@ -82,8 +82,8 @@ Returns:
 class DeepDiveRecursiveCodeExecutor(DeepDiveCodeExecutor):
     def __init__(self, task: Task, subagent_max_steps: int | None = 25):
         self.subagent_max_steps = subagent_max_steps
-        self._subagent_stats_this_step: tuple[int, int] = (0, 0)
-        self._counted_child_trajectory_ids_this_step: set[str] = set()
+        self._launched_subagent_ids_this_step: set[str] = set()
+        self._subagent_success_by_child_this_step: dict[str, float] = {}
         super().__init__(task)
         self.actions = (
             self.launch_subagent,
@@ -168,11 +168,11 @@ Returns:
         return self
 
     def reset_subagent_stats(self) -> None:
-        self._subagent_stats_this_step = (0, 0)
-        self._counted_child_trajectory_ids_this_step = set()
+        self._launched_subagent_ids_this_step.clear()
+        self._subagent_success_by_child_this_step.clear()
 
-    def get_subagent_stats(self) -> tuple[int, int]:
-        return self._subagent_stats_this_step
+    def get_subagent_stats(self) -> tuple[int, float]:
+        return len(self._launched_subagent_ids_this_step), sum(self._subagent_success_by_child_this_step.values())
 
     async def launch_subagent(self, goal: str) -> Any:
         traj_collection = current_trajectory_collection.get()
@@ -186,11 +186,10 @@ Returns:
             verbose=False,
         )
 
-        launched, succeeded = self._subagent_stats_this_step
         candidate_children: list[str] = []
 
         for traj_id, traj in traj_collection.trajectories.items():
-            if traj_id in traj_ids_before or traj_id in self._counted_child_trajectory_ids_this_step:
+            if traj_id in traj_ids_before or traj_id in self._launched_subagent_ids_this_step:
                 continue
             if not traj.parent_info or traj.parent_info.id != current_traj.id:
                 continue
@@ -199,22 +198,20 @@ Returns:
 
         if not candidate_children:
             for traj_id, traj in traj_collection.trajectories.items():
-                if traj_id in traj_ids_before or traj_id in self._counted_child_trajectory_ids_this_step:
+                if traj_id in traj_ids_before or traj_id in self._launched_subagent_ids_this_step:
                     continue
                 if traj.parent_info and traj.parent_info.id == current_traj.id:
                     candidate_children.append(traj_id)
 
         if candidate_children:
             child_id = candidate_children[0]
-            self._counted_child_trajectory_ids_this_step.add(child_id)
-            launched += 1
+            self._launched_subagent_ids_this_step.add(child_id)
             child_traj = traj_collection.trajectories[child_id]
+            success_reward = 0.0
             if child_traj.steps:
                 reward_misc = child_traj.steps[-1].misc.get("reward_misc", {})
-                if reward_misc.get("success", False) or float(reward_misc.get("reward/success", 0.0)) >= 1.0:
-                    succeeded += 1
-
-        self._subagent_stats_this_step = (launched, succeeded)
+                success_reward = float(reward_misc.get("reward/success", 0.0))
+            self._subagent_success_by_child_this_step[child_id] = success_reward
         return result
 
     async def fork(self, task: Task) -> DeepDiveRecursiveCodeExecutor:
@@ -346,8 +343,6 @@ class DeepDiveRecursiveEnv(DeepDiveEnv):
         self,
         task: Task,
         subagent_max_steps: int | None = 25,
-        per_step_subagent_success_reward: float = 0.0,
-        per_step_subagent_reward_ceiling: float = float("inf"),
     ):
         super().__init__(task)
         self._code_executor = DeepDiveRecursiveCodeExecutor(
@@ -355,10 +350,8 @@ class DeepDiveRecursiveEnv(DeepDiveEnv):
             subagent_max_steps=subagent_max_steps
         )
         self.subagent_max_steps = subagent_max_steps
-        self._per_step_subagent_success_reward = per_step_subagent_success_reward
-        self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
 
-    def _get_subagent_stats_and_reset(self) -> tuple[int, int]:
+    def _get_subagent_stats_and_reset(self) -> tuple[int, float]:
         stats = self._code_executor.get_subagent_stats()
         self._code_executor.reset_subagent_stats()
         return stats
@@ -366,24 +359,13 @@ class DeepDiveRecursiveEnv(DeepDiveEnv):
     async def evaluate(self) -> tuple[float, dict]:
         score, reward_misc = await super().evaluate()
 
-        launched, succeeded = self._get_subagent_stats_and_reset()
-        subagent_reward = 0.0
-        if self._per_step_subagent_success_reward > 0 and succeeded > 0:
-            subagent_reward = min(
-                self._per_step_subagent_success_reward * succeeded,
-                self._per_step_subagent_reward_ceiling,
-            )
-            score += subagent_reward
-
-        reward_misc["subagent_launched"] = launched
-        reward_misc["subagent_succeeded"] = succeeded
-        reward_misc["reward/subagent_success"] = subagent_reward
+        launched, success_total = self._get_subagent_stats_and_reset()
+        reward_misc["reward/subagent_launched"] = launched
+        reward_misc["reward/subagent_succeeded"] = success_total
         return score, reward_misc
 
     async def fork(self, task: Task) -> DeepDiveRecursiveEnv:
         return DeepDiveRecursiveEnv(
             task=task,
             subagent_max_steps=self.subagent_max_steps,
-            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
-            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import cast
 
 from openai.types.chat import ChatCompletionMessageParam
@@ -9,7 +10,10 @@ from platoon.config_defs import InferenceParams
 from platoon.agents.codeact.prompt_builder import CodeActPromptBuilder, PromptMode
 from platoon.envs.base import Task
 from platoon.envs.codeact import CodeActAction, CodeActObservation
+from platoon.episode.context import current_trajectory
+from platoon.utils import async_hang_debug
 from platoon.utils.llm_client import LLMClient
+from platoon.utils.span_profile import profile_span
 
 
 def extract_code_and_thought(raw_action: str) -> tuple[str, str]:
@@ -125,6 +129,8 @@ class CodeActAgent:
             return self._stuck_in_loop_action()
 
         prompt = cast(list[ChatCompletionMessageParam], self.prompt_builder.build_messages(obs))
+        current_traj = current_trajectory.get(None)
+        request_id = str(uuid.uuid4())
         request_kwargs = {
             "stop": ["</python>"],
             "max_completion_tokens": self.inference_params.max_completion_tokens,
@@ -135,11 +141,46 @@ class CodeActAgent:
         if self.inference_params.top_p is not None:
             request_kwargs["top_p"] = self.inference_params.top_p
 
-        response = await self.llm_client.async_chat_completion(
-            prompt,
-            # Stop sequence is agent-level behavior, not a global rollout knob.
-            **request_kwargs,
+        async_hang_debug.track_current_task(
+            request_id=request_id,
+            kind="agent_llm",
+            metadata={
+                "task_id": obs.task.id,
+                "trajectory_id": current_traj.id if current_traj is not None else None,
+                "parent_trajectory_id": (
+                    current_traj.parent_info.id
+                    if current_traj is not None and current_traj.parent_info is not None
+                    else None
+                ),
+                "step_index": len(obs.history),
+                "message_count": len(prompt),
+                "model": getattr(self.llm_client, "model", None),
+                "timeout": request_kwargs["timeout"],
+            },
         )
+        try:
+            async with profile_span(
+                "agent_act",
+                metadata={
+                    "task_id": obs.task.id,
+                    "trajectory_id": current_traj.id if current_traj is not None else None,
+                    "parent_trajectory_id": (
+                        current_traj.parent_info.id
+                        if current_traj is not None and current_traj.parent_info is not None
+                        else None
+                    ),
+                    "step_index": len(obs.history),
+                    "message_count": len(prompt),
+                    "model": getattr(self.llm_client, "model", None),
+                },
+            ):
+                response = await self.llm_client.async_chat_completion(
+                    prompt,
+                    # Stop sequence is agent-level behavior, not a global rollout knob.
+                    **request_kwargs,
+                )
+        finally:
+            async_hang_debug.untrack(request_id)
         response_text = response.choices[0].message.content or ""
         # NOTE: We only do this conditionally, because with Areal, stop words are not supported.
         # And so we might already have the stop word in the response.

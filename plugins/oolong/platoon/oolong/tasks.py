@@ -1,6 +1,7 @@
 """Task loading for Oolong benchmark from HuggingFace datasets."""
 import argparse
 import json
+from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
@@ -31,6 +32,65 @@ _SYNTH_TEST_DATA: Optional[List[Dict]] = None
 _REAL_VALIDATION_DATA: Optional[List[Dict]] = None
 _REAL_TEST_DATA: Optional[List[Dict]] = None
 _TASKS: Dict[str, Task] = {}
+_VALID_DATASETS = ("synth", "real")
+
+
+def _normalize_datasets(
+    dataset: Literal["synth", "real", "both"] | list[str],
+) -> list[str]:
+    """Normalize dataset selection into a deduplicated ordered list."""
+    if isinstance(dataset, str):
+        datasets = list(_VALID_DATASETS) if dataset == "both" else [dataset]
+    else:
+        datasets = list(dataset)
+
+    invalid = [ds for ds in datasets if ds not in _VALID_DATASETS]
+    if invalid:
+        raise ValueError(
+            f"Invalid dataset(s): {invalid}. Must be drawn from {_VALID_DATASETS}."
+        )
+
+    normalized: list[str] = []
+    for ds in datasets:
+        if ds not in normalized:
+            normalized.append(ds)
+    return normalized
+
+
+def _get_example_context_len(example: Dict) -> Optional[int]:
+    """Get context length directly from the raw context text."""
+    context_text = example.get("context_window_text") or example.get("context")
+    if context_text is None:
+        return None
+
+    return len(context_text)
+
+
+def _matches_filters(
+    example: Dict,
+    task_group: Optional[TaskGroup] = None,
+    answer_type: Optional[AnswerType] = None,
+    min_context_len: Optional[int] = None,
+    max_context_len: Optional[int] = None,
+) -> bool:
+    """Return whether a dataset example matches all requested filters."""
+    if task_group and example.get("task_group") != task_group.value:
+        return False
+    if answer_type and example.get("answer_type") != answer_type.value:
+        return False
+
+    if min_context_len is None and max_context_len is None:
+        return True
+
+    context_len = _get_example_context_len(example)
+    if context_len is None:
+        return False
+    if min_context_len is not None and context_len < min_context_len:
+        return False
+    if max_context_len is not None and context_len > max_context_len:
+        return False
+
+    return True
 
 
 def _load_dataset_from_hf(dataset_name: str, split: str) -> List[Dict]:
@@ -49,9 +109,11 @@ def _load_dataset_from_hf(dataset_name: str, split: str) -> List[Dict]:
         raise ImportError(
             "datasets library is required. Install with: pip install datasets"
         )
-
     hf_name = f"oolongbench/{dataset_name}"
-    dataset = load_dataset(hf_name, split=split)
+    if dataset_name == "oolong-real":
+        dataset = load_dataset(hf_name, "dnd", split=split)
+    else:
+        dataset = load_dataset(hf_name, split=split)
     return [dict(example) for example in dataset]
 
 
@@ -104,6 +166,7 @@ def _example_to_task(example: Dict, dataset: str, split: str, idx: int) -> Task:
 
     # Get context text
     example['context'] = example.pop("context_window_text")
+    example.pop('context_window_text_with_labels', None)
 
     return Task(
         goal=example['question'],
@@ -117,6 +180,7 @@ def get_synth_task_ids(
     split: Literal["validation", "test"] = "validation",
     task_group: Optional[TaskGroup] = None,
     answer_type: Optional[AnswerType] = None,
+    min_context_len: Optional[int] = None,
     max_context_len: Optional[int] = None,
 ) -> List[str]:
     """Get task IDs for oolong-synth dataset.
@@ -125,6 +189,7 @@ def get_synth_task_ids(
         split: "validation" or "test"
         task_group: Filter by task group (counting, user, timeline)
         answer_type: Filter by answer type (NUMERIC, LABEL, etc.)
+        min_context_len: Filter to only include tasks with context >= this length
         max_context_len: Filter to only include tasks with context <= this length
 
     Returns:
@@ -134,12 +199,13 @@ def get_synth_task_ids(
     task_ids = []
 
     for idx, example in enumerate(data):
-        # Apply filters
-        if task_group and example.get("task_group") != task_group.value:
-            continue
-        if answer_type and example.get("answer_type") != answer_type.value:
-            continue
-        if max_context_len and example.get("context_len", 0) > max_context_len:
+        if not _matches_filters(
+            example,
+            task_group=task_group,
+            answer_type=answer_type,
+            min_context_len=min_context_len,
+            max_context_len=max_context_len,
+        ):
             continue
 
         task_ids.append(f"oolong.synth.{split}.{idx}")
@@ -151,6 +217,7 @@ def get_real_task_ids(
     split: Literal["validation", "test"] = "validation",
     task_group: Optional[TaskGroup] = None,
     answer_type: Optional[AnswerType] = None,
+    min_context_len: Optional[int] = None,
     max_context_len: Optional[int] = None,
 ) -> List[str]:
     """Get task IDs for oolong-real dataset.
@@ -159,6 +226,7 @@ def get_real_task_ids(
         split: "validation" or "test"
         task_group: Filter by task group
         answer_type: Filter by answer type
+        min_context_len: Filter to only include tasks with context >= this length
         max_context_len: Filter to only include tasks with context <= this length
 
     Returns:
@@ -168,12 +236,13 @@ def get_real_task_ids(
     task_ids = []
 
     for idx, example in enumerate(data):
-        # Apply filters
-        if task_group and example.get("task_group") != task_group.value:
-            continue
-        if answer_type and example.get("answer_type") != answer_type.value:
-            continue
-        if max_context_len and example.get("context_len", 0) > max_context_len:
+        if not _matches_filters(
+            example,
+            task_group=task_group,
+            answer_type=answer_type,
+            min_context_len=min_context_len,
+            max_context_len=max_context_len,
+        ):
             continue
 
         task_ids.append(f"oolong.real.{split}.{idx}")
@@ -182,26 +251,27 @@ def get_real_task_ids(
 
 
 def get_task_ids(
-    dataset: Literal["synth", "real"] = "synth",
+    dataset: Literal["synth", "real", "both"] | list[str] = "synth",
     split: Literal["validation", "test"] = "validation",
     **kwargs
 ) -> List[str]:
     """Get task IDs for oolong benchmark.
 
     Args:
-        dataset: "synth" or "real"
+        dataset: "synth", "real", "both", or a list containing dataset names
         split: "validation" or "test"
-        **kwargs: Additional filters (task_group, answer_type, max_context_len)
+        **kwargs: Additional filters (task_group, answer_type, min_context_len, max_context_len)
 
     Returns:
         List of task IDs
     """
-    if dataset == "synth":
-        return get_synth_task_ids(split, **kwargs)
-    elif dataset == "real":
-        return get_real_task_ids(split, **kwargs)
-    else:
-        raise ValueError(f"Invalid dataset: {dataset}. Must be 'synth' or 'real'")
+    task_ids: list[str] = []
+    for dataset_name in _normalize_datasets(dataset):
+        if dataset_name == "synth":
+            task_ids.extend(get_synth_task_ids(split, **kwargs))
+        elif dataset_name == "real":
+            task_ids.extend(get_real_task_ids(split, **kwargs))
+    return task_ids
 
 
 def load_task_from_hf(task_id: str) -> Task:
@@ -245,22 +315,22 @@ def get_task(task_id: str) -> Task:
     """
     global _TASKS
     if task_id in _TASKS:
-        return _TASKS[task_id]
+        return deepcopy(_TASKS[task_id])
 
     task = load_task_from_hf(task_id)
     _TASKS[task_id] = task
-    return task
+    return deepcopy(task)
 
 
 def create_oolong_datasets(
-    dataset: Literal["synth", "real"] = "synth",
+    dataset: Literal["synth", "real", "both"] | list[str] = "synth",
     max_samples: Optional[int] = None,
     **kwargs
 ) -> tuple[List[Task], List[Task]]:
     """Create validation and test datasets for Oolong.
 
     Args:
-        dataset: "synth" or "real"
+        dataset: "synth", "real", "both", or a list containing dataset names
         max_samples: Maximum number of samples per split (None for all)
         **kwargs: Additional filters
 

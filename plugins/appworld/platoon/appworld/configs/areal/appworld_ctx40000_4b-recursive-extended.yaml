@@ -1,5 +1,5 @@
 experiment_name: recursive-agents
-trial_name: appworld-ctx40000-cispo-4b-mixed-sftepoch2-recursive-trial0
+trial_name: appworld-ctx40000-cispo-4b-mixed-sft-recursive-trial9
 
 seed: 343
 total_train_epochs: 100
@@ -36,20 +36,19 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 40
-    output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-4b-mixed-sftepoch2-recursive-trial0
+    max_steps: 75
+    output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-4b-mixed-sft-recursive-trial9
     verbose: True
     train: true
     timeout: 7200
     step_timeout: 7200
     inference_params:
-      temperature: 1.0
-      max_completion_tokens: 4096
+        temperature: 1.0
+        max_completion_tokens: 2048
   group_size: 8
   use_subprocesses: true
   leave_one_out_baseline: True  # Use leave-one-out baseline for advantage centering
-  depth_level_weighting: False  # Weight trajectories inversely by depth-level frequency
-  depth_level_discount_gamma: 0.5  # Alternate strategy: discount rewards by trajectory depth as gamma^d
+  depth_level_weighting: True  # Weight trajectories inversely by depth-level frequency
 
 # CISPO loss function configuration (matches tinker settings)
 loss_fn_config:
@@ -60,7 +59,7 @@ loss_fn_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: /mnt/efs/LlamaFactory/saves/appworld-sft-qwen3-4b-mix_opus_4_5_v6/checkpoint-44 #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-recursive_opus_4_5
+  path: apurvaga/qwen3-4b-sft-mixed-appworld #/mnt/efs/data/echoagent/llama-factory/saves/appworld-sft-qwen3-4b-recursive_opus_4_5
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true

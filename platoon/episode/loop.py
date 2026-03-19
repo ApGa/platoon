@@ -14,6 +14,7 @@ from platoon.episode.context import (
     finish_message,
 )
 from platoon.episode.trajectory import StepBudgetTracker, Trajectory, TrajectoryCollection
+from platoon.utils.span_profile import profile_span
 
 
 # NOTE: Call using asyncio.create_task() to make sure edits to contextvars do not leak to parent context
@@ -21,11 +22,23 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
     try:
         step_count = 0
         set_context_vars(agent, env, timeout=timeout)
-        obs = await env.reset()
-        while not halt_episode(obs):
-            action = await asyncio.wait_for(agent.act(obs), timeout=timeout)
-            obs = await asyncio.wait_for(env.step(action), timeout=timeout)
-            step_count += 1
+        traj = current_trajectory.get()
+        async with profile_span(
+            "run_episode",
+            metadata={
+                "agent_type": type(agent).__name__,
+                "env_type": type(env).__name__,
+                "task_id": getattr(env.task, "id", None),
+                "timeout": timeout,
+                "trajectory_id": traj.id,
+                "parent_trajectory_id": traj.parent_info.id if traj.parent_info is not None else None,
+            },
+        ):
+            obs = await env.reset()
+            while not halt_episode(obs):
+                action = await asyncio.wait_for(agent.act(obs), timeout=timeout)
+                obs = await asyncio.wait_for(env.step(action), timeout=timeout)
+                step_count += 1
     except (Exception, asyncio.CancelledError) as e:
         tb_summary = traceback.extract_tb(e.__traceback__)
         origin = ""

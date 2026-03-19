@@ -437,16 +437,17 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
             _share_inventory=_share_inventory,
             use_synth=use_synth,
         )
-        # Track subagent outcomes for current step: (launched_count, success_count)
-        self._subagent_stats_this_step: tuple[int, int] = (0, 0)
+        self._launched_subagent_ids_this_step: set[str] = set()
+        self._subagent_success_by_child_this_step: dict[str, float] = {}
 
     def reset_subagent_stats(self) -> None:
         """Reset subagent tracking for a new step."""
-        self._subagent_stats_this_step = (0, 0)
+        self._launched_subagent_ids_this_step.clear()
+        self._subagent_success_by_child_this_step.clear()
 
-    def get_subagent_stats(self) -> tuple[int, int]:
-        """Get (launched_count, success_count) for current step."""
-        return self._subagent_stats_this_step
+    def get_subagent_stats(self) -> tuple[int, float]:
+        """Get (unique launched children, summed child success score) for current step."""
+        return len(self._launched_subagent_ids_this_step), sum(self._subagent_success_by_child_this_step.values())
 
     async def launch_subagent(self, targets: Dict[str, int], num_steps: int, context: str = "") -> str:
         """Launch a subagent and track whether it succeeded."""
@@ -462,24 +463,19 @@ class TextCraftRecursiveCodeExecutor(TextCraftCodeExecutor):
         # Call parent's launch_subagent
         result = await super().launch_subagent(targets, num_steps, context)
 
-        # Find the new child trajectory and check if it succeeded at its task
-        launched, succeeded = self._subagent_stats_this_step
-        launched += 1
-
         for traj_id, traj in traj_collection.trajectories.items():
-            if traj_id not in traj_ids_before:
-                # This is a new trajectory - check if it's our child
-                if traj.parent_info and traj.parent_info.id == current_traj.id:
-                    # Check the final step's reward_misc for actual task success
-                    # (not traj.reward, which includes subagent bonuses)
-                    if traj.steps:
-                        final_step = traj.steps[-1]
-                        reward_misc = final_step.misc.get("reward_misc", {})
-                        if reward_misc.get("success", False):
-                            succeeded += 1
-                    break
+            if traj_id in traj_ids_before or traj_id in self._launched_subagent_ids_this_step:
+                continue
+            if not traj.parent_info or traj.parent_info.id != current_traj.id:
+                continue
 
-        self._subagent_stats_this_step = (launched, succeeded)
+            self._launched_subagent_ids_this_step.add(traj_id)
+            success_reward = 0.0
+            if traj.steps:
+                final_step = traj.steps[-1]
+                reward_misc = final_step.misc.get("reward_misc", {})
+                success_reward = float(reward_misc.get("reward/success", 0.0))
+            self._subagent_success_by_child_this_step[traj_id] = success_reward
         return result
 
     async def describe_action_space(self) -> str:
@@ -683,8 +679,6 @@ class TextCraftRecursiveEnv(TextCraftEnv):
         initial_inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
-        per_step_subagent_success_reward: float = 0.0,
-        per_step_subagent_reward_ceiling: float = float("inf"),
     ):
         super().__init__(
             task,
@@ -705,11 +699,9 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             _share_inventory=True,  # Always share since we're using parent's inventory dict
             use_synth=self._use_synth,
         )
-        self._per_step_subagent_success_reward = per_step_subagent_success_reward
-        self._per_step_subagent_reward_ceiling = per_step_subagent_reward_ceiling
 
-    def _get_subagent_stats_and_reset(self) -> tuple[int, int]:
-        """Get (launched_count, success_count) for current step and reset for next step."""
+    def _get_subagent_stats_and_reset(self) -> tuple[int, float]:
+        """Get per-step unique launched children and summed child success score."""
         stats = self._code_executor.get_subagent_stats()
         self._code_executor.reset_subagent_stats()
         return stats
@@ -717,21 +709,9 @@ class TextCraftRecursiveEnv(TextCraftEnv):
     async def evaluate(self) -> Tuple[float, dict]:
         score, reward_misc = await super().evaluate()
 
-        # Get subagent stats for this step (also resets for next step)
-        launched, succeeded = self._get_subagent_stats_and_reset()
-
-        # Add reward for successful subagents (scaled by count, capped at ceiling)
-        subagent_reward = 0.0
-        if self._per_step_subagent_success_reward > 0 and succeeded > 0:
-            subagent_reward = min(
-                self._per_step_subagent_success_reward * succeeded,
-                self._per_step_subagent_reward_ceiling,
-            )
-            score += subagent_reward
-
-        reward_misc["subagent_launched"] = launched
-        reward_misc["subagent_succeeded"] = succeeded
-        reward_misc["reward/subagent_success"] = subagent_reward
+        launched, success_total = self._get_subagent_stats_and_reset()
+        reward_misc["reward/subagent_launched"] = launched
+        reward_misc["reward/subagent_succeeded"] = success_total
 
         return score, reward_misc
 
@@ -751,7 +731,6 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             )
 
         # Create forked environment sharing the same inventory reference
-        # Propagate reward settings so nested subagents also get delegation rewards
         forked_env = TextCraftRecursiveEnv(
             task=task,
             recipes_dir=self._recipes_dir,
@@ -759,8 +738,6 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,
             use_synth=self._use_synth,
-            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
-            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
         )
 
         return forked_env
@@ -822,19 +799,18 @@ class TextCraftDepthAwareCodeExecutor(TextCraftRecursiveCodeExecutor):
 
         result = await _launch_subagent(goal=goal, max_steps=self._subagent_max_steps)
 
-        # --- subagent success tracking (same logic as TextCraftRecursiveCodeExecutor) ---
-        launched, succeeded = self._subagent_stats_this_step
-        launched += 1
         for traj_id, traj in traj_collection.trajectories.items():
-            if traj_id not in traj_ids_before:
-                if traj.parent_info and traj.parent_info.id == current_traj.id:
-                    if traj.steps:
-                        final_step = traj.steps[-1]
-                        reward_misc = final_step.misc.get("reward_misc", {})
-                        if reward_misc.get("success", False):
-                            succeeded += 1
-                    break
-        self._subagent_stats_this_step = (launched, succeeded)
+            if traj_id in traj_ids_before or traj_id in self._launched_subagent_ids_this_step:
+                continue
+            if not traj.parent_info or traj.parent_info.id != current_traj.id:
+                continue
+            self._launched_subagent_ids_this_step.add(traj_id)
+            success_reward = 0.0
+            if traj.steps:
+                final_step = traj.steps[-1]
+                reward_misc = final_step.misc.get("reward_misc", {})
+                success_reward = float(reward_misc.get("reward/success", 0.0))
+            self._subagent_success_by_child_this_step[traj_id] = success_reward
         return result
 
     # ------------------------------------------------------------------
@@ -961,8 +937,6 @@ class TextCraftDepthAwareEnv(TextCraftRecursiveEnv):
         initial_inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
-        per_step_subagent_success_reward: float = 0.0,
-        per_step_subagent_reward_ceiling: float = float("inf"),
     ):
         # Let the parent chain set up defaults (recipes_dir, initial_inventory, etc.)
         super().__init__(
@@ -972,8 +946,6 @@ class TextCraftDepthAwareEnv(TextCraftRecursiveEnv):
             initial_inventory=initial_inventory,
             _share_inventory=_share_inventory,
             use_synth=use_synth,
-            per_step_subagent_success_reward=per_step_subagent_success_reward,
-            per_step_subagent_reward_ceiling=per_step_subagent_reward_ceiling,
         )
         self._subagent_max_steps = subagent_max_steps
 
@@ -1007,8 +979,6 @@ class TextCraftDepthAwareEnv(TextCraftRecursiveEnv):
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,
             use_synth=self._use_synth,
-            per_step_subagent_success_reward=self._per_step_subagent_success_reward,
-            per_step_subagent_reward_ceiling=self._per_step_subagent_reward_ceiling,
         )
 
 
@@ -1032,8 +1002,6 @@ def create_synth_env(task: Task, items_per_domain_tier: int = 25, **kwargs) -> T
 
 def create_synth_recursive_env(
     task: Task,
-    per_step_subagent_success_reward: float = 0.0,
-    per_step_subagent_reward_ceiling: float = float("inf"),
     items_per_domain_tier: int = 25,
     **kwargs,
 ) -> TextCraftRecursiveEnv:
@@ -1041,8 +1009,6 @@ def create_synth_recursive_env(
 
     Args:
         task: The task to execute
-        per_step_subagent_success_reward: Reward per successful subagent
-        per_step_subagent_reward_ceiling: Maximum subagent reward per step
         items_per_domain_tier: Number of items per domain per tier (must match dataset generation)
         **kwargs: Additional arguments passed to TextCraftRecursiveEnv
 
@@ -1056,8 +1022,6 @@ def create_synth_recursive_env(
         task,
         recipe_db=recipe_db,
         use_synth=True,
-        per_step_subagent_success_reward=per_step_subagent_success_reward,
-        per_step_subagent_reward_ceiling=per_step_subagent_reward_ceiling,
         **kwargs,
     )
 
@@ -1065,8 +1029,6 @@ def create_synth_recursive_env(
 def create_synth_depth_aware_env(
     task: Task,
     subagent_max_steps: int = 25,
-    per_step_subagent_success_reward: float = 0.0,
-    per_step_subagent_reward_ceiling: float = float("inf"),
     items_per_domain_tier: int = 25,
     **kwargs,
 ) -> TextCraftDepthAwareEnv:
@@ -1079,8 +1041,6 @@ def create_synth_depth_aware_env(
     Args:
         task: The task to execute
         subagent_max_steps: Fixed step budget per agent (root and subagents)
-        per_step_subagent_success_reward: Reward per successful subagent
-        per_step_subagent_reward_ceiling: Maximum subagent reward per step
         items_per_domain_tier: Number of items per domain per tier (must match dataset generation)
         **kwargs: Additional arguments passed to TextCraftDepthAwareEnv
 
@@ -1095,7 +1055,5 @@ def create_synth_depth_aware_env(
         subagent_max_steps=subagent_max_steps,
         recipe_db=recipe_db,
         use_synth=True,
-        per_step_subagent_success_reward=per_step_subagent_success_reward,
-        per_step_subagent_reward_ceiling=per_step_subagent_reward_ceiling,
         **kwargs,
     )

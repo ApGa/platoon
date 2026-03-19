@@ -1,11 +1,10 @@
 experiment_name: recursive-agents
-trial_name: oolong-synth-recursive-trial-0
+trial_name: appworld-ctx40000-cispo-3.5-4b-linear-trial-0
 
 seed: 343
-total_train_epochs: 10
+total_train_epochs: 100
 tokenizer_path: ${actor.path}
-recursive: true 
-#enable_offload: false
+recursive: false
 
 
 cluster:
@@ -16,7 +15,7 @@ cluster:
     type: nfs
     nfs_record_root: /mnt/efs/tmp/areal/name_resolve
 
-allocation_mode: sglang:d4p1t1+d4p1t1
+allocation_mode: sglang:d4p1t1+d2p1t1c2
 
 rollout:
   experiment_name: ${experiment_name}
@@ -26,8 +25,6 @@ rollout:
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
   enable_rollout_tracing: false
-  #shuffle_cross_task: true
-  #ensure_batch_divisible_by: 4
 
 gconfig:
   n_samples: 1
@@ -39,16 +36,17 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 200
-    output_dir: /mnt/efs/tmp/areal/experiments/oolong-synth-recursive-trial-0
+    max_steps: 75
+    output_dir: /mnt/efs/tmp/areal/experiments/appworld-ctx40000-cispo-3.5-4b-linear-trial-0
     verbose: True
     train: true
-    timeout: 7200
-    step_timeout: 7200
+    timeout: 900
+    step_timeout: 600
     inference_params:
       temperature: 1.0
       max_completion_tokens: 2048
   group_size: 8
+  use_subprocesses: true
 
 # CISPO loss function configuration (matches tinker settings)
 loss_fn_config:
@@ -59,7 +57,7 @@ loss_fn_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct-2507 #OpenPipe/Qwen3-14B-Instruct
+  path: Qwen/Qwen3.5-4B
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -178,4 +176,3 @@ launcher:
   inference_server_mem_per_gpu: 32768
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 32768
-
