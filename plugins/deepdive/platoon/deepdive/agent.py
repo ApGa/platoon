@@ -24,6 +24,9 @@ You have access to Python plus web-search tools. Use them deliberately:
 ANSWER SUBMISSION:
 - When you are confident, call `finish(...)`.
 - The final answer should directly answer the question and stay concise unless the task explicitly asks for more detail.
+
+OTHER TIPS:
+- **All functions except for finish are async functions. YOU MUST AWAIT THE RESULTS OF THESE FUNCTIONS**
 """
 
         if include_reasoning:
@@ -78,6 +81,7 @@ RESEARCH STRATEGY:
 - Use Python to store notes, compare evidence, and synthesize findings.
 
 DELEGATION STRATEGY:
+- You have the ability to spawn subagents and delegate subtasks to them. Make effective use of subagents to solve the task!
 - Use `await launch_subagent(goal)` for coherent subproblems such as source discovery, fact verification, or answering one component of a multi-hop question.
 - Tell subagents exactly what to return, including format when useful.
 - Subagents can run in parallel with `await asyncio.gather(...)`.
@@ -86,6 +90,10 @@ DELEGATION STRATEGY:
 ANSWER SUBMISSION:
 - When you are confident, call `finish(...)`.
 - The final answer should directly answer the question and stay concise unless the task explicitly asks for more detail.
+
+OTHER TIPS:
+- **All functions except for finish are async functions. YOU MUST AWAIT THE RESULTS OF THESE FUNCTIONS**
+
 """
 
         if include_reasoning:

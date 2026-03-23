@@ -26,7 +26,9 @@ class DeepDiveCodeExecutor(IPythonCodeExecutor):
                 finish,
                 safe_asyncio
             ),
-            detect_unawaited_async_calls=False
+            detect_unawaited_async_calls=True,
+            detect_while_loops=True,
+            detect_interactive_input=True,
         )
 
     async def describe_action_space(self) -> str:
@@ -222,6 +224,7 @@ Returns:
 
 class DeepDiveEnv(CodeActEnv):
     def __init__(self, task: Task):
+        #task.fork_strategy = "task"
         super().__init__(task, DeepDiveCodeExecutor(task))
 
     def _parse_rubric_response(self, response: str) -> dict:
@@ -288,13 +291,13 @@ class DeepDiveEnv(CodeActEnv):
             err_message = self._state.history[-1].misc.get("error_message")
 
         if self._state.finished:
-            if isinstance(self._task, SubTask) and self._task.parent_tasks:
+            if 'deepdive' not in self._task.id:
                 try:
                     rubric_checklist = RubricChecklistFast(self._task.goal)
                     prompt_builder = DeepDivePromptBuilder()
                     action_history = prompt_builder.build_action_history_description(await self.observe())
                     
-                    rubric_context = f"We need to judge the performance of an agent on the task.\n\n# Agent Trajectory Info\n## Action History\n{action_history}\n\n## Final Message\n{final_message}\n\n## Error Message\n{err_message}"
+                    rubric_context = f"We need to judge the performance of an agent on the task. The agent may use subagents to solve parts of the task. Do not penalize the model for relying on subagents, unless the subtasks delegated to the subagents are not meaningful or useful for the task.\n\n# Agent Trajectory Info\n## Action History\n{action_history}\n\n## Final Message\n{final_message}\n\n## Error Message\n{err_message}"
                     score, reason = await rubric_checklist.aevaluate(include_reason=True, context=rubric_context)
 
                     reward_misc["reason"] = reason
@@ -314,6 +317,7 @@ class DeepDiveEnv(CodeActEnv):
                             "We need to judge the performance of an deepresearch agent on a task. The task requires searching the web for information across various sources and synthesizing information together to answer a question.\n"
                             "The agent may use subagents to solve parts of the task. Do not penalize the model for relying on subagents, unless the subtasks delegated to the subagents are not meaningful or useful for the task.\n"
                             "You will be given the ground truth answer to the task and the agent's answer to the task.\n"
+                            "When comparing the agent's answer to the ground truth answer, it is acceptable to have minor formatting differences as long as the core information is equivalent."
                             "Please provide a reason and success flag (boolean value) in the following format:\n"
                             "```json\n"
                             "{\n"

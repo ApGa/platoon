@@ -7,7 +7,11 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import logging
+
 from tavily import AsyncTavilyClient
+
+logger = logging.getLogger(__name__)
 
 TAVILY_CLIENT = AsyncTavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
@@ -41,9 +45,22 @@ class _TavilyLimiter:
 
                     if len(self._timestamps) < self._max_requests_per_minute:
                         self._timestamps.append(now)
+                        logger.debug(
+                            "[TavilyLimiter pid=%s] acquired slot (%d/%d used in window)",
+                            os.getpid(),
+                            len(self._timestamps),
+                            self._max_requests_per_minute,
+                        )
                         return
 
                     wait_time = max(0.0, 60.0 - (now - self._timestamps[0]))
+                logger.info(
+                    "[TavilyLimiter pid=%s] rate limit reached (%d/%d), waiting %.1fs",
+                    os.getpid(),
+                    len(self._timestamps),
+                    self._max_requests_per_minute,
+                    wait_time,
+                )
                 await asyncio.sleep(wait_time)
         except Exception:
             self._semaphore.release()
@@ -60,8 +77,8 @@ def _get_tavily_limiter() -> "_TavilyLimiter | None":
     global _TAVILY_LIMITER, _TAVILY_LIMITER_PID
 
     try:
-        max_requests_per_minute = int(os.getenv("PLATOON_TAVILY_MAX_REQUESTS_PER_MINUTE", "100"))
-        max_concurrency = int(os.getenv("PLATOON_TAVILY_MAX_CONCURRENCY", "1"))
+        max_requests_per_minute = int(os.getenv("PLATOON_TAVILY_MAX_REQUESTS_PER_MINUTE", "200"))
+        max_concurrency = int(os.getenv("PLATOON_TAVILY_MAX_CONCURRENCY", "1000"))
     except ValueError:
         return None
 
@@ -83,6 +100,13 @@ def _get_tavily_limiter() -> "_TavilyLimiter | None":
 async def _maybe_rate_limited_tavily_request() -> AsyncIterator[None]:
     limiter = _get_tavily_limiter()
     if limiter is None:
+        if not getattr(_maybe_rate_limited_tavily_request, "_warned", False):
+            logger.warning(
+                "[TavilyLimiter pid=%s] Rate limiter is DISABLED "
+                "(set PLATOON_TAVILY_RATE_LIMIT_ENABLED=1 to enable)",
+                os.getpid(),
+            )
+            _maybe_rate_limited_tavily_request._warned = True
         yield
         return
 

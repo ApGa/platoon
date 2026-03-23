@@ -1,12 +1,12 @@
 experiment_name: deepdive
-trial_name: deepdive-recursive-trial-0
+trial_name: deepdive-recursive-trial-1
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
 recursive: true
-train_split: qa_sft
-eval_split: qa_rl
+train_split: qa_rl
+eval_split: qa_sft
 train_num_tasks: null
 eval_num_tasks: 100
 
@@ -23,7 +23,7 @@ allocation_mode: sglang:d4p1t1+d4p1t1
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 16
+  max_concurrent_rollouts: 8
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -39,7 +39,7 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 50
+    max_steps: 25
     output_dir: /mnt/efs/tmp/areal/experiments/deepdive-recursive-trial-0
     verbose: true
     train: true
@@ -48,7 +48,7 @@ workflow_config:
     inference_params:
       temperature: 1.0
       max_completion_tokens: 2048
-  group_size: 4
+  group_size: 8
 
 loss_fn_config:
   loss_fn: cispo
@@ -156,7 +156,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 5
+  freq_steps: null
   freq_secs: null
 
 stats_logger:
