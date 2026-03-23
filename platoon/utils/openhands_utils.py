@@ -7,6 +7,15 @@ from openhands.sdk.conversation import ConversationExecutionStatus
 from platoon.openhands.types import OpenHandsObservation
 from collections import defaultdict
 
+
+def _is_terminal_status(conversation_state) -> bool:
+    """Return True if the conversation execution status is a terminal state."""
+    return conversation_state.execution_status in (
+        ConversationExecutionStatus.FINISHED,
+        ConversationExecutionStatus.STUCK,
+        ConversationExecutionStatus.ERROR,
+    )
+
 def is_action(event: Event) -> bool:
     return isinstance(event, ActionEvent) \
         or (isinstance(event, MessageEvent) and event.source == "agent")
@@ -32,7 +41,7 @@ def group_actions(events: Sequence[Event]):
 
 def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm_call_id: bool = True) -> list[Event]:
     """Collect all Actions between the last observation.last_step_observation_id and the most recent observation, ensuring that all these Actions have a corresponding observation except for messages and finish actions from agent."""
-    from openhands.sdk.context.view import ActionBatch
+    # from openhands.sdk.context.view import ActionBatch
     events = observation.conversation_state.events
     new_actions: list[Event] = list()
     seen_action_ids: set[EventID] = set()
@@ -63,8 +72,15 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
             if isinstance(event, MessageEvent) and event.source == "agent":
                 seen_action_ids.add(event.id)
                 at_least_one_future_obs_seen = True
-            elif isinstance(event, ActionEvent) and event.source == "agent" and isinstance(event.action, FinishAction):
-                # print("IMPORTANT: agent has finished rollout")
+            elif isinstance(event, ActionEvent) and event.source == "agent" and (
+                isinstance(event.action, FinishAction)
+                or _is_terminal_status(observation.conversation_state)
+            ):
+                # The agent submitted a terminal action (built-in FinishAction or
+                # a custom tool that set execution_status to FINISHED/STUCK/ERROR,
+                # e.g. LocalizationFinishAction).  Treat this the same as a
+                # message: mark it as "seen" so the downstream validation logic
+                # doesn't clear it for lacking a corresponding observation.
                 seen_action_ids.add(event.id)
                 at_least_one_future_obs_seen = True
 
@@ -172,15 +188,17 @@ def get_obs_for_last_action(observation: OpenHandsObservation) -> list[Event]:
             new_obs.append(event)
 
     # If not at least one future action seen and if this obs is not the final one, empty the list.
+    oh_conversation_finished = _is_terminal_status(observation.conversation_state)
+    if oh_conversation_finished and len(new_obs) == 0:
+        print(f"Conversation is finished and no new obs seen, returning empty obs list.")
+        return []
     if len(new_obs) == 0:
         return new_obs
     # last_event_seen = new_obs[0].id
     
     # Check if conversation has finished WITHOUT calling is_finished (to avoid circular dependency)
     conversation_state = observation.conversation_state
-    oh_conversation_finished = conversation_state.execution_status == ConversationExecutionStatus.FINISHED \
-        or conversation_state.execution_status == ConversationExecutionStatus.STUCK \
-        or conversation_state.execution_status == ConversationExecutionStatus.ERROR
+    oh_conversation_finished = _is_terminal_status(conversation_state)
     
     if not at_least_one_future_action_seen and not oh_conversation_finished:
         new_obs.clear()
@@ -200,9 +218,7 @@ def get_obs_for_last_action(observation: OpenHandsObservation) -> list[Event]:
 
 def is_finished(observation: OpenHandsObservation, last_event_seen: EventID | None = None) -> bool:
     conversation_state = observation.conversation_state
-    oh_conversation_finished = conversation_state.execution_status == ConversationExecutionStatus.FINISHED \
-        or conversation_state.execution_status == ConversationExecutionStatus.STUCK \
-        or conversation_state.execution_status == ConversationExecutionStatus.ERROR 
+    oh_conversation_finished = _is_terminal_status(conversation_state)
     last_event_id = conversation_state.events[-1].id
     assert last_event_id is not None, "Last event in conversation must have a non-None ID"
     valid_ids = [event_id for event_id in [observation.last_step_action_id, observation.last_step_observation_id, last_event_seen] if event_id is not None]

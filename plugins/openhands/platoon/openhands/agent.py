@@ -26,6 +26,7 @@ class OpenHandsAgent:
         # if is_finished(obs):
         #     print("Agent detected finished conversation in agent.act", flush=True)
         action = OpenHandsAction(action_events=step_actions)
+        print(f"got actions: {[action_event.action for action_event in step_actions]}", flush=True)
 
         if step_actions:
             action.misc['completion_id'] = step_actions[-1].llm_response_id

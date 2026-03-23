@@ -1,5 +1,5 @@
 experiment_name: codescout-grpo
-trial_name: trial6
+trial_name: trial1
 
 cluster:
   n_nodes: 1
@@ -25,7 +25,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 6
-    output_dir: /scratch/areal/experiments/codescout-grpo-trial6
+    output_dir: /scratch/areal/experiments/codescout-grpo-trial1
     verbose: True
     train: true
     timeout: 600
@@ -34,7 +34,7 @@ workflow_config:
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 2
+  max_concurrent_rollouts: 32
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -90,7 +90,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 40000
   optimizer: null
 
 train_dataset:
@@ -142,11 +142,11 @@ sglang:
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 32768
+  context_length: 40000
   mem_fraction_static: 0.8
 
 launcher:
   inference_server_cpus_per_gpu: 1
   inference_server_mem_per_gpu: 38000
   trainer_cpus_per_gpu: 1
-  trainer_mem_per_gpu: 45000
+  trainer_mem_per_gpu: 40000

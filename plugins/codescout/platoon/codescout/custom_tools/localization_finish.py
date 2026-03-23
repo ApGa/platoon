@@ -6,6 +6,37 @@ This tool allows the agent to submit localization results in a structured format
 - Function name is optional
 """
 
+import sys
+
+# This module lives at two importable paths simultaneously:
+#   - "platoon.codescout.custom_tools.localization_finish"  (via the platoon package)
+#   - "custom_tools.localization_finish"                    (via the .pth entry for plugins/codescout)
+#
+# Python treats these as two separate modules and will load the file twice,
+# producing two distinct class objects that both claim __module__ =
+# "custom_tools.localization_finish" after our __module__ override.
+# Pydantic then sees two Action/Observation subclasses with the same name
+# and raises "Duplicate class definition".
+#
+# Fix: whichever path loads us first, immediately register both keys in
+# sys.modules pointing to the SAME module object, so the second import
+# finds the cached version instead of re-executing the file.
+_SHORT = "custom_tools.localization_finish"
+_LONG  = "platoon.codescout.custom_tools.localization_finish"
+_PLUGINS = "plugins.codescout.platoon.codescout.custom_tools.localization_finish"
+_SHORT_PKG = "custom_tools"
+_LONG_PKG  = "platoon.codescout.custom_tools"
+
+_this_module = sys.modules[__name__]
+if _SHORT not in sys.modules:
+    sys.modules[_SHORT] = _this_module
+if _LONG not in sys.modules:
+    sys.modules[_LONG] = _this_module
+if _PLUGINS not in sys.modules:
+    sys.modules[_PLUGINS] = _this_module
+if _SHORT_PKG not in sys.modules and _LONG_PKG in sys.modules:
+    sys.modules[_SHORT_PKG] = sys.modules[_LONG_PKG]
+
 import json
 from typing import TYPE_CHECKING
 from collections.abc import Sequence
@@ -18,7 +49,8 @@ from openhands.sdk import (
     Observation,
     ToolDefinition
 )
-from openhands.sdk.tool import ToolExecutor, ToolAnnotations
+from openhands.sdk.tool import ToolExecutor, ToolAnnotations, register_tool
+
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 
 if TYPE_CHECKING:
@@ -57,6 +89,13 @@ class LocalizationFinishAction(Action):
             content.append("\n")
         return content
 
+# Override __module__ so the client-side pydantic discriminator registry uses the
+# same module path as the server container ("custom_tools.localization_finish").
+# This prevents a "Duplicate class definition" error when the server sends events
+# back and the client tries to deserialize them — both sides see the same name.
+LocalizationFinishAction.__module__ = "custom_tools.localization_finish"
+
+
 class LocalizationFinishObservation(Observation):
     """Observation returned after submitting localization results. No observation is needed since the agent will exit after this action."""
 
@@ -64,6 +103,8 @@ class LocalizationFinishObservation(Observation):
     def visualize(self) -> Text:
         """Return an empty Text representation since the message is in the action."""
         return Text()
+
+LocalizationFinishObservation.__module__ = "custom_tools.localization_finish"
     
 def locations_to_dict_list(locations: list[CodeLocation]) -> list[dict]:
     """Convert CodeLocation objects to dictionary format.
@@ -146,7 +187,7 @@ class LocalizationFinishTool(ToolDefinition[LocalizationFinishAction, Localizati
         
         return [
             cls(
-                name="localization_finish",
+                # name="localization_finish",
                 action_type=LocalizationFinishAction,
                 observation_type=LocalizationFinishObservation,
                 description=TOOL_DESCRIPTION,
@@ -160,4 +201,11 @@ class LocalizationFinishTool(ToolDefinition[LocalizationFinishAction, Localizati
                 ),
             )
         ]
-    
+
+# Override __module__ on all classes so both client and server use the same
+# module path ("custom_tools.localization_finish") in every registry:
+# - the pydantic discriminator registry (prevents "Duplicate class definition")
+# - the tool registry _MODULE_QUALNAMES (tells the server what to import)
+LocalizationFinishTool.__module__ = "custom_tools.localization_finish"
+
+register_tool("LocalizationFinishTool", LocalizationFinishTool)

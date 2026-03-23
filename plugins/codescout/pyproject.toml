@@ -50,10 +50,10 @@ override-dependencies = [
 [tool.uv.sources]
 platoon = { path = "../..", editable = true }
 platoon-openhands = { path = "../openhands", editable = true }
-openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-sdk" }
-openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-tools" }
-openhands-workspace = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-workspace" }
-openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "85ecfd9333d2d2cc4404dd460fd38868d9b978e2", subdirectory = "openhands-agent-server" }
+openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "de65ac5077753b0d5b7efda3df40accb89512948", subdirectory = "openhands-sdk" }
+openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "de65ac5077753b0d5b7efda3df40accb89512948", subdirectory = "openhands-tools" }
+openhands-workspace = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "de65ac5077753b0d5b7efda3df40accb89512948", subdirectory = "openhands-workspace" }
+openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "de65ac5077753b0d5b7efda3df40accb89512948", subdirectory = "openhands-agent-server" }
 
 [tool.ruff]
 line-length = 100

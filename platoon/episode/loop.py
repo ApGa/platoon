@@ -28,20 +28,28 @@ CLEANUP_TIMEOUT = 180  # seconds to allow each close() call before giving up
 
 # NOTE: This function should be called using asyncio.create_task() to make sure edits to contextvars do not leak to parent context
 async def run_episode(agent: Agent, env: Env, verbose: bool = True, timeout: int = 300) -> Trajectory:
+    curr = "pre reset"
     try:
         step_count = 0
         set_context_vars(agent, env)
+        print("waiting for env.reset()", flush=True)
         obs = await env.reset()
+        curr = "reset done"
         # while True:
         #     import time
         #     time.sleep(10000000)
         while not halt_episode(obs):
             # if agent_finished(obs):
             #     print("OpenHands Finished -- waiting for agent.act() to complete", flush=True)
+            print("waiting for agent.act()", flush=True)
+            curr = "before act"
             action = await asyncio.wait_for(agent.act(obs), timeout=timeout)
             # if agent_finished(obs):
             #     print("OpenHands Finished -- waiting for env.step() to complete", flush=True)
+            print("waiting for env.step()", flush=True)
+            curr = "before step"
             obs = await asyncio.wait_for(env.step(action), timeout=timeout)
+            print("completed env.step()", flush=True)
             # if agent_finished(obs):
             #     print("OpenHands Finished -- env.step() completed", flush=True)
             #     if not is_finished(obs):
@@ -72,26 +80,27 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = True, timeout: int
         # Cleanup with bounded timeouts so a blocking close() can't stall the process.
         # Use asyncio.shield() so that CancelledError from a parent wait_for()
         # doesn't prevent cleanup from running.
-        for label, closeable in [("agent", agent), ("env", env)]:
-            try:
-                await asyncio.shield(
-                    asyncio.wait_for(closeable.close(), timeout=CLEANUP_TIMEOUT)
-                )
-            except asyncio.CancelledError:
-                print(f"Warning: {label}.close() was cancelled, cleanup may be incomplete", flush=True)
-            except asyncio.TimeoutError:
-                print(f"Warning: {label}.close() timed out after {CLEANUP_TIMEOUT}s, skipping", flush=True)
-            except Exception as e:
-                print(f"Warning: {label}.close() raised {e}, skipping", flush=True)
+        # for label, closeable in [("agent", agent), ("env", env)]:
+        #     try:
+        #         await asyncio.shield(
+        #             asyncio.wait_for(closeable.close(), timeout=CLEANUP_TIMEOUT)
+        #         )
+        #     except asyncio.CancelledError:
+        #         print(f"Warning: {label}.close() was cancelled, cleanup may be incomplete", flush=True)
+        #     except asyncio.TimeoutError:
+        #         print(f"Warning: {label}.close() timed out after {CLEANUP_TIMEOUT}s, skipping", flush=True)
+        #     except Exception as e:
+        #         print(f"Warning: {label}.close() raised {e}, skipping", flush=True)
         # Finalize trajectory and emit a finish event to sinks
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
         traj.error_message = error_message.get()
         traj.finish_message = finish_message.get()
+        print(f"Current state: {curr}", flush=True)
         if traj.finish_message is None:
-            traj.finish_message = "Episode finished without a finish message."
-        if traj.error_message is None:
-            traj.error_message = "Rollout finished without an error or finish message"
+            traj.finish_message = f"Episode finished without a finish message: {curr}"
+        # if traj.error_message is None:
+        #     traj.error_message = "Rollout finished without an error or finish message"
         # TODO: We could move out trajectory finish logic (adding up rewards, setting finish message, etc.) from env logic to here.
         traj_collection.finish_trajectory(traj.id)
         return traj

@@ -15,7 +15,7 @@ import threading
 import asyncio
 from platoon.utils.openhands_utils import is_finished
 from openhands.sdk.event import ActionEvent
-from platoon.codescout.localization_finish import LocalizationFinishAction
+from platoon.codescout.custom_tools.localization_finish import LocalizationFinishAction
 
 def get_structured_locations(events):
     """Extract structured locations from LocalizationFinishAction in events.
