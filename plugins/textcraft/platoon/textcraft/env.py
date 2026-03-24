@@ -15,7 +15,7 @@ from platoon.envs.codeact import (
     IPythonCodeExecutor,
     safe_asyncio,
 )
-from platoon.episode.context import finish_message
+from platoon.episode.context import current_trajectory, finish_message
 
 from .recipe_loader import RecipeDatabase
 
@@ -507,6 +507,7 @@ class TextCraftEnv(CodeActEnv):
         initial_inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
+        skip_subagent_reward_computation: bool = False,
     ):
         """Initialize the TextCraft environment.
 
@@ -540,6 +541,7 @@ class TextCraftEnv(CodeActEnv):
         self._recipes_dir = recipes_dir
         self._recipe_db = recipe_db
         self._use_synth = use_synth
+        self._skip_subagent_reward_computation = skip_subagent_reward_computation
         # Always copy initial inventory for bookkeeping (to compare against for evaluation)
         # This is separate from whether the working inventory is shared with parent
         self._initial_inventory = initial_inventory.copy() if initial_inventory else {}
@@ -548,6 +550,11 @@ class TextCraftEnv(CodeActEnv):
         """Evaluate if the task goal is achieved."""
         score = 0.0
         reward_misc = {}
+        is_subagent_task = "textcraft" not in (self._task.id or "")
+        if self._skip_subagent_reward_computation and is_subagent_task:
+            reward_misc["success"] = False
+            reward_misc["reward/success"] = 0.0
+            return 0.0, reward_misc
 
         # Only give reward if agent explicitly called finish()
         if self._state.finished:
@@ -631,6 +638,7 @@ class TextCraftEnv(CodeActEnv):
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,  # Share inventory by reference for subagent propagation
             use_synth=self._use_synth,
+            skip_subagent_reward_computation=self._skip_subagent_reward_computation,
         )
 
         return forked_env
@@ -679,6 +687,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
         initial_inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
+        skip_subagent_reward_computation: bool = False,
     ):
         super().__init__(
             task,
@@ -687,6 +696,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             initial_inventory=initial_inventory,
             _share_inventory=_share_inventory,
             use_synth=use_synth,
+            skip_subagent_reward_computation=skip_subagent_reward_computation,
         )
         # Use self._recipes_dir and self._initial_inventory which were set by parent class
         # (parent applies defaults: recipes_dir from __file__, inventory from task.misc)
@@ -738,6 +748,7 @@ class TextCraftRecursiveEnv(TextCraftEnv):
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,
             use_synth=self._use_synth,
+            skip_subagent_reward_computation=self._skip_subagent_reward_computation,
         )
 
         return forked_env
@@ -937,6 +948,7 @@ class TextCraftDepthAwareEnv(TextCraftRecursiveEnv):
         initial_inventory: Optional[Dict[str, int]] = None,
         _share_inventory: bool = False,
         use_synth: bool = False,
+        skip_subagent_reward_computation: bool = False,
     ):
         # Let the parent chain set up defaults (recipes_dir, initial_inventory, etc.)
         super().__init__(
@@ -946,6 +958,7 @@ class TextCraftDepthAwareEnv(TextCraftRecursiveEnv):
             initial_inventory=initial_inventory,
             _share_inventory=_share_inventory,
             use_synth=use_synth,
+            skip_subagent_reward_computation=skip_subagent_reward_computation,
         )
         self._subagent_max_steps = subagent_max_steps
 
@@ -979,6 +992,7 @@ class TextCraftDepthAwareEnv(TextCraftRecursiveEnv):
             initial_inventory=self._code_executor.inventory,
             _share_inventory=True,
             use_synth=self._use_synth,
+            skip_subagent_reward_computation=self._skip_subagent_reward_computation,
         )
 
 

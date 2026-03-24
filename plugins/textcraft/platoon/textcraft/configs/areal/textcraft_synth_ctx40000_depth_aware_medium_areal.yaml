@@ -1,5 +1,5 @@
 experiment_name: recursive-agents
-trial_name: textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-medium-trial-3
+trial_name: textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-root-propogated-medium-trial-0
 
 seed: 343
 total_train_epochs: 10
@@ -42,11 +42,13 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 25
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-medium-trial-3
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx40000-cispo-4b-depth-aware-root-propogated-medium-trial-0
     verbose: True
     train: true
     timeout: 7200
     step_timeout: 7200
+    propogate_root_success: true
+    skip_subagent_reward_computation: false
   group_size: 8
   leave_one_out_baseline: True  # Use leave-one-out baseline for advantage centering
   depth_level_weighting: True  # Weight trajectories inversely by depth-level frequency

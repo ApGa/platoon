@@ -8,6 +8,7 @@ from platoon.episode.context import current_trajectory_collection
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import TrajectoryCollection
 from platoon.utils.llm_client import LLMClient
+from platoon.utils.subagent_rewards import propogate_root_success
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from .agent import TextCraftAgent, TextCraftRecursiveAgent
@@ -86,7 +87,10 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             # Disable Qwen3 reasoning/thinking mode for faster inference
             default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        env = TextCraftRecursiveEnv(task)
+        env = TextCraftRecursiveEnv(
+            task,
+            skip_subagent_reward_computation=config.skip_subagent_reward_computation,
+        )
         agent = TextCraftRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
@@ -120,10 +124,14 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
                 )
             raise
 
+        result: dict | TrajectoryCollection
         if config.return_dict:
-            return current_trajectory_collection.get().to_dict()
+            result = current_trajectory_collection.get().to_dict()
         else:
-            return current_trajectory_collection.get()
+            result = current_trajectory_collection.get()
+        if config.propogate_root_success:
+            result = propogate_root_success(result)
+        return result
 
     except Exception as e:
         if config.verbose:

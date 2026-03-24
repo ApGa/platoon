@@ -8,6 +8,7 @@ from platoon.episode.context import budget_tracker, current_trajectory_collectio
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCollection
 from platoon.utils.llm_client import LiteLLMClient
+from platoon.utils.subagent_rewards import propogate_root_success
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from .agent import AppWorldAgent, AppWorldDepthAwareAgent, AppWorldRecursiveAgent
@@ -88,7 +89,11 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
         )
-        env = AppWorldRecursiveEnv(task, timeout_seconds=config.step_timeout)
+        env = AppWorldRecursiveEnv(
+            task,
+            timeout_seconds=config.step_timeout,
+            skip_subagent_reward_computation=config.skip_subagent_reward_computation,
+        )
         agent = AppWorldRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
@@ -123,10 +128,14 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
                 )
             raise
 
+        result: dict | TrajectoryCollection
         if config.return_dict:
-            return current_trajectory_collection.get().to_dict()
+            result = current_trajectory_collection.get().to_dict()
         else:
-            return current_trajectory_collection.get()
+            result = current_trajectory_collection.get()
+        if config.propogate_root_success:
+            result = propogate_root_success(result)
+        return result
 
     except Exception as e:
         if config.verbose:
@@ -171,6 +180,7 @@ async def run_depth_aware_rollout(
             task,
             subagent_max_steps=per_subagent_max_steps,
             timeout_seconds=config.step_timeout,
+            skip_subagent_reward_computation=config.skip_subagent_reward_computation,
         )
         agent = AppWorldDepthAwareAgent(
             llm_client=llm_client,
@@ -209,10 +219,14 @@ async def run_depth_aware_rollout(
                 )
             raise
 
+        result: dict | TrajectoryCollection
         if config.return_dict:
-            return current_trajectory_collection.get().to_dict()
+            result = current_trajectory_collection.get().to_dict()
         else:
-            return current_trajectory_collection.get()
+            result = current_trajectory_collection.get()
+        if config.propogate_root_success:
+            result = propogate_root_success(result)
+        return result
 
     except Exception as e:
         if config.verbose:

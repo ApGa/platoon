@@ -223,9 +223,10 @@ Returns:
         )
 
 class DeepDiveEnv(CodeActEnv):
-    def __init__(self, task: Task):
+    def __init__(self, task: Task, skip_subagent_reward_computation: bool = False):
         #task.fork_strategy = "task"
         super().__init__(task, DeepDiveCodeExecutor(task))
+        self._skip_subagent_reward_computation = skip_subagent_reward_computation
 
     def _parse_rubric_response(self, response: str) -> dict:
         """Parse the LLM response to extract structured data.
@@ -282,6 +283,12 @@ class DeepDiveEnv(CodeActEnv):
 
     async def evaluate(self) -> tuple[float, dict]:
         score, reward_misc = 0., {}
+        is_subagent_task = "deepdive" not in (self._task.id or "")
+        if self._skip_subagent_reward_computation and is_subagent_task:
+            reward_misc["reason"] = "Skipped subagent reward computation"
+            reward_misc["success"] = False
+            reward_misc["reward/success"] = 0.0
+            return 0.0, reward_misc
 
         final_message = finish_message.get()
         if final_message is None and self._state.history:
@@ -347,8 +354,9 @@ class DeepDiveRecursiveEnv(DeepDiveEnv):
         self,
         task: Task,
         subagent_max_steps: int | None = 25,
+        skip_subagent_reward_computation: bool = False,
     ):
-        super().__init__(task)
+        super().__init__(task, skip_subagent_reward_computation=skip_subagent_reward_computation)
         self._code_executor = DeepDiveRecursiveCodeExecutor(
             task=task,
             subagent_max_steps=subagent_max_steps
@@ -372,4 +380,5 @@ class DeepDiveRecursiveEnv(DeepDiveEnv):
         return DeepDiveRecursiveEnv(
             task=task,
             subagent_max_steps=self.subagent_max_steps,
+            skip_subagent_reward_computation=self._skip_subagent_reward_computation,
         )

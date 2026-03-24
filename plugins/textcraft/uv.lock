@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker'",
@@ -48,7 +48,7 @@ wheels = [
 
 [[package]]
 name = "ai-rubric"
-version = "0.2.2"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
@@ -56,9 +56,9 @@ dependencies = [
     { name = "networkx" },
     { name = "plotly" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/e9/d131e3932fd01ec0a820990b983c31860480d47093078a093170aa9dfdbb/ai_rubric-0.2.2.tar.gz", hash = "sha256:ce8aaa222e84ee6495d37b3dfb94174b257f08c3e5ec13b88f816dd6afbcb99e", size = 694896, upload-time = "2025-09-07T04:17:36.265Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/3b/e8fd1ff134c396b4d6e4449f72970ccd6ddc4db01a13b11ecc5ba165e968/ai_rubric-0.2.4.tar.gz", hash = "sha256:2ccf2db3d87a2cc234e0dfa8cbcac45aabb79f359d30c648b0900e84792e9e60", size = 731238, upload-time = "2026-03-09T23:59:07.895Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cd/dc/9d6b7bd939facd39035aea07b28ebf3510d89a5ea9f25b00f9a18a56d6fd/ai_rubric-0.2.2-py3-none-any.whl", hash = "sha256:55f3c8916b6468cca3dd7fde6f5e8c6525966c0e759de5f5c593acbc7d07c544", size = 38770, upload-time = "2025-09-07T04:17:35.16Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/4b/26ac0c1ede93b0e345debbf517d4ea8ac1b8993f33ce88583b5e8624bd8d/ai_rubric-0.2.4-py3-none-any.whl", hash = "sha256:343ec6c29fdc538aa312719eb0a76b611e21d3a633332d4f7cc1b836932946d3", size = 39554, upload-time = "2026-03-09T23:59:06.634Z" },
 ]
 
 [[package]]
@@ -725,7 +725,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -1017,8 +1017,8 @@ name = "cupy-cuda12x"
 version = "13.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "fastrlock" },
-    { name = "numpy" },
+    { name = "fastrlock", marker = "sys_platform != 'darwin'" },
+    { name = "numpy", marker = "sys_platform != 'darwin'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/12/c5/7e7fc4816d0de0154e5d9053242c3a08a0ca8b43ee656a6f7b3b95055a7b/cupy_cuda12x-13.6.0-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:a6970ceefe40f9acbede41d7fe17416bd277b1bd2093adcde457b23b578c5a59", size = 127334633, upload-time = "2025-08-18T08:24:43.065Z" },
@@ -1791,7 +1791,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
+    { name = "hf-xet", marker = "platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -1943,7 +1943,7 @@ name = "ipykernel"
 version = "7.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "appnope", marker = "sys_platform == 'darwin'" },
+    { name = "appnope", marker = "sys_platform == 'darwin' or (extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "comm" },
     { name = "debugpy" },
     { name = "ipython" },
@@ -1967,12 +1967,12 @@ name = "ipython"
 version = "9.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "decorator" },
     { name = "ipython-pygments-lexers" },
     { name = "jedi" },
     { name = "matplotlib-inline" },
-    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pexpect", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'win32' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "prompt-toolkit" },
     { name = "pygments" },
     { name = "stack-data" },
@@ -2262,7 +2262,7 @@ dependencies = [
     { name = "nbformat" },
     { name = "packaging" },
     { name = "prometheus-client" },
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'linux'" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux') or (os_name == 'nt' and sys_platform == 'darwin' and extra != 'extra-17-platoon-textcraft-areal') or (os_name != 'nt' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'darwin' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "pyzmq" },
     { name = "send2trash" },
     { name = "terminado" },
@@ -2280,7 +2280,7 @@ name = "jupyter-server-terminals"
 version = "0.5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'linux'" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux') or (os_name == 'nt' and sys_platform == 'darwin' and extra != 'extra-17-platoon-textcraft-areal') or (os_name != 'nt' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'darwin' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "terminado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fc/d5/562469734f476159e99a55426d697cbf8e7eb5efe89fb0e0b4f83a3d3459/jupyter_server_terminals-0.5.3.tar.gz", hash = "sha256:5ae0295167220e9ace0edcfdb212afd2b01ee8d179fe6f23c899590e9b8a5269", size = 31430, upload-time = "2024-03-12T14:37:03.049Z" }
@@ -2680,12 +2680,12 @@ name = "mlx-lm"
 version = "0.28.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jinja2", marker = "sys_platform != 'linux'" },
+    { name = "jinja2", marker = "sys_platform == 'darwin'" },
     { name = "mlx", marker = "sys_platform == 'darwin'" },
-    { name = "numpy", marker = "sys_platform != 'linux'" },
-    { name = "protobuf", marker = "sys_platform != 'linux'" },
-    { name = "pyyaml", marker = "sys_platform != 'linux'" },
-    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
+    { name = "numpy", marker = "sys_platform == 'darwin'" },
+    { name = "protobuf", marker = "sys_platform == 'darwin'" },
+    { name = "pyyaml", marker = "sys_platform == 'darwin'" },
+    { name = "transformers", version = "4.56.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/51/f6/15e002d52c28d8c544ec3aaf9053677468333e6ef0e76ea68579fd77b76d/mlx_lm-0.28.3.tar.gz", hash = "sha256:75df2b925d343ebaf50b63008dede4fe98cd3b02b1b24b7da71ebeb198d674f0", size = 214455, upload-time = "2025-10-17T21:44:33.921Z" }
 wheels = [
@@ -3064,7 +3064,7 @@ name = "nvidia-cudnn-cu12"
 version = "9.10.2.21"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/41/e79269ce215c857c935fd86bcfe91a451a584dfc27f1e068f568b9ad1ab7/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:c9132cc3f8958447b4910a1720036d9eff5928cc3179b0a51fb6d167c6cc87d8", size = 705026878, upload-time = "2025-06-06T21:52:51.348Z" },
@@ -3087,7 +3087,7 @@ name = "nvidia-cufft-cu12"
 version = "11.3.3.83"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/bc/7771846d3a0272026c416fbb7e5f4c1f146d6d80704534d0b187dd6f4800/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:848ef7224d6305cdb2a4df928759dca7b1201874787083b6e7550dd6765ce69a", size = 193109211, upload-time = "2025-03-07T01:44:56.873Z" },
@@ -3119,9 +3119,9 @@ name = "nvidia-cusolver-cu12"
 version = "11.7.3.90"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-cusparse-cu12", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/32/f7cd6ce8a7690544d084ea21c26e910a97e077c9b7f07bf5de623ee19981/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:db9ed69dbef9715071232caa9b69c52ac7de3a95773c2db65bdba85916e4e5c0", size = 267229841, upload-time = "2025-03-07T01:46:54.356Z" },
@@ -3134,7 +3134,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.5.8.93"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bc/f7/cd777c4109681367721b00a106f491e0d0d15cfa1fd59672ce580ce42a97/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9b6c161cb130be1a07a27ea6923df8141f3c295852f4b260c65f18f3e0a091dc", size = 288117129, upload-time = "2025-03-07T01:47:40.407Z" },
@@ -3609,7 +3609,7 @@ wandb = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-rubric", specifier = ">=0.2.2" },
+    { name = "ai-rubric", specifier = ">=0.2.4" },
     { name = "areal", extras = ["cuda"], marker = "extra == 'areal'", git = "https://github.com/inclusionAI/AReaL.git?rev=35b57e2d2743f7158894239acda8b71f7226b955" },
     { name = "datasets" },
     { name = "ipython", specifier = ">=9.4.0" },
@@ -4250,7 +4250,7 @@ name = "pyzmq"
 version = "27.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "implementation_name == 'pypy'" },
+    { name = "cffi", marker = "implementation_name == 'pypy' or (extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/04/0b/3c9baedbdf613ecaa7aa07027780b8867f57b6293b6ee50de316c9f3222b/pyzmq-27.1.0.tar.gz", hash = "sha256:ac0765e3d44455adb6ddbf4417dcce460fc40a05978c08efdf2948072f6db540", size = 281750, upload-time = "2025-09-08T23:10:18.157Z" }
 wheels = [
@@ -5027,8 +5027,8 @@ name = "terminado"
 version = "0.18.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess", marker = "os_name != 'nt'" },
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'linux'" },
+    { name = "ptyprocess", marker = "os_name != 'nt' or (extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux') or (os_name == 'nt' and sys_platform == 'darwin' and extra != 'extra-17-platoon-textcraft-areal') or (os_name != 'nt' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'darwin' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "tornado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8a/11/965c6fd8e5cc254f1fe142d547387da17a8ebfd75a3455f637c663fb38a0/terminado-0.18.1.tar.gz", hash = "sha256:de09f2c4b85de4765f7714688fff57d3e75bad1f909b589fde880460c753fd2e", size = 32701, upload-time = "2024-03-12T14:34:39.026Z" }
@@ -5216,23 +5216,23 @@ dependencies = [
     { name = "fsspec" },
     { name = "jinja2" },
     { name = "networkx" },
-    { name = "nvidia-cublas-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cuda-cupti-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cudnn-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cufft-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cufile-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-curand-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cusolver-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cusparse-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cusparselt-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nccl-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nvjitlink-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nvtx-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cufile-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "setuptools" },
     { name = "sympy" },
-    { name = "triton", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "triton", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "typing-extensions" },
 ]
 wheels = [
@@ -5327,7 +5327,7 @@ name = "tqdm"
 version = "4.67.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a8/4b/29b4ef32e036bb34e4ab51796dd745cdba7ed47ad142a9f4a1eb8e0c744d/tqdm-4.67.1.tar.gz", hash = "sha256:f8aef9c52c08c13a65f30ea34f4e5aac3fd1a34959879d7e59e63027286627f2", size = 169737, upload-time = "2024-11-24T20:12:22.481Z" }
 wheels = [
@@ -5400,7 +5400,7 @@ name = "triton"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "setuptools", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform == 'linux' and extra != 'extra-17-platoon-textcraft-areal') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/66/b1eb52839f563623d185f0927eb3530ee4d5ffe9d377cdaf5346b306689e/triton-3.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:31c1d84a5c0ec2c0f8e8a072d7fd150cab84a9c239eaddc6706c081bfae4eb04", size = 155560068, upload-time = "2025-07-30T19:58:37.081Z" },
@@ -5821,8 +5821,8 @@ name = "xformers"
 version = "0.0.32.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", marker = "sys_platform == 'linux'" },
-    { name = "torch", marker = "sys_platform == 'linux'" },
+    { name = "numpy", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "torch", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6f/33/3b9c4d3d5b2da453d27de891df4ad653ac5795324961aa3a5c15b0353fe6/xformers-0.0.32.post1.tar.gz", hash = "sha256:1de84a45c497c8d92326986508d81f4b0a8c6be4d3d62a29b8ad6048a6ab51e1", size = 12106196, upload-time = "2025-08-14T18:07:45.486Z" }
 wheels = [

@@ -488,10 +488,12 @@ class AppWorldEnv(CodeActEnv):
         task: Task,
         code_executor: AppWorldCodeExecutor | None = None,
         timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
+        skip_subagent_reward_computation: bool = False,
         **kwargs,
     ):
         if code_executor is None:
             code_executor = AppWorldCodeExecutor(task, timeout_seconds=timeout_seconds)
+        self._skip_subagent_reward_computation = skip_subagent_reward_computation
 
         super().__init__(task, code_executor, **kwargs)
 
@@ -506,6 +508,11 @@ class AppWorldEnv(CodeActEnv):
 
     async def evaluate(self) -> tuple[float, dict]:
         score, reward_misc = 0., {}
+        is_subagent_task = isinstance(self._task, SubTask) and bool(self._task.parent_tasks)
+        if self._skip_subagent_reward_computation and is_subagent_task:
+            reward_misc["reason"] = "Skipped subagent reward computation"
+            reward_misc["reward/success"] = 0.0
+            return 0.0, reward_misc
 
         if self._state.finished:
             if isinstance(self._task, SubTask) and self._task.parent_tasks:
@@ -541,6 +548,7 @@ class AppWorldEnv(CodeActEnv):
         return type(self)(
             task,
             code_executor=code_executor,
+            skip_subagent_reward_computation=self._skip_subagent_reward_computation,
         )
     
 
@@ -552,11 +560,18 @@ class AppWorldRecursiveEnv(AppWorldEnv):
         task: Task,
         code_executor: AppWorldRecursiveCodeExecutor | None = None,
         timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
+        skip_subagent_reward_computation: bool = False,
         **kwargs,
     ):
         if code_executor is None:
             code_executor = AppWorldRecursiveCodeExecutor(task, timeout_seconds=timeout_seconds)
-        super().__init__(task, code_executor, **kwargs)
+        super().__init__(
+            task,
+            code_executor,
+            timeout_seconds=timeout_seconds,
+            skip_subagent_reward_computation=skip_subagent_reward_computation,
+            **kwargs,
+        )
 
     @property
     def code_executor(self) -> AppWorldRecursiveCodeExecutor:
@@ -643,6 +658,7 @@ class AppWorldDepthAwareEnv(AppWorldRecursiveEnv):
         code_executor: AppWorldDepthAwareCodeExecutor | None = None,
         subagent_max_steps: int = 25,
         timeout_seconds: int | None = DEFAULT_APPWORLD_TIMEOUT_SECONDS,
+        skip_subagent_reward_computation: bool = False,
         **kwargs,
     ):
         self._subagent_max_steps = subagent_max_steps
@@ -652,7 +668,13 @@ class AppWorldDepthAwareEnv(AppWorldRecursiveEnv):
                 subagent_max_steps=subagent_max_steps,
                 timeout_seconds=timeout_seconds,
             )
-        super().__init__(task, code_executor, **kwargs)
+        super().__init__(
+            task,
+            code_executor,
+            timeout_seconds=timeout_seconds,
+            skip_subagent_reward_computation=skip_subagent_reward_computation,
+            **kwargs,
+        )
 
     async def fork(self, task: Task) -> "AppWorldDepthAwareEnv":
         code_executor = await self.code_executor.fork(task)
@@ -660,5 +682,6 @@ class AppWorldDepthAwareEnv(AppWorldRecursiveEnv):
             task,
             code_executor=code_executor,
             subagent_max_steps=self._subagent_max_steps,
+            skip_subagent_reward_computation=self._skip_subagent_reward_computation,
         )
     

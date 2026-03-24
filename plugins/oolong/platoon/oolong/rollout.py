@@ -3,6 +3,7 @@ from .env import OolongEnv, OolongRecursiveEnv
 from .agent import OolongAgent, OolongRecursiveAgent
 from platoon.config_defs import RolloutConfig
 from platoon.utils.llm_client import LiteLLMClient
+from platoon.utils.subagent_rewards import propogate_root_success
 from platoon.episode.context import current_trajectory_collection, budget_tracker
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import TrajectoryCollection, DepthAwareStepBudgetTracker
@@ -109,7 +110,10 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             # Disable Qwen3 reasoning/thinking mode for faster inference
             # default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        env = OolongRecursiveEnv(task)
+        env = OolongRecursiveEnv(
+            task,
+            skip_subagent_reward_computation=config.skip_subagent_reward_computation,
+        )
         agent = OolongRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
@@ -150,10 +154,14 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
                 logger.warning(f"Process {os.getpid()}: Task cancellation did not complete in 5s for {task.id}, abandoning")
             raise
 
+        result: dict | TrajectoryCollection
         if config.return_dict:
-            return current_trajectory_collection.get().to_dict()
+            result = current_trajectory_collection.get().to_dict()
         else:
-            return current_trajectory_collection.get()
+            result = current_trajectory_collection.get()
+        if config.propogate_root_success:
+            result = propogate_root_success(result)
+        return result
 
     except Exception as e:
         if config.verbose:
