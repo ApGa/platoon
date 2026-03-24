@@ -140,11 +140,12 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
 
 
 class OolongEnv(CodeActEnv):
-    def __init__(self, task: Task):
+    def __init__(self, task: Task, skip_subagent_reward_computation: bool = False):
         task.fork_strategy = "task"
         code_executor = OolongCodeExecutor(task)
         # Remove context task misc to avoid massive context logging in events
         self.context = task.misc.pop('context')
+        self._skip_subagent_reward_computation = skip_subagent_reward_computation
         super().__init__(task, code_executor)
 
     def _parse_rubric_response(self, response: str) -> dict:
@@ -204,6 +205,11 @@ class OolongEnv(CodeActEnv):
         
         score = 0.0
         reward_misc = {}
+        is_subagent_task = "oolong" not in (self._task.id or "")
+        if self._skip_subagent_reward_computation and is_subagent_task:
+            reward_misc["reason"] = "Skipped subagent reward computation"
+            reward_misc["reward/success"] = 0.0
+            return 0.0, reward_misc
 
         if self._state.finished:
             if not "oolong" in self._task.id:
@@ -287,12 +293,13 @@ class OolongEnv(CodeActEnv):
 class OolongRecursiveEnv(OolongEnv):
     def __init__(self, task: Task,
         subagent_max_steps: int | None = 25,
+        skip_subagent_reward_computation: bool = False,
     ):
         code_executor = OolongRecursiveCodeExecutor(
             task,
             subagent_max_steps=subagent_max_steps
         )
-        super().__init__(task)
+        super().__init__(task, skip_subagent_reward_computation=skip_subagent_reward_computation)
         self._code_executor = code_executor
         self.subagent_max_steps = subagent_max_steps
     
@@ -315,6 +322,7 @@ class OolongRecursiveEnv(OolongEnv):
         return OolongRecursiveEnv(
             task,
             subagent_max_steps=self.subagent_max_steps,
+            skip_subagent_reward_computation=self._skip_subagent_reward_computation,
         )
 
 
