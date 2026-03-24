@@ -10,6 +10,7 @@ from platoon.episode.context import budget_tracker, current_trajectory_collectio
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCollection
 from platoon.utils.llm_client import LiteLLMClient
+from platoon.utils.subagent_rewards import propogate_root_success
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from .agent import TextCraftAgent, TextCraftDepthAwareAgent, TextCraftRecursiveAgent
@@ -108,6 +109,7 @@ async def run_synth_depth_aware_rollout(
         env = create_synth_depth_aware_env(
             task,
             subagent_max_steps=per_agent_max_steps,
+            skip_subagent_reward_computation=config.skip_subagent_reward_computation,
         )
         agent = TextCraftDepthAwareAgent(
             llm_client=llm_client,
@@ -145,10 +147,14 @@ async def run_synth_depth_aware_rollout(
                 )
             raise
 
+        result: dict | TrajectoryCollection
         if config.return_dict:
-            return current_trajectory_collection.get().to_dict()
+            result = current_trajectory_collection.get().to_dict()
         else:
-            return current_trajectory_collection.get()
+            result = current_trajectory_collection.get()
+        if config.propogate_root_success:
+            result = propogate_root_success(result)
+        return result
 
     except Exception as e:
         if config.verbose:
@@ -171,7 +177,10 @@ async def run_synth_recursive_rollout(task: Task, config: RolloutConfig) -> dict
             # Disable Qwen3 reasoning/thinking mode for faster inference
             # default_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
-        env = create_synth_recursive_env(task)
+        env = create_synth_recursive_env(
+            task,
+            skip_subagent_reward_computation=config.skip_subagent_reward_computation,
+        )
         agent = TextCraftRecursiveAgent(
             llm_client=llm_client,
             inference_params=config.inference_params,
@@ -205,10 +214,14 @@ async def run_synth_recursive_rollout(task: Task, config: RolloutConfig) -> dict
                 )
             raise
 
+        result: dict | TrajectoryCollection
         if config.return_dict:
-            return current_trajectory_collection.get().to_dict()
+            result = current_trajectory_collection.get().to_dict()
         else:
-            return current_trajectory_collection.get()
+            result = current_trajectory_collection.get()
+        if config.propogate_root_success:
+            result = propogate_root_success(result)
+        return result
 
     except Exception as e:
         if config.verbose:
