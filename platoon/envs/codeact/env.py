@@ -229,7 +229,7 @@ class UnawaitedAsyncCallDetector(ast.NodeVisitor):
     """
 
     # Functions that must be awaited
-    ASYNC_FUNCTIONS = {"launch_subagent"}
+    ASYNC_FUNCTIONS = {"launch_subagent", "search_web", "view_webpage_content"}
 
     def __init__(self):
         self.errors: list[str] = []

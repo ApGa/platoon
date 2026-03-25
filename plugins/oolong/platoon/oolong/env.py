@@ -221,8 +221,9 @@ class OolongEnv(CodeActEnv):
 
                     rubric_system_prompt = (
                         "We need to judge the performance of an agent on a task. The task relates to aggregating some information from a potentially very large context.\n"
-                        "1. Read the context carefully and see if the agent's answer is accurate. 2. Do not mark the agent as successful unless it prints out the context and reads it manually to answer the question.\n"
-                        "For example, if the agent uses regex or string matching/contains logic to answer the question, this is a heuristic that may not be reliable in general and thus should not be marked as successful."
+                        "1. Read the context carefully and see if the agent's answer is accurate. 2. Do not mark the agent as successful unless it prints out the context and reads it manually or alternatively uses subagents to answer the question.\n"
+                        "For example, if the agent uses regex or string matching/contains logic to answer the question, this is a heuristic that may not be reliable in general and thus should not be marked as successful.\n"
+                        "Using subagents is okay since subagents can view the context on behalf of the agent.\n"
                         "Please provide a reason and success flag (boolean value) in the following format:\n"
                         "```json\n"
                         "{\n"

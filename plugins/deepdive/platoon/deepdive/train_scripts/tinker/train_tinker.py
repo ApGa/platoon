@@ -26,14 +26,14 @@ logging.basicConfig(
 
 logging.getLogger("platoon").setLevel(logging.DEBUG)
 
-_DEEPDIVE_DELEGATION_REWARD_CAP = 0.4
+_DEEPDIVE_DELEGATION_REWARD_CAP = 0.
 
 
 @dataclass
 class DeepDiveTinkerTrainerConfig(PlatoonTinkerRLTrainerConfig):
     recursive: bool = True
-    train_split: str = "qa_sft"
-    eval_split: str = "qa_rl"
+    train_split: str = "qa_rl"
+    eval_split: str = "qa_sft"
     train_num_tasks: int | None = None
     eval_num_tasks: int = 100
     seed: int = 42

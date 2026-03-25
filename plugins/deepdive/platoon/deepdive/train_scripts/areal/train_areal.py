@@ -15,14 +15,14 @@ from platoon.deepdive.tasks import get_task, get_task_ids
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
 from platoon.train.areal.workflows import StepWiseArealWorkflow
 
-_DEEPDIVE_DELEGATION_REWARD_CAP = 0.4
+_DEEPDIVE_DELEGATION_REWARD_CAP = 0.0
 
 
 @dataclass
 class DeepDiveArealTrainerConfig(PlatoonArealRLTrainerConfig):
     recursive: bool = True
-    train_split: str = "qa_sft"
-    eval_split: str = "qa_rl"
+    train_split: str = "qa_rl"
+    eval_split: str = "qa_sft"
     train_num_tasks: int | None = None
     eval_num_tasks: int = 100
     seed: int = 42
