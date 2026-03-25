@@ -205,6 +205,14 @@ def patch_max_completion_tokens():
         # Convert messages to prompt format
         tools_val = tools if not is_omitted(tools) else None
         if self.chat_template_type == "hf":
+            for message in messages_list:
+                if isinstance(message["content"], list):
+                    new_content = "".join(
+                        item.get("text", "")
+                        for item in message["content"]
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    )
+                    message["content"] = new_content
             prompt_token_ids = self.tokenizer.apply_chat_template(
                 messages_list,
                 tools=tools_val,

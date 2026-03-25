@@ -1,0 +1,70 @@
+[project]
+name = "platoon-codescout"
+version = "0.1.0"
+description = "Platoon plugin for training OSS models with RL for repo-level code localization."
+requires-python = "~=3.12.0"
+authors = [
+    {name = "Aditya Bharat Soni", email = "adityabs@cs.cmu.edu"}
+]
+dependencies = [
+    "platoon >= 0.1.0",
+    "platoon-openhands >= 0.1.0",
+    "openhands-sdk",
+    "openhands-tools",
+    "openhands-workspace",
+    "openhands-agent-server"
+]
+[project.optional-dependencies]
+# Training backends - install one of these for training
+tinker = [
+    "platoon[tinker]",
+]
+# NOTE: areal backend requires uv for installation (not available on PyPI)
+areal = [
+    "platoon[areal]",
+]
+# Logging integrations
+wandb = [
+    "platoon[wandb]",
+]
+# uv-specific configuration
+[tool.uv]
+no-build-isolation-package = ['flash-attn']
+# tinker and areal backends are mutually exclusive
+conflicts = [
+    [
+        { extra = "tinker" },
+        { extra = "areal" },
+    ],
+]
+override-dependencies = [
+    "fastapi[standard]>=0.115.0",
+    "openai==1.99.6",
+    "xgrammar==0.1.24",
+    "outlines-core==0.1.26",
+    "pyarrow==20.0.0",
+    "huggingface_hub==0.34",
+    "datasets==4.3.0",
+    "networkx==3.3.0" # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
+]
+[tool.uv.sources]
+platoon = { path = "../..", editable = true }
+platoon-openhands = { path = "../openhands", editable = true }
+openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "737eae2b2384f04fe5853639294931284ab1f283", subdirectory = "openhands-sdk" }
+openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "737eae2b2384f04fe5853639294931284ab1f283", subdirectory = "openhands-tools" }
+openhands-workspace = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "737eae2b2384f04fe5853639294931284ab1f283", subdirectory = "openhands-workspace" }
+openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "737eae2b2384f04fe5853639294931284ab1f283", subdirectory = "openhands-agent-server" }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[tool.hatch.build.targets.wheel]
+packages = ["platoon"]

@@ -190,13 +190,15 @@ class PlatoonArealRLTrainer:
             self.ref.initialize(None, self.ft_spec)
 
         # Setup proxy servers
-        self.llm_client = ArealOpenAI(engine=self.rollout, tokenizer=self.tokenizer)
+        # TODO: How to fix the hard-coded tool_call_parser here?
+        self.llm_client = ArealOpenAI(engine=self.rollout, tokenizer=self.tokenizer, tool_call_parser="qwen25")
         free_port = find_free_ports(1)[0]
         self.proxy_server = ProxyServer(free_port, client=self.llm_client)
         self.proxy_server.start(wait_until_ready=True)
 
         # Eval proxy uses the eval rollout engine; training rollout is paused during eval.
-        self.eval_llm_client = ArealOpenAI(engine=self.eval_rollout, tokenizer=self.tokenizer)
+        # TODO: How to fix the hard-coded tool_call_parser here?
+        self.eval_llm_client = ArealOpenAI(engine=self.eval_rollout, tokenizer=self.tokenizer, tool_call_parser="qwen25")
         eval_free_port = find_free_ports(1)[0]
         self.eval_proxy_server = ProxyServer(eval_free_port, client=self.eval_llm_client)
         self.eval_proxy_server.start(wait_until_ready=True)
