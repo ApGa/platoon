@@ -1,64 +1,64 @@
 """Oolong environment for long-context aggregation tasks with recursive agent support."""
+
 from __future__ import annotations
 
-from copy import deepcopy
 import json
-import os
 import re
-from rubric.core.checklist import RubricChecklistFast   
+from copy import deepcopy
+
 from rubric.utils.llm_tools import create_llm_client as rubric_create_llm_client
 
-from platoon.envs.codeact import CodeActEnv, IPythonCodeExecutor
-from platoon.envs.base import Task, SubTask
 from platoon.agents.actions.common import finish
 from platoon.agents.actions.subagent import launch_subagent
-from platoon.episode.context import finish_message, current_trajectory, current_trajectory_collection, error_message
-from platoon.envs.codeact import safe_asyncio
+from platoon.envs.base import Task
+from platoon.envs.codeact import CodeActEnv, IPythonCodeExecutor, safe_asyncio
+from platoon.episode.context import (
+    current_trajectory,
+    current_trajectory_collection,
+    error_message,
+    finish_message,
+)
 from platoon.oolong.agent import OolongPromptBuilder
 from platoon.oolong.eval_helpers import dnd_process_response, synth_process_response
 from platoon.utils.span_profile import profile_span
 
 
 class OolongCodeExecutor(IPythonCodeExecutor):
-
     def __init__(self, task: Task):
-
         self.task = task
-        self.context = task.misc['context']
-        
+        self.context = task.misc["context"]
+
         super().__init__(
             task,
-            actions=(
-                finish,
-                safe_asyncio
-            ),
+            actions=(finish, safe_asyncio),
             detect_unawaited_async_calls=True,
             detect_while_loops=True,
             detect_interactive_input=True,
         )
-        self.shell.user_ns['context'] = self.context
+        self.shell.user_ns["context"] = self.context
 
     async def describe_action_space(self) -> str:
         return """Available Actions (python functions):
 1. def finish(message: str) -> str
     Complete the task with your answer.
 """
+
     async def reset(self) -> OolongCodeExecutor:
         await super().reset()
         # Re-inject bindings that are lost when the shell is recreated.
-        self.shell.user_ns['context'] = self.context
+        self.shell.user_ns["context"] = self.context
         return self
 
-class OolongRecursiveCodeExecutor(OolongCodeExecutor):
 
+class OolongRecursiveCodeExecutor(OolongCodeExecutor):
     def __init__(self, task: Task, subagent_max_steps: int | None = 15):
         super().__init__(task)
         self.subagent_max_steps = subagent_max_steps
-        self.shell.user_ns['context'] = self.context
-        self.shell.user_ns['launch_subagent'] = self.launch_subagent
+        self.shell.user_ns["context"] = self.context
+        self.shell.user_ns["launch_subagent"] = self.launch_subagent
         self._launched_subagent_ids_this_step: set[str] = set()
         self._subagent_success_by_child_this_step: dict[str, float] = {}
-    
+
     async def describe_action_space(self) -> str:
         return """Available Actions (python functions):
 1. async def launch_subagent(goal: str, context: str) -> Any
@@ -83,8 +83,8 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
     async def reset(self) -> OolongRecursiveCodeExecutor:
         await super().reset()
         # Re-inject bindings that are lost when the shell is recreated
-        self.shell.user_ns['context'] = self.context
-        self.shell.user_ns['launch_subagent'] = self.launch_subagent
+        self.shell.user_ns["context"] = self.context
+        self.shell.user_ns["launch_subagent"] = self.launch_subagent
         self.reset_subagent_stats()
         return self
 
@@ -95,12 +95,13 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
 
     def get_subagent_stats(self) -> tuple[int, float]:
         """Get (unique launched children, summed child success score) for current step."""
-        return len(self._launched_subagent_ids_this_step), sum(self._subagent_success_by_child_this_step.values())
+        return len(self._launched_subagent_ids_this_step), sum(
+            self._subagent_success_by_child_this_step.values()
+        )
 
-    async def launch_subagent(self, goal: str, context: str="") -> str:
-        
+    async def launch_subagent(self, goal: str, context: str = "") -> str:
         task_misc = deepcopy(self.task.misc)
-        task_misc['context'] = context
+        task_misc["context"] = context
 
         # Track trajectories before launch to find the new child
         traj_collection = current_trajectory_collection.get()
@@ -108,10 +109,7 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
         traj_ids_before = set(traj_collection.trajectories.keys())
 
         result = await launch_subagent(
-            goal=goal,
-            max_steps=self.subagent_max_steps,
-            task_misc=task_misc,
-            verbose=False
+            goal=goal, max_steps=self.subagent_max_steps, task_misc=task_misc, verbose=False
         )
 
         # Count each new child trajectory once, even if multiple launch_subagent
@@ -132,11 +130,7 @@ or `await launch_subagent()` for a single subtask. **Do not forget to await** th
         return result
 
     async def fork(self, task: Task) -> OolongRecursiveCodeExecutor:
-        return OolongRecursiveCodeExecutor(
-            task,
-            subagent_max_steps=self.subagent_max_steps
-        )
-
+        return OolongRecursiveCodeExecutor(task, subagent_max_steps=self.subagent_max_steps)
 
 
 class OolongEnv(CodeActEnv):
@@ -144,7 +138,7 @@ class OolongEnv(CodeActEnv):
         task.fork_strategy = "task"
         code_executor = OolongCodeExecutor(task)
         # Remove context task misc to avoid massive context logging in events
-        self.context = task.misc.pop('context')
+        self.context = task.misc.pop("context")
         super().__init__(task, code_executor)
 
     def _parse_rubric_response(self, response: str) -> dict:
@@ -184,16 +178,16 @@ class OolongEnv(CodeActEnv):
                     raise ValueError(f"Missing required field: {field}")
 
             return parsed_response
-            
+
         except json.JSONDecodeError as e:
             raise ValueError(f"Could not parse JSON response: {str(e)}") from e
 
     def parse_rubric_response(self, response: str) -> tuple[float, str]:
         rubric_dict = self._parse_rubric_response(response)
-        success_flag = rubric_dict['success']
+        success_flag = rubric_dict["success"]
         if isinstance(success_flag, bool):
             score = 1.0 if success_flag else 0.0
-            reason = rubric_dict['reason']
+            reason = rubric_dict["reason"]
         else:
             reason = "Success flag is not a boolean value"
             score = 0.0
@@ -201,16 +195,17 @@ class OolongEnv(CodeActEnv):
         return score, reason
 
     async def evaluate(self) -> tuple[float, dict]:
-        
         score = 0.0
         reward_misc = {}
 
         if self._state.finished:
-            if not "oolong" in self._task.id:
+            if "oolong" not in self._task.id:
                 try:
-                    #rubric_checklist = RubricChecklistFast(self._task.goal)
+                    # rubric_checklist = RubricChecklistFast(self._task.goal)
                     prompt_builder = OolongPromptBuilder()
-                    action_history = prompt_builder.build_action_history_description(await self.observe())
+                    action_history = prompt_builder.build_action_history_description(
+                        await self.observe()
+                    )
                     # Preserve falsy-but-meaningful outputs like 0 or ""; only fall back on None.
                     final_message = finish_message.get()
                     if final_message is None and self._state.history:
@@ -227,8 +222,8 @@ class OolongEnv(CodeActEnv):
                         "Please provide a reason and success flag (boolean value) in the following format:\n"
                         "```json\n"
                         "{\n"
-                        "    \"reason\": \"Brief reasoning for success flag here.\",\n"
-                        "    \"success\": <true|false>\n"
+                        '    "reason": "Brief reasoning for success flag here.",\n'
+                        '    "success": <true|false>\n'
                         "}\n"
                         "```"
                     )
@@ -249,7 +244,9 @@ class OolongEnv(CodeActEnv):
                             "task_id": self._task.id,
                             "trajectory_id": traj.id if traj is not None else None,
                             "parent_trajectory_id": (
-                                traj.parent_info.id if traj is not None and traj.parent_info is not None else None
+                                traj.parent_info.id
+                                if traj is not None and traj.parent_info is not None
+                                else None
                             ),
                             "action_history_len": len(action_history),
                             "final_message_len": len(str(final_message) or ""),
@@ -260,23 +257,25 @@ class OolongEnv(CodeActEnv):
                         rubric_response = await rubric_client.asystem_completion(
                             system_prompt=rubric_system_prompt,
                             user_prompt=rubric_context,
-                            temperature=1
+                            temperature=1,
                         )
-                    #rubric_response = "{\"reason\": \"The agent successfully completed the task.\", \"success\": true}"
+                    # rubric_response = "{\"reason\": \"The agent successfully completed the task.\", \"success\": true}"
 
                     score, reason = self.parse_rubric_response(rubric_response)
                     reward_misc["reason"] = reason
-                    #reward_misc["rubric_dict"] = rubric_checklist.to_dict()
+                    # reward_misc["rubric_dict"] = rubric_checklist.to_dict()
                 except Exception as e:
                     reward_misc["reason"] = f"Failed rubric-based evaluation: {e}"
-                    score = 0.
+                    score = 0.0
             else:
                 try:
-                    eval_fn = dnd_process_response if 'real' in self._task.id else synth_process_response
+                    eval_fn = (
+                        dnd_process_response if "real" in self._task.id else synth_process_response
+                    )
                     eval_result = eval_fn(self._task.misc, str(finish_message.get()))
-                    score = eval_result['score']
-                    reward_misc['reason'] = "Oolong environment evaluation result."
-                    reward_misc['parse_confidence'] = eval_result['parse_confidence']
+                    score = eval_result["score"]
+                    reward_misc["reason"] = "Oolong environment evaluation result."
+                    reward_misc["parse_confidence"] = eval_result["parse_confidence"]
 
                 except Exception as e:
                     reward_misc["reason"] = f"Failed to evaluate task: {e}"
@@ -284,18 +283,18 @@ class OolongEnv(CodeActEnv):
         reward_misc["reward/success"] = score
         return score, reward_misc
 
+
 class OolongRecursiveEnv(OolongEnv):
-    def __init__(self, task: Task,
+    def __init__(
+        self,
+        task: Task,
         subagent_max_steps: int | None = 25,
     ):
-        code_executor = OolongRecursiveCodeExecutor(
-            task,
-            subagent_max_steps=subagent_max_steps
-        )
+        code_executor = OolongRecursiveCodeExecutor(task, subagent_max_steps=subagent_max_steps)
         super().__init__(task)
         self._code_executor = code_executor
         self.subagent_max_steps = subagent_max_steps
-    
+
     def _get_subagent_stats_and_reset(self) -> tuple[int, float]:
         """Get per-step unique launched children and summed child success score."""
         stats = self._code_executor.get_subagent_stats()
@@ -316,5 +315,3 @@ class OolongRecursiveEnv(OolongEnv):
             task,
             subagent_max_steps=self.subagent_max_steps,
         )
-
-

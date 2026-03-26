@@ -25,6 +25,8 @@ train:
     grad_clip_norm: 1e12
   workflow_config:
     group_size: 8
+    leave_one_out_baseline: true
+    depth_level_weighting: true
     rollout_config:
       max_steps: 200
       output_dir: ./rollout_results

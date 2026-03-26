@@ -23,6 +23,8 @@ class WorkflowConfig:
 
     group_size: int = 8
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)
+    leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
+    depth_level_weighting: bool = False  # Weight trajectories inversely by depth-level frequency
 
 
 # TODO:
@@ -31,6 +33,7 @@ class WorkflowConfig:
 class TrainConfig:
     model_name: str  # HuggingFace model identifier
     renderer_name: str  # Renderer type for prompt formatting
+    renderer_kwargs: dict = field(default_factory=dict)  # Optional renderer attribute overrides
     context_window_length: int | None = None
     batch_size: int = 32
     # Training duration: specify num_epochs, max_training_steps, or both (takes max)

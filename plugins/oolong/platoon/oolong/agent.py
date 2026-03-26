@@ -1,4 +1,5 @@
 """Oolong agent with recursive spawning support."""
+
 from __future__ import annotations
 
 from platoon.agents.codeact import CodeActAgent, CodeActPromptBuilder, PromptMode
@@ -33,16 +34,22 @@ ANSWER SUBMISSION:
 """
 
         if include_reasoning:
-            return base_instructions + """
+            return (
+                base_instructions
+                + """
 
 You can perform actions by writing Python code blocks. You will get multiple steps to complete the task.
 For your current step, first briefly reason (~1-3 sentences) about your strategy in <thought> </thought> tags, then output your code in <python> </python> tags.
 Your code will be executed in a Jupyter notebook and the output will be shown to you."""
+            )
         else:
-            return base_instructions + """
+            return (
+                base_instructions
+                + """
 
 You can perform actions by writing Python code blocks. You will get multiple steps to complete the task.
 Output your code in <python> </python> tags."""
+            )
 
 
 class OolongAgent(CodeActAgent):
@@ -57,18 +64,14 @@ class OolongAgent(CodeActAgent):
         self,
         prompt_mode: PromptMode = "sequence_extension",
         include_reasoning: bool = True,
-        **kwargs
+        **kwargs,
     ):
         if "prompt_builder" not in kwargs:
             kwargs["prompt_builder"] = OolongPromptBuilder(
                 prompt_mode=prompt_mode,
                 include_reasoning=include_reasoning,
             )
-        super().__init__(
-            prompt_mode=prompt_mode,
-            include_reasoning=include_reasoning,
-            **kwargs
-        )
+        super().__init__(prompt_mode=prompt_mode, include_reasoning=include_reasoning, **kwargs)
 
 
 class OolongRecursivePromptBuilder(OolongPromptBuilder):
@@ -103,16 +106,24 @@ ANSWER SUBMISSION:
 """
 
         if include_reasoning:
-            return base_instructions + """
+            return (
+                base_instructions
+                + """
 
 You can perform printing out or peaking into the context or launching subagents using Python code blocks. You will get multiple steps to complete the task.
 For your current step, first briefly reason (~1-3 sentences) about your recursive strategy in <thought> </thought> tags, then output your code in <python> </python> tags.
-Your code will be executed in a Jupyter notebook and the output will be shown to you."""
+Your code will be executed in a Jupyter notebook and the output will be shown to you. The python code block should be formatted as follows: <python>code block</python> without any other tags.
+Do not output anything else except for <thought>...</thought>\n<python>...</python>"""
+            )
         else:
-            return base_instructions + """
+            return (
+                base_instructions
+                + """
 
 You can perform printing out or peaking into the context or launching subagents using Python code blocks. You will get multiple steps to complete the task.
-Output your code in <python> </python> tags."""
+Output your code in <python> </python> tags. The python code block should be formatted as follows: <python>code block</python> without any other tags.
+Do not output anything else except for the <python>...</python> block."""
+            )
 
 
 class OolongRecursiveAgent(OolongAgent):
@@ -127,18 +138,14 @@ class OolongRecursiveAgent(OolongAgent):
         self,
         prompt_mode: PromptMode = "sequence_extension",
         include_reasoning: bool = True,
-        **kwargs
+        **kwargs,
     ):
         if "prompt_builder" not in kwargs:
             kwargs["prompt_builder"] = OolongRecursivePromptBuilder(
                 prompt_mode=prompt_mode,
                 include_reasoning=include_reasoning,
             )
-        super().__init__(
-            prompt_mode=prompt_mode,
-            include_reasoning=include_reasoning,
-            **kwargs
-        )
+        super().__init__(prompt_mode=prompt_mode, include_reasoning=include_reasoning, **kwargs)
 
     async def fork(self, task) -> OolongRecursiveAgent:
         """Fork the agent for a subagent."""

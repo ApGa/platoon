@@ -23,8 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 tinker = [
-    "tinker",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@5ab4301db4543b5aeac49cb672880146146ec278",
+    "tinker==0.16.1",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@0be951bd38eb83c4363c1d11caddf4388bf05262",
 ]
 # NOTE: areal backend requires uv for installation (not available on PyPI)
 # Install with: uv pip install -e ".[areal]"
@@ -52,7 +52,7 @@ override-dependencies = [
     "xgrammar==0.1.24",
     "outlines-core==0.1.26",
     "pyarrow==20.0.0",
-    "huggingface_hub==0.34",
+    "huggingface_hub==1.7.1",
     "datasets==4.3.0",
     "networkx==3.3.0", # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
 ]

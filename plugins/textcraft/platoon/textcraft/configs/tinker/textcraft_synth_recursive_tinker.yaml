@@ -7,7 +7,7 @@ train:
   renderer_name: qwen3_instruct
   batch_size: 16
   num_epochs: 30
-  max_training_steps: 100
+  max_training_steps: 200
   num_minibatches: 1
   num_microbatches: 2
   max_staleness: 3
@@ -24,6 +24,8 @@ train:
     grad_clip_norm: 1e12
   workflow_config:
     group_size: 8
+    leave_one_out_baseline: true
+    depth_level_weighting: true
     rollout_config:
       max_steps: 200
       output_dir: ./rollout_results
@@ -65,7 +67,7 @@ watchdog:
 # Stats and WandB configuration
 stats:
   experiment_name: recursive-agents
-  trial_name: textcraft-synth-single-target-ctx8192-cispo-4b-recursive-medium-trial-0
+  trial_name: textcraft-synth-single-target-ctx8192-cispo-4b-recursive-medium-trial-4
   wandb:
     mode: online
     project: recursive-agents

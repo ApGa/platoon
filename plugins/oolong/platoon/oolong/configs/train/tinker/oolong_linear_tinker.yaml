@@ -1,4 +1,4 @@
-# DeepDive Tinker training configuration
+# Oolong linear training configuration for Tinker
 
 train:
   model_name: Qwen/Qwen3-4B-Instruct-2507
@@ -21,58 +21,63 @@ train:
     eps: 1e-8
     grad_clip_norm: 1e12
   workflow_config:
-    group_size: 4
-    leave_one_out_baseline: true
-    depth_level_weighting: true
+    group_size: 8
+    leave_one_out_baseline: false
+    depth_level_weighting: false
     rollout_config:
-      max_steps: 50
+      max_steps: 200
       output_dir: ./rollout_results
       verbose: true
-      timeout: 7200
-      step_timeout: 7200
+      timeout: 3600
+      step_timeout: 3600
       inference_params:
         temperature: 1.0
-        max_completion_tokens: 2048
-  num_concurrent_rollout_workflow_workers: 8
+        max_completion_tokens: 8192
+  num_concurrent_rollout_workflow_workers: 16
 
 eval:
   strategy: step
   every: 20
-  num_concurrent_rollout_workflow_workers: 8
+  num_concurrent_rollout_workflow_workers: 16
   workflow_config:
     group_size: 1
     rollout_config:
-      max_steps: 50
+      max_steps: 200
       output_dir: ./eval_results
       verbose: false
-      timeout: 7200
-      step_timeout: 7200
+      timeout: 3600
+      step_timeout: 3600
       inference_params:
         temperature: 1.0
-        max_completion_tokens: 2048
+        max_completion_tokens: 8192
 
 checkpoint:
   strategy: step
-  every: 10
+  every: 5
   load_checkpoint_path: null
 
-log_path: ./data/user_data/apurvag/platoon/runs/logs
+log_path: ./logs/runs
 tinker_base_url: null
 
+watchdog:
+  timeout_seconds: 3600
+
 stats:
-  experiment_name: deepdive-platoon-tinker
-  trial_name: recursive-trial0
+  experiment_name: recursive-agents
+  trial_name: oolong-real-qwen-4b-linear-tinker-trial-0
   wandb:
     mode: online
-    project: deepdive-platoon-tinker
+    project: recursive-agents
     entity: null
     tags:
-      - deepdive
+      - oolong
       - tinker
+      - linear
 
-recursive: true
-train_split: qa_sft
-eval_split: qa_rl
-train_num_tasks: null
-eval_num_tasks: 100
-seed: 42
+recursive: false
+seed: 343
+oolong_dataset: real
+task_group: null
+answer_type: null
+min_context_len: null
+max_context_len: 240000

@@ -27,6 +27,7 @@ from litellm.types.utils import (
     ChatCompletionTokenLogprob,
     Choices,
     ModelResponse,
+    Usage,
 )
 from litellm.types.utils import ChoiceLogprobs as LitellmChoiceLogprobs
 from litellm.types.utils import Message as LitellmMessage
@@ -38,7 +39,7 @@ from tinker_cookbook.renderers import Message as TinkerMessage
 from tinker_cookbook.renderers import Renderer, get_renderer
 from tinker_cookbook.renderers import ToolCall as TinkerToolCall
 from tinker_cookbook.tokenizer_utils import get_tokenizer
-from transformers import PreTrainedTokenizer
+from transformers import AutoProcessor, PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,30 @@ class TinkerLLM(CustomLLM):
             type="function",
         )
 
+    def _normalize_message_content(self, content: Any) -> str:
+        """Convert tinker-cookbook structured content parts to plain text for LiteLLM."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = part.get("type")
+                    if part_type == "text":
+                        parts.append(str(part.get("text", "")))
+                    elif part_type == "thinking":
+                        parts.append(str(part.get("thinking", "")))
+                    elif part_type == "image":
+                        # LiteLLM's Message model expects plain string content on this path.
+                        # Drop image payloads but keep a marker so content is not silently empty.
+                        parts.append("[image]")
+                    else:
+                        parts.append(str(part))
+                else:
+                    parts.append(str(part))
+            return "".join(parts)
+        return str(content)
+
     def _get_optional_params(
         self,
         kwargs: Dict[str, Any],
@@ -230,9 +255,11 @@ class TinkerLLM(CustomLLM):
         Extract log probabilities as well.
         """
         choices: List[Choices] = []
+        completion_token_count = 0
         for seq in response.sequences:
+            completion_token_count += len(seq.tokens)
             if seq.logprobs is not None:
-                token_strings: List[str] = self.tokenizer.batch_decode([token] for token in seq.tokens)  # type: ignore
+                token_strings: List[str] = self.tokenizer.batch_decode([[token] for token in seq.tokens])  # type: ignore
                 # FIXME: This might not be accurate for some corner cases.
                 # But it's not actually used in most cases.
                 bytes_list: List[List[int]] = [list(token.encode("utf-8")) for token in token_strings]
@@ -257,7 +284,7 @@ class TinkerLLM(CustomLLM):
                 if not self._validate_role(role):
                     assert False, "This should never happen"
                 # FIXME: The content should not be still there if tool call has been parsed.
-                content = parsed_response["content"]
+                content = self._normalize_message_content(parsed_response["content"])
                 # NOTE(yuge): I thought about adding this to make it more robust to empty responses,
                 # but later I found it's a configuration error in my renderer. So I think it's better
                 # to just log a warning and go with the default path.
@@ -281,14 +308,26 @@ class TinkerLLM(CustomLLM):
                 # Go with the default path
                 choices.append(
                     Choices(
-                        message=LitellmMessage(role="assistant", content=parsed_response["content"]),
+                        message=LitellmMessage(
+                            role="assistant",
+                            content=self._normalize_message_content(parsed_response["content"]),
+                        ),
                         finish_reason=seq.stop_reason,
                         logprobs=logprobs,
                         token_ids=seq.tokens,
                     )
                 )
+        prompt_token_count = model_input.length
         return ModelResponse(
-            id=generate_id("tinker-sampling-"), choices=choices, prompt_token_ids=model_input.to_ints()
+            id=generate_id("tinker-sampling-"),
+            model=self.model_name,
+            choices=choices,
+            prompt_token_ids=model_input.to_ints(),
+            usage=Usage(
+                prompt_tokens=prompt_token_count,
+                completion_tokens=completion_token_count,
+                total_tokens=prompt_token_count + completion_token_count,
+            ),
         )
 
     def _record_interaction(self, model_input: ModelInput, model_response: ModelResponse) -> None:
@@ -307,7 +346,7 @@ class TinkerLLM(CustomLLM):
     def _check_context_window_length(self, model_input: ModelInput, max_completion_tokens: int) -> None:
         prompt_length = model_input.length
         total_sequence_length = prompt_length + max_completion_tokens
-        if total_sequence_length > self.context_window_length and self.context_window_length is not None:
+        if self.context_window_length is not None and total_sequence_length > self.context_window_length:
             raise ValueError(
                 f"Prompt length plus max_tokens exceeds the model's context window: "
                 f"{prompt_length} prompt tokens + {max_completion_tokens} max_tokens > "
@@ -436,6 +475,7 @@ def register_tinker_llm(
     model_name: str,
     renderer_name: str,
     context_window_length: int | None = None,
+    renderer_kwargs: dict[str, Any] | None = None,
 ) -> ModelInfo:
     """
     Register the TinkerLLMProxy as a custom provider in LiteLLM.
@@ -444,15 +484,33 @@ def register_tinker_llm(
         model_name: HuggingFace model identifier (e.g., "Qwen/Qwen3-30B-A3B-Instruct-2507").
         renderer_name: Renderer type for prompt formatting (e.g., "qwen3", "qwen3_instruct").
         context_window_length: Context window length for the model. Defaults to None.
+        renderer_kwargs: Optional renderer attribute overrides applied after construction.
     """
     service_client = tinker.ServiceClient()
     sampling_client = service_client.create_sampling_client(base_model=model_name)
 
     tokenizer = get_tokenizer(model_name)
+    image_processor = None
+    try:
+        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+    except Exception as e:
+        logger.debug("Could not load AutoProcessor for %s: %s", model_name, e)
+    else:
+        processor_tokenizer = getattr(processor, "tokenizer", None)
+        if processor_tokenizer is not None:
+            tokenizer = processor_tokenizer
+        image_processor = getattr(processor, "image_processor", None)
+
+    renderer = get_renderer(renderer_name, tokenizer, image_processor=image_processor, model_name=model_name)
+    for key, value in (renderer_kwargs or {}).items():
+        if not hasattr(renderer, key):
+            raise ValueError(f"Renderer '{renderer_name}' does not support renderer_kwargs['{key}']")
+        setattr(renderer, key, value)
+
     tinker_llm = TinkerLLM(
         model_name=model_name,
         sampling_client=sampling_client,
-        renderer=get_renderer(renderer_name, tokenizer),
+        renderer=renderer,
         tokenizer=tokenizer,
         context_window_length=context_window_length,
     )

@@ -151,6 +151,8 @@ class SequenceAccumulator:
 def make_datum_from_accumulator(
     accumulator: SequenceAccumulator,
     checkpoint_version: int,
+    traj_depth: int | None = None,
+    traj_start: bool = False,
 ) -> tinker.Datum:
     """Create a tinker.Datum from the accumulated sequence data.
 
@@ -168,16 +170,21 @@ def make_datum_from_accumulator(
         f"Length mismatch: input={input_tokens_T.length} target={len(target_tokens_T)} logprobs={len(sampled_logprobs_T)}"  # noqa: E501
     )
 
+    loss_fn_inputs = {
+        "target_tokens": TensorData.from_torch(torch.tensor(target_tokens_T)),
+        "logprobs": TensorData.from_torch(torch.tensor(sampled_logprobs_T)),
+        "advantages": TensorData.from_torch(torch.tensor(advantages_T)),
+        "mask": TensorData.from_torch(torch.tensor(mask_T)),
+        # Store checkpoint_version for staleness checking (will be stripped before forward_backward)
+        "checkpoint_version": TensorData.from_torch(torch.tensor([checkpoint_version])),
+    }
+    if traj_depth is not None:
+        loss_fn_inputs["traj_depth"] = TensorData.from_torch(torch.tensor([traj_depth], dtype=torch.long))
+        loss_fn_inputs["traj_start"] = TensorData.from_torch(torch.tensor([1.0 if traj_start else 0.0]))
+
     return tinker.Datum(
         model_input=input_tokens_T,
-        loss_fn_inputs={
-            "target_tokens": TensorData.from_torch(torch.tensor(target_tokens_T)),
-            "logprobs": TensorData.from_torch(torch.tensor(sampled_logprobs_T)),
-            "advantages": TensorData.from_torch(torch.tensor(advantages_T)),
-            "mask": TensorData.from_torch(torch.tensor(mask_T)),
-            # Store checkpoint_version for staleness checking (will be stripped before forward_backward)
-            "checkpoint_version": TensorData.from_torch(torch.tensor([checkpoint_version])),
-        },
+        loss_fn_inputs=loss_fn_inputs,
     )
 
 
@@ -200,6 +207,7 @@ def trajectory_to_data(
     checkpoint_version: int,
     filter_errors: bool = False,
     trajectory_reward: float = 0.0,
+    traj_depth: int | None = None,
 ) -> TrajectoryDataResult:
     """Convert a trajectory to training data, merging sequences when possible.
 
@@ -266,7 +274,14 @@ def trajectory_to_data(
             delta_ob_flat = ob_flat[len(accumulator.full_sequence) :]
         else:
             # New sequence doesn't extend current - flush and start new
-            data.append(make_datum_from_accumulator(accumulator, checkpoint_version))
+            data.append(
+                make_datum_from_accumulator(
+                    accumulator,
+                    checkpoint_version,
+                    traj_depth=traj_depth,
+                    traj_start=len(data) == 0,
+                )
+            )
             accumulator.clear()
             delta_ob_flat = ob_flat
 
@@ -285,7 +300,14 @@ def trajectory_to_data(
 
     # Flush remaining accumulated data
     if accumulator.full_sequence:
-        data.append(make_datum_from_accumulator(accumulator, checkpoint_version))
+        data.append(
+            make_datum_from_accumulator(
+                accumulator,
+                checkpoint_version,
+                traj_depth=traj_depth,
+                traj_start=len(data) == 0,
+            )
+        )
 
     logger.debug(
         f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}"
@@ -306,6 +328,8 @@ def get_train_data_for_trajectory_collection(
     checkpoint_version: int,
     filter_errors: bool = False,
     reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj["reward"], {}),
+    include_traj_depth: bool = False,
+    include_traj_start: bool = False,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -329,6 +353,7 @@ def get_train_data_for_trajectory_collection(
     task_reward = 0.0
     root_rewards_dict: dict[str, float] = {}
     is_first = True
+    depth_map = _compute_trajectory_depths(trajectory_collection) if include_traj_depth else {}
 
     for trajectory_id, trajectory in trajectory_collection["trajectories"].items():
         trajectory_reward, rewards_dict = reward_processor(trajectory)
@@ -348,7 +373,12 @@ def get_train_data_for_trajectory_collection(
             checkpoint_version=checkpoint_version,
             filter_errors=filter_errors,
             trajectory_reward=trajectory_reward,
+            traj_depth=depth_map.get(trajectory_id) if include_traj_depth else None,
         )
+
+        if not include_traj_start:
+            for datum in result.datums:
+                datum.loss_fn_inputs.pop("traj_start", None)
 
         train_data.extend(result.datums)
 
@@ -377,3 +407,31 @@ def get_train_data_for_trajectory_collection(
         trajectory_stats=trajectory_stats,
         root_rewards_dict=root_rewards_dict,
     )
+
+
+def _compute_trajectory_depths(trajectory_collection: dict) -> dict[str, int]:
+    """Compute trajectory depth from parent links in the rollout tree."""
+    trajectories = trajectory_collection.get("trajectories", {})
+    if not trajectories:
+        return {}
+
+    traj_ids = list(trajectories.keys())
+    root_id = traj_ids[0]
+    parents: dict[str, str | None] = {}
+    for traj_id, traj in trajectories.items():
+        parent_info = traj.get("parent_info")
+        parents[traj_id] = parent_info.get("id") if isinstance(parent_info, dict) else None
+
+    depth_cache: dict[str, int] = {}
+
+    def _depth_for(traj_id: str) -> int:
+        if traj_id in depth_cache:
+            return depth_cache[traj_id]
+        parent_id = parents.get(traj_id)
+        if traj_id == root_id or parent_id is None or parent_id not in parents:
+            depth_cache[traj_id] = 0
+            return 0
+        depth_cache[traj_id] = _depth_for(parent_id) + 1
+        return depth_cache[traj_id]
+
+    return {traj_id: _depth_for(traj_id) for traj_id in traj_ids}

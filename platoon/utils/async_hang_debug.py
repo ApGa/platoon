@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import linecache
 import logging
 import os
 import sys
@@ -48,6 +49,14 @@ def _max_frames() -> int:
         return max(int(value), 1)
     except ValueError:
         return 8
+
+
+def _source_context_lines() -> int:
+    value = os.getenv("PLATOON_DEBUG_HANG_SOURCE_CONTEXT", "12")
+    try:
+        return max(int(value), 0)
+    except ValueError:
+        return 12
 
 
 @dataclass
@@ -154,14 +163,16 @@ def _log_task_stack(record: _TrackedTask, now: float) -> None:
         return
 
     formatted_stack: list[str] = []
+    source_context = ""
     if record.thread_ident is not None:
         frame = sys._current_frames().get(record.thread_ident)
         if frame is not None:
             formatted_stack = traceback.format_stack(frame, limit=_max_frames())
+            source_context = _format_frame_source_context(frame)
 
     waiter = getattr(task, "_fut_waiter", None)
     logger.warning(
-        "hang_watchdog kind=%s request_id=%s age_s=%.1f thread_ident=%s task_name=%s task_coro=%r waiter=%r metadata=%s\n%s",
+        "hang_watchdog kind=%s request_id=%s age_s=%.1f thread_ident=%s task_name=%s task_coro=%r waiter=%r metadata=%s\n%s%s",
         record.kind,
         record.request_id,
         now - record.started_at,
@@ -171,4 +182,30 @@ def _log_task_stack(record: _TrackedTask, now: float) -> None:
         waiter,
         record.metadata,
         "".join(formatted_stack).rstrip() or "<no python frames available>",
+        source_context,
     )
+
+
+def _format_frame_source_context(frame: Any) -> str:
+    """Format a small source window around the currently executing frame."""
+    try:
+        filename = frame.f_code.co_filename
+        lineno = frame.f_lineno
+    except Exception:
+        return ""
+
+    context = _source_context_lines()
+    if context <= 0 or not filename:
+        return ""
+
+    lines = linecache.getlines(filename)
+    if not lines:
+        return ""
+
+    start = max(1, lineno - context // 2)
+    end = min(len(lines), lineno + context // 2)
+    rendered: list[str] = ["\n--- source context ---\n"]
+    for line_no in range(start, end + 1):
+        marker = ">" if line_no == lineno else " "
+        rendered.append(f"{marker} {line_no:04d}: {lines[line_no - 1].rstrip()}\n")
+    return "".join(rendered)

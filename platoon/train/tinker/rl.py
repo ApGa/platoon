@@ -13,6 +13,7 @@ from typing import Any
 import tinker
 import torch
 from datasets import Dataset
+from tinker import TensorData
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.rl.metrics import compute_kl_sample_train
 
@@ -112,6 +113,47 @@ def compute_training_metrics(
             metrics["optim/clip_frac_total"] = (flat_clipped_low | flat_clipped_high).sum().item() / total_tokens
 
     return metrics
+
+
+def apply_depth_level_weighting(datums: list[tinker.Datum]) -> None:
+    """Reweight trajectory advantages so each depth level has comparable mass."""
+    if not datums:
+        return
+
+    depths: list[int] = []
+    traj_starts: list[float] = []
+    action_token_counts: list[float] = []
+    for datum in datums:
+        loss_fn_inputs = datum.loss_fn_inputs
+        if "traj_depth" not in loss_fn_inputs or "traj_start" not in loss_fn_inputs:
+            raise ValueError("depth_level_weighting requires traj_depth and traj_start in tinker datums")
+        depths.append(int(loss_fn_inputs["traj_depth"].to_torch().item()))
+        traj_starts.append(float(loss_fn_inputs["traj_start"].to_torch().item()))
+        action_token_counts.append(float(loss_fn_inputs["mask"].to_torch().sum().item()))
+
+    depth_tensor = torch.tensor(depths, dtype=torch.long)
+    traj_start_tensor = torch.tensor(traj_starts, dtype=torch.float32)
+    action_token_tensor = torch.tensor(action_token_counts, dtype=torch.float32)
+
+    num_depths = int(depth_tensor.max().item()) + 1 if len(depths) > 0 else 0
+    traj_counts = torch.zeros(num_depths, dtype=torch.float32)
+    action_tokens_per_depth = torch.zeros(num_depths, dtype=torch.float32)
+
+    for depth in range(num_depths):
+        mask = depth_tensor == depth
+        traj_counts[depth] = traj_start_tensor[mask].sum()
+        action_tokens_per_depth[depth] = action_token_tensor[mask].sum()
+
+    raw_weights = torch.where(traj_counts > 0, 1.0 / traj_counts, torch.zeros_like(traj_counts))
+    total_action_tokens = action_token_tensor.sum()
+    unnorm_total = (action_tokens_per_depth * raw_weights).sum()
+    if unnorm_total <= 0 or total_action_tokens <= 0:
+        raise ValueError("depth_level_weighting produced zero total weight for this microbatch")
+
+    per_depth_weights = raw_weights * (total_action_tokens / unnorm_total)
+    for datum, depth in zip(datums, depths):
+        advantages = datum.loss_fn_inputs["advantages"].to_torch()
+        datum.loss_fn_inputs["advantages"] = TensorData.from_torch(advantages * per_depth_weights[depth])
 
 
 class Watchdog:
@@ -313,6 +355,7 @@ class PlatoonTinkerRLTrainer:
             self.config.train.model_name,
             self.config.train.renderer_name,
             context_window_length=self.config.train.context_window_length,
+            renderer_kwargs=self.config.train.renderer_kwargs,
         )
         self._stats_logger: StatsLogger | None = None
         self._train_tracker: StatsTracker | None = None
@@ -346,10 +389,12 @@ class PlatoonTinkerRLTrainer:
         # Pass base log_path to StatsLogger - it will add experiment_name/trial_name internally
         stats_logger_config = self.config.stats.to_stats_logger_config(self.config.log_path)
 
-        # If resuming, use the saved wandb run ID
-        if resume_info and "wandb_run_id" in resume_info:
-            stats_logger_config.wandb.resume_run_id = resume_info["wandb_run_id"]
-            logger.info(f"Resuming WandB run: {resume_info['wandb_run_id']}")
+        # If resuming, use the saved wandb run ID.
+        resume_extra = resume_info.extra if resume_info is not None else {}
+        wandb_run_id = resume_extra.get("wandb_run_id")
+        if wandb_run_id:
+            stats_logger_config.wandb.resume_run_id = wandb_run_id
+            logger.info(f"Resuming WandB run: {wandb_run_id}")
 
         self._stats_logger = StatsLogger(stats_logger_config, exp_config=self.config)
         self._train_tracker = get_tracker("train")
@@ -564,6 +609,9 @@ class PlatoonTinkerRLTrainer:
                         logger.warning(f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num})")
                         continue
 
+                    if self.config.train.workflow_config.depth_level_weighting:
+                        apply_depth_level_weighting(task_rollout_results)
+
                     # Filter out mask and checkpoint_version from loss_fn_inputs before forward_backward
                     # Neither is needed in forward_backward computation.
                     # mask is redundant since advantages are 0 for masked tokens.
@@ -573,11 +621,27 @@ class PlatoonTinkerRLTrainer:
                         tinker.Datum(
                             model_input=datum.model_input,
                             loss_fn_inputs={
-                                k: v for k, v in datum.loss_fn_inputs.items() if k not in ("mask", "checkpoint_version")
+                                k: v
+                                for k, v in datum.loss_fn_inputs.items()
+                                if k not in ("mask", "checkpoint_version", "traj_depth", "traj_start")
                             },
                         )
                         for datum in task_rollout_results
                     ]
+
+                    # Scale advantages by sum of mask allows us to get mean reduction for the objective instead of sum reduction.
+                    # Tinker implements objectives with sum reduction by default, so we need to do this to make sure objective and
+                    # grad_norm is not sensitive to batch size.
+                    scale_factor = 0.0
+                    for datum in task_rollout_results:
+                        scale_factor += datum.loss_fn_inputs["mask"].to_torch().sum()
+                    scale_factor = 1.0 / (scale_factor + 1e-8)
+
+                    for datum in filtered_datums:
+                        datum.loss_fn_inputs["advantages"] = TensorData.from_torch(
+                            datum.loss_fn_inputs["advantages"].to_torch() * scale_factor
+                        )
+
                     logger.debug(
                         f"Submitting forward_backward_async with {len(filtered_datums)} datums "
                         f"(minibatch {minibatch_num}, microbatch {microbatch_num})"
@@ -878,14 +942,14 @@ class PlatoonTinkerRLTrainer:
             return sampling_client
 
     async def _create_training_client(
-        self, service_client: tinker.ServiceClient, resume_info: dict | None
+        self, service_client: tinker.ServiceClient, resume_info: checkpoint_utils.CheckpointRecord | None
     ) -> tinker.TrainingClient:
         if resume_info:
             # Resuming interrupted training - load optimizer state for proper continuation
             training_client = await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info["state_path"]
+                resume_info.state_path
             )
-            logger.info(f"Resumed training from {resume_info['state_path']}")
+            logger.info(f"Resumed training from {resume_info.state_path}")
         elif self.config.checkpoint.load_checkpoint_path:
             # Starting fresh from a checkpoint - load weights only (fresh optimizer)
             training_client = await service_client.create_training_client_from_state_async(
@@ -951,7 +1015,7 @@ class PlatoonTinkerRLTrainer:
         service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
 
         resume_info = checkpoint_utils.get_last_checkpoint(self.run_log_path)
-        start_batch = resume_info.get("batch", 0) if resume_info else 0
+        start_batch = (resume_info.batch or 0) if resume_info else 0
 
         training_client = await self._create_training_client(service_client, resume_info)
 

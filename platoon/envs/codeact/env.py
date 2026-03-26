@@ -431,9 +431,10 @@ class IPythonCodeExecutor(CodeExecutor):
         )
 
     async def describe_action_space(self) -> str:
-        raise NotImplementedError(
-            "IPythonCodeExecutor does not yet implement describe_action_space. Please implement it in your subclass."
-        )
+        return ""
+        # raise NotImplementedError(
+        #     "IPythonCodeExecutor does not yet implement describe_action_space. Please implement it in your subclass."
+        # )
 
     async def reset(self) -> CodeExecutor:
         self.shell = self._create_shell()

@@ -95,6 +95,7 @@ class GroupRolloutWorkflow:
             List of tinker.Datum with group-centered advantages, or None if no data.
         """
         results = await asyncio.gather(*[self.arun_episode_single(data, i) for i in range(self.config.group_size)])
+        valid_results = [result for result in results if result is not None]
 
         # Filter out None results and collect data
         all_data: list[tinker.Datum] = []
@@ -102,12 +103,11 @@ class GroupRolloutWorkflow:
         all_trajectory_stats: list[TrajectoryStats] = []
         all_root_rewards_dicts: list[dict[str, float]] = []
 
-        for result in results:
-            if result is not None:
-                all_data.extend(result.datums)
-                task_rewards.append(result.task_reward)
-                all_trajectory_stats.extend(result.trajectory_stats)
-                all_root_rewards_dicts.append(result.root_rewards_dict)
+        for result in valid_results:
+            all_data.extend(result.datums)
+            task_rewards.append(result.task_reward)
+            all_trajectory_stats.extend(result.trajectory_stats)
+            all_root_rewards_dicts.append(result.root_rewards_dict)
 
         if not all_data:
             logger.warning(f"No results found for task {data['task_id']}")
@@ -219,15 +219,22 @@ class GroupRolloutWorkflow:
             logger.debug(f"All rewards are the same for task {data['task_id']}: {mean_task_reward:.2f}")
             return None
 
-        # Center advantages: new_adv = old_adv - mean_reward
-        # The old_adv was set to trajectory_reward, so this gives us (reward - mean_reward)
-        for datum in all_data:
-            old_advantages = datum.loss_fn_inputs["advantages"].to_torch()
-            # The mask tells us which tokens were action tokens (advantage != 0)
-            mask = datum.loss_fn_inputs["mask"].to_torch()
-            # Subtract mean_task_reward from non-zero advantages
-            new_advantages = torch.where(mask > 0, old_advantages - mean_task_reward, old_advantages)
-            datum.loss_fn_inputs["advantages"] = TensorData.from_torch(new_advantages)
+        # Center advantages by rollout. The old_adv was set to trajectory_reward, so
+        # this produces either reward - mean_reward or reward - loo_baseline.
+        if self.config.leave_one_out_baseline and len(valid_results) > 1:
+            total_task_reward = sum(task_rewards)
+            baselines = [
+                (total_task_reward - result.task_reward) / (len(valid_results) - 1) for result in valid_results
+            ]
+        else:
+            baselines = [mean_task_reward] * len(valid_results)
+
+        for result, baseline in zip(valid_results, baselines):
+            for datum in result.datums:
+                old_advantages = datum.loss_fn_inputs["advantages"].to_torch()
+                mask = datum.loss_fn_inputs["mask"].to_torch()
+                new_advantages = torch.where(mask > 0, old_advantages - baseline, old_advantages)
+                datum.loss_fn_inputs["advantages"] = TensorData.from_torch(new_advantages)
 
         return all_data
 
@@ -278,6 +285,8 @@ class GroupRolloutWorkflow:
                     checkpoint_version=checkpoint_version,
                     filter_errors=self.filter_errors,
                     reward_processor=self.reward_processor,
+                    include_traj_depth=self.config.depth_level_weighting,
+                    include_traj_start=self.config.depth_level_weighting,
                 )
 
                 if not result.datums:
