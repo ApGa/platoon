@@ -36,7 +36,7 @@ override-dependencies = [
     "xgrammar==0.1.24",
     "outlines-core==0.1.26",
     "pyarrow==20.0.0",
-    "huggingface_hub==1.0.0",
+    "huggingface_hub==0.34",
     "datasets==4.3.0",
     "networkx==3.3.0",
 ]
