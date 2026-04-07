@@ -225,4 +225,4 @@ logs/
 slurm-scripts/
 .claude/
 inference_results/
-data/
+*.db
