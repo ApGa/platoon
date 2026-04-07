@@ -22,10 +22,11 @@ RESEARCH STRATEGY:
 - If the answer cannot be established from the inbox, say "I don't know".
 
 ANSWER SUBMISSION:
-- Finish by calling `finish(...)` with a JSON object of the form:
-  `{"answer": "<answer>", "sources": ["<message_id>", ...]}`
+- `json` and `asyncio` are already available in the notebook; do not import them.
+- Finish by calling `finish(...)` with a JSON string, not a Python dict.
+- Prefer `finish(json.dumps({"answer": "<answer>", "sources": ["<message_id>", ...]}))`.
 - `sources` should contain the supporting email `message_id` values.
-- If you cannot answer, use `{"answer": "I don't know", "sources": []}`.
+- If you cannot answer, use `finish(json.dumps({"answer": "I don't know", "sources": []}))`.
 
 OTHER TIPS:
 - `search_emails(...)` and `read_email(...)` are async and must be awaited.
@@ -82,11 +83,13 @@ DELEGATION STRATEGY:
 - Use `await launch_subagent(goal)` for coherent subtasks like "identify likely message IDs" or "check whether this sender/date hypothesis is correct".
 - Use `await asyncio.gather(...)` when multiple search hypotheses can be pursued in parallel.
 - For delegated subtasks, use `finish(...)` with the requested intermediate result.
-- For the root task, finish with a JSON object of the form
-  `{"answer": "<answer>", "sources": ["<message_id>", ...]}`.
+- For the root task, finish with a JSON string, not a Python dict.
+- Prefer `finish(json.dumps({"answer": "<answer>", "sources": ["<message_id>", ...]}))`.
 
 ANSWER SUBMISSION:
-- If the inbox does not support an answer, use `{"answer": "I don't know", "sources": []}`.
+- `json` and `asyncio` are already available in the notebook; do not import them.
+- If the inbox does not support an answer, use
+  `finish(json.dumps({"answer": "I don't know", "sources": []}))`.
 
 OTHER TIPS:
 - `search_emails(...)`, `read_email(...)`, and `launch_subagent(...)` are async and must be awaited.

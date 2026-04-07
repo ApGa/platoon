@@ -16,6 +16,11 @@ from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConf
 from platoon.train.areal.workflows import StepWiseArealWorkflow
 
 _EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.4
+_DEFAULT_REWARD_KEYS = {
+    "reward/success": 0.0,
+    "reward/subagent_launched": 0.0,
+    "reward/subagent_succeeded": 0.0,
+}
 
 
 @dataclass
@@ -31,20 +36,22 @@ class EmailSearchArealTrainerConfig(PlatoonArealRLTrainerConfig):
 
 
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
-    rewards_dict: dict[str, float] = {}
+    rewards_dict: dict[str, float] = dict(_DEFAULT_REWARD_KEYS)
+    found_reward_metric = False
     for step in traj.get("steps", []):
         reward_misc = step.get("misc", {}).get("reward_misc", {})
         for reward_key, reward_value in reward_misc.items():
             if reward_key.startswith("reward/"):
+                found_reward_metric = True
                 rewards_dict[reward_key] = rewards_dict.get(reward_key, 0.0) + float(reward_value)
 
-    score = rewards_dict.get("reward/success", 0.0)
-    launched = rewards_dict.get("reward/subagent_launched", 0.0)
+    score = rewards_dict["reward/success"]
+    launched = rewards_dict["reward/subagent_launched"]
     if launched > 0:
-        subagent_success_rate = rewards_dict.get("reward/subagent_succeeded", 0.0) / launched
+        subagent_success_rate = rewards_dict["reward/subagent_succeeded"] / launched
         score += _EMAIL_SEARCH_DELEGATION_REWARD_CAP * subagent_success_rate
 
-    if not rewards_dict:
+    if not found_reward_metric:
         score = float(traj.get("reward", 0.0))
     return score, rewards_dict
 

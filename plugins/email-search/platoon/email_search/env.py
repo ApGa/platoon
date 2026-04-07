@@ -57,6 +57,12 @@ class EmailSearchCodeExecutor(IPythonCodeExecutor):
             detect_interactive_input=True,
         )
 
+    def _create_shell(self):
+        shell = super()._create_shell()
+        shell.user_ns["asyncio"] = safe_asyncio
+        shell.user_ns["json"] = json
+        return shell
+
     async def search_emails(
         self,
         keywords: list[str],
@@ -115,8 +121,9 @@ class EmailSearchCodeExecutor(IPythonCodeExecutor):
 
 3. def finish(message: str) -> str
    Complete the task.
-   - For root tasks, `message` should be a JSON object like
-     `{"answer": "<answer>", "sources": ["<message_id>", ...]}`.
+   - `json` and `asyncio` are already available in the notebook; no import is needed.
+   - For root tasks, `message` must be a JSON string, not a Python dict.
+   - Prefer `finish(json.dumps({"answer": "<answer>", "sources": ["<message_id>", ...]}))`.
    - `answer` should directly answer the user question, or be `"I don't know"`.
    - `sources` should list the supporting email message IDs used for the answer.
    - For delegated subtasks, return the intermediate result in whatever format the parent requested.
@@ -176,8 +183,9 @@ class EmailSearchRecursiveCodeExecutor(EmailSearchCodeExecutor):
 
 4. def finish(message: str) -> str
    Complete the current task.
-   - For root tasks, `message` should be a JSON object like
-     `{"answer": "<answer>", "sources": ["<message_id>", ...]}`.
+   - `json` and `asyncio` are already available in the notebook; no import is needed.
+   - For root tasks, `message` must be a JSON string, not a Python dict.
+   - Prefer `finish(json.dumps({"answer": "<answer>", "sources": ["<message_id>", ...]}))`.
    - `answer` should directly answer the user question, or be `"I don't know"`.
    - `sources` should list the supporting email message IDs used for the answer.
    - For delegated subtasks, return the intermediate result in whatever format the parent requested.
