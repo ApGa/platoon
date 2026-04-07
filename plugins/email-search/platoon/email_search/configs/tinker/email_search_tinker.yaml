@@ -1,0 +1,80 @@
+# Email-search Tinker training configuration
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 16
+  num_epochs: 10
+  max_training_steps: 100
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 3
+  lora_rank: 32
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 3e-5
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    grad_clip_norm: 1e12
+  workflow_config:
+    group_size: 4
+    leave_one_out_baseline: true
+    depth_level_weighting: true
+    rollout_config:
+      max_steps: 20
+      output_dir: ./rollout_results
+      verbose: true
+      timeout: 7200
+      step_timeout: 7200
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+  num_concurrent_rollout_workflow_workers: 8
+
+eval:
+  strategy: step
+  every: 20
+  num_concurrent_rollout_workflow_workers: 8
+  workflow_config:
+    group_size: 1
+    rollout_config:
+      max_steps: 20
+      output_dir: ./eval_results
+      verbose: false
+      timeout: 7200
+      step_timeout: 7200
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+
+checkpoint:
+  strategy: step
+  every: 10
+  load_checkpoint_path: null
+
+log_path: ./data/user_data/apurvag/platoon/runs/logs
+tinker_base_url: null
+
+stats:
+  experiment_name: email-search-platoon-tinker
+  trial_name: recursive-trial0
+  wandb:
+    mode: online
+    project: email-search-platoon-tinker
+    entity: null
+    tags:
+      - email-search
+      - tinker
+
+recursive: true
+train_split: train
+eval_split: test
+train_num_tasks: 4000
+eval_num_tasks: 100
+max_messages: 1
+exclude_known_bad_queries: true
+seed: 42
