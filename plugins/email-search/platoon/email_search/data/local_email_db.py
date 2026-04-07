@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sqlite3
@@ -10,6 +11,7 @@ from tqdm import tqdm
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_PATH = os.path.join(BASE_DIR, "..", "..", "data", "enron_emails.db")
+DB_PATH_ENV_VAR = "PLATOON_EMAIL_SEARCH_DB_PATH"
 DEFAULT_REPO_ID = "corbt/enron-emails"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -68,6 +70,11 @@ END;
 
 INSERT INTO emails_fts (rowid, subject, body) SELECT id, subject, body FROM emails;
 """
+
+
+def resolve_db_path(db_path: str | None = None) -> str:
+    """Resolve the sqlite path, allowing an override outside the repo."""
+    return os.path.abspath(db_path or os.environ.get(DB_PATH_ENV_VAR, DEFAULT_DB_PATH))
 
 
 def download_dataset(repo_id: str = DEFAULT_REPO_ID) -> Dataset:
@@ -178,23 +185,43 @@ def create_indexes_and_triggers(db_path: str) -> None:
         conn.close()
 
 
-def generate_database(overwrite: bool = False) -> str:
-    db_dir = os.path.dirname(DEFAULT_DB_PATH)
+def generate_database(overwrite: bool = False, db_path: str | None = None) -> str:
+    resolved_db_path = resolve_db_path(db_path)
+    db_dir = os.path.dirname(resolved_db_path)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
 
-    if overwrite and os.path.exists(DEFAULT_DB_PATH):
-        os.remove(DEFAULT_DB_PATH)
-    elif not overwrite and os.path.exists(DEFAULT_DB_PATH):
-        logging.info("Email database already exists at %s", DEFAULT_DB_PATH)
-        return DEFAULT_DB_PATH
+    if overwrite and os.path.exists(resolved_db_path):
+        os.remove(resolved_db_path)
+    elif not overwrite and os.path.exists(resolved_db_path):
+        logging.info("Email database already exists at %s", resolved_db_path)
+        return resolved_db_path
 
     dataset = download_dataset(DEFAULT_REPO_ID)
-    create_database(DEFAULT_DB_PATH)
-    populate_database(DEFAULT_DB_PATH, dataset)
-    create_indexes_and_triggers(DEFAULT_DB_PATH)
-    return DEFAULT_DB_PATH
+    create_database(resolved_db_path)
+    populate_database(resolved_db_path, dataset)
+    create_indexes_and_triggers(resolved_db_path)
+    return resolved_db_path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate the local email-search sqlite database.")
+    parser.add_argument(
+        "--db-path",
+        default=None,
+        help=(
+            f"Custom sqlite output path. Defaults to `{DB_PATH_ENV_VAR}` when set, "
+            "otherwise the repo-local data directory."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite an existing database at the target path.",
+    )
+    args = parser.parse_args()
+    generate_database(overwrite=args.overwrite, db_path=args.db_path)
 
 
 if __name__ == "__main__":
-    generate_database(overwrite=True)
+    main()

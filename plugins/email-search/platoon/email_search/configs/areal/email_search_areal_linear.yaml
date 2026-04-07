@@ -1,15 +1,15 @@
 experiment_name: email-search
-trial_name: email-search-recursive-trial-1
+trial_name: email-search-qwen-4b-linear-trial-0
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
-recursive: true
+recursive: false
 train_split: train
 eval_split: test
-train_num_tasks: 4000
-eval_num_tasks: 100
-max_messages: 1
+train_num_tasks: null
+eval_num_tasks: null
+max_messages: null
 exclude_known_bad_queries: true
 
 cluster:
@@ -25,7 +25,7 @@ allocation_mode: sglang:d4p1t1+d4p1t1
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 8
+  max_concurrent_rollouts: 16
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -41,8 +41,8 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 20
-    output_dir: /mnt/efs/tmp/areal/experiments/email-search-recursive-trial-1
+    max_steps: 50
+    output_dir: /mnt/efs/tmp/areal/experiments/email-search-qwen-4b-linear-trial-0
     verbose: true
     train: true
     timeout: 7200

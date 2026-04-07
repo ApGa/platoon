@@ -6,22 +6,29 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
-from platoon.email_search.data.local_email_db import DEFAULT_DB_PATH
+from platoon.email_search.data.local_email_db import DB_PATH_ENV_VAR, resolve_db_path
 from platoon.email_search.data.types_enron import Email
 
 logger = logging.getLogger(__name__)
 _CONN: sqlite3.Connection | None = None
+_CONN_DB_PATH: str | None = None
 
 
 def get_conn() -> sqlite3.Connection:
-    global _CONN
-    if _CONN is None:
-        if not os.path.exists(DEFAULT_DB_PATH):
+    global _CONN, _CONN_DB_PATH
+    db_path = resolve_db_path()
+    if _CONN is None or _CONN_DB_PATH != db_path:
+        if _CONN is not None:
+            _CONN.close()
+        if not os.path.exists(db_path):
             raise FileNotFoundError(
-                f"Email database not found at {DEFAULT_DB_PATH}. "
-                "Generate it with `python -m platoon.email_search.data.local_email_db`."
+                f"Email database not found at {db_path}. "
+                "Generate it with "
+                f"`python -m platoon.email_search.data.local_email_db --db-path {db_path} --overwrite` "
+                f"or set `{DB_PATH_ENV_VAR}`."
             )
-        _CONN = sqlite3.connect(f"file:{DEFAULT_DB_PATH}?mode=ro", uri=True, check_same_thread=False)
+        _CONN = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        _CONN_DB_PATH = db_path
     return _CONN
 
 
