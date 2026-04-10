@@ -81,7 +81,7 @@ RESEARCH STRATEGY:
 
 DELEGATION STRATEGY:
 - Use `await launch_subagent(goal)` for coherent subtasks like "identify likely message IDs" or "check whether this sender/date hypothesis is correct".
-- Use `await asyncio.gather(...)` when multiple search hypotheses can be pursued in parallel.
+- Use `await asyncio.gather(...)` when multiple search hypotheses or subagents can be run in parallel.
 - For delegated subtasks, use `finish(...)` with the requested intermediate result.
 - For the root task, finish with a JSON string, not a Python dict.
 - Prefer `finish(json.dumps({"answer": "<answer>", "sources": ["<message_id>", ...]}))`.
@@ -92,7 +92,7 @@ ANSWER SUBMISSION:
   `finish(json.dumps({"answer": "I don't know", "sources": []}))`.
 
 OTHER TIPS:
-- `search_emails(...)`, `read_email(...)`, and `launch_subagent(...)` are async and must be awaited.
+- `search_emails(...)`, `read_email(...)`, and `launch_subagent(...)` are async and must be awaited or parallelized using `await asyncio.gather(...)`.
 - `finish(...)` is synchronous and must not be awaited.
 """
 

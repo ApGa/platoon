@@ -293,22 +293,32 @@ class EmailSearchEnv(CodeActEnv):
     async def _evaluate_subtask(self, final_message: str | None, err_message: str | None) -> tuple[float, dict]:
         reward_misc: dict[str, Any] = {}
         try:
-            rubric_checklist = RubricChecklistFast(self._task.goal)
+            #rubric_checklist = RubricChecklistFast(self._task.goal)
+            rubric_client = rubric_create_llm_client()
             prompt_builder = EmailSearchPromptBuilder()
             action_history = prompt_builder.build_action_history_description(await self.observe())
-            rubric_context = (
-                "We need to judge the performance of an email-search agent on a task. "
-                "The agent may use subagents to solve parts of the task. Do not penalize the model "
-                "for using subagents unless the delegated subtasks are not useful.\n\n"
-                f"# Agent Trajectory Info\n## Action History\n{action_history}\n\n"
-                f"## Final Message\n{final_message}\n\n"
-                f"## Error Message\n{err_message}"
+
+            rubric_response = await rubric_client.asystem_completion(
+                system_prompt=(
+                    "We need to judge the performance of an email-search agent on a task. "
+                    "The agent may use subagents to solve parts of the task. Do not penalize the model "
+                    "for using subagents unless the delegated subtasks are not useful. But mark the task as unsuccessful for degenerate behavior where all the agent does is delegate the exact same task to another subagent without doing any actual work itself.\n\n"
+                    "On the other hand, it is acceptable for the agent to do all the work itself, part of the work itself, or even okay to delegate all the work to subagents if it meaningfully divides the work across multiple subagents or rephrases "
+                    "the delegated subatasks to make them more specific or to try alternate strategies."
+                    "Please provide a reason and success flag (boolean value) in the following JSON format:\n"
+                    '```json\n{"reason": "Brief reasoning here.", "success": true}\n```'
+                ),
+                user_prompt=(
+                    f"# Agent Trajectory Info\n## Action History\n{action_history}\n\n"
+                    f"## Final Message\n{final_message}\n\n"
+                    f"## Error Message\n{err_message}"
+                ),
+                temperature=1,
             )
-            score, reason = await rubric_checklist.aevaluate(include_reason=True, context=rubric_context)
+            score, reason = self._parse_rubric_response(rubric_response)
             reward_misc["reason"] = reason
-            reward_misc["rubric_dict"] = rubric_checklist.to_dict()
             reward_misc["reward/success"] = score
-            reward_misc["success"] = bool(score >= 1.0)
+            reward_misc["success"] = score >= 1.0
             return score, reward_misc
         except Exception as exc:
             reward_misc["reason"] = f"Failed rubric-based evaluation: {exc}"
@@ -326,11 +336,12 @@ class EmailSearchEnv(CodeActEnv):
         rubric_system_prompt = (
             "We need to judge the performance of an email-search agent on a task. "
             "You will be given the ground truth answer and the agent answer. "
-            "Minor formatting differences are acceptable as long as the core information is equivalent. "
+            "Minor differences are acceptable as long as the core information is equivalent and sufficiently answers the task."
             "Please provide a reason and success flag (boolean value) in the following JSON format:\n"
             '```json\n{"reason": "Brief reasoning here.", "success": true}\n```'
         )
         rubric_user_prompt = (
+            f"Task:\n{self._task.goal}\n\n"
             f"Ground truth answer: {self._task.misc['ground_truth']}\n\n"
             f"Agent's answer: {answer}"
         )
