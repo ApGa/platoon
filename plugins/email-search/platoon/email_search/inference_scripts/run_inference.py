@@ -21,7 +21,7 @@ from platoon.inference import (
 from platoon.utils.config import load_config
 
 logger = logging.getLogger(__name__)
-_EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.0
+_EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.1
 _DEFAULT_REWARD_KEYS = {
     "reward/success": 0.0,
     "reward/subagent_launched": 0.0,

@@ -1,9 +1,10 @@
 experiment_name: email-search
-trial_name: email-search-qwen-14b-recursive-trial-4
+trial_name: email-search-qwen-14b-recursive-trial-5
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
+resume_recover_info_path: null
 recursive: true
 train_split: train
 eval_split: test
@@ -42,11 +43,11 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 15
-    output_dir: /mnt/efs/tmp/areal/experiments/email-search-qwen-14b-recursive-trial-4
+    output_dir: /mnt/efs/tmp/areal/experiments/email-search-qwen-14b-recursive-trial-5
     verbose: true
     train: true
-    timeout: 900
-    step_timeout: 900
+    timeout: 3600
+    step_timeout: 3600
     inference_params:
       temperature: 1.0
       max_completion_tokens: 2048

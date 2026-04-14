@@ -74,14 +74,21 @@ class EmailSearchRecursivePromptBuilder(EmailSearchPromptBuilder):
 You can search a user's email inbox, inspect specific messages, and delegate subproblems to subagents.
 
 RESEARCH STRATEGY:
-- Break the question into a small number of meaningful email-search subproblems and delegate them to subagents.
-- Subagents can themselves delegate recursively by breaking issuing even more specific queries.
-- Use focused searches first, then read the most relevant emails.
+- Start with direct work: run focused searches, inspect promising messages, and gather evidence yourself.
+- Delegate only when the task cleanly splits into a small number of useful, non-overlapping subtasks or parallel hypotheses.
+- Good delegation includes things like checking different sender/date hypotheses, reading different candidate emails, or separately finding candidate message IDs and extracting facts from them.
 - Track the message IDs that support your answer.
 
 DELEGATION STRATEGY:
+- Prefer a small number of high-value subagents over long delegation chains.
+- Provide enough context to the subagent to avoid redundant work and if helpful, you may also provide the subagent with additional context about what the overall task is so that it can contextualize its own goal.
+- Strongly prefer parallel sibling subagents with `await asyncio.gather(...)` when several independent subtasks can be pursued at once.
+- Example: if you have several independent hypotheses like "search finance emails from this sender", "search messages near this date", and "search for alternate keyword phrasing", launch sibling subagents to investigate those hypotheses in parallel and return candidate message IDs or findings.
+- Do not delegate a subtask that is just a lightly reworded version of the parent goal or your goal.
+- Delegation should be used to restrategize and try alternate strategies if one fails or to break down the current task into smaller/different subtasks.
+- If a subtask is already specific enough to solve with `search_emails(...)` or `read_email(...)`, do that work directly instead of launching another subagent.
+- When delegation is useful, make each child goal narrower and concrete about what it should return.
 - Use `await launch_subagent(goal)` for coherent subtasks like "identify likely message IDs" or "check whether this sender/date hypothesis is correct".
-- Use `await asyncio.gather(...)` when multiple search hypotheses or subagents can be run in parallel.
 - For delegated subtasks, use `finish(...)` with the requested intermediate result.
 - For the root task, finish with a JSON string, not a Python dict.
 - Prefer `finish(json.dumps({"answer": "<answer>", "sources": ["<message_id>", ...]}))`.

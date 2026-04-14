@@ -251,6 +251,7 @@ class EmailSearchRecursiveCodeExecutor(EmailSearchCodeExecutor):
 
 class EmailSearchEnv(CodeActEnv):
     def __init__(self, task: Task):
+        task.fork_strategy = "task"
         super().__init__(task, EmailSearchCodeExecutor(task))
 
     def _parse_json_payload(self, response: str) -> dict[str, Any]:
@@ -300,11 +301,13 @@ class EmailSearchEnv(CodeActEnv):
 
             rubric_response = await rubric_client.asystem_completion(
                 system_prompt=(
-                    "We need to judge the performance of an email-search agent on a task. "
-                    "The agent may use subagents to solve parts of the task. Do not penalize the model "
-                    "for using subagents unless the delegated subtasks are not useful. But mark the task as unsuccessful for degenerate behavior where all the agent does is delegate the exact same task to another subagent without doing any actual work itself.\n\n"
-                    "On the other hand, it is acceptable for the agent to do all the work itself, part of the work itself, or even okay to delegate all the work to subagents if it meaningfully divides the work across multiple subagents or rephrases "
-                    "the delegated subatasks to make them more specific or to try alternate strategies."
+                    "We need to judge the performance of an email-search agent on a task. You should mark the task as successful if both the agent's final answer is correct AND if the agent delegates, its delegation strategy is useful and efficient. "
+                    "The agent may use subagents to solve parts of the task, and good, useful delegation is allowed. But degenerate delegation strategies should not be rewarded."
+                    "Reward delegation only when it is genuinely useful: the subtasks should be concrete, non-overlapping, and should help the agent search or read emails more effectively.\n\n"
+                    "Mark the task as unsuccessful for degenerate delegation behavior even if the final answer is correct. "
+                    "Degenerate behavior includes repeated delegation of (forwarding) nearly the same/whole goal to a subagent without doing any meaningful search/reading work or decomposition or wasteful failed launches caused by trying to delegate past the depth limit.\n\n"
+                    "It is acceptable for the agent to do all the work itself, part of the work itself, or to use subagents heavily if those subagents do distinct useful work. "
+                    "Do not give credit just because the wording of child tasks changes slightly from the agent's own goal; judge whether the decomposition is actually useful and efficient. "
                     "Please provide a reason and success flag (boolean value) in the following JSON format:\n"
                     '```json\n{"reason": "Brief reasoning here.", "success": true}\n```'
                 ),

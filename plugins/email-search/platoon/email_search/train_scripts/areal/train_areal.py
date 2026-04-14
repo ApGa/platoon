@@ -15,7 +15,7 @@ from platoon.email_search.tasks import get_task, get_task_ids
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
 from platoon.train.areal.workflows import StepWiseArealWorkflow
 
-_EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.4
+_EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.1
 _DEFAULT_REWARD_KEYS = {
     "reward/success": 0.0,
     "reward/subagent_launched": 0.0,
