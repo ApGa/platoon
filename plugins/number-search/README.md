@@ -73,9 +73,9 @@ uv run python -m platoon.number_search.train_tinker \
 ### AReaL Backend
 
 ```bash
-uv run python3 -m areal.launcher.local \
-    platoon/number_search/train.py \
+uv run python3 platoon/number_search/train.py \
     --config platoon/number_search/number_search_areal.yaml \
+    scheduler.type=local \
     experiment_name=number-search-reinforce \
     trial_name=trial0
 ```

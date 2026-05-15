@@ -7,26 +7,15 @@ Usage:
 import random
 import sys
 from copy import deepcopy
-from dataclasses import dataclass
 
 from datasets import Dataset
 from areal.api.cli_args import load_expr_config
 
+from platoon.oolong.areal_config import OolongArealTrainerConfig
 from platoon.oolong.tasks import AnswerType, TaskGroup, get_task, get_task_ids
 from platoon.oolong.rollout import run_rollout, run_recursive_rollout
-from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
-from platoon.train.areal.workflows import StepWiseArealWorkflow
-
-
-@dataclass
-class OolongArealTrainerConfig(PlatoonArealRLTrainerConfig):
-    recursive: bool = False
-    seed: int = 42
-    oolong_dataset: str = "synth"
-    task_group: str | None = None
-    answer_type: str | None = None
-    min_context_len: int | None = None
-    max_context_len: int | None = None
+from platoon.train.areal import PlatoonArealRLTrainer
+from platoon.train.areal.workflows import GroupRolloutWorkflow
 
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     """Extract Oolong reward components from trajectory steps."""
@@ -104,18 +93,14 @@ def main(args):
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     ) as trainer:
-
-        proxy_server = trainer.proxy_server
-        eval_proxy_server = trainer.eval_proxy_server
-
         # Use recursive rollout for long-context tasks
-        workflow = StepWiseArealWorkflow(
+        workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_task,
             config.workflow_config,
-            proxy_server,
-            'train_rollout',
-            trainer.actor.device,
+            trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="train_rollout",
             filter_errors=True,
             reward_processor=reward_processor
         )
@@ -123,13 +108,13 @@ def main(args):
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
 
-        eval_workflow = StepWiseArealWorkflow(
+        eval_workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_task,
             eval_workflow_config,
-            eval_proxy_server,
-            'eval_rollout',
-            trainer.actor.device,
+            trainer.eval_proxy_base_url or trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="eval_rollout",
             reward_processor=reward_processor
         )
 

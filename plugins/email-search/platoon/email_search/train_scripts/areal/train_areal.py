@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 import random
 import sys
 
 from areal.api.cli_args import load_expr_config
 from datasets import Dataset
 
+from platoon.email_search.areal_config import EmailSearchArealTrainerConfig
 from platoon.email_search.rollout import run_recursive_rollout, run_rollout
 from platoon.email_search.tasks import get_task, get_task_ids
-from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
-from platoon.train.areal.workflows import StepWiseArealWorkflow
+from platoon.train.areal import PlatoonArealRLTrainer
+from platoon.train.areal.workflows import GroupRolloutWorkflow
 
 _EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.4
 _DEFAULT_REWARD_KEYS = {
@@ -21,19 +21,6 @@ _DEFAULT_REWARD_KEYS = {
     "reward/subagent_launched": 0.0,
     "reward/subagent_succeeded": 0.0,
 }
-
-
-@dataclass
-class EmailSearchArealTrainerConfig(PlatoonArealRLTrainerConfig):
-    recursive: bool = True
-    train_split: str = "train"
-    eval_split: str = "test"
-    train_num_tasks: int | None = None
-    eval_num_tasks: int | None = 100
-    max_messages: int | None = 1
-    exclude_known_bad_queries: bool = True
-    seed: int = 42
-
 
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     rewards_dict: dict[str, float] = dict(_DEFAULT_REWARD_KEYS)
@@ -105,26 +92,26 @@ def main(args: list[str]) -> None:
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     ) as trainer:
-        workflow = StepWiseArealWorkflow(
+        workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_task,
             config.workflow_config,
-            trainer.proxy_server,
-            "train_rollout",
-            trainer.actor.device,
+            trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="train_rollout",
             filter_errors=True,
             reward_processor=reward_processor,
         )
 
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
-        eval_workflow = StepWiseArealWorkflow(
+        eval_workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_task,
             eval_workflow_config,
-            trainer.eval_proxy_server,
-            "eval_rollout",
-            trainer.actor.device,
+            trainer.eval_proxy_base_url or trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="eval_rollout",
             reward_processor=reward_processor,
         )
 

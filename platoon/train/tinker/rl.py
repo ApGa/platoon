@@ -17,6 +17,12 @@ from tinker import TensorData
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.rl.metrics import compute_kl_sample_train
 
+from platoon.train.tinker.batch_transforms import (
+    BatchTransform,
+    BatchTransformContext,
+    build_default_batch_transforms,
+    run_batch_transforms,
+)
 from platoon.train.tinker.config_defs import (
     PlatoonTinkerRLTrainerConfig,
     TrainEventTriggerConfig,
@@ -113,47 +119,6 @@ def compute_training_metrics(
             metrics["optim/clip_frac_total"] = (flat_clipped_low | flat_clipped_high).sum().item() / total_tokens
 
     return metrics
-
-
-def apply_depth_level_weighting(datums: list[tinker.Datum]) -> None:
-    """Reweight trajectory advantages so each depth level has comparable mass."""
-    if not datums:
-        return
-
-    depths: list[int] = []
-    traj_starts: list[float] = []
-    action_token_counts: list[float] = []
-    for datum in datums:
-        loss_fn_inputs = datum.loss_fn_inputs
-        if "traj_depth" not in loss_fn_inputs or "traj_start" not in loss_fn_inputs:
-            raise ValueError("depth_level_weighting requires traj_depth and traj_start in tinker datums")
-        depths.append(int(loss_fn_inputs["traj_depth"].to_torch().item()))
-        traj_starts.append(float(loss_fn_inputs["traj_start"].to_torch().item()))
-        action_token_counts.append(float(loss_fn_inputs["mask"].to_torch().sum().item()))
-
-    depth_tensor = torch.tensor(depths, dtype=torch.long)
-    traj_start_tensor = torch.tensor(traj_starts, dtype=torch.float32)
-    action_token_tensor = torch.tensor(action_token_counts, dtype=torch.float32)
-
-    num_depths = int(depth_tensor.max().item()) + 1 if len(depths) > 0 else 0
-    traj_counts = torch.zeros(num_depths, dtype=torch.float32)
-    action_tokens_per_depth = torch.zeros(num_depths, dtype=torch.float32)
-
-    for depth in range(num_depths):
-        mask = depth_tensor == depth
-        traj_counts[depth] = traj_start_tensor[mask].sum()
-        action_tokens_per_depth[depth] = action_token_tensor[mask].sum()
-
-    raw_weights = torch.where(traj_counts > 0, 1.0 / traj_counts, torch.zeros_like(traj_counts))
-    total_action_tokens = action_token_tensor.sum()
-    unnorm_total = (action_tokens_per_depth * raw_weights).sum()
-    if unnorm_total <= 0 or total_action_tokens <= 0:
-        raise ValueError("depth_level_weighting produced zero total weight for this microbatch")
-
-    per_depth_weights = raw_weights * (total_action_tokens / unnorm_total)
-    for datum, depth in zip(datums, depths):
-        advantages = datum.loss_fn_inputs["advantages"].to_torch()
-        datum.loss_fn_inputs["advantages"] = TensorData.from_torch(advantages * per_depth_weights[depth])
 
 
 class Watchdog:
@@ -347,10 +312,12 @@ class PlatoonTinkerRLTrainer:
         config: PlatoonTinkerRLTrainerConfig,
         train_dataset: Dataset,
         eval_dataset: Dataset | None = None,
+        batch_transforms: list[BatchTransform] | None = None,
     ):
         self.config = config
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
+        self.batch_transforms = self._build_batch_transforms(batch_transforms)
         self._model_info = register_tinker_llm(
             self.config.train.model_name,
             self.config.train.renderer_name,
@@ -359,6 +326,22 @@ class PlatoonTinkerRLTrainer:
         )
         self._stats_logger: StatsLogger | None = None
         self._train_tracker: StatsTracker | None = None
+
+    def _build_batch_transforms(
+        self,
+        extra_batch_transforms: list[BatchTransform] | None = None,
+    ) -> list[BatchTransform]:
+        """Build the ordered microbatch transform pipeline.
+
+        Tinker trainer transforms intentionally operate at the current
+        microbatch boundary (`task_rollout_results`) so the existing math is
+        preserved while allowing trainer-side customization.
+        """
+
+        transforms = build_default_batch_transforms(self.config)
+        if extra_batch_transforms:
+            transforms.extend(extra_batch_transforms)
+        return transforms
 
     @property
     def model_info(self) -> ModelInfo:
@@ -609,8 +592,22 @@ class PlatoonTinkerRLTrainer:
                         logger.warning(f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num})")
                         continue
 
-                    if self.config.train.workflow_config.depth_level_weighting:
-                        apply_depth_level_weighting(task_rollout_results)
+                    task_rollout_results = run_batch_transforms(
+                        task_rollout_results,
+                        self.batch_transforms,
+                        BatchTransformContext(
+                            config=self.config,
+                            train_step=shared_state.train_step,
+                            minibatch_num=minibatch_num,
+                            microbatch_num=microbatch_num,
+                        ),
+                    )
+                    if task_rollout_results is None or len(task_rollout_results) == 0:
+                        logger.warning(
+                            f"All datums were filtered out for microbatch {microbatch_num} "
+                            f"(minibatch {minibatch_num})"
+                        )
+                        continue
 
                     # Filter out mask and checkpoint_version from loss_fn_inputs before forward_backward
                     # Neither is needed in forward_backward computation.

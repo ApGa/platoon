@@ -13,7 +13,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # Silence httpx spam
 from platoon.textcraft.rollout import run_recursive_rollout  # noqa: E402
 from platoon.textcraft.tasks import get_task, get_task_ids  # noqa: E402
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig  # noqa: E402
-from platoon.train.areal.workflows import StepWiseArealWorkflow  # noqa: E402
+from platoon.train.areal.workflows import GroupRolloutWorkflow  # noqa: E402
 
 _TEXTCRAFT_DELEGATION_REWARD_CAP = 0.0
 
@@ -49,15 +49,13 @@ def main(args):
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     ) as trainer:
-        proxy_server = trainer.proxy_server
-        eval_proxy_server = trainer.eval_proxy_server
-        workflow = StepWiseArealWorkflow(
+        workflow = GroupRolloutWorkflow(
             run_recursive_rollout,
             get_task,
             config.workflow_config,
-            proxy_server,
-            "train_rollout",
-            trainer.actor.device,
+            trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="train_rollout",
             filter_errors=True,
             reward_processor=reward_processor,
         )
@@ -65,13 +63,13 @@ def main(args):
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
         
-        eval_workflow = StepWiseArealWorkflow(
+        eval_workflow = GroupRolloutWorkflow(
             run_recursive_rollout,
             get_task,
             eval_workflow_config,
-            eval_proxy_server,
-            "eval_rollout",
-            trainer.actor.device,
+            trainer.eval_proxy_base_url or trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="eval_rollout",
             reward_processor=reward_processor,
         )
 

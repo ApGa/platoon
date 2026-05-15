@@ -134,8 +134,7 @@ AReaL uses a distributed training architecture. Refer to [AReaL documentation](h
 ```bash
 cd plugins/textcraft  # or number-search, codegrep
 
-uv run python3 -m areal.launcher.local \
-    platoon/textcraft/train.py \
+uv run python3 platoon/textcraft/train.py \
     --config platoon/textcraft/textcraft_areal.yaml \
     experiment_name=textcraft-reinforce \
     trial_name=trial0
@@ -218,7 +217,76 @@ stats:
 
 ### AReaL Config Structure
 
-See [AReaL documentation](https://github.com/inclusionAI/AReaL) for config options.
+Platoon supports a smaller, Platoon-first AReaL config surface than upstream AReaL.
+
+```yaml
+experiment_name: my-experiment
+trial_name: trial0
+tokenizer_path: ${actor.path}
+
+cluster:
+  fileroot: /mnt/efs/tmp/areal/experiments
+  name_resolve:
+    type: nfs
+    nfs_record_root: /mnt/efs/tmp/areal/name_resolve
+
+rollout:
+  backend: sglang:d4p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  consumer_batch_size: ${train_dataset.batch_size}
+
+workflow_config:
+  group_size: 8
+  rollout_config:
+    model_name: ${actor.path}
+    max_steps: 50
+    timeout: 900
+    inference_params:
+      temperature: 1.0
+      max_completion_tokens: 2048
+
+loss_fn_config:
+  loss_fn: cispo
+  clip_low_threshold: 0.0
+  clip_high_threshold: 5.0
+
+actor:
+  backend: fsdp:d4p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: Qwen/Qwen3-4B
+
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+
+train_dataset:
+  batch_size: 32
+
+valid_dataset:
+  batch_size: 32
+```
+
+Supported sources of truth:
+- Rollout/group behavior lives under `workflow_config`.
+- Generation settings used by Platoon rollouts live under `workflow_config.rollout_config.inference_params`.
+- Loss selection and clipping live under `loss_fn_config`.
+- Engine placement lives under explicit per-engine `backend` fields like `rollout.backend` and `actor.backend`.
+- Dataset config is intentionally minimal; Platoon only supports the dataloader knobs it actually consumes.
+
+Removed from the Platoon-supported AReaL surface:
+- `allocation_mode`
+- `launcher`
+- old actor-side loss config such as `actor.loss_fn`, `actor.clip_low_threshold`, and related duplicates
+- old `gconfig` generation knobs such as `gconfig.n_samples`, `gconfig.temperature`, and `gconfig.max_new_tokens`
+- dataset placeholders like `train_dataset.path`, `train_dataset.type`, `valid_dataset.path`, and `valid_dataset.type`
+
+If you need lower-level upstream AReaL behavior, prefer extending Platoon’s AReaL config/codepath explicitly rather than relying on inherited upstream config keys that Platoon does not consume.
 
 ## Visualizing Trajectories
 

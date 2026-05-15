@@ -73,9 +73,9 @@ uv run python -m platoon.codegrep.train_tinker \
 ### AReaL Backend
 
 ```bash
-uv run python3 -m areal.launcher.local \
-    platoon/codegrep/train.py \
+uv run python3 platoon/codegrep/train.py \
     --config platoon/codegrep/codegrep_areal.yaml \
+    scheduler.type=local \
     experiment_name=codegrep-reinforce \
     trial_name=trial0
 ```

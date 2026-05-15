@@ -1,47 +1,42 @@
-"""AReaL proxy session for tracking LLM interactions during rollouts."""
+"""Proxy helpers for the modern AReaL OpenAI session flow."""
 
 from __future__ import annotations
 
-from areal.experimental.openai.proxy import (
-    AReaLEndSessionRequest,
-    ProxySession,
-    _post_json_with_retry,
-)
+import aiohttp
+from areal.experimental.openai.proxy.client_session import OpenAIProxyClient
 
 
-class ArealProxySession(ProxySession):
-    """Async context manager for AReaL proxy sessions.
+class ArealProxySession:
+    """Small wrapper around AReaL's session-key based proxy client."""
 
-    This extends the base ProxySession to handle session lifecycle
-    and ensure proper cleanup even on exceptions.
-    """
-
-    async def __aenter__(self) -> ArealProxySession:
-        data = await _post_json_with_retry(
-            self.http_session,
-            f"{self.stripped_base_url}/rl/start_session",
-            payload={},
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        base_url: str,
+        task_id: str,
+        admin_api_key: str,
+    ):
+        self._client = OpenAIProxyClient(
+            session=session,
+            base_url=base_url,
+            task_id=task_id,
+            admin_api_key=admin_api_key,
         )
-        self.session_id = data["session_id"]
-        self.session_base_url = f"{self.stripped_base_url}/{self.session_id}"
 
+    @property
+    def session_id(self) -> str | None:
+        return self._client.session_id
+
+    @property
+    def session_api_key(self) -> str:
+        return self._client.session_api_key
+
+    async def export_interactions(self):
+        return await self._client.export_interactions(discount=1.0, style="individual")
+
+    async def __aenter__(self) -> "ArealProxySession":
+        await self._client.__aenter__()
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        # Always try to end the session to prevent memory leaks in session_cache
-        # even if an exception occurred during the rollout
-        try:
-            if self.session_id is not None:
-                # On exception, set final_reward to 0 (failed rollout)
-                reward = self.final_reward if exc_type is None else 0.0
-                payload = AReaLEndSessionRequest(session_id=self.session_id, final_reward=reward).model_dump()
-                await _post_json_with_retry(
-                    self.http_session,
-                    f"{self.stripped_base_url}/rl/end_session",
-                    payload=payload,
-                )
-        except Exception as e:
-            # Log but don't raise - we don't want to mask the original exception
-            print(f"Warning: Failed to end session {self.session_id}: {e}")
-        finally:
-            await self.http_session.close()
+        await self._client.__aexit__(exc_type, exc_value, traceback)

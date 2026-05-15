@@ -78,8 +78,7 @@ uv run python -m platoon.textcraft.train_tinker \
 ### AReaL Backend
 
 ```bash
-uv run python3 -m areal.launcher.local \
-    platoon/textcraft/train_areal.py \
+uv run python3 platoon/textcraft/train_areal.py \
     --config platoon/textcraft/textcraft_areal.yaml \
     experiment_name=textcraft-reinforce \
     trial_name=trial0
@@ -99,7 +98,16 @@ Key configuration options:
 
 ### AReaL Config (`textcraft_areal.yaml`)
 
-See the config file for available options.
+Platoon's AReaL configs are Platoon-first rather than a full dump of upstream AReaL options.
+
+Use these sections as the supported surface:
+- `rollout.backend` and `actor.backend` for placement
+- `workflow_config` for rollout/group behavior
+- `workflow_config.rollout_config.inference_params` for rollout-time generation settings
+- `loss_fn_config` for loss selection and loss-specific kwargs
+- `train_dataset.batch_size` / `valid_dataset.batch_size` for dataloader sizing
+
+Do not use the old compatibility keys such as `allocation_mode`, `launcher`, actor-side loss config duplicates, or `gconfig` generation knobs.
 
 ## Components
 

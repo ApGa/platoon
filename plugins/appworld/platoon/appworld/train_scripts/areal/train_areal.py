@@ -1,21 +1,15 @@
 import sys
 
 from copy import deepcopy
+from platoon.appworld.areal_config import AppWorldArealTrainerConfig
 from areal.api.cli_args import load_expr_config
 from appworld import load_task_ids
 from datasets import Dataset
-from dataclasses import dataclass
 
 from platoon.appworld.rollout import run_rollout, run_recursive_rollout, run_depth_aware_rollout
 from platoon.appworld.tasks import get_task
-from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
-from platoon.train.areal.workflows import StepWiseArealWorkflow
-
-
-@dataclass
-class AppWorldArealTrainerConfig(PlatoonArealRLTrainerConfig):
-    recursive: bool = False
-    depth_aware: bool = False
+from platoon.train.areal import PlatoonArealRLTrainer
+from platoon.train.areal.workflows import GroupRolloutWorkflow
 
 def reward_processor(traj: dict) -> tuple[float, dict]:
     """Process trajectory rewards, extracting individual reward components."""
@@ -56,15 +50,13 @@ def main(args):
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     ) as trainer:
-        proxy_server = trainer.proxy_server
-        eval_proxy_server = trainer.eval_proxy_server
-        workflow = StepWiseArealWorkflow(
+        workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_task,
             config.workflow_config,
-            proxy_server,
-            "train_rollout",
-            trainer.actor.device,
+            trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="train_rollout",
             reward_processor=reward_processor,
             filter_errors=False,
         )
@@ -72,13 +64,13 @@ def main(args):
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
         
-        eval_workflow = StepWiseArealWorkflow(
+        eval_workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_task,
             eval_workflow_config,
-            eval_proxy_server,
-            "eval_rollout",
-            trainer.actor.device,
+            trainer.eval_proxy_base_url or trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="eval_rollout",
             reward_processor=reward_processor,
             filter_errors=False,
         )

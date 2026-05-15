@@ -1,28 +1,14 @@
-"""Loss functions for AReaL RL training.
+"""Loss functions for Platoon's AReaL integration."""
 
-This module provides a registry of loss functions that can be used with the AReaL backend.
-Each loss function follows AReaL's train_batch interface:
-    - Inputs: logits, input_data, **config_kwargs
-    - Returns: loss Tensor (scalar)
-
-The loss functions compute logprobs internally from logits using gather_logprobs_entropy.
-Stats are logged directly via stats_tracker inside each loss function.
-
-To add a new loss function:
-    1. Define the function following the interface
-    2. Register it using @register_loss_fn("name")
-    3. Add any config parameters to LossFnConfig
-"""
-
-from typing import Callable
+import functools
+import inspect
+from typing import Any, Callable
 
 import torch
+from areal.trainer.ppo.actor import grpo_loss_fn as upstream_grpo_loss_fn
+from areal.trainer.ppo.stats import infer_token_denominator
 from areal.utils import stats_tracker
-from areal.utils.functional import gather_logprobs_entropy
 
-# Import LossFnConfig from config_defs to avoid duplication
-
-# Registry for loss functions
 _LOSS_FN_REGISTRY: dict[str, Callable] = {}
 
 
@@ -47,6 +33,21 @@ def get_loss_fn(name: str) -> Callable:
 def list_loss_fns() -> list[str]:
     """List all registered loss functions."""
     return list(_LOSS_FN_REGISTRY.keys())
+
+
+def build_loss_fn(name: str, **kwargs: Any) -> Callable:
+    """Resolve a registered loss function and bind compatible kwargs."""
+
+    fn = get_loss_fn(name)
+    signature = inspect.signature(fn)
+    accepts_var_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+    )
+    if accepts_var_kwargs:
+        filtered_kwargs = kwargs
+    else:
+        filtered_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return functools.partial(fn, **filtered_kwargs)
 
 
 def _compute_sequence_level_ratio_and_advantages(
@@ -103,9 +104,9 @@ def _compute_sequence_level_ratio_and_advantages(
 
 @register_loss_fn("cispo")
 def cispo_loss_fn(
-    logits: torch.Tensor,
+    logprobs: torch.Tensor,
+    entropy: torch.Tensor,
     input_data: dict,
-    temperature: float = 1.0,
     clip_low_threshold: float = 0.0,
     clip_high_threshold: float = 5.0,
     importance_sampling_level: str = "token",
@@ -140,14 +141,6 @@ def cispo_loss_fn(
     Returns:
         Scalar loss tensor
     """
-    # Get labels for computing logprobs (same as areal's grpo_loss_fn)
-    labels = input_data.get(
-        "rolled_input_ids",
-        torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
-    )
-
-    # Compute logprobs and entropy from logits
-    logprobs, entropy = gather_logprobs_entropy(logits, labels, temperature)
     entropy = entropy.detach()
 
     old_logprobs = input_data["logprobs"]
@@ -187,7 +180,7 @@ def cispo_loss_fn(
 
     # Log training statistics (matching areal's grpo_loss_fn pattern)
     stats_tracker.denominator(
-        n_tokens=torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device),
+        n_tokens=infer_token_denominator(input_data, loss_mask),
         n_valid_tokens=loss_mask.bool(),
         clipped_tokens=clip_mask,
         dual_clipped_tokens=torch.zeros_like(clip_mask),
@@ -209,73 +202,23 @@ def cispo_loss_fn(
 
 @register_loss_fn("grpo")
 def grpo_loss_fn(
-    logits: torch.Tensor,
+    logprobs: torch.Tensor,
+    entropy: torch.Tensor,
     input_data: dict,
-    temperature: float = 1.0,
-    eps_clip: float = 0.2,
-    eps_clip_higher: float | None = None,
-    c_clip: float | None = None,
-    behav_imp_weight_cap: float | None = None,
-    m2_threshold: float | None = None,
-    importance_sampling_level: str = "token",
     **kwargs,
 ) -> torch.Tensor:
-    """GRPO/PPO loss function with standard clipping.
+    """Registry wrapper around upstream AReaL GRPO/PPO loss."""
 
-    This matches areal's grpo_loss_fn interface (logits, input_data).
-    """
-    from areal.utils.functional import ppo_actor_loss_fn
-
-    # Get labels for computing logprobs
-    labels = input_data.get(
-        "rolled_input_ids",
-        torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
-    )
-
-    # Compute logprobs and entropy from logits
-    logprobs, entropy = gather_logprobs_entropy(logits, labels, temperature)
-    entropy = entropy.detach()
-
-    old_logprobs = input_data["logprobs"]
-    advantages = input_data["advantages"]
-    loss_mask = input_data.get("full_loss_mask", input_data["loss_mask"]).bool()
-    prox_logp = input_data.get("prox_logp", old_logprobs)
-    cu_seqlens = input_data.get("cu_seqlens")
-
-    loss, stat = ppo_actor_loss_fn(
-        logprobs=logprobs,
-        proximal_logprobs=prox_logp,
-        old_logprobs=old_logprobs,
-        advantages=advantages,
-        eps_clip=eps_clip,
-        eps_clip_higher=eps_clip_higher,
-        loss_mask=loss_mask,
-        c_clip=c_clip,
-        behav_imp_weight_cap=behav_imp_weight_cap,
-        importance_sampling_level=importance_sampling_level,
-        cu_seqlens=cu_seqlens,
-    )
-
-    # Log training statistics (matching areal's grpo_loss_fn pattern)
-    stats_tracker.denominator(
-        n_tokens=torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device),
-        n_valid_tokens=loss_mask.bool(),
-        clipped_tokens=stat["clip_mask"],
-        dual_clipped_tokens=stat["dual_clip_mask"],
-    )
-
-    stats_tracker.stat(
-        importance_weight=stat["importance_weight"],
-        approx_kl=stat["approx_kl"],
-        new_logp=logprobs.detach(),
-        old_logp=old_logprobs,
-        entropy=entropy.float(),
-        actor_loss=stat["loss"],
-        denominator="n_valid_tokens",
-    )
-
-    return loss
+    return upstream_grpo_loss_fn(logprobs, entropy, input_data, **kwargs)
 
 
-# Alias for backwards compatibility
-register_loss_fn("ppo")(grpo_loss_fn)
+@register_loss_fn("ppo")
+def ppo_loss_fn(
+    logprobs: torch.Tensor,
+    entropy: torch.Tensor,
+    input_data: dict,
+    **kwargs,
+) -> torch.Tensor:
+    """Alias of the upstream clipped PPO loss used by AReaL."""
+
+    return upstream_grpo_loss_fn(logprobs, entropy, input_data, **kwargs)

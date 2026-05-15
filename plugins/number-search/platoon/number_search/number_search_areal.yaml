@@ -4,8 +4,16 @@ trial_name: grpo-trial3
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
-#enable_offload: false
 
+workflow_spec:
+  registry_modules:
+    - platoon.number_search.registry
+  task_loader: number_search.task_loader
+  get_task: number_search.get_task
+  rollout_fn: number_search.rollout
+  reward_processor: number_search.reward_processor
+
+#enable_offload: false
 
 cluster:
   n_nodes: 1  
@@ -15,23 +23,17 @@ cluster:
     type: nfs
     nfs_record_root: /mnt/efs/tmp/areal/name_resolve
 
-allocation_mode: sglang:d4p1t1+d2p1t1c2
-
 rollout:
+  backend: sglang:d4p1t1
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
   max_concurrent_rollouts: 64
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
   enable_rollout_tracing: false
-
-gconfig:
-  n_samples: 1
-  min_new_tokens: 0
-  max_new_tokens: 8192
-  greedy: false
-  temperature: 1.0
 
 workflow_config:
   rollout_config:
@@ -41,9 +43,13 @@ workflow_config:
     verbose: True
     train: true
     timeout: 600
+    inference_params:
+      temperature: 1.0
+      max_completion_tokens: 8192
   group_size: 8
 
 actor:
+  backend: fsdp:d2p1t1c2
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: Qwen/Qwen3-4B-Instruct-2507
@@ -63,10 +69,8 @@ actor:
     lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
-  group_size: ${gconfig.n_samples}
   eps_clip: 0.20
   eps_clip_higher: 0.25
-  temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
   # aent:
@@ -84,17 +88,15 @@ actor:
   ppo_n_minibatches: 1
   recompute_logprob: true
   use_decoupled_loss: true
-  behav_imp_weight_cap: null
-  dynamic_sampling: false
   reward_norm:
     mean_level: null
     std_level: null
   adv_norm:
     mean_level: null
     std_level: null
-  max_new_tokens: ${gconfig.max_new_tokens}
 
 ref:
+  backend: ${actor.backend}
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: ${actor.path}
@@ -118,13 +120,9 @@ sglang:
 # datasets
 train_dataset:
   batch_size: 32
-  type: rl
-  path: ""
 
 valid_dataset:
   batch_size: 32
-  type: rl
-  path: ""
 
 # Utilities
 saver:
@@ -159,10 +157,4 @@ stats_logger:
   wandb:
     mode: online
     project: number-search-platoon
-
-launcher:
-  inference_server_cpus_per_gpu: 32
-  inference_server_mem_per_gpu: 32768
-  trainer_cpus_per_gpu: 8
-  trainer_mem_per_gpu: 32768
 

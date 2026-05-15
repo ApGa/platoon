@@ -7,7 +7,7 @@ from datasets import Dataset
 from platoon.codegrep.rollout import run_rollout
 from platoon.codegrep.tasks import get_task, get_task_ids
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
-from platoon.train.areal.workflows import StepWiseArealWorkflow
+from platoon.train.areal.workflows import GroupRolloutWorkflow
 
 
 def main(args):
@@ -23,27 +23,25 @@ def main(args):
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     ) as trainer:
-        proxy_server = trainer.proxy_server
-        eval_proxy_server = trainer.eval_proxy_server
-        workflow = StepWiseArealWorkflow(
+        workflow = GroupRolloutWorkflow(
             run_rollout,
             get_task,
             config.workflow_config,
-            proxy_server,
-            "train_rollout",
-            trainer.actor.device,
+            trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="train_rollout",
         )
         
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
         
-        eval_workflow = StepWiseArealWorkflow(
+        eval_workflow = GroupRolloutWorkflow(
             run_rollout,
             get_task,
             eval_workflow_config,
-            eval_proxy_server,
-            "eval_rollout",
-            trainer.actor.device,
+            trainer.eval_proxy_base_url or trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="eval_rollout",
         )
 
         trainer.train(

@@ -1,9 +1,12 @@
-experiment_name: textcraft-reinforce-plus-plus
-trial_name: cispo-4b-lora-recursive-trial-3
+experiment_name: test-areal
+trial_name: test-areal
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
+train_difficulties: ["medium"]
+eval_difficulties: null
+depth_aware: true
 #enable_offload: false
 
 cluster:
@@ -15,12 +18,13 @@ cluster:
     nfs_record_root: /mnt/efs/tmp/areal/name_resolve
 
 rollout:
-  backend: sglang:d6p1t1
+  backend: sglang:d4p1t1
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
-  max_concurrent_rollouts: 32
+  scheduling_spec: ${actor.scheduling_spec}
+  max_concurrent_rollouts: 8
   queue_size: null 
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -31,15 +35,21 @@ rollout:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 50
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-cispo-4b-lora-recursive-trial-3
+    max_steps: 25
+    output_dir: /mnt/efs/tmp/areal/experiments/test-areal
     verbose: True
     train: true
-    timeout: 900
+    timeout: 7200
     inference_params:
       temperature: 1.0
       max_completion_tokens: 8192
+    step_timeout: 7200
+    propogate_root_success: false
+    skip_subagent_reward_computation: false
   group_size: 8
+  leave_one_out_baseline: True  # Use leave-one-out baseline for advantage centering
+  depth_level_weighting: True  # Weight trajectories inversely by depth-level frequency
+  depth_level_discount_gamma: null  # Alternate strategy: discount rewards by trajectory depth as gamma^d
 
 # CISPO loss function configuration (matches tinker settings)
 loss_fn_config:
@@ -48,7 +58,7 @@ loss_fn_config:
   clip_high_threshold: 5.0
 
 actor:
-  backend: fsdp:d2p1t1
+  backend: fsdp:d4p1t1
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: Qwen/Qwen3-4B-Instruct-2507 #OpenPipe/Qwen3-14B-Instruct
@@ -56,8 +66,11 @@ actor:
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
+  # fsdp:
+  #   wrap_policy:
+  #     transformer_layer_cls_to_wrap: ["Qwen3DecoderLayer"]
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 60000
   optimizer:
     type: adam
     lr: 3e-6
@@ -68,6 +81,13 @@ actor:
     lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      mem: 32
+      cmd: python -m areal.infra.rpc.rpc_server
+      env_vars: {}
   eps_clip: 0.2
   eps_clip_higher: 0.26
   reward_scaling: 1.0
@@ -92,9 +112,16 @@ ref:
   init_from_scratch: false
   disable_dropout: true
   dtype: ${actor.dtype}
+  # fsdp:
+  #   wrap_policy:
+  #     transformer_layer_cls_to_wrap: ["Qwen3DecoderLayer"]
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 60000
   optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
 
 # SGLang
 sglang:
@@ -105,21 +132,22 @@ sglang:
   max_running_requests: null
   context_length: 40001
   mem_fraction_static: 0.8
+  #attention_backend: flashinfer # Uncomment for blackwell GPUs
 
 # datasets
 train_dataset:
-  batch_size: 32
+  batch_size: 16
 
 valid_dataset:
-  batch_size: 32
+  batch_size: 50
 
 # Utilities
 saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 5
-  freq_steps: null
+  freq_epochs: null
+  freq_steps: 25
   freq_secs: null
 
 recover:
@@ -145,5 +173,5 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: online
-    project: textcraft-platoon
+    project: test
 

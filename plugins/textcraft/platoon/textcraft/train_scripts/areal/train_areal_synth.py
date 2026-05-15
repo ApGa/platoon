@@ -3,14 +3,15 @@
 Uses the synthetic dataset with deeper crafting hierarchies and difficulty tagging.
 
 Usage:
-    python -m areal.launcher.local train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml
-    python -m areal.launcher.local train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml train.batch_size=64
+    python train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml scheduler.type=local
+    python train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml scheduler.type=local train.batch_size=64
 """
 
 import logging
 import sys
 
 from copy import deepcopy
+from platoon.textcraft.areal_config import TextCraftSynthArealTrainerConfig
 from areal.api.cli_args import load_expr_config
 from datasets import Dataset
 
@@ -26,20 +27,12 @@ from platoon.textcraft.synth_tasks import (  # noqa: E402
     get_synth_task_ids,
     get_synth_task_ids_by_difficulty,
 )
-from dataclasses import dataclass
 
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig  # noqa: E402
-from platoon.train.areal.workflows import StepWiseArealWorkflow  # noqa: E402
+from platoon.train.areal.workflows import GroupRolloutWorkflow  # noqa: E402
 
 logger = logging.getLogger("platoon.textcraft.train_areal_synth")
 _TEXTCRAFT_SYNTH_DELEGATION_REWARD_CAP = 0.0
-
-@dataclass
-class TextCraftSynthArealTrainerConfig(PlatoonArealRLTrainerConfig):
-    train_difficulties: list[str] | None = None
-    eval_difficulties: list[str] | None = None
-    recursive: bool = False
-    depth_aware: bool = False
 
 def reward_processor(traj: dict) -> tuple[float, dict]:
     """Process trajectory rewards, extracting individual reward components."""
@@ -133,15 +126,13 @@ def main(args):
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     ) as trainer:
-        proxy_server = trainer.proxy_server
-        eval_proxy_server = trainer.eval_proxy_server
-        workflow = StepWiseArealWorkflow(
+        workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_synth_task,
             config.workflow_config,
-            proxy_server,
-            "train_rollout",
-            trainer.actor.device,
+            trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="train_rollout",
             filter_errors=True,
             reward_processor=reward_processor,
         )
@@ -149,13 +140,13 @@ def main(args):
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
         
-        eval_workflow = StepWiseArealWorkflow(
+        eval_workflow = GroupRolloutWorkflow(
             rollout_fn,
             get_synth_task,
             eval_workflow_config,
-            eval_proxy_server,
-            "eval_rollout",
-            trainer.actor.device,
+            trainer.eval_proxy_base_url or trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="eval_rollout",
             reward_processor=reward_processor,
         )
 

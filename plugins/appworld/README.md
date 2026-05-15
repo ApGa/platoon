@@ -43,9 +43,9 @@ export WANDB_API_KEY=your_wandb_api_key
 ### AReaL Backend
 
 ```bash
-uv run python3 -m areal.launcher.local \
-    platoon/appworld/train_areal.py \
+uv run python3 platoon/appworld/train_areal.py \
     --config platoon/appworld/appworld_areal.yaml \
+    scheduler.type=local \
     experiment_name=number-search-reinforce \
     trial_name=trial0
 ```
