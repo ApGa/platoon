@@ -112,10 +112,18 @@ class PlatoonArealRLTrainer(PPOTrainer):
         """Platoon workflows already own rollout multiplicity internally."""
         return 1
 
-    def _maybe_shuffle_and_trim_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def _actor_dispatch_dp_size(self) -> int:
+        """Return the DP size used by AReaL controller tensor dispatch."""
+        parallel_strategy = getattr(self.actor, "parallel_strategy", None)
+        if parallel_strategy is not None and getattr(parallel_strategy, "dp_size", None) is not None:
+            return int(parallel_strategy.dp_size)
+        return int(self.actor.data_parallel_world_size)
+
+    def _maybe_shuffle_and_trim_batch(self, batch: dict[str, Any]) -> dict[str, Any] | None:
         batch_size = get_batch_size(batch)
         if batch_size == 0:
-            return batch
+            return None
+        dispatch_dp_size = self._actor_dispatch_dp_size()
 
         index_device = None
         for value in batch.values():
@@ -129,12 +137,24 @@ class PlatoonArealRLTrainer(PPOTrainer):
         if self.config.rollout.shuffle_cross_task:
             indices = indices[torch.randperm(batch_size, device=index_device)]
 
-        ensure = max(int(self.config.rollout.ensure_batch_divisible_by), 1)
+        ensure = max(
+            int(self.config.rollout.ensure_batch_divisible_by),
+            dispatch_dp_size,
+            1,
+        )
+        if int(indices.numel()) < dispatch_dp_size:
+            return None
         remainder = int(indices.numel()) % ensure
         if remainder != 0 and int(indices.numel()) >= ensure:
             indices = indices[: int(indices.numel()) - remainder]
+        dp_remainder = int(indices.numel()) % dispatch_dp_size
+        if dp_remainder != 0:
+            indices = indices[: int(indices.numel()) - dp_remainder]
+        if int(indices.numel()) < dispatch_dp_size:
+            return None
 
         return index_batch(batch, indices)
+
     def _reduce_rollout_batch(self, rollout_batch: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Reduce rollout items into the canonical trainer batch.
 
@@ -151,13 +171,12 @@ class PlatoonArealRLTrainer(PPOTrainer):
         if "trainable_datums" in batch:
             trainable_mask = batch.pop("trainable_datums").bool()
             global_trainable = int(trainable_mask.sum().item())
-            min_per_step = self.actor.data_parallel_world_size
+            min_per_step = self._actor_dispatch_dp_size()
             if global_trainable < min_per_step:
                 return None
             if not bool(trainable_mask.all()):
                 indices = torch.nonzero(trainable_mask, as_tuple=False).squeeze(-1)
                 batch = index_batch(batch, indices)
-                batch = self._maybe_shuffle_and_trim_batch(batch)
 
         return batch
 
@@ -174,12 +193,15 @@ class PlatoonArealRLTrainer(PPOTrainer):
 
         context = BatchTransformContext(
             config=self.config,
-            actor_dp_world_size=self.actor.data_parallel_world_size,
+            actor_dp_world_size=self._actor_dispatch_dp_size(),
             global_step=global_step,
             epoch=epoch,
             epoch_step=epoch_step,
         )
         batch = run_batch_transforms(batch, self.batch_transforms, context)
+        if batch is None:
+            return None
+        batch = self._maybe_shuffle_and_trim_batch(batch)
         if batch is None:
             return None
         # Restore AReaL's canonical per-trajectory representation so downstream

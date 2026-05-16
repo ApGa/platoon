@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
@@ -18,6 +19,32 @@ if TYPE_CHECKING:
 
 
 BatchDict = dict[str, Any]
+
+
+@lru_cache(maxsize=1)
+def _rtensor_type():
+    try:
+        from areal.infra.rpc.rtensor import RTensor  # pyright: ignore[reportMissingImports]
+    except Exception:
+        return None
+    return RTensor
+
+
+def localize_rtensors(value: Any) -> Any:
+    """Convert AReaL RTensor handles to local torch tensors when present."""
+
+    RTensor = _rtensor_type()
+    if RTensor is not None:
+        return RTensor.localize(value)
+    if hasattr(value, "to_local") and callable(value.to_local):
+        return value.to_local()
+    if isinstance(value, dict):
+        return {key: localize_rtensors(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [localize_rtensors(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(localize_rtensors(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -55,6 +82,7 @@ def get_batch_size(batch: BatchDict) -> int:
 
 
 def index_batch(batch: BatchDict, indices: torch.Tensor) -> BatchDict:
+    batch = localize_rtensors(batch)
     batch_size = get_batch_size(batch)
     filtered: BatchDict = {}
     for key, value in batch.items():
@@ -78,6 +106,7 @@ def split_batch_to_trajectories(batch: BatchDict) -> list[BatchDict]:
     atomic item.
     """
 
+    batch = localize_rtensors(batch)
     batch_size = get_batch_size(batch)
     if batch_size == 0:
         return []
@@ -121,9 +150,9 @@ class DepthLevelWeightingTransform:
         if "traj_depth" not in batch:
             return batch
 
-        traj_depth = batch["traj_depth"]
-        depth_indices = traj_depth.long()
-        rewards = batch["rewards"]
+        rewards = localize_rtensors(batch["rewards"])
+        traj_depth = torch.as_tensor(localize_rtensors(batch["traj_depth"]), device=rewards.device, dtype=torch.long)
+        depth_indices = traj_depth.reshape(-1)
         depth_gamma = context.config.workflow_config.depth_level_discount_gamma
 
         if depth_gamma is not None:
@@ -137,7 +166,11 @@ class DepthLevelWeightingTransform:
             normalization = (raw_weights.numel() / raw_weight_sum).to(raw_weights.dtype)
             per_datum_weights = raw_weights * normalization
         else:
-            traj_start = batch["traj_start"]
+            traj_start = torch.as_tensor(
+                localize_rtensors(batch["traj_start"]),
+                device=rewards.device,
+                dtype=rewards.dtype,
+            ).reshape(-1)
             global_max_depth = int(traj_depth.max().item()) if traj_depth.numel() > 0 else 0
             num_depths = global_max_depth + 1
             counts = torch.zeros(2, num_depths, device=traj_depth.device)

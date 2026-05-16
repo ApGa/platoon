@@ -109,9 +109,11 @@ def test_minimal_platoon_first_config_parses_and_injects_loss_settings():
                 "actor": {"backend": "fsdp:d2p1t1"},
                 "loss_fn_config": {
                     "loss_fn": "cispo",
-                    "clip_low_threshold": 0.1,
-                    "clip_high_threshold": 4.2,
-                    "loss_fn_kwargs": {"alpha": 3.0},
+                    "loss_fn_kwargs": {
+                        "clip_low_threshold": 0.1,
+                        "clip_high_threshold": 4.2,
+                        "alpha": 3.0,
+                    },
                 },
             }
         ),
@@ -122,8 +124,8 @@ def test_minimal_platoon_first_config_parses_and_injects_loss_settings():
     assert parsed.rollout.backend == "sglang:d4p1t1"
     assert parsed.actor.backend == "fsdp:d2p1t1"
     assert parsed.actor.loss_fn == "cispo"
-    assert parsed.actor.clip_low_threshold == 0.1
-    assert parsed.actor.clip_high_threshold == 4.2
+    assert parsed.actor.loss_fn_kwargs["clip_low_threshold"] == 0.1
+    assert parsed.actor.loss_fn_kwargs["clip_high_threshold"] == 4.2
     assert parsed.actor.loss_fn_kwargs["alpha"] == 3.0
     assert parsed.scheduler.type == "local"
     assert parsed.eval_gconfig.lora_name == parsed.gconfig.lora_name
@@ -155,6 +157,7 @@ def test_removed_nested_legacy_keys_are_rejected():
         {"actor": {"group_size": 8}},
         {"actor": {"dynamic_sampling": False}},
         {"actor": {"clip_low_threshold": 0.0}},
+        {"loss_fn_config": {"clip_low_threshold": 0.0}},
         {"train_dataset": {"path": ""}},
         {"train_dataset": {"type": "rl"}},
         {"valid_dataset": {"path": ""}},

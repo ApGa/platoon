@@ -17,21 +17,10 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-class CompletionResponse(Protocol):
-    """Protocol for completion response objects."""
-
-    input_tokens: list[int]
-    output_tokens: list[int]
-    input_len: int
-    output_len: int
-    output_logprobs: list[float]
-    output_versions: list[int]
-
-
 class CompletionWithResponse(Protocol):
-    """Protocol for completion objects that contain a model_response."""
+    """Protocol for exported AReaL completion records."""
 
-    model_response: CompletionResponse
+    def to_tensor_dict(self) -> dict[str, torch.Tensor]: ...
 
 
 @dataclass
@@ -83,6 +72,26 @@ def _is_prefix(seq1: list[int], seq2: list[int]) -> bool:
     return len(seq1) <= len(seq2) and seq2[: len(seq1)] == seq1
 
 
+def _extract_completion_tokens(completion_record: CompletionWithResponse) -> tuple[list[int], list[int], list[float], list[int]] | None:
+    """Return prompt/output token parts from an exported AReaL interaction."""
+
+    tensor_dict = completion_record.to_tensor_dict()
+    input_ids = tensor_dict["input_ids"].squeeze(0).tolist()
+    loss_mask = tensor_dict["loss_mask"].squeeze(0).tolist()
+    logprobs = tensor_dict["logprobs"].squeeze(0).tolist()
+    versions = tensor_dict["versions"].squeeze(0).tolist()
+
+    output_start = next((idx for idx, value in enumerate(loss_mask) if value), None)
+    if output_start is None:
+        return None
+
+    ob_tokens = [int(token) for token in input_ids[:output_start]]
+    ac_tokens = [int(token) for token, mask in zip(input_ids, loss_mask, strict=True) if mask]
+    ac_logprobs = [float(logprob) for logprob, mask in zip(logprobs, loss_mask, strict=True) if mask]
+    ac_versions = [int(version) for version, mask in zip(versions, loss_mask, strict=True) if mask]
+    return ob_tokens, ac_tokens, ac_logprobs, ac_versions
+
+
 def get_train_data_for_step(
     step: dict,
     completions: dict[str, CompletionWithResponse],
@@ -119,15 +128,19 @@ def get_train_data_for_step(
         return None
 
     completion_id = step["misc"]["action_misc"]["completion_id"]
-    completion = completions[completion_id].model_response
+    parts = _extract_completion_tokens(completions[completion_id])
+    if parts is None:
+        logger.warning("Completion ID %s for task %s has no trainable tokens", completion_id, task_id)
+        return None
+    ob_tokens, ac_tokens, ac_logprobs, ac_versions = parts
 
-    seq = list(completion.input_tokens) + list(completion.output_tokens)
-    logprobs = [0.0] * completion.input_len + list(completion.output_logprobs)
-    loss_mask = [0] * completion.input_len + [1] * completion.output_len
-    versions = [-1] * completion.input_len + list(completion.output_versions)
+    seq = ob_tokens + ac_tokens
+    logprobs = [0.0] * len(ob_tokens) + ac_logprobs
+    loss_mask = [0] * len(ob_tokens) + [1] * len(ac_tokens)
+    versions = [-1] * len(ob_tokens) + ac_versions
     attention_mask = torch.ones(len(seq), dtype=torch.bool).unsqueeze(0)
-    num_input_tokens = torch.tensor(completion.input_len, dtype=torch.float32).unsqueeze(0)
-    num_output_tokens = torch.tensor(completion.output_len, dtype=torch.float32).unsqueeze(0)
+    num_input_tokens = torch.tensor(len(ob_tokens), dtype=torch.float32).unsqueeze(0)
+    num_output_tokens = torch.tensor(len(ac_tokens), dtype=torch.float32).unsqueeze(0)
 
     return dict(
         input_ids=torch.tensor(seq).unsqueeze(0),
@@ -215,14 +228,17 @@ def get_train_data_for_trajectory(
             logger.warning(f"Completion ID {completion_id} not found for task {task_id}")
             continue
 
-        completion = completions[completion_id].model_response
+        parts = _extract_completion_tokens(completions[completion_id])
+        if parts is None:
+            logger.warning(
+                "Completion ID %s for task %s has no trainable tokens; skipping step %s",
+                completion_id,
+                task_id,
+                i,
+            )
+            continue
+        ob_tokens, ac_tokens, ac_logprobs, ac_versions = parts
         count_found += 1
-
-        # Get observation (input) and action (output) tokens
-        ob_tokens = list(completion.input_tokens)
-        ac_tokens = list(completion.output_tokens)
-        ac_logprobs = list(completion.output_logprobs)
-        ac_versions = list(completion.output_versions)
 
         # Track token counts (before merging) for overall trajectory stats
         total_input_tokens += len(ob_tokens)
@@ -439,7 +455,7 @@ def get_train_data_for_trajectory_collection(
             if include_traj_depth and trajectory_id in depth_map:
                 num_datums = trajectory_data["rewards"].shape[0]
                 trajectory_data["traj_depth"] = torch.full(
-                    (num_datums,), float(depth_map[trajectory_id]), dtype=torch.float32
+                    (num_datums,), int(depth_map[trajectory_id]), dtype=torch.long
                 )
                 if include_traj_start:
                     # Mark the first datum of this trajectory so we can count

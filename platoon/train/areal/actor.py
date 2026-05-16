@@ -25,9 +25,7 @@ class PlatoonActorImpl(PPOActor):
         self.config = config
 
     def _make_loss_fn(self, current_version: int | None) -> Callable[..., torch.Tensor]:
-        candidate_kwargs = dict(
-            clip_low_threshold=self.config.clip_low_threshold,
-            clip_high_threshold=self.config.clip_high_threshold,
+        common_kwargs = dict(
             importance_sampling_level=self.config.importance_sampling_level,
             eps_clip=self.config.eps_clip,
             eps_clip_higher=self.config.eps_clip_higher,
@@ -42,8 +40,11 @@ class PlatoonActorImpl(PPOActor):
             use_decoupled_loss=self.config.use_decoupled_loss,
             behave_imp_weight_mode=self.config.behave_imp_weight_mode,
         )
-        candidate_kwargs.update(self.config.loss_fn_kwargs)
-        return build_loss_fn(self.config.loss_fn, **candidate_kwargs)
+        return build_loss_fn(
+            self.config.loss_fn,
+            loss_fn_kwargs=self.config.loss_fn_kwargs,
+            common_kwargs=common_kwargs,
+        )
 
     @trace_perf("platoon_ppo_actor.ppo_update", category="compute")
     @stats_tracker.scope_func_wrapper("ppo_actor")

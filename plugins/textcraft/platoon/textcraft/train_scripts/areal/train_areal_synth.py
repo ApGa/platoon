@@ -3,8 +3,8 @@
 Uses the synthetic dataset with deeper crafting hierarchies and difficulty tagging.
 
 Usage:
-    python train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml scheduler.type=local
-    python train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml scheduler.type=local train.batch_size=64
+    python train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml +scheduler.type=local
+    python train_scripts/areal/train_areal_synth.py --config configs/areal/textcraft_synth_areal.yaml +scheduler.type=local +train.batch_size=64
 """
 
 import logging

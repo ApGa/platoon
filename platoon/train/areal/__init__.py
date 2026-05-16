@@ -26,9 +26,11 @@ from platoon.train.areal.config_defs import (  # noqa: E402
     WorkflowConfig,
 )
 from platoon.train.areal.loss_functions import (  # noqa: E402
+    LossFnSpec,
     build_loss_fn,
     cispo_loss_fn,
     get_loss_fn,
+    get_loss_fn_defaults,
     grpo_loss_fn,
     list_loss_fns,
     ppo_loss_fn,
@@ -36,7 +38,7 @@ from platoon.train.areal.loss_functions import (  # noqa: E402
 )
 from platoon.train.areal.proxy import ArealProxySession  # noqa: E402
 from platoon.train.areal.rl import PlatoonArealRLTrainer  # noqa: E402
-from platoon.train.areal.workflows import GroupRolloutWorkflow, StepWiseArealWorkflow  # noqa: E402
+from platoon.train.areal.workflows import GroupRolloutWorkflow  # noqa: E402
 
 __all__ = [
     # Config
@@ -54,16 +56,17 @@ __all__ = [
     "PlatoonArealRLTrainer",
     # Workflows
     "GroupRolloutWorkflow",
-    "StepWiseArealWorkflow",
     # Actor
     "PlatoonPPOActor",
     "create_actor",
     # Proxy
     "ArealProxySession",
     # Loss functions
+    "LossFnSpec",
     "build_loss_fn",
     "cispo_loss_fn",
     "get_loss_fn",
+    "get_loss_fn_defaults",
     "grpo_loss_fn",
     "ppo_loss_fn",
     "register_loss_fn",

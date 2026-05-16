@@ -24,6 +24,7 @@ rollout:
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
   scheduling_spec: ${actor.scheduling_spec}
+  setup_timeout: 900
   max_concurrent_rollouts: 8
   queue_size: null 
   consumer_batch_size: ${train_dataset.batch_size}
@@ -54,8 +55,9 @@ workflow_config:
 # CISPO loss function configuration (matches tinker settings)
 loss_fn_config:
   loss_fn: cispo
-  clip_low_threshold: 0.0
-  clip_high_threshold: 5.0
+  loss_fn_kwargs:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
 
 actor:
   backend: fsdp:d4p1t1

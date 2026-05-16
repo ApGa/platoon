@@ -2,6 +2,7 @@
 
 import functools
 import inspect
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import torch
@@ -9,14 +10,27 @@ from areal.trainer.ppo.actor import grpo_loss_fn as upstream_grpo_loss_fn
 from areal.trainer.ppo.stats import infer_token_denominator
 from areal.utils import stats_tracker
 
-_LOSS_FN_REGISTRY: dict[str, Callable] = {}
+@dataclass(frozen=True)
+class LossFnSpec:
+    """Registered loss function plus loss-specific default kwargs."""
+
+    fn: Callable
+    defaults: dict[str, Any] = field(default_factory=dict)
+    signature_fn: Callable | None = None
 
 
-def register_loss_fn(name: str):
+_LOSS_FN_REGISTRY: dict[str, LossFnSpec] = {}
+
+
+def register_loss_fn(
+    name: str,
+    defaults: dict[str, Any] | None = None,
+    signature_fn: Callable | None = None,
+):
     """Decorator to register a loss function by name."""
 
     def decorator(fn: Callable) -> Callable:
-        _LOSS_FN_REGISTRY[name] = fn
+        _LOSS_FN_REGISTRY[name] = LossFnSpec(fn=fn, defaults=dict(defaults or {}), signature_fn=signature_fn)
         return fn
 
     return decorator
@@ -27,7 +41,16 @@ def get_loss_fn(name: str) -> Callable:
     if name not in _LOSS_FN_REGISTRY:
         available = list(_LOSS_FN_REGISTRY.keys())
         raise ValueError(f"Unknown loss function: {name}. Available: {available}")
-    return _LOSS_FN_REGISTRY[name]
+    return _LOSS_FN_REGISTRY[name].fn
+
+
+def get_loss_fn_defaults(name: str) -> dict[str, Any]:
+    """Get a copy of default kwargs for a registered loss function."""
+
+    if name not in _LOSS_FN_REGISTRY:
+        available = list(_LOSS_FN_REGISTRY.keys())
+        raise ValueError(f"Unknown loss function: {name}. Available: {available}")
+    return dict(_LOSS_FN_REGISTRY[name].defaults)
 
 
 def list_loss_fns() -> list[str]:
@@ -35,18 +58,30 @@ def list_loss_fns() -> list[str]:
     return list(_LOSS_FN_REGISTRY.keys())
 
 
-def build_loss_fn(name: str, **kwargs: Any) -> Callable:
-    """Resolve a registered loss function and bind compatible kwargs."""
-
-    fn = get_loss_fn(name)
+def _filter_compatible_kwargs(fn: Callable, kwargs: dict[str, Any]) -> dict[str, Any]:
     signature = inspect.signature(fn)
     accepts_var_kwargs = any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
     )
     if accepts_var_kwargs:
-        filtered_kwargs = kwargs
-    else:
-        filtered_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in signature.parameters}
+
+
+def build_loss_fn(
+    name: str,
+    loss_fn_kwargs: dict[str, Any] | None = None,
+    common_kwargs: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Callable:
+    """Resolve a registered loss and bind defaults, user kwargs, then compatible common kwargs."""
+
+    fn = get_loss_fn(name)
+    spec = _LOSS_FN_REGISTRY[name]
+    loss_specific_kwargs = {**spec.defaults, **(loss_fn_kwargs or {}), **kwargs}
+    signature_fn = spec.signature_fn or fn
+    filtered_common_kwargs = _filter_compatible_kwargs(signature_fn, common_kwargs or {})
+    filtered_kwargs = _filter_compatible_kwargs(signature_fn, {**loss_specific_kwargs, **filtered_common_kwargs})
     return functools.partial(fn, **filtered_kwargs)
 
 
@@ -102,7 +137,13 @@ def _compute_sequence_level_ratio_and_advantages(
     return ratio, advantages
 
 
-@register_loss_fn("cispo")
+@register_loss_fn(
+    "cispo",
+    defaults={
+        "clip_low_threshold": 0.0,
+        "clip_high_threshold": 5.0,
+    },
+)
 def cispo_loss_fn(
     logprobs: torch.Tensor,
     entropy: torch.Tensor,
@@ -200,7 +241,7 @@ def cispo_loss_fn(
     return pg_loss
 
 
-@register_loss_fn("grpo")
+@register_loss_fn("grpo", signature_fn=upstream_grpo_loss_fn)
 def grpo_loss_fn(
     logprobs: torch.Tensor,
     entropy: torch.Tensor,
@@ -212,7 +253,7 @@ def grpo_loss_fn(
     return upstream_grpo_loss_fn(logprobs, entropy, input_data, **kwargs)
 
 
-@register_loss_fn("ppo")
+@register_loss_fn("ppo", signature_fn=upstream_grpo_loss_fn)
 def ppo_loss_fn(
     logprobs: torch.Tensor,
     entropy: torch.Tensor,

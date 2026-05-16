@@ -41,8 +41,10 @@ class LossFnConfig:
         # Use CISPO with custom clipping thresholds
         loss_fn_config = LossFnConfig(
             loss_fn="cispo",
-            clip_low_threshold=0.0,
-            clip_high_threshold=5.0,
+            loss_fn_kwargs={
+                "clip_low_threshold": 0.0,
+                "clip_high_threshold": 5.0,
+            },
         )
     """
 
@@ -50,11 +52,8 @@ class LossFnConfig:
     # Note: Using str instead of Literal for OmegaConf compatibility
     loss_fn: str = "grpo"
 
-    # CISPO-specific parameters
-    # CISPO clips the importance sampling ratio directly, then uses detach(clip(ρ)) * A * log π
-    # This ensures gradients always flow through log π, maintaining signal to all tokens
-    clip_low_threshold: float = 0.0  # Lower bound for importance ratio (default: no lower bound)
-    clip_high_threshold: float = 5.0  # Upper bound for importance ratio (default: 5)
+    # Loss-specific kwargs. Registered loss defaults are applied first, and
+    # values here override them.
     loss_fn_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -64,12 +63,7 @@ class PlatoonPPOActorConfig(PPOActorConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        # These are Platoon-owned loss settings. They are intentionally not
-        # part of the user-facing actor schema; `loss_fn_config` is the only
-        # supported way to configure them.
         self.loss_fn = "grpo"
-        self.clip_low_threshold = 0.0
-        self.clip_high_threshold = 5.0
         self.loss_fn_kwargs: dict[str, Any] = {}
 
 
@@ -159,16 +153,12 @@ class PlatoonArealRLTrainerConfig(GRPOConfig):
         if self.eval_gconfig is None:
             self.eval_gconfig = self.gconfig.new()
 
-        self.actor.loss_fn = self.loss_fn_config.loss_fn
-        self.actor.clip_low_threshold = self.loss_fn_config.clip_low_threshold
-        self.actor.clip_high_threshold = self.loss_fn_config.clip_high_threshold
-        merged_loss_fn_kwargs = dict(self.actor.loss_fn_kwargs)
-        merged_loss_fn_kwargs.update(self.loss_fn_config.loss_fn_kwargs)
-        merged_loss_fn_kwargs.setdefault("clip_low_threshold", self.loss_fn_config.clip_low_threshold)
-        merged_loss_fn_kwargs.setdefault("clip_high_threshold", self.loss_fn_config.clip_high_threshold)
-        self.actor.loss_fn_kwargs = merged_loss_fn_kwargs
-
         super().__post_init__()
+
+        self.actor.loss_fn = self.loss_fn_config.loss_fn
+        merged_loss_fn_kwargs = dict(getattr(self.actor, "loss_fn_kwargs", {}))
+        merged_loss_fn_kwargs.update(self.loss_fn_config.loss_fn_kwargs)
+        self.actor.loss_fn_kwargs = merged_loss_fn_kwargs
 
         if not self.rollout.backend:
             raise ValueError("rollout.backend must be set explicitly")

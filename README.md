@@ -250,8 +250,9 @@ workflow_config:
 
 loss_fn_config:
   loss_fn: cispo
-  clip_low_threshold: 0.0
-  clip_high_threshold: 5.0
+  loss_fn_kwargs:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
 
 actor:
   backend: fsdp:d4p1t1

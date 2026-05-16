@@ -349,6 +349,3 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
             await session.__aexit__(None, None, None)
 
         return await self._process_trajectory_result(trajectory_data, session, task_id, rollout_number)
-
-
-StepWiseArealWorkflow = GroupRolloutWorkflow

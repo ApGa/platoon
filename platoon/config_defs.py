@@ -15,7 +15,7 @@ class InferenceParams:
     """
 
     temperature: float | None = 1.0
-    top_p: float | None = None
+    top_p: float | None = 1.0
     max_completion_tokens: int = 512
 
 
