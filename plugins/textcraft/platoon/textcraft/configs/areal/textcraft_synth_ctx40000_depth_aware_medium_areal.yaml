@@ -10,6 +10,25 @@ eval_difficulties: null
 depth_aware: true
 #enable_offload: false
 
+plugin:
+  package: platoon.textcraft.registry
+  trainer_config: textcraft/synth/areal
+  dataset_loader: textcraft/synth
+  eval_dataset_loader: textcraft/synth
+  task_loader: textcraft/synth
+  rollout: textcraft/synth/depth_aware
+  reward_processor: textcraft/synth/delegation_capped
+  workflow: group_rollout
+  dataset_kwargs:
+    difficulties: ["medium"]
+    num_samples_train: 2522
+    num_samples_val: 632
+  eval_dataset_kwargs:
+    difficulties: null
+    limit: 100
+    num_samples_train: 2522
+    num_samples_val: 632
+
 cluster:
   n_nodes: 1  
   n_gpus_per_node: 8

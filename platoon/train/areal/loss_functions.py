@@ -10,6 +10,8 @@ from areal.trainer.ppo.actor import grpo_loss_fn as upstream_grpo_loss_fn
 from areal.trainer.ppo.stats import infer_token_denominator
 from areal.utils import stats_tracker
 
+from platoon.registry import get_registry
+
 @dataclass(frozen=True)
 class LossFnSpec:
     """Registered loss function plus loss-specific default kwargs."""
@@ -19,7 +21,7 @@ class LossFnSpec:
     signature_fn: Callable | None = None
 
 
-_LOSS_FN_REGISTRY: dict[str, LossFnSpec] = {}
+_LOSS_FN_REGISTRY = get_registry("loss")
 
 
 def register_loss_fn(
@@ -30,7 +32,11 @@ def register_loss_fn(
     """Decorator to register a loss function by name."""
 
     def decorator(fn: Callable) -> Callable:
-        _LOSS_FN_REGISTRY[name] = LossFnSpec(fn=fn, defaults=dict(defaults or {}), signature_fn=signature_fn)
+        _LOSS_FN_REGISTRY.register(
+            name,
+            LossFnSpec(fn=fn, defaults=dict(defaults or {}), signature_fn=signature_fn),
+            exist_ok=True,
+        )
         return fn
 
     return decorator
@@ -38,24 +44,18 @@ def register_loss_fn(
 
 def get_loss_fn(name: str) -> Callable:
     """Get a loss function by name."""
-    if name not in _LOSS_FN_REGISTRY:
-        available = list(_LOSS_FN_REGISTRY.keys())
-        raise ValueError(f"Unknown loss function: {name}. Available: {available}")
-    return _LOSS_FN_REGISTRY[name].fn
+    return _LOSS_FN_REGISTRY.get(name).fn
 
 
 def get_loss_fn_defaults(name: str) -> dict[str, Any]:
     """Get a copy of default kwargs for a registered loss function."""
 
-    if name not in _LOSS_FN_REGISTRY:
-        available = list(_LOSS_FN_REGISTRY.keys())
-        raise ValueError(f"Unknown loss function: {name}. Available: {available}")
-    return dict(_LOSS_FN_REGISTRY[name].defaults)
+    return dict(_LOSS_FN_REGISTRY.get(name).defaults)
 
 
 def list_loss_fns() -> list[str]:
     """List all registered loss functions."""
-    return list(_LOSS_FN_REGISTRY.keys())
+    return _LOSS_FN_REGISTRY.names()
 
 
 def _filter_compatible_kwargs(fn: Callable, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -77,7 +77,7 @@ def build_loss_fn(
     """Resolve a registered loss and bind defaults, user kwargs, then compatible common kwargs."""
 
     fn = get_loss_fn(name)
-    spec = _LOSS_FN_REGISTRY[name]
+    spec = _LOSS_FN_REGISTRY.get(name)
     loss_specific_kwargs = {**spec.defaults, **(loss_fn_kwargs or {}), **kwargs}
     signature_fn = spec.signature_fn or fn
     filtered_common_kwargs = _filter_compatible_kwargs(signature_fn, common_kwargs or {})

@@ -105,9 +105,27 @@ Use these sections as the supported surface:
 - `workflow_config` for rollout/group behavior
 - `workflow_config.rollout_config.inference_params` for rollout-time generation settings
 - `loss_fn_config` for loss selection and loss-specific kwargs
+- `plugin` for registry-backed dataset, task, rollout, and reward selection
 - `train_dataset.batch_size` / `valid_dataset.batch_size` for dataloader sizing
 
 Do not use the old compatibility keys such as `allocation_mode`, `launcher`, actor-side loss config duplicates, or `gconfig` generation knobs.
+
+### Registry-Driven Training
+
+TextCraft registers its reusable training components in `platoon.textcraft.registry`. Shared trainers can import that module and resolve components from config:
+
+```yaml
+plugin:
+  package: platoon.textcraft.registry
+  dataset_loader: textcraft/synth
+  eval_dataset_loader: textcraft/synth
+  task_loader: textcraft/synth
+  rollout: textcraft/synth/depth_aware
+  reward_processor: textcraft/synth/delegation_capped
+  workflow: group_rollout
+```
+
+Thin wrappers are available at `train_scripts/areal/train_registered.py` and `train_scripts/tinker/train_registered.py`. Existing handwritten train scripts are still supported during migration.
 
 ## Components
 

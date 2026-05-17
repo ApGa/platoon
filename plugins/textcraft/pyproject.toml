@@ -10,6 +10,9 @@ dependencies = [
     "platoon >= 0.1.0",
 ]
 
+[project.entry-points."platoon.plugins"]
+textcraft = "platoon.textcraft.registry"
+
 [project.optional-dependencies]
 # Training backends - install one of these for training
 tinker = [

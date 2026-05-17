@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from platoon.config_defs import RolloutConfig
+from platoon.train.components import PluginResolverConfig
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
 
@@ -110,6 +111,11 @@ class PlatoonTinkerRLTrainerConfig:
     eval: EvalConfig
     log_path: str
     tinker_base_url: str | None = None  # Tinker service URL
+    plugin: PluginResolverConfig = field(default_factory=PluginResolverConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
+
+    def __post_init__(self):
+        if isinstance(self.plugin, dict):
+            self.plugin = PluginResolverConfig(**self.plugin)

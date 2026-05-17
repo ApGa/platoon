@@ -277,8 +277,52 @@ Supported sources of truth:
 - Rollout/group behavior lives under `workflow_config`.
 - Generation settings used by Platoon rollouts live under `workflow_config.rollout_config.inference_params`.
 - Loss selection and clipping live under `loss_fn_config`.
+- Plugin-specific datasets, tasks, rollouts, rewards, and workflows can be selected under `plugin`.
 - Engine placement lives under explicit per-engine `backend` fields like `rollout.backend` and `actor.backend`.
 - Dataset config is intentionally minimal; Platoon only supports the dataloader knobs it actually consumes.
+
+### Registry-Based Extension
+
+Plugins can expose reusable components through Platoon's registries instead of writing a new trainer script for every environment/backend pair:
+
+```python
+from platoon.registry import register_dataset_loader, register_reward_processor, register_rollout, register_task_loader
+
+
+@register_task_loader("my_plugin/tasks")
+def get_task(task_id: str):
+    ...
+
+
+@register_dataset_loader("my_plugin/train")
+def load_dataset(config, split: str, **kwargs):
+    ...
+
+
+@register_rollout("my_plugin/recursive")
+async def run_rollout(task, rollout_config):
+    ...
+
+
+@register_reward_processor("my_plugin/reward")
+def reward_processor(traj: dict):
+    return traj["reward"], {}
+```
+
+YAML can then select those components by name:
+
+```yaml
+plugin:
+  package: my_plugin.registry
+  dataset_loader: my_plugin/train
+  eval_dataset_loader: my_plugin/train
+  task_loader: my_plugin/tasks
+  rollout: my_plugin/recursive
+  reward_processor: my_plugin/reward
+  workflow: group_rollout
+```
+
+Registry names are the preferred documented contract. Import paths such as `my_plugin.rollouts.run_rollout` remain supported for compatibility and for AReaL remote worker reconstruction.
 
 Removed from the Platoon-supported AReaL surface:
 - `allocation_mode`
