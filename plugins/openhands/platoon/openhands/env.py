@@ -3,13 +3,8 @@ from __future__ import annotations
 import asyncio
 import threading
 from copy import deepcopy
+from typing import Callable
 
-from openhands.sdk.agent.base import AgentBase
-from openhands.sdk.conversation import get_agent_final_response
-from openhands.sdk.conversation.base import BaseConversation
-from openhands.sdk.conversation.conversation import Conversation
-from openhands.sdk.conversation.state import ConversationExecutionStatus
-from openhands.sdk.workspace.base import BaseWorkspace
 from platoon.envs.base import Task
 from platoon.episode.context import (
     current_trajectory,
@@ -19,24 +14,48 @@ from platoon.episode.context import (
 )
 from platoon.utils.openhands_utils import get_obs_for_last_action, is_finished
 
+from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.conversation import get_agent_final_response
+from openhands.sdk.conversation.base import BaseConversation
+from openhands.sdk.conversation.conversation import Conversation
+from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.event.base import Event
+from openhands.sdk.workspace.base import BaseWorkspace
+
 from .types import OpenHandsAction, OpenHandsObservation, OpenHandsTrajectoryStep
 
 
+def _conversation_execution_status(conversation_state) -> ConversationExecutionStatus | None:
+    return (
+        getattr(conversation_state, "agent_status", None)
+        or getattr(conversation_state, "execution_status", None)
+        or getattr(conversation_state, "agent_state", None)
+    )
+
+
 class OpenHandsEnv:
-    def __init__(self, task: Task, agent: AgentBase, workspace: str | BaseWorkspace):
+    def __init__(
+        self,
+        task: Task,
+        agent: AgentBase,
+        workspace: str | BaseWorkspace,
+        callbacks: list[Callable[[Event], None]] | None = None,
+    ):
         self._task = task
         self._agent = agent
         if not isinstance(workspace, BaseWorkspace):
             workspace = str(workspace)
         self._workspace = workspace
+        self._callbacks = callbacks or []
         self._conversation = None
 
     async def reset(self) -> OpenHandsObservation:
         self._conversation: BaseConversation = Conversation(
             agent=self._agent,
+            callbacks=self._callbacks,
             workspace=self._workspace,
             visualizer=None,
-            max_iteration_per_run=self._task.max_steps,
+            max_iteration_per_run=self._task.max_steps or 500,
         )
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
         self._conversation.send_message(self._task.goal)
@@ -85,7 +104,7 @@ class OpenHandsEnv:
             self._state.finished = True
             finish_message.set(get_agent_final_response(self._conversation.state.events))
             self._state.misc["finish_message"] = finish_message.get()
-            if self._state.conversation_state.agent_status == ConversationExecutionStatus.STUCK:
+            if _conversation_execution_status(self._state.conversation_state) == ConversationExecutionStatus.STUCK:
                 error_message.set("Agent got stuck")
                 self._state.misc["error_message"] = error_message.get()
 
@@ -113,4 +132,4 @@ class OpenHandsEnv:
         # NOTE: The agent might have state, during the copy, but should be reinitialized before use withenv.reset().
         # TODO: Need to double-check that this works for remote agent server case.
         # TODO: Consider explicitly resetting the agent here manually.
-        return type(self)(task=task, agent=deepcopy(self._agent), workspace=self._workspace)
+        return type(self)(task=task, agent=deepcopy(self._agent), workspace=self._workspace, callbacks=self._callbacks)

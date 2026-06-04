@@ -27,6 +27,283 @@ from rich.text import Text
 from textual.binding import Binding
 from textual.events import MouseDown, MouseMove, MouseUp
 
+BRIDGE_EVENT_TYPES = {
+    "session_started",
+    "task_requested",
+    "tool_call",
+    "tool_result",
+    "max_tool_calls_exceeded",
+    "session_closing",
+}
+
+
+def _shorten_text(value: Any, max_chars: int = 240) -> str:
+    text = str(value).replace("\n", " ").strip()
+    return " ".join(text.split())
+
+
+def _as_dict_list(value: Any, nested_key: str | None = None) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        if nested_key and isinstance(value.get(nested_key), list):
+            return [item for item in value[nested_key] if isinstance(item, dict)]
+        if isinstance(value.get("action_events"), list):
+            return [item for item in value["action_events"] if isinstance(item, dict)]
+        if isinstance(value.get("observation_events"), list):
+            return [item for item in value["observation_events"] if isinstance(item, dict)]
+        if "kind" in value:
+            return [value]
+    return []
+
+
+def _step_action_events(step: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _as_dict_list(step.get("action_events"), "action_events")
+
+
+def _step_observation_events(step: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _as_dict_list(step.get("observation_events"), "observation_events")
+
+
+def _text_block_value(block: Any) -> str | None:
+    if isinstance(block, dict):
+        text = block.get("text")
+        if isinstance(text, str):
+            return text
+        if isinstance(block.get("content"), str):
+            return block["content"]
+    elif isinstance(block, str):
+        return block
+    return None
+
+
+def _parse_json_string(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _format_inline_value(value: Any, max_chars: int = 80) -> str:
+    parsed = _parse_json_string(value)
+    if isinstance(parsed, str):
+        return _shorten_text(parsed)
+    if isinstance(parsed, (int, float, bool)) or parsed is None:
+        return str(parsed)
+    if isinstance(parsed, list):
+        inner = ", ".join(_format_inline_value(item) for item in parsed)
+        return f"[{inner}]"
+    if isinstance(parsed, dict):
+        return _format_args_inline(parsed)
+    return _shorten_text(parsed)
+
+
+def _format_args_inline(value: Any, max_items: int = 4, max_chars: int = 180) -> str:
+    parsed = _parse_json_string(value)
+    if parsed in (None, "", {}):
+        return ""
+    if not isinstance(parsed, dict):
+        return _format_inline_value(parsed)
+
+    parts: List[str] = []
+    for key, item in parsed.items():
+        parts.append(f"{key}={_format_inline_value(item, 56)}")
+    return _shorten_text(", ".join(parts))
+
+
+def _pretty_json(value: Any) -> str:
+    return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _tool_call_display(event: Dict[str, Any]) -> tuple[str | None, Any]:
+    action = event.get("action")
+    action_data = action.get("data") if isinstance(action, dict) else None
+    if isinstance(action_data, dict) and action_data:
+        tool_name = action_data.get("name") or event.get("tool_name")
+        arguments = action_data.get("arguments")
+    else:
+        tool_name = event.get("tool_name")
+        arguments = None
+        tool_call = event.get("tool_call")
+        if isinstance(tool_call, dict):
+            tool_name = tool_call.get("name") or tool_name
+            arguments = tool_call.get("arguments")
+
+    arguments = _parse_json_string(arguments)
+    if tool_name == "call_tool" and isinstance(arguments, dict):
+        catalog_name = arguments.get("name")
+        if isinstance(catalog_name, str) and catalog_name:
+            return catalog_name, arguments.get("arguments") or {}
+    return tool_name if isinstance(tool_name, str) else None, arguments
+
+
+def _observation_payload(event: Dict[str, Any]) -> Any:
+    observation = event.get("observation")
+    if not isinstance(observation, dict):
+        return None
+    content = observation.get("content")
+    if isinstance(content, str):
+        return _parse_json_string(content)
+    if not isinstance(content, list):
+        return None
+
+    payloads: List[Any] = []
+    for block in content:
+        text = _text_block_value(block)
+        if not text or text.startswith("[Tool "):
+            continue
+        parsed = _parse_json_string(text)
+        if isinstance(parsed, dict) and "text" in parsed:
+            payloads.append(_parse_json_string(parsed.get("text")))
+        elif isinstance(parsed, dict) and "blocks" in parsed:
+            payloads.append(parsed.get("blocks"))
+        else:
+            payloads.append(parsed)
+    if not payloads:
+        return None
+    if len(payloads) == 1:
+        return payloads[0]
+    return payloads
+
+
+def _observation_preview(event: Dict[str, Any]) -> str | None:
+    payload = _observation_payload(event)
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return _shorten_text(payload)
+    return _shorten_text(_pretty_json(payload))
+
+
+def _message_text(event: Dict[str, Any]) -> str | None:
+    message = event.get("llm_message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [_text_block_value(block) for block in content]
+        text = " ".join(part for part in parts if part)
+        return text or None
+    return None
+
+
+def _thought_text(event: Dict[str, Any]) -> str | None:
+    thought = event.get("thought")
+    if isinstance(thought, str):
+        return thought
+    if isinstance(thought, list):
+        parts = [_text_block_value(block) for block in thought]
+        text = " ".join(part for part in parts if part)
+        return text or None
+    return None
+
+
+def _observation_text(event: Dict[str, Any]) -> str | None:
+    payload = _observation_payload(event)
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload
+    return _pretty_json(payload)
+
+
+def _openhands_event_summary(event: Dict[str, Any]) -> str:
+    kind = event.get("kind")
+    if kind == "ObservationEvent":
+        observation = _observation_preview(event)
+        if observation:
+            raw_tool_name = event.get("tool_name")
+            if isinstance(raw_tool_name, str) and raw_tool_name:
+                return f"{raw_tool_name}: {observation}"
+            return f"observation: {observation}"
+
+    tool_name, arguments = _tool_call_display(event)
+    if isinstance(tool_name, str) and tool_name:
+        args_text = _format_args_inline(arguments)
+        return f"{tool_name}: {args_text}" if args_text else tool_name
+
+    observation = _observation_preview(event)
+    if observation:
+        return f"observation: {observation}"
+
+    thought = _thought_text(event)
+    if thought:
+        return f"thought: {_shorten_text(thought)}"
+
+    message = _message_text(event)
+    if message:
+        return f"message: {_shorten_text(message)}"
+
+    if isinstance(kind, str) and kind:
+        return kind
+    return _shorten_text(event)
+
+
+def _openhands_step_summary(step: Dict[str, Any]) -> str | None:
+    action_summaries = [_openhands_event_summary(event) for event in _step_action_events(step)]
+    observation_events = _step_observation_events(step)
+    non_system_observations = [event for event in observation_events if event.get("kind") != "SystemPromptEvent"]
+    observation_summaries = [_openhands_event_summary(event) for event in non_system_observations or observation_events]
+
+    parts: List[str] = []
+    if action_summaries:
+        parts.append(action_summaries[0])
+
+    # Surface tool failures directly in the tree label. Successful observation text
+    # is usually redundant with the action summary and can be very large.
+    for summary in observation_summaries:
+        lowered = summary.lower()
+        if "error" in lowered or "traceback" in lowered or "exception" in lowered:
+            parts.append(f"-> {summary}")
+            break
+
+    if not parts and observation_summaries:
+        parts.append(observation_summaries[0])
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
+def _bridge_collection_id(record: Dict[str, Any]) -> str:
+    task_name = record.get("task_name")
+    if isinstance(task_name, str) and task_name:
+        return f"bridge:{task_name}"
+    env = record.get("env")
+    if isinstance(env, str) and env:
+        return f"bridge:{env}"
+    return "bridge"
+
+
+def _bridge_record_summary(record: Dict[str, Any]) -> str:
+    record_type = record.get("type", "bridge")
+    if record_type == "tool_call":
+        args_text = _format_args_inline(record.get("arguments"))
+        suffix = f": {args_text}" if args_text else ""
+        return f"call {record.get('tool_name', 'tool')}{suffix}"
+    if record_type == "tool_result":
+        result = record.get("result")
+        text = result.get("text") if isinstance(result, dict) else result
+        return f"result {record.get('tool_name', 'tool')}: {_shorten_text(text)}"
+    if record_type == "task_requested":
+        return f"task requested · {record.get('prompt_chars', '?')} prompt chars"
+    if record_type == "session_started":
+        return f"session · {record.get('env', '?')} · {record.get('split', '?')}"
+    if record_type == "session_closing":
+        return f"session closing · finished:{record.get('finished')}"
+    return _shorten_text(record)
+
+
+def _record_sort_key(record: Dict[str, Any]) -> float:
+    value = record.get("ts", record.get("time", 0.0))
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
 
 class PlayPauseFriendlyTree(Tree):
     """A Tree widget that doesn't capture space key, allowing it to bubble up for play/pause."""
@@ -501,6 +778,8 @@ class TrajectoryTree(Static):
         # Maintain a single "steps" container per trajectory to avoid duplicates
         # Map (trajectory_id, step_index) -> step node to enable focusing/scrolling
         self.step_nodes: Dict[tuple[str, int], TreeNode[str]] = {}
+        # Map (bridge collection, turn) -> node for raw OpenReward bridge JSONL files.
+        self.bridge_turn_nodes: Dict[tuple[str, int], TreeNode[str]] = {}
         # Track the latest known reward per trajectory for quick label updates
         self.traj_rewards: Dict[str, float] = {}
         # Track whether a trajectory has reached a terminal state.
@@ -532,6 +811,7 @@ class TrajectoryTree(Static):
         self.traj_to_group_label.clear()
         self.traj_steps_nodes.clear()
         self.step_nodes.clear()
+        self.bridge_turn_nodes.clear()
         self.traj_rewards.clear()
         self.traj_finished.clear()
         self.expanded_trajs.clear()
@@ -842,6 +1122,8 @@ class SplitDivider(Static):
         # Group strictly by collection_id to ensure all trajectories from the same
         # dump or live session appear under a single root node.
         collection_id = event.data.get("collection_id")
+        if not collection_id and event.type in BRIDGE_EVENT_TYPES:
+            collection_id = _bridge_collection_id(event.data)
 
         # Extract trajectory id (if present) for stable grouping between events
         traj_id_for_group: Optional[str] = None
@@ -967,6 +1249,10 @@ class SplitDivider(Static):
                     v = step.get(k)
                     if v:
                         summary_parts.append(k)
+                if not summary_parts:
+                    openhands_summary = _openhands_step_summary(step)
+                    if openhands_summary:
+                        summary_parts.append(openhands_summary)
             step_summary = "; ".join(summary_parts) if summary_parts else "(details)"
             step_node = steps_group.add(f"step {step_index}: {step_summary}")
             step_node.data = {"type": "step", "payload": step}
@@ -1002,6 +1288,22 @@ class SplitDivider(Static):
                 pass
             # Refresh label to reflect final reward and status
             self._set_node_label(node, self._format_traj_label(traj_id))
+
+        elif event.type in BRIDGE_EVENT_TYPES:
+            if group_node is None:
+                return
+            turn = event.data.get("turn")
+            if isinstance(turn, int):
+                turn_key = (str(collection_id), turn)
+                turn_node = self.bridge_turn_nodes.get(turn_key)
+                if turn_node is None:
+                    turn_node = group_node.add(f"turn {turn}")
+                    turn_node.data = {"type": "bridge_turn", "payload": {"turn": turn}}
+                    self.bridge_turn_nodes[turn_key] = turn_node
+                bridge_node = turn_node.add(_bridge_record_summary(event.data))
+            else:
+                bridge_node = group_node.add(_bridge_record_summary(event.data))
+            bridge_node.data = {"type": "bridge_event", "payload": event.data}
 
     def focus_step(self, traj_id: str, step_index: int) -> None:
         if self.tree_widget is None:
@@ -1521,7 +1823,7 @@ class TrajectoryViewer(App):
                     records.append(record)
                 except Exception:
                     continue
-        records.sort(key=lambda r: r.get("ts", 0.0))
+        records.sort(key=_record_sort_key)
         self._replay_records = records
         self._replay_index = 0
         # If running auto-play, loop until done; otherwise, render first frame if any
@@ -1545,7 +1847,7 @@ class TrajectoryViewer(App):
                     records.append(record)
                 except Exception:
                     continue
-        records.sort(key=lambda r: r.get("ts", 0.0))
+        records.sort(key=_record_sort_key)
         for record in records:
             await self._handle_record(record)
 
@@ -1562,7 +1864,7 @@ class TrajectoryViewer(App):
                     records.append(record)
                 except Exception:
                     continue
-        records.sort(key=lambda r: r.get("ts", 0.0))
+        records.sort(key=_record_sort_key)
         # For multi-file replay we can just stream sorted records
         for record in records:
             await self._handle_record(record)
@@ -1585,7 +1887,7 @@ class TrajectoryViewer(App):
                             continue
             except Exception:
                 continue
-        all_records.sort(key=lambda r: r.get("ts", 0.0))
+        all_records.sort(key=_record_sort_key)
         self._replay_records = all_records
         self._replay_index = 0
         # Start paused
@@ -1611,7 +1913,7 @@ class TrajectoryViewer(App):
                             continue
             except Exception:
                 continue
-        all_records.sort(key=lambda r: r.get("ts", 0.0))
+        all_records.sort(key=_record_sort_key)
         # Bulk load without per-record refresh
         if self.tree_widget is not None:
             self.tree_widget.bulk_loading = True
@@ -1806,8 +2108,71 @@ class DetailsPanel(Static):
             return False
         return query.lower() in self.current_content.lower()
 
+    def _is_openhands_step(self, data: Dict[str, Any]) -> bool:
+        return "action_events" in data or "observation_events" in data
+
+    def _render_openhands_step(self, data: Dict[str, Any]) -> Any:
+        panels: List[Any] = []
+        summary = _openhands_step_summary(data) or "OpenHands step"
+        panels.append(Panel(Text(summary, no_wrap=False, overflow="fold"), title="summary"))
+
+        action_events = _step_action_events(data)
+        if action_events:
+            panels.append(self._render_openhands_events("actions", action_events))
+
+        observation_events = _step_observation_events(data)
+        if observation_events:
+            panels.append(self._render_openhands_events("observations", observation_events))
+
+        for key, value in data.items():
+            if key in {"action_events", "observation_events"}:
+                continue
+            panels.append(self._render_key_value(key, value))
+        return Group(*panels) if panels else Text("<empty>")
+
+    def _render_openhands_events(self, title: str, events: List[Dict[str, Any]]) -> Panel:
+        cards: List[Any] = []
+        for index, event in enumerate(events, start=1):
+            lines = Text()
+
+            event_id = event.get("id")
+            timestamp = event.get("timestamp")
+            if event_id or timestamp:
+                lines.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+
+            thought = _thought_text(event)
+            if thought:
+                lines.append(f"thought: {_shorten_text(thought, 800)}\n")
+
+            message = _message_text(event)
+            if message:
+                lines.append(f"message: {_shorten_text(message, 800)}\n")
+
+            tool_name, arguments = _tool_call_display(event)
+            if tool_name and arguments not in (None, "", {}):
+                try:
+                    argument_view = Syntax(_pretty_json(_parse_json_string(arguments)), "json", word_wrap=True)
+                except Exception:
+                    argument_view = Text(str(arguments), no_wrap=False, overflow="fold")
+                cards.append(Panel(argument_view, title=f"{index}. {tool_name} arguments"))
+                continue
+
+            payload = _observation_payload(event)
+            if payload is not None:
+                if isinstance(payload, str):
+                    payload_view: Any = Text(payload, no_wrap=False, overflow="fold")
+                else:
+                    payload_view = Syntax(_pretty_json(payload), "json", word_wrap=True)
+                cards.append(Panel(payload_view, title=f"{index}. {_openhands_event_summary(event)}"))
+                continue
+
+            cards.append(Panel(lines or Text("<empty>"), title=f"{index}. {_openhands_event_summary(event)}"))
+        return Panel(Group(*cards), title=title) if cards else Panel(Text("<empty>"), title=title)
+
     def _render_data(self, data: Any) -> Any:
         if isinstance(data, dict):
+            if self._is_openhands_step(data):
+                return self._render_openhands_step(data)
             # Render as a set of panels for each field to keep things readable
             panels: List[Any] = []
             for key, value in data.items():

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Iterable, Protocol, runtime_checkable
 
 from platoon.envs.base import Task
@@ -11,6 +11,24 @@ from platoon.episode.context import (
     current_trajectory_collection,
     finish_message,
 )
+
+
+def _to_jsonable(obj: Any) -> Any:
+    if is_dataclass(obj):
+        return _to_jsonable(asdict(obj))
+    model_dump = getattr(obj, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _to_jsonable(model_dump(mode="json"))
+        except TypeError:
+            return _to_jsonable(model_dump())
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    return str(obj)
 
 
 @dataclass
@@ -148,9 +166,13 @@ class TrajectoryCollection:
     def to_dict(self) -> dict[str, Any]:
         """Serialize without handlers or file pointers for portability.
 
-        Avoids dataclasses.asdict to skip non-serializable fields (handlers).
+        Avoids serializing handlers and normalizes nested SDK objects such as
+        OpenHands events into JSON-safe dictionaries.
         """
-        return {"id": self.id, "trajectories": {traj_id: asdict(traj) for traj_id, traj in self.trajectories.items()}}
+        return {
+            "id": self.id,
+            "trajectories": {traj_id: _to_jsonable(traj) for traj_id, traj in self.trajectories.items()},
+        }
 
 
 # TODO: This is minimal for now on purpose, to better understand needs.
