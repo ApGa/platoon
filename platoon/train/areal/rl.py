@@ -112,6 +112,20 @@ class PlatoonArealRLTrainer(PPOTrainer):
         """Platoon workflows already own rollout multiplicity internally."""
         return 1
 
+    def _clear_actor_cuda_cache(self, global_step: int, label: str) -> None:
+        clear_cuda_cache = getattr(self.actor, "clear_cuda_cache", None)
+        if clear_cuda_cache is None:
+            return
+        with (
+            stats_tracker.record_timing(f"{label}_clear_cuda_cache"),
+            perf_tracer.trace_scope(
+                f"train.{label}_clear_cuda_cache",
+                category=Category.INSTR,
+                args={"global_step": global_step},
+            ),
+        ):
+            clear_cuda_cache()
+
     def _actor_dispatch_dp_size(self) -> int:
         """Return the DP size used by AReaL controller tensor dispatch."""
         parallel_strategy = getattr(self.actor, "parallel_strategy", None)
@@ -253,6 +267,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 break
             epoch = global_step // steps_per_epoch
             step = global_step % steps_per_epoch
+            batches_cleared = False
 
             if self._should_offload_rollout:
                 self._onload_rollout()
@@ -367,6 +382,18 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     adv_batch = self.actor.compute_advantages(rollout_batch)
                     self.actor.get_device_stats().log("compute advantages")
 
+                with (
+                    stats_tracker.record_timing("clear_rollout_batch"),
+                    perf_tracer.trace_scope(
+                        "train.clear_rollout_batch",
+                        category=Category.INSTR,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    self.actor.clear_batches(rollout_batch)
+                    rollout_batch = None
+                self._clear_actor_cuda_cache(global_step, "post_advantage")
+
                 self.saver.maybe_wait_for_staging()
 
                 with (
@@ -399,6 +426,22 @@ class PlatoonArealRLTrainer(PPOTrainer):
                         self.critic.get_device_stats().log("ppo critic update")
                     if self._should_offload_critic:
                         self._offload_model(self.critic, role="critic")
+
+                with (
+                    stats_tracker.record_timing("clear_train_batches"),
+                    perf_tracer.trace_scope(
+                        "train.clear_train_batches",
+                        category=Category.INSTR,
+                        args={"global_step": global_step},
+                    ),
+                ):
+                    if adv_batch is not None:
+                        self.actor.clear_batches(adv_batch)
+                        adv_batch = None
+                    if self.data_controller is not None:
+                        self.data_controller.clear_batches()
+                    batches_cleared = True
+                self._clear_actor_cuda_cache(global_step, "post_update")
 
                 self.rollout.pause()
 
@@ -484,10 +527,15 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     args={"global_step": global_step},
                 ),
             ):
-                if rollout_batch is not None and adv_batch is not None:
-                    self.actor.clear_batches(rollout_batch, adv_batch)
-                if self.data_controller is not None:
-                    self.data_controller.clear_batches()
+                if not batches_cleared:
+                    if rollout_batch is not None and adv_batch is not None:
+                        self.actor.clear_batches(rollout_batch, adv_batch)
+                    elif rollout_batch is not None:
+                        self.actor.clear_batches(rollout_batch)
+                    elif adv_batch is not None:
+                        self.actor.clear_batches(adv_batch)
+                    if self.data_controller is not None:
+                        self.data_controller.clear_batches()
 
             with perf_tracer.trace_scope(
                 "train.log_stats",

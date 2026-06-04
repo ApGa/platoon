@@ -1,5 +1,6 @@
 """Custom PPO actor support for Platoon's AReaL backend."""
 
+import gc
 from collections.abc import Callable
 from typing import Any
 
@@ -10,7 +11,12 @@ from areal.engine import FSDPPPOActor
 from areal.trainer.ppo.actor import PPOActor, PPOActorController
 from areal.trainer.ppo.stats import infer_token_denominator
 from areal.utils import stats_tracker
-from areal.utils.data import split_padded_tensor_dict_into_mb_list
+from areal.utils.data import (
+    broadcast_tensor_container,
+    concat_batch,
+    split_padded_tensor_dict_into_mb_list,
+    tensor_container_to,
+)
 from areal.utils.perf_tracer import trace_perf
 
 from platoon.train.areal.config_defs import PlatoonPPOActorConfig
@@ -50,6 +56,28 @@ class PlatoonActorImpl(PPOActor):
     @stats_tracker.scope_func_wrapper("ppo_actor")
     def ppo_update(self, data: list[dict[str, Any]]) -> None:
         return super().ppo_update(data)
+
+    @trace_perf("platoon_ppo_actor.ppo_update_batched", category="compute")
+    @stats_tracker.scope_func_wrapper("ppo_actor")
+    def ppo_update_batched(self, data: list[dict[str, Any]] | dict[str, Any] | None = None) -> None:
+        """Concat on the DP head before GPU broadcast to reduce peak memory."""
+
+        batch = None
+        if isinstance(data, list):
+            batch, _ = concat_batch(data)
+        elif data is not None:
+            batch = data
+
+        if batch is not None:
+            batch = tensor_container_to(batch, self.engine.device)
+        batch = broadcast_tensor_container(
+            batch,
+            src_rank=self.engine.current_data_parallel_head(),
+            group=self.engine.context_and_model_parallel_group,
+        )
+        if batch is None:
+            return
+        self._ppo_update(batch)
 
     def _ppo_update(self, data: dict[str, Any]) -> None:
         attn_mask = data["attention_mask"]
@@ -135,6 +163,21 @@ class PlatoonActorImpl(PPOActor):
                 stats_tracker.scalar(**train_stat)
 
 
+class PlatoonPPOActorController(PPOActorController):
+    """Controller extensions for Platoon's actor worker methods."""
+
+    def ppo_update(self, *args, **kwargs) -> None:
+        self._custom_function_call(
+            "ppo_update_batched",
+            *args,
+            rpc_meta={"broadcast": False},
+            **kwargs,
+        )
+
+    def clear_cuda_cache(self) -> None:
+        self._custom_function_call("clear_cuda_cache")
+
+
 class PlatoonPPOActor(FSDPPPOActor):
     """FSDP PPO actor with registry-driven Platoon loss selection."""
 
@@ -142,9 +185,18 @@ class PlatoonPPOActor(FSDPPPOActor):
         super().__init__(config)
         self.actor = PlatoonActorImpl(config, self)
 
+    def ppo_update_batched(self, *args, **kwargs) -> None:
+        self.actor.ppo_update_batched(*args, **kwargs)
+
+    def clear_cuda_cache(self) -> None:
+        gc.collect()
+        if torch.cuda.is_available() and getattr(self, "device", None) is not None:
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+
     @classmethod
     def as_controller(cls, config: PlatoonPPOActorConfig, scheduler: Scheduler):
-        return PPOActorController(train_engine=cls, config=config, scheduler=scheduler)
+        return PlatoonPPOActorController(train_engine=cls, config=config, scheduler=scheduler)
 
 
 def create_actor(config: PlatoonPPOActorConfig) -> FSDPPPOActor:

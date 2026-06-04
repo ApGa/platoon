@@ -32,7 +32,7 @@ from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConf
 from platoon.train.areal.workflows import GroupRolloutWorkflow  # noqa: E402
 
 logger = logging.getLogger("platoon.textcraft.train_areal_synth")
-_TEXTCRAFT_SYNTH_DELEGATION_REWARD_CAP = 0.0
+_TEXTCRAFT_SYNTH_DELEGATION_REWARD_CAP = 0.4
 
 def reward_processor(traj: dict) -> tuple[float, dict]:
     """Process trajectory rewards, extracting individual reward components."""

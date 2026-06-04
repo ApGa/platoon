@@ -304,6 +304,81 @@ def _patch_remote_inf_engine_proxy_resolution() -> None:
     RemoteInfEngine._resolve_workflow = _resolve_workflow_with_proxy_addr
 
 
+def _patch_fsdp_recover_lr_scheduler_state() -> None:
+    """Persist FSDP LR scheduler state in AReaL recover checkpoints.
+
+    This AReaL release saves model and optimizer state in DCP recover
+    checkpoints, but not ``lr_scheduler.state_dict()``. On resume, the optimizer
+    LR is restored briefly, then the fresh scheduler advances from the beginning
+    of the schedule. Save the scheduler state as a small sidecar file so resume
+    preserves the schedule.
+    """
+
+    try:
+        import torch  # pyright: ignore[reportMissingImports]
+        import torch.distributed as dist  # pyright: ignore[reportMissingImports]
+        from areal.engine.fsdp_engine import FSDPEngine  # pyright: ignore[reportMissingImports]
+    except Exception:
+        return
+
+    original_save_to_dcp = FSDPEngine._save_to_dcp
+    original_load_from_dcp = FSDPEngine._load_from_dcp
+    if getattr(original_save_to_dcp, "__platoon_lr_scheduler_patch__", False):
+        return
+
+    scheduler_state_name = "lr_scheduler.pt"
+
+    def _state_path(path: str) -> str:
+        return os.path.join(path, scheduler_state_name)
+
+    def _dist_is_initialized() -> bool:
+        return dist.is_available() and dist.is_initialized()
+
+    def _is_rank_zero() -> bool:
+        return not _dist_is_initialized() or dist.get_rank() == 0
+
+    def _barrier(engine: Any) -> None:
+        if _dist_is_initialized():
+            dist.barrier(group=getattr(engine, "cpu_group", None))
+
+    def _warn(engine: Any, message: str) -> None:
+        logger = getattr(engine, "logger", None)
+        if logger is not None:
+            logger.warning(message)
+
+    @wraps(original_save_to_dcp)
+    def _save_to_dcp_with_lr_scheduler(self, path: str, with_optim: bool):
+        result = original_save_to_dcp(self, path, with_optim)
+        lr_scheduler = getattr(self, "lr_scheduler", None)
+        if with_optim and lr_scheduler is not None:
+            if _is_rank_zero():
+                torch.save(lr_scheduler.state_dict(), _state_path(path))
+            _barrier(self)
+        return result
+
+    @wraps(original_load_from_dcp)
+    def _load_from_dcp_with_lr_scheduler(self, path: str, with_optim: bool):
+        result = original_load_from_dcp(self, path, with_optim)
+        lr_scheduler = getattr(self, "lr_scheduler", None)
+        if with_optim and lr_scheduler is not None:
+            scheduler_path = _state_path(path)
+            if os.path.exists(scheduler_path):
+                state_dict = torch.load(scheduler_path, map_location="cpu", weights_only=False)
+                lr_scheduler.load_state_dict(state_dict)
+            else:
+                _warn(
+                    self,
+                    f"LR scheduler state not found in recover checkpoint: {scheduler_path}. "
+                    "The scheduler will resume from its freshly initialized state.",
+                )
+        return result
+
+    _save_to_dcp_with_lr_scheduler.__platoon_lr_scheduler_patch__ = True
+    _load_from_dcp_with_lr_scheduler.__platoon_lr_scheduler_patch__ = True
+    FSDPEngine._save_to_dcp = _save_to_dcp_with_lr_scheduler
+    FSDPEngine._load_from_dcp = _load_from_dcp_with_lr_scheduler
+
+
 def apply_all_patches() -> None:
     """Apply Platoon compatibility patches for the current AReaL release."""
 
@@ -312,3 +387,4 @@ def apply_all_patches() -> None:
     _patch_batch_task_dispatcher_idle_submit()
     _patch_local_scheduler_fork_ready_timeout()
     _patch_remote_inf_engine_proxy_resolution()
+    _patch_fsdp_recover_lr_scheduler_state()

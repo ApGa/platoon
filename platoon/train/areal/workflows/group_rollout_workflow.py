@@ -127,10 +127,13 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
 
     def _record_stats(self, train_data: dict) -> None:
         tracker = stats_tracker.get(workflow_context.stat_scope())
-        task_reward_mask = torch.ones_like(train_data["task_reward"], dtype=torch.bool)
-        output_token_mask = torch.ones_like(train_data["num_output_tokens"], dtype=torch.bool)
-        input_token_mask = torch.ones_like(train_data["num_input_tokens"], dtype=torch.bool)
-        num_steps_mask = torch.ones_like(train_data["num_steps"], dtype=torch.bool)
+
+        def scalar_series(name: str, values: torch.Tensor) -> None:
+            for value in values.detach().float().reshape(-1):
+                tracker.scalar(**{name: value.item()})
+
+        def scalar_value(name: str, value: torch.Tensor) -> None:
+            tracker.scalar(**{name: value.detach().float().item()})
 
         num_steps = train_data["num_steps"]
         num_input_tokens = train_data["num_input_tokens"]
@@ -139,38 +142,26 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         avg_input_tokens_per_step = num_input_tokens / safe_num_steps
         avg_output_tokens_per_step = num_output_tokens / safe_num_steps
 
-        tracker.denominator(
-            task_reward_mask=task_reward_mask,
-            num_output_tokens_mask=output_token_mask,
-            num_input_tokens_mask=input_token_mask,
-            num_steps_mask=num_steps_mask,
-            avg_input_tokens_per_step_mask=num_steps_mask,
-            avg_output_tokens_per_step_mask=num_steps_mask,
-        )
-        tracker.stat(task_reward=train_data["task_reward"], denominator="task_reward_mask")
-        tracker.stat(num_output_tokens=num_output_tokens, denominator="num_output_tokens_mask")
-        tracker.stat(num_input_tokens=num_input_tokens, denominator="num_input_tokens_mask")
-        tracker.stat(num_steps=num_steps, denominator="num_steps_mask")
-        tracker.stat(avg_input_tokens_per_step=avg_input_tokens_per_step, denominator="avg_input_tokens_per_step_mask")
-        tracker.stat(avg_output_tokens_per_step=avg_output_tokens_per_step, denominator="avg_output_tokens_per_step_mask")
+        scalar_series("task_reward", train_data["task_reward"])
+        scalar_series("num_output_tokens", num_output_tokens)
+        scalar_series("num_input_tokens", num_input_tokens)
+        scalar_series("num_steps", num_steps)
+        scalar_series("avg_input_tokens_per_step", avg_input_tokens_per_step)
+        scalar_series("avg_output_tokens_per_step", avg_output_tokens_per_step)
 
         task_rewards = train_data["task_reward"]
-        task_reward_at_k_mask = torch.ones(1, dtype=torch.bool)
-        tracker.denominator(task_reward_at_k_mask=task_reward_at_k_mask)
-        tracker.stat(task_reward_at_k_mean=torch.mean(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
-        tracker.stat(task_reward_at_k_max=torch.max(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
-        tracker.stat(task_reward_at_k_min=torch.min(task_rewards).unsqueeze(0), denominator="task_reward_at_k_mask")
+        scalar_value("task_reward_at_k_mean", torch.mean(task_rewards))
+        scalar_value("task_reward_at_k_max", torch.max(task_rewards))
+        scalar_value("task_reward_at_k_min", torch.min(task_rewards))
 
         for key, value in train_data.items():
             if key.startswith("root_"):
-                tracker.stat(**{key: value}, denominator="task_reward_mask")
-                tracker.stat(**{f"{key}_at_k_mean": torch.mean(value).unsqueeze(0)}, denominator="task_reward_at_k_mask")
-                tracker.stat(**{f"{key}_at_k_max": torch.max(value).unsqueeze(0)}, denominator="task_reward_at_k_mask")
-                tracker.stat(**{f"{key}_at_k_min": torch.min(value).unsqueeze(0)}, denominator="task_reward_at_k_mask")
+                scalar_series(key, value)
+                scalar_value(f"{key}_at_k_mean", torch.mean(value))
+                scalar_value(f"{key}_at_k_max", torch.max(value))
+                scalar_value(f"{key}_at_k_min", torch.min(value))
             elif key.startswith("reward/"):
-                reward_mask = torch.ones_like(value, dtype=torch.bool)
-                tracker.denominator(**{f"{key}_mask": reward_mask})
-                tracker.stat(**{key: value}, denominator=f"{key}_mask")
+                scalar_series(key, value)
 
     async def arun_episode(self, engine: InferenceEngine, data: dict) -> dict | None:
         if self.config.use_subprocesses:
