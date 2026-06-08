@@ -131,6 +131,8 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 index_device = value.device
                 break
         if index_device is None:
+            # RTensors expose shape metadata but fetch CPU tensors when localized,
+            # so CPU indices are the safest default until index_batch localizes.
             index_device = torch.device("cpu")
 
         indices = torch.arange(batch_size, device=index_device)

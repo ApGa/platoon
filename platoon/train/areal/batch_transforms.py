@@ -68,14 +68,29 @@ class BatchTransform(Protocol):
     ) -> BatchDict | None: ...
 
 
+def _tensor_like_batch_size(value: Any) -> int | None:
+    if torch.is_tensor(value) and value.ndim >= 1:
+        return int(value.shape[0])
+    if hasattr(value, "shape") and hasattr(value, "ndim"):
+        try:
+            if int(value.ndim) >= 1:
+                return int(value.shape[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+    return None
+
+
 def get_batch_size(batch: BatchDict) -> int:
-    if "attention_mask" in batch and torch.is_tensor(batch["attention_mask"]):
-        return int(batch["attention_mask"].shape[0])
-    if "input_ids" in batch and torch.is_tensor(batch["input_ids"]):
-        return int(batch["input_ids"].shape[0])
+    attention_mask_size = _tensor_like_batch_size(batch.get("attention_mask"))
+    if attention_mask_size is not None:
+        return attention_mask_size
+    input_ids_size = _tensor_like_batch_size(batch.get("input_ids"))
+    if input_ids_size is not None:
+        return input_ids_size
     for value in batch.values():
-        if torch.is_tensor(value) and value.ndim >= 1:
-            return int(value.shape[0])
+        tensor_like_size = _tensor_like_batch_size(value)
+        if tensor_like_size is not None:
+            return tensor_like_size
         if isinstance(value, list):
             return len(value)
     raise ValueError("Unable to infer batch size from batch contents")

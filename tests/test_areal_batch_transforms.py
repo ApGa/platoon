@@ -205,6 +205,43 @@ def test_trainer_batch_transforms_run_after_trainable_datum_filtering():
     assert seen["global_step"] == 7
 
 
+def test_maybe_shuffle_and_trim_localizes_before_inferring_batch_size():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+
+    class LocalTensor:
+        def __init__(self, tensor):
+            self.tensor = tensor
+
+        @property
+        def shape(self):
+            return self.tensor.shape
+
+        @property
+        def ndim(self):
+            return self.tensor.ndim
+
+        def to_local(self):
+            return self.tensor
+
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.actor = SimpleNamespace(data_parallel_world_size=1)
+    trainer.config = SimpleNamespace(
+        rollout=SimpleNamespace(shuffle_cross_task=False, ensure_batch_divisible_by=1),
+    )
+
+    processed = trainer._maybe_shuffle_and_trim_batch(
+        {
+            "attention_mask": LocalTensor(torch.ones(2, 3, dtype=torch.bool)),
+            "rewards": LocalTensor(torch.tensor([[1.0], [2.0]])),
+        }
+    )
+
+    assert processed is not None
+    assert torch.equal(processed["attention_mask"], torch.ones(2, 3, dtype=torch.bool))
+    assert torch.equal(processed["rewards"], torch.tensor([[1.0], [2.0]]))
+
+
 def test_split_batch_to_trajectories_restores_dp_dispatch_shape():
     batch_transforms = _load_batch_transforms_module()
 

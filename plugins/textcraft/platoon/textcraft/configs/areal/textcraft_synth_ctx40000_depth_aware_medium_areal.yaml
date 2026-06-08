@@ -21,13 +21,9 @@ environments:
     workflow: group_rollout
     dataset_kwargs:
       difficulties: ["medium"]
-      num_samples_train: 2522
-      num_samples_val: 632
     eval_dataset_kwargs:
       difficulties: null
       limit: 100
-      num_samples_train: 2522
-      num_samples_val: 632
 
 cluster:
   n_nodes: 1  
