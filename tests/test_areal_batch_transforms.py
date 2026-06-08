@@ -51,6 +51,10 @@ def _load_trainer_module(batch_transforms_module):
     config_mod.PlatoonPPOActorConfig = object
     sys.modules["platoon.train.areal.config_defs"] = config_mod
 
+    serialization_mod = types.ModuleType("platoon.train.areal.workflow_serialization")
+    serialization_mod.normalize_remote_workflow = lambda workflow, workflow_kwargs: (workflow, workflow_kwargs)
+    sys.modules["platoon.train.areal.workflow_serialization"] = serialization_mod
+
     api_mod = types.ModuleType("areal.api")
     api_mod.WorkflowLike = object
     sys.modules["areal.api"] = api_mod
@@ -73,7 +77,12 @@ def _load_trainer_module(batch_transforms_module):
         yield None
 
     utils_mod = types.ModuleType("areal.utils")
-    utils_mod.logging = SimpleNamespace(getLogger=lambda name: SimpleNamespace(info=lambda *a, **k: None))
+    utils_mod.logging = SimpleNamespace(
+        getLogger=lambda name: SimpleNamespace(
+            info=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
+        )
+    )
     utils_mod.perf_tracer = SimpleNamespace(trace_scope=_null_context)
     utils_mod.stats_tracker = SimpleNamespace(record_timing=_null_context)
     sys.modules["areal.utils"] = utils_mod
@@ -203,6 +212,96 @@ def test_trainer_batch_transforms_run_after_trainable_datum_filtering():
     assert torch.equal(seen["batch_rewards"].squeeze(-1), torch.tensor([1.0, 3.0]))
     assert seen["has_trainable_datums"] is False
     assert seen["global_step"] == 7
+
+
+def test_trainer_skips_empty_rollout_batches():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.actor = SimpleNamespace(data_parallel_world_size=1)
+    trainer.config = SimpleNamespace(
+        rollout=SimpleNamespace(shuffle_cross_task=False, ensure_batch_divisible_by=1),
+        workflow_config=SimpleNamespace(depth_level_weighting=False, depth_level_discount_gamma=None),
+    )
+    trainer.batch_transforms = []
+
+    assert trainer._postprocess_rollout_batch([{}, None], global_step=7, epoch=1, epoch_step=2) is None
+    assert trainer._postprocess_rollout_batch([{}], global_step=7, epoch=1, epoch_step=2) is None
+
+
+def test_trainer_localizes_remote_tensors_before_batch_size_inference():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+
+    class RemoteTensorLike:
+        def __init__(self, tensor: torch.Tensor):
+            self.tensor = tensor
+
+        def to_local(self) -> torch.Tensor:
+            return self.tensor
+
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.actor = SimpleNamespace(data_parallel_world_size=1)
+    trainer.config = SimpleNamespace(
+        rollout=SimpleNamespace(shuffle_cross_task=False, ensure_batch_divisible_by=1),
+    )
+
+    processed = trainer._maybe_shuffle_and_trim_batch(
+        {
+            "attention_mask": RemoteTensorLike(torch.tensor([[1, 1], [1, 0]], dtype=torch.bool)),
+            "input_ids": RemoteTensorLike(torch.tensor([[4, 5], [6, 0]])),
+            "rewards": RemoteTensorLike(torch.tensor([[0.0], [1.0]])),
+        }
+    )
+
+    assert processed is not None
+    assert torch.equal(processed["attention_mask"], torch.tensor([[1, 1], [1, 0]], dtype=torch.bool))
+    assert torch.equal(processed["input_ids"], torch.tensor([[4, 5], [6, 0]]))
+    assert torch.equal(processed["rewards"], torch.tensor([[0.0], [1.0]]))
+
+
+def test_trainer_eval_uses_platoon_controller_dispatch_group_size():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+
+    submitted = []
+    waited = []
+    barriers = []
+    synchronized = []
+
+    class EvalRollout:
+        def submit(self, item, workflow, workflow_kwargs, group_size, is_eval):
+            submitted.append(
+                {
+                    "item": item,
+                    "workflow": workflow,
+                    "workflow_kwargs": workflow_kwargs,
+                    "group_size": group_size,
+                    "is_eval": is_eval,
+                }
+            )
+
+        def wait(self, count, timeout=None):
+            waited.append((count, timeout))
+
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.actor = SimpleNamespace(is_data_parallel_head=lambda: True, cpu_group="cpu-group")
+    trainer.valid_dataloader = [["a", "b"], ["c"]]
+    trainer.eval_rollout = EvalRollout()
+    rl_module.dist = SimpleNamespace(barrier=lambda group: barriers.append(group))
+    rl_module.current_platform = SimpleNamespace(synchronize=lambda: synchronized.append(True))
+
+    trainer._evaluate_fn("workflow", {"x": 1})
+
+    assert [item["item"] for item in submitted] == ["a", "b", "c"]
+    assert all(item["workflow"] == "workflow" for item in submitted)
+    assert all(item["workflow_kwargs"] == {"x": 1} for item in submitted)
+    assert all(item["group_size"] == 1 for item in submitted)
+    assert all(item["is_eval"] for item in submitted)
+    assert waited == [(3, None)]
+    assert barriers == ["cpu-group"]
+    assert synchronized == [True]
 
 
 def test_split_batch_to_trajectories_restores_dp_dispatch_shape():

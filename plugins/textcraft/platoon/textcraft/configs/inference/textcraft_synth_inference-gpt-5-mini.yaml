@@ -1,0 +1,36 @@
+# TextCraft-Synth inference benchmark config.
+inference:
+  model_name: openai/openai/openai/gpt-5-mini #Qwen/Qwen3-4B-Instruct-2507
+  model_endpoint: null #http://127.0.0.1:30000/v1
+  model_api_key: null
+  output_dir: ./inference_results/gpt-5-mini-trial-0
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 50
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 800
+      output_dir: ./inference_results/gpt-5-mini-trial-0/rollouts
+      verbose: true
+      timeout: 1200
+      step_timeout: 300
+      inference_params:
+        temperature: 0.0
+        top_p: null
+        max_completion_tokens: 2048
+
+dataset_split: val
+difficulty: ['easy', 'medium', 'hard']
+num_tasks: 100
+use_recursive_agent: false
+task_id: null
+# full: run rollouts + report
+# rollouts: only write rollouts to disk (resume-friendly)
+# report: only read existing rollouts and generate report
+stage: full
+shuffle_tasks: true
+seed: 42

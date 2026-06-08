@@ -72,9 +72,10 @@ class PlatoonGenerationConfig:
     """Minimal generation config still required by upstream AReaL internals."""
 
     lora_name: str = "default_lora"
+    n_samples: int = 1
 
     def new(self, **kwargs):
-        args = {"lora_name": self.lora_name}
+        args = {"lora_name": self.lora_name, "n_samples": self.n_samples}
         args.update(kwargs)
         return type(self)(**args)
 

@@ -1,0 +1,44 @@
+# Oolong inference benchmark config.
+inference:
+  model_name: openai/openai/openai/gpt-5.5
+  model_endpoint: null #http://127.0.0.1:30000/v1 #uv run --extra areal -m sglang.launch_server --model-path Qwen/Qwen3-4B-Instruct-2507 --dp 8 --context-length 70000
+  model_api_key: null
+  output_dir: ./inference_results/gpt-5.5-recursive-trial-0
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 10
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 15 #200
+      output_dir: ./inference_results/gpt-5.5-recursive-trial-0/rollouts
+      verbose: true
+      timeout: 900
+      step_timeout: 900
+      skip_subagent_reward_computation: true
+      inference_params:
+        temperature: 0.0
+        top_p: null
+        max_completion_tokens: 8192
+    
+
+# Dataset configuration
+oolong_dataset: real # synth, real, or both
+dataset_split: test  # validation or test
+num_tasks: 650
+use_recursive_agent: true
+task_id: null
+# Filtering options (null means no filter)
+task_group: null   # counting, user, or timeline
+answer_type: null  # NUMERIC, LABEL, COMPARISON, USER, MONTH_YEAR
+min_context_len: null
+max_context_len: 700000
+# full: run rollouts + report
+# rollouts: only write rollouts to disk (resume-friendly)
+# report: only read existing rollouts and generate report
+stage: full
+shuffle_tasks: true
+seed: 42

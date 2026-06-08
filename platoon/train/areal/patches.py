@@ -1,14 +1,80 @@
 from __future__ import annotations
 
+import ctypes
 import fcntl
 import hashlib
 import json
 import os
+import sysconfig
 import tempfile
 import time
 from functools import lru_cache
 from functools import wraps
+from pathlib import Path
 from typing import Any
+
+
+def _prepend_nvidia_cuda_library_paths() -> None:
+    """Expose NVIDIA wheel libs before peft imports transformer_engine.
+
+    Transformer Engine's cu13 build looks for ``libcublas.so.13`` under
+    ``site-packages/nvidia/``. Those paths are not on the default loader path
+    inside enroot containers, which triggers import-time failures even when the
+    platoon image and venv are otherwise correct.
+    """
+
+    if getattr(_prepend_nvidia_cuda_library_paths, "__platoon_cuda_lib_patch__", False):
+        return
+
+    lib_dirs: list[str] = []
+    nvidia_dir = Path(sysconfig.get_path("purelib")) / "nvidia"
+    if nvidia_dir.is_dir():
+        for lib_dir in sorted(nvidia_dir.glob("**/lib")):
+            if lib_dir.is_dir() and any(lib_dir.glob("*.so*")):
+                lib_dirs.append(str(lib_dir))
+        for lib_dir in sorted(nvidia_dir.glob("**/lib64")):
+            if lib_dir.is_dir() and any(lib_dir.glob("*.so*")):
+                lib_dirs.append(str(lib_dir))
+
+    for module_name in ("nvidia.cublas", "nvidia.cuda_runtime", "nvidia.cudnn"):
+        try:
+            module = __import__(module_name, fromlist=["lib"])
+            lib_module = getattr(module, "lib", None)
+            if lib_module is not None and hasattr(lib_module, "__file__"):
+                lib_dirs.append(str(Path(lib_module.__file__).resolve().parent))
+        except Exception:
+            pass
+
+    for system_dir in (
+        "/usr/local/cuda/lib64",
+        "/usr/local/cuda-13/lib64",
+        "/usr/local/cuda-12/lib64",
+    ):
+        if os.path.isdir(system_dir):
+            lib_dirs.append(system_dir)
+
+    if not lib_dirs:
+        _prepend_nvidia_cuda_library_paths.__platoon_cuda_lib_patch__ = True
+        return
+
+    deduped = list(dict.fromkeys(lib_dirs))
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = (
+        ":".join(deduped) + (":" + existing if existing else "")
+    )
+
+    # LD_LIBRARY_PATH is read by the dynamic loader at process startup, so
+    # changing it here mainly helps forked subprocesses. Preload the CUDA 13
+    # libs by absolute path as well so the current trainer process can import
+    # transformer_engine_cu13 immediately after this patch runs.
+    for lib_name in ("libcudart.so.13", "libcublasLt.so.13", "libcublas.so.13"):
+        for lib_dir in deduped:
+            lib_path = Path(lib_dir) / lib_name
+            if lib_path.exists():
+                ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
+                break
+
+    _prepend_nvidia_cuda_library_paths.__platoon_cuda_lib_patch__ = True
 
 
 def _patch_hf_tokenizer_download_race() -> None:
@@ -304,11 +370,186 @@ def _patch_remote_inf_engine_proxy_resolution() -> None:
     RemoteInfEngine._resolve_workflow = _resolve_workflow_with_proxy_addr
 
 
+def _normalize_fsdp_wrap_classes(classes: Any) -> list[str]:
+    if classes is None:
+        return []
+    if isinstance(classes, str):
+        return [classes]
+    if isinstance(classes, (set, tuple)):
+        return list(classes)
+    return list(classes)
+
+
+def _flatten_message_list_content(messages: list[dict[str, Any]]) -> None:
+    """Convert OpenAI list-shaped text content blocks to plain strings.
+
+    OpenHands (and other clients) may send ``content`` as
+    ``[{"type": "text", "text": "..."}]``. Hugging Face ``apply_chat_template``
+    and AReaL's interaction cache expect string ``content`` for text-only turns.
+    """
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(item, dict)
+            and item.get("type") in ("image_url", "image", "input_image")
+            for item in content
+        ):
+            continue
+        text_parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_parts.append(item.get("text", ""))
+            elif isinstance(item, str):
+                text_parts.append(item)
+        message["content"] = "".join(text_parts)
+
+
+def _patch_areal_openai_message_content_flatten() -> None:
+    """Flatten OpenHands-style list content before HF chat templates and proxy cache."""
+
+    import areal.experimental.openai.client as client_module  # pyright: ignore[reportMissingImports]
+
+    original_ensure = client_module._ensure_message_dict_list
+    if getattr(original_ensure, "__platoon_message_content_patch__", False):
+        return
+
+    @wraps(original_ensure)
+    def _ensure_message_dict_list_with_flatten(
+        name: str,
+        value: list[Any],
+    ) -> list[dict[str, Any]]:
+        normalized = original_ensure(name, value)
+        _flatten_message_list_content(normalized)
+        return normalized
+
+    _ensure_message_dict_list_with_flatten.__platoon_message_content_patch__ = True
+    client_module._ensure_message_dict_list = _ensure_message_dict_list_with_flatten
+
+
+def _coerce_apply_chat_template_token_ids(token_ids: Any) -> Any:
+    """Return a plain ``list[int]`` from Transformers chat-template output.
+
+    Transformers 5 defaults ``return_dict=True`` for ``apply_chat_template``, which
+    returns a ``BatchEncoding``. AReaL expects token-id lists for SGLang payloads.
+    """
+
+    if token_ids is None:
+        return []
+    if hasattr(token_ids, "input_ids"):
+        ids = token_ids["input_ids"]
+        if isinstance(ids, list) and ids and isinstance(ids[0], list):
+            return list(ids[0])
+        return list(ids)
+    if isinstance(token_ids, list):
+        return token_ids
+    return list(token_ids)
+
+
+def _patch_transformers_apply_chat_template_return_type() -> None:
+    """Coerce ``apply_chat_template`` token output for AReaL/SGLang compatibility."""
+
+    import transformers  # pyright: ignore[reportMissingImports]
+
+    base = transformers.PreTrainedTokenizerBase
+    original = base.apply_chat_template
+    if getattr(original, "__platoon_apply_chat_template_patch__", False):
+        return
+
+    @wraps(original)
+    def apply_chat_template_with_list_token_ids(self, *args: Any, **kwargs: Any) -> Any:
+        result = original(self, *args, **kwargs)
+        if kwargs.get("tokenize", True):
+            return _coerce_apply_chat_template_token_ids(result)
+        return result
+
+    apply_chat_template_with_list_token_ids.__platoon_apply_chat_template_patch__ = True
+    base.apply_chat_template = apply_chat_template_with_list_token_ids
+
+
+def _patch_areal_proxy_rollout_fork_command() -> None:
+    """Run forked proxy workers through Platoon's patched entry module."""
+
+    from areal.infra.scheduler.local import LocalScheduler  # pyright: ignore[reportMissingImports]
+
+    areal_proxy_module = "areal.experimental.openai.proxy.proxy_rollout_server"
+    platoon_proxy_module = "platoon.areal_proxy_rollout"
+
+    original = LocalScheduler._fork_single_worker
+    if getattr(original, "__platoon_proxy_fork_patch__", False):
+        return
+
+    @wraps(original)
+    async def _fork_single_worker_with_platoon_proxy(
+        self,
+        session,
+        role: str,
+        idx: int,
+        target_wi,
+        target_role: str,
+        command: str | None = None,
+    ):
+        if command == areal_proxy_module:
+            command = platoon_proxy_module
+        return await original(
+            self,
+            session,
+            role,
+            idx,
+            target_wi,
+            target_role,
+            command,
+        )
+
+    _fork_single_worker_with_platoon_proxy.__platoon_proxy_fork_patch__ = True
+    LocalScheduler._fork_single_worker = _fork_single_worker_with_platoon_proxy
+
+
+def _patch_areal_fsdp_wrap_classes_set_compat() -> None:
+    """Normalize FSDP wrap class names before AReaL indexes them by position.
+
+    Newer Transformers releases can expose ``_no_split_modules`` as a ``set``.
+    AReaL's ``apply_fsdp2`` still does ``fsdp_transformer_layer_cls_to_wrap[0]``,
+    which crashes with ``TypeError: 'set' object is not subscriptable``.
+    """
+
+    import areal.engine.fsdp_utils as fsdp_utils  # pyright: ignore[reportMissingImports]
+
+    original = fsdp_utils.apply_fsdp2
+    if getattr(original, "__platoon_fsdp_set_patch__", False):
+        return
+
+    @wraps(original)
+    def apply_fsdp2(model, fsdp_kwargs, wrap_policy):
+        if wrap_policy is not None:
+            wrap_policy.transformer_layer_cls_to_wrap = _normalize_fsdp_wrap_classes(
+                wrap_policy.transformer_layer_cls_to_wrap
+            )
+
+        no_split_modules = getattr(model, "_no_split_modules", None)
+        if isinstance(no_split_modules, (set, tuple)):
+            model._no_split_modules = list(no_split_modules)
+
+        return original(model, fsdp_kwargs, wrap_policy)
+
+    apply_fsdp2.__platoon_fsdp_set_patch__ = True
+    fsdp_utils.apply_fsdp2 = apply_fsdp2
+
+
 def apply_all_patches() -> None:
     """Apply Platoon compatibility patches for the current AReaL release."""
 
+    _prepend_nvidia_cuda_library_paths()
     _patch_hf_tokenizer_download_race()
     _patch_model_response_custom_stop_sequences()
     _patch_batch_task_dispatcher_idle_submit()
     _patch_local_scheduler_fork_ready_timeout()
     _patch_remote_inf_engine_proxy_resolution()
+    _patch_transformers_apply_chat_template_return_type()
+    _patch_areal_openai_message_content_flatten()
+    _patch_areal_proxy_rollout_fork_command()
+    _patch_areal_fsdp_wrap_classes_set_compat()

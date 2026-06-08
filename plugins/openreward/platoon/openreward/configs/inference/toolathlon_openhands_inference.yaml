@@ -25,10 +25,10 @@ inference:
         max_completion_tokens: 4096
 
 openreward:
-  env_name: toolathlongym
+  env_name: numbersearchgym
   split: train
   eval_split: train
-  session_url: http://localhost:8080
+  session_url: http://localhost:8082
   api_url: null
   api_key: local
   train_task_limit: 20

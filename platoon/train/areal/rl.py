@@ -24,6 +24,7 @@ from platoon.train.areal.batch_transforms import (
     build_default_batch_transforms,
     get_batch_size,
     index_batch,
+    localize_rtensors,
     run_batch_transforms,
     split_batch_to_trajectories,
 )
@@ -120,7 +121,15 @@ class PlatoonArealRLTrainer(PPOTrainer):
         return int(self.actor.data_parallel_world_size)
 
     def _maybe_shuffle_and_trim_batch(self, batch: dict[str, Any]) -> dict[str, Any] | None:
-        batch_size = get_batch_size(batch)
+        batch = localize_rtensors(batch)
+        try:
+            batch_size = get_batch_size(batch)
+        except ValueError:
+            logger.warning(
+                "Skipping rollout batch without size-bearing contents: keys=%s",
+                sorted(batch.keys()),
+            )
+            return None
         if batch_size == 0:
             return None
         dispatch_dp_size = self._actor_dispatch_dp_size()
@@ -163,6 +172,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
         reduction has produced a stable full batch.
         """
 
+        rollout_batch = [item for item in rollout_batch if item]
         if not rollout_batch:
             return None
 
@@ -500,7 +510,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
             current_platform.synchronize()
             self._save_perf_tracer(step=global_step)
 
-    def _evaluate_once(
+    def _evaluate_fn(
         self,
         eval_workflow: WorkflowLike,
         eval_workflow_kwargs,

@@ -23,6 +23,8 @@ overrides = [
     { name = "hydra-core", specifier = "==1.4.0.dev1" },
     { name = "megatron-core", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==0.16.0" },
     { name = "networkx", specifier = "==3.3.0" },
+    { name = "nvidia-cublas", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=13.0.0" },
+    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=13.0.0" },
     { name = "nvidia-cudnn-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==9.16.0.29" },
     { name = "nvidia-resiliency-ext", specifier = "~=0.4.1" },
     { name = "openai", specifier = "==1.99.6" },
@@ -3904,6 +3906,17 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cublas"
+version = "13.5.1.27"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nvidia-cuda-nvrtc", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/0d/cc77458e8fb0634597e3994650c2853ee785f2fc61bf370bbb304021cca1/nvidia_cublas-13.5.1.27-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:db3a1f0c8bc24945a4d195ba199d83f27e650ffdfc0c32e6b8362c314f14d553", size = 407748877, upload-time = "2026-05-26T16:44:19.938Z" },
+]
+
+[[package]]
 name = "nvidia-cublas-cu12"
 version = "12.9.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3920,11 +3933,27 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cuda-nvrtc"
+version = "13.3.33"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/2c/86916c8a34dcdb0c3ddd1c0e30545041bd781184e437b9cb76fcda70560b/nvidia_cuda_nvrtc-13.3.33-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:82530788b8c6164a54d3fd9ae8bcca8893d397c4aeb998861982a03bbe41e204", size = 51110910, upload-time = "2026-05-26T16:38:16.116Z" },
+]
+
+[[package]]
 name = "nvidia-cuda-nvrtc-cu12"
 version = "12.9.86"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/85/e4af82cc9202023862090bfca4ea827d533329e925c758f0cde964cb54b7/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:210cf05005a447e29214e9ce50851e83fc5f4358df8b453155d5e1918094dcb4", size = 89568129, upload-time = "2025-06-05T20:02:41.973Z" },
+]
+
+[[package]]
+name = "nvidia-cuda-runtime"
+version = "13.3.29"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/97/be/5699b6e642b372f7d24c59c2f41383e2696825e20bab85f7399c7c6a56f7/nvidia_cuda_runtime-13.3.29-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:e04420616e72f563167a7733272992d7e6df6dc5cb54b2f94f9f1520ea9e30c1", size = 2339786, upload-time = "2026-05-26T16:30:21.584Z" },
 ]
 
 [[package]]
@@ -4905,6 +4934,8 @@ dependencies = [
 [package.optional-dependencies]
 areal = [
     { name = "areal", extra = ["cuda"], marker = "(platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
+    { name = "nvidia-cublas", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 tinker = [
     { name = "tinker", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -4922,6 +4953,8 @@ requires-dist = [
     { name = "ipython", specifier = ">=9.4.0" },
     { name = "litellm" },
     { name = "notebook", specifier = ">=7.4.4" },
+    { name = "nvidia-cublas", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = ">=13.0.0" },
+    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = ">=13.0.0" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pyarrow", specifier = ">=22.0.0" },
     { name = "rich", specifier = ">=13.9.4" },
@@ -4979,6 +5012,8 @@ dependencies = [
 
 [package.optional-dependencies]
 areal = [
+    { name = "nvidia-cublas", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "platoon", extra = ["areal"], marker = "(platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
 ]
 tinker = [
@@ -4991,6 +5026,8 @@ wandb = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=1.0.0" },
+    { name = "nvidia-cublas", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = ">=13.0.0" },
+    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = ">=13.0.0" },
     { name = "openreward", specifier = ">=0.1.33" },
     { name = "platoon", editable = "../../" },
     { name = "platoon", extras = ["areal"], marker = "extra == 'areal'", editable = "../../" },
