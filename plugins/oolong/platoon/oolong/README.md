@@ -1,34 +1,25 @@
-# Oolong Plugin for Platoon
+# Oolong
 
-This plugin provides support for the [Oolong benchmark](https://github.com/abertsch72/oolong), a challenging long-context aggregation benchmark for language models.
+This plugin adds the [Oolong benchmark](https://github.com/abertsch72/oolong) to Platoon. Oolong evaluates long-context aggregation over synthetic tasks and real D&D campaign transcripts.
 
-## Overview
-
-Oolong evaluates a model's ability to reason and aggregate information across large text contexts. It includes two datasets:
-
-- **oolong-synth**: Synthetic aggregation tasks with controlled settings
-- **oolong-real**: Real-world tasks over D&D campaign transcripts
-
-## Installation
+## Install
 
 ```bash
 cd plugins/oolong
-uv sync
+uv sync --extra areal --extra wandb
 ```
 
-For training with Tinker backend:
+Use `--extra tinker` for Tinker experiments.
+
+## Train
+
 ```bash
-uv sync --extra tinker
+uv run python platoon/oolong/train_scripts/areal/train_areal.py \
+  --config platoon/oolong/configs/train/areal/oolong_linear_areal.yaml
 ```
-
-For training with AReaL backend:
-```bash
-uv sync --extra areal
-```
-
 
 ## References
 
-- [Oolong Benchmark Paper](https://arxiv.org/abs/2511.02817)
+- [Oolong paper](https://arxiv.org/abs/2511.02817)
 - [Oolong GitHub](https://github.com/abertsch72/oolong)
-- [HuggingFace Datasets](https://huggingface.co/oolongbench)
+- [HuggingFace datasets](https://huggingface.co/oolongbench)

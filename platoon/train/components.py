@@ -1,4 +1,4 @@
-"""Shared component protocols and resolver config for registered trainers."""
+"""Shared component protocols and environment config for Auto factories."""
 
 from __future__ import annotations
 
@@ -37,8 +37,8 @@ LossFn = Callable[..., Any]
 
 
 @dataclass
-class PluginResolverConfig:
-    """Registry/import-path references for plugin-specific training components."""
+class EnvironmentConfig:
+    """References for environment-specific training components."""
 
     package: str | None = None
     discover_entry_points: bool = False
@@ -55,6 +55,31 @@ class PluginResolverConfig:
     workflow_kwargs: dict[str, Any] = field(default_factory=dict)
     eval_workflow_kwargs: dict[str, Any] = field(default_factory=dict)
 
+def normalize_environment_configs(environments: Any) -> list[EnvironmentConfig]:
+    """Normalize the public `environments` config list."""
+
+    if environments is None:
+        return []
+    if isinstance(environments, EnvironmentConfig):
+        raise ValueError(
+            "`environments` must be a list; use `environments: [{...}]` for a single environment"
+        )
+    if isinstance(environments, dict):
+        raise ValueError(
+            "`environments` must be a list; use `environments: - ...` for a single environment"
+        )
+    if not isinstance(environments, (list, tuple)):
+        raise TypeError("`environments` must be a list of environment configs")
+
+    normalized: list[EnvironmentConfig] = []
+    for environment in environments:
+        if isinstance(environment, EnvironmentConfig):
+            normalized.append(environment)
+        elif isinstance(environment, dict):
+            normalized.append(EnvironmentConfig(**environment))
+        else:
+            raise TypeError("Each `environments` entry must be an EnvironmentConfig or dict")
+    return normalized
 
 
 def task_ids_to_dataset(task_ids: Sequence[str]) -> Any:

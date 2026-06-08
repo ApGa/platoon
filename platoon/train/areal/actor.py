@@ -20,7 +20,7 @@ logger = logging.getLogger("PlatoonActor")
 
 
 class PlatoonActorImpl(PPOActor):
-    """PPO actor implementation with registry-driven Platoon losses."""
+    """PPO actor implementation with Platoon loss selection."""
 
     def __init__(self, config: PlatoonPPOActorConfig, engine: Any):
         super().__init__(config, engine)
@@ -144,7 +144,7 @@ class PlatoonActorImpl(PPOActor):
 
 
 class PlatoonPPOActor(FSDPPPOActor):
-    """FSDP PPO actor with registry-driven Platoon loss selection."""
+    """FSDP PPO actor with Platoon loss selection."""
 
     def __init__(self, config: PlatoonPPOActorConfig):
         super().__init__(config)

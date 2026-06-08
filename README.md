@@ -1,404 +1,98 @@
-<img src="assets/platoon_icon_cropped_no_background.png" width="400">
+<img src="assets/platoon_icon_cropped_no_background.png" width="320">
 
+Build and train systems of agents.
 
-## Setup
+## Install
 
-### Core Installation
-
-Install the core platoon package:
+Use `uv` for the main development workflow:
 
 ```bash
-# Using uv (recommended)
 uv sync
-
-# Using pip
-pip install -e .
 ```
 
-### Training Backend Installation
-
-Platoon supports two training backends: **Tinker** and **AReaL**. Install the one you need:
-
-#### Tinker Backend
+Install the training backend you need:
 
 ```bash
-# Using uv
-uv sync --extra tinker
-
-# Using pip
-pip install -e ".[tinker]"
-```
-
-#### AReaL Backend
-
-> **Note**: AReaL requires `uv` for installation as it's not available on PyPI.
-
-```bash
-# Using uv only (required)
-uv sync --extra areal
-```
-
-### Optional Dependencies
-
-#### WandB (Experiment Tracking)
-
-WandB should be installed alongside your chosen training backend:
-
-```bash
-# With Tinker backend
-
-# Using uv
 uv sync --extra tinker --extra wandb
-
-# Using pip
-pip install -e ".[tinker,wandb]"
-
-# With AReaL backend (uv only)
+# OR
 uv sync --extra areal --extra wandb
 ```
 
-### Plugin Installation
-
-Install a plugin or extension:
+Install a plugin from its directory:
 
 ```bash
 cd plugins/<plugin-name>
-uv sync  # or: pip install -e .
+uv sync --extra <backend> --extra wandb
 ```
 
-## Training a Model with Reinforcement Learning
+AReaL is installed through `uv` extras. Tinker and WandB may also require service credentials in your environment.
 
-Platoon supports two training backends: Tinker and AReaL.
+## Plugins
 
-### Training with Tinker
+- `plugins/textcraft`: crafting tasks, including the synthetic recursive TextCraft benchmark.
+- `plugins/appworld`: AppWorld API tasks.
+- `plugins/oolong`: long-context aggregation tasks.
+- `plugins/codegrep`: code localization tasks.
+- `plugins/email-search`: ART-E email-search tasks.
+- `plugins/number-search`: compact number-guessing tasks for quick RL smoke tests.
 
-Tinker uses a service-based architecture. Make sure your Tinker service is running before training.
+Each plugin README contains task-specific setup and example commands.
 
-#### Single Plugin Training Example
+## Training
 
-```bash
-cd plugins/textcraft  # or number-search, codegrep
-
-# Using uv
-uv run python -m platoon.textcraft.train_tinker --config textcraft_tinker.yaml
-
-# Using python directly (after pip install)
-python -m platoon.textcraft.train_tinker --config textcraft_tinker.yaml
-```
-
-#### CLI Overrides
-
-Override config values from the command line:
-
-```bash
-uv run python -m platoon.textcraft.train_tinker \
-    --config textcraft_tinker.yaml \
-    stats.experiment_name=my-experiment \
-    stats.trial_name=trial1 \
-    train.batch_size=64 \
-    train.optimizer.learning_rate=1e-5
-```
-
-#### WandB Logging
-
-Enable WandB logging by setting the mode in your config or via CLI:
-
-```bash
-# Via CLI override
-uv run python -m platoon.textcraft.train_tinker \
-    --config textcraft_tinker.yaml \
-    stats.wandb.mode=online \
-    stats.wandb.project=my-project
-```
-
-Or in your YAML config:
-
-```yaml
-stats:
-  experiment_name: my-experiment
-  trial_name: trial1
-  wandb:
-    mode: online  # Options: online, offline, disabled
-    project: my-project
-    entity: my-team  # optional
-    tags:
-      - experiment-tag
-```
-
-### Training with AReaL
-
-AReaL uses a distributed training architecture. Refer to [AReaL documentation](https://github.com/inclusionAI/AReaL) for detailed setup instructions.
-
-#### Single Node Training Example
-
-```bash
-cd plugins/textcraft  # or number-search, codegrep
-
-uv run python3 platoon/textcraft/train.py \
-    --config platoon/textcraft/textcraft_areal.yaml \
-    experiment_name=textcraft-reinforce \
-    trial_name=trial0
-```
-
-#### Multi-Node Training
-
-See AReaL documentation for distributed training setup.
-
-## Inference Benchmarking
-
-Use the standalone inference workflow to benchmark a model endpoint on a dataset and generate a final report.
+Tinker example:
 
 ```bash
 cd plugins/textcraft
+uv run python -m platoon.textcraft.train_scripts.tinker.train_tinker \
+  --config platoon/textcraft/configs/tinker/textcraft_tinker.yaml
+```
 
-# Uses OpenAI-compatible endpoint settings from config
-uv run python -m platoon.textcraft.run_inference \
-    --config platoon/textcraft/configs/inference/textcraft_inference.yaml
+AReaL example:
 
-cd ../appworld
+```bash
+cd plugins/number-search
+uv run python3 platoon/number_search/train.py \
+  --config platoon/number_search/nv_number_search_cispo_areal.yaml
+```
+
+Most config values can be overridden from the CLI:
+
+```bash
+uv run python3 platoon/number_search/train.py \
+  --config platoon/number_search/nv_number_search_cispo_areal.yaml \
+  trial_name=debug-run \
+  train_dataset.batch_size=16
+```
+
+## Inference
+
+Standalone inference workflows benchmark an OpenAI-compatible endpoint and write rollouts plus aggregate reports under `inference.output_dir`.
+
+```bash
+cd plugins/appworld
 uv run python -m platoon.appworld.run_inference \
-    --config platoon/appworld/configs/inference/appworld_inference.yaml
+  --config platoon/appworld/configs/inference/appworld_inference.yaml
 ```
 
-Outputs are written under `inference.output_dir` from config, including:
-- `rollouts/` with raw trajectory collections per task and rollout
-- `reports/task_results.jsonl` with per-task benchmark records
-- `reports/final_report.json` with aggregate metrics (success, success@k, reward@k, step/time stats)
+## AReaL Config Surface
 
-The benchmarking workflow supports:
-- **Two stages**: collect rollouts first, then generate reports from saved rollouts
-- **Resume**: interrupted runs can continue from completed rollout artifacts
-- **Subprocess isolation**: enable for environments that require isolated rollouts
-- **Single-task quick run**: set `task_id` in config (or CLI override) to benchmark one task
+Platoon intentionally exposes a smaller AReaL config surface than upstream AReaL:
 
-## Configuration
+- `rollout.backend` and `actor.backend` select engine placement.
+- `workflow_config` controls rollout grouping and reward processing.
+- `workflow_config.rollout_config.inference_params` controls rollout generation.
+- `loss_fn_config` selects the policy loss and loss-specific arguments.
+- `environments` selects dataset, task, rollout, reward, and workflow components through `platoon.train.auto`.
+- `train_dataset.batch_size` and `valid_dataset.batch_size` control dataloader sizing.
 
-### Tinker Config Structure
+## Visualization
 
-```yaml
-# Training configuration
-train:
-  model_name: Qwen/Qwen3-4B      # HuggingFace model identifier
-  renderer_name: qwen3            # Prompt renderer type
-  batch_size: 32
-  num_epochs: 10
-  lora_rank: 32
-  optimizer:
-    learning_rate: 1e-6
-  workflow_config:
-    group_size: 8                 # Rollouts per task for GRPO
-    rollout_config:
-      max_steps: 50
-      timeout: 900
-
-# Eval configuration
-eval:
-  strategy: epoch                 # When to evaluate: epoch, step, none
-  every: 1                        # Frequency of evaluation
-
-# Checkpoint configuration
-checkpoint:
-  strategy: epoch
-  every: 5
-  load_checkpoint_path: null      # Resume from checkpoint
-
-# Paths
-log_path: ./logs
-tinker_base_url: null             # Tinker service URL (uses default if null)
-
-# Stats and logging
-stats:
-  experiment_name: my-experiment
-  trial_name: trial1
-  wandb:
-    mode: online
-    project: my-project
-```
-
-### AReaL Config Structure
-
-Platoon supports a smaller, Platoon-first AReaL config surface than upstream AReaL.
-
-```yaml
-experiment_name: my-experiment
-trial_name: trial0
-tokenizer_path: ${actor.path}
-
-cluster:
-  fileroot: /mnt/efs/tmp/areal/experiments
-  name_resolve:
-    type: nfs
-    nfs_record_root: /mnt/efs/tmp/areal/name_resolve
-
-rollout:
-  backend: sglang:d4p1t1
-  experiment_name: ${experiment_name}
-  trial_name: ${trial_name}
-  fileroot: ${cluster.fileroot}
-  tokenizer_path: ${tokenizer_path}
-  consumer_batch_size: ${train_dataset.batch_size}
-
-workflow_config:
-  group_size: 8
-  rollout_config:
-    model_name: ${actor.path}
-    max_steps: 50
-    timeout: 900
-    inference_params:
-      temperature: 1.0
-      max_completion_tokens: 2048
-
-loss_fn_config:
-  loss_fn: cispo
-  loss_fn_kwargs:
-    clip_low_threshold: 0.0
-    clip_high_threshold: 5.0
-
-actor:
-  backend: fsdp:d4p1t1
-  experiment_name: ${experiment_name}
-  trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B
-
-ref:
-  backend: ${actor.backend}
-  experiment_name: ${experiment_name}
-  trial_name: ${trial_name}
-  path: ${actor.path}
-
-train_dataset:
-  batch_size: 32
-
-valid_dataset:
-  batch_size: 32
-```
-
-Supported sources of truth:
-- Rollout/group behavior lives under `workflow_config`.
-- Generation settings used by Platoon rollouts live under `workflow_config.rollout_config.inference_params`.
-- Loss selection and clipping live under `loss_fn_config`.
-- Plugin-specific datasets, tasks, rollouts, rewards, and workflows can be selected under `plugin`.
-- Engine placement lives under explicit per-engine `backend` fields like `rollout.backend` and `actor.backend`.
-- Dataset config is intentionally minimal; Platoon only supports the dataloader knobs it actually consumes.
-
-### Registry-Based Extension
-
-Plugins can expose reusable components through Platoon's registries instead of writing a new trainer script for every environment/backend pair:
-
-```python
-from platoon.registry import register_dataset_loader, register_reward_processor, register_rollout, register_task_loader
-
-
-@register_task_loader("my_plugin/tasks")
-def get_task(task_id: str):
-    ...
-
-
-@register_dataset_loader("my_plugin/train")
-def load_dataset(config, split: str, **kwargs):
-    ...
-
-
-@register_rollout("my_plugin/recursive")
-async def run_rollout(task, rollout_config):
-    ...
-
-
-@register_reward_processor("my_plugin/reward")
-def reward_processor(traj: dict):
-    return traj["reward"], {}
-```
-
-YAML can then select those components by name:
-
-```yaml
-plugin:
-  package: my_plugin.registry
-  dataset_loader: my_plugin/train
-  eval_dataset_loader: my_plugin/train
-  task_loader: my_plugin/tasks
-  rollout: my_plugin/recursive
-  reward_processor: my_plugin/reward
-  workflow: group_rollout
-```
-
-Registry names are the preferred documented contract. Import paths such as `my_plugin.rollouts.run_rollout` remain supported for compatibility and for AReaL remote worker reconstruction.
-
-Removed from the Platoon-supported AReaL surface:
-- `allocation_mode`
-- `launcher`
-- old actor-side loss config such as `actor.loss_fn`, `actor.clip_low_threshold`, and related duplicates
-- old `gconfig` generation knobs such as `gconfig.n_samples`, `gconfig.temperature`, and `gconfig.max_new_tokens`
-- dataset placeholders like `train_dataset.path`, `train_dataset.type`, `valid_dataset.path`, and `valid_dataset.type`
-
-If you need lower-level upstream AReaL behavior, prefer extending Platoon’s AReaL config/codepath explicitly rather than relying on inherited upstream config keys that Platoon does not consume.
-
-## Visualizing Trajectories
-
-See the dedicated guide: [Trajectory visualization CLI](platoon/visualization/README.md).
-
-## Development
-
-### Setup
+Use the trajectory visualization CLI to tail, replay, and analyze rollout event logs:
 
 ```bash
-# Install dev dependencies (include your existing extras to preserve them)
-uv sync --extra tinker --group dev                 # Tinker backend
-uv sync --extra areal --group dev                  # AReaL backend
-uv sync --extra tinker --extra wandb --group dev   # Tinker + WandB
-
-# Install pre-commit hooks
-uvx pre-commit install
+uv run -m platoon.visualization.cli --help
 ```
 
-### Running Tests
+See [`platoon/visualization/README.md`](platoon/visualization/README.md).
 
-```bash
-uv run pytest tests/ -v
-```
-
-### Linting and Type Checking
-
-The project uses [ruff](https://docs.astral.sh/ruff/) for linting/formatting and [ty](https://docs.astral.sh/ty/) for type checking. Both run automatically via pre-commit hooks.
-
-```bash
-# Run all pre-commit checks manually
-uvx pre-commit run --all-files
-
-# Run individual tools
-uv run ruff check .           # Lint
-uv run ruff format .          # Format
-uvx ty check                  # Type check
-```
-
-### Pre-commit Hooks
-
-Pre-commit hooks run automatically on `git commit`. They include:
-- **ruff**: Linting with auto-fix
-- **ruff-format**: Code formatting
-- **ty**: Type checking
-- **conventional-pre-commit**: Validates commit message format
-
-If a hook fails, fix the issues and commit again.
-
-### Commit Messages
-
-This project uses [Conventional Commits](https://www.conventionalcommits.org/). Commit messages must follow the format:
-
-```
-type(scope): description
-```
-
-Common types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
-
-Examples:
-- `feat: add user authentication`
-- `fix(api): handle null response`
-- `docs: update README`
-
-### CI
-
-Pull requests and pushes to `main` trigger CI checks (see [.github/workflows/ci.yml](.github/workflows/ci.yml)):
-- **pr-title**: Validates PR title follows conventional commit format
-- **lint**: Runs pre-commit hooks (ruff + ty)
-- **test**: Runs pytest

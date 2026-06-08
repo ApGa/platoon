@@ -1,17 +1,17 @@
-"""Registry-driven Tinker training entrypoint."""
+"""Tinker training entrypoint for Auto-selected Platoon components."""
 
 from __future__ import annotations
 
 import asyncio
 import sys
 
-from platoon.train.registered import (
-    build_registered_dataset,
-    load_plugin_components,
-    resolve_registered_reward_processor,
-    resolve_registered_rollout,
-    resolve_registered_task_loader,
-    resolve_registered_workflow,
+from platoon.train.auto import (
+    AutoDataset,
+    AutoEnvironment,
+    AutoRewardProcessor,
+    AutoRollout,
+    AutoTaskLoader,
+    AutoWorkflow,
 )
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
@@ -19,8 +19,8 @@ from platoon.train.tinker.workflows import GroupRolloutWorkflow
 from platoon.utils.config import load_config
 
 
-async def arun_registered_tinker_training(args: list[str] | None = None, default_config_path: str | None = None) -> None:
-    """Run Tinker training from registry-backed plugin config."""
+async def arun_tinker_training(args: list[str] | None = None, default_config_path: str | None = None) -> None:
+    """Run Tinker training from an environment-backed Platoon config."""
 
     config, _ = load_config(
         args=args or sys.argv[1:],
@@ -28,19 +28,20 @@ async def arun_registered_tinker_training(args: list[str] | None = None, default
         default_config_path=default_config_path,
     )
     config: PlatoonTinkerRLTrainerConfig = config
-    load_plugin_components(config.plugin)
+    AutoEnvironment.load(config)
+    environment = AutoEnvironment.from_config(config)
 
-    train_dataset = build_registered_dataset(config, "train")
-    eval_dataset = build_registered_dataset(config, "eval")
-    rollout_fn = resolve_registered_rollout(config, "train")
-    eval_rollout_fn = resolve_registered_rollout(config, "eval")
-    get_task_fn = resolve_registered_task_loader(config)
-    reward_processor = resolve_registered_reward_processor(config)
-    workflow_cls = resolve_registered_workflow(config, GroupRolloutWorkflow)
+    train_dataset = AutoDataset.from_config(config, "train")
+    eval_dataset = AutoDataset.from_config(config, "eval")
+    rollout_fn = AutoRollout.from_config(config, "train")
+    eval_rollout_fn = AutoRollout.from_config(config, "eval")
+    get_task_fn = AutoTaskLoader.from_config(config)
+    reward_processor = AutoRewardProcessor.from_config(config)
+    workflow_cls = AutoWorkflow.from_config(config, default=GroupRolloutWorkflow)
 
     trainer = PlatoonTinkerRLTrainer(config=config, train_dataset=train_dataset, eval_dataset=eval_dataset)
     async with trainer:
-        workflow_kwargs = dict(config.plugin.workflow_kwargs)
+        workflow_kwargs = dict(environment.workflow_kwargs)
         train_workflow = workflow_cls(
             rollout_fn=rollout_fn,
             get_task_fn=get_task_fn,
@@ -53,7 +54,7 @@ async def arun_registered_tinker_training(args: list[str] | None = None, default
             **workflow_kwargs,
         )
 
-        eval_workflow_kwargs = dict(config.plugin.eval_workflow_kwargs)
+        eval_workflow_kwargs = dict(environment.eval_workflow_kwargs)
         eval_workflow = workflow_cls(
             rollout_fn=eval_rollout_fn,
             get_task_fn=get_task_fn,
@@ -69,9 +70,9 @@ async def arun_registered_tinker_training(args: list[str] | None = None, default
         await trainer.train(train_workflow=train_workflow, eval_workflow=eval_workflow)
 
 
-def run_registered_tinker_training(args: list[str] | None = None, default_config_path: str | None = None) -> None:
-    asyncio.run(arun_registered_tinker_training(args=args, default_config_path=default_config_path))
+def run_tinker_training(args: list[str] | None = None, default_config_path: str | None = None) -> None:
+    asyncio.run(arun_tinker_training(args=args, default_config_path=default_config_path))
 
 
 if __name__ == "__main__":
-    run_registered_tinker_training()
+    run_tinker_training()

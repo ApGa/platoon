@@ -6,7 +6,7 @@ from typing import Any
 from areal.api.cli_args import GRPOConfig, PPOActorConfig
 
 from platoon.config_defs import RolloutConfig
-from platoon.train.components import PluginResolverConfig
+from platoon.train.components import EnvironmentConfig, normalize_environment_configs
 from platoon.utils.train import VariableBatchInferenceEngineConfig
 
 
@@ -137,7 +137,7 @@ class PlatoonArealRLTrainerConfig(GRPOConfig):
     actor: PlatoonPPOActorConfig = field(default_factory=PlatoonPPOActorConfig)
     ref: PlatoonPPOActorConfig | None = None
     loss_fn_config: LossFnConfig = field(default_factory=LossFnConfig)
-    plugin: PluginResolverConfig = field(default_factory=PluginResolverConfig)
+    environments: list[EnvironmentConfig] = field(default_factory=lambda: [EnvironmentConfig()])
 
     def __post_init__(self):
         if isinstance(self.gconfig, dict):
@@ -150,8 +150,11 @@ class PlatoonArealRLTrainerConfig(GRPOConfig):
             self.valid_dataset = PlatoonValidDatasetConfig(**self.valid_dataset)
         if isinstance(self.loss_fn_config, dict):
             self.loss_fn_config = LossFnConfig(**self.loss_fn_config)
-        if isinstance(self.plugin, dict):
-            self.plugin = PluginResolverConfig(**self.plugin)
+        self.environments = normalize_environment_configs(self.environments)
+        if len(self.environments) > 1:
+            raise NotImplementedError(
+                "Multiple environments are not yet supported; provide exactly one entry"
+            )
 
         if self.scheduler.type is None:
             # Platoon's updated AReaL path relies on the single-controller scheduler.

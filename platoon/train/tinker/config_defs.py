@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from platoon.config_defs import RolloutConfig
-from platoon.train.components import PluginResolverConfig
+from platoon.train.components import EnvironmentConfig, normalize_environment_configs
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
 
@@ -111,11 +111,14 @@ class PlatoonTinkerRLTrainerConfig:
     eval: EvalConfig
     log_path: str
     tinker_base_url: str | None = None  # Tinker service URL
-    plugin: PluginResolverConfig = field(default_factory=PluginResolverConfig)
+    environments: list[EnvironmentConfig] = field(default_factory=lambda: [EnvironmentConfig()])
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
 
     def __post_init__(self):
-        if isinstance(self.plugin, dict):
-            self.plugin = PluginResolverConfig(**self.plugin)
+        self.environments = normalize_environment_configs(self.environments)
+        if len(self.environments) > 1:
+            raise NotImplementedError(
+                "Multiple environments are not yet supported; provide exactly one entry"
+            )

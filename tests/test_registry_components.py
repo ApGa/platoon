@@ -9,13 +9,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from platoon.registry import Registry, import_from_string
-from platoon.train.components import PluginResolverConfig
-from platoon.train.registered import (
-    build_registered_dataset,
-    load_plugin_components,
-    resolve_registered_rollout,
-    resolve_registered_workflow,
-)
+from platoon.train.auto import AutoDataset, AutoEnvironment, AutoRollout, AutoWorkflow
+from platoon.train.components import EnvironmentConfig
 
 
 def double(value):
@@ -40,7 +35,7 @@ def test_registry_resolves_import_paths():
     assert sqrt(9) == 3
 
 
-def test_registered_dataset_loader_receives_split_kwargs():
+def test_auto_dataset_loader_receives_split_kwargs():
     dataset_registry = Registry("dataset_loader")
     seen = {}
 
@@ -55,12 +50,14 @@ def test_registered_dataset_loader_receives_split_kwargs():
         "Config",
         (),
         {
-            "plugin": PluginResolverConfig(
-                dataset_loader="fake",
-                eval_dataset_loader="fake",
-                dataset_kwargs={"difficulty": "train"},
-                eval_dataset_kwargs={"difficulty": "eval"},
-            )
+            "environments": [
+                EnvironmentConfig(
+                    dataset_loader="fake",
+                    eval_dataset_loader="fake",
+                    dataset_kwargs={"difficulty": "train"},
+                    eval_dataset_kwargs={"difficulty": "eval"},
+                )
+            ]
         },
     )()
 
@@ -69,7 +66,7 @@ def test_registered_dataset_loader_receives_split_kwargs():
     original = registry_module._REGISTRIES.get("dataset_loader")
     registry_module._REGISTRIES["dataset_loader"] = dataset_registry
     try:
-        assert build_registered_dataset(config, "eval") == ("dataset", "eval")
+        assert AutoDataset.from_config(config, "eval") == ("dataset", "eval")
         assert seen == {"split": "eval", "kwargs": {"difficulty": "eval"}}
     finally:
         if original is None:
@@ -78,7 +75,7 @@ def test_registered_dataset_loader_receives_split_kwargs():
             registry_module._REGISTRIES["dataset_loader"] = original
 
 
-def test_registered_resolvers_import_packages_for_side_effects():
+def test_auto_factories_import_packages_for_side_effects():
     rollout_registry = Registry("rollout")
 
     def rollout(task, config):
@@ -91,9 +88,9 @@ def test_registered_resolvers_import_packages_for_side_effects():
     original = registry_module._REGISTRIES.get("rollout")
     registry_module._REGISTRIES["rollout"] = rollout_registry
     try:
-        config = type("Config", (), {"plugin": PluginResolverConfig(rollout="fake/rollout")})()
-        load_plugin_components(config.plugin)
-        assert resolve_registered_rollout(config) is rollout
+        config = type("Config", (), {"environments": [EnvironmentConfig(rollout="fake/rollout")]})()
+        AutoEnvironment.load(config)
+        assert AutoRollout.from_config(config) is rollout
     finally:
         if original is None:
             registry_module._REGISTRIES.pop("rollout", None)
@@ -101,9 +98,25 @@ def test_registered_resolvers_import_packages_for_side_effects():
             registry_module._REGISTRIES["rollout"] = original
 
 
-def test_registered_workflow_uses_default_group_rollout_name():
+def test_auto_workflow_uses_default_group_rollout_name():
     class DefaultWorkflow:
         pass
 
-    config = type("Config", (), {"plugin": PluginResolverConfig(workflow="group_rollout")})()
-    assert resolve_registered_workflow(config, DefaultWorkflow) is DefaultWorkflow
+    config = type("Config", (), {"environments": [EnvironmentConfig(workflow="group_rollout")]})()
+    assert AutoWorkflow.from_config(config, default=DefaultWorkflow) is DefaultWorkflow
+
+
+def test_auto_environment_rejects_multiple_environments():
+    config = type(
+        "Config",
+        (),
+        {
+            "environments": [
+                EnvironmentConfig(rollout="fake/one"),
+                EnvironmentConfig(rollout="fake/two"),
+            ]
+        },
+    )()
+
+    with pytest.raises(NotImplementedError, match="Multiple environments are not yet supported"):
+        AutoEnvironment.from_config(config)
