@@ -22,8 +22,8 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     try:
         llm_client = LiteLLMClient(
             model=config.model_name,
-            # base_url=config.model_endpoint,
-            # api_key=config.model_api_key
+            base_url=config.model_endpoint,
+            api_key=config.model_api_key,
         )
         env = NumberSearchEnv(task)
         agent = NumberSearchAgent(

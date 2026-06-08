@@ -1,5 +1,5 @@
 experiment_name: number-search-cispo
-trial_name: nv-cispo-trial0
+trial_name: nv-cispo-trial1
 
 seed: 343
 total_train_epochs: 10
@@ -10,10 +10,10 @@ tokenizer_path: ${actor.path}
 cluster:
   n_nodes: 1
   n_gpus_per_node: 8
-  fileroot: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments
+  fileroot: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/name_resolve
+    nfs_record_root: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/name_resolve
 
 rollout:
   backend: sglang:d4p1t1
@@ -33,7 +33,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 10
-    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/number-search-nv-cispo-trial0
+    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/number-search-nv-cispo-trial0
     verbose: True
     train: true
     timeout: 600
