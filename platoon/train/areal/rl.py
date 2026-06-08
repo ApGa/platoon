@@ -162,7 +162,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
         `trainable_datums`. User-extensible transforms only run after this
         reduction has produced a stable full batch.
         """
-
+        rollout_batch = [item for item in rollout_batch if item]
         if not rollout_batch:
             return None
 
@@ -500,7 +500,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
             current_platform.synchronize()
             self._save_perf_tracer(step=global_step)
 
-    def _evaluate_once(
+    def _evaluate_fn(
         self,
         eval_workflow: WorkflowLike,
         eval_workflow_kwargs,

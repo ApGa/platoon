@@ -64,6 +64,9 @@ class PlatoonPPOActorConfig(PPOActorConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        # These are runtime-only defaults for the custom actor implementation.
+        # User configs should choose losses via top-level `loss_fn_config`;
+        # PlatoonArealRLTrainerConfig copies those values onto `actor` below.
         self.loss_fn = "grpo"
         self.loss_fn_kwargs: dict[str, Any] = {}
 
@@ -159,6 +162,8 @@ class PlatoonArealRLTrainerConfig(GRPOConfig):
 
         super().__post_init__()
 
+        # Keep loss selection in one public config location (`loss_fn_config`)
+        # while attaching it to the actor object consumed by PlatoonActorImpl.
         self.actor.loss_fn = self.loss_fn_config.loss_fn
         merged_loss_fn_kwargs = dict(getattr(self.actor, "loss_fn_kwargs", {}))
         merged_loss_fn_kwargs.update(self.loss_fn_config.loss_fn_kwargs)

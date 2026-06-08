@@ -9,12 +9,14 @@ from areal.api.cli_args import MicroBatchSpec
 from areal.engine import FSDPPPOActor
 from areal.trainer.ppo.actor import PPOActor, PPOActorController
 from areal.trainer.ppo.stats import infer_token_denominator
-from areal.utils import stats_tracker
+from areal.utils import logging, stats_tracker
 from areal.utils.data import split_padded_tensor_dict_into_mb_list
 from areal.utils.perf_tracer import trace_perf
 
 from platoon.train.areal.config_defs import PlatoonPPOActorConfig
 from platoon.train.areal.loss_functions import build_loss_fn
+
+logger = logging.getLogger("PlatoonActor")
 
 
 class PlatoonActorImpl(PPOActor):
@@ -39,6 +41,12 @@ class PlatoonActorImpl(PPOActor):
             sapo_tau_neg=self.config.sapo_tau_neg,
             use_decoupled_loss=self.config.use_decoupled_loss,
             behave_imp_weight_mode=self.config.behave_imp_weight_mode,
+        )
+        logger.info(
+            "Using Platoon loss_fn=%s loss_fn_kwargs=%s current_version=%s",
+            self.config.loss_fn,
+            self.config.loss_fn_kwargs,
+            current_version,
         )
         return build_loss_fn(
             self.config.loss_fn,

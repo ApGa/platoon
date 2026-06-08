@@ -1,5 +1,5 @@
-experiment_name: number-search-grpo
-trial_name: grpo-trial4
+experiment_name: number-search-cispo
+trial_name: nv-cispo-trial0
 
 seed: 343
 total_train_epochs: 10
@@ -8,12 +8,12 @@ tokenizer_path: ${actor.path}
 #enable_offload: false
 
 cluster:
-  n_nodes: 1  
+  n_nodes: 1
   n_gpus_per_node: 8
-  fileroot: /mnt/efs/tmp/areal/experiments
+  fileroot: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /mnt/efs/tmp/areal/name_resolve
+    nfs_record_root: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/name_resolve
 
 rollout:
   backend: sglang:d4p1t1
@@ -33,7 +33,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 10
-    output_dir: /mnt/efs/tmp/areal/experiments/number-search-grpo-trial4
+    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/number-search-nv-cispo-trial0
     verbose: True
     train: true
     timeout: 600
@@ -41,6 +41,12 @@ workflow_config:
       temperature: 1.0
       max_completion_tokens: 512
   group_size: 8
+
+loss_fn_config:
+  loss_fn: cispo
+  loss_fn_kwargs:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
 
 actor:
   backend: fsdp:d4p1t1
@@ -52,13 +58,13 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 32000  
+    max_tokens_per_mb: 60000
   optimizer:
     type: adam
-    lr: 1e-6
+    lr: 3e-6
     weight_decay: 0.017
     beta1: 0.9
-    beta2: 0.999
+    beta2: 0.95
     eps: 1e-8
     lr_scheduler_type: constant
     gradient_clipping: 1.0
@@ -71,7 +77,7 @@ actor:
       cmd: python -m areal.infra.rpc.rpc_server
       env_vars: {}
   eps_clip: 0.20
-  eps_clip_higher: 0.25
+  eps_clip_higher: 0.26
   reward_scaling: 1.0
   reward_bias: 0.0
   # aent:
@@ -87,8 +93,8 @@ actor:
   kl_ctl: 0.0
   kl_estimator: k1
   ppo_n_minibatches: 1
-  recompute_logprob: true
-  use_decoupled_loss: true
+  recompute_logprob: false #true
+  use_decoupled_loss: false #true
   reward_norm:
     mean_level: null
     std_level: null
@@ -105,7 +111,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 32000  
+    max_tokens_per_mb: 60000
   optimizer: null
 
   scheduling_strategy:
@@ -162,4 +168,3 @@ stats_logger:
   wandb:
     mode: online
     project: number-search-platoon
-
