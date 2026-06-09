@@ -228,13 +228,13 @@ def cispo_loss_fn(
     )
 
     stats_tracker.stat(
-        importance_weight=ratio.detach(),
-        clamped_importance_weight=cispo_coefficient,
-        approx_kl=log_ratio.detach(),
-        new_logp=logprobs.detach(),
-        old_logp=old_logprobs,
+        importance_weight=ratio.detach().float(),
+        clamped_importance_weight=cispo_coefficient.float(),
+        approx_kl=log_ratio.detach().float(),
+        new_logp=logprobs.detach().float(),
+        old_logp=old_logprobs.float(),
         entropy=entropy.float(),
-        actor_loss=logging_loss,
+        actor_loss=logging_loss.float(),
         denominator="n_valid_tokens",
     )
 

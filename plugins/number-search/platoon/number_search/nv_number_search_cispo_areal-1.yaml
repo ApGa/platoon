@@ -1,5 +1,5 @@
 experiment_name: number-search-cispo
-trial_name: nv-cispo-trial6
+trial_name: nv-cispo-trial5
 
 seed: 343
 total_train_epochs: 10
@@ -33,7 +33,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 10
-    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/number-search-nv-cispo-trial6
+    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/number-search-nv-cispo-trial5
     verbose: True
     train: true
     timeout: 600
@@ -61,7 +61,7 @@ actor:
     max_tokens_per_mb: 60000
   optimizer:
     type: adam
-    lr: 3e-6
+    lr: 1e-6
     weight_decay: 0.017
     beta1: 0.9
     beta2: 0.95

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 import types
-from dataclasses import dataclass, field
+import sys
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -28,7 +28,11 @@ def _load_config_module():
     if existing is not None:
         return existing
 
+    areal_mod = types.ModuleType("areal")
+    areal_api_mod = types.ModuleType("areal.api")
     cli_args_mod = types.ModuleType("areal.api.cli_args")
+    sys.modules["areal"] = areal_mod
+    sys.modules["areal.api"] = areal_api_mod
     sys.modules["areal.api.cli_args"] = cli_args_mod
 
     @dataclass
@@ -127,6 +131,9 @@ def test_minimal_platoon_first_config_parses_and_injects_loss_settings():
     assert parsed.actor.loss_fn_kwargs["clip_low_threshold"] == 0.1
     assert parsed.actor.loss_fn_kwargs["clip_high_threshold"] == 4.2
     assert parsed.actor.loss_fn_kwargs["alpha"] == 3.0
+    serialized = asdict(parsed)
+    assert serialized["actor"]["loss_fn"] == "cispo"
+    assert serialized["actor"]["loss_fn_kwargs"]["clip_high_threshold"] == 4.2
     assert parsed.scheduler.type == "local"
     assert parsed.eval_gconfig.lora_name == parsed.gconfig.lora_name
     assert not hasattr(parsed.train_dataset, "path")

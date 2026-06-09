@@ -1,19 +1,23 @@
-experiment_name: number-search-cispo
-trial_name: nv-cispo-trial6
+experiment_name: recursive-agents
+trial_name: nv-textcraft-synth-ctx40000-depth-aware-medium-areal-cispo-trial-0
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
 
+train_difficulties: ["medium"]
+eval_difficulties: null
+depth_aware: true
 #enable_offload: false
 
+
 cluster:
-  n_nodes: 1
+  n_nodes: 1  
   n_gpus_per_node: 8
   fileroot: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/name_resolve
+    nfs_record_root: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/name_resolve
 
 rollout:
   backend: sglang:d4p1t1
@@ -23,25 +27,34 @@ rollout:
   tokenizer_path: ${tokenizer_path}
   scheduling_spec: ${actor.scheduling_spec}
   setup_timeout: 900
-  max_concurrent_rollouts: 64
-  queue_size: null
+  max_concurrent_rollouts: 8
+  queue_size: null 
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
   enable_rollout_tracing: false
+  #shuffle_cross_task: true
+  #ensure_batch_divisible_by: 4
 
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 10
-    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/number-search-nv-cispo-trial6
+    max_steps: 25
+    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/nv-textcraft-synth-ctx40000-depth-aware-medium-areal-cispo-trial-0
     verbose: True
     train: true
-    timeout: 600
+    timeout: 7200
     inference_params:
       temperature: 1.0
-      max_completion_tokens: 512
+      max_completion_tokens: 8192
+    step_timeout: 7200
+    propogate_root_success: true
+    skip_subagent_reward_computation: false
   group_size: 8
+  leave_one_out_baseline: True  # Use leave-one-out baseline for advantage centering
+  depth_level_weighting: True  # Weight trajectories inversely by depth-level frequency
+  depth_level_discount_gamma: null  # Alternate strategy: discount rewards by trajectory depth as gamma^d
 
+# CISPO loss function configuration (matches tinker settings)
 loss_fn_config:
   loss_fn: cispo
   loss_fn_kwargs:
@@ -52,7 +65,7 @@ actor:
   backend: fsdp:d4p1t1
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct-2507
+  path: Qwen/Qwen3-4B-Instruct-2507 #OpenPipe/Qwen3-14B-Instruct
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -76,20 +89,10 @@ actor:
       mem: 32
       cmd: python -m areal.infra.rpc.rpc_server
       env_vars: {}
-  eps_clip: 0.20
+  eps_clip: 0.2
   eps_clip_higher: 0.26
   reward_scaling: 1.0
   reward_bias: 0.0
-  # aent:
-  #   entropy_coeff: 0.002
-  #   entropy_clamp: 0.4
-  #   adaptive_coeff: True
-  #   entropy_high: 0.23
-  #   entropy_low: 0.05
-  #   coeff_lr: 0.001
-  #   coeff_box_high: 0.003
-  #   coeff_box_low: 1e-5
-  #   warmup_steps: 10
   kl_ctl: 0.0
   kl_estimator: k1
   ppo_n_minibatches: 1
@@ -125,15 +128,16 @@ sglang:
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 32001
+  context_length: 40001
   mem_fraction_static: 0.8
+  #attention_backend: flashinfer # Uncomment for blackwell GPUs
 
 # datasets
 train_dataset:
-  batch_size: 32
+  batch_size: 16
 
 valid_dataset:
-  batch_size: 32
+  batch_size: 50
 
 # Utilities
 saver:
@@ -141,7 +145,7 @@ saver:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 25
   freq_secs: null
 
 recover:
@@ -149,8 +153,8 @@ recover:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: null
-  freq_steps: null
+  freq_epochs: 1
+  freq_steps: 5
   freq_secs: 3600
 
 evaluator:
@@ -167,4 +171,5 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: online
-    project: number-search-platoon
+    project: recursive-agents
+
