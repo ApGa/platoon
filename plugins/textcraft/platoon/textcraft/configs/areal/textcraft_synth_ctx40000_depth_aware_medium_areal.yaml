@@ -1,5 +1,5 @@
 experiment_name: recursive-agents
-trial_name: textcraft-synth-test7
+trial_name: textcraft-synth-test8
 
 seed: 343
 total_train_epochs: 10
@@ -10,20 +10,20 @@ eval_difficulties: null
 depth_aware: true
 #enable_offload: false
 
-environments:
-  - package: platoon.textcraft.registry
-    trainer_config: textcraft/synth/areal
-    dataset_loader: textcraft/synth
-    eval_dataset_loader: textcraft/synth
-    task_loader: textcraft/synth
-    rollout: textcraft/synth/depth_aware
-    reward_processor: textcraft/synth/delegation_capped
-    workflow: group_rollout
-    dataset_kwargs:
-      difficulties: ["medium"]
-    eval_dataset_kwargs:
-      difficulties: null
-      limit: 100
+# environments:
+#   - package: platoon.textcraft.registry
+#     trainer_config: textcraft/synth/areal
+#     dataset_loader: textcraft/synth
+#     eval_dataset_loader: textcraft/synth
+#     task_loader: textcraft/synth
+#     rollout: textcraft/synth/depth_aware
+#     reward_processor: textcraft/synth/delegation_capped
+#     workflow: group_rollout
+#     dataset_kwargs:
+#       difficulties: ["medium"]
+#     eval_dataset_kwargs:
+#       difficulties: null
+#       limit: 100
 
 cluster:
   n_nodes: 1  

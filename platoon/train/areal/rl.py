@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +25,7 @@ from platoon.train.areal.batch_transforms import (
     build_default_batch_transforms,
     get_batch_size,
     index_batch,
+    localize_rtensors,
     run_batch_transforms,
     split_batch_to_trajectories,
 )
@@ -139,19 +141,21 @@ class PlatoonArealRLTrainer(PPOTrainer):
         if self.config.rollout.shuffle_cross_task:
             indices = indices[torch.randperm(batch_size, device=index_device)]
 
-        ensure = max(
-            int(self.config.rollout.ensure_batch_divisible_by),
+        # Match the pre-migration trimming semantics: enforce divisibility by
+        # lcm(ensure_batch_divisible_by, dp_size) so a single trim preserves both
+        # guarantees, and skip trimming entirely when the batch is smaller than
+        # one full multiple (sequential %-trims could over-trim and break the
+        # ensure_batch_divisible_by contract).
+        ensure = math.lcm(
+            max(int(self.config.rollout.ensure_batch_divisible_by), 1),
             dispatch_dp_size,
-            1,
         )
-        if int(indices.numel()) < dispatch_dp_size:
+        total = int(indices.numel())
+        if total < dispatch_dp_size:
             return None
-        remainder = int(indices.numel()) % ensure
-        if remainder != 0 and int(indices.numel()) >= ensure:
-            indices = indices[: int(indices.numel()) - remainder]
-        dp_remainder = int(indices.numel()) % dispatch_dp_size
-        if dp_remainder != 0:
-            indices = indices[: int(indices.numel()) - dp_remainder]
+        remainder = total % ensure
+        if remainder != 0 and total >= ensure:
+            indices = indices[: total - remainder]
         if int(indices.numel()) < dispatch_dp_size:
             return None
 
@@ -168,7 +172,22 @@ class PlatoonArealRLTrainer(PPOTrainer):
         if not rollout_batch:
             return None
 
+        # In single-controller mode prepare_batch returns remotized trajectories
+        # whose values are RTensor handles, not torch.Tensors. AReaL's
+        # concat_padded_tensors only concatenates tensor/list values and silently
+        # keeps the *first* dict's value for anything else, which would drop every
+        # rollout group but the first. Localize before concatenating.
+        rollout_batch = [localize_rtensors(item) for item in rollout_batch]
         batch = concat_padded_tensors(rollout_batch)
+
+        # Workflow-level stat tensors were already consumed by rollout-side stats
+        # recording and do not share the per-datum batch dim, so they cannot be
+        # filtered/split consistently with the rest of the batch. Drop them here
+        # instead of broadcasting stale copies into every dispatched trajectory.
+        stat_keys = ("task_reward", "num_steps", "num_input_tokens", "num_output_tokens")
+        for key in list(batch.keys()):
+            if key in stat_keys or key.startswith("root_") or key.startswith("reward/"):
+                del batch[key]
 
         if "trainable_datums" in batch:
             trainable_mask = batch.pop("trainable_datums").bool()
