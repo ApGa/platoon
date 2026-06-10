@@ -121,6 +121,23 @@ class PlatoonArealRLTrainer(PPOTrainer):
             return int(parallel_strategy.dp_size)
         return int(self.actor.data_parallel_world_size)
 
+    @staticmethod
+    def _maybe_clear_device_cache(engine: Any) -> None:
+        """Release cached CUDA blocks on an engine's GPU workers.
+
+        The pre-migration SPMD trainer ran ``torch.cuda.empty_cache()`` on every
+        rank between training phases. In single-controller mode this must be an
+        RPC to the workers; engines without the RPC (e.g. stock AReaL critics)
+        are skipped.
+        """
+        if engine is None:
+            return
+        clear = getattr(engine, "clear_device_cache", None)
+        if clear is None:
+            return
+        with stats_tracker.record_timing("clear_device_cache"):
+            clear()
+
     def _maybe_shuffle_and_trim_batch(self, batch: dict[str, Any]) -> dict[str, Any] | None:
         batch_size = get_batch_size(batch)
         if batch_size == 0:
@@ -336,6 +353,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     for traj, logp in zip(rollout_batch, ref_logps):
                         traj["ref_logp"] = logp
                     self.ref.get_device_stats().log("ref logp")
+                self._maybe_clear_device_cache(self.ref)
                 if self._should_offload_ref:
                     self._offload_model(self.ref, role="ref")
 
@@ -376,6 +394,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                         for traj, logp in zip(rollout_batch, prox_logps):
                             traj["prox_logp"] = logp
                         self.actor.get_device_stats().log("recompute logp")
+                    self._maybe_clear_device_cache(self.actor)
 
                 with (
                     stats_tracker.record_timing("compute_advantage"),
@@ -401,6 +420,9 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     self.actor.ppo_update(adv_batch)
                     self.actor.step_lr_scheduler()
                     self.actor.get_device_stats().log("ppo update")
+                # Free the training-peak allocator cache before the NCCL-heavy
+                # weight-update broadcast and checkpoint phases below.
+                self._maybe_clear_device_cache(self.actor)
                 if self._should_offload_actor:
                     self._offload_model(self.actor, role="actor")
 
@@ -444,6 +466,9 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     self.rollout.set_version(new_version)
                     if self.eval_rollout is not None:
                         self.eval_rollout.set_version(new_version)
+                # The bucketed broadcast leaves gathered full-parameter buckets
+                # in the cache; drop them before DCP save's NCCL collectives.
+                self._maybe_clear_device_cache(self.actor)
             else:
                 new_version = global_step + 1
                 self.actor.set_version(new_version)

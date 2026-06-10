@@ -7,6 +7,7 @@ import torch
 from areal.api import Scheduler
 from areal.api.cli_args import MicroBatchSpec
 from areal.engine import FSDPPPOActor
+from areal.infra import current_platform
 from areal.trainer.ppo.actor import PPOActor, PPOActorController
 from areal.trainer.ppo.stats import infer_token_denominator
 from areal.utils import logging, stats_tracker
@@ -143,6 +144,13 @@ class PlatoonActorImpl(PPOActor):
                 stats_tracker.scalar(**train_stat)
 
 
+class PlatoonPPOActorController(PPOActorController):
+    """Actor controller exposing Platoon's worker-side memory hygiene RPC."""
+
+    def clear_device_cache(self) -> None:
+        self._custom_function_call("clear_device_cache")
+
+
 class PlatoonPPOActor(FSDPPPOActor):
     """FSDP PPO actor with Platoon loss selection."""
 
@@ -150,9 +158,21 @@ class PlatoonPPOActor(FSDPPPOActor):
         super().__init__(config)
         self.actor = PlatoonActorImpl(config, self)
 
+    def clear_device_cache(self) -> None:
+        """Release cached allocator blocks on this worker's GPU.
+
+        The pre-migration SPMD trainer called ``torch.cuda.empty_cache()`` on
+        every rank between training phases. In single-controller mode the
+        trainer process owns no GPU, so the cleanup must run on the workers.
+        Freeing the cache before NCCL-heavy phases (weight-update broadcast,
+        DCP checkpoint save) matters because NCCL allocates its buffers outside
+        PyTorch's caching allocator.
+        """
+        current_platform.clear_memory()
+
     @classmethod
     def as_controller(cls, config: PlatoonPPOActorConfig, scheduler: Scheduler):
-        return PPOActorController(train_engine=cls, config=config, scheduler=scheduler)
+        return PlatoonPPOActorController(train_engine=cls, config=config, scheduler=scheduler)
 
 
 def create_actor(config: PlatoonPPOActorConfig) -> FSDPPPOActor:
