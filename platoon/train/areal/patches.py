@@ -257,46 +257,50 @@ def _patch_local_scheduler_fork_ready_timeout() -> None:
 
 
 def _patch_remote_inf_engine_asyncio_teardown_race() -> None:
-    """Retry inference-server fan-out requests that hit CPython's asyncio race.
+    """Run inference-server fan-out coroutines without asyncio's racy teardown.
 
-    ``RemoteInfEngine._run_request_on_all_servers`` issues pause/resume/
-    offload/onload requests through ``uvloop.run``, whose event-loop teardown
-    calls ``asyncio.all_tasks()``. That snapshots a process-global WeakSet
-    shared by every event loop in the process; with the workflow executor
-    churning thousands of rollout tasks in another thread, the snapshot can
-    fail with ``RuntimeError: Set changed size during iteration`` even after
-    CPython's 1000 internal retries (bpo-36607; only structurally fixed by the
-    per-thread task lists in Python 3.14). The race fires during loop teardown
-    after the HTTP requests already completed, and these control-plane
-    requests are idempotent, so retrying the whole fan-out is safe.
+    ``areal.infra.remote_inf_engine`` issues control-plane requests (pause/
+    resume/offload/onload and weight-update fan-outs) through ``uvloop.run``,
+    whose ``asyncio.Runner`` teardown calls ``asyncio.all_tasks()``. That
+    snapshots a process-global WeakSet shared by every event loop in the
+    process; with the workflow executor churning thousands of rollout tasks in
+    another thread, the snapshot fails with ``RuntimeError: Set changed size
+    during iteration`` even after CPython's 1000 internal retries (bpo-36607;
+    only structurally fixed by per-thread task lists in Python 3.14). At
+    recursive-workflow concurrency the churn is continuous, so retrying the
+    fan-out does not help either - observed 5 consecutive failures over 2.5
+    minutes. Instead, replace the module's ``uvloop.run`` with a runner that
+    drives a private event loop directly and skips the cancel-all sweep. The
+    fan-out coroutines await everything they spawn before returning, so the
+    sweep (the only ``all_tasks()`` caller on this path) is dead weight.
     """
 
-    from areal.infra.remote_inf_engine import RemoteInfEngine  # pyright: ignore[reportMissingImports]
-    from areal.utils import logging  # pyright: ignore[reportMissingImports]
+    import uvloop  # pyright: ignore[reportMissingImports]
+    import areal.infra.remote_inf_engine as remote_inf_engine  # pyright: ignore[reportMissingImports]
 
-    original = RemoteInfEngine._run_request_on_all_servers
-    if getattr(original, "__platoon_asyncio_teardown_race_patch__", False):
+    if getattr(remote_inf_engine.uvloop, "__platoon_asyncio_teardown_race_patch__", False):
         return
 
-    logger = logging.getLogger("PlatoonPatches", "system")
+    class _RaceFreeUvloop:
+        """Module-local ``uvloop`` stand-in whose ``run`` skips Runner teardown."""
 
-    @wraps(original)
-    def _run_request_on_all_servers_with_race_retry(self, req):
-        max_attempts = 5
-        for attempt in range(1, max_attempts + 1):
+        __platoon_asyncio_teardown_race_patch__ = True
+
+        @staticmethod
+        def run(coro):
+            loop = uvloop.new_event_loop()
             try:
-                return original(self, req)
-            except RuntimeError as e:
-                if "Set changed size during iteration" not in str(e) or attempt == max_attempts:
-                    raise
-                logger.warning(
-                    f"asyncio task-set race while sending '{getattr(req, 'endpoint', '?')}' "
-                    f"to inference servers (attempt {attempt}/{max_attempts}); retrying"
-                )
-                time.sleep(0.5)
+                return loop.run_until_complete(coro)
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                finally:
+                    loop.close()
 
-    _run_request_on_all_servers_with_race_retry.__platoon_asyncio_teardown_race_patch__ = True
-    RemoteInfEngine._run_request_on_all_servers = _run_request_on_all_servers_with_race_retry
+        def __getattr__(self, name):
+            return getattr(uvloop, name)
+
+    remote_inf_engine.uvloop = _RaceFreeUvloop()
 
 
 def _patch_remote_inf_engine_proxy_resolution() -> None:
