@@ -4,8 +4,11 @@ import fcntl
 import hashlib
 import json
 import os
+import sys
 import tempfile
+import threading
 import time
+import traceback
 from functools import lru_cache
 from functools import wraps
 from typing import Any
@@ -484,6 +487,191 @@ def _patch_areal_fsdp_wrap_classes_set_compat() -> None:
     fsdp_utils.apply_fsdp2 = apply_fsdp2
 
 
+# ---------------------------------------------------------------------------
+# Process stall instrumentation
+# ---------------------------------------------------------------------------
+# Workers have wedged in ways that left no post-mortem evidence (e.g. a
+# rollout worker stopped answering `pause` RPCs entirely and the run died
+# without a single stack trace). The watchdog below makes the next wedge
+# self-diagnosing from the worker's own log.
+
+_STALL_WATCHDOG_STARTED = False
+_ENGINE_CALL_LOCK = threading.Lock()
+_ENGINE_CALL_STATE: dict[str, Any] = {}
+
+
+def _watchdog_log(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(
+        f"[platoon-stall-watchdog pid={os.getpid()}] {timestamp} {message}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _dump_all_thread_stacks(reason: str) -> None:
+    name_by_ident = {t.ident: t.name for t in threading.enumerate()}
+    lines = [f"all thread stacks ({reason}):"]
+    for ident, frame in sys._current_frames().items():
+        name = name_by_ident.get(ident, "unknown")
+        stack = "".join(traceback.format_stack(frame))
+        lines.append(f"--- thread {name!r} (ident={ident}) ---\n{stack}")
+    _watchdog_log("\n".join(lines))
+
+
+def _patch_engine_rpc_call_tracking() -> None:
+    """Record which engine RPC method is running on the worker engine thread.
+
+    All engine RPCs (including trivial ones like ``pause``) are serialized
+    through a single engine thread, so one stuck method makes the whole worker
+    unresponsive to the trainer. Tracking the current method lets the stall
+    watchdog name the offender and dump its stack instead of the trainer only
+    seeing opaque RPC timeouts.
+    """
+
+    try:
+        import areal.infra.rpc.guard.engine_blueprint as engine_blueprint  # pyright: ignore[reportMissingImports]
+    except Exception:
+        return
+
+    original = engine_blueprint._submit_to_engine_thread
+    if getattr(original, "__platoon_engine_call_tracking__", False):
+        return
+
+    @wraps(original)
+    def _submit_with_tracking(func_name: str, func, *args: Any, **kwargs: Any) -> Any:
+        @wraps(func)
+        def _tracked(*func_args: Any, **func_kwargs: Any) -> Any:
+            with _ENGINE_CALL_LOCK:
+                _ENGINE_CALL_STATE.update(
+                    name=func_name,
+                    started=time.monotonic(),
+                    active=True,
+                )
+            try:
+                return func(*func_args, **func_kwargs)
+            finally:
+                with _ENGINE_CALL_LOCK:
+                    _ENGINE_CALL_STATE["active"] = False
+
+        return original(func_name, _tracked, *args, **kwargs)
+
+    _submit_with_tracking.__platoon_engine_call_tracking__ = True
+    engine_blueprint._submit_to_engine_thread = _submit_with_tracking
+
+
+def _install_process_stall_watchdog() -> None:
+    """Start a watchdog that makes process wedges self-diagnosing.
+
+    Installs, in every Platoon AReaL process (trainer, train workers, rollout
+    workers, proxy workers):
+
+    - ``SIGUSR1`` -> faulthandler dump of all thread stacks to stderr, for
+      on-demand inspection of a live process (``kill -USR1 <pid>``).
+    - A dead-man timer re-armed every few seconds by a heartbeat thread. If
+      Python threads cannot run for ``PLATOON_STALL_DUMP_SECS`` (default 180s;
+      e.g. a stop-the-world GC pause or a GIL-holding native call),
+      faulthandler's C watchdog thread dumps all thread stacks to stderr
+      without needing the GIL.
+    - A post-hoc warning when the heartbeat thread itself was frozen, which
+      timestamps GC/GIL stalls even when they end before the dump fires.
+    - A warning plus all-thread stack dump when one engine RPC method has been
+      running for over ``PLATOON_ENGINE_STALL_SECS`` (default 600s).
+    - A warning when open file descriptors exceed 80% of the soft limit
+      (leaked sockets exhaust FDs long before the process dies).
+
+    Disable with ``PLATOON_STALL_WATCHDOG=0``.
+    """
+
+    global _STALL_WATCHDOG_STARTED
+
+    if os.environ.get("PLATOON_STALL_WATCHDOG", "1") != "1":
+        return
+    if _STALL_WATCHDOG_STARTED:
+        return
+    _STALL_WATCHDOG_STARTED = True
+
+    import faulthandler
+    import signal
+
+    try:
+        # chain=False: with no prior Python handler installed, chaining would
+        # fall through to the default action and terminate the process.
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+    except Exception:
+        pass
+
+    _patch_engine_rpc_call_tracking()
+
+    heartbeat_interval = 5.0
+    freeze_warn_slack = 30.0
+    freeze_dump_secs = float(os.environ.get("PLATOON_STALL_DUMP_SECS", "180"))
+    engine_stall_secs = float(os.environ.get("PLATOON_ENGINE_STALL_SECS", "600"))
+    fd_check_period = 60.0
+    fd_warn_fraction = 0.8
+    fd_warn_cooldown = 300.0
+
+    def _maybe_warn_fd_usage(last_warn: float) -> float:
+        try:
+            import resource
+
+            soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            open_fds = len(os.listdir("/proc/self/fd"))
+        except Exception:
+            return last_warn
+        now = time.monotonic()
+        if soft_limit > 0 and open_fds > fd_warn_fraction * soft_limit and now - last_warn > fd_warn_cooldown:
+            _watchdog_log(
+                f"high file descriptor usage: {open_fds}/{soft_limit} open; "
+                "leaked sockets can wedge this process before any crash"
+            )
+            return now
+        return last_warn
+
+    def _watchdog_loop() -> None:
+        last_fd_check = 0.0
+        last_fd_warn = float("-inf")
+        last_engine_report = float("-inf")
+        while True:
+            try:
+                faulthandler.dump_traceback_later(freeze_dump_secs, exit=False, file=sys.stderr)
+            except Exception:
+                pass
+
+            before_sleep = time.monotonic()
+            time.sleep(heartbeat_interval)
+            now = time.monotonic()
+
+            gap = now - before_sleep
+            if gap > heartbeat_interval + freeze_warn_slack:
+                _watchdog_log(
+                    f"Python threads could not run for {gap:.0f}s "
+                    "(stop-the-world GC pause or GIL-holding native call); "
+                    f"stalls over {freeze_dump_secs:.0f}s dump all thread stacks via faulthandler"
+                )
+
+            with _ENGINE_CALL_LOCK:
+                engine_call = dict(_ENGINE_CALL_STATE)
+            if engine_call.get("active"):
+                elapsed = now - engine_call["started"]
+                if elapsed > engine_stall_secs and now - last_engine_report > engine_stall_secs:
+                    last_engine_report = now
+                    _dump_all_thread_stacks(
+                        f"engine RPC method {engine_call['name']!r} has been running for {elapsed:.0f}s; "
+                        "all other engine RPCs (e.g. pause) are queued behind it"
+                    )
+
+            if now - last_fd_check > fd_check_period:
+                last_fd_check = now
+                last_fd_warn = _maybe_warn_fd_usage(last_fd_warn)
+
+    threading.Thread(target=_watchdog_loop, daemon=True, name="platoon-stall-watchdog").start()
+    _watchdog_log(
+        f"started (freeze dump after {freeze_dump_secs:.0f}s, engine RPC stall report after "
+        f"{engine_stall_secs:.0f}s); run `kill -USR1 {os.getpid()}` for an on-demand stack dump"
+    )
+
+
 def apply_all_patches() -> None:
     """Apply Platoon compatibility patches for the current AReaL release."""
 
@@ -496,3 +684,4 @@ def apply_all_patches() -> None:
     _patch_transformers_apply_chat_template_return_type()
     _patch_areal_openai_message_content_flatten()
     _patch_areal_fsdp_wrap_classes_set_compat()
+    _install_process_stall_watchdog()

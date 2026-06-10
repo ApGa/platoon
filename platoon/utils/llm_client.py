@@ -386,6 +386,21 @@ class LiteLLMClient:
         # Disable LiteLLM internal retries by default to prevent long rollout slot blocking.
         # Callers can still override by explicitly passing num_retries in kwargs.
         kwargs.setdefault("num_retries", 0)
+
+        api_key = self.api_key
+        if api_key and self.model.startswith("openai/"):
+            # LiteLLM caches one AsyncOpenAI client (each owning an aiohttp
+            # ClientSession) per api_key, and its cache evicts old clients
+            # WITHOUT closing them ("relying on GC", per LLMClientCache).
+            # AReaL rollouts use a unique proxy session key per rollout, so
+            # every rollout leaked a client with open sockets until GC
+            # ("Unclosed client session" floods and FD pressure in rollout
+            # workers). Authenticate per request via headers instead, so all
+            # calls share one cached client per event loop.
+            extra_headers = dict(kwargs.pop("extra_headers", None) or {})
+            extra_headers.setdefault("Authorization", f"Bearer {api_key}")
+            kwargs["extra_headers"] = extra_headers
+            api_key = "platoon-shared-litellm-client"
         try:
             async with profile_span(
                 "llm_chat_completion",
@@ -406,7 +421,7 @@ class LiteLLMClient:
                         await litellm.acompletion(
                             model=self.model,
                             api_base=self.base_url,
-                            api_key=self.api_key,
+                            api_key=api_key,
                             messages=messages,
                             temperature=temperature,
                             max_tokens=max_tokens,
