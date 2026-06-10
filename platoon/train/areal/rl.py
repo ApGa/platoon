@@ -30,6 +30,7 @@ from platoon.train.areal.batch_transforms import (
     split_batch_to_trajectories,
 )
 from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig, PlatoonPPOActorConfig
+from platoon.train.areal.preallocated_slurm import PreallocatedSlurmScheduler
 from platoon.train.areal.workflow_serialization import normalize_remote_workflow
 
 logger = logging.getLogger("PlatoonArealRLTrainer")
@@ -51,6 +52,11 @@ class PlatoonArealRLTrainer(PPOTrainer):
         self.eval_proxy_base_url: str | None = None
         self.batch_transforms = self._build_batch_transforms(batch_transforms)
         self._start_platoon_proxies()
+
+    def _init_scheduler(self):
+        if self.config.scheduler.type == "slurm_prealloc":
+            return PreallocatedSlurmScheduler(exp_config=self.config)
+        return super()._init_scheduler()
 
     def _create_train_engine(self, actor_config, alloc):
         if (

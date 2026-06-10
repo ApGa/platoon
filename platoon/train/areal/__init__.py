@@ -36,6 +36,7 @@ from platoon.train.areal.loss_functions import (  # noqa: E402
     ppo_loss_fn,
     register_loss_fn,
 )
+from platoon.train.areal.preallocated_slurm import PreallocatedSlurmScheduler  # noqa: E402
 from platoon.train.areal.proxy import ArealProxySession  # noqa: E402
 from platoon.train.areal.rl import PlatoonArealRLTrainer  # noqa: E402
 from platoon.train.areal.workflows import GroupRolloutWorkflow  # noqa: E402
@@ -47,6 +48,7 @@ __all__ = [
     "PlatoonPPOActorConfig",
     "RolloutConfig",
     "WorkflowConfig",
+    "PreallocatedSlurmScheduler",
     # Batch transforms
     "BatchTransform",
     "BatchTransformContext",

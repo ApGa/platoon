@@ -38,6 +38,9 @@ overrides = [
     { name = "pyarrow", specifier = "==20.0.0" },
     { name = "soundfile", specifier = ">=0.12.1,<0.13.0" },
     { name = "timm", specifier = "==1.0.16" },
+    { name = "transformer-engine", extras = ["pytorch"], marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==2.12.0" },
+    { name = "transformer-engine-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==2.12.0" },
+    { name = "transformer-engine-torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==2.12.0" },
     { name = "transformers", specifier = "==4.57.1" },
     { name = "xgrammar", specifier = "==0.1.24" },
 ]
@@ -3177,7 +3180,7 @@ dependencies = [
     { name = "timm", marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux')" },
     { name = "torch", version = "2.9.1+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" }, marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux')" },
     { name = "tqdm", marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux')" },
-    { name = "transformer-engine", extra = ["core-cu13", "pytorch"], marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal') or (platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (platform_machine == 's390x' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
+    { name = "transformer-engine", extra = ["pytorch"], marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal') or (platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (platform_machine == 's390x' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker') or (sys_platform != 'linux' and extra == 'extra-17-platoon-textcraft-areal' and extra == 'extra-17-platoon-textcraft-tinker')" },
     { name = "transformers", marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux')" },
     { name = "typing-extensions", marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux')" },
     { name = "wandb", marker = "(platform_machine != 'aarch64' and platform_machine != 's390x' and sys_platform == 'linux') or (platform_machine == 'aarch64' and platform_python_implementation != 'CPython' and sys_platform == 'linux')" },
@@ -4587,6 +4590,11 @@ dependencies = [
 
 [package.optional-dependencies]
 areal = [
+    { name = "nvidia-cublas-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal'" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal'" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal'" },
+    { name = "nvidia-cusparse-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-17-platoon-textcraft-areal'" },
     { name = "platoon", extra = ["areal"], marker = "extra == 'extra-17-platoon-textcraft-areal'" },
 ]
 tinker = [
@@ -4598,6 +4606,11 @@ wandb = [
 
 [package.metadata]
 requires-dist = [
+    { name = "nvidia-cublas-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = "==12.9.1.4" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = "==12.9.86" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = "==12.9.79" },
+    { name = "nvidia-cusparse-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = "==12.5.10.65" },
+    { name = "nvidia-nvjitlink-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = "==12.9.86" },
     { name = "platoon", editable = "../../" },
     { name = "platoon", extras = ["areal"], marker = "extra == 'areal'", editable = "../../" },
     { name = "platoon", extras = ["tinker"], marker = "extra == 'tinker'", editable = "../../" },
