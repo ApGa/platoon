@@ -53,7 +53,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 25
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-test7
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-test8
     verbose: True
     train: true
     timeout: 7200
