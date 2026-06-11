@@ -229,6 +229,72 @@ def test_preallocated_overlap_workers_do_not_use_exclusive(monkeypatch):
     assert "--exclusive" not in command
 
 
+def test_separated_roles_are_pinned_to_distinct_nodes(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+
+    scheduler = module.PreallocatedSlurmScheduler()
+    # Two-node allocation; spreading should pin actor -> node0, rollout -> node1.
+    monkeypatch.setattr(scheduler, "_allocation_nodes", lambda: ["node0", "node1"])
+
+    captured: dict[str, str] = {}
+
+    class FakeProcess:
+        pid = 999
+
+        def poll(self):
+            return None
+
+    def fake_launch(role, command):
+        captured[role] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(scheduler, "_launch_role_process", fake_launch)
+
+    for role in ("actor", "rollout"):
+        job = FakeJob(
+            role=role,
+            replicas=8,
+            tasks=[FakeSchedulingSpec(cpu=2, gpu=1, mem=4)],
+            scheduling_strategy=types.SimpleNamespace(type="separation", target=None),
+        )
+        scheduler.create_workers(job)
+
+    assert "--nodelist=node0" in captured["actor"]
+    assert "--nodelist=node1" in captured["rollout"]
+
+
+def test_node_spreading_can_be_disabled(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    monkeypatch.setenv("PLATOON_AREAL_PREALLOC_SPREAD_NODES", "0")
+
+    scheduler = module.PreallocatedSlurmScheduler()
+    monkeypatch.setattr(scheduler, "_allocation_nodes", lambda: ["node0", "node1"])
+
+    captured: dict[str, str] = {}
+
+    class FakeProcess:
+        pid = 1000
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        scheduler,
+        "_launch_role_process",
+        lambda role, command: captured.setdefault(role, command) or FakeProcess(),
+    )
+
+    job = FakeJob(
+        role="actor",
+        replicas=8,
+        tasks=[FakeSchedulingSpec(cpu=2, gpu=1, mem=4)],
+        scheduling_strategy=types.SimpleNamespace(type="separation", target=None),
+    )
+    scheduler.create_workers(job)
+
+    assert "--nodelist" not in captured["actor"]
+
+
 def test_create_workers_tracks_background_srun_process(monkeypatch):
     module = _load_scheduler_module(monkeypatch)
 

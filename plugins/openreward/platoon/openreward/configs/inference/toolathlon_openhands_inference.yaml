@@ -1,0 +1,45 @@
+# OpenReward Toolathlon + OpenHands inference benchmark config.
+
+inference:
+  model_name: openai/aws/anthropic/bedrock-claude-opus-4-7
+  model_endpoint: https://inference-api.nvidia.com/v1/
+  model_api_key: sk-SXhZXj9mYOufVZTmn5NZIQ
+  output_dir: ./inference_results/toolathlon_openhands-opus4-7-test-0
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 10
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: true
+    subprocess_max_workers: 10
+    rollout_config:
+      max_steps: 100
+      output_dir: ./inference_results/toolathlon_openhands-opus4-7-test-0/rollouts
+      verbose: true
+      timeout: 600
+      step_timeout: 300
+      inference_params:
+        temperature: null
+        top_p: null
+        max_completion_tokens: 4096
+
+openreward:
+  env_name: numbersearchgym
+  split: train
+  eval_split: train
+  session_url: http://localhost:8082
+  api_url: null
+  api_key: local
+  train_task_limit: 20
+  eval_task_limit: 50
+  task_names: null
+  max_tool_calls: 0
+
+task_id: null
+# full: run rollouts + report
+# rollouts: only write rollouts to disk
+# report: only read existing rollouts and generate report
+stage: full
+shuffle_tasks: false
+seed: 42

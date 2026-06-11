@@ -4,6 +4,14 @@ from openhands.sdk.event import ActionEvent, AgentErrorEvent, Event, EventID, Me
 from platoon.openhands.types import OpenHandsObservation
 
 
+def _conversation_execution_status(conversation_state) -> ConversationExecutionStatus | None:
+    return (
+        getattr(conversation_state, "agent_status", None)
+        or getattr(conversation_state, "execution_status", None)
+        or getattr(conversation_state, "agent_state", None)
+    )
+
+
 def is_action(event: Event) -> bool:
     return isinstance(event, ActionEvent) or (isinstance(event, MessageEvent) and event.source == "agent")
 
@@ -83,10 +91,11 @@ def get_obs_for_last_action(observation: OpenHandsObservation) -> list[Event]:
 
 def is_finished(observation: OpenHandsObservation, last_event_seen: EventID | None = None) -> bool:
     conversation_state = observation.conversation_state
+    execution_status = _conversation_execution_status(conversation_state)
     oh_conversation_finished = (
-        conversation_state.agent_status == ConversationExecutionStatus.FINISHED
-        or conversation_state.agent_status == ConversationExecutionStatus.STUCK
-        or conversation_state.agent_status == ConversationExecutionStatus.ERROR
+        execution_status == ConversationExecutionStatus.FINISHED
+        or execution_status == ConversationExecutionStatus.STUCK
+        or execution_status == ConversationExecutionStatus.ERROR
     )
     last_event_id = conversation_state.events[-1].id
     platoon_episode_caught_up = last_event_id in (

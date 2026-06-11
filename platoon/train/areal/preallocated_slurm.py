@@ -37,6 +37,13 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         self._role_processes: dict[str, subprocess.Popen] = {}
         self._role_commands: dict[str, str] = {}
         self._stopping_roles: set[str] = set()
+        # Round-robin cursor used to pin each separated role to distinct nodes of
+        # the allocation. Without this, every single-node srun step launches with
+        # `--overlap` and no `--nodelist`, so Slurm stacks them all on the first
+        # node (e.g. actor + sglang sharing GPUs) while the rest of the allocation
+        # idles. See _allocation_nodes / create_workers.
+        self._separated_node_cursor = 0
+        self._alloc_nodes_cache: list[str] | None = None
 
     @staticmethod
     def _split_env_list(name: str) -> list[str]:
@@ -78,6 +85,65 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         if not preamble:
             return []
         return [preamble]
+
+    def _allocation_nodes(self) -> list[str]:
+        """Expand the current Slurm allocation into an ordered list of hostnames.
+
+        Used to pin separated roles to distinct nodes. Best-effort: returns an
+        empty list when run outside a Slurm allocation or when ``scontrol`` is
+        unavailable, in which case node spreading is silently skipped.
+        """
+
+        if self._alloc_nodes_cache is not None:
+            return self._alloc_nodes_cache
+
+        nodes: list[str] = []
+        nodelist = os.environ.get("SLURM_JOB_NODELIST") or os.environ.get(
+            "SLURM_NODELIST"
+        )
+        if nodelist:
+            try:
+                out = subprocess.check_output(
+                    ["scontrol", "show", "hostnames", nodelist],
+                    text=True,
+                )
+                nodes = [n for n in out.split() if n]
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.warning(
+                    "Could not expand SLURM node list %r for node spreading: %s",
+                    nodelist,
+                    exc,
+                )
+                nodes = []
+        self._alloc_nodes_cache = nodes
+        return nodes
+
+    def _assign_separated_nodelist(self, role: str, nodes: int) -> str | None:
+        """Pick the next ``nodes`` allocation hostnames for a separated role.
+
+        Returns a comma-separated ``--nodelist`` value, or ``None`` when spreading
+        is disabled or the allocation can't be resolved (falls back to Slurm's
+        default placement).
+        """
+
+        if not self._truthy_env(
+            os.environ.get("PLATOON_AREAL_PREALLOC_SPREAD_NODES", "1")
+        ):
+            return None
+
+        alloc_nodes = self._allocation_nodes()
+        if not alloc_nodes or nodes <= 0 or nodes > len(alloc_nodes):
+            return None
+
+        start = self._separated_node_cursor
+        if start + nodes > len(alloc_nodes):
+            # Not enough distinct nodes left before the end; wrap to the front.
+            start = 0
+        assigned = alloc_nodes[start : start + nodes]
+        self._separated_node_cursor = (start + nodes) % len(alloc_nodes)
+        nodelist = ",".join(assigned)
+        logger.info("Pinning separated role '%s' to node(s): %s", role, nodelist)
+        return nodelist
 
     def _build_role_srun_command(
         self,
@@ -298,6 +364,11 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         cpus_per_task = spec.cpu
         mem_per_task = spec.mem * 1024
         nodelist = spec.nodelist
+        if not nodelist:
+            # AReaL leaves nodelist unset, so every single-node `--overlap` step
+            # otherwise lands on the first node. Pin separated roles to distinct
+            # nodes so e.g. the trainer and colocated sglang don't share GPUs.
+            nodelist = self._assign_separated_nodelist(role, nodes)
 
         command = self._build_role_srun_command(
             role=role,

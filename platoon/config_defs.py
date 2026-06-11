@@ -5,6 +5,7 @@ parts of the codebase (rollouts, training, inference, etc.).
 """
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -40,6 +41,7 @@ class RolloutConfig:
     propogate_root_success: bool = False
     skip_subagent_reward_computation: bool = False
     inference_params: InferenceParams = field(default_factory=InferenceParams)
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Support loading from plain dicts from config loaders and subprocess paths.
