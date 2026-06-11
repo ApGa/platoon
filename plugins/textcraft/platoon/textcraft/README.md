@@ -11,7 +11,7 @@ It includes:
 
 ```bash
 cd plugins/textcraft
-uv sync --extra areal --extra wandb
+uv sync --extra areal
 ```
 
 Use `--extra tinker` for Tinker experiments.

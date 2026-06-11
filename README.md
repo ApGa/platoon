@@ -13,19 +13,54 @@ uv sync
 Install the training backend you need:
 
 ```bash
-uv sync --extra tinker --extra wandb
+uv sync --extra tinker
 # OR
-uv sync --extra areal --extra wandb
+uv sync --extra areal
 ```
 
 Install a plugin from its directory:
 
 ```bash
 cd plugins/<plugin-name>
-uv sync --extra <backend> --extra wandb
+uv sync --extra <backend>
 ```
 
-AReaL is installed through `uv` extras. Tinker and WandB may also require service credentials in your environment.
+AReaL is installed through `uv` extras. WandB is a core dependency; Tinker and WandB may require service credentials in your environment.
+
+### Megatron backend (Transformer Engine)
+
+The AReaL **FSDP** backend and all inference workflows work out of the box after
+`uv sync --extra areal`. The **Megatron** backend additionally needs NVIDIA
+Transformer Engine (TE), which is intentionally **not** part of the locked
+dependencies: `transformer-engine-torch` is source-only and has no prebuilt wheel
+for the pinned torch, so locking it would force a CUDA compile on every `uv sync`
+(which would break FSDP/inference installs too). It is therefore excluded via a
+`transformer-engine; sys_platform == 'never'` override and installed separately
+only when you actually run Megatron.
+
+Installing TE requires a real CUDA toolkit (`nvcc`) for the one-time compile of
+`transformer-engine-torch` — e.g. inside the training container or after
+`module load cuda`. Once built, the wheel is reusable on bare nodes without a
+toolkit. Into the plugin venv (after `uv sync --extra areal`):
+
+```bash
+# Build deps + a real CUDA toolkit must be available (container / module load cuda).
+uv pip install ninja
+# --no-config bypasses the `sys_platform == 'never'` override; --no-build-isolation
+# builds against the venv's torch instead of pulling a mismatched one.
+CUDA_HOME=/usr/local/cuda uv pip install --no-config --no-build-isolation \
+  "transformer-engine[pytorch]==2.12.0"
+# The empty `transformer-engine` meta is dropped by the override, so install it
+# explicitly or TE's PyPI sanity check fails ("Could not find transformer-engine"):
+uv pip install --no-config "transformer-engine==2.12.0"
+```
+
+Verify with `python -c "import transformer_engine.pytorch"`. Select the backend
+per run via `actor.backend: megatron` in the config.
+
+> Tip: this can be automated with a local (uncommitted) helper that builds the
+> wheel once, caches it under `.te-wheels/`, and fast-reinstalls it into any plugin
+> venv — see the manual steps above for what such a helper needs to do.
 
 ## Plugins
 

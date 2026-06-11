@@ -6,7 +6,7 @@ Number Search is a small binary-search-style environment for quick Platoon train
 
 ```bash
 cd plugins/number-search
-uv sync --extra areal --extra wandb
+uv sync --extra areal
 ```
 
 Use `--extra tinker` instead of `--extra areal` for Tinker experiments.

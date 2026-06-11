@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
+import os
+import secrets
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
 from areal.api import WorkflowLike
-from areal.api.cli_args import OpenAIProxyConfig
 from areal.infra import RolloutController, current_platform
 from areal.trainer.rl_trainer import PPOTrainer
 from areal.utils import logging, perf_tracer, stats_tracker
@@ -33,7 +34,50 @@ from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig, Platoon
 from platoon.train.areal.preallocated_slurm import PreallocatedSlurmScheduler
 from platoon.train.areal.workflow_serialization import normalize_remote_workflow
 
+if TYPE_CHECKING:
+    # Imported only for typing; the runtime import is deferred to the Megatron
+    # branch of _create_train_engine so FSDP-only runs never import Megatron /
+    # Transformer Engine.
+    from platoon.train.areal.actor import PlatoonMegatronPPOActor
+
 logger = logging.getLogger("PlatoonArealRLTrainer")
+
+# AReaL's publicly documented default proxy admin key. AReaL refuses to bind
+# the proxy rollout server to a routable (non-loopback) host while the key is
+# still this value, since anyone reachable could call admin endpoints.
+_DEFAULT_AREAL_ADMIN_API_KEY = "areal-admin-key"
+
+
+def _normalize_proxy_admin_api_key(config: PlatoonArealRLTrainerConfig) -> None:
+    """Ensure the AReaL proxy admin key is a unique secret, not the default.
+
+    AReaL validates ``rollout.agent.admin_api_key`` on the proxy server (and
+    adopts it as the server's accepted admin key), while Platoon's client
+    authenticates management calls with ``rollout.admin_api_key``. The two must
+    share a single secret. Operators can pin a value via the
+    ``PLATOON_AREAL_ADMIN_API_KEY`` env var; otherwise a per-run random token is
+    generated. Mutating the shared ``config.rollout`` here (before the trainer
+    builds its train/eval rollout controllers) covers every plugin config
+    without per-YAML edits.
+    """
+    rollout = config.rollout
+    candidates = [rollout.admin_api_key]
+    if rollout.agent is not None:
+        candidates.append(rollout.agent.admin_api_key)
+
+    configured = next(
+        (key for key in candidates if key and key != _DEFAULT_AREAL_ADMIN_API_KEY),
+        None,
+    )
+    if configured is not None:
+        resolved = configured
+    else:
+        env_key = (os.environ.get("PLATOON_AREAL_ADMIN_API_KEY") or "").strip()
+        resolved = env_key or f"platoon-{secrets.token_hex(16)}"
+
+    rollout.admin_api_key = resolved
+    if rollout.agent is not None:
+        rollout.agent.admin_api_key = resolved
 
 
 class PlatoonArealRLTrainer(PPOTrainer):
@@ -46,8 +90,14 @@ class PlatoonArealRLTrainer(PPOTrainer):
         val_dataset: Dataset | None,
         batch_transforms: list[BatchTransform] | None = None,
     ):
+        # Resolve a unique proxy admin key before super().__init__() builds the
+        # rollout controllers, so both the proxy server (rollout.agent.admin_api_key)
+        # and Platoon's client (rollout.admin_api_key) share one non-default secret.
+        _normalize_proxy_admin_api_key(config)
         super().__init__(config=config, train_dataset=train_dataset, valid_dataset=val_dataset)
-        self.proxy_admin_api_key = (self.config.rollout.openai or OpenAIProxyConfig()).admin_api_key
+        # AReaL HEAD moved the admin key out of the (renamed) AgentConfig to a
+        # top-level rollout field; rollout controller v2 reads rollout.admin_api_key.
+        self.proxy_admin_api_key = self.config.rollout.admin_api_key
         self.proxy_base_url: str | None = None
         self.eval_proxy_base_url: str | None = None
         self.batch_transforms = self._build_batch_transforms(batch_transforms)
@@ -59,20 +109,30 @@ class PlatoonArealRLTrainer(PPOTrainer):
         return super()._init_scheduler()
 
     def _create_train_engine(self, actor_config, alloc):
-        if (
-            isinstance(actor_config, PlatoonPPOActorConfig)
-            and alloc.backend == "fsdp"
-        ):
+        actor_cls: type[PlatoonPPOActor | PlatoonMegatronPPOActor] | None = None
+        if isinstance(actor_config, PlatoonPPOActorConfig):
+            if alloc.backend == "fsdp":
+                actor_cls = PlatoonPPOActor
+            elif alloc.backend == "megatron":
+                # Deferred import: pulls in Megatron / Transformer Engine only
+                # when the Megatron backend is actually selected.
+                from platoon.train.areal.actor import PlatoonMegatronPPOActor
+
+                actor_cls = PlatoonMegatronPPOActor
+        if actor_cls is not None:
             if is_single_controller():
-                actor = PlatoonPPOActor.as_controller(actor_config, self.scheduler)
+                actor = actor_cls.as_controller(actor_config, self.scheduler)
             else:
-                actor = PlatoonPPOActor(actor_config)
+                actor = actor_cls(actor_config)
             actor.create_process_group(parallel_strategy=alloc.parallel)
             return actor
         return super()._create_train_engine(actor_config, alloc)
 
     def _proxy_mode(self) -> str:
-        return (self.config.rollout.openai or OpenAIProxyConfig()).mode
+        # OpenAIProxyConfig was folded into AgentConfig at AReaL HEAD; the proxy
+        # mode now lives on rollout.agent (which always has a default factory).
+        agent_cfg = self.config.rollout.agent
+        return agent_cfg.mode if agent_cfg is not None else "inline"
 
     def _resolve_proxy_base_url(self, controller: RolloutController) -> str | None:
         mode = self._proxy_mode()
@@ -280,13 +340,13 @@ class PlatoonArealRLTrainer(PPOTrainer):
         max_steps = total_epochs * steps_per_epoch
 
         if workflow is None:
-            openai_cfg = self.config.rollout.openai
-            if openai_cfg is not None and openai_cfg.mode == "online":
+            agent_cfg = self.config.rollout.agent
+            if agent_cfg is not None and agent_cfg.mode == "online":
                 self._ensure_proxy_started()
             else:
                 raise ValueError(
                     "workflow must be specified for train() unless "
-                    "openai.mode='online' is configured. "
+                    "rollout.agent.mode='online' is configured. "
                     "Pass a RolloutWorkflow, AgentWorkflow, or callable."
                 )
         elif self._requires_proxy_workflow(workflow):

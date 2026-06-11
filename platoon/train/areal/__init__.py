@@ -41,6 +41,18 @@ from platoon.train.areal.proxy import ArealProxySession  # noqa: E402
 from platoon.train.areal.rl import PlatoonArealRLTrainer  # noqa: E402
 from platoon.train.areal.workflows import GroupRolloutWorkflow  # noqa: E402
 
+
+def __getattr__(name: str):
+    # Lazily expose the Megatron actor so importing the AReaL backend does not
+    # pull in Megatron / Transformer Engine for FSDP-only runs. ``MegatronPPOActor``
+    # transitively triggers an unconditional ``import transformer_engine``.
+    if name == "PlatoonMegatronPPOActor":
+        from platoon.train.areal.actor import PlatoonMegatronPPOActor
+
+        return PlatoonMegatronPPOActor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     # Config
     "LossFnConfig",
@@ -60,6 +72,7 @@ __all__ = [
     "GroupRolloutWorkflow",
     # Actor
     "PlatoonPPOActor",
+    "PlatoonMegatronPPOActor",
     "create_actor",
     # Proxy
     "ArealProxySession",

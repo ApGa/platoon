@@ -6,7 +6,7 @@ This plugin adds AppWorld tasks to Platoon. AppWorld is a benchmark of API-based
 
 ```bash
 cd plugins/appworld
-uv sync --extra areal --extra wandb
+uv sync --extra areal
 ```
 
 Install AppWorld data once:

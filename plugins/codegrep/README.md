@@ -6,7 +6,7 @@ CodeGrep trains agents to localize files relevant to a software issue. It is int
 
 ```bash
 cd plugins/codegrep
-uv sync --extra tinker --extra wandb
+uv sync --extra tinker
 ```
 
 Use `--extra areal` for AReaL experiments.

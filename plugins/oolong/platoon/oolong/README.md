@@ -6,7 +6,7 @@ This plugin adds the [Oolong benchmark](https://github.com/abertsch72/oolong) to
 
 ```bash
 cd plugins/oolong
-uv sync --extra areal --extra wandb
+uv sync --extra areal
 ```
 
 Use `--extra tinker` for Tinker experiments.

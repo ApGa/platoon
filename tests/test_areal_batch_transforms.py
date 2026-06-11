@@ -44,6 +44,11 @@ def _load_trainer_module(batch_transforms_module):
         (),
         {"as_controller": classmethod(lambda cls, config, scheduler: cls())},
     )
+    actor_mod.PlatoonMegatronPPOActor = type(
+        "PlatoonMegatronPPOActor",
+        (),
+        {"as_controller": classmethod(lambda cls, config, scheduler: cls())},
+    )
     sys.modules["platoon.train.areal.actor"] = actor_mod
 
     config_mod = types.ModuleType("platoon.train.areal.config_defs")

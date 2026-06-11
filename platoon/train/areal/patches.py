@@ -181,7 +181,7 @@ def _patch_batch_task_dispatcher_idle_submit() -> None:
                     self.logger.warning(
                         "Rollout dispatch is waiting without submit capacity: "
                         "batch_size=%s accepted=%s total_attempts=%s "
-                        "pending_inputs=%s runner_input_queue=%s runner_output_queue=%s "
+                        "pending_inputs=%s runner_input_queue=%s "
                         "max_queue_size=%s cap_staleness=%s free_runner_slots=%s "
                         "paused=%s stats=%s",
                         batch_size,
@@ -189,7 +189,6 @@ def _patch_batch_task_dispatcher_idle_submit() -> None:
                         total_attempts,
                         pending_inputs,
                         runner_input_size,
-                        self.runner.get_output_queue_size(),
                         self.runner.max_queue_size,
                         cap_staleness,
                         free_runner_slots,
@@ -354,16 +353,6 @@ def _patch_remote_inf_engine_proxy_resolution() -> None:
     RemoteInfEngine._resolve_workflow = _resolve_workflow_with_proxy_addr
 
 
-def _normalize_fsdp_wrap_classes(classes: Any) -> list[str]:
-    if classes is None:
-        return []
-    if isinstance(classes, str):
-        return [classes]
-    if isinstance(classes, (set, tuple)):
-        return list(classes)
-    return list(classes)
-
-
 def _flatten_message_list_content(messages: list[dict[str, Any]]) -> None:
     """Convert OpenAI list-shaped text content blocks to plain strings.
 
@@ -413,78 +402,6 @@ def _patch_areal_openai_message_content_flatten() -> None:
 
     _ensure_message_dict_list_with_flatten.__platoon_message_content_patch__ = True
     client_module._ensure_message_dict_list = _ensure_message_dict_list_with_flatten
-
-
-def _coerce_apply_chat_template_token_ids(token_ids: Any) -> Any:
-    """Return a plain ``list[int]`` from Transformers chat-template output.
-
-    Transformers 5 defaults ``return_dict=True`` for ``apply_chat_template``, which
-    returns a ``BatchEncoding``. AReaL expects token-id lists for SGLang payloads.
-    """
-
-    if token_ids is None:
-        return []
-    if hasattr(token_ids, "input_ids"):
-        ids = token_ids["input_ids"]
-        if isinstance(ids, list) and ids and isinstance(ids[0], list):
-            return list(ids[0])
-        return list(ids)
-    if isinstance(token_ids, list):
-        return token_ids
-    return list(token_ids)
-
-
-def _patch_transformers_apply_chat_template_return_type() -> None:
-    """Coerce ``apply_chat_template`` token output for AReaL/SGLang compatibility."""
-
-    import transformers  # pyright: ignore[reportMissingImports]
-
-    base = transformers.PreTrainedTokenizerBase
-    original = base.apply_chat_template
-    if getattr(original, "__platoon_apply_chat_template_patch__", False):
-        return
-
-    @wraps(original)
-    def apply_chat_template_with_list_token_ids(self, *args: Any, **kwargs: Any) -> Any:
-        result = original(self, *args, **kwargs)
-        if kwargs.get("tokenize", True):
-            return _coerce_apply_chat_template_token_ids(result)
-        return result
-
-    apply_chat_template_with_list_token_ids.__platoon_apply_chat_template_patch__ = True
-    base.apply_chat_template = apply_chat_template_with_list_token_ids
-
-
-
-def _patch_areal_fsdp_wrap_classes_set_compat() -> None:
-    """Normalize FSDP wrap class names before AReaL indexes them by position.
-
-    Newer Transformers releases can expose ``_no_split_modules`` as a ``set``.
-    AReaL's ``apply_fsdp2`` still does ``fsdp_transformer_layer_cls_to_wrap[0]``,
-    which crashes with ``TypeError: 'set' object is not subscriptable``.
-    """
-
-    import areal.engine.fsdp_utils as fsdp_utils  # pyright: ignore[reportMissingImports]
-
-    original = fsdp_utils.apply_fsdp2
-    if getattr(original, "__platoon_fsdp_set_patch__", False):
-        return
-
-    @wraps(original)
-    def apply_fsdp2(model, fsdp_kwargs, wrap_policy):
-        if wrap_policy is not None:
-            wrap_policy.transformer_layer_cls_to_wrap = _normalize_fsdp_wrap_classes(
-                wrap_policy.transformer_layer_cls_to_wrap
-            )
-
-        no_split_modules = getattr(model, "_no_split_modules", None)
-        if isinstance(no_split_modules, (set, tuple)):
-            model._no_split_modules = list(no_split_modules)
-
-        return original(model, fsdp_kwargs, wrap_policy)
-
-    apply_fsdp2.__platoon_fsdp_set_patch__ = True
-    fsdp_utils.apply_fsdp2 = apply_fsdp2
 
 
 # ---------------------------------------------------------------------------
@@ -673,7 +590,19 @@ def _install_process_stall_watchdog() -> None:
 
 
 def apply_all_patches() -> None:
-    """Apply Platoon compatibility patches for the current AReaL release."""
+    """Apply Platoon compatibility patches for the current AReaL release.
+
+    Two historical patches were dropped when upgrading to AReaL HEAD
+    (``a0f3dca``) because upstream now handles those cases natively:
+
+    - ``apply_chat_template`` return-type coercion: ``areal.utils.hf_utils``
+      now provides an ``apply_chat_template`` wrapper that normalizes the
+      Transformers 5 dict return to ``list[int]``. Re-patching the tokenizer
+      method globally would make that wrapper's ``result["input_ids"]`` fail.
+    - FSDP wrap-class set/tuple compatibility: ``areal.engine.fsdp_utils``'s
+      ``apply_fsdp2`` now normalizes ``_no_split_modules`` and
+      ``transformer_layer_cls_to_wrap`` internally.
+    """
 
     _patch_hf_tokenizer_download_race()
     _patch_model_response_custom_stop_sequences()
@@ -681,7 +610,5 @@ def apply_all_patches() -> None:
     _patch_local_scheduler_fork_ready_timeout()
     _patch_remote_inf_engine_asyncio_teardown_race()
     _patch_remote_inf_engine_proxy_resolution()
-    _patch_transformers_apply_chat_template_return_type()
     _patch_areal_openai_message_content_flatten()
-    _patch_areal_fsdp_wrap_classes_set_compat()
     _install_process_stall_watchdog()

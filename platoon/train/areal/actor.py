@@ -1,7 +1,7 @@
 """Custom PPO actor support for Platoon's AReaL backend."""
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from areal.api import Scheduler
@@ -16,6 +16,12 @@ from areal.utils.perf_tracer import trace_perf
 
 from platoon.train.areal.config_defs import PlatoonPPOActorConfig
 from platoon.train.areal.loss_functions import build_loss_fn
+
+if TYPE_CHECKING:
+    # PlatoonMegatronPPOActor is built dynamically by _get_platoon_megatron_actor_cls
+    # (to avoid importing Megatron / Transformer Engine eagerly). Alias the base
+    # here so type checkers can resolve the name used in annotations below.
+    from areal.engine import MegatronPPOActor as PlatoonMegatronPPOActor
 
 logger = logging.getLogger("PlatoonActor")
 
@@ -33,7 +39,9 @@ class PlatoonActorImpl(PPOActor):
             eps_clip=self.config.eps_clip,
             eps_clip_higher=self.config.eps_clip_higher,
             c_clip=self.config.c_clip,
-            behave_imp_weight_cap=self.config.behave_imp_weight_cap,
+            # AReaL HEAD replaced behave_imp_weight_{cap,mode} with the
+            # rejection_sampling sub-config (see PPOActorConfig).
+            rejection_sampling=self.config.rejection_sampling,
             m2_threshold=self.m2_threshold,
             current_version=current_version,
             prox_logp_method=self.config.prox_logp_method,
@@ -41,7 +49,6 @@ class PlatoonActorImpl(PPOActor):
             sapo_tau_pos=self.config.sapo_tau_pos,
             sapo_tau_neg=self.config.sapo_tau_neg,
             use_decoupled_loss=self.config.use_decoupled_loss,
-            behave_imp_weight_mode=self.config.behave_imp_weight_mode,
         )
         logger.info(
             "Using Platoon loss_fn=%s loss_fn_kwargs=%s current_version=%s",
@@ -113,8 +120,11 @@ class PlatoonActorImpl(PPOActor):
             scalars["use_dual_clip"] = 1
         else:
             scalars["use_dual_clip"] = 0
-        if self.config.behave_imp_weight_cap is not None:
-            scalars["behave_imp_weight_cap"] = self.config.behave_imp_weight_cap
+        if self.config.rejection_sampling is not None:
+            rs = self.config.rejection_sampling
+            scalars["rs_upper"] = rs.upper
+            if rs.lower is not None:
+                scalars["rs_lower"] = rs.lower
         stats_tracker.scalar(**scalars)
 
         if self.config.log_agent_stats:
@@ -175,7 +185,73 @@ class PlatoonPPOActor(FSDPPPOActor):
         return PlatoonPPOActorController(train_engine=cls, config=config, scheduler=scheduler)
 
 
-def create_actor(config: PlatoonPPOActorConfig) -> FSDPPPOActor:
-    """Create the Platoon actor implementation for the configured loss."""
+# Cache for the lazily-built Megatron actor subclass (see below).
+_platoon_megatron_actor_cls: type | None = None
 
-    return PlatoonPPOActor(config)
+
+def _get_platoon_megatron_actor_cls() -> type:
+    """Lazily build and return ``PlatoonMegatronPPOActor``.
+
+    ``MegatronPPOActor`` pulls in ``megatron.bridge``, which *unconditionally*
+    imports ``transformer_engine`` (e.g. ``megatron.bridge.peft.lora_layers``).
+    Importing it at module load would break FSDP-only environments that don't
+    install Transformer Engine, so we defer both the import and the subclass
+    definition until the Megatron backend is actually requested.
+
+    Mirrors ``PlatoonPPOActor`` for the Megatron training backend: the base
+    builds ``self.actor`` in ``__init__`` as the upstream ``PPOActor``; we swap
+    in ``PlatoonActorImpl`` so Platoon's loss selection and stats apply to the
+    Megatron path too.
+    """
+    global _platoon_megatron_actor_cls
+    if _platoon_megatron_actor_cls is not None:
+        return _platoon_megatron_actor_cls
+
+    from areal.engine import MegatronPPOActor
+
+    class PlatoonMegatronPPOActor(MegatronPPOActor):
+        """Megatron PPO actor with Platoon loss selection."""
+
+        def __init__(self, config: PlatoonPPOActorConfig):
+            super().__init__(config)
+            self.actor = PlatoonActorImpl(config, self)
+
+        def clear_device_cache(self) -> None:
+            """Release cached allocator blocks on this worker's GPU.
+
+            See ``PlatoonPPOActor.clear_device_cache``; the Megatron engine has
+            the same single-controller memory-hygiene requirement before
+            NCCL-heavy weight-update and checkpoint phases.
+            ``current_platform.clear_memory()`` is backend-agnostic.
+            """
+            current_platform.clear_memory()
+
+        @classmethod
+        def as_controller(cls, config: PlatoonPPOActorConfig, scheduler: Scheduler):
+            return PlatoonPPOActorController(train_engine=cls, config=config, scheduler=scheduler)
+
+    _platoon_megatron_actor_cls = PlatoonMegatronPPOActor
+    return _platoon_megatron_actor_cls
+
+
+def __getattr__(name: str):
+    # PEP 562 module-level lazy attribute. Lets both
+    # ``actor.PlatoonMegatronPPOActor`` and
+    # ``from platoon.train.areal.actor import PlatoonMegatronPPOActor`` resolve
+    # without importing Megatron / Transformer Engine unless the Megatron actor
+    # is actually used.
+    if name == "PlatoonMegatronPPOActor":
+        return _get_platoon_megatron_actor_cls()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def create_actor(
+    config: PlatoonPPOActorConfig, backend: str = "fsdp"
+) -> "PlatoonPPOActor | PlatoonMegatronPPOActor":
+    """Create the Platoon actor implementation for the configured loss/backend."""
+
+    if backend == "megatron":
+        return _get_platoon_megatron_actor_cls()(config)
+    if backend == "fsdp":
+        return PlatoonPPOActor(config)
+    raise ValueError(f"Unsupported Platoon actor backend: {backend!r} (expected 'fsdp' or 'megatron')")
