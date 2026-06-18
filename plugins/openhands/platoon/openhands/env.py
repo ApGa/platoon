@@ -4,6 +4,7 @@ import asyncio
 import threading
 from copy import deepcopy
 from typing import Callable
+from uuid import UUID, uuid4
 
 from platoon.envs.base import Task
 from platoon.episode.context import (
@@ -40,6 +41,8 @@ class OpenHandsEnv:
         agent: AgentBase,
         workspace: str | BaseWorkspace,
         callbacks: list[Callable[[Event], None]] | None = None,
+        persistence_dir: str | None = None,
+        conversation_id: UUID | str | None = None,
     ):
         self._task = task
         self._agent = agent
@@ -47,6 +50,8 @@ class OpenHandsEnv:
             workspace = str(workspace)
         self._workspace = workspace
         self._callbacks = callbacks or []
+        self._persistence_dir = persistence_dir
+        self._conversation_id = conversation_id
         self._conversation = None
 
     async def reset(self) -> OpenHandsObservation:
@@ -56,6 +61,9 @@ class OpenHandsEnv:
             workspace=self._workspace,
             visualizer=None,
             max_iteration_per_run=self._task.max_steps or 500,
+            persistence_dir=self._persistence_dir,
+            conversation_id=self._conversation_id,
+            delete_on_close=False,
         )
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
         self._conversation.send_message(self._task.goal)
@@ -132,4 +140,11 @@ class OpenHandsEnv:
         # NOTE: The agent might have state, during the copy, but should be reinitialized before use withenv.reset().
         # TODO: Need to double-check that this works for remote agent server case.
         # TODO: Consider explicitly resetting the agent here manually.
-        return type(self)(task=task, agent=deepcopy(self._agent), workspace=self._workspace, callbacks=self._callbacks)
+        return type(self)(
+            task=task,
+            agent=deepcopy(self._agent),
+            workspace=self._workspace,
+            callbacks=self._callbacks,
+            persistence_dir=self._persistence_dir,
+            conversation_id=uuid4() if self._persistence_dir is not None else None,
+        )

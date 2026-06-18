@@ -9,6 +9,9 @@ from pathlib import Path
 from .tui import run_replay_from_jsonls, run_viewer_from_jsonls
 
 
+VISUALIZATION_MODES = ("auto", "codeact", "openhands")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Trajectory visualization (Textual)")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
@@ -17,6 +20,17 @@ def main() -> None:
     tail_p = subparsers.add_parser("tail", help="Tail one or more JSONL event files")
     tail_p.add_argument("paths", nargs="*", help="JSONL files to tail; multiple supported")
     tail_p.add_argument("--dir", dest="dir", default=None, help="Directory of JSONL files to watch (non-recursive)")
+    tail_p.add_argument(
+        "--mode",
+        choices=VISUALIZATION_MODES,
+        default="auto",
+        help="Rendering mode for trajectory steps (default: auto)",
+    )
+    tail_p.add_argument(
+        "--selectable-text",
+        action="store_true",
+        help="Disable mouse capture so terminal drag-selection works; use keyboard navigation",
+    )
     tail_p.add_argument(
         "--rdir",
         dest="rdir",
@@ -28,6 +42,17 @@ def main() -> None:
     replay_p = subparsers.add_parser("replay", help="Replay JSONL events from the start with a delay")
     replay_p.add_argument("paths", nargs="*", help="JSONL files to replay; multiple supported")
     replay_p.add_argument("--dir", dest="dir", default=None, help="Directory of JSONL files to replay (non-recursive)")
+    replay_p.add_argument(
+        "--mode",
+        choices=VISUALIZATION_MODES,
+        default="auto",
+        help="Rendering mode for trajectory steps (default: auto)",
+    )
+    replay_p.add_argument(
+        "--selectable-text",
+        action="store_true",
+        help="Disable mouse capture so terminal drag-selection works; use keyboard navigation",
+    )
     replay_p.add_argument(
         "--delay", dest="delay", type=float, default=0.5, help="Seconds to wait between events (default: 0.5)"
     )
@@ -46,6 +71,17 @@ def main() -> None:
         dest="dir",
         default=None,
         help="Directory of JSON/JSONL dump files to load (non-recursive)",
+    )
+    dump_p.add_argument(
+        "--mode",
+        choices=VISUALIZATION_MODES,
+        default="auto",
+        help="Rendering mode for trajectory steps (default: auto)",
+    )
+    dump_p.add_argument(
+        "--selectable-text",
+        action="store_true",
+        help="Disable mouse capture so terminal drag-selection works; use keyboard navigation",
     )
 
     # Analyze and compare two sets of runs (dumps or event JSONLs)
@@ -125,7 +161,7 @@ def main() -> None:
             paths.extend(Path(p) for p in args.paths)
         if not paths:
             parser.error("tail: provide at least one path, --dir, or --rdir with JSONL files")
-        run_viewer_from_jsonls(paths)
+        run_viewer_from_jsonls(paths, mode=args.mode, selectable_text=args.selectable_text)
 
     elif args.cmd == "replay":
         paths = []
@@ -137,7 +173,7 @@ def main() -> None:
             paths.extend(Path(p) for p in args.paths)
         if not paths:
             parser.error("replay: provide at least one path or --dir with JSONL files")
-        run_replay_from_jsonls(paths, delay=args.delay)
+        run_replay_from_jsonls(paths, delay=args.delay, mode=args.mode, selectable_text=args.selectable_text)
 
     elif args.cmd == "show-dump":
         # Collect input files from --dir and positional paths
@@ -189,7 +225,7 @@ def main() -> None:
             parser.error("show-dump: no valid JSON/JSONL dump files were found")
 
         # Fast load: replay instantly when no delay specified
-        run_replay_from_jsonls(tmp_event_paths, delay=0.0)
+        run_replay_from_jsonls(tmp_event_paths, delay=0.0, mode=args.mode, selectable_text=args.selectable_text)
 
     elif args.cmd == "analyze-compare":
         from platoon.analysis.compare import (

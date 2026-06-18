@@ -2765,7 +2765,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ai-rubric", specifier = ">=0.2.4" },
-    { name = "areal", extras = ["cuda"], marker = "extra == 'areal'", git = "https://github.com/inclusionAI/AReaL.git?rev=a0f3dca200074f920195e1ec34558538d9c7642d" },
+    { name = "areal", extras = ["cuda"], marker = "extra == 'areal'", git = "https://github.com/inclusionAI/AReaL.git?rev=67bc932" },
     { name = "datasets" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = "==2.8.3" },

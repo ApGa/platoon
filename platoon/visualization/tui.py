@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,10 +37,34 @@ BRIDGE_EVENT_TYPES = {
     "session_closing",
 }
 
+VISUALIZATION_MODES = {"auto", "codeact", "openhands"}
+
+MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
+MOUSE_CAPTURE_DISABLE = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
+
 
 def _shorten_text(value: Any, max_chars: int = 240) -> str:
     text = str(value).replace("\n", " ").strip()
-    return " ".join(text.split())
+    text = " ".join(text.split())
+    if max_chars > 0 and len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _normalize_visualization_mode(mode: str | None) -> str:
+    if mode in VISUALIZATION_MODES:
+        return str(mode)
+    return "auto"
+
+
+def _is_openhands_step_payload(data: Any) -> bool:
+    return isinstance(data, dict) and ("action_events" in data or "observation_events" in data)
+
+
+def _should_render_openhands(mode: str, data: Any) -> bool:
+    if mode == "openhands":
+        return _is_openhands_step_payload(data)
+    return mode == "auto" and _is_openhands_step_payload(data)
 
 
 def _as_dict_list(value: Any, nested_key: str | None = None) -> List[Dict[str, Any]]:
@@ -108,9 +133,12 @@ def _format_args_inline(value: Any, max_items: int = 4, max_chars: int = 180) ->
         return _format_inline_value(parsed)
 
     parts: List[str] = []
-    for key, item in parsed.items():
+    for index, (key, item) in enumerate(parsed.items()):
+        if index >= max_items:
+            parts.append("...")
+            break
         parts.append(f"{key}={_format_inline_value(item, 56)}")
-    return _shorten_text(", ".join(parts))
+    return _shorten_text(", ".join(parts), max_chars)
 
 
 def _pretty_json(value: Any) -> str:
@@ -122,7 +150,7 @@ def _tool_call_display(event: Dict[str, Any]) -> tuple[str | None, Any]:
     action_data = action.get("data") if isinstance(action, dict) else None
     if isinstance(action_data, dict) and action_data:
         tool_name = action_data.get("name") or event.get("tool_name")
-        arguments = action_data.get("arguments")
+        arguments = action_data.get("arguments") if "arguments" in action_data else action_data
     else:
         tool_name = event.get("tool_name")
         arguments = None
@@ -202,6 +230,13 @@ def _thought_text(event: Dict[str, Any]) -> str | None:
     return None
 
 
+def _reasoning_text(event: Dict[str, Any]) -> str | None:
+    reasoning = event.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning
+    return None
+
+
 def _observation_text(event: Dict[str, Any]) -> str | None:
     payload = _observation_payload(event)
     if payload is None:
@@ -209,6 +244,134 @@ def _observation_text(event: Dict[str, Any]) -> str | None:
     if isinstance(payload, str):
         return payload
     return _pretty_json(payload)
+
+
+def _find_nested_value(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            found = _find_nested_value(item, key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_nested_value(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _event_has_error(event: Dict[str, Any]) -> bool:
+    payload = _observation_payload(event)
+    preview = _observation_preview(event) or ""
+    lowered = preview.lower()
+    if any(token in lowered for token in ("error", "traceback", "exception", "failed")):
+        return True
+    if isinstance(payload, dict):
+        for key in ("error", "exception", "traceback"):
+            value = _find_nested_value(payload, key)
+            if value:
+                return True
+    return False
+
+
+def _observation_error_summary(events: List[Dict[str, Any]]) -> str | None:
+    for event in events:
+        if _event_has_error(event):
+            return _openhands_event_summary(event)
+    return None
+
+
+def _task_discovery_summary(events: List[Dict[str, Any]]) -> str | None:
+    for event in events:
+        raw_tool_name = event.get("tool_name")
+        payload = _observation_payload(event)
+        task_name = _find_nested_value(payload, "task_name")
+        if not task_name and raw_tool_name == "get_task":
+            task_name = _find_nested_value(payload, "name")
+        prompt = _find_nested_value(payload, "prompt")
+        if raw_tool_name == "get_task" or task_name or prompt:
+            if isinstance(task_name, str) and task_name:
+                return f"get_task -> {task_name}"
+            if isinstance(prompt, str) and prompt:
+                return f"get_task -> {_shorten_text(prompt, 160)}"
+            return "get_task"
+    return None
+
+
+def _event_tool_names(events: List[Dict[str, Any]]) -> List[str]:
+    names: List[str] = []
+    for event in events:
+        tool_name, _ = _tool_call_display(event)
+        if tool_name:
+            names.append(tool_name)
+    return names
+
+
+def _tool_batch_summary(events: List[Dict[str, Any]]) -> str | None:
+    if not events:
+        return None
+    names = _event_tool_names(events)
+    if not names:
+        return _openhands_event_summary(events[0])
+    if len(names) == 1:
+        return _openhands_event_summary(events[0])
+
+    counts: Dict[str, int] = {}
+    order: List[str] = []
+    for name in names:
+        if name not in counts:
+            order.append(name)
+            counts[name] = 0
+        counts[name] += 1
+    parts = [f"{name} x{counts[name]}" if counts[name] > 1 else name for name in order]
+    return "tools: " + _shorten_text(", ".join(parts), 180)
+
+
+def _reward_misc(step: Dict[str, Any]) -> Dict[str, Any]:
+    misc = step.get("misc")
+    if not isinstance(misc, dict):
+        return {}
+    reward_misc = misc.get("reward_misc")
+    return reward_misc if isinstance(reward_misc, dict) else {}
+
+
+def _final_payload(step: Dict[str, Any]) -> Any:
+    reward_misc = _reward_misc(step)
+    payload = reward_misc.get("openreward/final_payload")
+    return _parse_json_string(payload)
+
+
+def _final_evaluation_summary(step: Dict[str, Any]) -> str | None:
+    payload = _final_payload(step)
+    if not payload:
+        return None
+
+    status: str | None = None
+    reward = None
+    text = None
+    if isinstance(payload, dict):
+        reward = payload.get("reward")
+        text = payload.get("text")
+        if isinstance(text, str):
+            first = text.strip().splitlines()[0].strip()
+            if first:
+                status = first
+        if status is None and payload.get("finished") is True:
+            status = "finished"
+    elif isinstance(payload, str):
+        text = payload
+        first = payload.strip().splitlines()[0].strip()
+        if first:
+            status = first
+
+    parts = ["claim_done"]
+    if status:
+        parts.append(str(status))
+    if reward is not None:
+        parts.append(f"reward={reward}")
+    return " -> ".join(parts[:2]) + (f" ({parts[2]})" if len(parts) > 2 else "")
 
 
 def _openhands_event_summary(event: Dict[str, Any]) -> str:
@@ -234,6 +397,10 @@ def _openhands_event_summary(event: Dict[str, Any]) -> str:
     if thought:
         return f"thought: {_shorten_text(thought)}"
 
+    reasoning = _reasoning_text(event)
+    if reasoning:
+        return f"reasoning: {_shorten_text(reasoning)}"
+
     message = _message_text(event)
     if message:
         return f"message: {_shorten_text(message)}"
@@ -244,28 +411,73 @@ def _openhands_event_summary(event: Dict[str, Any]) -> str:
 
 
 def _openhands_step_summary(step: Dict[str, Any]) -> str | None:
-    action_summaries = [_openhands_event_summary(event) for event in _step_action_events(step)]
+    action_events = _step_action_events(step)
     observation_events = _step_observation_events(step)
     non_system_observations = [event for event in observation_events if event.get("kind") != "SystemPromptEvent"]
     observation_summaries = [_openhands_event_summary(event) for event in non_system_observations or observation_events]
 
+    final_summary = _final_evaluation_summary(step)
+    if final_summary:
+        return final_summary
+
+    if not action_events:
+        setup_messages = [
+            event
+            for event in observation_events
+            if event.get("kind") == "MessageEvent" and (_message_text(event) or "").strip()
+        ]
+        has_system = any(event.get("kind") == "SystemPromptEvent" for event in observation_events)
+        if has_system and setup_messages:
+            return "setup: system prompt + user message"
+        if has_system:
+            return "setup: system prompt"
+
+    task_summary = _task_discovery_summary(non_system_observations or observation_events)
+    if task_summary:
+        return task_summary
+
     parts: List[str] = []
-    if action_summaries:
-        parts.append(action_summaries[0])
+    action_summary = _tool_batch_summary(action_events)
+    if action_summary:
+        parts.append(action_summary)
 
     # Surface tool failures directly in the tree label. Successful observation text
     # is usually redundant with the action summary and can be very large.
-    for summary in observation_summaries:
-        lowered = summary.lower()
-        if "error" in lowered or "traceback" in lowered or "exception" in lowered:
-            parts.append(f"-> {summary}")
-            break
+    error_summary = _observation_error_summary(non_system_observations or observation_events)
+    if error_summary:
+        parts.append(f"-> {error_summary}")
 
     if not parts and observation_summaries:
         parts.append(observation_summaries[0])
     if not parts:
         return None
     return " ".join(parts)
+
+
+def _openhands_search_text(step: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    summary = _openhands_step_summary(step)
+    if summary:
+        parts.append(summary)
+    for event in _step_action_events(step):
+        parts.append(_openhands_event_summary(event))
+        tool_name, arguments = _tool_call_display(event)
+        if tool_name:
+            parts.append(tool_name)
+        if arguments:
+            parts.append(_format_args_inline(arguments, max_items=8, max_chars=400))
+        for text in (_thought_text(event), _reasoning_text(event), _message_text(event)):
+            if text:
+                parts.append(text)
+    for event in _step_observation_events(step):
+        parts.append(_openhands_event_summary(event))
+        text = _observation_text(event)
+        if text:
+            parts.append(text)
+        message = _message_text(event)
+        if message:
+            parts.append(message)
+    return " ".join(part for part in parts if part)
 
 
 def _bridge_collection_id(record: Dict[str, Any]) -> str:
@@ -661,6 +873,10 @@ class SearchPanel(Static):
             if isinstance(data, dict):
                 payload = data.get("payload", {})
                 if isinstance(payload, dict):
+                    if _is_openhands_step_payload(payload):
+                        context = _openhands_search_text(payload)
+                        if context:
+                            return _shorten_text(context, 120)
                     # Extract relevant context based on type
                     if "code" in payload:
                         code = payload["code"]
@@ -764,8 +980,9 @@ class SearchPanel(Static):
 
 
 class TrajectoryTree(Static):
-    def __init__(self) -> None:
+    def __init__(self, *, mode: str = "auto") -> None:
         super().__init__()
+        self.mode = _normalize_visualization_mode(mode)
         self.tree_widget: Optional[PlayPauseFriendlyTree[str]] = None
         self.traj_nodes: Dict[str, TreeNode[str]] = {}
         # Map grouping label -> group node to avoid duplicate "unlabeled" nodes
@@ -863,6 +1080,8 @@ class TrajectoryTree(Static):
             # Extract payload content
             payload = data.get("payload", {})
             if isinstance(payload, dict):
+                if _is_openhands_step_payload(payload):
+                    content_parts.append(_openhands_search_text(payload))
                 for key, value in payload.items():
                     if isinstance(value, str):
                         content_parts.append(value)
@@ -1233,22 +1452,27 @@ class SplitDivider(Static):
             # Build a concise summary label for the step
             summary_parts: List[str] = []
             if isinstance(step, dict):
-                if "code" in step and isinstance(step["code"], str):
-                    code_lines = step["code"].splitlines()
-                    if code_lines:
-                        code_line = code_lines[0].strip()
-                        # Do not truncate; let the UI scroll horizontally
-                        summary_parts.append(f"code: {code_line}")
-                if "thought" in step and isinstance(step["thought"], str):
-                    thought_lines = step["thought"].splitlines()
-                    if thought_lines:
-                        thought_line = thought_lines[0].strip()
-                        if thought_line:
-                            summary_parts.append(f"thought: {thought_line}")
-                for k in ("output", "error"):
-                    v = step.get(k)
-                    if v:
-                        summary_parts.append(k)
+                if _should_render_openhands(getattr(self, "mode", "auto"), step):
+                    openhands_summary = _openhands_step_summary(step)
+                    if openhands_summary:
+                        summary_parts.append(openhands_summary)
+                if not summary_parts:
+                    if "code" in step and isinstance(step["code"], str):
+                        code_lines = step["code"].splitlines()
+                        if code_lines:
+                            code_line = code_lines[0].strip()
+                            # Do not truncate; let the UI scroll horizontally
+                            summary_parts.append(f"code: {code_line}")
+                    if "thought" in step and isinstance(step["thought"], str):
+                        thought_lines = step["thought"].splitlines()
+                        if thought_lines:
+                            thought_line = thought_lines[0].strip()
+                            if thought_line:
+                                summary_parts.append(f"thought: {thought_line}")
+                    for k in ("output", "error"):
+                        v = step.get(k)
+                        if v:
+                            summary_parts.append(k)
                 if not summary_parts:
                     openhands_summary = _openhands_step_summary(step)
                     if openhands_summary:
@@ -1462,6 +1686,8 @@ class TrajectoryViewer(App):
         Binding("n", "step", show=False),
         Binding("r", "restart", "Restart"),
         Binding("ctrl+f", "toggle_search", "Search"),
+        Binding("m", "toggle_mouse_capture", "Mouse/Select"),
+        Binding("d", "toggle_details_only", "Details Only"),
         Binding("f3", "next_search", "Next Result"),
         Binding("shift+f3", "prev_search", "Prev Result"),
         Binding("escape", "close_search", "Close Search"),
@@ -1480,13 +1706,18 @@ class TrajectoryViewer(App):
         # (seconds). When set, files are read from the beginning and stop at EOF
         # rather than tailing indefinitely.
         replay_delay: Optional[float] = None,
+        mode: str = "auto",
+        selectable_text: bool = False,
     ) -> None:
         super().__init__()
+        self.mode = _normalize_visualization_mode(mode)
+        self.selectable_text = selectable_text
+        self.mouse_capture_enabled = not selectable_text
         self.event_queue = event_queue
         self.jsonl_path = Path(jsonl_path) if jsonl_path else None
         self.jsonl_paths = [Path(p) for p in jsonl_paths] if jsonl_paths else None
-        self.tree_widget = TrajectoryTree()
-        self.details_panel = DetailsPanel()
+        self.tree_widget = TrajectoryTree(mode=self.mode)
+        self.details_panel = DetailsPanel(mode=self.mode)
         self.search_panel = SearchPanel(self)
         self.start_at_end = start_at_end
         self.replay_delay = replay_delay
@@ -1498,7 +1729,9 @@ class TrajectoryViewer(App):
         self._replay_running: bool = False
         # Split view state
         self._split_pct: int = 60
+        self._details_only: bool = False
         self._left_container: Optional[HorizontalScroll] = None
+        self._right_outer_container: Optional[HorizontalScroll] = None
         self._right_container: Optional[VerticalScroll] = None
         self._divider: Optional[Static] = None
 
@@ -1539,6 +1772,7 @@ class TrajectoryViewer(App):
 
             # Right pane: Details with vertical + horizontal scrolling
             outer_h = HorizontalScroll()
+            self._right_outer_container = outer_h
             try:
                 outer_h.styles.flex = 1
                 # Allow vertical scrolling to propagate to the inner VerticalScroll
@@ -1562,6 +1796,8 @@ class TrajectoryViewer(App):
         yield Footer()
 
     def set_split(self, pct: int) -> None:
+        if self._details_only:
+            return
         pct = max(10, min(90, int(pct)))
         self._split_pct = pct
         if self._left_container is not None:
@@ -1628,6 +1864,55 @@ class TrajectoryViewer(App):
         if hasattr(self.tree_widget, "current_search_index"):
             self.search_panel.highlight_result(self.tree_widget.current_search_index)
 
+    def action_toggle_mouse_capture(self) -> None:
+        """Toggle terminal mouse capture so text can be selected with the mouse."""
+        self.mouse_capture_enabled = not self.mouse_capture_enabled
+        self._apply_mouse_capture()
+        try:
+            if self.mouse_capture_enabled:
+                self.notify("Mouse capture enabled")
+            else:
+                self.notify("Mouse capture disabled; drag-select text in your terminal")
+        except Exception:
+            pass
+
+    def action_toggle_details_only(self) -> None:
+        """Expand details to full width so terminal selection stays within details."""
+        self._details_only = not self._details_only
+        self._apply_details_only_layout()
+        try:
+            if self._details_only:
+                self.notify("Details-only view enabled")
+            else:
+                self.notify("Split view enabled")
+        except Exception:
+            pass
+
+    def _apply_details_only_layout(self) -> None:
+        try:
+            if self._left_container is not None:
+                self._left_container.styles.width = 0 if self._details_only else f"{self._split_pct}%"
+                self._left_container.styles.min_width = 0 if self._details_only else 20
+            if self._divider is not None:
+                self._divider.styles.width = 0 if self._details_only else 2
+                self._divider.styles.min_width = 0 if self._details_only else 2
+            if self._right_outer_container is not None:
+                self._right_outer_container.styles.flex = 1
+        except Exception:
+            pass
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+    def _apply_mouse_capture(self) -> None:
+        sequence = MOUSE_CAPTURE_ENABLE if self.mouse_capture_enabled else MOUSE_CAPTURE_DISABLE
+        try:
+            sys.__stdout__.write(sequence)
+            sys.__stdout__.flush()
+        except Exception:
+            pass
+
     def perform_search(self, query: str) -> None:
         """Perform search in tree widget and update search panel."""
         if query:
@@ -1648,6 +1933,7 @@ class TrajectoryViewer(App):
         self.search_panel.highlight_result(index)
 
     async def on_mount(self) -> None:  # type: ignore[override]
+        self._apply_mouse_capture()
         if self.event_queue is not None:
             self._polling_task = asyncio.create_task(self._poll_queue())
         elif self.jsonl_path is not None:
@@ -2002,12 +2288,14 @@ class TrajectoryViewer(App):
         self.details_panel.show(label, payload)
 
 
-def run_viewer_from_queue(event_queue: queue.Queue) -> None:
-    app = TrajectoryViewer(event_queue=event_queue)
+def run_viewer_from_queue(event_queue: queue.Queue, *, mode: str = "auto", selectable_text: bool = False) -> None:
+    app = TrajectoryViewer(event_queue=event_queue, mode=mode, selectable_text=selectable_text)
     app.run()
 
 
-def run_viewer_from_jsonl(path: str | Path, *, start_at_end: bool = False) -> None:
+def run_viewer_from_jsonl(
+    path: str | Path, *, start_at_end: bool = False, mode: str = "auto", selectable_text: bool = False
+) -> None:
     """Launch a TrajectoryViewer for a single JSONL file.
 
     By default, the viewer starts reading from the **beginning** of the file so that
@@ -2015,23 +2303,41 @@ def run_viewer_from_jsonl(path: str | Path, *, start_at_end: bool = False) -> No
     a *tail -f* style live view that ignores existing lines and only shows new
     events appended after the viewer starts.
     """
-    app = TrajectoryViewer(jsonl_path=path, start_at_end=start_at_end)
+    app = TrajectoryViewer(jsonl_path=path, start_at_end=start_at_end, mode=mode, selectable_text=selectable_text)
     app.run()
 
 
-def run_viewer_from_jsonls(paths: List[str | Path], *, start_at_end: bool = False) -> None:
+def run_viewer_from_jsonls(
+    paths: List[str | Path], *, start_at_end: bool = False, mode: str = "auto", selectable_text: bool = False
+) -> None:
     """Launch a TrajectoryViewer that tails multiple JSONL files in parallel."""
-    app = TrajectoryViewer(jsonl_paths=paths, start_at_end=start_at_end)
+    app = TrajectoryViewer(jsonl_paths=paths, start_at_end=start_at_end, mode=mode, selectable_text=selectable_text)
     app.run()
 
 
-def run_replay_from_jsonl(path: str | Path, *, delay: float = 0.5) -> None:
-    app = TrajectoryViewer(jsonl_path=path, start_at_end=False, replay_delay=delay)
+def run_replay_from_jsonl(
+    path: str | Path, *, delay: float = 0.5, mode: str = "auto", selectable_text: bool = False
+) -> None:
+    app = TrajectoryViewer(
+        jsonl_path=path,
+        start_at_end=False,
+        replay_delay=delay,
+        mode=mode,
+        selectable_text=selectable_text,
+    )
     app.run()
 
 
-def run_replay_from_jsonls(paths: List[str | Path], *, delay: float = 0.5) -> None:
-    app = TrajectoryViewer(jsonl_paths=paths, start_at_end=False, replay_delay=delay)
+def run_replay_from_jsonls(
+    paths: List[str | Path], *, delay: float = 0.5, mode: str = "auto", selectable_text: bool = False
+) -> None:
+    app = TrajectoryViewer(
+        jsonl_paths=paths,
+        start_at_end=False,
+        replay_delay=delay,
+        mode=mode,
+        selectable_text=selectable_text,
+    )
     app.run()
 
 
@@ -2042,8 +2348,9 @@ class DetailsPanel(Static):
     - For other payloads, pretty-prints JSON when possible.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, mode: str = "auto") -> None:
         super().__init__()
+        self.mode = _normalize_visualization_mode(mode)
         self.current_content: str = ""
         self.search_query: str = ""
 
@@ -2109,7 +2416,7 @@ class DetailsPanel(Static):
         return query.lower() in self.current_content.lower()
 
     def _is_openhands_step(self, data: Dict[str, Any]) -> bool:
-        return "action_events" in data or "observation_events" in data
+        return _should_render_openhands(self.mode, data)
 
     def _render_openhands_step(self, data: Dict[str, Any]) -> Any:
         panels: List[Any] = []
@@ -2117,18 +2424,158 @@ class DetailsPanel(Static):
         panels.append(Panel(Text(summary, no_wrap=False, overflow="fold"), title="summary"))
 
         action_events = _step_action_events(data)
-        if action_events:
-            panels.append(self._render_openhands_events("actions", action_events))
-
         observation_events = _step_observation_events(data)
-        if observation_events:
-            panels.append(self._render_openhands_events("observations", observation_events))
+        system_events = [event for event in observation_events if event.get("kind") == "SystemPromptEvent"]
+        visible_observations = [event for event in observation_events if event.get("kind") != "SystemPromptEvent"]
+
+        if system_events:
+            panels.append(self._render_openhands_setup(system_events))
+
+        if action_events:
+            panels.append(self._render_openhands_action_observation_pairs(action_events, visible_observations))
+        elif visible_observations:
+            panels.append(self._render_openhands_events("observations", visible_observations))
 
         for key, value in data.items():
             if key in {"action_events", "observation_events"}:
                 continue
             panels.append(self._render_key_value(key, value))
         return Group(*panels) if panels else Text("<empty>")
+
+    def _render_openhands_setup(self, events: List[Dict[str, Any]]) -> Panel:
+        lines = Text()
+        for event in events:
+            system_prompt = event.get("system_prompt")
+            if isinstance(system_prompt, dict):
+                text = system_prompt.get("text")
+                tools = event.get("tools")
+                if isinstance(text, str):
+                    lines.append(f"system prompt: {len(text)} chars\n")
+                if isinstance(tools, list):
+                    lines.append(f"tools advertised: {len(tools)}\n")
+                continue
+            lines.append(_openhands_event_summary(event) + "\n")
+        return Panel(lines or Text("setup event"), title="setup")
+
+    def _render_openhands_action_observation_pairs(
+        self, action_events: List[Dict[str, Any]], observation_events: List[Dict[str, Any]]
+    ) -> Panel:
+        cards: List[Any] = []
+        matched_observation_ids: set[int] = set()
+
+        for index, action in enumerate(action_events, start=1):
+            tool_name, arguments = _tool_call_display(action)
+            title = f"{index}. {tool_name or _openhands_event_summary(action)}"
+            sections: List[Any] = []
+
+            metadata = Text()
+            event_id = action.get("id")
+            timestamp = action.get("timestamp")
+            if event_id or timestamp:
+                metadata.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+            security_risk = action.get("security_risk")
+            if security_risk:
+                metadata.append(f"security: {security_risk}\n", style="dim")
+            summary = action.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                metadata.append(f"summary: {_shorten_text(summary, 300)}\n")
+            if metadata.plain:
+                sections.append(metadata)
+
+            thought = _thought_text(action)
+            if thought:
+                sections.append(Panel(Text(thought, no_wrap=False, overflow="fold"), title="thought"))
+
+            reasoning = _reasoning_text(action)
+            if reasoning and reasoning != thought:
+                sections.append(Panel(Text(reasoning, no_wrap=False, overflow="fold"), title="reasoning"))
+
+            if arguments not in (None, "", {}):
+                sections.extend(self._render_openhands_argument_panels(tool_name, arguments))
+
+            matched = self._matching_observations(action, observation_events)
+            for observation in matched:
+                matched_observation_ids.add(id(observation))
+                sections.append(self._render_openhands_observation_card(observation))
+
+            cards.append(Panel(Group(*sections) if sections else Text("<empty>"), title=title))
+
+        unmatched = [event for event in observation_events if id(event) not in matched_observation_ids]
+        if unmatched:
+            cards.append(self._render_openhands_events("unmatched observations", unmatched))
+        return Panel(Group(*cards), title="actions and observations") if cards else Panel(Text("<empty>"), title="actions")
+
+    def _render_openhands_argument_panels(self, tool_name: str | None, arguments: Any) -> List[Panel]:
+        parsed = _parse_json_string(arguments)
+        panels: List[Panel] = []
+
+        if isinstance(parsed, dict):
+            remaining = dict(parsed)
+            for key in ("code", "python", "script"):
+                value = remaining.pop(key, None)
+                if isinstance(value, str) and value.strip():
+                    panels.append(
+                        Panel(
+                            Syntax(value, "python", word_wrap=True, line_numbers=True),
+                            title=f"{tool_name or 'tool'} {key}",
+                        )
+                    )
+
+            command = remaining.pop("command", None)
+            if isinstance(command, str) and command.strip():
+                lang = "python" if tool_name == "python_execute" else "bash"
+                panels.append(
+                    Panel(
+                        Syntax(command, lang, word_wrap=True, line_numbers=True),
+                        title=f"{tool_name or 'tool'} command",
+                    )
+                )
+
+            if remaining:
+                panels.append(Panel(Syntax(_pretty_json(remaining), "json", word_wrap=True), title="arguments"))
+            return panels or [Panel(Text("<empty>"), title="arguments")]
+
+        if isinstance(parsed, str) and tool_name == "python_execute":
+            return [Panel(Syntax(parsed, "python", word_wrap=True, line_numbers=True), title="python_execute code")]
+
+        try:
+            argument_view: Any = Syntax(_pretty_json(parsed), "json", word_wrap=True)
+        except Exception:
+            argument_view = Text(str(arguments), no_wrap=False, overflow="fold")
+        return [Panel(argument_view, title="arguments")]
+
+    def _matching_observations(
+        self, action: Dict[str, Any], observation_events: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        action_id = action.get("id")
+        tool_call_id = action.get("tool_call_id")
+        matches: List[Dict[str, Any]] = []
+        for observation in observation_events:
+            if tool_call_id and observation.get("tool_call_id") == tool_call_id:
+                matches.append(observation)
+            elif action_id and observation.get("action_id") == action_id:
+                matches.append(observation)
+        return matches
+
+    def _render_openhands_observation_card(self, event: Dict[str, Any]) -> Panel:
+        payload = _observation_payload(event)
+        title = _openhands_event_summary(event)
+        if payload is not None:
+            if isinstance(payload, str):
+                payload_view: Any = Text(payload, no_wrap=False, overflow="fold")
+            else:
+                payload_view = Syntax(_pretty_json(payload), "json", word_wrap=True)
+            return Panel(payload_view, title=title)
+
+        lines = Text()
+        event_id = event.get("id")
+        timestamp = event.get("timestamp")
+        if event_id or timestamp:
+            lines.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+        message = _message_text(event)
+        if message:
+            lines.append(f"message: {_shorten_text(message, 800)}\n")
+        return Panel(lines or Text("<empty>"), title=title)
 
     def _render_openhands_events(self, title: str, events: List[Dict[str, Any]]) -> Panel:
         cards: List[Any] = []
@@ -2142,7 +2589,11 @@ class DetailsPanel(Static):
 
             thought = _thought_text(event)
             if thought:
-                lines.append(f"thought: {_shorten_text(thought, 800)}\n")
+                lines.append(f"thought: {thought}\n")
+
+            reasoning = _reasoning_text(event)
+            if reasoning and reasoning != thought:
+                lines.append(f"reasoning: {reasoning}\n", style="dim")
 
             message = _message_text(event)
             if message:
@@ -2150,11 +2601,9 @@ class DetailsPanel(Static):
 
             tool_name, arguments = _tool_call_display(event)
             if tool_name and arguments not in (None, "", {}):
-                try:
-                    argument_view = Syntax(_pretty_json(_parse_json_string(arguments)), "json", word_wrap=True)
-                except Exception:
-                    argument_view = Text(str(arguments), no_wrap=False, overflow="fold")
-                cards.append(Panel(argument_view, title=f"{index}. {tool_name} arguments"))
+                argument_panels = self._render_openhands_argument_panels(tool_name, arguments)
+                body = Group(lines, *argument_panels) if lines.plain else Group(*argument_panels)
+                cards.append(Panel(body, title=f"{index}. {tool_name}"))
                 continue
 
             payload = _observation_payload(event)

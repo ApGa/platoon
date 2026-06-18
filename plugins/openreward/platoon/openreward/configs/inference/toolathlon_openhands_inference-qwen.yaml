@@ -1,24 +1,24 @@
 # OpenReward Toolathlon + OpenHands inference benchmark config.
 
 inference:
-  model_name: openai/aws/anthropic/bedrock-claude-opus-4-7
+  model_name: openai/nvidia/qwen/qwen3.5-35b-a3b
   model_endpoint: null
   model_api_key: null
-  output_dir: ./inference_results/toolathlon_openhands-opus4-7-test-3
+  output_dir: ./inference_results/toolathlon_openhands-qwen3.5-35b-a3b-test-1
   resume: true
   workflow:
-    num_rollouts_per_task: 8
-    num_concurrent_workers: 128
+    num_rollouts_per_task: 4
+    num_concurrent_workers: 32
     success_threshold: 1.0
     fail_fast: false
     use_subprocesses: true
     subprocess_max_workers: 128
     rollout_config:
       max_steps: 100
-      output_dir: ./inference_results/toolathlon_openhands-opus4-7-test-3/rollouts
+      output_dir: ./inference_results/toolathlon_openhands-qwen3.5-35b-a3b-test-1/rollouts
       verbose: true
-      timeout: 600
-      step_timeout: 300
+      timeout: 3600
+      step_timeout: 900
       inference_params:
         temperature: null
         top_p: null
@@ -31,7 +31,7 @@ openreward:
   session_url: http://localhost:8082
   api_url: null
   api_key: local
-  train_task_limit: 48
+  train_task_limit: 600
   eval_task_limit: 50
   task_names: null
   max_tool_calls: 0

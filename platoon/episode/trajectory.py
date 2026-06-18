@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Iterable, Protocol, runtime_checkable
 
 from platoon.envs.base import Task
@@ -14,19 +14,29 @@ from platoon.episode.context import (
 
 
 def _to_jsonable(obj: Any) -> Any:
-    if is_dataclass(obj):
-        return _to_jsonable(asdict(obj))
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    # Walk dataclass fields WITHOUT dataclasses.asdict(): asdict() deep-copies
+    # every leaf value, and trajectory steps embed live SDK objects (e.g.
+    # OpenHands events holding a threading.Lock / asyncio.Future) that cannot be
+    # copied/pickled. Recursing via _to_jsonable instead routes those through
+    # model_dump()/str() below rather than copy.deepcopy.
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: _to_jsonable(getattr(obj, f.name)) for f in fields(obj)}
     model_dump = getattr(obj, "model_dump", None)
     if callable(model_dump):
         try:
-            return _to_jsonable(model_dump(mode="json"))
+            return model_dump(mode="json")
         except TypeError:
-            return _to_jsonable(model_dump())
-    if isinstance(obj, (str, int, float, bool)) or obj is None:
-        return obj
+            try:
+                return _to_jsonable(model_dump())
+            except Exception:
+                return str(obj)
+        except Exception:
+            return str(obj)
     if isinstance(obj, dict):
-        return {k: _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
         return [_to_jsonable(x) for x in obj]
     return str(obj)
 

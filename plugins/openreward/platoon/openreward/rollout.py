@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sys
 import uuid
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from openhands.sdk import LLM
 from openhands.sdk import Agent as OpenHandsSDKAgent
+from openhands.sdk.context.condenser import LLMSummarizingCondenser
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
 from platoon.episode.context import current_trajectory_collection
@@ -22,6 +24,40 @@ from platoon.openreward.config_defs import OpenRewardConfig
 from platoon.openreward.env import OpenRewardOpenHandsEnv
 
 
+def _patch_mcp_boot_timeout() -> None:
+    """Raise OpenHands' hardcoded 30s MCP tool-listing timeout.
+
+    At episode start OpenHands spawns the openreward mcp_bridge, which boots a
+    per-session env (clone Postgres DB + spawn several node/python MCP servers).
+    Under high ``num_concurrent_workers`` these boots all land on the gym server
+    at once and routinely exceed 30s, so ``Agent._initialize`` raises
+    ``MCPTimeoutError`` and the episode dies at step 0. The 30s is a hardcoded
+    literal in ``openhands.sdk.agent.base`` (no config hook), so we wrap the
+    ``create_mcp_tools`` symbol it calls and force a larger timeout. Override via
+    ``OPENREWARD_MCP_TIMEOUT`` (seconds).
+    """
+    try:
+        timeout = float(os.environ.get("OPENREWARD_MCP_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        timeout = 120.0
+    try:
+        from openhands.sdk.agent import base as _oh_agent_base
+    except Exception:
+        return
+    original = getattr(_oh_agent_base, "create_mcp_tools", None)
+    if original is None or getattr(original, "_openreward_patched", False):
+        return
+
+    def _create_mcp_tools(config, _timeout=30, *args, **kwargs):
+        return original(config, timeout, *args, **kwargs)
+
+    _create_mcp_tools._openreward_patched = True  # type: ignore[attr-defined]
+    _oh_agent_base.create_mcp_tools = _create_mcp_tools
+
+
+_patch_mcp_boot_timeout()
+
+
 def _slug(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in value).strip("-") or "task"
 
@@ -31,7 +67,29 @@ def _openreward_config(config: RolloutConfig) -> OpenRewardConfig:
     return OpenRewardConfig.from_mapping(extra.get("openreward"))
 
 
+def _select_session_url(default_url: str, shard_key: str) -> str:
+    """Pick one env-server backend for this rollout when sharding is enabled.
+
+    Multinode training runs the rollout workflow on a single controller node, so
+    every session would otherwise hit one env server and bottleneck. When
+    ``OPENREWARD_SESSION_URLS`` (comma-separated) is set, we spread rollouts over
+    those backends by hashing a per-rollout key. Each rollout is exactly one ORS
+    session, so binding the whole session to one backend keeps the gym's
+    in-container session affinity (consistent hash on X-Session-ID) intact end to
+    end -- no extra load balancer required. Unset -> use the config's session_url.
+    """
+    urls = os.environ.get("OPENREWARD_SESSION_URLS", "").strip()
+    if not urls:
+        return default_url
+    candidates = [u.strip() for u in urls.split(",") if u.strip()]
+    if not candidates:
+        return default_url
+    digest = hashlib.sha1(shard_key.encode("utf-8")).hexdigest()
+    return candidates[int(digest, 16) % len(candidates)]
+
+
 def _build_mcp_config(task: Task, config: RolloutConfig, openreward_config: OpenRewardConfig, output_dir: str) -> dict:
+    session_url = _select_session_url(openreward_config.session_url, output_dir)
     bridge_args = [
         "-m",
         "platoon.openreward.mcp_bridge",
@@ -42,7 +100,7 @@ def _build_mcp_config(task: Task, config: RolloutConfig, openreward_config: Open
         "--task-name",
         str(task.id),
         "--session-url",
-        openreward_config.session_url,
+        session_url,
         "--api-key",
         openreward_config.api_key,
         "--output-dir",
@@ -70,6 +128,7 @@ def _build_mcp_config(task: Task, config: RolloutConfig, openreward_config: Open
 def _build_llm(config: RolloutConfig) -> LLM:
     inference_params = config.inference_params
     api_key = config.model_api_key
+    custom_tokenizer = config.model_name if not config.model_name.startswith("openai/") else config.model_name.split("/")[1]
     return LLM(
         usage_id="platoon-openreward-openhands",
         model=config.model_name or "openai/gpt-4o-mini",
@@ -79,6 +138,7 @@ def _build_llm(config: RolloutConfig) -> LLM:
         top_p=inference_params.top_p,
         max_output_tokens=inference_params.max_completion_tokens,
         timeout=config.step_timeout,
+        custom_tokenizer="Qwen/Qwen3.5-35B-A3B" #custom_tokenizer, # TODO: Make this configurable
     )
 
 
@@ -86,10 +146,13 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     openreward_config = _openreward_config(config)
     task_id = str(task.id)
     rollout_id = uuid.uuid4().hex[:8]
+    openhands_conversation_id = uuid.uuid4()
     rollout_output_dir = os.path.join(config.output_dir, "openreward", _slug(task_id), rollout_id)
     bridge_output_dir = os.path.join(rollout_output_dir, "bridge")
+    openhands_persistence_dir = os.path.join(rollout_output_dir, "openhands")
     workspace_dir = os.path.join(rollout_output_dir, "workspace")
     Path(bridge_output_dir).mkdir(parents=True, exist_ok=True)
+    Path(openhands_persistence_dir).mkdir(parents=True, exist_ok=True)
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
 
     llm = _build_llm(config)
@@ -98,8 +161,19 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         tools=[],
         mcp_config=_build_mcp_config(task, config, openreward_config, bridge_output_dir),
         include_default_tools=[],
+        condenser=LLMSummarizingCondenser(
+            llm=llm,
+            keep_first=4,
+            max_tokens=int(0.8*32768), #TODO: Make this configurable
+        ),
     )
-    env = OpenRewardOpenHandsEnv(task=task, agent=oh_agent, workspace=workspace_dir)
+    env = OpenRewardOpenHandsEnv(
+        task=task,
+        agent=oh_agent,
+        workspace=workspace_dir,
+        persistence_dir=openhands_persistence_dir,
+        conversation_id=openhands_conversation_id,
+    )
     agent = OpenHandsAgent()
 
     traj_collection = TrajectoryCollection()
@@ -126,6 +200,8 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             "openreward": asdict(openreward_config),
             "rollout_output_dir": rollout_output_dir,
             "bridge_output_dir": bridge_output_dir,
+            "openhands_persistence_dir": openhands_persistence_dir,
+            "openhands_conversation_id": str(openhands_conversation_id),
         }
         return result
     return current_trajectory_collection.get()

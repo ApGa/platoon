@@ -382,8 +382,50 @@ def _flatten_message_list_content(messages: list[dict[str, Any]]) -> None:
         message["content"] = "".join(text_parts)
 
 
+def _decode_tool_call_arguments(messages: list[dict[str, Any]]) -> None:
+    """Decode assistant tool-call ``arguments`` from JSON strings into dicts.
+
+    OpenAI-format messages (e.g. from OpenHands native tool calling) carry
+    ``tool_calls[].function.arguments`` as a JSON string per spec. Chat
+    templates such as Qwen3 render them with the Jinja ``items`` filter, which
+    requires a mapping and otherwise raises ``TypeError: Can only get item
+    pairs from a mapping`` once the conversation history contains a tool call.
+    Decode the string into a dict in place so the template sees a mapping;
+    leave non-JSON or non-object payloads untouched.
+    """
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str):
+                continue
+            try:
+                decoded = json.loads(arguments)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(decoded, dict):
+                function["arguments"] = decoded
+
+
 def _patch_areal_openai_message_content_flatten() -> None:
-    """Flatten OpenHands-style list content before HF chat templates and proxy cache."""
+    """Normalize OpenHands-style messages before HF chat templates and proxy cache.
+
+    Two adjustments are applied to the proxy's incoming messages:
+
+    - Flatten list-shaped text ``content`` blocks to plain strings.
+    - Decode tool-call ``arguments`` from JSON strings into dicts so chat
+      templates that iterate them as mappings (e.g. Qwen3) do not crash.
+    """
 
     import areal.experimental.openai.client as client_module  # pyright: ignore[reportMissingImports]
 
@@ -398,6 +440,7 @@ def _patch_areal_openai_message_content_flatten() -> None:
     ) -> list[dict[str, Any]]:
         normalized = original_ensure(name, value)
         _flatten_message_list_content(normalized)
+        _decode_tool_call_arguments(normalized)
         return normalized
 
     _ensure_message_dict_list_with_flatten.__platoon_message_content_patch__ = True

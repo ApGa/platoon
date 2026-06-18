@@ -1,15 +1,25 @@
-experiment_name: recursive-agents
-trial_name: nv-textcraft-synth-ctx40000-linear-medium-areal-cispo-prealloc-2node-trial-2
+experiment_name: openreward-openhands
+trial_name: toolathlon-openhands-prealloc-2node-trial0
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
 
-train_difficulties: ["medium"]
-eval_difficulties: null
-recursive: false
-#enable_offload: false
+openreward:
+  env_name: toolathlongym
+  split: train
+  eval_split: train
+  # Default backend; the launch script overrides this (and/or sets
+  # OPENREWARD_SESSION_URLS for cross-node sharding) at runtime.
+  session_url: http://localhost:8082
+  api_url: null
+  api_key: local
+  train_task_limit: null
+  eval_task_limit: 50
+  task_names: null
+  max_tool_calls: 0
 
+# Run AReaL workers as srun steps inside this (preallocated) sbatch allocation.
 scheduler:
   type: slurm_prealloc
 
@@ -22,6 +32,7 @@ cluster:
     nfs_record_root: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/name_resolve
 
 rollout:
+  # 16 GPUs total, split 50/50: 8 GPUs of sglang inference (1 node).
   backend: sglang:d8p1t1
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
@@ -34,23 +45,29 @@ rollout:
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
   enable_rollout_tracing: false
-  #shuffle_cross_task: true
-  #ensure_batch_divisible_by: 4
+  # The rollout OpenAI proxy (areal ArealOpenAI) parses model tool calls with this
+  # parser. Qwen3.5 emits tool calls in the Qwen3-Coder XML format
+  # (<tool_call><function=name><parameter=k>v</parameter></function></tool_call>);
+  # AReaL's default "qwen" (Qwen2.5, JSON-in-<tool_call>) can't parse that, so
+  # tool_calls come back null and OpenHands ends every episode after 1 step.
+  agent:
+    tool_call_parser: qwen3_coder
+    reasoning_parser: qwen3
 
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 200
-    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/nv-textcraft-synth-ctx40000-linear-medium-areal-cispo-prealloc-2node-trial-2
-    verbose: True
+    max_steps: 100
+    output_dir: ${cluster.fileroot}/toolathlon-openhands-prealloc-2node-trial0
+    verbose: true
     train: true
-    timeout: 7200
+    timeout: 1800
+    step_timeout: 600
     inference_params:
       temperature: 1.0
-      max_completion_tokens: 512
-    step_timeout: 7200
-  group_size: 8
-  leave_one_out_baseline: True
+      max_completion_tokens: 4096
+  group_size: 4
+  use_subprocesses: true
 
 loss_fn_config:
   loss_fn: cispo
@@ -59,16 +76,17 @@ loss_fn_config:
     clip_high_threshold: 5.0
 
 actor:
+  # 8 GPUs of training (1 node): DP4 x context-parallel 2.
   backend: fsdp:d4p1t1c2
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct-2507
+  path: Qwen/Qwen3-4B
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 60000
   optimizer:
     type: adam
     lr: 3e-6
@@ -111,7 +129,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 60000
+    max_tokens_per_mb: 4000
   optimizer: null
   scheduling_strategy:
     type: colocation
@@ -126,7 +144,6 @@ sglang:
   max_running_requests: null
   context_length: 40001
   mem_fraction_static: 0.8
-  #attention_backend: flashinfer # Uncomment for blackwell GPUs
 
 train_dataset:
   batch_size: 16
@@ -156,7 +173,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 5
   freq_secs: null
 
 stats_logger:
@@ -164,5 +181,5 @@ stats_logger:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   wandb:
-    mode: online
-    project: recursive-agents
+    mode: disabled
+    project: openreward-openhands

@@ -1,20 +1,30 @@
-experiment_name: recursive-agents
-trial_name: nv-textcraft-synth-ctx40000-linear-medium-areal-cispo-prealloc-2node-trial-2
+experiment_name: openreward-openhands
+trial_name: toolathlon-openhands-prealloc-8node-trial6
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
 
-train_difficulties: ["medium"]
-eval_difficulties: null
-recursive: false
-#enable_offload: false
+openreward:
+  env_name: toolathlongym
+  split: train
+  eval_split: train
+  # Default backend; the launch script overrides this (and/or sets
+  # OPENREWARD_SESSION_URLS for cross-node sharding) at runtime.
+  session_url: http://localhost:8082
+  api_url: null
+  api_key: local
+  train_task_limit: null
+  eval_task_limit: 50
+  task_names: null
+  max_tool_calls: 0
 
+# Run AReaL workers as srun steps inside this (preallocated) sbatch allocation.
 scheduler:
   type: slurm_prealloc
 
 cluster:
-  n_nodes: 2
+  n_nodes: 8
   n_gpus_per_node: 8
   fileroot: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments
   name_resolve:
@@ -22,35 +32,42 @@ cluster:
     nfs_record_root: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/name_resolve
 
 rollout:
-  backend: sglang:d8p1t1
+  # 64 GPUs total, split ~50/50: 32 GPUs of sglang inference (4 nodes).
+  backend: sglang:d4p1t8
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   tokenizer_path: ${tokenizer_path}
   scheduling_spec: ${actor.scheduling_spec}
   setup_timeout: 900
-  max_concurrent_rollouts: 16
+  max_concurrent_rollouts: 8
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
   enable_rollout_tracing: false
-  #shuffle_cross_task: true
-  #ensure_batch_divisible_by: 4
+  # The rollout OpenAI proxy (areal ArealOpenAI) parses model tool calls with this
+  # parser. Qwen3.5 emits tool calls in the Qwen3-Coder XML format
+  # (<tool_call><function=name><parameter=k>v</parameter></function></tool_call>);
+  # AReaL's default "qwen" (Qwen2.5, JSON-in-<tool_call>) can't parse that, so
+  # tool_calls come back null and OpenHands ends every episode after 1 step.
+  agent:
+    tool_call_parser: qwen3_coder
+    reasoning_parser: qwen3
 
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 200
-    output_dir: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments/nv-textcraft-synth-ctx40000-linear-medium-areal-cispo-prealloc-2node-trial-2
-    verbose: True
+    max_steps: 100
+    output_dir: ${cluster.fileroot}/toolathlon-openhands-prealloc-8node-trial6
+    verbose: true
     train: true
-    timeout: 7200
+    timeout: 3600
+    step_timeout: 1800
     inference_params:
       temperature: 1.0
-      max_completion_tokens: 512
-    step_timeout: 7200
+      max_completion_tokens: 4096
   group_size: 8
-  leave_one_out_baseline: True
+  use_subprocesses: true
 
 loss_fn_config:
   loss_fn: cispo
@@ -59,16 +76,24 @@ loss_fn_config:
     clip_high_threshold: 5.0
 
 actor:
-  backend: fsdp:d4p1t1c2
+  # Parallelism constraints for Qwen3.5-35B-A3B (qwen3_5_moe) on Megatron:
+  #   * CP>1 unsupported for this VLM/MoE model -> c1.
+  #   * TP <= num_query_groups (GQA KV groups = 2) -> TP capped at t2.
+  # The disaggregated attn|ffn groups must have matching per-pipeline-stage device
+  # counts (attn DP*TP*CP == ffn DP*TP*EP) and shared DP/PP. With attn width capped
+  # at t2*c1=2, the ffn group must also be width 2 (t1*e2), and DP rises to 4 to fill
+  # the 32 actor GPUs: attn 4*4*2*1=32, ffn 4*4*1*2=32 (overlap same 32 GPUs;
+  # +32 for sglang = 64 = 8 nodes).
+  backend: megatron:(attn:d4p4t2c1|ffn:d4p4t1e2)
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct-2507
+  path: Qwen/Qwen3.5-35B-A3B
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 32768 #40000
   optimizer:
     type: adam
     lr: 3e-6
@@ -101,6 +126,10 @@ actor:
   adv_norm:
     mean_level: null
     std_level: null
+  megatron:
+    bridge_type: megatron-bridge
+    use_bridge_for_update_weights: true # for live weight sync
+    use_deterministic_algorithms: true
 
 ref:
   backend: ${actor.backend}
@@ -111,7 +140,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 60000
+    max_tokens_per_mb: 32768 #40000
   optimizer: null
   scheduling_strategy:
     type: colocation
@@ -124,9 +153,8 @@ sglang:
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 40001
+  context_length: 32769 #40001
   mem_fraction_static: 0.8
-  #attention_backend: flashinfer # Uncomment for blackwell GPUs
 
 train_dataset:
   batch_size: 16
@@ -156,7 +184,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 5
   freq_secs: null
 
 stats_logger:
@@ -165,4 +193,4 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: online
-    project: recursive-agents
+    project: toolathlon-openhands

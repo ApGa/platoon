@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import queue
 import time
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict
 
@@ -14,15 +14,23 @@ from platoon.episode.trajectory import Trajectory, TrajectoryEventHandler
 
 
 def _to_jsonable(obj: Any) -> Any:
-    if is_dataclass(obj):
-        return _to_jsonable(asdict(obj))
-    if isinstance(obj, BaseModel):
-        return obj.model_dump(mode="json")
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj
+    if isinstance(obj, BaseModel):
+        try:
+            return obj.model_dump(mode="json")
+        except Exception:
+            return str(obj)
+    # Walk dataclass fields WITHOUT dataclasses.asdict(): asdict() deep-copies
+    # every leaf value, and trajectory steps embed live SDK objects (e.g.
+    # OpenHands events holding a threading.Lock / asyncio.Future) that cannot be
+    # copied/pickled. Recursing via _to_jsonable routes those through
+    # model_dump()/str() instead of copy.deepcopy.
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: _to_jsonable(getattr(obj, f.name)) for f in fields(obj)}
     if isinstance(obj, dict):
-        return {k: _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
         return [_to_jsonable(x) for x in obj]
     # Fallback to string
     return str(obj)
