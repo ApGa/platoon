@@ -57,6 +57,23 @@ def _normalize_visualization_mode(mode: str | None) -> str:
     return "auto"
 
 
+def _task_display_id(task: Any) -> str | None:
+    if not isinstance(task, dict):
+        return None
+    for key in ("id", "task_id", "name"):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _collection_display_label(collection_id: Any, task_id: str | None = None) -> str:
+    if task_id:
+        short_id = _shorten_text(collection_id, 8) if collection_id else "unlabeled"
+        return f"collection:{task_id} · id:{short_id}"
+    return f"collection:{collection_id}" if collection_id else "unlabeled"
+
+
 def _is_openhands_step_payload(data: Any) -> bool:
     return isinstance(data, dict) and ("action_events" in data or "observation_events" in data)
 
@@ -987,6 +1004,9 @@ class TrajectoryTree(Static):
         self.traj_nodes: Dict[str, TreeNode[str]] = {}
         # Map grouping label -> group node to avoid duplicate "unlabeled" nodes
         self.group_nodes: Dict[str, TreeNode[str]] = {}
+        # Map collection_id -> task id once trajectory_task_set arrives. Group
+        # nodes are created before task metadata, so labels are upgraded later.
+        self.collection_task_ids: Dict[str, str] = {}
         # Remember which group label a trajectory belongs to so later events are
         # attached consistently even if they don't repeat collection/process/task.
         self.traj_to_group_label: Dict[str, str] = {}
@@ -1025,6 +1045,7 @@ class TrajectoryTree(Static):
         # Clear internal maps
         self.traj_nodes.clear()
         self.group_nodes.clear()
+        self.collection_task_ids.clear()
         self.traj_to_group_label.clear()
         self.traj_steps_nodes.clear()
         self.step_nodes.clear()
@@ -1359,8 +1380,13 @@ class SplitDivider(Static):
             # find or create grouping node via our map to avoid duplicates
             group_node = self.group_nodes.get(label)
             if group_node is None:
-                group_node = self.tree_widget.root.add(label)
+                task_id = self.collection_task_ids.get(str(collection_id)) if collection_id else None
+                group_node = self.tree_widget.root.add(_collection_display_label(collection_id, task_id))
                 group_node.expand()
+                group_node.data = {
+                    "type": "collection",
+                    "payload": {"collection_id": collection_id, "task_id": task_id},
+                }
                 self.group_nodes[label] = group_node
             # Remember association of this trajectory to the chosen group label
             if traj_id_for_group is not None:
@@ -1401,8 +1427,22 @@ class SplitDivider(Static):
         elif event.type == "trajectory_task_set":
             traj_id = event.data["trajectory_id"]
             task = event.data.get("task")
+            task_id = _task_display_id(task)
+            if task_id and collection_id and group_node is not None:
+                self.collection_task_ids[str(collection_id)] = task_id
+                self._set_node_label(group_node, _collection_display_label(collection_id, task_id))
+                group_node.data = {
+                    "type": "collection",
+                    "payload": {"collection_id": collection_id, "task_id": task_id},
+                }
             node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
-            task_label = f"task: {task.get('goal')}" if task else "task: None"
+            if task:
+                task_goal = task.get("goal")
+                task_label = f"task: {task_id}" if task_id else "task"
+                if isinstance(task_goal, str) and task_goal.strip():
+                    task_label = f"{task_label} · {_shorten_text(task_goal, 160)}"
+            else:
+                task_label = "task: None"
             task_node = node.add(task_label)
             task_node.data = {"type": "task", "payload": task} if task else None
 

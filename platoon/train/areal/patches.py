@@ -118,6 +118,131 @@ def _patch_model_response_custom_stop_sequences() -> None:
     ModelResponse.output_tokens_without_stop = property(_output_tokens_without_custom_stop_error)
 
 
+def _patch_megatron_bridge_attention_backend() -> None:
+    """Allow Platoon launchers to force Megatron Bridge attention backend.
+
+    AReaL's public config schema does not expose Megatron Core's
+    ``attention_backend`` field, but Megatron Bridge providers do have the field
+    before ``finalize()``. Set it from an env var at provider-construction time.
+    """
+
+    try:
+        from megatron.bridge.models.conversion.auto_bridge import AutoBridge  # pyright: ignore[reportMissingImports]
+        from megatron.core.transformer.enums import AttnBackend  # pyright: ignore[reportMissingImports]
+    except Exception:
+        return
+
+    original = AutoBridge.to_megatron_provider
+    if getattr(original, "__platoon_attention_backend_patch__", False):
+        return
+
+    def _forced_attention_backend():
+        backend_name = os.environ.get("PLATOON_MEGATRON_ATTENTION_BACKEND", "").strip().lower()
+        if not backend_name:
+            return None
+        try:
+            return AttnBackend[backend_name]
+        except KeyError as exc:
+            allowed = ", ".join(member.name for member in AttnBackend)
+            raise ValueError(
+                "Invalid PLATOON_MEGATRON_ATTENTION_BACKEND="
+                f"{backend_name!r}; expected one of: {allowed}"
+            ) from exc
+
+    @wraps(original)
+    def _to_megatron_provider_with_forced_attention_backend(self, *args, **kwargs):
+        provider = original(self, *args, **kwargs)
+        attention_backend = _forced_attention_backend()
+        if attention_backend is not None:
+            provider.attention_backend = attention_backend
+        return provider
+
+    _to_megatron_provider_with_forced_attention_backend.__platoon_attention_backend_patch__ = True
+    AutoBridge.to_megatron_provider = _to_megatron_provider_with_forced_attention_backend
+
+
+def _patch_megatron_bridge_qwen35_tp_validation() -> None:
+    """Relax an over-strict Megatron Bridge Qwen3.5 TP validation guard.
+
+    megatron-bridge 0.4.0's Qwen3.5-VL providers require
+    ``tensor_model_parallel_size <= num_query_groups``. Megatron Core's actual
+    compatibility rule is less restrictive: the two sizes only need to be
+    multiples/divisors of each other, with TP > KV groups handled by KV-head
+    replication. Newer Megatron Bridge versions have removed this provider-level
+    guard, so mirror that behavior here while leaving Core's validation intact.
+    """
+
+    try:
+        from megatron.bridge.models.qwen_vl.qwen35_vl_provider import (  # pyright: ignore[reportMissingImports]
+            Qwen35VLModelProvider,
+            Qwen35VLMoEModelProvider,
+        )
+    except Exception:
+        return
+
+    def _allow_megatron_core_to_validate_parallelism(self) -> None:
+        return None
+
+    for provider_cls in (Qwen35VLModelProvider, Qwen35VLMoEModelProvider):
+        current = getattr(provider_cls, "validate_parallelism", None)
+        if getattr(current, "__platoon_qwen35_tp_validation_patch__", False):
+            continue
+        _allow_megatron_core_to_validate_parallelism.__platoon_qwen35_tp_validation_patch__ = True
+        provider_cls.validate_parallelism = _allow_megatron_core_to_validate_parallelism
+
+
+def _patch_megatron_checkpoint_optimizer_metadata() -> None:
+    """Save Megatron distributed optimizer state with a supported sharding mode.
+
+    AReaL's Megatron checkpoint manager calls
+    ``optimizer.sharded_state_dict(state_dict)`` without metadata. With newer
+    Megatron Core releases that default can produce optimizer shards using
+    ``flattened_range``, which ``ShardedTensor.validate_metadata_integrity()``
+    rejects. Request the ``dp_reshardable`` strategy instead; it avoids
+    ``flattened_range`` and is suitable for recovery checkpoints where DP layout
+    is expected to remain stable across resume.
+    """
+
+    try:
+        from areal.engine.megatron_utils.checkpointer import (  # pyright: ignore[reportMissingImports]
+            MegatronCheckpointManager,
+        )
+    except Exception:
+        return
+
+    original = MegatronCheckpointManager.generate_state_dict
+    if getattr(original, "__platoon_megatron_optim_metadata_patch__", False):
+        return
+
+    @wraps(original)
+    def _generate_state_dict_with_optimizer_metadata(self, *args, **kwargs):
+        optimizer = getattr(self, "optimizer", None)
+        original_sharded_state_dict = getattr(optimizer, "sharded_state_dict", None)
+        if original_sharded_state_dict is None:
+            return original(self, *args, **kwargs)
+
+        @wraps(original_sharded_state_dict)
+        def _sharded_state_dict_with_dp_reshardable_metadata(*inner_args, **inner_kwargs):
+            inner_kwargs.setdefault(
+                "metadata",
+                {"distrib_optim_sharding_type": "dp_reshardable"},
+            )
+            return original_sharded_state_dict(*inner_args, **inner_kwargs)
+
+        try:
+            optimizer.sharded_state_dict = _sharded_state_dict_with_dp_reshardable_metadata
+        except Exception:
+            return original(self, *args, **kwargs)
+
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            optimizer.sharded_state_dict = original_sharded_state_dict
+
+    _generate_state_dict_with_optimizer_metadata.__platoon_megatron_optim_metadata_patch__ = True
+    MegatronCheckpointManager.generate_state_dict = _generate_state_dict_with_optimizer_metadata
+
+
 def _patch_batch_task_dispatcher_idle_submit() -> None:
     """Avoid silent dispatcher stalls when no rollout tasks are in flight.
 
@@ -649,6 +774,9 @@ def apply_all_patches() -> None:
 
     _patch_hf_tokenizer_download_race()
     _patch_model_response_custom_stop_sequences()
+    _patch_megatron_bridge_attention_backend()
+    _patch_megatron_bridge_qwen35_tp_validation()
+    _patch_megatron_checkpoint_optimizer_metadata()
     _patch_batch_task_dispatcher_idle_submit()
     _patch_local_scheduler_fork_ready_timeout()
     _patch_remote_inf_engine_asyncio_teardown_race()

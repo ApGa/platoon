@@ -34,6 +34,15 @@ def _conversation_execution_status(conversation_state) -> ConversationExecutionS
     )
 
 
+def _condensation_completion_id(event: Event) -> str | None:
+    if getattr(event, "kind", None) != "Condensation":
+        return None
+    llm_response_id = getattr(event, "llm_response_id", None)
+    if llm_response_id is None:
+        return None
+    return str(llm_response_id)
+
+
 class OpenHandsEnv:
     def __init__(
         self,
@@ -53,6 +62,29 @@ class OpenHandsEnv:
         self._persistence_dir = persistence_dir
         self._conversation_id = conversation_id
         self._conversation = None
+        self._synthetic_condensation_step_event_ids: set[str] = set()
+
+    def _add_trainable_condensation_steps(
+        self,
+        traj_collection,
+        trajectory_id: str,
+        obs_events: list[Event] | None,
+    ) -> None:
+        for event in obs_events or []:
+            completion_id = _condensation_completion_id(event)
+            event_id = getattr(event, "id", None)
+            if completion_id is None or event_id is None:
+                continue
+            event_id = str(event_id)
+            if event_id in self._synthetic_condensation_step_event_ids:
+                continue
+            self._synthetic_condensation_step_event_ids.add(event_id)
+
+            step = OpenHandsTrajectoryStep(observation_events=[event])
+            step.misc["action_misc"] = {"completion_id": completion_id}
+            step.misc["reward_misc"] = {}
+            step.misc["synthetic_step_type"] = "openhands_condensation"
+            traj_collection.add_trajectory_step(trajectory_id, step)
 
     async def reset(self) -> OpenHandsObservation:
         self._conversation: BaseConversation = Conversation(
@@ -84,6 +116,7 @@ class OpenHandsEnv:
                 observation_events=obs_events,
             ),
         )
+        self._add_trainable_condensation_steps(traj_collection, traj.id, obs_events)
         self._state.last_step_observation_id = obs_events[-1].id
         return await self.observe()
 
@@ -119,6 +152,7 @@ class OpenHandsEnv:
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
         traj_collection.add_trajectory_step(traj.id, step)
+        self._add_trainable_condensation_steps(traj_collection, traj.id, obs_events)
         if self._state.finished:
             traj.reward = self._state.reward
         return await self.observe()

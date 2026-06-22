@@ -9,10 +9,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from platoon.visualization.tui import (  # noqa: E402
     DetailsPanel,
+    _collection_display_label,
     _observation_error_summary,
     _openhands_search_text,
     _openhands_step_summary,
     _step_action_events,
+    _task_display_id,
     _tool_call_display,
 )
 
@@ -48,6 +50,18 @@ def test_nested_action_events_are_normalized():
     step = {"action_events": {"action_events": [{"kind": "ActionEvent", "tool_name": "get_task"}]}}
 
     assert _step_action_events(step) == [{"kind": "ActionEvent", "tool_name": "get_task"}]
+
+
+def test_collection_label_prefers_task_id_when_available():
+    label = _collection_display_label("0338e49c-8572-4348-af60-1fb38d686bc0", "canvas-assessment-quality-audit")
+
+    assert label == "collection:canvas-assessment-quality-audit · id:0338e..."
+
+
+def test_task_display_id_uses_task_id_field():
+    assert _task_display_id({"id": "canvas-assessment-quality-audit", "goal": "Call get_task"}) == (
+        "canvas-assessment-quality-audit"
+    )
 
 
 def test_call_tool_display_uses_catalog_tool_name():

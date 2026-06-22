@@ -1,5 +1,5 @@
 experiment_name: openreward-openhands
-trial_name: toolathlon-openhands-prealloc-8node-trial8
+trial_name: toolathlon-openhands-prealloc-16node-trial0
 
 seed: 343
 total_train_epochs: 10
@@ -24,7 +24,7 @@ scheduler:
   type: slurm_prealloc
 
 cluster:
-  n_nodes: 8
+  n_nodes: 16
   n_gpus_per_node: 8
   fileroot: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/experiments/areal/experiments
   name_resolve:
@@ -33,7 +33,7 @@ cluster:
 
 rollout:
   # 64 GPUs total, split ~50/50: 32 GPUs of sglang inference (4 nodes).
-  backend: sglang:d3p1t8
+  backend: sglang:d6p1t8
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
@@ -58,7 +58,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 100
-    output_dir: ${cluster.fileroot}/toolathlon-openhands-prealloc-8node-trial8
+    output_dir: ${cluster.fileroot}/toolathlon-openhands-prealloc-16node-trial0
     verbose: true
     train: true
     timeout: 3600
@@ -85,7 +85,7 @@ actor:
   # at t2*c1=2, the ffn group must also be width 2 (t1*e2), and DP rises to 4 to fill
   # the 32 actor GPUs: attn 4*4*2*1=32, ffn 4*4*1*2=32 (overlap same 32 GPUs;
   # +32 for sglang = 64 = 8 nodes).
-  backend: megatron:(attn:d1p20t2c1|ffn:d1p20t1e2)
+  backend: megatron:(attn:d1p10t8c1|ffn:d1p10t1e8)
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   path: Qwen/Qwen3.5-35B-A3B
