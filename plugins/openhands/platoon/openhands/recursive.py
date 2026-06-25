@@ -1,0 +1,328 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+import threading
+from collections.abc import Sequence
+from concurrent.futures import Future
+from contextlib import redirect_stderr, redirect_stdout
+from contextvars import Context
+from copy import deepcopy
+from typing import Any, cast
+from uuid import uuid4
+
+from pydantic import Field
+
+from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.context import AgentContext
+from openhands.sdk.tool import (
+    Action,
+    DeclaredResources,
+    Observation,
+    Tool,
+    ToolAnnotations,
+    ToolDefinition,
+    ToolExecutor,
+    register_tool,
+)
+from platoon.agents.actions.subagent import launch_subagent
+
+PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX = (
+    "When programmatic_tool_calling is available, use it for multi-step tool "
+    "orchestration, persistent Python state, and concurrent independent work.\n\n"
+    "Inside programmatic_tool_calling, OpenHands tools are available as Python "
+    "callables. Use `await asyncio.gather(...)` when launching independent async "
+    "tool calls concurrently. Store observations in variables, inspect their "
+    "`.text` when needed, combine the results in Python, and then continue with "
+    "the task."
+)
+
+RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (
+    "For multi-part tasks, actively look for independent work that can run in "
+    "parallel or make progress while you continue planning. Prefer delegating "
+    "self-contained investigation, verification, summarization, or data-gathering "
+    "subtasks to launch_subagent instead of doing all work in the root agent. "
+    "Give each child a clear goal and an appropriate max_steps budget. If you "
+    "omit max_steps, the configured default child budget is used.\n\n"
+    "Use the task_tracker tool to maintain a plan for nontrivial tasks. When a "
+    "plan item is self-contained, launch a subagent for that item, then update "
+    "the plan with the result.\n\n"
+    "If programmatic_tool_calling is also available, use "
+    "`await atools.launch_subagent(goal=..., max_steps=...)` from Python, and "
+    "`await asyncio.gather(...)` to run independent child agents concurrently.\n\n"
+    "At the start of a nontrivial task, consider whether at least one subagent "
+    "can help decompose the work before you perform all tool calls yourself. "
+    "Launch subagents only for work that can make progress independently."
+)
+
+RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX = (
+    "For this task, strongly prefer using recursive subagents for independent "
+    "subtasks. After reading the task, create or update a task_tracker plan. "
+    "When the task has self-contained data-gathering, verification, analysis, "
+    "or artifact-building subtasks, the first action after creating the plan "
+    "should launch at least one subagent for a plan item unless there is a "
+    "clear reason it would not help. When programmatic_tool_calling is "
+    "available, use `await atools.launch_subagent(...)` and "
+    "`await asyncio.gather(...)` for independent child work."
+)
+
+RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX = (
+    "Recursive coordination guidance: for nontrivial multi-step work, use "
+    "`task_tracker` to maintain a plan. When a plan item is self-contained, "
+    "delegate it with `launch_subagent` instead of doing all work yourself. "
+    "When programmatic_tool_calling is available, prefer code shaped like "
+    '`child = await atools.launch_subagent(goal="...", max_steps=50)`. If '
+    "there are multiple independent child tasks, use `await asyncio.gather(...)` "
+    "to run them concurrently."
+)
+
+LAUNCH_SUBAGENT_TOOL_NAME = "launch_subagent"
+DEFAULT_SUBAGENT_MAX_STEPS = 50
+
+_RUNTIMES: dict[str, "LaunchSubagentRuntime"] = {}
+_RUNTIMES_LOCK = threading.Lock()
+
+
+class LaunchSubagentAction(Action):
+    goal: str = Field(description="Task goal for the child agent.")
+    max_steps: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum number of child-agent steps. If omitted, Platoon's configured default for this rollout is used."
+        ),
+    )
+    task_misc: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional metadata to attach to the forked child task.",
+    )
+    verbose: bool = Field(
+        default=True,
+        description=("Whether to include the child agent's budget summary in the returned text."),
+    )
+
+
+class LaunchSubagentObservation(Observation):
+    pass
+
+
+class LaunchSubagentRuntime:
+    def __init__(self) -> None:
+        self.id = str(uuid4())
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._context: Context | None = None
+        with _RUNTIMES_LOCK:
+            _RUNTIMES[self.id] = self
+
+    def bind(self, loop: asyncio.AbstractEventLoop, context: Context) -> None:
+        with self._lock:
+            self._loop = loop
+            self._context = context
+
+    def close(self) -> None:
+        with _RUNTIMES_LOCK:
+            _RUNTIMES.pop(self.id, None)
+
+    def run(
+        self,
+        *,
+        goal: str,
+        max_steps: int,
+        task_misc: dict[str, Any] | None,
+        verbose: bool,
+    ) -> Any:
+        with self._lock:
+            loop = self._loop
+            context = self._context
+        if loop is None or context is None:
+            raise RuntimeError("launch_subagent runtime is not bound to an episode")
+        if loop.is_closed():
+            raise RuntimeError("launch_subagent runtime loop is closed")
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            raise RuntimeError("launch_subagent cannot block from the episode loop")
+
+        future: Future[Any] = Future()
+
+        async def _run_subagent() -> Any:
+            with (
+                redirect_stdout(sys.__stdout__ or sys.stdout),
+                redirect_stderr(sys.__stderr__ or sys.stderr),
+            ):
+                return await launch_subagent(
+                    goal=goal,
+                    max_steps=max_steps,
+                    task_misc=task_misc,
+                    verbose=verbose,
+                )
+
+        def _start() -> None:
+            try:
+                task = asyncio.create_task(_run_subagent())
+            except BaseException as exc:
+                future.set_exception(exc)
+                return
+
+            def _finish(done_task: asyncio.Task[Any]) -> None:
+                if future.done():
+                    return
+                if done_task.cancelled():
+                    future.cancel()
+                    return
+                try:
+                    future.set_result(done_task.result())
+                except BaseException as exc:
+                    future.set_exception(exc)
+
+            task.add_done_callback(_finish)
+
+        loop.call_soon_threadsafe(_start, context=context)
+        return future.result()
+
+
+class LaunchSubagentExecutor(ToolExecutor[LaunchSubagentAction, LaunchSubagentObservation]):
+    def __init__(self, runtime_id: str, default_max_steps: int) -> None:
+        self._runtime_id = runtime_id
+        self._default_max_steps = default_max_steps
+
+    def __call__(
+        self,
+        action: LaunchSubagentAction,
+        conversation: Any | None = None,
+    ) -> LaunchSubagentObservation:
+        _ = conversation
+        with _RUNTIMES_LOCK:
+            runtime = _RUNTIMES.get(self._runtime_id)
+        if runtime is None:
+            return LaunchSubagentObservation.from_text(
+                "launch_subagent runtime is no longer available.",
+                is_error=True,
+            )
+
+        max_steps = action.max_steps if action.max_steps is not None else self._default_max_steps
+        try:
+            result = runtime.run(
+                goal=action.goal,
+                max_steps=max_steps,
+                task_misc=action.task_misc,
+                verbose=action.verbose,
+            )
+        except BaseException as exc:
+            return LaunchSubagentObservation.from_text(
+                f"{exc.__class__.__name__}: {exc}",
+                is_error=True,
+            )
+        return LaunchSubagentObservation.from_text(str(result))
+
+
+class LaunchSubagentTool(ToolDefinition[LaunchSubagentAction, LaunchSubagentObservation]):
+    name = LAUNCH_SUBAGENT_TOOL_NAME
+
+    @classmethod
+    def create(
+        cls,
+        conv_state: Any,
+        runtime_id: str,
+        default_max_steps: int = DEFAULT_SUBAGENT_MAX_STEPS,
+    ) -> Sequence["LaunchSubagentTool"]:
+        _ = conv_state
+        return [
+            cls(
+                description=(
+                    "Launch a recursive Platoon subagent on a child task. The "
+                    "child runs with the same forkable agent and environment "
+                    "configuration, including programmatic tool calling when enabled."
+                ),
+                action_type=LaunchSubagentAction,
+                observation_type=LaunchSubagentObservation,
+                annotations=ToolAnnotations(
+                    title=LAUNCH_SUBAGENT_TOOL_NAME,
+                    readOnlyHint=False,
+                    destructiveHint=False,
+                    idempotentHint=False,
+                    openWorldHint=True,
+                ),
+                executor=LaunchSubagentExecutor(
+                    runtime_id=runtime_id,
+                    default_max_steps=default_max_steps,
+                ),
+            )
+        ]
+
+    def declared_resources(self, action: Action) -> DeclaredResources:  # noqa: ARG002
+        return DeclaredResources(keys=(), declared=True)
+
+
+register_tool(LaunchSubagentTool.name, LaunchSubagentTool)
+
+
+def _replace_tool(agent: AgentBase, tool: Tool) -> AgentBase:
+    tools = [existing for existing in agent.tools if existing.name != tool.name]
+    tools.append(tool)
+    return cast(AgentBase, agent.model_copy(update={"tools": tools}))
+
+
+def with_launch_subagent_tool(
+    agent: AgentBase,
+    *,
+    runtime: LaunchSubagentRuntime,
+    default_max_steps: int,
+) -> AgentBase:
+    return _replace_tool(
+        agent,
+        Tool(
+            name=LaunchSubagentTool.name,
+            params={
+                "runtime_id": runtime.id,
+                "default_max_steps": default_max_steps,
+            },
+        ),
+    )
+
+
+def with_programmatic_tool_calling(agent: AgentBase) -> AgentBase:
+    from openhands.tools.programmatic_tool_calling import ProgrammaticToolCallingTool
+
+    return _replace_tool(agent, Tool(name=ProgrammaticToolCallingTool.name))
+
+
+def with_task_tracker_tool(agent: AgentBase) -> AgentBase:
+    from openhands.tools.task_tracker import TaskTrackerTool
+
+    return _replace_tool(agent, Tool(name=TaskTrackerTool.name))
+
+
+def append_system_message_suffix(agent: AgentBase, suffix: str | None) -> AgentBase:
+    if suffix is None or not suffix.strip():
+        return agent
+
+    context = agent.agent_context or AgentContext()
+    parts = [value.strip() for value in (context.system_message_suffix, suffix) if value is not None and value.strip()]
+    merged_context = context.model_copy(update={"system_message_suffix": "\n\n".join(parts)})
+    return cast(AgentBase, agent.model_copy(update={"agent_context": merged_context}))
+
+
+def append_user_message_suffix(agent: AgentBase, suffix: str | None) -> AgentBase:
+    if suffix is None or not suffix.strip():
+        return agent
+
+    context = agent.agent_context or AgentContext()
+    parts = [value.strip() for value in (context.user_message_suffix, suffix) if value is not None and value.strip()]
+    merged_context = context.model_copy(update={"user_message_suffix": "\n\n".join(parts)})
+    return cast(AgentBase, agent.model_copy(update={"agent_context": merged_context}))
+
+
+def copy_agent_config_for_fork(agent: AgentBase) -> AgentBase:
+    field_values = {field_name: getattr(agent, field_name) for field_name in type(agent).model_fields}
+    if "tools" in field_values:
+        field_values["tools"] = list(agent.tools)
+    if "include_default_tools" in field_values:
+        field_values["include_default_tools"] = list(agent.include_default_tools)
+    if "mcp_config" in field_values:
+        field_values["mcp_config"] = deepcopy(agent.mcp_config)
+    return cast(AgentBase, type(agent).model_validate(field_values))

@@ -13,6 +13,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+DECLARED_RESOURCES_META_KEY = "openhands.dev/declared_resources"
+
 
 def _json_default(value: Any) -> Any:
     if hasattr(value, "model_dump"):
@@ -57,12 +59,10 @@ def _prompt_to_text(prompt: Any) -> str:
 
 def _tool_result_to_payload(result: Any) -> dict[str, Any]:
     blocks = getattr(result, "blocks", None) or []
-    block_texts = [
-        getattr(block, "text", None)
-        if getattr(block, "text", None) is not None
-        else str(block)
-        for block in blocks
-    ]
+    block_texts: list[str] = []
+    for block in blocks:
+        text = getattr(block, "text", None)
+        block_texts.append(text if isinstance(text, str) else str(block))
     data = getattr(result, "data", None)
     reward = getattr(result, "reward", None)
     finished = bool(getattr(result, "finished", False))
@@ -122,6 +122,10 @@ def _tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
     return parameters if isinstance(parameters, dict) else {}
 
 
+def _lockfree_tool_meta() -> dict[str, Any]:
+    return {DECLARED_RESOURCES_META_KEY: []}
+
+
 def _make_environment_tool(runtime: "OpenRewardMCPBridge", tool: dict[str, Any]):
     tool_name = str(tool["name"])
     parameters_schema = _tool_parameters(tool)
@@ -146,7 +150,11 @@ def _make_environment_tool(runtime: "OpenRewardMCPBridge", tool: dict[str, Any])
                 annotation=annotation,
             )
         )
-    _environment_tool.__signature__ = inspect.Signature(signature_parameters, return_annotation=str)
+    setattr(
+        _environment_tool,
+        "__signature__",
+        inspect.Signature(signature_parameters, return_annotation=str),
+    )
     return _environment_tool
 
 
@@ -375,9 +383,7 @@ class OpenRewardMCPBridge:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Expose one OpenReward session through stdio MCP tools."
-    )
+    parser = argparse.ArgumentParser(description="Expose one OpenReward session through stdio MCP tools.")
     parser.add_argument("--env-name", default="toolathlongym")
     parser.add_argument("--split", default="train")
     parser.add_argument("--task-index", type=int, default=0)
@@ -409,13 +415,13 @@ def main(argv: list[str] | None = None) -> int:
 
     mcp = FastMCP("openreward")
 
-    @mcp.tool()
+    @mcp.tool(meta=_lockfree_tool_meta())
     def get_task() -> str:
         """Return the OpenReward task prompt and environment tool catalog."""
 
         return runtime.get_task()
 
-    @mcp.tool()
+    @mcp.tool(meta=_lockfree_tool_meta())
     def get_status() -> str:
         """Return bridge state including turn count, reward, and finished flag."""
 
@@ -429,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
             _make_environment_tool(runtime, tool),
             name=str(tool_name),
             description=tool.get("description") or f"Invoke OpenReward tool {tool_name}.",
+            meta=_lockfree_tool_meta(),
         )
 
     try:

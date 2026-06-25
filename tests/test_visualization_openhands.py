@@ -4,6 +4,10 @@ import json
 import sys
 from pathlib import Path
 
+from rich.console import Console, Group
+from rich.markdown import Markdown
+from rich.panel import Panel
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -11,6 +15,7 @@ from platoon.visualization.tui import (  # noqa: E402
     DetailsPanel,
     _collection_display_label,
     _observation_error_summary,
+    _openhands_event_summary,
     _openhands_search_text,
     _openhands_step_summary,
     _step_action_events,
@@ -129,9 +134,7 @@ def test_observation_errors_are_surfaced():
     observation = _tool_observation("python_execute", "Traceback: RuntimeError('boom')", tool_call_id="call-python")
     step = {
         "action_events": {
-            "action_events": [
-                {"kind": "ActionEvent", "tool_name": "python_execute", "tool_call_id": "call-python"}
-            ]
+            "action_events": [{"kind": "ActionEvent", "tool_name": "python_execute", "tool_call_id": "call-python"}]
         },
         "observation_events": [observation],
     }
@@ -168,6 +171,82 @@ def test_openhands_search_text_includes_tool_and_observation_payload():
 
     assert "woocommerce.woo_reports_top_sellers" in search_text
     assert "Widget A" in search_text
+
+
+def test_condensation_summary_is_surfaced():
+    event = {
+        "kind": "Condensation",
+        "summary": "USER_CONTEXT: KPI report work has been summarized.",
+        "forgotten_event_ids": ["event-1", "event-2"],
+    }
+    step = {"action_events": None, "observation_events": [event]}
+
+    assert _openhands_event_summary(event) == "condensation: USER_CONTEXT: KPI report work has been summarized."
+    assert _openhands_step_summary(step) == "condensation: USER_CONTEXT: KPI report work has been summarized."
+
+
+def test_condensation_summary_is_included_with_action_summary():
+    step = {
+        "action_events": {
+            "action_events": [
+                _tool_action("snowflake.write_query"),
+                _tool_action("snowflake.write_query"),
+            ]
+        },
+        "observation_events": [
+            {
+                "kind": "Condensation",
+                "summary": "Warehouse context and KPI calculations were condensed.",
+            }
+        ],
+    }
+
+    summary = _openhands_step_summary(step)
+
+    assert summary is not None
+    assert "tools: snowflake.write_query x2" in summary
+    assert "condensation: Warehouse context and KPI calculations were condensed." in summary
+
+
+def test_openhands_search_text_includes_condensation_summary():
+    step = {
+        "action_events": None,
+        "observation_events": [
+            {
+                "kind": "Condensation",
+                "summary": "The condensed state includes revenue and support KPI calculations.",
+            }
+        ],
+    }
+
+    search_text = _openhands_search_text(step)
+
+    assert "revenue and support KPI calculations" in search_text
+
+
+def test_condensation_detail_panel_renders_summary():
+    panel = DetailsPanel(mode="openhands")
+    rendered = panel._render_openhands_condensation_summary(
+        {
+            "kind": "Condensation",
+            "summary": "## KPI State\n\n- Revenue: **Near**\n- Support: Met",
+            "forgotten_event_ids": ["event-1"],
+        },
+        "condensation summary",
+    )
+    console = Console(record=True, width=120)
+
+    console.print(rendered)
+    output = console.export_text()
+
+    assert isinstance(rendered, Panel)
+    assert isinstance(rendered.renderable, Group)
+    assert any(isinstance(renderable, Markdown) for renderable in rendered.renderable.renderables)
+    assert "condensation summary" in output
+    assert "forgotten events: 1" in output
+    assert "KPI State" in output
+    assert "Revenue" in output
+    assert "Near" in output
 
 
 def test_python_execute_arguments_render_code_panel():

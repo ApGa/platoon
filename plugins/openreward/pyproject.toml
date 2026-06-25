@@ -36,14 +36,15 @@ conflicts = [
     ],
 ]
 override-dependencies = [
-    # Force the OpenHands SDK stack from OpenHands/software-agent-sdk main at
-    # cceb86fa3d32e38953d94aa50396137aebbd2783. This is a hard override:
+    # Force the OpenHands SDK stack from ApGa/openhands-agent-sdk with
+    # programmatic tool calling and declared-resource concurrency support. This
+    # is a hard override:
     # areal's litellm[proxy]/swanboard pin rich<14, but openhands-tools'
     # browser-use needs rich>=14, so we force rich 14.x (overriding litellm's pin).
-    "openhands-sdk==1.28.0",
-    "openhands-tools==1.28.0",
-    "openhands-workspace==1.28.0",
-    "openhands-agent-server==1.28.0",
+    "openhands-sdk==1.29.0",
+    "openhands-tools==1.29.0",
+    "openhands-workspace==1.29.0",
+    "openhands-agent-server==1.29.0",
     "rich==14.3.1",
     # Mirror AReaL HEAD's own override-dependencies; uv only honours overrides from the
     # root project, so each lockable project must re-declare them. Plain pins (fastapi,
@@ -80,23 +81,23 @@ platoon = { path = "../..", editable = true }
 platoon-openhands = { path = "../openhands", editable = true }
 
 [tool.uv.sources.openhands-sdk]
-git = "https://github.com/OpenHands/software-agent-sdk.git"
-rev = "cceb86fa3d32e38953d94aa50396137aebbd2783"
+git = "https://github.com/ApGa/openhands-agent-sdk.git"
+rev = "c80646b3f88a69834afaca54855842da7e4dda3f"
 subdirectory = "openhands-sdk"
 
 [tool.uv.sources.openhands-tools]
-git = "https://github.com/OpenHands/software-agent-sdk.git"
-rev = "cceb86fa3d32e38953d94aa50396137aebbd2783"
+git = "https://github.com/ApGa/openhands-agent-sdk.git"
+rev = "c80646b3f88a69834afaca54855842da7e4dda3f"
 subdirectory = "openhands-tools"
 
 [tool.uv.sources.openhands-workspace]
-git = "https://github.com/OpenHands/software-agent-sdk.git"
-rev = "cceb86fa3d32e38953d94aa50396137aebbd2783"
+git = "https://github.com/ApGa/openhands-agent-sdk.git"
+rev = "c80646b3f88a69834afaca54855842da7e4dda3f"
 subdirectory = "openhands-workspace"
 
 [tool.uv.sources.openhands-agent-server]
-git = "https://github.com/OpenHands/software-agent-sdk.git"
-rev = "cceb86fa3d32e38953d94aa50396137aebbd2783"
+git = "https://github.com/ApGa/openhands-agent-sdk.git"
+rev = "c80646b3f88a69834afaca54855842da7e4dda3f"
 subdirectory = "openhands-agent-server"
 
 [tool.ruff]

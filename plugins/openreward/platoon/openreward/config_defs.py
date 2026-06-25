@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from platoon.inference import InferenceBenchmarkConfig
 
@@ -19,14 +19,21 @@ class OpenRewardConfig:
     eval_task_limit: int | None = 50
     task_names: list[str] | None = None
     max_tool_calls: int = 0
+    enable_programmatic_tool_calling: bool = False
+    enable_recursive_subagents: bool = False
+    subagent_default_max_steps: int = 50
+    subagent_max_depth: int | None = None
+    openhands_system_prompt_suffix: str | None = None
 
     @classmethod
-    def from_mapping(cls, value: "OpenRewardConfig | dict[str, Any] | None") -> "OpenRewardConfig":
+    def from_mapping(cls, value: OpenRewardConfig | dict[str, Any] | None) -> OpenRewardConfig:
         if value is None:
             return cls()
         if isinstance(value, cls):
             return value
-        return cls(**value)
+        if isinstance(value, dict):
+            return cls(**cast(dict[str, Any], value))
+        raise TypeError(f"Unsupported OpenRewardConfig value: {type(value).__name__}")
 
 
 @dataclass
@@ -39,5 +46,6 @@ class OpenRewardInferenceConfig:
     seed: int = 42
 
     def __post_init__(self):
-        if isinstance(self.openreward, dict):
-            self.openreward = OpenRewardConfig(**self.openreward)
+        openreward = self.openreward
+        if isinstance(openreward, dict):
+            self.openreward = OpenRewardConfig(**cast(dict[str, Any], openreward))

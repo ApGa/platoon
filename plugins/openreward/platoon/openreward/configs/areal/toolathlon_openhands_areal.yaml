@@ -16,6 +16,11 @@ openreward:
   eval_task_limit: 50
   task_names: null
   max_tool_calls: 0
+  enable_programmatic_tool_calling: false
+  enable_recursive_subagents: false
+  subagent_default_max_steps: 50
+  subagent_max_depth: null
+  openhands_system_prompt_suffix: null
 
 cluster:
   n_nodes: 1

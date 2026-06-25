@@ -7,21 +7,33 @@ import sys
 import uuid
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
 from openhands.sdk import LLM
 from openhands.sdk import Agent as OpenHandsSDKAgent
 from openhands.sdk.context.condenser import LLMSummarizingCondenser
+
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
-from platoon.episode.context import current_trajectory_collection
+from platoon.episode.context import budget_tracker, current_trajectory_collection
 from platoon.episode.loop import run_episode
-from platoon.episode.trajectory import TrajectoryCollection
+from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCollection
 from platoon.openhands.agent import OpenHandsAgent
-from platoon.visualization.event_sinks import JsonlFileSink
-from pydantic import SecretStr
-
+from platoon.openhands.recursive import (
+    PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX,
+    RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX,
+    RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX,
+    RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX,
+    append_system_message_suffix,
+    append_user_message_suffix,
+    with_programmatic_tool_calling,
+    with_task_tracker_tool,
+)
 from platoon.openreward.config_defs import OpenRewardConfig
 from platoon.openreward.env import OpenRewardOpenHandsEnv
+from platoon.visualization.event_sinks import JsonlFileSink
+
+OPENREWARD_CONDENSER_KEEP_FIRST = 2
 
 
 def _patch_mcp_boot_timeout() -> None:
@@ -51,7 +63,7 @@ def _patch_mcp_boot_timeout() -> None:
     def _create_mcp_tools(config, _timeout=30, *args, **kwargs):
         return original(config, timeout, *args, **kwargs)
 
-    _create_mcp_tools._openreward_patched = True  # type: ignore[attr-defined]
+    setattr(_create_mcp_tools, "_openreward_patched", True)
     _oh_agent_base.create_mcp_tools = _create_mcp_tools
 
 
@@ -128,23 +140,66 @@ def _build_mcp_config(task: Task, config: RolloutConfig, openreward_config: Open
 def _build_llm(config: RolloutConfig) -> LLM:
     inference_params = config.inference_params
     api_key = config.model_api_key
-    custom_tokenizer = config.model_name if not config.model_name.startswith("openai/") else config.model_name.split("/")[1]
     return LLM(
         usage_id="platoon-openreward-openhands",
         model=config.model_name or "openai/gpt-4o-mini",
         base_url=config.model_endpoint,
-        api_key=SecretStr(api_key) if api_key else None,
+        api_key=api_key or None,
         temperature=inference_params.temperature,
         top_p=inference_params.top_p,
         max_output_tokens=inference_params.max_completion_tokens,
         timeout=config.step_timeout,
-        custom_tokenizer="Qwen/Qwen3.5-35B-A3B" #custom_tokenizer, # TODO: Make this configurable
+        custom_tokenizer="Qwen/Qwen3.5-35B-A3B",  # TODO: Make this configurable
+    )
+
+
+def _configure_openhands_agent(
+    agent: OpenHandsSDKAgent,
+    openreward_config: OpenRewardConfig,
+) -> OpenHandsSDKAgent:
+    suffix_parts: list[str] = []
+    user_suffix_parts: list[str] = []
+    configured_agent = agent
+    if openreward_config.enable_programmatic_tool_calling:
+        configured_agent = cast(
+            OpenHandsSDKAgent,
+            with_programmatic_tool_calling(configured_agent),
+        )
+        suffix_parts.append(PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX)
+    if openreward_config.enable_recursive_subagents:
+        configured_agent = cast(
+            OpenHandsSDKAgent,
+            with_task_tracker_tool(configured_agent),
+        )
+        suffix_parts.append(RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX)
+        user_suffix_parts.append(RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX)
+        if openreward_config.subagent_max_depth is not None:
+            suffix_parts.append(
+                "Recursive subagents are limited to maximum depth "
+                f"{openreward_config.subagent_max_depth}; the root agent is depth 0."
+            )
+    if openreward_config.openhands_system_prompt_suffix:
+        suffix_parts.append(openreward_config.openhands_system_prompt_suffix)
+
+    suffix = "\n\n".join(part.strip() for part in suffix_parts if part.strip())
+    user_suffix = "\n\n".join(part.strip() for part in user_suffix_parts if part.strip())
+    configured_agent = cast(
+        OpenHandsSDKAgent,
+        append_system_message_suffix(configured_agent, suffix),
+    )
+    return cast(
+        OpenHandsSDKAgent,
+        append_user_message_suffix(configured_agent, user_suffix),
     )
 
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     openreward_config = _openreward_config(config)
     task_id = str(task.id)
+    initial_goal_suffix = (
+        RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX if openreward_config.enable_recursive_subagents else None
+    )
+
     rollout_id = uuid.uuid4().hex[:8]
     openhands_conversation_id = uuid.uuid4()
     rollout_output_dir = os.path.join(config.output_dir, "openreward", _slug(task_id), rollout_id)
@@ -156,16 +211,19 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
 
     llm = _build_llm(config)
-    oh_agent = OpenHandsSDKAgent(
-        llm=llm,
-        tools=[],
-        mcp_config=_build_mcp_config(task, config, openreward_config, bridge_output_dir),
-        include_default_tools=[],
-        condenser=LLMSummarizingCondenser(
+    oh_agent = _configure_openhands_agent(
+        OpenHandsSDKAgent(
             llm=llm,
-            keep_first=4,
-            max_tokens=int(0.8*32768), #TODO: Make this configurable
+            tools=[],
+            mcp_config=_build_mcp_config(task, config, openreward_config, bridge_output_dir),
+            include_default_tools=[],
+            condenser=LLMSummarizingCondenser(
+                llm=llm,
+                keep_first=OPENREWARD_CONDENSER_KEEP_FIRST,
+                max_tokens=int(0.8 * 32768),  # TODO: Make this configurable
+            ),
         ),
+        openreward_config,
     )
     env = OpenRewardOpenHandsEnv(
         task=task,
@@ -173,11 +231,16 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         workspace=workspace_dir,
         persistence_dir=openhands_persistence_dir,
         conversation_id=openhands_conversation_id,
+        enable_recursive_subagents=openreward_config.enable_recursive_subagents,
+        subagent_default_max_steps=openreward_config.subagent_default_max_steps,
+        initial_goal_suffix=initial_goal_suffix,
     )
     agent = OpenHandsAgent()
 
     traj_collection = TrajectoryCollection()
     current_trajectory_collection.set(traj_collection)
+    if openreward_config.enable_recursive_subagents:
+        budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=openreward_config.subagent_max_depth))
     events_path = os.path.join(config.output_dir, "events", f"events_{_slug(task_id)}_{traj_collection.id}.jsonl")
     traj_collection.register_event_handlers(
         JsonlFileSink(events_path, collection_id=traj_collection.id, process_id=os.getpid())
