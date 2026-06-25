@@ -46,5 +46,37 @@ uv run python -m platoon.openreward.inference_scripts.run_inference \
 ```
 
 The rollout attaches an OpenReward MCP bridge to OpenHands. The bridge owns the
-OpenReward session, so `get_task`, catalog tool calls, `python_execute`, and
-`claim_done` all run against the same environment workspace.
+OpenReward session. At reset time, the env resolves `get_task` itself and uses
+the returned task prompt as the agent's first goal, so the root agent does not
+spend its first model step bootstrapping the task. Catalog tool calls,
+`python_execute`, and `claim_done` still run through the same bridge session and
+are exposed through OpenHands tool schemas. Bridge tools declare an empty
+OpenHands resource set, so PTC can run independent MCP calls concurrently with
+`asyncio.gather(...)`.
+
+## Recursive Programmatic Tool Calling
+
+Set `openreward.enable_programmatic_tool_calling: true` to add OpenHands'
+persistent Python tool. Set `openreward.enable_recursive_subagents: true` to add
+OpenHands' `task_tracker` plan tool and a Platoon-backed `launch_subagent` tool.
+Enable both flags to train recursive agents that orchestrate tool calls and
+child agents from PTC:
+
+```python
+results = await asyncio.gather(
+    atools.launch_subagent(goal="inspect one candidate", max_steps=10),
+    atools.launch_subagent(goal="inspect another candidate", max_steps=10),
+)
+```
+
+Child agents reuse the forked Platoon agent and environment, including whichever
+PTC and recursion capabilities are enabled on the parent. OpenReward child
+agents reuse the parent's live MCP bridge tools, so parent and child tool calls
+operate on the same OpenReward session instead of spawning separate task
+sessions. Their trajectories are recorded in the same `TrajectoryCollection`
+with parent links, so existing AReaL/Tinker data processing can include
+depth-aware samples. Calls that omit `max_steps` use
+`openreward.subagent_default_max_steps`, which defaults to 50. Use
+`openreward.subagent_max_depth` to cap recursive depth. When recursive subagents
+are enabled, the rollout uses `DepthAwareStepBudgetTracker`, so each trajectory
+is bounded by its own step budget instead of charging child steps to the parent.

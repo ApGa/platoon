@@ -4,8 +4,8 @@ import os
 from typing import Any
 
 from platoon.envs.base import Task
-
 from platoon.openreward.config_defs import OpenRewardConfig
+from platoon.openreward.constants import OPENREWARD_RESOLVE_GOAL_KEY
 
 
 def _configure_openreward_urls(config: OpenRewardConfig) -> None:
@@ -39,8 +39,7 @@ def get_task_ids(config: OpenRewardConfig, *, split: str | None = None, limit: i
     try:
         environment = client.environments.get(name=config.env_name)
         task_names = [
-            _task_name(task, index)
-            for index, task in enumerate(environment.list_tasks(split=split or config.split))
+            _task_name(task, index) for index, task in enumerate(environment.list_tasks(split=split or config.split))
         ]
     finally:
         client.close()
@@ -56,10 +55,6 @@ def get_task_ids(config: OpenRewardConfig, *, split: str | None = None, limit: i
 def get_task(task_id: str) -> Task:
     return Task(
         id=task_id,
-        goal=(
-            "Call `get_task()` first and use its returned prompt as the task instructions. "
-            "Use the returned environment tools directly by name. If the environment itself "
-            "exposes a catalog/meta tool such as `call_tool`, follow the task prompt for when "
-            "to use it. Call `claim_done` when complete."
-        ),
+        goal=f"Task {task_id}",
+        misc={OPENREWARD_RESOLVE_GOAL_KEY: True},
     )

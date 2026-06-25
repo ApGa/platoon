@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from copy import deepcopy
-from typing import Callable
+from contextvars import copy_context
+from dataclasses import replace
+from typing import Any, Callable
 from uuid import UUID, uuid4
 
+from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.conversation import get_agent_final_response
+from openhands.sdk.conversation.base import BaseConversation
+from openhands.sdk.conversation.conversation import Conversation
+from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.event.base import Event
+from openhands.sdk.workspace.base import BaseWorkspace
 from platoon.envs.base import Task
 from platoon.episode.context import (
     current_trajectory,
@@ -15,14 +23,7 @@ from platoon.episode.context import (
 )
 from platoon.utils.openhands_utils import get_obs_for_last_action, is_finished
 
-from openhands.sdk.agent.base import AgentBase
-from openhands.sdk.conversation import get_agent_final_response
-from openhands.sdk.conversation.base import BaseConversation
-from openhands.sdk.conversation.conversation import Conversation
-from openhands.sdk.conversation.state import ConversationExecutionStatus
-from openhands.sdk.event.base import Event
-from openhands.sdk.workspace.base import BaseWorkspace
-
+from .recursive import DEFAULT_SUBAGENT_MAX_STEPS, copy_agent_config_for_fork
 from .types import OpenHandsAction, OpenHandsObservation, OpenHandsTrajectoryStep
 
 
@@ -52,6 +53,8 @@ class OpenHandsEnv:
         callbacks: list[Callable[[Event], None]] | None = None,
         persistence_dir: str | None = None,
         conversation_id: UUID | str | None = None,
+        enable_recursive_subagents: bool = False,
+        subagent_default_max_steps: int = DEFAULT_SUBAGENT_MAX_STEPS,
     ):
         self._task = task
         self._agent = agent
@@ -63,6 +66,34 @@ class OpenHandsEnv:
         self._conversation_id = conversation_id
         self._conversation = None
         self._synthetic_condensation_step_event_ids: set[str] = set()
+        self._enable_recursive_subagents = enable_recursive_subagents
+        self._subagent_default_max_steps = subagent_default_max_steps
+        self._launch_subagent_runtime: Any | None = None
+
+    def _close_launch_subagent_runtime(self) -> None:
+        if self._launch_subagent_runtime is not None:
+            self._launch_subagent_runtime.close()
+            self._launch_subagent_runtime = None
+
+    def _prepare_agent_for_conversation(self) -> AgentBase:
+        if not self._enable_recursive_subagents:
+            return self._agent
+
+        from platoon.openhands.recursive import (
+            LaunchSubagentRuntime,
+            with_launch_subagent_tool,
+        )
+
+        self._close_launch_subagent_runtime()
+        runtime = LaunchSubagentRuntime()
+        runtime.bind(asyncio.get_running_loop(), copy_context())
+        self._launch_subagent_runtime = runtime
+        self._agent = with_launch_subagent_tool(
+            self._agent,
+            runtime=runtime,
+            default_max_steps=self._subagent_default_max_steps,
+        )
+        return self._agent
 
     def _add_trainable_condensation_steps(
         self,
@@ -86,9 +117,12 @@ class OpenHandsEnv:
             step.misc["synthetic_step_type"] = "openhands_condensation"
             traj_collection.add_trajectory_step(trajectory_id, step)
 
+    async def _initial_user_message(self) -> str:
+        return self._task.goal or ""
+
     async def reset(self) -> OpenHandsObservation:
         self._conversation: BaseConversation = Conversation(
-            agent=self._agent,
+            agent=self._prepare_agent_for_conversation(),
             callbacks=self._callbacks,
             workspace=self._workspace,
             visualizer=None,
@@ -97,8 +131,10 @@ class OpenHandsEnv:
             conversation_id=self._conversation_id,
             delete_on_close=False,
         )
+        initial_user_message = await self._initial_user_message()
+        self._task = replace(self._task, goal=initial_user_message)
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
-        self._conversation.send_message(self._task.goal)
+        self._conversation.send_message(initial_user_message)
         # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
         threading.Thread(target=self._conversation.run, daemon=True).start()
 
@@ -133,7 +169,7 @@ class OpenHandsEnv:
         if obs_events:
             self._state.last_step_observation_id = obs_events[-1].id
         step = OpenHandsTrajectoryStep(
-            action_events=action,
+            action_events=action.action_events,
             observation_events=obs_events,
         )
         step.misc["action_misc"] = action.misc
@@ -161,6 +197,7 @@ class OpenHandsEnv:
         if self._conversation is not None:
             self._conversation.close()
         self._conversation = None
+        self._close_launch_subagent_runtime()
 
     # TODO: Consider adding a return_copy option here.
     async def observe(self) -> OpenHandsObservation:
@@ -176,9 +213,11 @@ class OpenHandsEnv:
         # TODO: Consider explicitly resetting the agent here manually.
         return type(self)(
             task=task,
-            agent=deepcopy(self._agent),
+            agent=copy_agent_config_for_fork(self._agent),
             workspace=self._workspace,
             callbacks=self._callbacks,
             persistence_dir=self._persistence_dir,
             conversation_id=uuid4() if self._persistence_dir is not None else None,
+            enable_recursive_subagents=self._enable_recursive_subagents,
+            subagent_default_max_steps=self._subagent_default_max_steps,
         )

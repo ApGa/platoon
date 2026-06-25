@@ -222,6 +222,15 @@ def _observation_preview(event: Dict[str, Any]) -> str | None:
     return _shorten_text(_pretty_json(payload))
 
 
+def _condensation_summary_text(event: Dict[str, Any]) -> str | None:
+    if event.get("kind") != "Condensation":
+        return None
+    summary = event.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    return None
+
+
 def _message_text(event: Dict[str, Any]) -> str | None:
     message = event.get("llm_message")
     if not isinstance(message, dict):
@@ -255,6 +264,10 @@ def _reasoning_text(event: Dict[str, Any]) -> str | None:
 
 
 def _observation_text(event: Dict[str, Any]) -> str | None:
+    condensation_summary = _condensation_summary_text(event)
+    if condensation_summary:
+        return condensation_summary
+
     payload = _observation_payload(event)
     if payload is None:
         return None
@@ -297,6 +310,14 @@ def _observation_error_summary(events: List[Dict[str, Any]]) -> str | None:
     for event in events:
         if _event_has_error(event):
             return _openhands_event_summary(event)
+    return None
+
+
+def _first_condensation_summary(events: List[Dict[str, Any]]) -> str | None:
+    for event in events:
+        summary = _condensation_summary_text(event)
+        if summary:
+            return f"condensation: {_shorten_text(summary)}"
     return None
 
 
@@ -393,6 +414,10 @@ def _final_evaluation_summary(step: Dict[str, Any]) -> str | None:
 
 def _openhands_event_summary(event: Dict[str, Any]) -> str:
     kind = event.get("kind")
+    condensation_summary = _condensation_summary_text(event)
+    if condensation_summary:
+        return f"condensation: {_shorten_text(condensation_summary)}"
+
     if kind == "ObservationEvent":
         observation = _observation_preview(event)
         if observation:
@@ -463,6 +488,10 @@ def _openhands_step_summary(step: Dict[str, Any]) -> str | None:
     error_summary = _observation_error_summary(non_system_observations or observation_events)
     if error_summary:
         parts.append(f"-> {error_summary}")
+
+    condensation_summary = _first_condensation_summary(non_system_observations or observation_events)
+    if condensation_summary:
+        parts.append(condensation_summary)
 
     if not parts and observation_summaries:
         parts.append(observation_summaries[0])
@@ -2543,7 +2572,9 @@ class DetailsPanel(Static):
         unmatched = [event for event in observation_events if id(event) not in matched_observation_ids]
         if unmatched:
             cards.append(self._render_openhands_events("unmatched observations", unmatched))
-        return Panel(Group(*cards), title="actions and observations") if cards else Panel(Text("<empty>"), title="actions")
+        return (
+            Panel(Group(*cards), title="actions and observations") if cards else Panel(Text("<empty>"), title="actions")
+        )
 
     def _render_openhands_argument_panels(self, tool_name: str | None, arguments: Any) -> List[Panel]:
         parsed = _parse_json_string(arguments)
@@ -2597,7 +2628,33 @@ class DetailsPanel(Static):
                 matches.append(observation)
         return matches
 
+    def _render_openhands_condensation_summary(self, event: Dict[str, Any], title: str) -> Panel:
+        summary = _condensation_summary_text(event)
+        if summary is None:
+            return Panel(Text("<empty>"), title=title)
+
+        metadata = Text()
+        event_id = event.get("id")
+        timestamp = event.get("timestamp")
+        if event_id or timestamp:
+            metadata.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+        forgotten_event_ids = event.get("forgotten_event_ids")
+        if isinstance(forgotten_event_ids, list):
+            metadata.append(f"forgotten events: {len(forgotten_event_ids)}\n", style="dim")
+        summary_offset = event.get("summary_offset")
+        if summary_offset is not None:
+            metadata.append(f"summary offset: {summary_offset}\n", style="dim")
+
+        body: Any = Markdown(summary)
+        if metadata.plain:
+            body = Group(metadata, body)
+        return Panel(body, title=title)
+
     def _render_openhands_observation_card(self, event: Dict[str, Any]) -> Panel:
+        condensation_summary = _condensation_summary_text(event)
+        if condensation_summary:
+            return self._render_openhands_condensation_summary(event, "condensation summary")
+
         payload = _observation_payload(event)
         title = _openhands_event_summary(event)
         if payload is not None:
@@ -2626,6 +2683,11 @@ class DetailsPanel(Static):
             timestamp = event.get("timestamp")
             if event_id or timestamp:
                 lines.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+
+            condensation_summary = _condensation_summary_text(event)
+            if condensation_summary:
+                cards.append(self._render_openhands_condensation_summary(event, f"{index}. condensation summary"))
+                continue
 
             thought = _thought_text(event)
             if thought:
