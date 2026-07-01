@@ -1,5 +1,5 @@
 experiment_name: openreward-openhands
-trial_name: toolathlon-openhands-16node-cp-trial0
+trial_name: toolathlon-openhands-16node-cp-trial3
 
 seed: 343
 total_train_epochs: 10
@@ -58,7 +58,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 100
-    output_dir: ${cluster.fileroot}/toolathlon-openhands-16node-cp-trial0
+    output_dir: ${cluster.fileroot}/toolathlon-openhands-16node-cp-trial3
     verbose: true
     train: true
     timeout: 3600
@@ -177,7 +177,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 5
+  freq_steps: null
   freq_secs: null
 
 stats_logger:
