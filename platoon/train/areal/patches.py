@@ -145,8 +145,7 @@ def _patch_megatron_bridge_attention_backend() -> None:
         except KeyError as exc:
             allowed = ", ".join(member.name for member in AttnBackend)
             raise ValueError(
-                "Invalid PLATOON_MEGATRON_ATTENTION_BACKEND="
-                f"{backend_name!r}; expected one of: {allowed}"
+                f"Invalid PLATOON_MEGATRON_ATTENTION_BACKEND={backend_name!r}; expected one of: {allowed}"
             ) from exc
 
     @wraps(original)
@@ -197,14 +196,15 @@ def _patch_megatron_bridge_qwen35_drop_mtp_for_rl() -> None:
     AReaL commit 4be0c641 made Megatron-Bridge MTP opt-in for RL because MTP is
     not used by rollout/inference and complicates RL training/export. This local
     AReaL checkout predates that ``enable_mtp`` config, so mirror the default
-    behavior for the opt-in Qwen3.5 GDN CP path. Set
-    ``PLATOON_QWEN35_GDN_CP_ENABLE_MTP=1`` to keep the head for debugging.
+    behavior for the opt-in Qwen3.5 GDN CP path.
+
+    Leave the provider's MoE and z-loss coefficients unchanged. Megatron's
+    normal non-per-token loss path already gives them the same semantics under
+    CP as under CP=1; changing their coefficients here would change the training
+    objective rather than repair a CP normalization error.
     """
 
     if not _qwen35_gdn_cp_enabled():
-        return
-    enable_mtp = os.environ.get("PLATOON_QWEN35_GDN_CP_ENABLE_MTP", "").strip().lower()
-    if enable_mtp in {"1", "true", "yes", "on"}:
         return
 
     try:
@@ -219,15 +219,14 @@ def _patch_megatron_bridge_qwen35_drop_mtp_for_rl() -> None:
     @wraps(original)
     def _to_megatron_provider_without_mtp_for_gdn_cp(self, *args, **kwargs):
         provider = original(self, *args, **kwargs)
-        if (
-            getattr(provider, "experimental_attention_variant", None) == "gated_delta_net"
-            and getattr(provider, "mtp_num_layers", None)
-        ):
+        if getattr(provider, "experimental_attention_variant", None) != "gated_delta_net":
+            return provider
+
+        if getattr(provider, "mtp_num_layers", None):
             _log_qwen35_gdn_cp_once(
                 _to_megatron_provider_without_mtp_for_gdn_cp,
                 "drop_mtp",
-                "Dropping Qwen3.5 GDN MTP head for CP RL path "
-                "(set PLATOON_QWEN35_GDN_CP_ENABLE_MTP=1 to keep it).",
+                "Dropping Qwen3.5 GDN MTP head for the CP RL path.",
             )
             provider.mtp_num_layers = None
         return provider
@@ -236,8 +235,17 @@ def _patch_megatron_bridge_qwen35_drop_mtp_for_rl() -> None:
     AutoBridge.to_megatron_provider = _to_megatron_provider_without_mtp_for_gdn_cp
 
 
-def _patch_megatron_bridge_qwen35_cp_per_token_loss() -> None:
-    """Enable Qwen3.5 VL wrapper's CP-safe token loss mode for text-only GDN CP."""
+def _patch_megatron_bridge_qwen35_cp_constructor_loss_mode() -> None:
+    """Satisfy Qwen's CP constructor guard without changing AReaL loss semantics.
+
+    Qwen3-VL asserts that CP uses Megatron's per-token loss mode while the model
+    is constructed. That mode expects the training loss callback to return an
+    unnormalized loss sum and a token count. AReaL PPO instead returns an
+    already-normalized scalar, so leaving the mode enabled disables DDP's normal
+    ``1 / (DP * CP)`` gradient scaling without providing the replacement token
+    divisor. Enable it only for Qwen's constructor assertion, then restore both
+    the shared config and modules (notably MoE routers) that cache the flag.
+    """
 
     if not _qwen35_gdn_cp_enabled():
         return
@@ -252,20 +260,41 @@ def _patch_megatron_bridge_qwen35_cp_per_token_loss() -> None:
 
     for provider_cls in (Qwen35VLModelProvider, Qwen35VLMoEModelProvider):
         original = provider_cls.provide
-        if getattr(original, "__platoon_qwen35_cp_per_token_loss_patch__", False):
+        if getattr(original, "__platoon_qwen35_cp_constructor_loss_mode_patch__", False):
             continue
 
         @wraps(original)
-        def _provide_with_cp_per_token_loss(self, *args, __original=original, **kwargs):
-            if (
+        def _provide_with_constructor_only_per_token_loss(self, *args, __original=original, **kwargs):
+            needs_cp_constructor_mode = (
                 getattr(self, "experimental_attention_variant", None) == "gated_delta_net"
                 and getattr(self, "context_parallel_size", 1) > 1
-            ):
-                self.calculate_per_token_loss = True
-            return __original(self, *args, **kwargs)
+            )
+            if not needs_cp_constructor_mode:
+                return __original(self, *args, **kwargs)
 
-        _provide_with_cp_per_token_loss.__platoon_qwen35_cp_per_token_loss_patch__ = True
-        provider_cls.provide = _provide_with_cp_per_token_loss
+            previous = getattr(self, "calculate_per_token_loss", False)
+            self.calculate_per_token_loss = True
+            try:
+                model = __original(self, *args, **kwargs)
+            finally:
+                # The provider is also the TransformerConfig held by the model,
+                # so this restoration happens before Bridge constructs DDP.
+                self.calculate_per_token_loss = previous
+
+            modules = model.modules() if callable(getattr(model, "modules", None)) else ()
+            for module in modules:
+                if hasattr(module, "calculate_per_token_loss"):
+                    module.calculate_per_token_loss = previous
+            _log_qwen35_gdn_cp_once(
+                _provide_with_constructor_only_per_token_loss,
+                "restore_runtime_loss_mode",
+                "Qwen3.5 GDN CP used calculate_per_token_loss=True only during construction; "
+                f"restored runtime/DDP mode to {previous!r}.",
+            )
+            return model
+
+        _provide_with_constructor_only_per_token_loss.__platoon_qwen35_cp_constructor_loss_mode_patch__ = True
+        provider_cls.provide = _provide_with_constructor_only_per_token_loss
 
 
 def _patch_megatron_checkpoint_optimizer_metadata() -> None:
@@ -286,10 +315,10 @@ def _patch_megatron_checkpoint_optimizer_metadata() -> None:
     """
 
     try:
+        import torch.distributed as dist  # pyright: ignore[reportMissingImports]
         from areal.engine.megatron_utils.checkpointer import (  # pyright: ignore[reportMissingImports]
             MegatronCheckpointManager,
         )
-        import torch.distributed as dist  # pyright: ignore[reportMissingImports]
         from megatron.core.dist_checkpointing.mapping import (  # pyright: ignore[reportMissingImports]
             ShardedTensor,
         )
@@ -383,11 +412,17 @@ def _patch_megatron_checkpoint_optimizer_metadata() -> None:
 
 
 def _qwen35_gdn_cp_enabled() -> bool:
-    return _env_truthy("PLATOON_QWEN35_GDN_CP")
+    return os.environ.get("PLATOON_QWEN35_GDN_CP", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _qwen35_gdn_cp_conv_backend() -> str:
+    backend = os.environ.get("PLATOON_QWEN35_GDN_CP_CONV_BACKEND", "fla").strip().lower()
+    if backend not in {"fla", "reference"}:
+        raise ValueError(
+            "Invalid PLATOON_QWEN35_GDN_CP_CONV_BACKEND="
+            f"{backend!r}; expected one of: fla, reference"
+        )
+    return backend
 
 
 def _is_global_rank_zero_or_unknown() -> bool:
@@ -471,7 +506,9 @@ def _build_zigzag_cp_text_position_ids(cu_seqlens, cp_rank: int, cp_size: int, d
         local_len = seq_len // cp_size
         half_len = local_len // 2
         pieces.append(torch.arange(half_len * cp_rank, half_len * (cp_rank + 1), device=device, dtype=dtype))
-        pieces.append(torch.arange(seq_len - half_len * (cp_rank + 1), seq_len - half_len * cp_rank, device=device, dtype=dtype))
+        pieces.append(
+            torch.arange(seq_len - half_len * (cp_rank + 1), seq_len - half_len * cp_rank, device=device, dtype=dtype)
+        )
     return torch.cat(pieces, dim=0) if pieces else torch.empty(0, device=device, dtype=dtype)
 
 
@@ -485,7 +522,9 @@ def _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input() -> None:
         return
 
     try:
-        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3vl_model  # pyright: ignore[reportMissingImports]
+        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import (
+            model as qwen3vl_model,  # pyright: ignore[reportMissingImports]
+        )
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (  # pyright: ignore[reportMissingImports]
             Qwen3VLModel,
         )
@@ -618,8 +657,15 @@ def _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input() -> None:
     Qwen3VLModel.forward = _forward_with_already_cp_local_context
 
 
-def _patch_megatron_core_qwen35_mtp_local_thd_rope() -> None:
-    """Let MTP consume Qwen's already-CP-local THD RoPE table without re-slicing it."""
+def _patch_megatron_core_qwen35_already_cp_local_thd_rope() -> None:
+    """Apply already-CP-local THD RoPE frequencies without slicing them again.
+
+    The Qwen wrapper's thread-local context identifies the normal forward pass,
+    but full activation recomputation re-enters the attention layer during
+    backward after that outer context has been cleared.  The tensor metadata is
+    therefore also part of the contract: an already-local table has one row per
+    local token while ``cu_seqlens`` still describes the global packed stream.
+    """
 
     if not _qwen35_gdn_cp_enabled():
         return
@@ -630,7 +676,7 @@ def _patch_megatron_core_qwen35_mtp_local_thd_rope() -> None:
         raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron-Core RoPE utilities.") from exc
 
     original_apply_thd = rope_utils._apply_rotary_pos_emb_thd
-    if getattr(original_apply_thd, "__platoon_qwen35_mtp_local_thd_rope_patch__", False):
+    if getattr(original_apply_thd, "__platoon_qwen35_already_cp_local_thd_rope_patch__", False):
         return
 
     @wraps(original_apply_thd)
@@ -644,14 +690,20 @@ def _patch_megatron_core_qwen35_mtp_local_thd_rope() -> None:
         cp_group=None,
     ):
         context = getattr(_QWEN35_GDN_ALREADY_CP_LOCAL_CONTEXT, "value", None)
+        cp_size = cp_group.size() if cp_group is not None else 1
+        has_local_tensor_metadata = (
+            cp_size > 1
+            and cu_seqlens is not None
+            and cu_seqlens.numel() > 0
+            and int(cu_seqlens[-1].item()) == t.size(0) * cp_size
+        )
+        context_confirms_local_layout = context is not None and context.get("local_total_len") == t.size(0)
         if (
-            context is not None
-            and cp_group is not None
-            and cp_group.size() > 1
+            cp_size > 1
             and freqs is not None
             and freqs.dim() >= 1
-            and context.get("local_total_len") == t.size(0)
             and freqs.size(0) == t.size(0)
+            and (context_confirms_local_layout or has_local_tensor_metadata)
         ):
             return rope_utils._apply_rotary_pos_emb_bshd(
                 t.unsqueeze(1),
@@ -670,309 +722,8 @@ def _patch_megatron_core_qwen35_mtp_local_thd_rope() -> None:
             cp_group=cp_group,
         )
 
-    _apply_rotary_pos_emb_thd_with_local_freqs.__platoon_qwen35_mtp_local_thd_rope_patch__ = True
+    _apply_rotary_pos_emb_thd_with_local_freqs.__platoon_qwen35_already_cp_local_thd_rope_patch__ = True
     rope_utils._apply_rotary_pos_emb_thd = _apply_rotary_pos_emb_thd_with_local_freqs
-
-
-def _patch_megatron_core_mtp_checkpoint_non_tensor_kwargs() -> None:
-    """Keep MTP activation recompute from saving PackedSeqParams in autograd state."""
-
-    if not _qwen35_gdn_cp_enabled():
-        return
-
-    try:
-        import torch  # pyright: ignore[reportMissingImports]
-        import torch.distributed as dist  # pyright: ignore[reportMissingImports]
-        from megatron.core import tensor_parallel  # pyright: ignore[reportMissingImports]
-        from megatron.core.transformer.multi_token_prediction import (  # pyright: ignore[reportMissingImports]
-            MultiTokenPredictionLayer,
-        )
-    except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron-Core MTP checkpointing.") from exc
-
-    original_checkpointed_forward = MultiTokenPredictionLayer._checkpointed_forward
-    if getattr(original_checkpointed_forward, "__platoon_qwen35_mtp_checkpoint_non_tensor_patch__", False):
-        return
-
-    @wraps(original_checkpointed_forward)
-    def _checkpointed_forward_with_non_tensor_closure(self, forward_func, *args, **kwargs):
-        if self.config.fp8:
-            return original_checkpointed_forward(self, forward_func, *args, **kwargs)
-
-        def checkpoint_handler():
-            tensor_args = []
-            arg_specs = []
-            for arg in args:
-                if torch.is_tensor(arg):
-                    arg_specs.append(("tensor", len(tensor_args)))
-                    tensor_args.append(arg)
-                else:
-                    arg_specs.append(("value", arg))
-
-            kw_specs = {}
-            for key, value in kwargs.items():
-                if torch.is_tensor(value):
-                    kw_specs[key] = ("tensor", len(tensor_args))
-                    tensor_args.append(value)
-                else:
-                    kw_specs[key] = ("value", value)
-
-            def _forward_with_closed_non_tensors(*runtime_tensor_args):
-                rebuilt_args = [
-                    runtime_tensor_args[spec[1]] if spec[0] == "tensor" else spec[1] for spec in arg_specs
-                ]
-                rebuilt_kwargs = {
-                    key: runtime_tensor_args[spec[1]] if spec[0] == "tensor" else spec[1]
-                    for key, spec in kw_specs.items()
-                }
-
-                packed_seq_params = rebuilt_kwargs.get("packed_seq_params", None)
-                cp_group = getattr(self, "cp_group", None)
-                context = None
-                if packed_seq_params is not None and cp_group is not None and cp_group.size() > 1:
-                    cu_seqlens_padded = getattr(packed_seq_params, "cu_seqlens_q_padded", None)
-                    cu_seqlens = cu_seqlens_padded if cu_seqlens_padded is not None else packed_seq_params.cu_seqlens_q
-                    _, local_seq_lengths = _get_cp_sequence_lengths(cu_seqlens, cp_group.size())
-                    local_total_len = sum(local_seq_lengths)
-                    context = {
-                        "packed_seq_params": packed_seq_params,
-                        "cu_seqlens": cu_seqlens,
-                        "cp_rank": dist.get_rank(group=cp_group),
-                        "cp_size": cp_group.size(),
-                        "local_total_len": local_total_len,
-                    }
-
-                previous = getattr(_QWEN35_GDN_ALREADY_CP_LOCAL_CONTEXT, "value", None)
-                if context is not None:
-                    _QWEN35_GDN_ALREADY_CP_LOCAL_CONTEXT.value = context
-                try:
-                    return forward_func(*rebuilt_args, **rebuilt_kwargs)
-                finally:
-                    _QWEN35_GDN_ALREADY_CP_LOCAL_CONTEXT.value = previous
-
-            return tensor_parallel.checkpoint(
-                _forward_with_closed_non_tensors,
-                self.config.distribute_saved_activations,
-                *tensor_args,
-            )
-
-        if self.config.recompute_method == "uniform":
-            assert self.config.recompute_num_layers == 1, "recompute_num_layers must be 1 for MTP recompute"
-            return checkpoint_handler()
-        if self.config.recompute_method == "block":
-            return forward_func(*args, **kwargs)
-        raise ValueError("Invalid activation recompute method.")
-
-    _checkpointed_forward_with_non_tensor_closure.__platoon_qwen35_mtp_checkpoint_non_tensor_patch__ = True
-    MultiTokenPredictionLayer._checkpointed_forward = _checkpointed_forward_with_non_tensor_closure
-
-
-def _patch_megatron_core_mtp_aux_loss_scaling_for_areal_cp() -> None:
-    """Normalize Megatron auxiliary losses explicitly for AReaL's PPO loss path.
-
-    Megatron's per-token-loss mode expects the main loss function to return
-    ``(loss_sum, num_tokens, metrics)`` so ``finalize_model_grads`` can divide
-    all gradients, including MTP and MoE auxiliary-loss autoscaler gradients, by
-    global tokens. AReaL's PPO path returns ``(already_normalized_loss,
-    metrics)`` instead, so ``num_tokens`` stays zero and auxiliary losses need
-    their own explicit normalization. Under CP this shows up as huge grad norms.
-    """
-
-    if not _qwen35_gdn_cp_enabled():
-        return
-
-    try:
-        from megatron.core import parallel_state  # pyright: ignore[reportMissingImports]
-        from megatron.core.pipeline_parallel import schedules  # pyright: ignore[reportMissingImports]
-        from megatron.core.transformer.moe import moe_utils  # pyright: ignore[reportMissingImports]
-        from megatron.core.transformer.moe.router import TopKRouter  # pyright: ignore[reportMissingImports]
-        import megatron.core.transformer.multi_token_prediction as mtp  # pyright: ignore[reportMissingImports]
-    except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron-Core aux-loss scaling.") from exc
-
-    original_process_mtp_loss = mtp.process_mtp_loss
-    if not getattr(original_process_mtp_loss, "__platoon_qwen35_mtp_areal_cp_process_loss_patch__", False):
-
-        @wraps(original_process_mtp_loss)
-        def _process_mtp_loss_with_explicit_areal_cp_normalization(*args, **kwargs):
-            config = kwargs.get("config", None)
-            if config is None and len(args) >= 10:
-                config = args[9]
-            cp_group = kwargs.get("cp_group", None)
-            if cp_group is None and len(args) >= 11:
-                cp_group = args[10]
-
-            should_use_explicit_normalization = (
-                config is not None
-                and getattr(config, "calculate_per_token_loss", False)
-                and cp_group is not None
-                and cp_group.size() > 1
-            )
-            if not should_use_explicit_normalization:
-                return original_process_mtp_loss(*args, **kwargs)
-
-            previous = config.calculate_per_token_loss
-            config.calculate_per_token_loss = False
-            try:
-                # Use MTP's legacy explicit normalization path:
-                # sum(loss * mask) / rolled_num_tokens. AReaL's main PPO loss
-                # is already normalized and does not drive finalize_model_grads'
-                # token-count division.
-                return original_process_mtp_loss(*args, **kwargs)
-            finally:
-                config.calculate_per_token_loss = previous
-
-        _process_mtp_loss_with_explicit_areal_cp_normalization.__platoon_qwen35_mtp_areal_cp_process_loss_patch__ = True
-        mtp.process_mtp_loss = _process_mtp_loss_with_explicit_areal_cp_normalization
-        try:
-            import megatron.core.models.gpt.gpt_model as gpt_model  # pyright: ignore[reportMissingImports]
-
-            # GPTModel imports process_mtp_loss by value, so update the already
-            # imported module reference as well as the source MTP module.
-            gpt_model.process_mtp_loss = _process_mtp_loss_with_explicit_areal_cp_normalization
-        except Exception:
-            pass
-
-    def _router_needs_explicit_areal_cp_normalization(router) -> bool:
-        cp_group = getattr(router, "cp_group", None)
-        return (
-            getattr(getattr(router, "config", None), "calculate_per_token_loss", False)
-            and cp_group is not None
-            and cp_group.size() > 1
-        )
-
-    def _disable_moe_aux_for_diagnostics(router) -> bool:
-        return _env_truthy("PLATOON_QWEN35_GDN_CP_DISABLE_MOE_AUX") and _router_needs_explicit_areal_cp_normalization(router)
-
-    original_attach_aux_loss = TopKRouter.attach_and_log_load_balancing_loss
-    if not getattr(original_attach_aux_loss, "__platoon_qwen35_moe_areal_cp_aux_patch__", False):
-
-        @wraps(original_attach_aux_loss)
-        def _attach_aux_loss_with_explicit_areal_cp_normalization(self, *args, **kwargs):
-            if _disable_moe_aux_for_diagnostics(self):
-                _log_qwen35_gdn_cp_once(
-                    _attach_aux_loss_with_explicit_areal_cp_normalization,
-                    "disable_moe_aux",
-                    "Disabling MoE aux load-balancing autograd hooks for Qwen3.5 GDN CP diagnostic run.",
-                )
-                return args[0] if args else kwargs["activation"]
-            if not _router_needs_explicit_areal_cp_normalization(self):
-                return original_attach_aux_loss(self, *args, **kwargs)
-
-            previous = self.calculate_per_token_loss
-            self.calculate_per_token_loss = False
-            try:
-                # AReaL's PPO loss path does not drive Megatron's final
-                # token-count gradient divisor, so avoid multiplying MoE aux
-                # loss by local token count here.
-                return original_attach_aux_loss(self, *args, **kwargs)
-            finally:
-                self.calculate_per_token_loss = previous
-
-        _attach_aux_loss_with_explicit_areal_cp_normalization.__platoon_qwen35_moe_areal_cp_aux_patch__ = True
-        TopKRouter.attach_and_log_load_balancing_loss = _attach_aux_loss_with_explicit_areal_cp_normalization
-
-    original_apply_z_loss = TopKRouter.apply_z_loss
-    if not getattr(original_apply_z_loss, "__platoon_qwen35_moe_areal_cp_z_patch__", False):
-
-        @wraps(original_apply_z_loss)
-        def _apply_z_loss_with_explicit_areal_cp_normalization(self, *args, **kwargs):
-            if _disable_moe_aux_for_diagnostics(self):
-                _log_qwen35_gdn_cp_once(
-                    _apply_z_loss_with_explicit_areal_cp_normalization,
-                    "disable_moe_z",
-                    "Disabling MoE router z-loss autograd hooks for Qwen3.5 GDN CP diagnostic run.",
-                )
-                return args[0] if args else kwargs["logits"]
-            if not _router_needs_explicit_areal_cp_normalization(self):
-                return original_apply_z_loss(self, *args, **kwargs)
-
-            previous = self.calculate_per_token_loss
-            self.calculate_per_token_loss = False
-            try:
-                return original_apply_z_loss(self, *args, **kwargs)
-            finally:
-                self.calculate_per_token_loss = previous
-
-        _apply_z_loss_with_explicit_areal_cp_normalization.__platoon_qwen35_moe_areal_cp_z_patch__ = True
-        TopKRouter.apply_z_loss = _apply_z_loss_with_explicit_areal_cp_normalization
-
-    original_forward_step_calc_loss = schedules.forward_step_calc_loss
-    if getattr(original_forward_step_calc_loss, "__platoon_qwen35_mtp_areal_cp_scale_patch__", False):
-        if getattr(original_forward_step_calc_loss, "__platoon_qwen35_moe_areal_cp_scale_patch__", False):
-            return
-        # Older live interpreters may already have the MTP-only wrapper
-        # installed. Re-wrap the original function instead of nesting the old
-        # wrapper, which would double-apply MTP scaling.
-        original_forward_step_calc_loss = getattr(
-            original_forward_step_calc_loss,
-            "__wrapped__",
-            original_forward_step_calc_loss,
-        )
-
-    @wraps(original_forward_step_calc_loss)
-    def _forward_step_calc_loss_with_areal_cp_mtp_scale(
-        model,
-        output_tensor,
-        loss_func,
-        config,
-        vp_stage,
-        collect_non_loss_data,
-        num_microbatches,
-        forward_data_store,
-        cp_group_size=None,
-        is_last_stage=None,
-    ):
-        original_set_loss_scale = mtp.MTPLossAutoScaler.set_loss_scale
-        original_set_moe_loss_scale = moe_utils.MoEAuxLossAutoScaler.set_loss_scale
-
-        def _set_mtp_loss_scale_with_areal_cp_normalization(scale):
-            if (
-                getattr(config, "calculate_per_token_loss", False)
-                and getattr(config, "mtp_num_layers", None) is not None
-                and (cp_group_size or parallel_state.get_context_parallel_world_size()) > 1
-            ):
-                dp_cp_size = parallel_state.get_data_parallel_world_size(with_context_parallel=True)
-                scale = scale / max(1, int(num_microbatches)) / max(1, int(dp_cp_size))
-            return original_set_loss_scale(scale)
-
-        def _set_moe_loss_scale_with_areal_cp_normalization(scale):
-            if (
-                getattr(config, "calculate_per_token_loss", False)
-                and getattr(config, "num_moe_experts", None) is not None
-                and (cp_group_size or parallel_state.get_context_parallel_world_size()) > 1
-            ):
-                cp_size = cp_group_size or parallel_state.get_context_parallel_world_size()
-                dp_cp_size = parallel_state.get_data_parallel_world_size(with_context_parallel=True)
-                # Match Megatron's non-per-token MoE aux-loss semantics:
-                # scale by cp_size/num_microbatches, with the missing DDP
-                # average supplied explicitly because calculate_per_token_loss
-                # disables DDP's built-in 1/dp_cp scaling.
-                scale = scale * int(cp_size) / max(1, int(num_microbatches)) / max(1, int(dp_cp_size))
-            return original_set_moe_loss_scale(scale)
-
-        mtp.MTPLossAutoScaler.set_loss_scale = staticmethod(_set_mtp_loss_scale_with_areal_cp_normalization)
-        moe_utils.MoEAuxLossAutoScaler.set_loss_scale = staticmethod(_set_moe_loss_scale_with_areal_cp_normalization)
-        try:
-            return original_forward_step_calc_loss(
-                model,
-                output_tensor,
-                loss_func,
-                config,
-                vp_stage,
-                collect_non_loss_data,
-                num_microbatches,
-                forward_data_store,
-                cp_group_size=cp_group_size,
-                is_last_stage=is_last_stage,
-            )
-        finally:
-            mtp.MTPLossAutoScaler.set_loss_scale = original_set_loss_scale
-            moe_utils.MoEAuxLossAutoScaler.set_loss_scale = original_set_moe_loss_scale
-
-    _forward_step_calc_loss_with_areal_cp_mtp_scale.__platoon_qwen35_mtp_areal_cp_scale_patch__ = True
-    _forward_step_calc_loss_with_areal_cp_mtp_scale.__platoon_qwen35_moe_areal_cp_scale_patch__ = True
-    schedules.forward_step_calc_loss = _forward_step_calc_loss_with_areal_cp_mtp_scale
 
 
 def _gather_cp_tensors(tensor, cp_group):
@@ -1100,38 +851,6 @@ def _packed_shard_to_zigzag(hidden_states, cu_seqlens, cp_group, cp_rank: int, c
     return _PackedShardToZigzag.apply(hidden_states, cu_seqlens, cp_group, cp_rank, cp_size)
 
 
-def _maybe_gather_sequence_parallel_for_gdn(module, hidden_states, expected_seq_len: int):
-    """Gather GDN activations that are still sequence-parallel sharded.
-
-    Some Megatron Bridge Qwen3-VL paths feed GDN with SP-sharded activations even
-    after the input projection. The packed CP relayout operates on the complete
-    CP-local sequence, so gather along sequence dimension when the observed shape
-    shows an extra SP split.
-    """
-
-    if hidden_states.size(0) == expected_seq_len:
-        return hidden_states
-    if not getattr(module.config, "sequence_parallel", False):
-        raise ValueError(f"Packed GDN CP expected local sequence length {expected_seq_len}, got {hidden_states.size(0)}")
-    if expected_seq_len % hidden_states.size(0) != 0:
-        raise ValueError(f"Packed GDN CP expected local sequence length {expected_seq_len}, got {hidden_states.size(0)}")
-
-    from megatron.core import tensor_parallel  # pyright: ignore[reportMissingImports]
-
-    gathered = tensor_parallel.gather_from_sequence_parallel_region(
-        hidden_states,
-        tensor_parallel_output_grad=True,
-        group=module.pg_collection.tp,
-    )
-    if gathered.size(0) != expected_seq_len:
-        raise ValueError(
-            "Packed GDN CP sequence-parallel gather produced length "
-            f"{gathered.size(0)}, expected {expected_seq_len}; "
-            f"input length was {hidden_states.size(0)} and TP group size is {module.pg_collection.tp.size()}."
-        )
-    return gathered
-
-
 def _get_gdn_cp_group_info(module):
     from megatron.core import parallel_state as mpu  # pyright: ignore[reportMissingImports]
 
@@ -1206,15 +925,11 @@ def _select_gdn_cp_group_for_tensor(module, packed_seq_params, cu_seqlens, hidde
         if hidden_states.size(0) == expected_seq_len:
             return cp_group, cp_rank, cp_size, hidden_states
 
-        try:
-            gathered = _maybe_gather_sequence_parallel_for_gdn(module, hidden_states, expected_seq_len)
-        except Exception as exc:
-            diagnostics.append(
-                f"{source}: expected local sequence length {expected_seq_len}, "
-                f"observed {hidden_states.size(0)} ({exc})"
-            )
-            continue
-        return cp_group, cp_rank, cp_size, gathered
+        diagnostics.append(
+            f"{source}: expected post-in_proj local sequence length {expected_seq_len}, "
+            f"observed {hidden_states.size(0)}. Refusing to gather this tensor across TP because "
+            "its last dimension is already feature-partitioned"
+        )
 
     raise ValueError(
         "Packed GDN CP could not find a CP group matching the packed tensor shape. "
@@ -1235,8 +950,7 @@ def _build_gdn_cp_context(module, cu_seqlens, device, cp_group=None, cp_size: in
         from fla.ops.cp import build_cp_context  # pyright: ignore[reportMissingImports]
     except Exception as exc:
         raise RuntimeError(
-            "PLATOON_QWEN35_GDN_CP=1 requires flash-linear-attention with "
-            "`fla.ops.cp.build_cp_context` available."
+            "PLATOON_QWEN35_GDN_CP=1 requires flash-linear-attention with `fla.ops.cp.build_cp_context` available."
         ) from exc
 
     return build_cp_context(
@@ -1246,7 +960,7 @@ def _build_gdn_cp_context(module, cu_seqlens, device, cp_group=None, cp_size: in
     )
 
 
-def _apply_packed_causal_conv1d_for_gdn(
+def _apply_packed_causal_conv1d_reference_for_gdn(
     module,
     qkv,
     cu_seqlens,
@@ -1254,14 +968,12 @@ def _apply_packed_causal_conv1d_for_gdn(
     cp_rank: int | None = None,
     cp_size: int | None = None,
 ):
-    """Apply GDN's depthwise causal conv without bleeding across packed samples.
+    """Reference GDN convolution used for parity tests and emergency rollback.
 
-    Megatron-Core's current GDN conv is an ``nn.Conv1d`` over the full sequence.
-    For packed THD input that would mix state across sample boundaries. For the
-    opt-in CP path, gather the contiguous CP shards, run the real module weights
-    independently per packed sequence, then return this CP rank's contiguous
-    shard. This is correctness-first and can be replaced by FLA ShortConvolution
-    once the runtime exposes a parameter-sharing CP convolution path.
+    This reconstructs the full packed stream on every CP rank and applies the
+    original Megatron ``nn.Conv1d`` independently to each sequence. It is
+    intentionally slow and memory-heavy, but provides a simple implementation
+    against which the distributed FLA path can be checked.
     """
 
     import torch  # pyright: ignore[reportMissingImports]
@@ -1296,6 +1008,85 @@ def _apply_packed_causal_conv1d_for_gdn(
 
     shard_len = local_qkv.size(0)
     return conv_full[cp_rank * shard_len : (cp_rank + 1) * shard_len].unsqueeze(0)
+
+
+def _apply_packed_causal_conv1d_for_gdn(
+    module,
+    qkv,
+    cu_seqlens,
+    cp_group=None,
+    cp_rank: int | None = None,
+    cp_size: int | None = None,
+    cp_context=None,
+):
+    """Apply GDN's packed causal convolution with CP-local FLA kernels.
+
+    FLA exchanges only the ``kernel_size - 1`` token halo needed at a CP shard
+    boundary and runs one packed local convolution. The existing Megatron
+    parameters are passed directly so checkpoint and optimizer state remain
+    unchanged. Set ``PLATOON_QWEN35_GDN_CP_CONV_BACKEND=reference`` to restore
+    the correctness-first full-gather implementation.
+    """
+
+    if cp_group is None or cp_rank is None or cp_size is None:
+        cp_group, cp_rank, cp_size = _get_gdn_cp_group_info(module)
+
+    if qkv.size(0) != 1:
+        raise ValueError(f"Packed GDN expects dummy batch dimension 1, got qkv shape {tuple(qkv.shape)}")
+
+    backend = _qwen35_gdn_cp_conv_backend()
+    if cp_size <= 1 or backend == "reference":
+        if cp_size > 1:
+            _log_qwen35_gdn_cp_once(
+                _apply_packed_causal_conv1d_for_gdn,
+                "reference_conv",
+                "Using the full-gather reference GDN convolution because "
+                "PLATOON_QWEN35_GDN_CP_CONV_BACKEND=reference.",
+            )
+        return _apply_packed_causal_conv1d_reference_for_gdn(
+            module,
+            qkv,
+            cu_seqlens,
+            cp_group,
+            cp_rank,
+            cp_size,
+        )
+
+    if cp_context is None:
+        cp_context = _build_gdn_cp_context(module, cu_seqlens, qkv.device, cp_group, cp_size)
+
+    try:
+        from fla.modules.convolution import causal_conv1d  # pyright: ignore[reportMissingImports]
+    except Exception as exc:
+        raise RuntimeError(
+            "The Qwen3.5 GDN CP FLA convolution requires "
+            "`fla.modules.convolution.causal_conv1d` with CP support. Set "
+            "PLATOON_QWEN35_GDN_CP_CONV_BACKEND=reference only as a temporary rollback."
+        ) from exc
+
+    weight = module.conv1d.weight
+    if weight.ndim != 3 or weight.size(1) != 1:
+        raise ValueError(f"Packed GDN expects depthwise Conv1d weights [D, 1, W], got {tuple(weight.shape)}")
+    context_kernel_size = getattr(cp_context, "conv1d_kernel_size", weight.size(-1))
+    if context_kernel_size != weight.size(-1):
+        raise ValueError(
+            f"Packed GDN CP context uses kernel size {context_kernel_size}, "
+            f"but Conv1d weights use {weight.size(-1)}"
+        )
+
+    _log_qwen35_gdn_cp_once(
+        _apply_packed_causal_conv1d_for_gdn,
+        "fla_conv",
+        "Using FLA's CP-local packed GDN convolution.",
+    )
+    conv, _ = causal_conv1d(
+        x=qkv.contiguous(),
+        weight=weight.squeeze(1),
+        bias=module.conv1d.bias,
+        activation=None,
+        cp_context=cp_context,
+    )
+    return module.act_fn(conv)
 
 
 def _patch_megatron_core_gdn_context_parallel_config_validation() -> None:
@@ -1345,8 +1136,8 @@ def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
     This mirrors the MILES approach at the layout/recurrence boundary while
     keeping Megatron-Core's TP-sharded GDN weights. It is intentionally guarded
     by ``PLATOON_QWEN35_GDN_CP=1`` because upstream MCore still marks this area
-    experimental and the duplicated convolution fallback trades memory for
-    correctness.
+    experimental. FLA handles the packed recurrence and CP-local convolution;
+    the full-gather convolution remains available only as a rollback reference.
     """
 
     if not _qwen35_gdn_cp_enabled():
@@ -1414,7 +1205,9 @@ def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
         qkvzba, _ = self.in_proj(hidden_states)
         nvtx_range_pop(suffix="in_proj")
 
-        cp_group, cp_rank, cp_size, qkvzba = _select_gdn_cp_group_for_tensor(self, packed_seq_params, cu_seqlens, qkvzba)
+        cp_group, cp_rank, cp_size, qkvzba = _select_gdn_cp_group_for_tensor(
+            self, packed_seq_params, cu_seqlens, qkvzba
+        )
         if cp_size > 1:
             qkvzba = _zigzag_to_packed_shard(qkvzba, cu_seqlens, cp_group, cp_rank, cp_size)
 
@@ -1437,8 +1230,17 @@ def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
         beta = beta.reshape(batch, seq_len, -1)
         alpha = alpha.reshape(batch, seq_len, -1)
 
+        cp_context = _build_gdn_cp_context(self, cu_seqlens, hidden_states.device, cp_group, cp_size)
         nvtx_range_push(suffix="conv1d")
-        qkv = _apply_packed_causal_conv1d_for_gdn(self, qkv, cu_seqlens, cp_group, cp_rank, cp_size)
+        qkv = _apply_packed_causal_conv1d_for_gdn(
+            self,
+            qkv,
+            cu_seqlens,
+            cp_group,
+            cp_rank,
+            cp_size,
+            cp_context,
+        )
         nvtx_range_pop(suffix="conv1d")
 
         query, key, value = torch.split(
@@ -1472,7 +1274,6 @@ def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
         # Even when AReaL sets config.deterministic_mode for MoE stability, the
         # deterministic torch GDN reference path has no CP state passing. Keep
         # the global deterministic settings and use FLA only for packed GDN CP.
-        cp_context = _build_gdn_cp_context(self, cu_seqlens, hidden_states.device, cp_group, cp_size)
         nvtx_range_push(suffix="gated_delta_rule")
         if cp_context is not None:
             core_attn_out, _ = gdn_module.chunk_gated_delta_rule(
@@ -1808,9 +1609,7 @@ def _flatten_message_list_content(messages: list[dict[str, Any]]) -> None:
         if not isinstance(content, list):
             continue
         if any(
-            isinstance(item, dict)
-            and item.get("type") in ("image_url", "image", "input_image")
-            for item in content
+            isinstance(item, dict) and item.get("type") in ("image_url", "image", "input_image") for item in content
         ):
             continue
         text_parts: list[str] = []
@@ -2093,13 +1892,11 @@ def apply_all_patches() -> None:
     _patch_megatron_bridge_attention_backend()
     _patch_megatron_bridge_qwen35_tp_validation()
     _patch_megatron_bridge_qwen35_drop_mtp_for_rl()
-    _patch_megatron_bridge_qwen35_cp_per_token_loss()
+    _patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
     _patch_megatron_checkpoint_optimizer_metadata()
     _patch_areal_qwen35_gdn_cp_guards()
     _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input()
-    _patch_megatron_core_qwen35_mtp_local_thd_rope()
-    _patch_megatron_core_mtp_checkpoint_non_tensor_kwargs()
-    _patch_megatron_core_mtp_aux_loss_scaling_for_areal_cp()
+    _patch_megatron_core_qwen35_already_cp_local_thd_rope()
     _patch_megatron_core_gdn_context_parallel_config_validation()
     _patch_megatron_core_gated_delta_net_context_parallel()
     _patch_batch_task_dispatcher_idle_submit()

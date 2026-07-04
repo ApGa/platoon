@@ -95,8 +95,6 @@ class PlatoonArealRLTrainer(PPOTrainer):
         # and Platoon's client (rollout.admin_api_key) share one non-default secret.
         _normalize_proxy_admin_api_key(config)
         super().__init__(config=config, train_dataset=train_dataset, valid_dataset=val_dataset)
-        # AReaL HEAD moved the admin key out of the (renamed) AgentConfig to a
-        # top-level rollout field; rollout controller v2 reads rollout.admin_api_key.
         self.proxy_admin_api_key = self.config.rollout.admin_api_key
         self.proxy_base_url: str | None = None
         self.eval_proxy_base_url: str | None = None

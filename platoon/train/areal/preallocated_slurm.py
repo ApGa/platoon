@@ -6,7 +6,10 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
 from areal.api import Job, Worker
@@ -44,6 +47,126 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         # idles. See _allocation_nodes / create_workers.
         self._separated_node_cursor = 0
         self._alloc_nodes_cache: list[str] | None = None
+
+        # AReaL configures workers one at a time.  For Megatron workers each
+        # /configure request performs expensive model setup, so the serial loop
+        # costs tens of minutes on a multi-node job.  Configure different hosts
+        # concurrently while retaining a single stream per host (which avoids
+        # eight workers on one node competing for CPU, disk, and host memory).
+        configure_concurrency = os.environ.get(
+            "PLATOON_AREAL_PREALLOC_CONFIGURE_CONCURRENCY", "16"
+        )
+        try:
+            self._configure_concurrency = int(configure_concurrency)
+        except ValueError as exc:
+            raise ValueError(
+                "PLATOON_AREAL_PREALLOC_CONFIGURE_CONCURRENCY must be a positive integer, "
+                f"got {configure_concurrency!r}"
+            ) from exc
+        if self._configure_concurrency <= 0:
+            raise ValueError(
+                "PLATOON_AREAL_PREALLOC_CONFIGURE_CONCURRENCY must be a positive integer, "
+                f"got {configure_concurrency!r}"
+            )
+        self._configure_lock = threading.Lock()
+        self._configured_worker_generations: dict[str, tuple[int, ...]] = {}
+
+    @staticmethod
+    def _worker_host_key(worker_info: SlurmWorkerInfo) -> str:
+        """Return a stable host key after worker network discovery."""
+
+        return worker_info.node or worker_info.worker.ip or worker_info.worker.id
+
+    def _configure_worker(self, worker_info: SlurmWorkerInfo, worker_rank: int) -> None:
+        """Configure one role in bounded host-parallel streams.
+
+        Upstream calls this method from a serial loop once per worker.  The
+        first call configures the complete current generation for that role;
+        subsequent loop calls are no-ops.  Calling the upstream implementation
+        directly inside the pool preserves its readiness checks, RPC payload,
+        timeout, and exception translation.
+        """
+
+        role_workers = self._workers.get(worker_info.role)
+        if not role_workers or not any(w is worker_info for w in role_workers):
+            # Defensive fallback for an upstream lifecycle we do not own.
+            SlurmScheduler._configure_worker(self, worker_info, worker_rank)
+            return
+
+        generation = tuple(id(w) for w in role_workers)
+        with self._configure_lock:
+            if self._configured_worker_generations.get(worker_info.role) == generation:
+                return
+
+            workers_by_host: dict[
+                str, list[tuple[int, SlurmWorkerInfo]]
+            ] = defaultdict(list)
+            for rank, role_worker in enumerate(role_workers):
+                workers_by_host[self._worker_host_key(role_worker)].append(
+                    (rank, role_worker)
+                )
+
+            host_count = len(workers_by_host)
+            max_workers = min(self._configure_concurrency, host_count)
+            logger.info(
+                "Configuring %s workers for role '%s' across %s hosts "
+                "(%s concurrent host streams)",
+                len(role_workers),
+                worker_info.role,
+                host_count,
+                max_workers,
+            )
+            started = time.monotonic()
+
+            def configure_host(
+                host_workers: list[tuple[int, SlurmWorkerInfo]],
+            ) -> tuple[int, Exception] | None:
+                for rank, host_worker in host_workers:
+                    try:
+                        SlurmScheduler._configure_worker(self, host_worker, rank)
+                    except Exception as exc:  # preserve the original upstream exception
+                        return rank, exc
+                return None
+
+            failures: list[tuple[int, Exception]] = []
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix=f"areal-configure-{worker_info.role}",
+            ) as executor:
+                futures = {
+                    executor.submit(configure_host, host_workers): host
+                    for host, host_workers in workers_by_host.items()
+                }
+                for future in as_completed(futures):
+                    try:
+                        failure = future.result()
+                    except Exception as exc:
+                        # This only covers failures in our wrapper itself; normal
+                        # upstream configuration errors are returned with rank.
+                        first_rank = workers_by_host[futures[future]][0][0]
+                        failure = (first_rank, exc)
+                    if failure is not None:
+                        failures.append(failure)
+
+            if failures:
+                failures.sort(key=lambda item: item[0])
+                failed_ranks = [rank for rank, _ in failures]
+                logger.error(
+                    "Worker configuration failed for role '%s' on rank(s) %s",
+                    worker_info.role,
+                    failed_ranks,
+                )
+                # A failed generation is deliberately not cached, so a caller
+                # can retry after fixing a transient worker/RPC issue.
+                raise failures[0][1]
+
+            self._configured_worker_generations[worker_info.role] = generation
+            logger.info(
+                "Configured %s workers for role '%s' in %.1fs",
+                len(role_workers),
+                worker_info.role,
+                time.monotonic() - started,
+            )
 
     @staticmethod
     def _split_env_list(name: str) -> list[str]:
@@ -420,6 +543,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             if role in self._workers:
                 logger.info("Removing forked role '%s' (managed by parent worker)", role)
                 del self._workers[role]
+            self._configured_worker_generations.pop(role, None)
             del self._colocated_roles[role]
             return
 
@@ -430,6 +554,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         logger.info("Deleting preallocated Slurm workers for role '%s'", role)
         self._terminate_role_process(role)
         del self._workers[role]
+        self._configured_worker_generations.pop(role, None)
         self._jobs.pop(role, None)
         self._role_commands.pop(role, None)
 

@@ -1,5 +1,5 @@
 experiment_name: openreward-openhands
-trial_name: toolathlon-openhands-16node-qwen3.6-35B-trial0
+trial_name: toolathlon-openhands-16node-cp-bs16-trial0
 
 seed: 343
 total_train_epochs: 10
@@ -41,7 +41,7 @@ rollout:
   tokenizer_path: ${tokenizer_path}
   scheduling_spec: ${actor.scheduling_spec}
   setup_timeout: 900
-  max_concurrent_rollouts: 8
+  max_concurrent_rollouts: 16
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -151,7 +151,7 @@ sglang:
   mem_fraction_static: 0.8
 
 train_dataset:
-  batch_size: 8 #16
+  batch_size: 16
 
 valid_dataset:
   batch_size: 50

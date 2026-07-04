@@ -9,8 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,6 +55,14 @@ def _load_trainer_module(batch_transforms_module):
     config_mod.PlatoonArealRLTrainerConfig = object
     config_mod.PlatoonPPOActorConfig = object
     sys.modules["platoon.train.areal.config_defs"] = config_mod
+
+    preallocated_mod = types.ModuleType("platoon.train.areal.preallocated_slurm")
+    preallocated_mod.PreallocatedSlurmScheduler = type("PreallocatedSlurmScheduler", (), {})
+    sys.modules["platoon.train.areal.preallocated_slurm"] = preallocated_mod
+
+    workflow_serialization_mod = types.ModuleType("platoon.train.areal.workflow_serialization")
+    workflow_serialization_mod.normalize_remote_workflow = lambda workflow: workflow
+    sys.modules["platoon.train.areal.workflow_serialization"] = workflow_serialization_mod
 
     api_mod = types.ModuleType("areal.api")
     api_mod.WorkflowLike = object
@@ -114,6 +122,104 @@ def _load_trainer_module(batch_transforms_module):
         "platoon_rl_test",
         REPO_ROOT / "platoon/train/areal/rl.py",
     )
+
+
+def _evaluator_config(**overrides):
+    values = {
+        "eval_before_train": False,
+        "freq_epochs": None,
+        "freq_steps": None,
+        "freq_secs": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"eval_before_train": True},
+        {"freq_epochs": 1},
+        {"freq_steps": 0},
+        {"freq_secs": 60},
+    ],
+)
+def test_evaluation_enabled_recognizes_every_schedule(override):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+
+    config = SimpleNamespace(evaluator=_evaluator_config(**override))
+
+    assert rl_module._evaluation_enabled(config)
+
+
+def test_init_rollout_skips_unused_eval_controller(monkeypatch):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.config = SimpleNamespace(evaluator=_evaluator_config())
+    delegated: list[tuple[object, bool, str | None]] = []
+
+    def init_rollout(_self, rollout_config, is_eval=False, lora_path=None):
+        delegated.append((rollout_config, is_eval, lora_path))
+        return "upstream-rollout"
+
+    monkeypatch.setattr(rl_module.PPOTrainer, "_init_rollout", init_rollout, raising=False)
+
+    assert trainer._init_rollout("eval-config", is_eval=True) is None
+    assert delegated == []
+    assert trainer._init_rollout("train-config", is_eval=False, lora_path="adapter") == ("upstream-rollout")
+    assert delegated == [("train-config", False, "adapter")]
+
+
+def test_init_rollout_preserves_enabled_evaluation(monkeypatch):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    # Explicit zero is still an AReaL setting, not the disabled sentinel.
+    trainer.config = SimpleNamespace(evaluator=_evaluator_config(freq_steps=0))
+
+    monkeypatch.setattr(
+        rl_module.PPOTrainer,
+        "_init_rollout",
+        lambda _self, rollout_config, is_eval=False, lora_path=None: (
+            rollout_config,
+            is_eval,
+            lora_path,
+        ),
+        raising=False,
+    )
+
+    assert trainer._init_rollout("eval-config", is_eval=True) == (
+        "eval-config",
+        True,
+        None,
+    )
+
+
+def test_disabled_evaluation_reuses_training_proxy_url():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+
+    class Controller(rl_module.RolloutController):
+        def __init__(self):
+            self.proxy_starts = 0
+
+        def start_proxy(self):
+            self.proxy_starts += 1
+
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.config = SimpleNamespace(
+        rollout=SimpleNamespace(agent=SimpleNamespace(mode="inline"))
+    )
+    trainer.rollout = Controller()
+    trainer.eval_rollout = None
+
+    trainer._start_platoon_proxies()
+
+    assert trainer.rollout.proxy_starts == 1
+    assert trainer.proxy_base_url is None
+    assert trainer.eval_proxy_base_url is trainer.proxy_base_url
 
 
 def test_depth_level_weighting_transform_matches_inverse_frequency_formula():
