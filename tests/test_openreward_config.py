@@ -222,6 +222,7 @@ def test_openreward_goal_format_adds_child_tree_context(monkeypatch):
 
     assert "You are a sub-agent provided a task by a parent" in goal
     assert "Your Task:\nInspect the warehouse tables." in goal
+    assert "call `finish` with your answer" in goal
     assert "Parent Agent Task:\nBuild the KPI report." in goal
     assert "Root Agent Task:" not in goal
     assert "python_execute" not in goal
@@ -306,6 +307,7 @@ def test_openreward_shared_tools_are_non_owning(monkeypatch):
     agent = Agent(
         [
             Tool("get_task", executor, "openreward"),
+            Tool("claim_done", Executor(), "openreward"),
             Tool("other_tool", other_executor, "other"),
         ]
     )

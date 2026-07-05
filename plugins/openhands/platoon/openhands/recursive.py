@@ -42,13 +42,12 @@ RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (
     "parallel or make progress while you continue planning. Prefer delegating "
     "self-contained investigation, verification, summarization, or data-gathering "
     "subtasks to launch_subagent instead of doing all work in the root agent. "
-    "Give each child a clear goal and an appropriate max_steps budget. If you "
-    "omit max_steps, the configured default child budget is used.\n\n"
+    "Give each child a clear, self-contained goal.\n\n"
     "Use the task_tracker tool to maintain a plan for nontrivial tasks. When a "
     "plan item is self-contained, launch a subagent for that item, then update "
     "the plan with the result.\n\n"
     "If programmatic_tool_calling is also available, use "
-    "`await atools.launch_subagent(goal=..., max_steps=...)` from Python, and "
+    "`await atools.launch_subagent(goal=...)` from Python, and "
     "`await asyncio.gather(...)` to run independent child agents concurrently.\n\n"
     "At the start of a nontrivial task, consider whether at least one subagent "
     "can help decompose the work before you perform all tool calls yourself. "
@@ -71,13 +70,14 @@ RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX = (
     "`task_tracker` to maintain a plan. When a plan item is self-contained, "
     "delegate it with `launch_subagent` instead of doing all work yourself. "
     "When programmatic_tool_calling is available, prefer code shaped like "
-    '`child = await atools.launch_subagent(goal="...", max_steps=50)`. If '
+    '`child = await atools.launch_subagent(goal="...")`. If '
     "there are multiple independent child tasks, use `await asyncio.gather(...)` "
     "to run them concurrently."
 )
 
 LAUNCH_SUBAGENT_TOOL_NAME = "launch_subagent"
 DEFAULT_SUBAGENT_MAX_STEPS = 50
+FINISH_TOOL_CLASS_NAME = "FinishTool"
 
 _RUNTIMES: dict[str, "LaunchSubagentRuntime"] = {}
 _RUNTIMES_LOCK = threading.Lock()
@@ -85,21 +85,6 @@ _RUNTIMES_LOCK = threading.Lock()
 
 class LaunchSubagentAction(Action):
     goal: str = Field(description="Task goal for the child agent.")
-    max_steps: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Maximum number of child-agent steps. If omitted, Platoon's configured default for this rollout is used."
-        ),
-    )
-    task_misc: dict[str, Any] | None = Field(
-        default=None,
-        description="Optional metadata to attach to the forked child task.",
-    )
-    verbose: bool = Field(
-        default=True,
-        description=("Whether to include the child agent's budget summary in the returned text."),
-    )
 
 
 class LaunchSubagentObservation(Observation):
@@ -204,13 +189,12 @@ class LaunchSubagentExecutor(ToolExecutor[LaunchSubagentAction, LaunchSubagentOb
                 is_error=True,
             )
 
-        max_steps = action.max_steps if action.max_steps is not None else self._default_max_steps
         try:
             result = runtime.run(
                 goal=action.goal,
-                max_steps=max_steps,
-                task_misc=action.task_misc,
-                verbose=action.verbose,
+                max_steps=self._default_max_steps,
+                task_misc=None,
+                verbose=True,
             )
         except BaseException as exc:
             return LaunchSubagentObservation.from_text(
@@ -236,7 +220,8 @@ class LaunchSubagentTool(ToolDefinition[LaunchSubagentAction, LaunchSubagentObse
                 description=(
                     "Launch a recursive Platoon subagent on a child task. The "
                     "child runs with the same forkable agent and environment "
-                    "configuration, including programmatic tool calling when enabled."
+                    "configuration, including programmatic tool calling when enabled. "
+                    "Child step budget is configured by the rollout."
                 ),
                 action_type=LaunchSubagentAction,
                 observation_type=LaunchSubagentObservation,
@@ -295,6 +280,15 @@ def with_task_tracker_tool(agent: AgentBase) -> AgentBase:
     from openhands.tools.task_tracker import TaskTrackerTool
 
     return _replace_tool(agent, Tool(name=TaskTrackerTool.name))
+
+
+def with_finish_tool(agent: AgentBase) -> AgentBase:
+    if FINISH_TOOL_CLASS_NAME in agent.include_default_tools:
+        return agent
+    return cast(
+        AgentBase,
+        agent.model_copy(update={"include_default_tools": [*agent.include_default_tools, FINISH_TOOL_CLASS_NAME]}),
+    )
 
 
 def append_system_message_suffix(agent: AgentBase, suffix: str | None) -> AgentBase:

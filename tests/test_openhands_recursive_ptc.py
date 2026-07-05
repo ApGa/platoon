@@ -290,6 +290,7 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
             runtime=runtime,
             default_max_steps=7,
         )
+        agent = recursive.with_finish_tool(agent)
         agent = recursive.append_system_message_suffix(agent, "extra")
         agent = recursive.append_user_message_suffix(agent, "user-extra")
     finally:
@@ -305,11 +306,14 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
         "runtime_id": runtime.id,
         "default_max_steps": 7,
     }
+    assert agent.include_default_tools == ["FinishTool"]
     assert agent.agent_context.system_message_suffix == "base\n\nextra"
     assert agent.agent_context.user_message_suffix == "user-base\n\nuser-extra"
     assert "task_tracker tool" in recursive.RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
     assert "launch at least one subagent" in recursive.RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX
     assert "Recursive coordination guidance" in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
+    assert "max_steps" not in recursive.RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
+    assert "max_steps" not in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
     assert "OpenReward" not in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
 
 
@@ -323,6 +327,7 @@ def test_launch_subagent_tool_declares_no_shared_resources(monkeypatch):
 
     resources = tool.declared_resources(action)
 
+    assert set(recursive.LaunchSubagentAction.model_fields) == {"goal"}
     assert resources.declared is True
     assert resources.keys == ()
 
@@ -532,8 +537,8 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
             action = ptc.ProgrammaticToolCallingAction(
                 code=(
                     "north, europe = await asyncio.gather(\n"
-                    '    atools.launch_subagent(goal="revenue north", max_steps=2, verbose=False),\n'
-                    '    atools.launch_subagent(goal="revenue europe", max_steps=2, verbose=False),\n'
+                    '    atools.launch_subagent(goal="revenue north"),\n'
+                    '    atools.launch_subagent(goal="revenue europe"),\n'
                     ")\n"
                     "grandchild_outputs = [north.text, europe.text]\n"
                     "grandchild_outputs"
@@ -571,8 +576,8 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
     first_action = ptc.ProgrammaticToolCallingAction(
         code=(
             "child_a, child_b = await asyncio.gather(\n"
-            '    atools.launch_subagent(goal="collect revenue", max_steps=3, verbose=False),\n'
-            '    atools.launch_subagent(goal="collect support", max_steps=3, verbose=False),\n'
+            '    atools.launch_subagent(goal="collect revenue"),\n'
+            '    atools.launch_subagent(goal="collect support"),\n'
             ")\n"
             "child_outputs = [child_a.text, child_b.text]\n"
             "child_outputs"

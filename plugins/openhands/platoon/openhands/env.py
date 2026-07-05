@@ -14,7 +14,7 @@ from openhands.sdk.conversation.conversation import Conversation
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event.base import Event
 from openhands.sdk.workspace.base import BaseWorkspace
-from platoon.envs.base import Task
+from platoon.envs.base import SubTask, Task
 from platoon.episode.context import (
     current_trajectory,
     current_trajectory_collection,
@@ -76,7 +76,14 @@ class OpenHandsEnv:
             self._launch_subagent_runtime = None
 
     def _prepare_agent_for_conversation(self) -> AgentBase:
+        configured_agent = self._agent
+        if isinstance(self._task, SubTask):
+            from platoon.openhands.recursive import with_finish_tool
+
+            configured_agent = with_finish_tool(configured_agent)
+
         if not self._enable_recursive_subagents:
+            self._agent = configured_agent
             return self._agent
 
         from platoon.openhands.recursive import (
@@ -89,7 +96,7 @@ class OpenHandsEnv:
         runtime.bind(asyncio.get_running_loop(), copy_context())
         self._launch_subagent_runtime = runtime
         self._agent = with_launch_subagent_tool(
-            self._agent,
+            configured_agent,
             runtime=runtime,
             default_max_steps=self._subagent_default_max_steps,
         )

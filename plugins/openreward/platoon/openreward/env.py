@@ -59,7 +59,7 @@ def _openreward_mcp_tools(agent: Any) -> dict[str, Any]:
     return {
         name: _non_owning_tool(tool)
         for name, tool in agent.tools_map.items()
-        if getattr(tool, "mcp_server_name", None) == "openreward"
+        if getattr(tool, "mcp_server_name", None) == "openreward" and name != "claim_done"
     }
 
 
@@ -112,6 +112,7 @@ def _format_subagent_task_goal(
     parts = [
         "You are a sub-agent provided a task by a parent in a recursive tree of agents.",
         f"Your Task:\n{(task.goal or '').strip()}",
+        "When you are done, call `finish` with your answer and any evidence the parent needs.",
     ]
 
     context_parts: list[str] = []
