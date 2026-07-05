@@ -12,7 +12,6 @@ from typing import cast
 from openhands.sdk import LLM
 from openhands.sdk import Agent as OpenHandsSDKAgent
 from openhands.sdk.context.condenser import LLMSummarizingCondenser
-
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
 from platoon.episode.context import budget_tracker, current_trajectory_collection
@@ -29,9 +28,11 @@ from platoon.openhands.recursive import (
     with_programmatic_tool_calling,
     with_task_tracker_tool,
 )
+from platoon.utils.subagent_rewards import propogate_root_success
+from platoon.visualization.event_sinks import JsonlFileSink
+
 from platoon.openreward.config_defs import OpenRewardConfig
 from platoon.openreward.env import OpenRewardOpenHandsEnv
-from platoon.visualization.event_sinks import JsonlFileSink
 
 OPENREWARD_CONDENSER_KEEP_FIRST = 2
 
@@ -257,8 +258,12 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             pass
         raise
 
+    result = current_trajectory_collection.get()
+    if config.propogate_root_success:
+        propogate_root_success(result)
+
     if config.return_dict:
-        result = current_trajectory_collection.get().to_dict()
+        result = result.to_dict()
         result["misc"] = {
             "openreward": asdict(openreward_config),
             "rollout_output_dir": rollout_output_dir,
@@ -267,7 +272,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             "openhands_conversation_id": str(openhands_conversation_id),
         }
         return result
-    return current_trajectory_collection.get()
+    return result
 
 
 def reward_processor(traj: dict) -> tuple[float, dict]:

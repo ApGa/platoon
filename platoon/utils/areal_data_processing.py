@@ -72,7 +72,9 @@ def _is_prefix(seq1: list[int], seq2: list[int]) -> bool:
     return len(seq1) <= len(seq2) and seq2[: len(seq1)] == seq1
 
 
-def _extract_completion_tokens(completion_record: CompletionWithResponse) -> tuple[list[int], list[int], list[float], list[int]] | None:
+def _extract_completion_tokens(
+    completion_record: CompletionWithResponse,
+) -> tuple[list[int], list[int], list[float], list[int]] | None:
     """Return prompt/output token parts from an exported AReaL interaction."""
 
     tensor_dict = completion_record.to_tensor_dict()
@@ -202,7 +204,9 @@ def get_train_data_for_trajectory(
 
     train_data = []
     accumulator = SequenceAccumulator()
+    seen_completion_ids: set[str] = set()
     count_found = 0
+    count_duplicates = 0
     total_input_tokens = 0
     total_output_tokens = 0
     num_merged = 0
@@ -224,6 +228,14 @@ def get_train_data_for_trajectory(
             continue
 
         completion_id = step["misc"]["action_misc"]["completion_id"]
+        # OpenHands may expose one parallel model response over multiple
+        # environment steps as individual tool observations arrive. Every such
+        # step carries the same completion ID, while the exported completion
+        # record contains the *entire* model response. Training each occurrence
+        # would therefore duplicate all loss-masked tokens from that response.
+        if completion_id in seen_completion_ids:
+            count_duplicates += 1
+            continue
         if completion_id not in completions:
             logger.warning(f"Completion ID {completion_id} not found for task {task_id}")
             continue
@@ -237,6 +249,10 @@ def get_train_data_for_trajectory(
                 i,
             )
             continue
+        # Mark the completion only after it has produced trainable data. This
+        # preserves the existing fallback behavior if an earlier occurrence was
+        # filtered or its exported record was temporarily unavailable.
+        seen_completion_ids.add(completion_id)
         ob_tokens, ac_tokens, ac_logprobs, ac_versions = parts
         count_found += 1
 
@@ -305,7 +321,8 @@ def get_train_data_for_trajectory(
 
     print(
         f"[DataProcessing] Task {task_id} trajectory {trajectory_id}: "
-        f"Found {count_found} steps, merged {num_merged}, produced {len(train_data)} datums"
+        f"Found {count_found} unique completions, skipped {count_duplicates} duplicate occurrences, "
+        f"merged {num_merged}, produced {len(train_data)} datums"
     )
 
     if not train_data:
@@ -338,11 +355,21 @@ def _get_train_data_for_trajectory_no_merge(
 ) -> dict | None:
     """Non-aggregated version for comparison/fallback."""
     train_data = []
+    seen_completion_ids: set[str] = set()
     count_found_train_data = 0
 
     for i, step in enumerate(trajectory["steps"]):
+        completion_id = step.get("misc", {}).get("action_misc", {}).get("completion_id")
+        if completion_id is not None and completion_id in seen_completion_ids:
+            continue
+
         step_train_data = get_train_data_for_step(step, completions, task_id, filter_errors, trajectory_reward)
         if step_train_data:
+            # See the merged path above: one exported completion may back
+            # several environment steps, but its model tokens must be trained
+            # exactly once per trajectory.
+            if completion_id is not None:
+                seen_completion_ids.add(completion_id)
             count_found_train_data += 1
             step_train_data["rewards"] = torch.tensor([trajectory_reward])
             seq_len = step_train_data["attention_mask"].shape[1]

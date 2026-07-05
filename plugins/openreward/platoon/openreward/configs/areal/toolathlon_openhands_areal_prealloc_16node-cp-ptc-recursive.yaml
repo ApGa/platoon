@@ -1,0 +1,31 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_16node-cp
+  - _self_
+
+# Keep this trial separate from the non-recursive Qwen3.6 run. All checkpoint,
+# rollout, name-resolution, and W&B paths inherit this value.
+trial_name: toolathlon-openhands-16node-qwen3.6-35B-ptc-recursive-trial0
+
+openreward:
+  enable_programmatic_tool_calling: true
+  enable_recursive_subagents: true
+  subagent_default_max_steps: 50
+  # Root is depth 0: permit children and grandchildren, but prevent unbounded
+  # recursive fan-out during the first training run.
+  subagent_max_depth: 2
+
+workflow_config:
+  # Recursive rollouts add a variable number of child trajectories. Balance
+  # their contribution by depth so prolific deeper levels do not dominate.
+  depth_level_weighting: true
+  depth_level_discount_gamma: null
+  rollout_config:
+    # A child usually returns evidence to its parent rather than calling
+    # claim_done itself. Train every trajectory toward the root task outcome.
+    propogate_root_success: true
+
+# Repeat these two values so the launcher can identify this as a Megatron job
+# before Hydra composes the base config and enables the cached TE/APEX build.
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: Qwen/Qwen3.6-35B-A3B

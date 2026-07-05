@@ -1,5 +1,5 @@
 experiment_name: openreward-openhands
-trial_name: toolathlon-openhands-16node-qwen3.6-35B-trial0
+trial_name: toolathlon-openhands-16node-qwen3.6-35B-trial1
 
 seed: 343
 total_train_epochs: 10

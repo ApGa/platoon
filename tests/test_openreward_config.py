@@ -149,6 +149,65 @@ def test_openreward_rollout_condenser_keeps_system_prompt_and_goal_only():
     assert keep_first == 2
 
 
+def test_openreward_rollout_honors_root_success_propagation_flag():
+    source = REPO_ROOT.joinpath("plugins/openreward/platoon/openreward/rollout.py").read_text()
+    module = ast.parse(source)
+    run_rollout = next(
+        node for node in module.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_rollout"
+    )
+
+    guarded_calls = [
+        node
+        for node in ast.walk(run_rollout)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Attribute)
+        and isinstance(node.test.value, ast.Name)
+        and node.test.value.id == "config"
+        and node.test.attr == "propogate_root_success"
+    ]
+
+    assert len(guarded_calls) == 1
+    assert any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "propogate_root_success"
+        for node in ast.walk(guarded_calls[0])
+    )
+
+
+def test_root_success_propagation_relabels_helpful_child_trajectory():
+    from platoon.utils.subagent_rewards import propogate_root_success
+
+    collection = {
+        "trajectories": {
+            "root": {
+                "reward": 0.75,
+                "steps": [{"misc": {"reward_misc": {"reward/success": 0.75}}}],
+            },
+            "child": {
+                "reward": 0.0,
+                "steps": [
+                    {
+                        "misc": {
+                            "reward_misc": {
+                                "reward/success": 0.0,
+                                "reward/subagent_launched": 1.0,
+                            }
+                        }
+                    }
+                ],
+            },
+        }
+    }
+
+    result = propogate_root_success(collection)
+
+    assert result is collection
+    assert result["trajectories"]["root"]["reward"] == 0.75
+    assert result["trajectories"]["child"]["reward"] == 0.75
+    child_reward_misc = result["trajectories"]["child"]["steps"][-1]["misc"]["reward_misc"]
+    assert child_reward_misc["reward/success"] == 0.75
+    assert child_reward_misc["reward/subagent_succeeded"] == 0.75
+
+
 def test_openreward_mcp_bridge_declares_tools_lockfree(monkeypatch):
     bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
 
