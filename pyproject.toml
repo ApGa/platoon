@@ -93,7 +93,7 @@ override-dependencies = [
 no-build-isolation-package = ["flash-attn", "causal-conv1d", "mamba-ssm"]
 
 [tool.uv.sources]
-areal = { git = "https://github.com/inclusionAI/AReaL.git", rev = "67bc932" }
+areal = { git = "https://github.com/inclusionAI/AReaL.git", rev = "d99124ec15102ca2fcd4960cc8beaef3950c2672" }
 
 [build-system]
 requires = ["hatchling"]

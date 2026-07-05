@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import ast
+import contextvars
 import fcntl
 import hashlib
+import inspect
 import json
 import logging
 import os
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -190,51 +194,6 @@ def _patch_megatron_bridge_qwen35_tp_validation() -> None:
         provider_cls.validate_parallelism = _allow_megatron_core_to_validate_parallelism
 
 
-def _patch_megatron_bridge_qwen35_drop_mtp_for_rl() -> None:
-    """Drop Qwen3.5 MTP heads for the experimental GDN CP RL path.
-
-    AReaL commit 4be0c641 made Megatron-Bridge MTP opt-in for RL because MTP is
-    not used by rollout/inference and complicates RL training/export. This local
-    AReaL checkout predates that ``enable_mtp`` config, so mirror the default
-    behavior for the opt-in Qwen3.5 GDN CP path.
-
-    Leave the provider's MoE and z-loss coefficients unchanged. Megatron's
-    normal non-per-token loss path already gives them the same semantics under
-    CP as under CP=1; changing their coefficients here would change the training
-    objective rather than repair a CP normalization error.
-    """
-
-    if not _qwen35_gdn_cp_enabled():
-        return
-
-    try:
-        from megatron.bridge.models.conversion.auto_bridge import AutoBridge  # pyright: ignore[reportMissingImports]
-    except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron Bridge AutoBridge.") from exc
-
-    original = AutoBridge.to_megatron_provider
-    if getattr(original, "__platoon_qwen35_gdn_cp_drop_mtp_patch__", False):
-        return
-
-    @wraps(original)
-    def _to_megatron_provider_without_mtp_for_gdn_cp(self, *args, **kwargs):
-        provider = original(self, *args, **kwargs)
-        if getattr(provider, "experimental_attention_variant", None) != "gated_delta_net":
-            return provider
-
-        if getattr(provider, "mtp_num_layers", None):
-            _log_qwen35_gdn_cp_once(
-                _to_megatron_provider_without_mtp_for_gdn_cp,
-                "drop_mtp",
-                "Dropping Qwen3.5 GDN MTP head for the CP RL path.",
-            )
-            provider.mtp_num_layers = None
-        return provider
-
-    _to_megatron_provider_without_mtp_for_gdn_cp.__platoon_qwen35_gdn_cp_drop_mtp_patch__ = True
-    AutoBridge.to_megatron_provider = _to_megatron_provider_without_mtp_for_gdn_cp
-
-
 def _patch_megatron_bridge_qwen35_cp_constructor_loss_mode() -> None:
     """Satisfy Qwen's CP constructor guard without changing AReaL loss semantics.
 
@@ -297,21 +256,16 @@ def _patch_megatron_bridge_qwen35_cp_constructor_loss_mode() -> None:
         provider_cls.provide = _provide_with_constructor_only_per_token_loss
 
 
-def _patch_megatron_checkpoint_optimizer_metadata() -> None:
-    """Save Megatron distributed optimizer state with a supported sharding mode.
+def _patch_megatron_checkpoint_optimizer_bucket_shapes() -> None:
+    """Repair padded distributed-optimizer bucket checkpoint shapes.
 
-    AReaL's Megatron checkpoint manager calls
-    ``optimizer.sharded_state_dict(state_dict)`` without metadata. With newer
-    Megatron Core releases that default can produce optimizer shards using
-    ``flattened_range``, which ``ShardedTensor.validate_metadata_integrity()``
-    rejects. Request the ``dp_reshardable`` strategy instead; it avoids
-    ``flattened_range`` and is suitable for recovery checkpoints where DP layout
-    is expected to remain stable across resume.
-
-    Newer distributed-optimizer bucket state can also expose padded local bucket
-    shards while recording the unpadded bucket length as ``global_shape``. PyTorch
-    DCP rejects those plans as out-of-bounds. Keep the padded shard data intact
-    and make the checkpoint metadata agree on the padded bucket length globally.
+    AReaL now requests Megatron Core's ``dp_reshardable`` optimizer layout on
+    both save and load, including ``is_loading=True`` when it builds the load
+    template. Keep those upstream arguments untouched. Some optimizer buckets
+    can still expose padded local shards while recording the unpadded bucket
+    length as ``global_shape``. PyTorch DCP rejects those plans as out-of-bounds.
+    Keep the padded shard data intact and make the checkpoint metadata agree on
+    the padded bucket length globally.
     """
 
     try:
@@ -326,7 +280,7 @@ def _patch_megatron_checkpoint_optimizer_metadata() -> None:
         return
 
     original = MegatronCheckpointManager.generate_state_dict
-    if getattr(original, "__platoon_megatron_optim_metadata_patch__", False):
+    if getattr(original, "__platoon_megatron_optim_bucket_shapes_patch__", False):
         return
 
     def _iter_sharded_tensors(obj):
@@ -381,24 +335,20 @@ def _patch_megatron_checkpoint_optimizer_metadata() -> None:
         return optimizer_state_dict
 
     @wraps(original)
-    def _generate_state_dict_with_optimizer_metadata(self, *args, **kwargs):
+    def _generate_state_dict_with_padded_optimizer_bucket_shapes(self, *args, **kwargs):
         optimizer = getattr(self, "optimizer", None)
         original_sharded_state_dict = getattr(optimizer, "sharded_state_dict", None)
         if original_sharded_state_dict is None:
             return original(self, *args, **kwargs)
 
         @wraps(original_sharded_state_dict)
-        def _sharded_state_dict_with_dp_reshardable_metadata(*inner_args, **inner_kwargs):
-            inner_kwargs.setdefault(
-                "metadata",
-                {"distrib_optim_sharding_type": "dp_reshardable"},
-            )
+        def _sharded_state_dict_with_padded_bucket_shapes(*inner_args, **inner_kwargs):
             return _pad_distributed_optimizer_bucket_global_shapes(
                 original_sharded_state_dict(*inner_args, **inner_kwargs)
             )
 
         try:
-            optimizer.sharded_state_dict = _sharded_state_dict_with_dp_reshardable_metadata
+            optimizer.sharded_state_dict = _sharded_state_dict_with_padded_bucket_shapes
         except Exception:
             return original(self, *args, **kwargs)
 
@@ -407,8 +357,8 @@ def _patch_megatron_checkpoint_optimizer_metadata() -> None:
         finally:
             optimizer.sharded_state_dict = original_sharded_state_dict
 
-    _generate_state_dict_with_optimizer_metadata.__platoon_megatron_optim_metadata_patch__ = True
-    MegatronCheckpointManager.generate_state_dict = _generate_state_dict_with_optimizer_metadata
+    _generate_state_dict_with_padded_optimizer_bucket_shapes.__platoon_megatron_optim_bucket_shapes_patch__ = True
+    MegatronCheckpointManager.generate_state_dict = _generate_state_dict_with_padded_optimizer_bucket_shapes
 
 
 def _qwen35_gdn_cp_enabled() -> bool:
@@ -418,10 +368,7 @@ def _qwen35_gdn_cp_enabled() -> bool:
 def _qwen35_gdn_cp_conv_backend() -> str:
     backend = os.environ.get("PLATOON_QWEN35_GDN_CP_CONV_BACKEND", "fla").strip().lower()
     if backend not in {"fla", "reference"}:
-        raise ValueError(
-            "Invalid PLATOON_QWEN35_GDN_CP_CONV_BACKEND="
-            f"{backend!r}; expected one of: fla, reference"
-        )
+        raise ValueError(f"Invalid PLATOON_QWEN35_GDN_CP_CONV_BACKEND={backend!r}; expected one of: fla, reference")
     return backend
 
 
@@ -1040,8 +987,7 @@ def _apply_packed_causal_conv1d_for_gdn(
             _log_qwen35_gdn_cp_once(
                 _apply_packed_causal_conv1d_for_gdn,
                 "reference_conv",
-                "Using the full-gather reference GDN convolution because "
-                "PLATOON_QWEN35_GDN_CP_CONV_BACKEND=reference.",
+                "Using the full-gather reference GDN convolution because PLATOON_QWEN35_GDN_CP_CONV_BACKEND=reference.",
             )
         return _apply_packed_causal_conv1d_reference_for_gdn(
             module,
@@ -1070,8 +1016,7 @@ def _apply_packed_causal_conv1d_for_gdn(
     context_kernel_size = getattr(cp_context, "conv1d_kernel_size", weight.size(-1))
     if context_kernel_size != weight.size(-1):
         raise ValueError(
-            f"Packed GDN CP context uses kernel size {context_kernel_size}, "
-            f"but Conv1d weights use {weight.size(-1)}"
+            f"Packed GDN CP context uses kernel size {context_kernel_size}, but Conv1d weights use {weight.size(-1)}"
         )
 
     _log_qwen35_gdn_cp_once(
@@ -1359,6 +1304,370 @@ def _patch_areal_qwen35_gdn_cp_guards() -> None:
         megatron_engine.is_valid_vision_model = core_model.is_valid_vision_model
 
 
+_VOCAB_REDUCTION_MAX_FP32_SCRATCH_BYTES = 64 * 1024 * 1024
+
+
+def _bounded_fp32_vocab_reduction(
+    tensor,
+    reduction: str,
+    dim: int = -1,
+    max_scratch_bytes: int = _VOCAB_REDUCTION_MAX_FP32_SCRATCH_BYTES,
+    _chunk_observer=None,
+):
+    """Reduce full vocab rows using a bounded temporary FP32 cast.
+
+    PyTorch's ``dtype=torch.float32`` reduction argument still performs an
+    internal full-input ``_to_copy`` for BF16/FP16 tensors. Packed Megatron
+    logits are contiguous ``[local_tokens, vocab_shard]`` tensors, so cast a
+    bounded number of complete token rows at a time. Keeping each vocab row
+    intact also preserves the exact per-token reduction order of the upstream
+    ``tensor.float().mean/norm`` expressions. One complete FP32 vocab row is
+    the minimum possible scratch size, even when it exceeds the requested cap.
+    """
+
+    import torch
+
+    if tensor.ndim == 0 or dim not in (-1, tensor.ndim - 1):
+        raise ValueError("Bounded vocab reductions require a non-scalar tensor and dim=-1.")
+    if not tensor.is_contiguous():
+        raise RuntimeError(
+            "AReaL returned non-contiguous vocab logits; refusing a reshape that "
+            "could allocate another full logits tensor."
+        )
+    vocab_size = tensor.shape[-1]
+    if vocab_size == 0:
+        raise ValueError("Cannot reduce an empty vocabulary dimension.")
+    if max_scratch_bytes <= 0:
+        raise ValueError("max_scratch_bytes must be positive.")
+
+    flat_logits = tensor.reshape(-1, vocab_size)
+    result = torch.empty(flat_logits.shape[0], dtype=torch.float32, device=tensor.device)
+    fp32_bytes_per_row = vocab_size * torch.float32.itemsize
+    rows_per_chunk = max(1, max_scratch_bytes // fp32_bytes_per_row)
+    for start in range(0, flat_logits.shape[0], rows_per_chunk):
+        end = min(start + rows_per_chunk, flat_logits.shape[0])
+        fp32_chunk = flat_logits[start:end].float()
+        if _chunk_observer is not None:
+            _chunk_observer(fp32_chunk)
+        if reduction == "mean":
+            reduced = fp32_chunk.mean(dim=-1)
+        elif reduction == "norm":
+            reduced = fp32_chunk.norm(dim=-1)
+        else:
+            raise ValueError(f"Unknown vocab reduction: {reduction!r}")
+        result[start:end].copy_(reduced)
+        del fp32_chunk, reduced
+    return result.reshape(tensor.shape[:-1])
+
+
+def _fp32_vocab_mean_without_materializing_logits(
+    tensor,
+    dim: int = -1,
+    max_scratch_bytes: int = _VOCAB_REDUCTION_MAX_FP32_SCRATCH_BYTES,
+):
+    """Accumulate vocab means with bounded FP32 scratch storage."""
+
+    return _bounded_fp32_vocab_reduction(tensor, "mean", dim, max_scratch_bytes)
+
+
+def _fp32_vocab_norm_without_materializing_logits(
+    tensor,
+    dim: int = -1,
+    max_scratch_bytes: int = _VOCAB_REDUCTION_MAX_FP32_SCRATCH_BYTES,
+):
+    """Compute vocab norms with bounded FP32 scratch storage."""
+
+    return _bounded_fp32_vocab_reduction(tensor, "norm", dim, max_scratch_bytes)
+
+
+def _rewrite_areal_vocab_reductions(original):
+    """Replace two known AReaL full-logits casts with bounded FP32 reductions.
+
+    AReaL computes diagnostic per-token mean and norm values from vocab logits.
+    The expressions added on main use ``output.detach().float()`` first, which
+    temporarily allocates an FP32 tensor as large as the full local logits.  An
+    AST rewrite keeps the surrounding loss implementation byte-for-byte while
+    changing only those two reductions. Exact expression and signature guards
+    avoid rewriting an unrelated computation, and a partial match fails before
+    an expensive training launch can silently retain the logits-sized copy.
+    """
+
+    expected_parameters = (
+        "self",
+        "output",
+        "inputs",
+        "loss_fn",
+        "loss_weight_fn",
+        "total_loss_weight",
+        "loss_multiplier",
+    )
+    try:
+        parameters = tuple(inspect.signature(original).parameters)
+    except (TypeError, ValueError):
+        return original, 0, 0
+    if parameters != expected_parameters:
+        return original, 0, 0
+    if original.__closure__:
+        raise RuntimeError(
+            "Cannot safely patch AReaL vocab reductions: the guarded method unexpectedly closes over runtime state."
+        )
+
+    try:
+        source = textwrap.dedent(inspect.getsource(original))
+        tree = ast.parse(source)
+    except (OSError, TypeError, IndentationError, SyntaxError) as exc:
+        raise RuntimeError(
+            "Cannot inspect AReaL's guarded vocab reductions; refusing to "
+            "launch without verifying the logits-memory safeguard."
+        ) from exc
+
+    def _is_minus_one(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant)
+            and node.operand.value == 1
+        )
+
+    def _is_output_detach_float(node: ast.AST) -> bool:
+        if not (
+            isinstance(node, ast.Call)
+            and not node.args
+            and not node.keywords
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "float"
+        ):
+            return False
+        detach = node.func.value
+        return (
+            isinstance(detach, ast.Call)
+            and not detach.args
+            and not detach.keywords
+            and isinstance(detach.func, ast.Attribute)
+            and detach.func.attr == "detach"
+            and isinstance(detach.func.value, ast.Name)
+            and detach.func.value.id == "output"
+        )
+
+    def _reduction_dim(node: ast.Call) -> ast.AST | None:
+        if len(node.args) == 1 and not node.keywords and _is_minus_one(node.args[0]):
+            return node.args[0]
+        if not node.args and len(node.keywords) == 1:
+            keyword = node.keywords[0]
+            if keyword.arg == "dim" and _is_minus_one(keyword.value):
+                return keyword.value
+        return None
+
+    class _VocabReductionRewriter(ast.NodeTransformer):
+        mean_replacements = 0
+        norm_replacements = 0
+
+        def visit_Call(self, node: ast.Call):  # noqa: N802 - AST visitor API
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("mean", "norm")
+                and _is_output_detach_float(node.func.value)
+            ):
+                dim = _reduction_dim(node)
+                if dim is not None:
+                    if node.func.attr == "mean":
+                        helper_name = "_platoon_fp32_vocab_mean"
+                        self.mean_replacements += 1
+                    else:
+                        helper_name = "_platoon_fp32_vocab_norm"
+                        self.norm_replacements += 1
+                    replacement = ast.Call(
+                        func=ast.Name(id=helper_name, ctx=ast.Load()),
+                        args=[
+                            ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id="output", ctx=ast.Load()),
+                                    attr="detach",
+                                    ctx=ast.Load(),
+                                ),
+                                args=[],
+                                keywords=[],
+                            )
+                        ],
+                        keywords=[ast.keyword(arg="dim", value=dim)],
+                    )
+                    return ast.copy_location(replacement, node)
+            return self.generic_visit(node)
+
+    function_defs = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(function_defs) != 1 or function_defs[0].name != original.__name__:
+        raise RuntimeError(
+            "AReaL's guarded loss method has an unexpected source layout; refusing an unverified vocab-reduction patch."
+        )
+    function_defs[0].decorator_list = []
+
+    rewriter = _VocabReductionRewriter()
+    tree = rewriter.visit(tree)
+    ast.fix_missing_locations(tree)
+    replacement_counts = (rewriter.mean_replacements, rewriter.norm_replacements)
+    if replacement_counts == (0, 0):
+        # The older AReaL implementation does not compute these diagnostics,
+        # and a future implementation may fix both reductions upstream.
+        return original, 0, 0
+    if replacement_counts != (1, 1):
+        raise RuntimeError(
+            "AReaL's vocab-reduction implementation drifted: expected exactly "
+            "one unsafe mean and one unsafe norm, found "
+            f"mean={replacement_counts[0]}, norm={replacement_counts[1]}."
+        )
+
+    globals_dict = original.__globals__
+    globals_dict["_platoon_fp32_vocab_mean"] = _fp32_vocab_mean_without_materializing_logits
+    globals_dict["_platoon_fp32_vocab_norm"] = _fp32_vocab_norm_without_materializing_logits
+    namespace: dict[str, Any] = {}
+    try:
+        exec(compile(tree, original.__code__.co_filename, "exec"), globals_dict, namespace)
+    except Exception as exc:
+        raise RuntimeError("Failed to compile AReaL's guarded vocab-reduction patch.") from exc
+    rewritten = namespace[original.__name__]
+    rewritten = wraps(original)(rewritten)
+    rewritten.__platoon_areal_vocab_reduction_patch__ = True
+    return rewritten, rewriter.mean_replacements, rewriter.norm_replacements
+
+
+def _compute_areal_cp_local_forward_result(engine, output, inputs, megatron_engine_module):
+    """Turn CP-local logits/values into reassembled per-token scalars."""
+
+    if not engine.config.is_critic:
+        tp_group = None
+        if megatron_engine_module.mpu.get_tensor_model_parallel_world_size() > 1:
+            tp_group = megatron_engine_module.mpu.get_tensor_model_parallel_group()
+        result = megatron_engine_module.gather_logprobs(
+            output,
+            inputs["_cp_local_labels"],
+            temperature=engine.config.temperature,
+            tp_group=tp_group,
+        )
+    else:
+        result = output.squeeze(-1)
+
+    padded_cu_seqlens = inputs["_cp_padded_cu_seqlens"]
+    result = megatron_engine_module.reassemble_cp_packed_logprobs(result, padded_cu_seqlens)
+    return megatron_engine_module.unpad_logits(
+        result,
+        inputs.get("_cp_padding_length", 0),
+        padded_cu_seqlens,
+        inputs.get("_cp_old_cu_seqlens"),
+    )
+
+
+def _patch_areal_megatron_memory_compatibility(megatron_engine_module=None) -> dict[str, bool]:
+    """Avoid two AReaL-main logits-sized FP32/CP communication buffers.
+
+    The CP optimization is deliberately limited to packed, text-only, non-tree
+    ``forward_batch`` calls.  Training/evaluation loss paths and callers that
+    explicitly request gathered logits retain upstream behavior.  The local
+    logits are reduced to selected log-probabilities (or critic values) first;
+    only those one-dimensional token scalars are reassembled across CP ranks.
+    """
+
+    patched = {"vocab_reductions": False, "cp_forward_scalars": False}
+    if megatron_engine_module is None:
+        # Importing Megatron eagerly can initialize TE/CUDA and breaks FSDP-only
+        # installations. This compatibility patch belongs only to the opt-in
+        # packed GDN CP path; explicit modules remain injectable for unit tests.
+        if not _qwen35_gdn_cp_enabled():
+            return patched
+        import areal.engine.megatron_engine as megatron_engine_module  # pyright: ignore[reportMissingImports]
+
+    engine_cls = getattr(megatron_engine_module, "MegatronEngine", None)
+    if engine_cls is None:
+        return patched
+
+    original_loss = getattr(engine_cls, "_compute_logprobs_and_loss", None)
+    if original_loss is not None and not getattr(original_loss, "__platoon_areal_vocab_reduction_patch__", False):
+        rewritten, mean_count, norm_count = _rewrite_areal_vocab_reductions(original_loss)
+        if mean_count or norm_count:
+            engine_cls._compute_logprobs_and_loss = rewritten
+            patched["vocab_reductions"] = True
+
+    required_module_attributes = (
+        "gather_logprobs",
+        "reassemble_cp_packed_logprobs",
+        "unpad_logits",
+        "mpu",
+    )
+    if any(not hasattr(megatron_engine_module, name) for name in required_module_attributes):
+        return patched
+
+    original_result = getattr(engine_cls, "_compute_forward_result", None)
+    try:
+        result_parameters = tuple(inspect.signature(original_result).parameters)
+    except (TypeError, ValueError):
+        result_parameters = ()
+    if result_parameters != ("self", "output", "inputs"):
+        return patched
+
+    if not getattr(original_result, "__platoon_areal_cp_forward_result_patch__", False):
+
+        @wraps(original_result)
+        def _compute_forward_result_with_cp_scalars(self, output, inputs):
+            if inputs.get("_cp_local_labels") is None:
+                return original_result(self, output, inputs)
+            return _compute_areal_cp_local_forward_result(self, output, inputs, megatron_engine_module)
+
+        _compute_forward_result_with_cp_scalars.__platoon_areal_cp_forward_result_patch__ = True
+        engine_cls._compute_forward_result = _compute_forward_result_with_cp_scalars
+        patched["cp_forward_scalars"] = True
+
+    original_forward_batch = getattr(engine_cls, "forward_batch", None)
+    original_forward_backward = getattr(engine_cls, "forward_backward_batch", None)
+    if original_forward_batch is None or original_forward_backward is None:
+        return patched
+    if getattr(original_forward_batch, "__platoon_areal_cp_forward_batch_patch__", False):
+        return patched
+
+    try:
+        forward_backward_signature = inspect.signature(original_forward_backward)
+    except (TypeError, ValueError):
+        return patched
+    if "gather_cp_output" not in forward_backward_signature.parameters:
+        # Older AReaL already keeps packed CP outputs local.  The result wrapper
+        # above supplies the missing scalar reassembly for that implementation.
+        return patched
+
+    cp_local_forward_batch = contextvars.ContextVar("platoon_areal_cp_local_forward_batch", default=False)
+
+    @wraps(original_forward_backward)
+    def _forward_backward_batch_with_cp_local_scalars(self, *args, **kwargs):
+        try:
+            bound = forward_backward_signature.bind(self, *args, **kwargs)
+        except TypeError:
+            return original_forward_backward(self, *args, **kwargs)
+        bound.apply_defaults()
+        can_reassemble_scalars = (
+            cp_local_forward_batch.get()
+            and bound.arguments.get("forward_only") is True
+            and bound.arguments.get("gather_cp_output") is True
+            and not getattr(self, "enable_tree_training", False)
+            and not getattr(self, "is_vision_model", False)
+            and not getattr(self, "use_padded_seq", False)
+        )
+        if can_reassemble_scalars:
+            bound.arguments["gather_cp_output"] = False
+        return original_forward_backward(*bound.args, **bound.kwargs)
+
+    @wraps(original_forward_batch)
+    def _forward_batch_with_cp_local_scalars(self, *args, **kwargs):
+        token = cp_local_forward_batch.set(True)
+        try:
+            return original_forward_batch(self, *args, **kwargs)
+        finally:
+            cp_local_forward_batch.reset(token)
+
+    _forward_backward_batch_with_cp_local_scalars.__platoon_areal_cp_forward_backward_patch__ = True
+    _forward_batch_with_cp_local_scalars.__platoon_areal_cp_forward_batch_patch__ = True
+    engine_cls.forward_backward_batch = _forward_backward_batch_with_cp_local_scalars
+    engine_cls.forward_batch = _forward_batch_with_cp_local_scalars
+    patched["cp_forward_scalars"] = True
+    return patched
+
+
 def _patch_batch_task_dispatcher_idle_submit() -> None:
     """Avoid silent dispatcher stalls when no rollout tasks are in flight.
 
@@ -1621,49 +1930,11 @@ def _flatten_message_list_content(messages: list[dict[str, Any]]) -> None:
         message["content"] = "".join(text_parts)
 
 
-def _decode_tool_call_arguments(messages: list[dict[str, Any]]) -> None:
-    """Decode assistant tool-call ``arguments`` from JSON strings into dicts.
-
-    OpenAI-format messages (e.g. from OpenHands native tool calling) carry
-    ``tool_calls[].function.arguments`` as a JSON string per spec. Chat
-    templates such as Qwen3 render them with the Jinja ``items`` filter, which
-    requires a mapping and otherwise raises ``TypeError: Can only get item
-    pairs from a mapping`` once the conversation history contains a tool call.
-    Decode the string into a dict in place so the template sees a mapping;
-    leave non-JSON or non-object payloads untouched.
-    """
-
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        tool_calls = message.get("tool_calls")
-        if not isinstance(tool_calls, list):
-            continue
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                continue
-            function = tool_call.get("function")
-            if not isinstance(function, dict):
-                continue
-            arguments = function.get("arguments")
-            if not isinstance(arguments, str):
-                continue
-            try:
-                decoded = json.loads(arguments)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(decoded, dict):
-                function["arguments"] = decoded
-
-
 def _patch_areal_openai_message_content_flatten() -> None:
-    """Normalize OpenHands-style messages before HF chat templates and proxy cache.
+    """Flatten OpenHands-style text content before templates and proxy caching.
 
-    Two adjustments are applied to the proxy's incoming messages:
-
-    - Flatten list-shaped text ``content`` blocks to plain strings.
-    - Decode tool-call ``arguments`` from JSON strings into dicts so chat
-      templates that iterate them as mappings (e.g. Qwen3) do not crash.
+    AReaL handles OpenAI JSON-string tool-call arguments upstream. This patch
+    only retains Platoon's text-list normalization for native OpenAI requests.
     """
 
     import areal.experimental.openai.client as client_module  # pyright: ignore[reportMissingImports]
@@ -1679,7 +1950,6 @@ def _patch_areal_openai_message_content_flatten() -> None:
     ) -> list[dict[str, Any]]:
         normalized = original_ensure(name, value)
         _flatten_message_list_content(normalized)
-        _decode_tool_call_arguments(normalized)
         return normalized
 
     _ensure_message_dict_list_with_flatten.__platoon_message_content_patch__ = True
@@ -1874,8 +2144,7 @@ def _install_process_stall_watchdog() -> None:
 def apply_all_patches() -> None:
     """Apply Platoon compatibility patches for the current AReaL release.
 
-    Two historical patches were dropped when upgrading to AReaL HEAD
-    (``a0f3dca``) because upstream now handles those cases natively:
+    Historical compatibility behavior is removed as AReaL adopts it upstream:
 
     - ``apply_chat_template`` return-type coercion: ``areal.utils.hf_utils``
       now provides an ``apply_chat_template`` wrapper that normalizes the
@@ -1884,6 +2153,10 @@ def apply_all_patches() -> None:
     - FSDP wrap-class set/tuple compatibility: ``areal.engine.fsdp_utils``'s
       ``apply_fsdp2`` now normalizes ``_no_split_modules`` and
       ``transformer_layer_cls_to_wrap`` internally.
+    - MTP removal: Qwen RL configs set ``megatron.enable_mtp=false`` and AReaL
+      owns both model construction and MTP-stripped checkpoint export.
+    - JSON-string tool-call arguments: AReaL normalizes them before applying
+      chat templates; the remaining OpenAI patch only flattens text lists.
     """
 
     _patch_hf_tokenizer_download_race()
@@ -1891,10 +2164,10 @@ def apply_all_patches() -> None:
     _patch_triton_cache_for_qwen35_gdn_cp()
     _patch_megatron_bridge_attention_backend()
     _patch_megatron_bridge_qwen35_tp_validation()
-    _patch_megatron_bridge_qwen35_drop_mtp_for_rl()
     _patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
-    _patch_megatron_checkpoint_optimizer_metadata()
+    _patch_megatron_checkpoint_optimizer_bucket_shapes()
     _patch_areal_qwen35_gdn_cp_guards()
+    _patch_areal_megatron_memory_compatibility()
     _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input()
     _patch_megatron_core_qwen35_already_cp_local_thd_rope()
     _patch_megatron_core_gdn_context_parallel_config_validation()

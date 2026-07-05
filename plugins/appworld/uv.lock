@@ -337,8 +337,8 @@ wheels = [
 
 [[package]]
 name = "areal"
-version = "1.0.4"
-source = { git = "https://github.com/inclusionAI/AReaL.git?rev=67bc932#67bc932cc2e214ffa6cbd26eb640e16e5dc977b5" }
+version = "2.0.0"
+source = { git = "https://github.com/inclusionAI/AReaL.git?rev=d99124ec15102ca2fcd4960cc8beaef3950c2672#d99124ec15102ca2fcd4960cc8beaef3950c2672" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -5346,7 +5346,7 @@ tinker = [
 [package.metadata]
 requires-dist = [
     { name = "ai-rubric", specifier = ">=0.2.4" },
-    { name = "areal", extras = ["cuda"], marker = "extra == 'areal'", git = "https://github.com/inclusionAI/AReaL.git?rev=67bc932" },
+    { name = "areal", extras = ["cuda"], marker = "extra == 'areal'", git = "https://github.com/inclusionAI/AReaL.git?rev=d99124ec15102ca2fcd4960cc8beaef3950c2672" },
     { name = "datasets" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'areal'", specifier = "==2.8.3" },

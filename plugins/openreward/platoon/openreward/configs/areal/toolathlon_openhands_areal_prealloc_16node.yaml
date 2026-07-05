@@ -129,6 +129,7 @@ actor:
     std_level: null
   megatron:
     bridge_type: megatron-bridge
+    enable_mtp: false
     use_bridge_for_update_weights: true # for live weight sync
     use_deterministic_algorithms: true
 

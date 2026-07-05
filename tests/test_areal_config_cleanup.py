@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
-import types
 import sys
+import types
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from omegaconf import OmegaConf
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,6 +64,10 @@ def _load_config_module():
     @dataclass
     class FakeGRPOConfig:
         scheduler: FakeSchedulerConfig = field(default_factory=FakeSchedulerConfig)
+        # Match the optional engine fields supplied by AReaL's real PPOConfig,
+        # which Platoon's post-init visits to propagate worker allocator flags.
+        critic: FakePPOActorConfig | None = None
+        teacher: FakePPOActorConfig | None = None
 
         def __post_init__(self):
             pass
@@ -80,6 +83,7 @@ def _load_config_module():
 
     cli_args_mod.FakeSchedulerConfig = FakeSchedulerConfig
     cli_args_mod.FakeOpenAIConfig = FakeOpenAIConfig
+    cli_args_mod.FakePPOActorConfig = FakePPOActorConfig
     cli_args_mod.GRPOConfig = FakeGRPOConfig
     cli_args_mod.PPOActorConfig = FakePPOActorConfig
     cli_args_mod.InferenceEngineConfig = FakeInferenceEngineConfig

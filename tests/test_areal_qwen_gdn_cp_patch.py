@@ -11,6 +11,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PATCHES_PATH = REPO_ROOT / "platoon/train/areal/patches.py"
@@ -243,13 +244,17 @@ def _fla_conv_worker(rank: int, world_size: int, init_file: str, result_dir: str
                 act_fn=torch.nn.functional.silu,
             )
             cu_seqlens = torch.tensor(boundaries, device=device, dtype=torch.int32)
-            full_input = torch.linspace(
-                -1.0,
-                1.0,
-                total_tokens * channels,
-                device=device,
-                dtype=torch.float32,
-            ).to(dtype).view(total_tokens, channels)
+            full_input = (
+                torch.linspace(
+                    -1.0,
+                    1.0,
+                    total_tokens * channels,
+                    device=device,
+                    dtype=torch.float32,
+                )
+                .to(dtype)
+                .view(total_tokens, channels)
+            )
             local_slice = slice(rank * local_tokens, (rank + 1) * local_tokens)
             local_input = full_input[local_slice].clone().requires_grad_(True)
             cp_context = build_cp_context(
@@ -285,13 +290,17 @@ def _fla_conv_worker(rank: int, world_size: int, init_file: str, result_dir: str
                 cp_rank=0,
                 cp_size=1,
             )
-            output_weight = torch.linspace(
-                0.2,
-                1.7,
-                total_tokens * channels,
-                device=device,
-                dtype=torch.float32,
-            ).to(dtype).view(1, total_tokens, channels)
+            output_weight = (
+                torch.linspace(
+                    0.2,
+                    1.7,
+                    total_tokens * channels,
+                    device=device,
+                    dtype=torch.float32,
+                )
+                .to(dtype)
+                .view(1, total_tokens, channels)
+            )
             (local_output * output_weight[:, local_slice]).sum().backward()
             dist.all_reduce(conv.weight.grad, op=dist.ReduceOp.SUM)
             (reference_output * output_weight).sum().backward()
@@ -705,77 +714,6 @@ def test_qwen_gdn_cp_provider_uses_constructor_only_per_token_loss(monkeypatch):
     assert failed_provider.calculate_per_token_loss is False
 
 
-def test_qwen_gdn_cp_provider_policy_disables_mtp_and_preserves_aux_coefficients(monkeypatch, caplog):
-    patches = _load_patches_module("platoon_areal_patches_drop_mtp_test")
-    megatron_mod = types.ModuleType("megatron")
-    bridge_mod = types.ModuleType("megatron.bridge")
-    models_mod = types.ModuleType("megatron.bridge.models")
-    conversion_mod = types.ModuleType("megatron.bridge.models.conversion")
-    auto_bridge_mod = types.ModuleType("megatron.bridge.models.conversion.auto_bridge")
-
-    class FakeAutoBridge:
-        def __init__(self, provider):
-            self.provider = provider
-
-        def to_megatron_provider(self):
-            return self.provider
-
-    auto_bridge_mod.AutoBridge = FakeAutoBridge
-    monkeypatch.setitem(sys.modules, "megatron", megatron_mod)
-    monkeypatch.setitem(sys.modules, "megatron.bridge", bridge_mod)
-    monkeypatch.setitem(sys.modules, "megatron.bridge.models", models_mod)
-    monkeypatch.setitem(sys.modules, "megatron.bridge.models.conversion", conversion_mod)
-    monkeypatch.setitem(sys.modules, "megatron.bridge.models.conversion.auto_bridge", auto_bridge_mod)
-
-    def make_provider(*, variant="gated_delta_net", mtp_layers=1, aux_coeff=1e-3, z_coeff=2e-3):
-        return types.SimpleNamespace(
-            experimental_attention_variant=variant,
-            mtp_num_layers=mtp_layers,
-            moe_aux_loss_coeff=aux_coeff,
-            moe_z_loss_coeff=z_coeff,
-        )
-
-    monkeypatch.delenv("PLATOON_QWEN35_GDN_CP", raising=False)
-    patches._patch_megatron_bridge_qwen35_drop_mtp_for_rl()
-    unpatched = FakeAutoBridge(make_provider()).to_megatron_provider()
-    assert unpatched.mtp_num_layers == 1
-    assert unpatched.moe_aux_loss_coeff == pytest.approx(1e-3)
-    assert unpatched.moe_z_loss_coeff == pytest.approx(2e-3)
-
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
-    monkeypatch.setenv("RANK", "0")
-    caplog.set_level("WARNING", logger="PlatoonQwen35GDNCP")
-    patches._patch_megatron_bridge_qwen35_drop_mtp_for_rl()
-
-    provider = make_provider()
-    bridge = FakeAutoBridge(provider)
-    converted = bridge.to_megatron_provider()
-    assert converted is provider
-    assert converted.mtp_num_layers is None
-    assert converted.moe_aux_loss_coeff == pytest.approx(1e-3)
-    assert converted.moe_z_loss_coeff == pytest.approx(2e-3)
-
-    # Reapplying the provider hook remains harmless and never mutates the
-    # canonical MoE objective.
-    converted_again = bridge.to_megatron_provider()
-    assert converted_again.mtp_num_layers is None
-    assert converted_again.moe_aux_loss_coeff == pytest.approx(1e-3)
-    assert converted_again.moe_z_loss_coeff == pytest.approx(2e-3)
-
-    no_z_loss = FakeAutoBridge(make_provider(z_coeff=None)).to_megatron_provider()
-    assert no_z_loss.mtp_num_layers is None
-    assert no_z_loss.moe_aux_loss_coeff == pytest.approx(1e-3)
-    assert no_z_loss.moe_z_loss_coeff is None
-
-    non_gdn = FakeAutoBridge(make_provider(variant=None)).to_megatron_provider()
-    assert non_gdn.mtp_num_layers == 1
-    assert non_gdn.moe_aux_loss_coeff == pytest.approx(1e-3)
-    assert non_gdn.moe_z_loss_coeff == pytest.approx(2e-3)
-
-    assert "Dropping Qwen3.5 GDN MTP head" in caplog.text
-    assert "Scaling Qwen3.5 GDN MoE auxiliary coefficients" not in caplog.text
-
-
 def test_qwen_gdn_cp_rejects_sequence_parallel_gather_after_input_projection(monkeypatch):
     patches = _load_patches_module("platoon_areal_patches_post_projection_sp_test")
 
@@ -820,3 +758,153 @@ def test_qwen_gdn_cp_rejects_sequence_parallel_gather_after_input_projection(mon
     assert "sequence length 8, observed 4" in error
     assert "feature-partitioned" in error
     assert gather_calls == []
+
+
+def test_checkpoint_bucket_shape_patch_preserves_upstream_load_metadata(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_checkpoint_shape_test")
+
+    class FakeShardedTensor:
+        def __init__(self, key, global_shape, local_shape, global_offset):
+            self.key = key
+            self.global_shape = global_shape
+            self.local_shape = local_shape
+            self.global_offset = global_offset
+
+    padded_shard = FakeShardedTensor(
+        "optimizer.distributed.bucket.exp_avg",
+        global_shape=(8,),
+        local_shape=(4,),
+        global_offset=(8,),
+    )
+    model_shard = FakeShardedTensor(
+        "model.weight",
+        global_shape=(8,),
+        local_shape=(4,),
+        global_offset=(8,),
+    )
+
+    class FakeOptimizer:
+        def __init__(self):
+            self.calls = []
+
+        def sharded_state_dict(self, state_dict, **kwargs):
+            self.calls.append((state_dict, kwargs))
+            return {"optimizer": [padded_shard], "model": [model_shard]}
+
+    upstream_metadata = {
+        "distrib_optim_sharding_type": "dp_reshardable",
+        "upstream_sentinel": True,
+    }
+
+    class FakeCheckpointManager:
+        def __init__(self):
+            self.optimizer = FakeOptimizer()
+
+        def generate_state_dict(self, *, is_loading=False):
+            return self.optimizer.sharded_state_dict(
+                {"model": "state"},
+                is_loading=is_loading,
+                metadata=upstream_metadata,
+            )
+
+    areal_mod = types.ModuleType("areal")
+    engine_mod = types.ModuleType("areal.engine")
+    megatron_utils_mod = types.ModuleType("areal.engine.megatron_utils")
+    checkpointer_mod = types.ModuleType("areal.engine.megatron_utils.checkpointer")
+    checkpointer_mod.MegatronCheckpointManager = FakeCheckpointManager
+    megatron_mod = types.ModuleType("megatron")
+    core_mod = types.ModuleType("megatron.core")
+    dist_checkpointing_mod = types.ModuleType("megatron.core.dist_checkpointing")
+    mapping_mod = types.ModuleType("megatron.core.dist_checkpointing.mapping")
+    mapping_mod.ShardedTensor = FakeShardedTensor
+
+    for name, module in {
+        "areal": areal_mod,
+        "areal.engine": engine_mod,
+        "areal.engine.megatron_utils": megatron_utils_mod,
+        "areal.engine.megatron_utils.checkpointer": checkpointer_mod,
+        "megatron": megatron_mod,
+        "megatron.core": core_mod,
+        "megatron.core.dist_checkpointing": dist_checkpointing_mod,
+        "megatron.core.dist_checkpointing.mapping": mapping_mod,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(dist, "is_available", lambda: False)
+
+    patches._patch_megatron_checkpoint_optimizer_bucket_shapes()
+    manager = FakeCheckpointManager()
+    original_sharded_state_dict = manager.optimizer.sharded_state_dict
+    state = manager.generate_state_dict(is_loading=True)
+
+    assert manager.optimizer.calls == [
+        (
+            {"model": "state"},
+            {"is_loading": True, "metadata": upstream_metadata},
+        )
+    ]
+    assert state["optimizer"][0].global_shape == (12,)
+    assert state["model"][0].global_shape == (8,)
+    assert manager.optimizer.sharded_state_dict == original_sharded_state_dict
+
+
+def test_openai_content_patch_leaves_tool_argument_decoding_to_upstream(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_openai_content_test")
+
+    client_mod = types.ModuleType("areal.experimental.openai.client")
+
+    def ensure_message_dict_list(_name, value):
+        return value
+
+    client_mod._ensure_message_dict_list = ensure_message_dict_list
+    for name in ("areal", "areal.experimental", "areal.experimental.openai"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "areal.experimental.openai.client", client_mod)
+
+    arguments = '{"query":"weather"}'
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello "},
+                "world",
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": "search", "arguments": arguments},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}],
+        },
+    ]
+
+    patches._patch_areal_openai_message_content_flatten()
+    normalized = client_mod._ensure_message_dict_list("messages", messages)
+
+    assert normalized[0]["content"] == "hello world"
+    assert normalized[1]["tool_calls"][0]["function"]["arguments"] == arguments
+    assert isinstance(normalized[2]["content"], list)
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    [
+        "toolathlon_openhands_areal_prealloc_8node.yaml",
+        "toolathlon_openhands_areal_prealloc_16node.yaml",
+        "toolathlon_openhands_areal_prealloc_16node-cp.yaml",
+        "toolathlon_openhands_areal_prealloc_16node-cp-bs16.yaml",
+        "toolathlon_openhands_areal_prealloc_16node-cp-ptc-recursive.yaml",
+    ],
+)
+def test_qwen_megatron_configs_explicitly_disable_mtp(config_name):
+    config_path = REPO_ROOT / "plugins/openreward/platoon/openreward/configs/areal" / config_name
+    config = yaml.safe_load(config_path.read_text())
+
+    assert config["actor"]["megatron"]["enable_mtp"] is False

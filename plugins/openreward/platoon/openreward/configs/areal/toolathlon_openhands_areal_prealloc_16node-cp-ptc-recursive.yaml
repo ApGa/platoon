@@ -29,3 +29,5 @@ workflow_config:
 actor:
   backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
   path: Qwen/Qwen3.6-35B-A3B
+  megatron:
+    enable_mtp: false
