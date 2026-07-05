@@ -1,12 +1,15 @@
+import logging
 from collections import defaultdict
 from typing import Sequence
 
 from openhands.sdk.conversation.state import ConversationExecutionStatus
-from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.event import ActionEvent, AgentErrorEvent, Event, EventID, MessageEvent
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.tool.builtins.finish import FinishAction
 
 from platoon.openhands.types import OpenHandsObservation
+
+logger = logging.getLogger(__name__)
 
 
 def _conversation_execution_status(conversation_state) -> ConversationExecutionStatus | None:
@@ -86,8 +89,10 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
         if isinstance(event, MessageEvent) and event.source == "agent":
             seen_action_ids.add(event.id)
             at_least_one_future_obs_seen = True
-        elif isinstance(event, ActionEvent) and event.source == "agent" and (
-            isinstance(event.action, FinishAction) or _is_terminal_status(observation.conversation_state)
+        elif (
+            isinstance(event, ActionEvent)
+            and event.source == "agent"
+            and (isinstance(event.action, FinishAction) or _is_terminal_status(observation.conversation_state))
         ):
             seen_action_ids.add(event.id)
             at_least_one_future_obs_seen = True
@@ -99,10 +104,9 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
     if not is_finished(observation, last_event_seen=last_event_seen) and not at_least_one_future_error_event_seen:
         for action in new_actions:
             if action.id not in seen_action_ids:
-                print(
+                logger.debug(
                     "Clearing new_actions due to action event that has not been observed "
                     f"in a future observation: {action.id} {action.kind}",
-                    flush=True,
                 )
                 new_actions.clear()
                 break
@@ -118,11 +122,10 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
                 "This is unexpected and can lead to undefined behavior."
             )
         if len(new_actions) != len(batches[llm_call_id]):
-            print(
+            logger.debug(
                 "Warning: The number of new actions detected does not match the number of actions in the batch "
                 "for the corresponding llm_response_id. This could indicate that some actions are not being "
                 "properly observed or that there are unexpected events in the conversation history.",
-                flush=True,
             )
 
     return list(reversed(new_actions))
@@ -149,7 +152,7 @@ def get_obs_for_last_action(observation: OpenHandsObservation) -> list[Event]:
     # If not at least one future action seen and if this obs is not the final one, empty the list.
     oh_conversation_finished = _is_terminal_status(observation.conversation_state)
     if oh_conversation_finished and len(new_obs) == 0:
-        print("Conversation is finished and no new obs seen, returning empty obs list.")
+        logger.debug("Conversation is finished and no new obs seen, returning empty obs list.")
         return []
     if len(new_obs) == 0:
         return new_obs
@@ -173,13 +176,13 @@ def is_finished(observation: OpenHandsObservation, last_event_seen: EventID | No
     platoon_episode_caught_up = last_event_id in valid_ids
     if oh_conversation_finished and platoon_episode_caught_up:
         try:
-            print(
+            logger.debug(
                 "is_finished: conversation finished with status "
                 f"{_conversation_execution_status(conversation_state)}, last_event_id: {last_event_id}, "
                 f"valid_ids: {valid_ids}, last_event_seen: {conversation_state.events[-1].kind}"
             )
         except Exception as e:
-            print(
+            logger.debug(
                 "is_finished: conversation finished with status "
                 f"{_conversation_execution_status(conversation_state)}, last_event_id: {last_event_id}, "
                 f"valid_ids: {valid_ids}, unable to print last event kind due to error: {e}"

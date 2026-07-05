@@ -5,8 +5,23 @@ from platoon.agents.base import ForkableAgent
 from platoon.envs.base import ForkableEnv
 from platoon.episode.context import budget_tracker, current_agent, current_env, current_trajectory, episode_step_timeout
 from platoon.episode.loop import run_episode
-from platoon.episode.trajectory import BudgetExceededError
+from platoon.episode.trajectory import BudgetExceededError, Trajectory
 from platoon.utils.span_profile import profile_span
+
+
+def _subagent_return_message(traj: Trajectory) -> str:
+    if traj.finish_message:
+        return traj.finish_message
+    if traj.error_message:
+        return _subagent_error_message(traj.error_message)
+    return traj.finish_message or ""
+
+
+def _subagent_error_message(error: str) -> str:
+    first_line = next((line.strip() for line in error.splitlines() if line.strip()), "")
+    if first_line.startswith("WARNING: Exhausted budget"):
+        return "Subagent did not finish before its step budget was exhausted."
+    return "Subagent failed before finishing."
 
 
 async def launch_subagent(goal: str, max_steps: int = 15, task_misc: dict | None = None, verbose: bool = True) -> Any:
@@ -57,15 +72,5 @@ async def launch_subagent(goal: str, max_steps: int = 15, task_misc: dict | None
         finally:
             budget_tracker.get().release_budget(max_steps + 1)
 
-        used_recursive = int(budget_tracker.get().used_budget_for(traj.id))
-        remaining_total = int(budget_tracker.get().remaining_budget())
-
-        budget_message = (
-            f"\n\nBudget used by subagent: {used_recursive}/{max_steps} steps. "
-            f"Total remaining budget for the current task is {remaining_total} steps.\n"
-        )
-
-        if verbose:
-            return (traj.finish_message or traj.error_message or "") + budget_message
-        else:
-            return traj.finish_message or traj.error_message or ""
+        _ = verbose
+        return _subagent_return_message(traj)

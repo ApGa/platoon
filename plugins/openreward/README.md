@@ -64,8 +64,8 @@ child agents from PTC:
 
 ```python
 results = await asyncio.gather(
-    atools.launch_subagent(goal="inspect one candidate", max_steps=10),
-    atools.launch_subagent(goal="inspect another candidate", max_steps=10),
+    atools.launch_subagent(goal="inspect one candidate"),
+    atools.launch_subagent(goal="inspect another candidate"),
 )
 ```
 
@@ -75,8 +75,9 @@ agents reuse the parent's live MCP bridge tools, so parent and child tool calls
 operate on the same OpenReward session instead of spawning separate task
 sessions. Their trajectories are recorded in the same `TrajectoryCollection`
 with parent links, so existing AReaL/Tinker data processing can include
-depth-aware samples. Calls that omit `max_steps` use
+depth-aware samples. Child step budgets are configured through
 `openreward.subagent_default_max_steps`, which defaults to 50. Use
-`openreward.subagent_max_depth` to cap recursive depth. When recursive subagents
-are enabled, the rollout uses `DepthAwareStepBudgetTracker`, so each trajectory
-is bounded by its own step budget instead of charging child steps to the parent.
+`openreward.subagent_max_depth` to cap recursive depth. Successful subagent calls
+return the child `finish` message directly, without appending budget metadata;
+children that fail before finishing return a short failure status instead of raw
+episode-loop diagnostics.

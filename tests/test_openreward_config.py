@@ -222,7 +222,9 @@ def test_openreward_goal_format_adds_child_tree_context(monkeypatch):
 
     assert "You are a sub-agent provided a task by a parent" in goal
     assert "Your Task:\nInspect the warehouse tables." in goal
-    assert "call `finish` with your answer" in goal
+    assert "call `finish`" in goal
+    assert "returned verbatim to the parent" in goal
+    assert "return exactly that format" in goal
     assert "Parent Agent Task:\nBuild the KPI report." in goal
     assert "Root Agent Task:" not in goal
     assert "python_execute" not in goal

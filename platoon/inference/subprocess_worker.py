@@ -4,7 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
+import signal
 from typing import Any
+
+
+def _hard_timeout_seconds(config_dict: dict[str, Any]) -> int:
+    return int((config_dict.get("timeout") or 900) + 120 + 60)
+
+
+def _hard_timeout_handler(_signum, _frame):
+    print("[InferenceSubprocessWorker] Hard timeout exceeded; killing subprocess process group")
+    try:
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    except Exception:
+        os._exit(1)
 
 
 def run_rollout_subprocess(
@@ -16,6 +30,13 @@ def run_rollout_subprocess(
     rollout_config_dict: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Execute a single rollout in a subprocess."""
+    try:
+        os.setpgrp()
+    except Exception:
+        pass
+
+    old_handler = signal.signal(signal.SIGALRM, _hard_timeout_handler)
+    signal.alarm(_hard_timeout_seconds(rollout_config_dict))
     try:
         rollout_module = importlib.import_module(rollout_fn_module)
         rollout_fn = getattr(rollout_module, rollout_fn_name)
@@ -43,3 +64,6 @@ def run_rollout_subprocess(
 
         traceback.print_exc()
         return None
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
