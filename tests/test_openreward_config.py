@@ -132,6 +132,48 @@ def test_openreward_config_defaults_subagent_budget_to_50():
     assert config.subagent_default_max_steps == 50
 
 
+def test_openreward_config_defaults_subagent_judging_off():
+    config_mod = _load_openreward_config_module()
+
+    config = config_mod.OpenRewardConfig.from_mapping({})
+
+    assert config.enable_subagent_reward_judging is False
+    assert config.subagent_reward_judge_max_steps == 20
+
+
+def test_openreward_config_accepts_legacy_subagent_judging_keys():
+    config_mod = _load_openreward_config_module()
+
+    config = config_mod.OpenRewardConfig.from_mapping(
+        {
+            "enable_subagent_judging": True,
+            "subagent_judge_max_steps": 7,
+        }
+    )
+
+    assert config.enable_subagent_reward_judging is True
+    assert config.subagent_reward_judge_max_steps == 7
+
+
+def test_openreward_reward_processor_uses_subagent_judgment(monkeypatch):
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rollout", raising=False)
+    rollout_mod = __import__("platoon.openreward.rollout", fromlist=["reward_processor"])
+
+    reward, components = rollout_mod.reward_processor(
+        {
+            "reward": 0.0,
+            "misc": {"subagent_reward_judgment": {"score": 0.75}},
+            "steps": [],
+        }
+    )
+
+    assert reward == 0.75
+    assert components["reward/success"] == 0.75
+    assert components["reward/openreward"] == 0.0
+    assert components["reward/subagent_judgment"] == 0.75
+
+
 def test_openreward_rollout_condenser_keeps_system_prompt_and_goal_only():
     source = REPO_ROOT.joinpath("plugins/openreward/platoon/openreward/rollout.py").read_text()
     module = ast.parse(source)

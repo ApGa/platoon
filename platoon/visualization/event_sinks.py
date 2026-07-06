@@ -108,6 +108,7 @@ class JsonlFileSink(TrajectoryEventHandler):
                 "reward": trajectory.reward,
                 "finish_message": trajectory.finish_message,
                 "error_message": trajectory.error_message,
+                "misc": _to_jsonable(trajectory.misc),
             }
         )
 
@@ -173,6 +174,7 @@ class QueueSink(TrajectoryEventHandler):
                 "reward": trajectory.reward,
                 "finish_message": trajectory.finish_message,
                 "error_message": trajectory.error_message,
+                "misc": _to_jsonable(trajectory.misc),
             }
         )
 
@@ -232,6 +234,7 @@ def trajectory_collection_dump_to_events(traj_collection_dump: Dict[str, Any]) -
                 "reward": traj.get("reward", 0.0),
                 "finish_message": traj.get("finish_message"),
                 "error_message": traj.get("error_message"),
+                "misc": traj.get("misc", {}),
                 "collection_id": collection_id,
                 "ts": now + (seq * 1e-6),
             }

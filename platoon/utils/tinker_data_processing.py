@@ -15,9 +15,15 @@ import tinker
 import torch
 from tinker import TensorData
 
+from platoon.agents.actions.subagent import EXCLUDE_FROM_TRAINING_MISC_KEY
 from platoon.train.tinker.proxy import TinkerLLMInteraction
 
 logger = logging.getLogger(__name__)
+
+
+def _exclude_from_training(trajectory: dict) -> bool:
+    misc = trajectory.get("misc", {})
+    return isinstance(misc, dict) and bool(misc.get(EXCLUDE_FROM_TRAINING_MISC_KEY))
 
 
 def create_rightshifted_model_input_and_leftshifted_targets(
@@ -356,6 +362,8 @@ def get_train_data_for_trajectory_collection(
     depth_map = _compute_trajectory_depths(trajectory_collection) if include_traj_depth else {}
 
     for trajectory_id, trajectory in trajectory_collection["trajectories"].items():
+        if _exclude_from_training(trajectory):
+            continue
         trajectory_reward, rewards_dict = reward_processor(trajectory)
 
         # Store the root (first) trajectory's reward as the task reward

@@ -14,7 +14,14 @@ from typing import Callable, Protocol
 
 import torch
 
+from platoon.agents.actions.subagent import EXCLUDE_FROM_TRAINING_MISC_KEY
+
 logger = logging.getLogger(__name__)
+
+
+def _exclude_from_training(trajectory: dict) -> bool:
+    misc = trajectory.get("misc", {})
+    return isinstance(misc, dict) and bool(misc.get(EXCLUDE_FROM_TRAINING_MISC_KEY))
 
 
 class CompletionWithResponse(Protocol):
@@ -72,7 +79,9 @@ def _is_prefix(seq1: list[int], seq2: list[int]) -> bool:
     return len(seq1) <= len(seq2) and seq2[: len(seq1)] == seq1
 
 
-def _extract_completion_tokens(completion_record: CompletionWithResponse) -> tuple[list[int], list[int], list[float], list[int]] | None:
+def _extract_completion_tokens(
+    completion_record: CompletionWithResponse,
+) -> tuple[list[int], list[int], list[float], list[int]] | None:
     """Return prompt/output token parts from an exported AReaL interaction."""
 
     tensor_dict = completion_record.to_tensor_dict()
@@ -448,6 +457,8 @@ def get_train_data_for_trajectory_collection(
 
     train_data = []
     for trajectory_id, trajectory in trajectory_collection["trajectories"].items():
+        if _exclude_from_training(trajectory):
+            continue
         trajectory_data = get_train_data_for_trajectory(
             trajectory, completions, task_id, trajectory_id, filter_errors, reward_processor, merge_prefixes, concat_fn
         )

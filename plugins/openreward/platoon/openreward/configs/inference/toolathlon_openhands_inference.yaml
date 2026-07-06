@@ -39,6 +39,8 @@ openreward:
   enable_recursive_subagents: false
   subagent_default_max_steps: 50
   subagent_max_depth: null
+  enable_subagent_reward_judging: false
+  subagent_reward_judge_max_steps: 20
   openhands_system_prompt_suffix: null
 
 task_id: null

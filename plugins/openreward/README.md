@@ -81,3 +81,17 @@ depth-aware samples. Child step budgets are configured through
 return the child `finish` message directly, without appending budget metadata;
 children that fail before finishing return a short failure status instead of raw
 episode-loop diagnostics.
+
+Set `openreward.enable_subagent_reward_judging: true` to automatically launch a
+verifier agent after each normal subagent finishes. The verifier receives the
+child goal, final message, and trajectory id, then inspects the shared
+environment with tools and returns a JSON verdict via `finish`. The judged child
+trajectory stores the normalized result in `misc.subagent_reward_judgment`; the
+verifier trajectory stores the judged child id in
+`misc.subagent_reward_verifies_trajectory_id`.
+`openreward.subagent_reward_judge_max_steps` controls the verifier step budget
+and defaults to 20. Verifier tasks do not receive `launch_subagent`, which
+avoids verifier-of-verifier recursion. Verifier trajectories are marked
+`misc.exclude_from_training: true`; judged worker trajectories expose
+`reward/subagent_judgment`, and OpenReward's reward processor uses that score as
+the worker subtrajectory reward.

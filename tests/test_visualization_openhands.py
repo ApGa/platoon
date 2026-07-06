@@ -13,6 +13,9 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from platoon.visualization.tui import (  # noqa: E402
     DetailsPanel,
+    Event,
+    PlayPauseFriendlyTree,
+    TrajectoryTree,
     _collection_display_label,
     _observation_error_summary,
     _openhands_event_summary,
@@ -67,6 +70,171 @@ def test_task_display_id_uses_task_id_field():
     assert _task_display_id({"id": "canvas-assessment-quality-audit", "goal": "Call get_task"}) == (
         "canvas-assessment-quality-audit"
     )
+
+
+def test_trajectory_tree_nests_child_trajectories_by_parent_info():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+
+    root = {"id": "root", "reward": 0.0}
+    child = {
+        "id": "child",
+        "reward": 1.0,
+        "parent_info": {"id": "root", "fork_step": 2},
+    }
+    verifier = {
+        "id": "verifier",
+        "reward": 0.0,
+        "parent_info": {"id": "root", "fork_step": 3},
+        "misc": {
+            "subagent_reward_verifier_task": True,
+            "subagent_reward_verifies_trajectory_id": "child",
+            "exclude_from_training": True,
+        },
+    }
+
+    for trajectory in (root, child, verifier):
+        tree.ingest(
+            Event(
+                type="trajectory_created",
+                data={"collection_id": collection_id, "trajectory": trajectory},
+            )
+        )
+
+    assert tree.traj_nodes["root"].parent is tree.group_nodes[f"collection:{collection_id}"]
+    assert tree.traj_nodes["child"].parent is tree.traj_nodes["root"]
+    assert tree.traj_nodes["verifier"].parent is tree.traj_nodes["child"]
+    assert "verifier:verifier" in str(tree.traj_nodes["verifier"].label)
+    assert getattr(tree.traj_nodes["verifier"].label, "style", None) == "dim"
+
+    for event_type, extra in (
+        ("trajectory_task_set", {"task": {"id": "verifier-task", "goal": "verify child"}}),
+        ("trajectory_step_added", {"step_index": 0, "step": {"misc": {}}, "reward": 0.0}),
+        ("trajectory_finished", {"reward": 0.0, "finish_message": "{}", "misc": verifier["misc"]}),
+    ):
+        tree.ingest(
+            Event(
+                type=event_type,
+                data={"collection_id": collection_id, "trajectory_id": "verifier", **extra},
+            )
+        )
+
+    assert tree.traj_nodes["verifier"].parent is tree.traj_nodes["child"]
+    assert "verifier:verifier" in str(tree.traj_nodes["verifier"].label)
+    assert getattr(tree.traj_nodes["verifier"].label, "style", None) == "dim"
+
+
+def test_trajectory_tree_repairs_verifier_parent_from_task_misc():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+
+    root = {"id": "root", "reward": 0.0}
+    child = {
+        "id": "child",
+        "reward": 1.0,
+        "parent_info": {"id": "root", "fork_step": 2},
+    }
+    verifier = {
+        "id": "verifier",
+        "reward": 0.0,
+        "parent_info": {"id": "root", "fork_step": 3},
+    }
+    verifier_misc = {
+        "subagent_reward_verifier_task": True,
+        "subagent_reward_verifies_trajectory_id": "child",
+        "exclude_from_training": True,
+    }
+
+    for trajectory in (root, child, verifier):
+        tree.ingest(
+            Event(
+                type="trajectory_created",
+                data={"collection_id": collection_id, "trajectory": trajectory},
+            )
+        )
+
+    assert tree.traj_nodes["verifier"].parent is tree.traj_nodes["root"]
+
+    tree.ingest(
+        Event(
+            type="trajectory_task_set",
+            data={
+                "collection_id": collection_id,
+                "trajectory_id": "verifier",
+                "task": {"id": "verifier-task", "goal": "verify child", "misc": verifier_misc},
+            },
+        )
+    )
+
+    assert tree.traj_nodes["verifier"].parent is tree.traj_nodes["child"]
+
+
+def test_trajectory_tree_updates_reward_from_late_finished_event():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+
+    tree.ingest(
+        Event(
+            type="trajectory_created",
+            data={"collection_id": collection_id, "trajectory": {"id": "child", "reward": 0.0}},
+        )
+    )
+    tree.ingest(
+        Event(
+            type="trajectory_finished",
+            data={"collection_id": collection_id, "trajectory_id": "child", "reward": 0.0},
+        )
+    )
+    tree.ingest(
+        Event(
+            type="trajectory_finished",
+            data={
+                "collection_id": collection_id,
+                "trajectory_id": "child",
+                "reward": 0.8,
+                "misc": {"subagent_reward_judgment": {"score": 0.8}},
+            },
+        )
+    )
+
+    assert tree.traj_rewards["child"] == 0.8
+    assert "reward:0.800" in str(tree.traj_nodes["child"].label)
+    payload = tree.traj_nodes["child"].data["payload"]
+    assert payload["reward"] == 0.8
+    assert payload["misc"]["subagent_reward_judgment"]["score"] == 0.8
+
+
+def test_trajectory_tree_repairs_out_of_order_deep_parent_chain():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+
+    root = {"id": "root", "reward": 0.0}
+    child = {
+        "id": "child",
+        "reward": 0.0,
+        "parent_info": {"id": "root", "fork_step": 1},
+    }
+    grandchild = {
+        "id": "grandchild",
+        "reward": 1.0,
+        "parent_info": {"id": "child", "fork_step": 2},
+    }
+
+    for trajectory in (grandchild, child, root):
+        tree.ingest(
+            Event(
+                type="trajectory_created",
+                data={"collection_id": collection_id, "trajectory": trajectory},
+            )
+        )
+
+    assert tree.traj_nodes["root"].parent is tree.group_nodes[f"collection:{collection_id}"]
+    assert tree.traj_nodes["child"].parent is tree.traj_nodes["root"]
+    assert tree.traj_nodes["grandchild"].parent is tree.traj_nodes["child"]
 
 
 def test_call_tool_display_uses_catalog_tool_name():

@@ -12,10 +12,17 @@ from typing import cast
 from openhands.sdk import LLM
 from openhands.sdk import Agent as OpenHandsSDKAgent
 from openhands.sdk.context.condenser import LLMSummarizingCondenser
-
+from platoon.agents.actions.subagent import (
+    SUBAGENT_REWARD_JUDGMENT_MISC_KEY,
+    SubagentRewardJudgeConfig,
+)
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
-from platoon.episode.context import budget_tracker, current_trajectory_collection
+from platoon.episode.context import (
+    budget_tracker,
+    current_trajectory_collection,
+    subagent_reward_judge_config,
+)
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCollection
 from platoon.openhands.agent import OpenHandsAgent
@@ -29,9 +36,10 @@ from platoon.openhands.recursive import (
     with_programmatic_tool_calling,
     with_task_tracker_tool,
 )
+from platoon.visualization.event_sinks import JsonlFileSink
+
 from platoon.openreward.config_defs import OpenRewardConfig
 from platoon.openreward.env import OpenRewardOpenHandsEnv
-from platoon.visualization.event_sinks import JsonlFileSink
 
 OPENREWARD_CONDENSER_KEEP_FIRST = 2
 
@@ -238,12 +246,19 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     agent = OpenHandsAgent()
 
     traj_collection = TrajectoryCollection()
-    current_trajectory_collection.set(traj_collection)
-    if openreward_config.enable_recursive_subagents:
-        budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=openreward_config.subagent_max_depth))
     events_path = os.path.join(config.output_dir, "events", f"events_{_slug(task_id)}_{traj_collection.id}.jsonl")
     traj_collection.register_event_handlers(
         JsonlFileSink(events_path, collection_id=traj_collection.id, process_id=os.getpid())
+    )
+    tokens = [current_trajectory_collection.set(traj_collection)]
+    if openreward_config.enable_recursive_subagents:
+        tokens.append(budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=openreward_config.subagent_max_depth)))
+    tokens.append(
+        subagent_reward_judge_config.set(
+            SubagentRewardJudgeConfig(max_steps=openreward_config.subagent_reward_judge_max_steps)
+            if openreward_config.enable_subagent_reward_judging
+            else None
+        )
     )
 
     try:
@@ -256,9 +271,12 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         raise
+    finally:
+        for token in reversed(tokens):
+            token.var.reset(token)
 
     if config.return_dict:
-        result = current_trajectory_collection.get().to_dict()
+        result = traj_collection.to_dict()
         result["misc"] = {
             "openreward": asdict(openreward_config),
             "rollout_output_dir": rollout_output_dir,
@@ -267,12 +285,30 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             "openhands_conversation_id": str(openhands_conversation_id),
         }
         return result
-    return current_trajectory_collection.get()
+    return traj_collection
+
+
+def _judgment_score(traj: dict) -> float | None:
+    misc = traj.get("misc", {})
+    judgment = misc.get(SUBAGENT_REWARD_JUDGMENT_MISC_KEY) if isinstance(misc, dict) else None
+    if not isinstance(judgment, dict):
+        return None
+    score = judgment.get("score")
+    if not isinstance(score, (int, float)):
+        return None
+    return min(1.0, max(0.0, float(score)))
 
 
 def reward_processor(traj: dict) -> tuple[float, dict]:
-    reward = float(traj.get("reward", 0.0))
-    rewards_dict: dict[str, float] = {"reward/success": reward, "reward/openreward": reward}
+    openreward_score = float(traj.get("reward", 0.0))
+    judgment_score = _judgment_score(traj)
+    reward = judgment_score if judgment_score is not None else openreward_score
+    rewards_dict: dict[str, float] = {
+        "reward/success": reward,
+        "reward/openreward": openreward_score,
+    }
+    if judgment_score is not None:
+        rewards_dict["reward/subagent_judgment"] = judgment_score
     for step in traj.get("steps", []):
         reward_misc = step.get("misc", {}).get("reward_misc", {})
         for key, value in reward_misc.items():

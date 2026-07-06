@@ -7,13 +7,7 @@ from dataclasses import replace
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
-from openhands.sdk.agent.base import AgentBase
-from openhands.sdk.conversation import get_agent_final_response
-from openhands.sdk.conversation.base import BaseConversation
-from openhands.sdk.conversation.conversation import Conversation
-from openhands.sdk.conversation.state import ConversationExecutionStatus
-from openhands.sdk.event.base import Event
-from openhands.sdk.workspace.base import BaseWorkspace
+from platoon.agents.actions.subagent import SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY
 from platoon.envs.base import SubTask, Task
 from platoon.episode.context import (
     current_trajectory,
@@ -22,6 +16,14 @@ from platoon.episode.context import (
     finish_message,
 )
 from platoon.utils.openhands_utils import get_obs_for_last_action, is_finished
+
+from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.conversation import get_agent_final_response
+from openhands.sdk.conversation.base import BaseConversation
+from openhands.sdk.conversation.conversation import Conversation
+from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.event.base import Event
+from openhands.sdk.workspace.base import BaseWorkspace
 
 from .recursive import DEFAULT_SUBAGENT_MAX_STEPS, copy_agent_config_for_fork
 from .types import OpenHandsAction, OpenHandsObservation, OpenHandsTrajectoryStep
@@ -82,7 +84,7 @@ class OpenHandsEnv:
 
             configured_agent = with_finish_tool(configured_agent)
 
-        if not self._enable_recursive_subagents:
+        if not self._enable_recursive_subagents or self._task.misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
             self._agent = configured_agent
             return self._agent
 
