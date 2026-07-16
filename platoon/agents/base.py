@@ -16,4 +16,11 @@ class Agent(Protocol):
 
 @runtime_checkable
 class ForkableAgent(Agent, Protocol):
-    async def fork(self, task: Task) -> ForkableAgent: ...
+    async def fork(self, task: Task) -> ForkableAgent:
+        """Return an independently closeable child agent.
+
+        Implementations that allocate resources before returning must clean up
+        partial allocations if the fork raises, including on cancellation.
+        """
+
+        ...

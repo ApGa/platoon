@@ -21,7 +21,14 @@ class Env(Protocol):
 
 @runtime_checkable
 class ForkableEnv(Env, Protocol):
-    async def fork(self, task: Task) -> ForkableEnv: ...
+    async def fork(self, task: Task) -> ForkableEnv:
+        """Return an independently closeable child environment.
+
+        Implementations that allocate resources before returning must clean up
+        partial allocations if the fork raises, including on cancellation.
+        """
+
+        ...
 
 
 @dataclass

@@ -14,7 +14,7 @@ from platoon.episode.context import (
     episode_step_timeout,
     subagent_reward_judge_config,
 )
-from platoon.episode.loop import run_episode
+from platoon.episode.loop import _close_episode_resource, run_episode
 from platoon.episode.trajectory import BudgetExceededError, Trajectory
 from platoon.utils.span_profile import profile_span
 
@@ -29,9 +29,7 @@ EXCLUDE_FROM_TRAINING_MISC_KEY = "exclude_from_training"
 EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY = "exclude_from_policy_training"
 SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY = "training_eligible"
 
-_VALID_JUDGMENT_STATUSES = frozenset(
-    {"verified", "partial", "failed", "insufficient_evidence"}
-)
+_VALID_JUDGMENT_STATUSES = frozenset({"verified", "partial", "failed", "insufficient_evidence"})
 
 
 @dataclass(frozen=True)
@@ -196,6 +194,19 @@ def _emit_trajectory_finished_update(traj: Trajectory) -> None:
     traj_collection.finish_trajectory(traj.id)
 
 
+async def _run_owned_subagent_episode(
+    agent: ForkableAgent,
+    env: ForkableEnv,
+    *,
+    timeout: int,
+    ownership_started: asyncio.Event,
+) -> Trajectory:
+    """Hand fork ownership to ``run_episode`` before its first suspension."""
+
+    ownership_started.set()
+    return await run_episode(agent, env, timeout=timeout)
+
+
 async def _run_subagent_trajectory(
     *,
     goal: str,
@@ -210,11 +221,14 @@ async def _run_subagent_trajectory(
     task = parent_traj.task if parent_traj is not None and parent_traj.task is not None else env.task
 
     subtask = task.fork(goal, max_steps, task_misc=task_misc)
-    forked_agent = await agent.fork(subtask)
-    forked_env = await env.fork(subtask)
+    tracker = budget_tracker.get()
+    reserved_budget = max_steps + 1
+    forked_agent: ForkableAgent | None = None
+    forked_env: ForkableEnv | None = None
+    episode_ownership_started = asyncio.Event()
 
     try:
-        budget_tracker.get().reserve_budget(max_steps + 1, raise_on_failure=True)
+        tracker.reserve_budget(reserved_budget, raise_on_failure=True)
     except (BudgetExceededError, ValueError) as e:
         guidance = getattr(e, "guidance", "")
         msg = f"Not enough budget to launch subagent for goal {goal}. {e}"
@@ -223,21 +237,36 @@ async def _run_subagent_trajectory(
         return msg
 
     try:
+        forked_agent = await agent.fork(subtask)
+        forked_env = await env.fork(subtask)
         _ = verbose
         parent_token = current_trajectory.set(parent_traj) if parent_traj is not None else None
         try:
             return await asyncio.create_task(
-                run_episode(
+                _run_owned_subagent_episode(
                     forked_agent,
                     forked_env,
                     timeout=episode_step_timeout.get(),
+                    ownership_started=episode_ownership_started,
                 )
             )
         finally:
             if parent_token is not None:
                 current_trajectory.reset(parent_token)
     finally:
-        budget_tracker.get().release_budget(max_steps + 1)
+        try:
+            # Release synchronously, before cleanup awaits can be cancelled or
+            # mutate the trajectory context used by StepBudgetTracker.
+            tracker.release_budget(reserved_budget)
+        finally:
+            # Once the child task starts, run_episode is the sole owner and
+            # closes both resources. Before that handoff, close only handles
+            # that were successfully returned by their fork methods.
+            if not episode_ownership_started.is_set():
+                if forked_agent is not None:
+                    await _close_episode_resource(forked_agent, "forked agent")
+                if forked_env is not None:
+                    await _close_episode_resource(forked_env, "forked environment")
 
 
 async def _maybe_judge_subagent(*, goal: str, traj: Trajectory) -> None:

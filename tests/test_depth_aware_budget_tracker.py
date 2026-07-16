@@ -253,14 +253,11 @@ async def test_depth_limit_blocks_subagent():
     # Subagent should have been blocked; parent still uses its steps
     assert len(traj.steps) == parent_max
 
-    # Only the root trajectory should exist (no child trajectories besides the blocked fork attempt)
+    # Admission fails before resource forks, so only the root trajectory exists.
     collection = current_trajectory_collection.get()
     child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
     assert child_ids == []
-    # The forked env/agent are created before reserve_budget, but run_episode was never called
-    # for the child because reserve_budget failed. So no child trajectory should have steps.
-    # Actually, the fork happens before the check, but the episode is never started.
-    # Let's check that the captured message mentions depth.
+    # The captured message still explains the depth limit to the parent.
     msg_steps = [s for s in traj.steps if isinstance(s, dict) and "subagent_message" in s]
     assert len(msg_steps) == 1
     assert "depth" in msg_steps[0]["subagent_message"].lower()
@@ -306,9 +303,8 @@ async def test_depth_limit_allows_within_limit():
         tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == child_ids[0]
     ]
     assert grandchild_ids == []
-    # No grandchild trajectory should have been run
-    # (the fork creates agent/env but run_episode is never called due to reserve_budget failure)
-    # Check the child's captured message mentions depth
+    # No grandchild resources or trajectory are created after admission fails.
+    # The child's captured message still explains the depth limit.
     msg_steps = [s for s in child_traj.steps if isinstance(s, dict) and "subagent_message" in s]
     assert len(msg_steps) == 1
     assert "depth" in msg_steps[0]["subagent_message"].lower()
