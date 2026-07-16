@@ -61,7 +61,31 @@ def test_toolathlon_launcher_mounts_supervisor_without_bad_exit_cascade():
     assert "srun_pid=${server_pid} srun_state=${srun_state}" in launcher
     assert "WARNING: Toolathlon env-server step died" in launcher
     assert "WARNING: Toolathlon env-server endpoint is unreachable" in launcher
-    assert "stop_gpu_keepalive_before_training" in launcher
+    assert "stop_gpu_keepalive_before_training" not in launcher
+    assert "ROLLOUT_IDLE_GUARD" not in launcher
+    assert "rollout_gpu_idle_guard" not in launcher
+
+    keepalive_start = launcher.index("# --- GPU keepalive (starts immediately")
+    keepalive_end = launcher.index("start_env_servers", keepalive_start)
+    keepalive_step = launcher[keepalive_start:keepalive_end]
+    assert '--nodes="${NNODES}"' in keepalive_step
+    assert '--ntasks="${NNODES}"' in keepalive_step
+    assert "--ntasks-per-node=1" in keepalive_step
+    assert '--gpus-per-node="${GPUS_PER_NODE}"' in keepalive_step
+    assert "export KEEPALIVE_START_DELAY_SEC=0" in keepalive_step
+    assert "monitor_gpu_keepalive &" in launcher
+    assert launcher.index("monitor_gpu_keepalive &") < launcher.index(
+        "# --- Read-only host controller"
+    )
+    for expected_default in (
+        "KEEPALIVE_TICK_SEC=${KEEPALIVE_TICK_SEC:-5}",
+        "KEEPALIVE_MATMUL_DIM=${KEEPALIVE_MATMUL_DIM:-4096}",
+        "KEEPALIVE_MATMUL_REPS=${KEEPALIVE_MATMUL_REPS:-2000}",
+        "KEEPALIVE_MAX_SEC=${KEEPALIVE_MAX_SEC:-16200}",
+        "KEEPALIVE_EXPECTED_GPUS=${KEEPALIVE_EXPECTED_GPUS:-${GPUS_PER_NODE}}",
+        "KEEPALIVE_MAX_CONSECUTIVE_ERRORS=${KEEPALIVE_MAX_CONSECUTIVE_ERRORS:-3}",
+    ):
+        assert expected_default in launcher
     assert ("${TOOLATHLON_SERVER_ENTRYPOINT}:${TOOLATHLON_CONTAINER_ENTRYPOINT}:ro") in launcher
     assert "/app/entrypoint.sh" not in launcher
 

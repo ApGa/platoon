@@ -39,7 +39,6 @@ CONTAINER_IMAGE=${USER_ROOT}/images/platoon.sqsh
 OPENREWARD_DIR=${REPO_ROOT}/plugins/openreward
 JOB_SCRIPT=${OPENREWARD_JOB_SCRIPT:-$(readlink -f "${BASH_SOURCE[0]}")}
 KEEPALIVE_SCRIPT=${REPO_ROOT}/slurm-scripts/gpu_keepalive.py
-ROLLOUT_IDLE_GUARD_SCRIPT=${REPO_ROOT}/slurm-scripts/rollout_gpu_idle_guard.py
 PREPARE_ENV_SCRIPT=${REPO_ROOT}/slurm-scripts/prepare_openreward_env.sh
 TOOLATHLON_SERVER_ENTRYPOINT=${OPENREWARD_TOOLATHLON_SERVER_ENTRYPOINT:-${REPO_ROOT}/plugins/openreward/scripts/openreward-toolathlon-resilient-entrypoint.sh}
 TOOLATHLON_CONTAINER_ENTRYPOINT=/app/openreward-toolathlon-resilient-entrypoint.sh
@@ -86,10 +85,6 @@ if [[ ! -f "${CONFIG}" ]]; then
 fi
 if [[ ! -x "${TOOLATHLON_SERVER_ENTRYPOINT}" ]]; then
   echo "ERROR: Toolathlon server supervisor is missing or not executable: ${TOOLATHLON_SERVER_ENTRYPOINT}" >&2
-  exit 2
-fi
-if [[ ! -x "${ROLLOUT_IDLE_GUARD_SCRIPT}" ]]; then
-  echo "ERROR: rollout GPU idle guard is missing or not executable: ${ROLLOUT_IDLE_GUARD_SCRIPT}" >&2
   exit 2
 fi
 # The controller and workers intentionally run from a neutral job-state
@@ -216,7 +211,6 @@ OPENREWARD_JOB_STATE_DIR=${OPENREWARD_JOB_STATE_ROOT}/${JOB_INSTANCE_ID}
 OPENREWARD_ENV_READY_FILE=${OPENREWARD_JOB_STATE_DIR}/env-ready
 OPENREWARD_RUNTIME_GUARD_BIN=${OPENREWARD_JOB_STATE_DIR}/runtime-guard-bin
 KEEPALIVE_READY_DIR=${OPENREWARD_JOB_STATE_DIR}/keepalive-ready
-ROLLOUT_IDLE_GUARD_READY_DIR=${OPENREWARD_JOB_STATE_DIR}/gpu-idle-guard-ready
 # The old project venv is no longer mutated. It provides torch immediately to
 # the keepalive while a first content-addressed training environment is built.
 OPENREWARD_KEEPALIVE_PYTHON=${OPENREWARD_KEEPALIVE_PYTHON:-${OPENREWARD_DIR}/.venv/bin/python}
@@ -339,24 +333,6 @@ export KEEPALIVE_MAX_SEC=${KEEPALIVE_MAX_SEC:-16200}
 export KEEPALIVE_EXPECTED_GPUS=${KEEPALIVE_EXPECTED_GPUS:-${GPUS_PER_NODE}}
 export KEEPALIVE_MAX_CONSECUTIVE_ERRORS=${KEEPALIVE_MAX_CONSECUTIVE_ERRORS:-3}
 KEEPALIVE_WAIT_SECS=${KEEPALIVE_WAIT_SECS:-300}
-# Runtime idle protection is separate from the setup-only keepalive above. The
-# scheduler starts one sibling for each exact actor and rollout role, pinned to
-# its resolved role nodes. The Python guard independently rejects
-# configurations above a 25% duty cycle or a 2048 matrix dimension.
-export PLATOON_AREAL_ROLLOUT_IDLE_GUARD=${PLATOON_AREAL_ROLLOUT_IDLE_GUARD:-1}
-export ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS=${ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS:-10}
-export ROLLOUT_IDLE_GUARD_INTERVAL_JITTER_SECONDS=${ROLLOUT_IDLE_GUARD_INTERVAL_JITTER_SECONDS:-2}
-export ROLLOUT_IDLE_GUARD_SAMPLE_COUNT=${ROLLOUT_IDLE_GUARD_SAMPLE_COUNT:-2}
-export ROLLOUT_IDLE_GUARD_SAMPLE_INTERVAL_SECONDS=${ROLLOUT_IDLE_GUARD_SAMPLE_INTERVAL_SECONDS:-2}
-export ROLLOUT_IDLE_GUARD_UTILIZATION_THRESHOLD=${ROLLOUT_IDLE_GUARD_UTILIZATION_THRESHOLD:-10}
-export ROLLOUT_IDLE_GUARD_BURST_SECONDS=${ROLLOUT_IDLE_GUARD_BURST_SECONDS:-2}
-export ROLLOUT_IDLE_GUARD_MATRIX_DIM=${ROLLOUT_IDLE_GUARD_MATRIX_DIM:-1024}
-export ROLLOUT_IDLE_GUARD_OPERATIONS_PER_SYNC=${ROLLOUT_IDLE_GUARD_OPERATIONS_PER_SYNC:-32}
-export ROLLOUT_IDLE_GUARD_EXPECTED_DEVICES=1
-export ROLLOUT_IDLE_GUARD_MAX_CONSECUTIVE_QUERY_ERRORS=${ROLLOUT_IDLE_GUARD_MAX_CONSECUTIVE_QUERY_ERRORS:-5}
-export ROLLOUT_IDLE_GUARD_MAX_CONSECUTIVE_CUDA_ERRORS=${ROLLOUT_IDLE_GUARD_MAX_CONSECUTIVE_CUDA_ERRORS:-3}
-export ROLLOUT_IDLE_GUARD_LOG_EVERY_CYCLES=${ROLLOUT_IDLE_GUARD_LOG_EVERY_CYCLES:-10}
-
 
 unset NVTE_FLASH_ATTN NVTE_FUSED_ATTN NVTE_UNFUSED_ATTN
 export PLATOON_MEGATRON_ATTENTION_BACKEND=${PLATOON_MEGATRON_ATTENTION_BACKEND:-flash}
@@ -380,9 +356,6 @@ for package_manager in pip pip3 pip3.12; do
 done
 mkdir -p "${KEEPALIVE_READY_DIR}"
 rm -f "${KEEPALIVE_READY_DIR}"/*.ready "${KEEPALIVE_READY_DIR}"/.*.tmp
-mkdir -p "${ROLLOUT_IDLE_GUARD_READY_DIR}/actor" "${ROLLOUT_IDLE_GUARD_READY_DIR}/rollout"
-rm -f "${ROLLOUT_IDLE_GUARD_READY_DIR}/actor"/*.ready "${ROLLOUT_IDLE_GUARD_READY_DIR}/actor"/.*.tmp
-rm -f "${ROLLOUT_IDLE_GUARD_READY_DIR}/rollout"/*.ready "${ROLLOUT_IDLE_GUARD_READY_DIR}/rollout"/.*.tmp
 mkdir -p "${STOP_DIR}"
 
 # --- Node list + sharded session URLs ----------------------------------------
@@ -518,11 +491,6 @@ export PLATOON_AREAL_PREALLOC_SRUN_BIN=${PLATOON_AREAL_PREALLOC_SRUN_BIN:-$(comm
 export PLATOON_AREAL_PREALLOC_SRUN_ARGS=${PLATOON_AREAL_PREALLOC_SRUN_ARGS:-"--unbuffered --mpi=pmi2 -K --overlap"}
 export PLATOON_AREAL_PREALLOC_GPU_FLAG=${PLATOON_AREAL_PREALLOC_GPU_FLAG:-"--gpus-per-node={gpus}"}
 export PLATOON_AREAL_PREALLOC_CONFIGURE_CONCURRENCY=${PLATOON_AREAL_PREALLOC_CONFIGURE_CONCURRENCY:-16}
-export PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT="${ROLLOUT_IDLE_GUARD_SCRIPT}"
-export PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON="${OPENREWARD_JOB_PYTHON}"
-export PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR="${ROLLOUT_IDLE_GUARD_READY_DIR}"
-export PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX="${USER_ROOT}/logs/gpu-idle-guard-${RUN_ID}-${JOB_INSTANCE_ID}"
-export PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_TIMEOUT=${PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_TIMEOUT:-120}
 export PLATOON_AREAL_PREALLOC_WORKER_PREAMBLE="
   set -euo pipefail
   export HOME=${USER_ROOT}
@@ -818,27 +786,6 @@ monitor_gpu_keepalive() {
   kill -TERM "${launcher_pid}" 2>/dev/null || true
 }
 
-stop_gpu_keepalive_before_training() {
-  # The keepalive owns all GPUs only to bridge server/environment setup. Once
-  # the trainer controller starts, AReaL launches real actor and rollout steps
-  # across the allocation. Leaving the synthetic 4096x4096 matmul workload
-  # alive beside those workers both wastes capacity and has repeatedly ended in
-  # a single keepalive rank being SIGKILLed, which the safety monitor correctly
-  # treats as loss of idle-GPU protection. Stop the monitor first so this
-  # intentional handoff cannot race its failure path.
-  if [[ -n "${keepalive_monitor_pid}" ]] && kill -0 "${keepalive_monitor_pid}" 2>/dev/null; then
-    kill "${keepalive_monitor_pid}" 2>/dev/null || true
-    wait "${keepalive_monitor_pid}" 2>/dev/null || true
-  fi
-  keepalive_monitor_pid=
-
-  if [[ -n "${keepalive_pid}" ]] && kill -0 "${keepalive_pid}" 2>/dev/null; then
-    echo "Stopping setup-only GPU keepalive before trainer handoff (pid ${keepalive_pid})."
-    kill "${keepalive_pid}" 2>/dev/null || true
-    wait "${keepalive_pid}" 2>/dev/null || true
-  fi
-  keepalive_pid=
-}
 
 # A manifest match alone cannot prove that a supposedly immutable environment
 # was not modified after publication.  Invalidate a poisoned warm cache before
@@ -1004,9 +951,6 @@ seal_environment_runtime
 touch "${OPENREWARD_ENV_READY_FILE}"
 
 # --- Read-only host controller: runs trainer and spawns workers ----------------
-if [[ "${OPENREWARD_GPU_KEEPALIVE}" == "1" ]]; then
-  stop_gpu_keepalive_before_training
-fi
 srun \
   --overlap \
   --unbuffered \

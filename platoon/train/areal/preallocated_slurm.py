@@ -11,7 +11,6 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
-from pathlib import Path
 
 from areal.api import Job, Worker
 from areal.api.cli_args import SchedulingSpec, SchedulingStrategyType
@@ -40,8 +39,6 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         super().__init__(*args, **kwargs)
         self._role_processes: dict[str, subprocess.Popen] = {}
         self._role_commands: dict[str, str] = {}
-        self._role_idle_guard_processes: dict[str, subprocess.Popen] = {}
-        self._role_idle_guard_commands: dict[str, str] = {}
         self._stopping_roles: set[str] = set()
         # Round-robin cursor used to pin each separated role to distinct nodes of
         # the allocation. Without this, every single-node srun step launches with
@@ -382,194 +379,11 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             start_new_session=True,
         )
 
-    @staticmethod
-    def _idle_guard_enabled(role: str) -> bool:
-        return role in {"actor", "rollout"} and PreallocatedSlurmScheduler._truthy_env(
-            os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD", "0")
-        )
-
-    def _build_idle_guard_command(
-        self, role: str, nodes: int, nodelist: str | None
-    ) -> str:
-        """Build a sibling srun pinned to an exact guarded-role topology."""
-
-        if not nodelist:
-            raise WorkerCreationError(
-                role,
-                "Idle guard requires an exact role nodelist",
-            )
-        script = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT")
-        python = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON")
-        ready_root = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR")
-        log_prefix_root = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX")
-        missing = [
-            name
-            for name, value in (
-                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT", script),
-                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON", python),
-                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR", ready_root),
-                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX", log_prefix_root),
-            )
-            if not value
-        ]
-        if missing:
-            raise WorkerCreationError(
-                role,
-                f"Idle guard configuration is missing: {', '.join(missing)}",
-            )
-        ready_dir = f"{ready_root}/{role}"
-        log_prefix = f"{log_prefix_root}-{role}"
-
-        guard_cmd = " ".join(
-            [
-                "exec",
-                shlex.quote(python),
-                "-u",
-                shlex.quote(script),
-                "--expected-devices",
-                "1",
-                "--ready-dir",
-                shlex.quote(ready_dir),
-            ]
-        )
-        bash_cmds = [*self._worker_preamble(), guard_cmd]
-        guard_script = ";\n".join(command.strip() for command in bash_cmds if command.strip())
-        task_count = nodes * self.n_gpus_per_node
-        srun_args = [
-            self._srun_binary(),
-            "--overlap",
-            "--exact",
-            "--unbuffered",
-            "--kill-on-bad-exit=1",
-            f"--job-name={role}-idle-guard",
-            f"--nodes={nodes}",
-            f"--ntasks={task_count}",
-            f"--ntasks-per-node={self.n_gpus_per_node}",
-            "--cpu-bind=none",
-            "--cpus-per-task=1",
-            "--mem-per-cpu=1024M",
-            "--gpus-per-task=1",
-            "--gpu-bind=single:1",
-            f"--nodelist={nodelist}",
-            f"--output={log_prefix}-%N-%t.log",
-            f"--error={log_prefix}-%N-%t.log",
-            *self._container_srun_args(),
-            "/bin/bash",
-            "-lc",
-            guard_script,
-        ]
-        return " ".join(shlex.quote(str(arg)) for arg in srun_args)
-
-    def _launch_idle_guard_process(self, role: str, command: str) -> subprocess.Popen:
-        logger.info("Launching GPU idle guard for role '%s'", role)
-        logger.info("Preallocated Slurm GPU idle guard command for '%s': %s", role, command)
-        return subprocess.Popen(
-            command,
-            shell=True,
-            executable="/bin/bash",
-            start_new_session=True,
-        )
-
-    @staticmethod
-    def _prepare_idle_guard_ready_dir(role: str) -> Path:
-        ready_value = os.environ["PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR"]
-        ready_dir = Path(ready_value) / role
-        ready_dir.mkdir(parents=True, exist_ok=True)
-        for pattern in ("*.ready", ".*.tmp"):
-            for marker in ready_dir.glob(pattern):
-                marker.unlink()
-        return ready_dir
-
-    def _wait_for_idle_guard(
-        self,
-        role: str,
-        proc: subprocess.Popen,
-        ready_dir: Path,
-        expected_tasks: int,
-    ) -> None:
-        timeout = float(os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_TIMEOUT", "120"))
-        if timeout <= 0:
-            raise ValueError("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_TIMEOUT must be positive")
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            status = proc.poll()
-            if status is not None:
-                raise RuntimeError(f"GPU idle guard exited before readiness with status {status}")
-            if all((ready_dir / f"{rank}.ready").is_file() for rank in range(expected_tasks)):
-                logger.info(
-                    "GPU idle guard for role '%s' is ready on %s GPU task(s)",
-                    role,
-                    expected_tasks,
-                )
-                return
-            time.sleep(0.25)
-        ready_count = sum((ready_dir / f"{rank}.ready").is_file() for rank in range(expected_tasks))
-        raise TimeoutError(
-            f"GPU idle guard for {role} timed out: {ready_count}/{expected_tasks} tasks"
-        )
-
-    def _start_idle_guard(
-        self,
-        role: str,
-        nodes: int,
-        nodelist: str | None,
-    ) -> None:
-        command = self._build_idle_guard_command(role, nodes, nodelist)
-        ready_dir = self._prepare_idle_guard_ready_dir(role)
-        proc = self._launch_idle_guard_process(role, command)
-        self._role_idle_guard_processes[role] = proc
-        self._role_idle_guard_commands[role] = command
-        try:
-            self._wait_for_idle_guard(
-                role,
-                proc,
-                ready_dir,
-                nodes * self.n_gpus_per_node,
-            )
-        except Exception as exc:
-            self._terminate_idle_guard_process(role)
-            raise WorkerCreationError(
-                role,
-                "GPU idle guard failed to become ready",
-                str(exc),
-            ) from exc
-
-    def _terminate_idle_guard_process(self, role: str) -> None:
-        proc = self._role_idle_guard_processes.pop(role, None)
-        self._role_idle_guard_commands.pop(role, None)
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    logger.warning("Force killing GPU idle guard for role '%s'", role)
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait(timeout=10)
-        except ProcessLookupError:
-            pass
-
     def _check_job_status(self, role: str) -> None:
-        """Check the local srun processes instead of querying child Slurm jobs."""
+        """Check the local srun process instead of querying child Slurm jobs."""
 
         if role in self._colocated_roles:
             return self._check_job_status(self._colocated_roles[role])
-
-        guard_proc = self._role_idle_guard_processes.get(role)
-        if guard_proc is not None and role not in self._stopping_roles:
-            guard_status = guard_proc.poll()
-            if guard_status is not None:
-                guard_pid = guard_proc.pid
-                self._role_idle_guard_processes.pop(role, None)
-                self._role_idle_guard_commands.pop(role, None)
-                self._terminate_role_process(role)
-                raise WorkerFailedError(
-                    f"{role}-idle-guard/*",
-                    guard_pid,
-                    f"GPU idle guard exited unexpectedly with status {guard_status}",
-                )
 
         proc = self._role_processes.get(role)
         if proc is None:
@@ -583,7 +397,6 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         if role in self._stopping_roles:
             return
 
-        self._terminate_idle_guard_process(role)
         logs = self._read_log_tail(role)
         raise WorkerFailedError(
             f"{role}/*",
@@ -691,53 +504,30 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             nodelist=nodelist,
             exclude=spec.exclude,
         )
-        guard_started = False
-        if self._idle_guard_enabled(role):
-            self._start_idle_guard(role, nodes, nodelist)
-            guard_started = True
-        try:
-            proc = self._launch_role_process(role, command)
-        except Exception:
-            if guard_started:
-                self._terminate_idle_guard_process(role)
-            raise
+        proc = self._launch_role_process(role, command)
 
-        # Track the live srun before constructing/registering worker metadata so
-        # any later exception can terminate both siblings without leaking a step.
+        workers: list[SlurmWorkerInfo] = []
+        worker_ids: list[str] = []
+        for idx in range(num_workers):
+            worker_id = f"{role}/{idx}"
+            worker = Worker(id=worker_id, ip="", worker_ports=[], engine_ports=[])
+            worker_spec = schedulings[idx] if len(schedulings) == num_workers else schedulings[0]
+            workers.append(
+                SlurmWorkerInfo(
+                    worker=worker,
+                    role=role,
+                    slurm_job_id=proc.pid,
+                    task_index=idx,
+                    discovered=False,
+                    spec=worker_spec,
+                )
+            )
+            worker_ids.append(worker_id)
+
+        self._workers[role] = workers
+        self._jobs[role] = proc.pid
         self._role_processes[role] = proc
         self._role_commands[role] = command
-        try:
-            workers: list[SlurmWorkerInfo] = []
-            worker_ids: list[str] = []
-            for idx in range(num_workers):
-                worker_id = f"{role}/{idx}"
-                worker = Worker(id=worker_id, ip="", worker_ports=[], engine_ports=[])
-                worker_spec = (
-                    schedulings[idx]
-                    if len(schedulings) == num_workers
-                    else schedulings[0]
-                )
-                workers.append(
-                    SlurmWorkerInfo(
-                        worker=worker,
-                        role=role,
-                        slurm_job_id=proc.pid,
-                        task_index=idx,
-                        discovered=False,
-                        spec=worker_spec,
-                    )
-                )
-                worker_ids.append(worker_id)
-
-            self._workers[role] = workers
-            self._jobs[role] = proc.pid
-        except Exception:
-            self._workers.pop(role, None)
-            self._jobs.pop(role, None)
-            self._terminate_idle_guard_process(role)
-            self._terminate_role_process(role)
-            self._role_commands.pop(role, None)
-            raise
 
         return worker_ids
 
@@ -762,12 +552,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             return
 
         logger.info("Deleting preallocated Slurm workers for role '%s'", role)
-        self._stopping_roles.add(role)
-        try:
-            self._terminate_idle_guard_process(role)
-            self._terminate_role_process(role)
-        finally:
-            self._stopping_roles.discard(role)
+        self._terminate_role_process(role)
         del self._workers[role]
         self._configured_worker_generations.pop(role, None)
         self._jobs.pop(role, None)
