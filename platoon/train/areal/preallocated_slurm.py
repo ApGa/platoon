@@ -506,28 +506,41 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         )
         proc = self._launch_role_process(role, command)
 
-        workers: list[SlurmWorkerInfo] = []
-        worker_ids: list[str] = []
-        for idx in range(num_workers):
-            worker_id = f"{role}/{idx}"
-            worker = Worker(id=worker_id, ip="", worker_ports=[], engine_ports=[])
-            worker_spec = schedulings[idx] if len(schedulings) == num_workers else schedulings[0]
-            workers.append(
-                SlurmWorkerInfo(
-                    worker=worker,
-                    role=role,
-                    slurm_job_id=proc.pid,
-                    task_index=idx,
-                    discovered=False,
-                    spec=worker_spec,
-                )
-            )
-            worker_ids.append(worker_id)
-
-        self._workers[role] = workers
-        self._jobs[role] = proc.pid
+        # Track the live srun before constructing worker metadata so any
+        # registration failure can terminate the already-launched role.
         self._role_processes[role] = proc
         self._role_commands[role] = command
+        try:
+            workers: list[SlurmWorkerInfo] = []
+            worker_ids: list[str] = []
+            for idx in range(num_workers):
+                worker_id = f"{role}/{idx}"
+                worker = Worker(id=worker_id, ip="", worker_ports=[], engine_ports=[])
+                worker_spec = (
+                    schedulings[idx]
+                    if len(schedulings) == num_workers
+                    else schedulings[0]
+                )
+                workers.append(
+                    SlurmWorkerInfo(
+                        worker=worker,
+                        role=role,
+                        slurm_job_id=proc.pid,
+                        task_index=idx,
+                        discovered=False,
+                        spec=worker_spec,
+                    )
+                )
+                worker_ids.append(worker_id)
+
+            self._workers[role] = workers
+            self._jobs[role] = proc.pid
+        except Exception:
+            self._workers.pop(role, None)
+            self._jobs.pop(role, None)
+            self._terminate_role_process(role)
+            self._role_commands.pop(role, None)
+            raise
 
         return worker_ids
 

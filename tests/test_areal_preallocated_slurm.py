@@ -494,3 +494,58 @@ def test_create_workers_tracks_background_srun_process(monkeypatch):
     process.status = 1
     with pytest.raises(FakeWorkerFailedError):
         scheduler._check_job_status("actor")
+
+
+def test_worker_registration_failure_cleans_up_role_process(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    monkeypatch.setattr(scheduler, "_allocation_nodes", lambda: ["node0"])
+
+    class FakeProcess:
+        pid = 900
+
+        def __init__(self):
+            self.status = None
+
+        def poll(self):
+            return self.status
+
+        def wait(self, timeout):
+            self.status = -15
+            return self.status
+
+    process = FakeProcess()
+    monkeypatch.setattr(
+        scheduler,
+        "_launch_role_process",
+        lambda role, command: process,
+    )
+    monkeypatch.setattr(
+        module,
+        "Worker",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("registration failed")),
+    )
+    signals = []
+    monkeypatch.setattr(
+        module.os,
+        "killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    with pytest.raises(RuntimeError, match="registration failed"):
+        scheduler.create_workers(
+            FakeJob(
+                role="rollout",
+                replicas=1,
+                tasks=[FakeSchedulingSpec(cpu=4, gpu=8, mem=16)],
+                scheduling_strategy=types.SimpleNamespace(
+                    type="separation", target=None
+                ),
+            )
+        )
+
+    assert signals == [(process.pid, module.signal.SIGTERM)]
+    assert "rollout" not in scheduler._role_processes
+    assert "rollout" not in scheduler._role_commands
+    assert "rollout" not in scheduler._workers
+    assert "rollout" not in scheduler._jobs
