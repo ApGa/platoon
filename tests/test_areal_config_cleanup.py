@@ -318,6 +318,52 @@ def test_judged_recursive_r3_fp32_yaml_composes_all_features():
     assert "moe_z_loss_coeff" not in composed.actor.megatron
 
 
+def test_mixed_recursive_r3_fp32_yaml_composes_balancing_and_child_policies():
+    config_dir = REPO_ROOT / "plugins/openreward/platoon/openreward/configs/areal"
+    config_name = (
+        "toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-ptc-recursive-"
+        "r3-fp32-lm-head"
+    )
+    config_path = config_dir / f"{config_name}.yaml"
+    with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
+        composed = compose(config_name=config_name)
+
+    literal = OmegaConf.load(config_path)
+    assert literal.defaults[0] == "toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-r3-fp32-lm-head"
+    assert "openreward" in literal
+    assert "actor" in literal
+
+    environments = {
+        environment.label: environment
+        for environment in composed.openreward.environments
+    }
+    assert list(environments) == ["toolathlon", "tmax", "swe_rebench"]
+    assert {label: environment.sampling_weight for label, environment in environments.items()} == {
+        "toolathlon": 1.0,
+        "tmax": 1.0,
+        "swe_rebench": 1.0,
+    }
+    assert environments["swe_rebench"].subagent_environment_access == "read_only"
+    assert "subagent_environment_access" not in environments["toolathlon"]
+    assert "subagent_environment_access" not in environments["tmax"]
+
+    assert composed.openreward.enable_programmatic_tool_calling is True
+    assert composed.openreward.enable_recursive_subagents is True
+    assert composed.openreward.subagent_default_max_steps == 50
+    assert composed.openreward.subagent_max_depth == 2
+    assert composed.workflow_config.depth_level_weighting is True
+    assert composed.workflow_config.depth_level_discount_gamma is None
+    assert composed.workflow_config.leave_one_out_baseline is True
+    assert composed.workflow_config.rollout_config.propogate_root_success is True
+    assert composed.trial_name.endswith("ptc-recursive-r3-fp32-lm-head-trial0")
+
+    assert composed.rollout.return_routed_experts is True
+    assert composed.actor.enable_router_replay is True
+    assert composed.actor.megatron.enable_mtp is False
+    assert composed.actor.megatron.enable_fp32_lm_head is True
+    assert composed.ref.megatron.enable_fp32_lm_head is True
+
+
 def test_32node_judged_recursive_config_has_balanced_topology_and_timeouts():
     config_dir = REPO_ROOT / "plugins/openreward/platoon/openreward/configs/areal"
     config_name = "toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head"
