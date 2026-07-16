@@ -42,7 +42,7 @@ require_source_revision() {
 case "${KIND}" in
   tmax)
     ENV_ROOT=${REPO_ROOT}/external/tmax
-    TMAX_SOURCE_REVISION=${TMAX_SOURCE_REVISION:-5c6cdfa3d9456af0829d8d0cbab38ec89767aacc}
+    TMAX_SOURCE_REVISION=${TMAX_SOURCE_REVISION:-00607489e4a433f24db3b791185b0d1f652246cb}
     require_source_revision "${ENV_ROOT}" "${TMAX_SOURCE_REVISION}"
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
     [[ -x "${PYTHON}" ]] || {
