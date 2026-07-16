@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = REPO_ROOT / "slurm-scripts" / "rollout_gpu_idle_guard.py"
+
+
+@pytest.fixture()
+def guard_module():
+    spec = importlib.util.spec_from_file_location("rollout_gpu_idle_guard", SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class SequenceProbe:
+    def __init__(self, module, utilizations):
+        self._module = module
+        self._utilizations = iter(utilizations)
+
+    def read(self):
+        return self._module.GpuUtilization(
+            index=3,
+            uuid="GPU-test",
+            utilization=next(self._utilizations),
+        )
+
+
+class RecordingBurster:
+    low_priority = 0
+
+    def __init__(self):
+        self.calls = []
+
+    def burst(self, seconds):
+        self.calls.append(seconds)
+        return seconds + 0.01, 64
+
+
+def test_defaults_are_low_duty_and_sample_utilization_twice(guard_module):
+    config = guard_module.GuardConfig()
+
+    config.validate()
+
+    assert config.interval_seconds == 30
+    assert config.sample_count == 2
+    assert config.utilization_threshold == 10
+    assert config.burst_seconds == 1
+    assert config.matrix_dim == 1024
+    assert config.burst_seconds / config.interval_seconds < 0.05
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"matrix_dim": 4096}, "matrix_dim"),
+        ({"interval_seconds": 10, "burst_seconds": 1}, "duty cycle"),
+        ({"interval_seconds": 9}, "interval_seconds"),
+        ({"sample_count": 1}, "sample_count"),
+        ({"burst_seconds": 2.1}, "burst_seconds"),
+        ({"expected_devices": 8}, "one guard process"),
+    ],
+)
+def test_safety_validation_rejects_high_overhead_configs(guard_module, overrides, match):
+    values = guard_module.GuardConfig().__dict__ | overrides
+
+    with pytest.raises(ValueError, match=match):
+        guard_module.GuardConfig(**values).validate()
+
+
+def test_nvidia_smi_rows_are_parsed_strictly(guard_module):
+    rows = guard_module.parse_nvidia_smi_output("0, GPU-aaaa, 0\n3, GPU-bbbb, 17\n")
+
+    assert [(row.index, row.uuid, row.utilization) for row in rows] == [
+        (0, "GPU-aaaa", 0),
+        (3, "GPU-bbbb", 17),
+    ]
+
+    with pytest.raises(ValueError, match="invalid nvidia-smi row"):
+        guard_module.parse_nvidia_smi_output("0, GPU-aaaa, N/A\n")
+
+
+def test_visible_gpu_selection_uses_physical_index_or_uuid(guard_module):
+    rows = guard_module.parse_nvidia_smi_output("0, GPU-aaaa, 0\n3, GPU-bbbb, 17\n")
+
+    assert guard_module.select_visible_gpu(rows, ("3",)).uuid == "GPU-bbbb"
+    assert guard_module.select_visible_gpu(rows, ("GPU-aaaa",)).index == 0
+
+    with pytest.raises(RuntimeError, match="exactly one"):
+        guard_module.select_visible_gpu(rows, ())
+
+
+def test_single_visible_nvidia_smi_row_handles_container_index_remap(guard_module):
+    rows = guard_module.parse_nvidia_smi_output("7, GPU-remapped, 0\n")
+
+    selected = guard_module.select_visible_gpu(rows, ("0",))
+
+    assert selected.index == 7
+
+
+def test_recent_active_sample_skips_burst(guard_module):
+    config = guard_module.GuardConfig()
+    burster = RecordingBurster()
+    waits = []
+
+    result = guard_module.run_cycle(
+        SequenceProbe(guard_module, [0, 10]),
+        burster,
+        config,
+        waits.append,
+    )
+
+    assert result.action == "skip-active"
+    assert result.samples == (0, 10)
+    assert burster.calls == []
+    assert waits == [2]
+
+
+def test_two_idle_samples_trigger_one_bounded_burst(guard_module):
+    config = guard_module.GuardConfig()
+    burster = RecordingBurster()
+
+    result = guard_module.run_cycle(
+        SequenceProbe(guard_module, [0, 3]),
+        burster,
+        config,
+        lambda _seconds: None,
+    )
+
+    assert result.action == "burst"
+    assert burster.calls == [1]
+    assert result.operations == 64
+    assert result.burst_elapsed_seconds == pytest.approx(1.01)
+
+
+def test_low_priority_uses_cuda_least_urgent_end_of_range(guard_module):
+    assert guard_module.low_stream_priority((0, -1)) == 0
+
+
+def test_ready_marker_is_atomic_and_identifies_exact_gpu(guard_module, tmp_path, monkeypatch):
+    monkeypatch.setenv("SLURM_PROCID", "47")
+    gpu = guard_module.GpuUtilization(index=7, uuid="GPU-last", utilization=0)
+
+    marker = guard_module.publish_ready(
+        tmp_path,
+        gpu,
+        guard_module.GuardConfig(),
+        low_priority=0,
+    )
+
+    assert marker == tmp_path / "47.ready"
+    assert marker is not None
+    contents = marker.read_text(encoding="utf-8")
+    assert "gpu_index=7" in contents
+    assert "gpu_uuid=GPU-last" in contents
+    assert "stream_priority=0" in contents
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_environment_defaults_can_be_overridden(guard_module, monkeypatch):
+    monkeypatch.setenv("ROLLOUT_IDLE_GUARD_UTILIZATION_THRESHOLD", "15")
+    monkeypatch.setenv("ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS", "40")
+
+    config = guard_module.config_from_args(guard_module.parse_args([]))
+
+    assert config.utilization_threshold == 15
+    assert config.interval_seconds == 40
+
+
+def test_script_is_executable_after_install():
+    assert SCRIPT_PATH.exists()
+    # The source tree mode is part of the launcher contract.
+    assert os.access(SCRIPT_PATH, os.X_OK)
+
+
+def test_openreward_launcher_wires_separate_job_specific_rollout_guard():
+    launcher = (REPO_ROOT / "slurm-scripts" / "openreward-toolathlon-prealloc-base.sh").read_text(encoding="utf-8")
+
+    assert "ROLLOUT_IDLE_GUARD_READY_DIR=${OPENREWARD_JOB_STATE_DIR}/rollout-idle-guard-ready" in launcher
+    assert "PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT" in launcher
+    assert "PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON" in launcher
+    assert "rollout-idle-guard-${RUN_ID}-${JOB_INSTANCE_ID}" in launcher
+    assert "ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS:-30" in launcher
+    assert "ROLLOUT_IDLE_GUARD_BURST_SECONDS:-1" in launcher
+    assert "ROLLOUT_IDLE_GUARD_MATRIX_DIM:-1024" in launcher

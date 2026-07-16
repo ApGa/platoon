@@ -494,3 +494,247 @@ def test_create_workers_tracks_background_srun_process(monkeypatch):
     process.status = 1
     with pytest.raises(FakeWorkerFailedError):
         scheduler._check_job_status("actor")
+
+
+def _configure_rollout_idle_guard(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD", "1")
+    monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT", "/repo/rollout_gpu_idle_guard.py")
+    monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON", "/venv/bin/python")
+    monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR", str(tmp_path / "ready"))
+    monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX", str(tmp_path / "guard"))
+
+
+@pytest.mark.parametrize(
+    ("role", "enabled"),
+    [
+        ("rollout", True),
+        ("actor", False),
+        ("eval-rollout", False),
+        ("proxy-rollout", False),
+        ("rollout-worker", False),
+    ],
+)
+def test_rollout_idle_guard_matches_only_exact_role(monkeypatch, role, enabled):
+    module = _load_scheduler_module(monkeypatch)
+    monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD", "1")
+
+    assert module.PreallocatedSlurmScheduler._rollout_idle_guard_enabled(role) is enabled
+
+
+def test_rollout_idle_guard_command_uses_exact_resolved_topology(monkeypatch, tmp_path):
+    module = _load_scheduler_module(monkeypatch)
+    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    monkeypatch.setenv("PLATOON_AREAL_PREALLOC_CONTAINER_IMAGE", "/image.sqsh")
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    command = scheduler._build_rollout_idle_guard_command(
+        nodes=6,
+        nodelist="node10,node11,node12,node13,node14,node15",
+    )
+
+    assert "--overlap" in command
+    assert "--exact" in command
+    assert "--nodes=6" in command
+    assert "--ntasks=48" in command
+    assert "--ntasks-per-node=8" in command
+    assert "--gpus-per-task=1" in command
+    assert "--gpu-bind=single:1" in command
+    assert "--kill-on-bad-exit=1" in command
+    assert "--exclusive" not in command
+    assert "--nodelist=node10,node11,node12,node13,node14,node15" in command
+    assert "/repo/rollout_gpu_idle_guard.py" in command
+    assert str(tmp_path / "ready") in command
+
+
+def test_rollout_idle_guard_starts_before_rollout_on_same_nodes(monkeypatch, tmp_path):
+    module = _load_scheduler_module(monkeypatch)
+    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    scheduler = module.PreallocatedSlurmScheduler()
+    monkeypatch.setattr(
+        scheduler,
+        "_allocation_nodes",
+        lambda: [f"node{rank}" for rank in range(16)],
+    )
+    events = []
+
+    class FakeProcess:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        scheduler,
+        "_start_rollout_idle_guard",
+        lambda role, nodes, nodelist: events.append(("guard", role, nodes, nodelist)),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_launch_role_process",
+        lambda role, command: events.append(("role", role, command)) or FakeProcess(),
+    )
+
+    scheduler.create_workers(
+        FakeJob(
+            role="rollout",
+            replicas=6,
+            tasks=[FakeSchedulingSpec(cpu=4, gpu=8, mem=16)],
+            scheduling_strategy=types.SimpleNamespace(type="separation", target=None),
+        )
+    )
+
+    assert events[0] == (
+        "guard",
+        "rollout",
+        6,
+        "node0,node1,node2,node3,node4,node5",
+    )
+    assert events[1][0:2] == ("role", "rollout")
+    assert "--nodelist=node0,node1,node2,node3,node4,node5" in events[1][2]
+
+
+def test_rollout_role_launch_failure_cleans_up_ready_guard(monkeypatch, tmp_path):
+    module = _load_scheduler_module(monkeypatch)
+    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    scheduler = module.PreallocatedSlurmScheduler()
+    monkeypatch.setattr(scheduler, "_allocation_nodes", lambda: ["node0"])
+    events = []
+    monkeypatch.setattr(
+        scheduler,
+        "_start_rollout_idle_guard",
+        lambda role, nodes, nodelist: events.append(("start", role)),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_launch_role_process",
+        lambda role, command: (_ for _ in ()).throw(RuntimeError("launch failed")),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_rollout_idle_guard_process",
+        lambda role: events.append(("stop", role)),
+    )
+
+    with pytest.raises(RuntimeError, match="launch failed"):
+        scheduler.create_workers(
+            FakeJob(
+                role="rollout",
+                replicas=1,
+                tasks=[FakeSchedulingSpec(cpu=4, gpu=8, mem=16)],
+                scheduling_strategy=types.SimpleNamespace(type="separation", target=None),
+            )
+        )
+
+    assert events == [("start", "rollout"), ("stop", "rollout")]
+
+
+@pytest.mark.parametrize("guard_status", [0, 1])
+def test_unexpected_rollout_idle_guard_exit_fails_and_stops_role(monkeypatch, guard_status):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    class FakeProcess:
+        def __init__(self, pid, status):
+            self.pid = pid
+            self.status = status
+
+        def poll(self):
+            return self.status
+
+        def wait(self, timeout):
+            self.status = -15
+            return self.status
+
+    role_process = FakeProcess(100, None)
+    guard_process = FakeProcess(200, guard_status)
+    scheduler._role_processes["rollout"] = role_process
+    scheduler._role_idle_guard_processes["rollout"] = guard_process
+    scheduler._role_idle_guard_commands["rollout"] = "guard"
+    scheduler._workers["rollout"] = []
+    signals = []
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    with pytest.raises(FakeWorkerFailedError, match="idle guard exited unexpectedly"):
+        scheduler._check_job_status("rollout")
+
+    assert signals == [(100, module.signal.SIGTERM)]
+    assert "rollout" not in scheduler._role_processes
+    assert "rollout" not in scheduler._role_idle_guard_processes
+
+
+def test_delete_rollout_stops_guard_before_main(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler._workers["rollout"] = []
+    events = []
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_rollout_idle_guard_process",
+        lambda role: events.append(("guard", role)),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_role_process",
+        lambda role: events.append(("role", role)),
+    )
+
+    scheduler.delete_workers("rollout")
+
+    assert events == [("guard", "rollout"), ("role", "rollout")]
+
+def test_rollout_registration_failure_cleans_up_guard_and_role(monkeypatch, tmp_path):
+    module = _load_scheduler_module(monkeypatch)
+    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    scheduler = module.PreallocatedSlurmScheduler()
+    monkeypatch.setattr(scheduler, "_allocation_nodes", lambda: ["node0"])
+    events = []
+
+    class FakeProcess:
+        pid = 900
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        scheduler,
+        "_start_rollout_idle_guard",
+        lambda role, nodes, nodelist: events.append(("start", role)),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_launch_role_process",
+        lambda role, command: FakeProcess(),
+    )
+    monkeypatch.setattr(
+        module,
+        "Worker",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("registration failed")),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_rollout_idle_guard_process",
+        lambda role: events.append(("guard", role)),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_role_process",
+        lambda role: events.append(("role", role)),
+    )
+
+    with pytest.raises(RuntimeError, match="registration failed"):
+        scheduler.create_workers(
+            FakeJob(
+                role="rollout",
+                replicas=1,
+                tasks=[FakeSchedulingSpec(cpu=4, gpu=8, mem=16)],
+                scheduling_strategy=types.SimpleNamespace(
+                    type="separation", target=None
+                ),
+            )
+        )
+
+    assert events == [
+        ("start", "rollout"),
+        ("guard", "rollout"),
+        ("role", "rollout"),
+    ]
