@@ -45,25 +45,30 @@ class RecordingBurster:
         return seconds + 0.01, 64
 
 
-def test_defaults_are_low_duty_and_sample_utilization_twice(guard_module):
+def test_defaults_use_bounded_idle_duty_and_sample_utilization_twice(guard_module):
     config = guard_module.GuardConfig()
 
     config.validate()
 
-    assert config.interval_seconds == 30
+    assert config.interval_seconds == 10
+    assert config.interval_jitter_seconds == 2
     assert config.sample_count == 2
     assert config.utilization_threshold == 10
-    assert config.burst_seconds == 1
+    assert config.burst_seconds == 2
     assert config.matrix_dim == 1024
-    assert config.burst_seconds / config.interval_seconds < 0.05
+    assert config.sample_interval_seconds == 2
+    assert config.burst_seconds / config.interval_seconds == 0.2
+    assert config.burst_seconds / config.interval_seconds <= 0.25
 
 
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
         ({"matrix_dim": 4096}, "matrix_dim"),
-        ({"interval_seconds": 10, "burst_seconds": 1}, "duty cycle"),
+        ({"interval_seconds": 10, "burst_seconds": 2.6}, "duty cycle"),
         ({"interval_seconds": 9}, "interval_seconds"),
+        ({"interval_jitter_seconds": -0.1}, "interval_jitter_seconds"),
+        ({"interval_jitter_seconds": 10.1}, "interval_jitter_seconds"),
         ({"sample_count": 1}, "sample_count"),
         ({"burst_seconds": 2.1}, "burst_seconds"),
         ({"expected_devices": 8}, "one guard process"),
@@ -136,9 +141,40 @@ def test_two_idle_samples_trigger_one_bounded_burst(guard_module):
     )
 
     assert result.action == "burst"
-    assert burster.calls == [1]
+    assert burster.calls == [2]
     assert result.operations == 64
-    assert result.burst_elapsed_seconds == pytest.approx(1.01)
+    assert result.burst_elapsed_seconds == pytest.approx(2.01)
+
+
+def test_interval_jitter_is_deterministic_and_bounded_by_slurm_identity(guard_module):
+    identity = {
+        "SLURM_JOB_ID": "14078417",
+        "SLURM_STEP_ID": "6",
+        "SLURM_PROCID": "47",
+    }
+    seed = guard_module.deterministic_jitter_seed(identity)
+
+    assert seed == guard_module.deterministic_jitter_seed(dict(identity))
+    for name in identity:
+        changed = identity | {name: f"{identity[name]}-different"}
+        assert guard_module.deterministic_jitter_seed(changed) != seed
+
+    config = guard_module.GuardConfig()
+    first_rng = guard_module.random.Random(seed)
+    second_rng = guard_module.random.Random(seed)
+    first = [guard_module.cycle_interval_jitter(config, first_rng) for _ in range(8)]
+    second = [guard_module.cycle_interval_jitter(config, second_rng) for _ in range(8)]
+
+    assert first == second
+    assert all(0 <= jitter <= 2 for jitter in first)
+    assert len(set(first)) > 1
+    assert (
+        guard_module.cycle_interval_jitter(
+            guard_module.GuardConfig(interval_jitter_seconds=0),
+            guard_module.random.Random(seed),
+        )
+        == 0
+    )
 
 
 def test_burster_uses_public_default_stream_priority_without_range_query(
@@ -181,6 +217,7 @@ def test_ready_marker_is_atomic_and_identifies_exact_gpu(guard_module, tmp_path,
         gpu,
         guard_module.GuardConfig(),
         low_priority=0,
+        jitter_seed=123456,
     )
 
     assert marker == tmp_path / "47.ready"
@@ -189,17 +226,21 @@ def test_ready_marker_is_atomic_and_identifies_exact_gpu(guard_module, tmp_path,
     assert "gpu_index=7" in contents
     assert "gpu_uuid=GPU-last" in contents
     assert "stream_priority=0" in contents
+    assert "interval_jitter_seconds=2" in contents
+    assert "jitter_seed=123456" in contents
     assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_environment_defaults_can_be_overridden(guard_module, monkeypatch):
     monkeypatch.setenv("ROLLOUT_IDLE_GUARD_UTILIZATION_THRESHOLD", "15")
     monkeypatch.setenv("ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS", "40")
+    monkeypatch.setenv("ROLLOUT_IDLE_GUARD_INTERVAL_JITTER_SECONDS", "1.5")
 
     config = guard_module.config_from_args(guard_module.parse_args([]))
 
     assert config.utilization_threshold == 15
     assert config.interval_seconds == 40
+    assert config.interval_jitter_seconds == 1.5
 
 
 def test_script_is_executable_after_install():
@@ -208,13 +249,16 @@ def test_script_is_executable_after_install():
     assert os.access(SCRIPT_PATH, os.X_OK)
 
 
-def test_openreward_launcher_wires_separate_job_specific_rollout_guard():
+def test_openreward_launcher_wires_role_specific_runtime_guards():
     launcher = (REPO_ROOT / "slurm-scripts" / "openreward-toolathlon-prealloc-base.sh").read_text(encoding="utf-8")
 
-    assert "ROLLOUT_IDLE_GUARD_READY_DIR=${OPENREWARD_JOB_STATE_DIR}/rollout-idle-guard-ready" in launcher
+    assert "ROLLOUT_IDLE_GUARD_READY_DIR=${OPENREWARD_JOB_STATE_DIR}/gpu-idle-guard-ready" in launcher
+    assert "${ROLLOUT_IDLE_GUARD_READY_DIR}/actor" in launcher
+    assert "${ROLLOUT_IDLE_GUARD_READY_DIR}/rollout" in launcher
     assert "PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT" in launcher
     assert "PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON" in launcher
-    assert "rollout-idle-guard-${RUN_ID}-${JOB_INSTANCE_ID}" in launcher
-    assert "ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS:-30" in launcher
-    assert "ROLLOUT_IDLE_GUARD_BURST_SECONDS:-1" in launcher
+    assert "gpu-idle-guard-${RUN_ID}-${JOB_INSTANCE_ID}" in launcher
+    assert "ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS:-10" in launcher
+    assert "ROLLOUT_IDLE_GUARD_INTERVAL_JITTER_SECONDS:-2" in launcher
+    assert "ROLLOUT_IDLE_GUARD_BURST_SECONDS:-2" in launcher
     assert "ROLLOUT_IDLE_GUARD_MATRIX_DIM:-1024" in launcher

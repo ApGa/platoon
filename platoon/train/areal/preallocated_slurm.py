@@ -383,38 +383,42 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         )
 
     @staticmethod
-    def _rollout_idle_guard_enabled(role: str) -> bool:
-        return role == "rollout" and PreallocatedSlurmScheduler._truthy_env(
+    def _idle_guard_enabled(role: str) -> bool:
+        return role in {"actor", "rollout"} and PreallocatedSlurmScheduler._truthy_env(
             os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD", "0")
         )
 
-    def _build_rollout_idle_guard_command(self, nodes: int, nodelist: str | None) -> str:
-        """Build a sibling srun pinned to the already-resolved rollout nodes."""
+    def _build_idle_guard_command(
+        self, role: str, nodes: int, nodelist: str | None
+    ) -> str:
+        """Build a sibling srun pinned to an exact guarded-role topology."""
 
         if not nodelist:
             raise WorkerCreationError(
-                "rollout",
-                "Idle guard requires an exact rollout nodelist",
+                role,
+                "Idle guard requires an exact role nodelist",
             )
         script = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT")
         python = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON")
-        ready_dir = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR")
-        log_prefix = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX")
+        ready_root = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR")
+        log_prefix_root = os.environ.get("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX")
         missing = [
             name
             for name, value in (
                 ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT", script),
                 ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON", python),
-                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR", ready_dir),
-                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX", log_prefix),
+                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR", ready_root),
+                ("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_LOG_PREFIX", log_prefix_root),
             )
             if not value
         ]
         if missing:
             raise WorkerCreationError(
-                "rollout",
+                role,
                 f"Idle guard configuration is missing: {', '.join(missing)}",
             )
+        ready_dir = f"{ready_root}/{role}"
+        log_prefix = f"{log_prefix_root}-{role}"
 
         guard_cmd = " ".join(
             [
@@ -437,7 +441,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             "--exact",
             "--unbuffered",
             "--kill-on-bad-exit=1",
-            "--job-name=rollout-idle-guard",
+            f"--job-name={role}-idle-guard",
             f"--nodes={nodes}",
             f"--ntasks={task_count}",
             f"--ntasks-per-node={self.n_gpus_per_node}",
@@ -456,9 +460,9 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         ]
         return " ".join(shlex.quote(str(arg)) for arg in srun_args)
 
-    def _launch_rollout_idle_guard_process(self, command: str) -> subprocess.Popen:
-        logger.info("Launching rollout idle guard inside preallocated Slurm job")
-        logger.info("Preallocated Slurm rollout idle guard command: %s", command)
+    def _launch_idle_guard_process(self, role: str, command: str) -> subprocess.Popen:
+        logger.info("Launching GPU idle guard for role '%s'", role)
+        logger.info("Preallocated Slurm GPU idle guard command for '%s': %s", role, command)
         return subprocess.Popen(
             command,
             shell=True,
@@ -467,17 +471,18 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         )
 
     @staticmethod
-    def _prepare_rollout_idle_guard_ready_dir() -> Path:
+    def _prepare_idle_guard_ready_dir(role: str) -> Path:
         ready_value = os.environ["PLATOON_AREAL_ROLLOUT_IDLE_GUARD_READY_DIR"]
-        ready_dir = Path(ready_value)
+        ready_dir = Path(ready_value) / role
         ready_dir.mkdir(parents=True, exist_ok=True)
         for pattern in ("*.ready", ".*.tmp"):
             for marker in ready_dir.glob(pattern):
                 marker.unlink()
         return ready_dir
 
-    def _wait_for_rollout_idle_guard(
+    def _wait_for_idle_guard(
         self,
+        role: str,
         proc: subprocess.Popen,
         ready_dir: Path,
         expected_tasks: int,
@@ -489,43 +494,47 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         while time.monotonic() < deadline:
             status = proc.poll()
             if status is not None:
-                raise RuntimeError(f"rollout idle guard exited before readiness with status {status}")
+                raise RuntimeError(f"GPU idle guard exited before readiness with status {status}")
             if all((ready_dir / f"{rank}.ready").is_file() for rank in range(expected_tasks)):
                 logger.info(
-                    "Rollout idle guard is ready on %s GPU task(s)",
+                    "GPU idle guard for role '%s' is ready on %s GPU task(s)",
+                    role,
                     expected_tasks,
                 )
                 return
             time.sleep(0.25)
         ready_count = sum((ready_dir / f"{rank}.ready").is_file() for rank in range(expected_tasks))
-        raise TimeoutError(f"rollout idle guard readiness timed out: {ready_count}/{expected_tasks} tasks")
+        raise TimeoutError(
+            f"GPU idle guard for {role} timed out: {ready_count}/{expected_tasks} tasks"
+        )
 
-    def _start_rollout_idle_guard(
+    def _start_idle_guard(
         self,
         role: str,
         nodes: int,
         nodelist: str | None,
     ) -> None:
-        command = self._build_rollout_idle_guard_command(nodes, nodelist)
-        ready_dir = self._prepare_rollout_idle_guard_ready_dir()
-        proc = self._launch_rollout_idle_guard_process(command)
+        command = self._build_idle_guard_command(role, nodes, nodelist)
+        ready_dir = self._prepare_idle_guard_ready_dir(role)
+        proc = self._launch_idle_guard_process(role, command)
         self._role_idle_guard_processes[role] = proc
         self._role_idle_guard_commands[role] = command
         try:
-            self._wait_for_rollout_idle_guard(
+            self._wait_for_idle_guard(
+                role,
                 proc,
                 ready_dir,
                 nodes * self.n_gpus_per_node,
             )
         except Exception as exc:
-            self._terminate_rollout_idle_guard_process(role)
+            self._terminate_idle_guard_process(role)
             raise WorkerCreationError(
                 role,
-                "Rollout idle guard failed to become ready",
+                "GPU idle guard failed to become ready",
                 str(exc),
             ) from exc
 
-    def _terminate_rollout_idle_guard_process(self, role: str) -> None:
+    def _terminate_idle_guard_process(self, role: str) -> None:
         proc = self._role_idle_guard_processes.pop(role, None)
         self._role_idle_guard_commands.pop(role, None)
         if proc is None:
@@ -536,7 +545,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    logger.warning("Force killing rollout idle guard for role '%s'", role)
+                    logger.warning("Force killing GPU idle guard for role '%s'", role)
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait(timeout=10)
         except ProcessLookupError:
@@ -559,7 +568,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
                 raise WorkerFailedError(
                     f"{role}-idle-guard/*",
                     guard_pid,
-                    f"rollout idle guard exited unexpectedly with status {guard_status}",
+                    f"GPU idle guard exited unexpectedly with status {guard_status}",
                 )
 
         proc = self._role_processes.get(role)
@@ -574,7 +583,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         if role in self._stopping_roles:
             return
 
-        self._terminate_rollout_idle_guard_process(role)
+        self._terminate_idle_guard_process(role)
         logs = self._read_log_tail(role)
         raise WorkerFailedError(
             f"{role}/*",
@@ -683,14 +692,14 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             exclude=spec.exclude,
         )
         guard_started = False
-        if self._rollout_idle_guard_enabled(role):
-            self._start_rollout_idle_guard(role, nodes, nodelist)
+        if self._idle_guard_enabled(role):
+            self._start_idle_guard(role, nodes, nodelist)
             guard_started = True
         try:
             proc = self._launch_role_process(role, command)
         except Exception:
             if guard_started:
-                self._terminate_rollout_idle_guard_process(role)
+                self._terminate_idle_guard_process(role)
             raise
 
         # Track the live srun before constructing/registering worker metadata so
@@ -725,7 +734,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         except Exception:
             self._workers.pop(role, None)
             self._jobs.pop(role, None)
-            self._terminate_rollout_idle_guard_process(role)
+            self._terminate_idle_guard_process(role)
             self._terminate_role_process(role)
             self._role_commands.pop(role, None)
             raise
@@ -755,7 +764,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         logger.info("Deleting preallocated Slurm workers for role '%s'", role)
         self._stopping_roles.add(role)
         try:
-            self._terminate_rollout_idle_guard_process(role)
+            self._terminate_idle_guard_process(role)
             self._terminate_role_process(role)
         finally:
             self._stopping_roles.discard(role)

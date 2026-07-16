@@ -229,32 +229,60 @@ avoids verifier-of-verifier recursion. Verifier trajectories are marked
 `reward/subagent_judgment`, and OpenReward's reward processor uses that score as
 the worker subtrajectory reward.
 
-## Rollout GPU idle guard
+## Training GPU idle guard
 
-Preallocated OpenReward jobs enable a low-duty idle guard for the exact
-`rollout` scheduler role. The scheduler reuses that role's resolved node list
-and launches one overlapping task per rollout GPU; actor nodes are never
-included. It waits for every guard task's job-specific readiness marker before
-launching SGLang. Starting guard-first proves that GPU binding is complete and
-lets SGLang size its memory after the small guard CUDA context and 1024-square
-BF16 operands exist.
+Preallocated OpenReward jobs enable one scheduler-owned guard for each exact
+`actor` and `rollout` role; aliases and other roles are excluded. In the
+16-node layout this is 80 one-GPU tasks on the actor's ten resolved nodes and
+48 one-GPU tasks on the rollout's six resolved nodes. Each overlapping guard
+step preserves `--exact`, one task and one visible device per GPU,
+`--gpu-bind=single:1`, `--cpu-bind=none`, and the owning role's exact node list.
+Role-specific job names, log suffixes, and readiness subdirectories prevent the
+two steps from consuming or deleting each other's state.
 
-Each 30-second cycle takes two `nvidia-smi` utilization samples two seconds
-apart. A GPU at or above 10% utilization in either sample is skipped. An idle
-GPU receives a one-second BF16 matrix-multiply burst on CUDA's least-urgent
-stream. Persistent compute processes do not suppress the guard because SGLang
-processes remain present during tool-heavy idle periods. Runtime validation
-rejects intervals below 10 seconds, bursts above two seconds, configured duty
-above 5%, matrix dimensions above 2048, and any task that sees other than one
-CUDA device.
+This stronger policy is based on observed idle-reaper behavior. Earlier
+unguarded cancellations reported 47/128 and 39/128 idle GPUs, both close to the
+48-GPU rollout pool. A later healthy rollout-only guard at one second every 30
+seconds (3.3% configured duty) was still canceled with 73/128 GPUs reported
+idle. The default therefore covers both training roles and uses a two-second
+burst on a ten-second base cadence for GPUs that are actually idle. A
+deterministic positive delay from zero through two seconds is applied before
+every cycle, including the first, to avoid synchronized 128-GPU spikes and
+fixed-cadence aliasing with an idle-reaper poll. A stable SHA-256 seed over the
+Slurm job, step, and task rank gives each guard its own reproducible sequence.
+All policy knobs remain overridable.
+
+After the positive jitter, each base ten-second cycle takes two
+`nvidia-smi` utilization samples two seconds apart. A GPU at or above 10%
+utilization in either sample is skipped. Only a GPU below 10% in both samples
+receives the two-second BF16 matrix-multiply burst on the public PyTorch
+priority-0 CUDA stream. Positive jitter can only lengthen the cadence, so the
+worst case remains 20% configured idle duty; the hard validation ceiling is
+25%. Persistent compute processes do not suppress the guard because training
+and SGLang processes remain present during otherwise idle periods. Validation
+also rejects intervals below ten seconds, bursts above two seconds, matrix
+dimensions above 2048, and any task that sees other than one CUDA device.
+
+A guard process retains three 1024-square BF16 tensors (about 6 MiB total) plus
+hardware- and runtime-dependent CUDA-context, PyTorch, and host-memory overhead.
+The supplemental step reserves one CPU and 1024 MiB of host memory per GPU task.
+It starts before its owning role, so actor and SGLang initialization see the
+resident CUDA footprint, and it is terminated before that role's main step.
+This avoids hidden late allocation, but the additional context and 128 Python
+processes should still be monitored for GPU- or host-memory pressure. Reducing
+`ROLLOUT_IDLE_GUARD_MATRIX_DIM`, reducing duty, or disabling the guard remains
+available if that footprint causes a regression.
 
 The main knobs are `ROLLOUT_IDLE_GUARD_INTERVAL_SECONDS`,
+`ROLLOUT_IDLE_GUARD_INTERVAL_JITTER_SECONDS`,
 `ROLLOUT_IDLE_GUARD_SAMPLE_INTERVAL_SECONDS`,
 `ROLLOUT_IDLE_GUARD_UTILIZATION_THRESHOLD`,
 `ROLLOUT_IDLE_GUARD_BURST_SECONDS`, and
-`ROLLOUT_IDLE_GUARD_MATRIX_DIM`. Disable the feature with
-`PLATOON_AREAL_ROLLOUT_IDLE_GUARD=0`. Guard logs include the run and job
-instance IDs; readiness markers live below the job-specific OpenReward state
-directory. Any startup/readiness failure prevents rollout launch. Any later
-guard exit fails its rollout role, and intentional role deletion stops the
-guard before SGLang.
+`ROLLOUT_IDLE_GUARD_MATRIX_DIM`. The legacy `ROLLOUT_IDLE_GUARD_` prefix now
+configures both exact guarded roles. Disable the feature with
+`PLATOON_AREAL_ROLLOUT_IDLE_GUARD=0`. Guard logs include the run, job instance,
+and role; readiness markers record the jitter seed and live under separate
+`actor` and `rollout` subdirectories in the job-specific OpenReward state
+directory. A startup or readiness failure prevents only its owning role from
+launching. A later guard exit fails that role, and intentional role deletion
+stops its guard first.

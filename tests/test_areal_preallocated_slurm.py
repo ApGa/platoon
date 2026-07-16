@@ -496,7 +496,7 @@ def test_create_workers_tracks_background_srun_process(monkeypatch):
         scheduler._check_job_status("actor")
 
 
-def _configure_rollout_idle_guard(monkeypatch, tmp_path):
+def _configure_idle_guard(monkeypatch, tmp_path):
     monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD", "1")
     monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_SCRIPT", "/repo/rollout_gpu_idle_guard.py")
     monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD_PYTHON", "/venv/bin/python")
@@ -508,55 +508,133 @@ def _configure_rollout_idle_guard(monkeypatch, tmp_path):
     ("role", "enabled"),
     [
         ("rollout", True),
-        ("actor", False),
+        ("actor", True),
+        ("eval-actor", False),
+        ("actor-worker", False),
         ("eval-rollout", False),
         ("proxy-rollout", False),
         ("rollout-worker", False),
+        ("trainer", False),
     ],
 )
-def test_rollout_idle_guard_matches_only_exact_role(monkeypatch, role, enabled):
+def test_idle_guard_matches_only_exact_role(monkeypatch, role, enabled):
     module = _load_scheduler_module(monkeypatch)
     monkeypatch.setenv("PLATOON_AREAL_ROLLOUT_IDLE_GUARD", "1")
 
-    assert module.PreallocatedSlurmScheduler._rollout_idle_guard_enabled(role) is enabled
+    assert module.PreallocatedSlurmScheduler._idle_guard_enabled(role) is enabled
 
 
-def test_rollout_idle_guard_command_uses_exact_resolved_topology(monkeypatch, tmp_path):
+def test_idle_guard_commands_use_exact_role_topologies(monkeypatch, tmp_path):
     module = _load_scheduler_module(monkeypatch)
-    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    _configure_idle_guard(monkeypatch, tmp_path)
     monkeypatch.setenv("PLATOON_AREAL_PREALLOC_CONTAINER_IMAGE", "/image.sqsh")
     scheduler = module.PreallocatedSlurmScheduler()
+    cases = [
+        ("actor", 10, ",".join(f"node{rank}" for rank in range(10)), 80),
+        ("rollout", 6, ",".join(f"node{rank}" for rank in range(10, 16)), 48),
+    ]
 
-    command = scheduler._build_rollout_idle_guard_command(
-        nodes=6,
-        nodelist="node10,node11,node12,node13,node14,node15",
+    for role, nodes, nodelist, task_count in cases:
+        command = scheduler._build_idle_guard_command(role, nodes, nodelist)
+
+        assert "--overlap" in command
+        assert "--exact" in command
+        assert f"--job-name={role}-idle-guard" in command
+        assert f"--nodes={nodes}" in command
+        assert f"--ntasks={task_count}" in command
+        assert "--ntasks-per-node=8" in command
+        assert "--cpu-bind=none" in command
+        assert "--gpus-per-task=1" in command
+        assert "--gpu-bind=single:1" in command
+        assert "--kill-on-bad-exit=1" in command
+        assert "--exclusive" not in command
+        assert f"--nodelist={nodelist}" in command
+        assert "/repo/rollout_gpu_idle_guard.py" in command
+        assert str(tmp_path / "ready" / role) in command
+        assert f"{tmp_path / 'guard'}-{role}-%N-%t.log" in command
+
+
+def test_idle_guard_ready_dirs_are_role_isolated(monkeypatch, tmp_path):
+    module = _load_scheduler_module(monkeypatch)
+    _configure_idle_guard(monkeypatch, tmp_path)
+
+    actor_dir = module.PreallocatedSlurmScheduler._prepare_idle_guard_ready_dir(
+        "actor"
+    )
+    actor_marker = actor_dir / "0.ready"
+    actor_marker.write_text("actor", encoding="utf-8")
+    rollout_dir = module.PreallocatedSlurmScheduler._prepare_idle_guard_ready_dir(
+        "rollout"
     )
 
-    assert "--overlap" in command
-    assert "--exact" in command
-    assert "--nodes=6" in command
-    assert "--ntasks=48" in command
-    assert "--ntasks-per-node=8" in command
-    assert "--cpu-bind=none" in command
-    assert "--gpus-per-task=1" in command
-    assert "--gpu-bind=single:1" in command
-    assert "--kill-on-bad-exit=1" in command
-    assert "--exclusive" not in command
-    assert "--nodelist=node10,node11,node12,node13,node14,node15" in command
-    assert "/repo/rollout_gpu_idle_guard.py" in command
-    assert str(tmp_path / "ready") in command
+    assert actor_dir == tmp_path / "ready" / "actor"
+    assert rollout_dir == tmp_path / "ready" / "rollout"
+    assert actor_marker.read_text(encoding="utf-8") == "actor"
 
 
-def test_rollout_idle_guard_starts_before_rollout_on_same_nodes(monkeypatch, tmp_path):
+def test_actor_and_rollout_guards_keep_independent_lifecycle_state(
+    monkeypatch, tmp_path
+):
     module = _load_scheduler_module(monkeypatch)
-    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    _configure_idle_guard(monkeypatch, tmp_path)
     scheduler = module.PreallocatedSlurmScheduler()
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+            self.status = None
+
+        def poll(self):
+            return self.status
+
+        def wait(self, timeout):
+            self.status = -15
+            return self.status
+
+    processes = {"actor": FakeProcess(100), "rollout": FakeProcess(200)}
     monkeypatch.setattr(
         scheduler,
-        "_allocation_nodes",
-        lambda: [f"node{rank}" for rank in range(16)],
+        "_launch_idle_guard_process",
+        lambda role, command: processes[role],
     )
-    events = []
+    monkeypatch.setattr(scheduler, "_wait_for_idle_guard", lambda *args: None)
+
+    scheduler._start_idle_guard(
+        "actor", 10, ",".join(f"node{rank}" for rank in range(10))
+    )
+    scheduler._start_idle_guard(
+        "rollout", 6, ",".join(f"node{rank}" for rank in range(10, 16))
+    )
+
+    assert scheduler._role_idle_guard_processes == processes
+    assert set(scheduler._role_idle_guard_commands) == {"actor", "rollout"}
+    assert "--job-name=actor-idle-guard" in scheduler._role_idle_guard_commands[
+        "actor"
+    ]
+    assert "--job-name=rollout-idle-guard" in scheduler._role_idle_guard_commands[
+        "rollout"
+    ]
+
+    signals = []
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    scheduler._terminate_idle_guard_process("actor")
+
+    assert "actor" not in scheduler._role_idle_guard_processes
+    assert "actor" not in scheduler._role_idle_guard_commands
+    assert scheduler._role_idle_guard_processes["rollout"] is processes["rollout"]
+    assert "rollout" in scheduler._role_idle_guard_commands
+
+    scheduler._terminate_idle_guard_process("rollout")
+    assert signals == [
+        (100, module.signal.SIGTERM),
+        (200, module.signal.SIGTERM),
+    ]
+
+
+def test_idle_guard_starts_before_each_guarded_role_on_same_nodes(monkeypatch, tmp_path):
+    module = _load_scheduler_module(monkeypatch)
+    _configure_idle_guard(monkeypatch, tmp_path)
+    cases = [("actor", 80, 1, 10), ("rollout", 6, 8, 6)]
 
     class FakeProcess:
         pid = 4321
@@ -564,45 +642,61 @@ def test_rollout_idle_guard_starts_before_rollout_on_same_nodes(monkeypatch, tmp
         def poll(self):
             return None
 
-    monkeypatch.setattr(
-        scheduler,
-        "_start_rollout_idle_guard",
-        lambda role, nodes, nodelist: events.append(("guard", role, nodes, nodelist)),
-    )
-    monkeypatch.setattr(
-        scheduler,
-        "_launch_role_process",
-        lambda role, command: events.append(("role", role, command)) or FakeProcess(),
-    )
-
-    scheduler.create_workers(
-        FakeJob(
-            role="rollout",
-            replicas=6,
-            tasks=[FakeSchedulingSpec(cpu=4, gpu=8, mem=16)],
-            scheduling_strategy=types.SimpleNamespace(type="separation", target=None),
+    for role, replicas, gpus_per_worker, expected_nodes in cases:
+        scheduler = module.PreallocatedSlurmScheduler()
+        monkeypatch.setattr(
+            scheduler,
+            "_allocation_nodes",
+            lambda: [f"node{rank}" for rank in range(16)],
         )
-    )
+        events = []
+        monkeypatch.setattr(
+            scheduler,
+            "_start_idle_guard",
+            lambda role, nodes, nodelist: events.append(
+                ("guard", role, nodes, nodelist)
+            ),
+        )
+        monkeypatch.setattr(
+            scheduler,
+            "_launch_role_process",
+            lambda role, command: events.append(("role", role, command))
+            or FakeProcess(),
+        )
 
-    assert events[0] == (
-        "guard",
-        "rollout",
-        6,
-        "node0,node1,node2,node3,node4,node5",
-    )
-    assert events[1][0:2] == ("role", "rollout")
-    assert "--nodelist=node0,node1,node2,node3,node4,node5" in events[1][2]
+        scheduler.create_workers(
+            FakeJob(
+                role=role,
+                replicas=replicas,
+                tasks=[FakeSchedulingSpec(cpu=4, gpu=gpus_per_worker, mem=16)],
+                scheduling_strategy=types.SimpleNamespace(
+                    type="separation", target=None
+                ),
+            )
+        )
+
+        expected_nodelist = ",".join(
+            f"node{rank}" for rank in range(expected_nodes)
+        )
+        assert events[0] == (
+            "guard",
+            role,
+            expected_nodes,
+            expected_nodelist,
+        )
+        assert events[1][0:2] == ("role", role)
+        assert f"--nodelist={expected_nodelist}" in events[1][2]
 
 
 def test_rollout_role_launch_failure_cleans_up_ready_guard(monkeypatch, tmp_path):
     module = _load_scheduler_module(monkeypatch)
-    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    _configure_idle_guard(monkeypatch, tmp_path)
     scheduler = module.PreallocatedSlurmScheduler()
     monkeypatch.setattr(scheduler, "_allocation_nodes", lambda: ["node0"])
     events = []
     monkeypatch.setattr(
         scheduler,
-        "_start_rollout_idle_guard",
+        "_start_idle_guard",
         lambda role, nodes, nodelist: events.append(("start", role)),
     )
     monkeypatch.setattr(
@@ -612,7 +706,7 @@ def test_rollout_role_launch_failure_cleans_up_ready_guard(monkeypatch, tmp_path
     )
     monkeypatch.setattr(
         scheduler,
-        "_terminate_rollout_idle_guard_process",
+        "_terminate_idle_guard_process",
         lambda role: events.append(("stop", role)),
     )
 
@@ -630,7 +724,7 @@ def test_rollout_role_launch_failure_cleans_up_ready_guard(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("guard_status", [0, 1])
-def test_unexpected_rollout_idle_guard_exit_fails_and_stops_role(monkeypatch, guard_status):
+def test_unexpected_idle_guard_exit_fails_and_stops_role(monkeypatch, guard_status):
     module = _load_scheduler_module(monkeypatch)
     scheduler = module.PreallocatedSlurmScheduler()
 
@@ -663,29 +757,32 @@ def test_unexpected_rollout_idle_guard_exit_fails_and_stops_role(monkeypatch, gu
     assert "rollout" not in scheduler._role_idle_guard_processes
 
 
-def test_delete_rollout_stops_guard_before_main(monkeypatch):
+def test_delete_guarded_role_stops_guard_before_main(monkeypatch):
     module = _load_scheduler_module(monkeypatch)
-    scheduler = module.PreallocatedSlurmScheduler()
-    scheduler._workers["rollout"] = []
-    events = []
-    monkeypatch.setattr(
-        scheduler,
-        "_terminate_rollout_idle_guard_process",
-        lambda role: events.append(("guard", role)),
-    )
-    monkeypatch.setattr(
-        scheduler,
-        "_terminate_role_process",
-        lambda role: events.append(("role", role)),
-    )
 
-    scheduler.delete_workers("rollout")
+    for role in ("actor", "rollout"):
+        scheduler = module.PreallocatedSlurmScheduler()
+        scheduler._workers[role] = []
+        events = []
+        monkeypatch.setattr(
+            scheduler,
+            "_terminate_idle_guard_process",
+            lambda stopped_role: events.append(("guard", stopped_role)),
+        )
+        monkeypatch.setattr(
+            scheduler,
+            "_terminate_role_process",
+            lambda stopped_role: events.append(("role", stopped_role)),
+        )
 
-    assert events == [("guard", "rollout"), ("role", "rollout")]
+        scheduler.delete_workers(role)
+
+        assert events == [("guard", role), ("role", role)]
+
 
 def test_rollout_registration_failure_cleans_up_guard_and_role(monkeypatch, tmp_path):
     module = _load_scheduler_module(monkeypatch)
-    _configure_rollout_idle_guard(monkeypatch, tmp_path)
+    _configure_idle_guard(monkeypatch, tmp_path)
     scheduler = module.PreallocatedSlurmScheduler()
     monkeypatch.setattr(scheduler, "_allocation_nodes", lambda: ["node0"])
     events = []
@@ -698,7 +795,7 @@ def test_rollout_registration_failure_cleans_up_guard_and_role(monkeypatch, tmp_
 
     monkeypatch.setattr(
         scheduler,
-        "_start_rollout_idle_guard",
+        "_start_idle_guard",
         lambda role, nodes, nodelist: events.append(("start", role)),
     )
     monkeypatch.setattr(
@@ -713,7 +810,7 @@ def test_rollout_registration_failure_cleans_up_guard_and_role(monkeypatch, tmp_
     )
     monkeypatch.setattr(
         scheduler,
-        "_terminate_rollout_idle_guard_process",
+        "_terminate_idle_guard_process",
         lambda role: events.append(("guard", role)),
     )
     monkeypatch.setattr(

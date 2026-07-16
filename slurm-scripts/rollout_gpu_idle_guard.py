@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Low-duty, utilization-aware idle guard for one rollout GPU.
+"""Bounded-duty, utilization-aware idle guard for one training GPU.
 
 Run one process per GPU. The guard samples ``nvidia-smi`` twice and only emits
 a short BF16 matrix-multiply burst when every recent sample is below the
@@ -11,12 +11,15 @@ keepalive workload.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import random
 import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -36,11 +39,12 @@ class GpuUtilization:
 
 @dataclass(frozen=True)
 class GuardConfig:
-    interval_seconds: float = 30.0
+    interval_seconds: float = 10.0
+    interval_jitter_seconds: float = 2.0
     sample_count: int = 2
     sample_interval_seconds: float = 2.0
     utilization_threshold: int = 10
-    burst_seconds: float = 1.0
+    burst_seconds: float = 2.0
     matrix_dim: int = 1024
     operations_per_sync: int = 32
     expected_devices: int = 1
@@ -52,16 +56,20 @@ class GuardConfig:
     def validate(self) -> None:
         if self.interval_seconds < 10:
             raise ValueError("interval_seconds must be at least 10")
+        if not 0 <= self.interval_jitter_seconds <= self.interval_seconds:
+            raise ValueError(
+                "interval_jitter_seconds must be between zero and interval_seconds"
+            )
         if self.sample_count < 2:
             raise ValueError("sample_count must be at least 2")
         if self.sample_interval_seconds < 0.1:
             raise ValueError("sample_interval_seconds must be at least 0.1")
         if not 1 <= self.utilization_threshold <= 100:
             raise ValueError("utilization_threshold must be between 1 and 100")
+        if self.burst_seconds / self.interval_seconds > 0.25:
+            raise ValueError("configured burst duty cycle must not exceed 25%")
         if not 0.05 <= self.burst_seconds <= 2.0:
             raise ValueError("burst_seconds must be between 0.05 and 2.0")
-        if self.burst_seconds / self.interval_seconds > 0.05:
-            raise ValueError("configured burst duty cycle must not exceed 5%")
         if not 128 <= self.matrix_dim <= 2048:
             raise ValueError("matrix_dim must be between 128 and 2048")
         if self.operations_per_sync <= 0:
@@ -272,11 +280,30 @@ def run_cycle(
     )
 
 
+def deterministic_jitter_seed(
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    source = os.environ if environ is None else environ
+    identity_parts = []
+    for name in ("SLURM_JOB_ID", "SLURM_STEP_ID", "SLURM_PROCID"):
+        identity_parts.extend((name, source.get(name, "")))
+    identity = "\0".join(identity_parts)
+    digest = hashlib.sha256(identity.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def cycle_interval_jitter(
+    config: GuardConfig, rng: random.Random
+) -> float:
+    return rng.uniform(0.0, config.interval_jitter_seconds)
+
+
 def publish_ready(
     ready_dir: Path | None,
     gpu: GpuUtilization,
     config: GuardConfig,
     low_priority: int,
+    jitter_seed: int,
 ) -> Path | None:
     if ready_dir is None:
         return None
@@ -293,6 +320,8 @@ def publish_ready(
                 f"gpu_index={gpu.index}",
                 f"gpu_uuid={gpu.uuid}",
                 f"interval_seconds={config.interval_seconds}",
+                f"interval_jitter_seconds={config.interval_jitter_seconds}",
+                f"jitter_seed={jitter_seed}",
                 f"burst_seconds={config.burst_seconds}",
                 f"utilization_threshold={config.utilization_threshold}",
                 f"stream_priority={low_priority}",
@@ -311,7 +340,12 @@ def _env(name: str, default: str) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--interval-seconds", type=float, default=float(_env("INTERVAL_SECONDS", "30")))
+    parser.add_argument("--interval-seconds", type=float, default=float(_env("INTERVAL_SECONDS", "10")))
+    parser.add_argument(
+        "--interval-jitter-seconds",
+        type=float,
+        default=float(_env("INTERVAL_JITTER_SECONDS", "2")),
+    )
     parser.add_argument("--sample-count", type=int, default=int(_env("SAMPLE_COUNT", "2")))
     parser.add_argument(
         "--sample-interval-seconds",
@@ -323,7 +357,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=int(_env("UTILIZATION_THRESHOLD", "10")),
     )
-    parser.add_argument("--burst-seconds", type=float, default=float(_env("BURST_SECONDS", "1")))
+    parser.add_argument("--burst-seconds", type=float, default=float(_env("BURST_SECONDS", "2")))
     parser.add_argument("--matrix-dim", type=int, default=int(_env("MATRIX_DIM", "1024")))
     parser.add_argument(
         "--operations-per-sync",
@@ -355,6 +389,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def config_from_args(args: argparse.Namespace) -> GuardConfig:
     config = GuardConfig(
         interval_seconds=args.interval_seconds,
+        interval_jitter_seconds=args.interval_jitter_seconds,
         sample_count=args.sample_count,
         sample_interval_seconds=args.sample_interval_seconds,
         utilization_threshold=args.utilization_threshold,
@@ -379,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{PREFIX} invalid configuration: {exc}", file=sys.stderr, flush=True)
         return 2
 
+    jitter_seed = deterministic_jitter_seed()
+    jitter_rng = random.Random(jitter_seed)
     stop_event = threading.Event()
 
     def request_stop(signum, _frame) -> None:
@@ -399,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"{PREFIX} START host={os.uname().nodename} pid={os.getpid()} "
         f"gpu={initial_gpu.uuid} index={initial_gpu.index} interval={config.interval_seconds}s "
+        f"jitter=0..{config.interval_jitter_seconds}s jitter_seed={jitter_seed} "
         f"samples={config.sample_count}x{config.sample_interval_seconds}s "
         f"threshold={config.utilization_threshold}% burst={config.burst_seconds}s "
         f"dim={config.matrix_dim} duty_cap={config.burst_seconds / config.interval_seconds:.3%} "
@@ -416,6 +454,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{PREFIX} reached max runtime; stopping", flush=True)
             break
         cycle += 1
+        cycle_jitter = cycle_interval_jitter(config, jitter_rng)
+        if stop_event.wait(cycle_jitter):
+            break
         cycle_started = time.monotonic()
         try:
             result = run_cycle(probe, burster, config, stop_event.wait)
@@ -425,12 +466,18 @@ def main(argv: list[str] | None = None) -> int:
             if cycle == 1 or cycle % config.log_every_cycles == 0:
                 print(
                     f"{PREFIX} cycle={cycle} gpu={initial_gpu.uuid} "
-                    f"samples={result.samples} action={result.action} "
+                    f"cadence_jitter={cycle_jitter:.3f}s samples={result.samples} action={result.action} "
                     f"burst_elapsed={result.burst_elapsed_seconds:.3f}s ops={result.operations}",
                     flush=True,
                 )
             if not ready_published:
-                marker = publish_ready(args.ready_dir, initial_gpu, config, burster.low_priority)
+                marker = publish_ready(
+                    args.ready_dir,
+                    initial_gpu,
+                    config,
+                    burster.low_priority,
+                    jitter_seed,
+                )
                 print(f"{PREFIX} READY marker={marker or 'disabled'}", flush=True)
                 ready_published = True
         except subprocess.SubprocessError as exc:
