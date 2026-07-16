@@ -331,11 +331,15 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
 
         conversation = cast(Any, self._conversation)
         conversation._ensure_agent_ready()
-        _inject_shared_openreward_tools(
-            conversation.agent,
-            self._shared_openreward_tools,
-            self._subagent_environment_access,
-        )
+        # This policy describes a recursive child's view of the parent's live
+        # session. The root owns the MCP bridge and must retain its complete
+        # environment tool set even when its future children are read-only.
+        if isinstance(self._task, SubTask):
+            _inject_shared_openreward_tools(
+                conversation.agent,
+                self._shared_openreward_tools,
+                self._subagent_environment_access,
+            )
         tool = conversation.agent.tools_map.get("get_task")
         if tool is None:
             raise RuntimeError("OpenReward MCP bridge did not expose get_task")

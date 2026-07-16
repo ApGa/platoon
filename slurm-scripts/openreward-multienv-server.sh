@@ -18,6 +18,9 @@ export ENROOT_CACHE_PATH=${LOCAL_ROOT}/enroot-cache
 export ENROOT_DATA_PATH=${LOCAL_ROOT}/enroot-data
 export ENROOT_RUNTIME_PATH=${LOCAL_ROOT}/enroot-runtime
 export ENROOT_MAX_PROCESSORS=${OPENREWARD_ENROOT_MAX_PROCESSORS:-4}
+# Never let Enroot's site hook bind the submitter's home into untrusted task
+# containers. Both environment backends enforce this again per start.
+export ENROOT_MOUNT_HOME=
 mkdir -p "${ENROOT_CACHE_PATH}" "${ENROOT_DATA_PATH}" "${ENROOT_RUNTIME_PATH}"
 
 require_source_revision() {
@@ -38,7 +41,7 @@ require_source_revision() {
 case "${KIND}" in
   tmax)
     ENV_ROOT=${REPO_ROOT}/external/tmax
-    TMAX_SOURCE_REVISION=${TMAX_SOURCE_REVISION:-02b8e6412ff7c571b512757c274b8068e4cb132a}
+    TMAX_SOURCE_REVISION=${TMAX_SOURCE_REVISION:-5c6cdfa3d9456af0829d8d0cbab38ec89767aacc}
     require_source_revision "${ENV_ROOT}" "${TMAX_SOURCE_REVISION}"
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
     [[ -x "${PYTHON}" ]] || {
@@ -59,7 +62,7 @@ case "${KIND}" in
     ;;
   swe_rebench)
     ENV_ROOT=${REPO_ROOT}/external/swe-rebench-v2-openrewardenv
-    SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-f3f0520dd80be7ff2e47b06b8f2f63410c73a809}
+    SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-035d99666931ae39395938f0fdf2deb1e1d2038f}
     require_source_revision "${ENV_ROOT}" "${SWE_REBENCH_SOURCE_REVISION}"
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
     DATA_DIR=${SWE_REBENCH_DATA_DIR:-${REPO_ROOT}/.cache/swe-rebench-v2}

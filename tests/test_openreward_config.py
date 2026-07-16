@@ -560,7 +560,10 @@ async def test_openreward_env_resolves_get_task_before_first_message(monkeypatch
             )
 
     class FakeAgent:
-        tools_map = {"get_task": FakeTool()}
+        tools_map = {
+            "get_task": FakeTool(),
+            "submit_answer": types.SimpleNamespace(mcp_server_name="openreward"),
+        }
 
     class FakeConversation:
         def __init__(self):
@@ -574,7 +577,12 @@ async def test_openreward_env_resolves_get_task_before_first_message(monkeypatch
         id="task",
         goal="Task task",
     )
-    env = env_mod.OpenRewardOpenHandsEnv(task=task, agent=object(), workspace=".")
+    env = env_mod.OpenRewardOpenHandsEnv(
+        task=task,
+        agent=object(),
+        workspace=".",
+        subagent_environment_access="read_only",
+    )
     env._conversation = FakeConversation()
 
     goal = await env._initial_user_message()
@@ -585,6 +593,8 @@ async def test_openreward_env_resolves_get_task_before_first_message(monkeypatch
     assert env._task.goal == goal
     assert env._task.misc[env_mod._CURRENT_AGENT_TASK_GOAL_KEY] == "Use the data tools."
     assert env._task.misc[env_mod._ROOT_AGENT_TASK_GOAL_KEY] == "Use the data tools."
+    assert "get_task" in env._conversation.agent.tools_map
+    assert "submit_answer" in env._conversation.agent.tools_map
 
 
 @pytest.mark.asyncio
