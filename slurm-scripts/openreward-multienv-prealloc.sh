@@ -119,7 +119,7 @@ start_server_pool() {
     --overlap \
     --unbuffered \
     --nodes="${NNODES}" \
-    --kill-on-bad-exit=1 \
+    --kill-on-bad-exit=0 \
     --ntasks="${NNODES}" \
     --ntasks-per-node=1 \
     --nodelist="${NODELIST}" \
@@ -132,15 +132,42 @@ start_server_pool() {
   printf -v "${pid_variable}" '%s' "$!"
 }
 
-server_pool_ready() {
-  local port=$1
+SERVER_POOL_FAILURE_DETAIL=
+SERVER_POOL_SRUN_DIED=0
+
+server_pool_healthy() {
+  local name=$1
+  local port=$2
+  local pid=$3
+  local failed_endpoint=
   local node
+
   for node in "${ALLOC_NODES[@]}"; do
     if ! (exec 3<>"/dev/tcp/${node}/${port}") 2>/dev/null; then
-      return 1
+      failed_endpoint="${node}:${port}"
+      break
     fi
     exec 3>&- 3<&- || true
   done
+
+  local srun_state=alive
+  SERVER_POOL_SRUN_DIED=0
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    srun_state=died
+    SERVER_POOL_SRUN_DIED=1
+  fi
+
+  if [[ -n "${failed_endpoint}" ]]; then
+    SERVER_POOL_FAILURE_DETAIL="pool=${name} endpoint=${failed_endpoint} srun_pid=${pid} srun_state=${srun_state}"
+    return 1
+  fi
+  if [[ "${SERVER_POOL_SRUN_DIED}" -eq 1 ]]; then
+    SERVER_POOL_FAILURE_DETAIL="pool=${name} endpoints=accepting port=${port} srun_pid=${pid} srun_state=died"
+    return 1
+  fi
+
+  SERVER_POOL_FAILURE_DETAIL=
+  return 0
 }
 
 wait_for_server_pool() {
@@ -149,14 +176,14 @@ wait_for_server_pool() {
   local pid=$3
   local log_prefix=$4
   local waited=0
-  while ! server_pool_ready "${port}"; do
-    if ! kill -0 "${pid}" 2>/dev/null; then
-      echo "ERROR: ${name} server pool exited during startup." >&2
+  while ! server_pool_healthy "${name}" "${port}" "${pid}"; do
+    if [[ "${SERVER_POOL_SRUN_DIED}" -eq 1 ]]; then
+      echo "ERROR: ${name} server pool exited during startup: ${SERVER_POOL_FAILURE_DETAIL}." >&2
       tail -n 80 "${log_prefix}"-*.log 2>/dev/null || true
       return 1
     fi
     if [[ "${waited}" -ge "${SERVER_WAIT_SECS}" ]]; then
-      echo "ERROR: timed out waiting for ${name} on port ${port}." >&2
+      echo "ERROR: timed out waiting for ${name}: ${SERVER_POOL_FAILURE_DETAIL}." >&2
       tail -n 80 "${log_prefix}"-*.log 2>/dev/null || true
       return 1
     fi
@@ -180,17 +207,23 @@ base_pid=$!
 
 monitor_supplemental_servers() {
   local failures=0
+  local issue_summary
   while kill -0 "${base_pid}" 2>/dev/null; do
-    if kill -0 "${tmax_pid}" 2>/dev/null && \
-       kill -0 "${swe_pid}" 2>/dev/null && \
-       server_pool_ready "${TMAX_PORT}" && \
-       server_pool_ready "${SWE_PORT}"; then
+    issue_summary=
+    if ! server_pool_healthy TMax "${TMAX_PORT}" "${tmax_pid}"; then
+      issue_summary="${SERVER_POOL_FAILURE_DETAIL}"
+    fi
+    if ! server_pool_healthy SWE-rebench "${SWE_PORT}" "${swe_pid}"; then
+      issue_summary="${issue_summary:+${issue_summary}; }${SERVER_POOL_FAILURE_DETAIL}"
+    fi
+
+    if [[ -z "${issue_summary}" ]]; then
       failures=0
     else
       failures=$((failures + 1))
-      echo "WARNING: supplemental environment health check failed (${failures}/${HEALTH_FAILURE_THRESHOLD})." >&2
+      echo "WARNING: supplemental environment health check failed (${failures}/${HEALTH_FAILURE_THRESHOLD}): ${issue_summary}." >&2
       if [[ "${failures}" -ge "${HEALTH_FAILURE_THRESHOLD}" ]]; then
-        echo "ERROR: supplemental environment servers remained unhealthy; terminating the base launcher." >&2
+        echo "ERROR: supplemental environment servers remained unhealthy (${issue_summary}); terminating the base launcher." >&2
         kill -TERM "${base_pid}" 2>/dev/null || true
         return 1
       fi

@@ -549,13 +549,52 @@ start_env_servers() {
   echo "OpenReward env-server srun pid: ${server_pid}"
 }
 
+ENV_SERVER_FAILURE_DETAIL=
+ENV_SERVER_SRUN_DIED=0
+
+env_servers_healthy() {
+  local failed_endpoint=
+  local n
+  local srun_state=alive
+
+  for n in "${SERVER_NODES[@]}"; do
+    if ! (exec 3<>"/dev/tcp/${n}/${OPENREWARD_PORT}") 2>/dev/null; then
+      failed_endpoint="${n}:${OPENREWARD_PORT}"
+      break
+    fi
+    exec 3>&- 3<&- || true
+  done
+
+  ENV_SERVER_SRUN_DIED=0
+  if ! kill -0 "${server_pid}" 2>/dev/null; then
+    srun_state=died
+    ENV_SERVER_SRUN_DIED=1
+  fi
+
+  if [[ -n "${failed_endpoint}" ]]; then
+    ENV_SERVER_FAILURE_DETAIL="pool=Toolathlon endpoint=${failed_endpoint} srun_pid=${server_pid} srun_state=${srun_state}"
+    return 1
+  fi
+  if [[ "${ENV_SERVER_SRUN_DIED}" -eq 1 ]]; then
+    ENV_SERVER_FAILURE_DETAIL="pool=Toolathlon endpoints=accepting port=${OPENREWARD_PORT} srun_pid=${server_pid} srun_state=died"
+    return 1
+  fi
+
+  ENV_SERVER_FAILURE_DETAIL=
+  return 0
+}
+
 wait_for_env_servers() {
   echo "Waiting up to ${SERVER_WAIT_SECS}s for ${#SERVER_NODES[@]} env server(s)..."
   local waited=0
-  local n ready
+  local ready
   while true; do
-    if ! kill -0 "${server_pid}" 2>/dev/null; then
-      echo "ERROR: OpenReward env-server srun exited during startup. Recent logs:"
+    ready=1
+    if ! env_servers_healthy; then
+      ready=0
+    fi
+    if [[ "${ENV_SERVER_SRUN_DIED}" -eq 1 ]]; then
+      echo "ERROR: OpenReward env-server srun exited during startup: ${ENV_SERVER_FAILURE_DETAIL}. Recent logs:"
       tail -n 50 "${SERVER_LOG_PREFIX}"-*.log 2>/dev/null || true
       return 1
     fi
@@ -564,20 +603,12 @@ wait_for_env_servers() {
       tail -n 50 "${SERVER_LOG_PREFIX}"-*.log 2>/dev/null || true
       return 1
     fi
-    ready=1
-    for n in "${SERVER_NODES[@]}"; do
-      if ! (exec 3<>"/dev/tcp/${n}/${OPENREWARD_PORT}") 2>/dev/null; then
-        ready=0
-        break
-      fi
-      exec 3>&- 3<&- || true
-    done
     if [[ "${ready}" -eq 1 ]]; then
       echo "All ${#SERVER_NODES[@]} env server(s) are accepting connections on port ${OPENREWARD_PORT}."
       return 0
     fi
     if [[ "${waited}" -ge "${SERVER_WAIT_SECS}" ]]; then
-      echo "ERROR: Timed out waiting for env servers after ${SERVER_WAIT_SECS}s. Recent logs:"
+      echo "ERROR: Timed out waiting for env servers after ${SERVER_WAIT_SECS}s: ${ENV_SERVER_FAILURE_DETAIL}. Recent logs:"
       tail -n 50 "${SERVER_LOG_PREFIX}"-*.log 2>/dev/null || true
       return 1
     fi
@@ -589,29 +620,25 @@ wait_for_env_servers() {
 monitor_env_servers() {
   local consecutive_failures=0
   local environment_failures=0
-  local n healthy
+  local healthy
 
   while kill -0 "${srun_pid}" 2>/dev/null; do
     healthy=1
-    if ! kill -0 "${server_pid}" 2>/dev/null; then
+    if ! env_servers_healthy; then
       healthy=0
-    else
-      for n in "${SERVER_NODES[@]}"; do
-        if ! (exec 3<>"/dev/tcp/${n}/${OPENREWARD_PORT}") 2>/dev/null; then
-          healthy=0
-          break
-        fi
-        exec 3>&- 3<&- || true
-      done
     fi
 
     if [[ "${healthy}" -eq 1 ]]; then
       consecutive_failures=0
     else
       consecutive_failures=$((consecutive_failures + 1))
-      echo "WARNING: env-server health probe failed (${consecutive_failures}/${SERVER_HEALTH_FAILURE_THRESHOLD})." >&2
+      if [[ "${ENV_SERVER_SRUN_DIED}" -eq 1 ]]; then
+        echo "WARNING: Toolathlon env-server step died (${consecutive_failures}/${SERVER_HEALTH_FAILURE_THRESHOLD}): ${ENV_SERVER_FAILURE_DETAIL}." >&2
+      else
+        echo "WARNING: Toolathlon env-server endpoint is unreachable (${consecutive_failures}/${SERVER_HEALTH_FAILURE_THRESHOLD}): ${ENV_SERVER_FAILURE_DETAIL}." >&2
+      fi
       if [[ "${consecutive_failures}" -ge "${SERVER_HEALTH_FAILURE_THRESHOLD}" ]]; then
-        echo "ERROR: env servers remained unhealthy; terminating the trainer to avoid rejected zero-data rollouts." >&2
+        echo "ERROR: env servers remained unhealthy (${ENV_SERVER_FAILURE_DETAIL}); terminating the trainer to avoid rejected zero-data rollouts." >&2
         : >"${SERVER_HEALTH_FAILURE_FILE}"
         kill -TERM "${srun_pid}" 2>/dev/null || true
         return 1

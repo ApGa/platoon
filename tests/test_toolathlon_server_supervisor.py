@@ -11,6 +11,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = REPO_ROOT / "plugins" / "openreward" / "scripts" / "openreward-toolathlon-resilient-entrypoint.sh"
 LAUNCHER = REPO_ROOT / "slurm-scripts" / "openreward-toolathlon-prealloc-base.sh"
+MULTIENV_LAUNCHER = REPO_ROOT / "slurm-scripts" / "openreward-multienv-prealloc.sh"
 KEEPALIVE = REPO_ROOT / "slurm-scripts" / "gpu_keepalive.py"
 PREPARE_ENV = REPO_ROOT / "slurm-scripts" / "prepare_openreward_env.sh"
 
@@ -55,9 +56,29 @@ def test_toolathlon_launcher_mounts_supervisor_without_bad_exit_cascade():
     ) in launcher
     assert ("TOOLATHLON_CONTAINER_ENTRYPOINT=/app/openreward-toolathlon-resilient-entrypoint.sh") in launcher
     assert "--kill-on-bad-exit=0" in launcher
+    assert "env_servers_healthy" in launcher
+    assert "pool=Toolathlon endpoint=${failed_endpoint}" in launcher
+    assert "srun_pid=${server_pid} srun_state=${srun_state}" in launcher
+    assert "WARNING: Toolathlon env-server step died" in launcher
+    assert "WARNING: Toolathlon env-server endpoint is unreachable" in launcher
     assert "stop_gpu_keepalive_before_training" in launcher
     assert ("${TOOLATHLON_SERVER_ENTRYPOINT}:${TOOLATHLON_CONTAINER_ENTRYPOINT}:ro") in launcher
     assert "/app/entrypoint.sh" not in launcher
+
+
+def test_multienv_launcher_isolates_rank_loss_and_reports_failed_pool_endpoint():
+    subprocess.run(["bash", "-n", str(MULTIENV_LAUNCHER)], check=True)
+    launcher = MULTIENV_LAUNCHER.read_text()
+
+    assert MULTIENV_LAUNCHER.stat().st_mode & 0o111
+    assert "--kill-on-bad-exit=0" in launcher
+    assert "--kill-on-bad-exit=1" not in launcher
+    assert "server_pool_healthy" in launcher
+    assert "pool=${name} endpoint=${failed_endpoint}" in launcher
+    assert "srun_pid=${pid} srun_state=${srun_state}" in launcher
+    assert 'server_pool_healthy TMax "${TMAX_PORT}" "${tmax_pid}"' in launcher
+    assert 'server_pool_healthy SWE-rebench "${SWE_PORT}" "${swe_pid}"' in launcher
+    assert "${issue_summary}" in launcher
 
 
 def _write_executable(path: Path, body: str) -> None:
