@@ -17,14 +17,67 @@ class WorkflowConfig:
     group_size: int = 1
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)
     use_subprocesses: bool = False  # Enable subprocess-based rollouts for isolation
+    # Once every member but a tail straggler has finished, wait at most this
+    # many additional seconds before reaping the dedicated group process pool.
+    # None preserves the full absolute rollout timeout for every member.
+    straggler_timeout_seconds: float | None = None
+    # Number of completed root rollouts that starts the tail-grace clock.
+    # Interrupted partial roots do not count. None uses group_size - 1 (the
+    # classic single-straggler policy).
+    straggler_quorum: int | None = None
+    subprocess_shutdown_grace_seconds: float = 5.0
+    # Reject/replenish groups that return too few valid members for a meaningful
+    # within-task baseline.  Recursive runs use 4 for an intended group size 8.
+    min_successful_group_size: int = 1
     leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
     depth_level_weighting: bool = False  # Trainer-side full-batch inverse-frequency weighting by depth level
     depth_level_discount_gamma: float | None = None  # Trainer-side full-batch reward discounting by gamma^d
+    # Retain every root datum and independently sample each post-merge subagent
+    # datum.  A value of one preserves the historical training batch exactly.
+    subagent_datum_keep_probability: float = 1.0
+    subagent_datum_sampling_seed: int = 0
+    # Reward-only throughput fast path: identify exact-zero centered scalar
+    # rewards after group centering and policy/Bernoulli masks, retain them
+    # through global DP selection and multiplicative depth normalization, then
+    # omit all but the minimum dispatch padding before model-side computation.
+    # IMPORTANT: disable this when KL != 0, reward_bias != 0, reward/advantage
+    # normalization is active, overlong_reward_penalty is enabled, a critic or
+    # teacher/distillation objective or independent MoE/router auxiliary loss
+    # is present, or a custom transform adds to rewards. In those modes zero
+    # scalar reward need not imply zero final policy advantage (or zero total
+    # objective). A trainer startup warning
+    # repeats these constraints because the remote workflow cannot validate the
+    # complete actor/objective configuration by itself.
+    filter_zero_advantage_datums: bool = True
     filter_zero_variance_groups: bool = True  # Preserve old behavior by rejecting zero-variance groups
+    # Router replay (R3) is opt-in. The actor config is the public source of
+    # truth; PlatoonArealRLTrainerConfig copies its model-derived dimensions
+    # here so remote rollout workers can reshape SGLang's flattened routes.
+    enable_router_replay: bool = False
+    router_replay_num_layers: int | None = None
+    router_replay_topk: int | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.rollout_config, dict):
             self.rollout_config = RolloutConfig(**self.rollout_config)
+        if self.group_size < 1:
+            raise ValueError("workflow group_size must be positive")
+        if self.straggler_timeout_seconds is not None and self.straggler_timeout_seconds <= 0:
+            raise ValueError("straggler_timeout_seconds must be positive or null")
+        if self.straggler_quorum is not None and not 1 <= self.straggler_quorum <= self.group_size:
+            raise ValueError("straggler_quorum must be in [1, group_size] or null")
+        if self.straggler_timeout_seconds is None and self.straggler_quorum is not None:
+            raise ValueError("straggler_quorum requires straggler_timeout_seconds")
+        if self.subprocess_shutdown_grace_seconds < 0:
+            raise ValueError("subprocess_shutdown_grace_seconds must be non-negative")
+        if not 1 <= self.min_successful_group_size <= self.group_size:
+            raise ValueError("min_successful_group_size must be in [1, group_size]")
+        if not 0.0 <= self.subagent_datum_keep_probability <= 1.0:
+            raise ValueError("subagent_datum_keep_probability must be in [0, 1]")
+        if isinstance(self.subagent_datum_sampling_seed, bool) or not isinstance(
+            self.subagent_datum_sampling_seed, int
+        ):
+            raise ValueError("subagent_datum_sampling_seed must be an integer")
 
 
 @dataclass
@@ -64,6 +117,10 @@ class PlatoonPPOActorConfig(PPOActorConfig):
 
     loss_fn: str = "grpo"
     loss_fn_kwargs: dict[str, Any] = field(default_factory=dict)
+    enable_router_replay: bool = False
+    router_replay_num_layers: int | None = None
+    router_replay_topk: int | None = None
+    router_replay_num_experts: int | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -74,6 +131,15 @@ class PlatoonPPOActorConfig(PPOActorConfig):
             self.loss_fn = "grpo"
         if getattr(self, "loss_fn_kwargs", None) is None:
             self.loss_fn_kwargs = {}
+        if self.enable_router_replay:
+            if not isinstance(self.router_replay_num_layers, int) or self.router_replay_num_layers <= 0:
+                raise ValueError(
+                    "actor.router_replay_num_layers must be a positive integer when router replay is enabled"
+                )
+            if not isinstance(self.router_replay_topk, int) or self.router_replay_topk <= 0:
+                raise ValueError("actor.router_replay_topk must be a positive integer when router replay is enabled")
+            if self.router_replay_num_experts is not None and self.router_replay_num_experts <= 0:
+                raise ValueError("actor.router_replay_num_experts must be positive or null")
 
 
 @dataclass
@@ -157,9 +223,7 @@ class PlatoonArealRLTrainerConfig(GRPOConfig):
             self.loss_fn_config = LossFnConfig(**self.loss_fn_config)
         self.environments = normalize_environment_configs(self.environments)
         if len(self.environments) > 1:
-            raise NotImplementedError(
-                "Multiple environments are not yet supported; provide exactly one entry"
-            )
+            raise NotImplementedError("Multiple environments are not yet supported; provide exactly one entry")
 
         if self.scheduler.type is None:
             # Platoon's updated AReaL path relies on the single-controller scheduler.
@@ -177,12 +241,44 @@ class PlatoonArealRLTrainerConfig(GRPOConfig):
         merged_loss_fn_kwargs.update(self.loss_fn_config.loss_fn_kwargs)
         self.actor.loss_fn_kwargs = merged_loss_fn_kwargs
 
+        # Keep one public R3 gate on the actor while giving remote workflows
+        # the dimensions required to reshape SGLang's flattened routing data.
+        self.workflow_config.enable_router_replay = self.actor.enable_router_replay
+        self.workflow_config.router_replay_num_layers = self.actor.router_replay_num_layers
+        self.workflow_config.router_replay_topk = self.actor.router_replay_topk
+
         if not self.rollout.backend:
             raise ValueError("rollout.backend must be set explicitly")
         if not self.actor.backend:
             raise ValueError("actor.backend must be set explicitly")
         if self.ref is not None and not self.ref.backend:
             self.ref.backend = self.actor.backend
+        if self.actor.enable_router_replay:
+            actor_backend = self.actor.backend.split(":", 1)[0]
+            rollout_backend = self.rollout.backend.split(":", 1)[0]
+            if actor_backend != "megatron":
+                raise ValueError("actor.enable_router_replay requires the Megatron actor backend")
+            if rollout_backend != "sglang":
+                raise ValueError("actor.enable_router_replay requires the SGLang rollout backend")
+            if not bool(getattr(self.rollout, "return_routed_experts", False)):
+                raise ValueError("actor.enable_router_replay requires rollout.return_routed_experts=true")
+            if bool(getattr(self.actor.megatron, "enable_mtp", False)):
+                raise ValueError(
+                    "actor.enable_router_replay requires actor.megatron.enable_mtp=false; "
+                    "rollout routes do not include MTP layers"
+                )
+            if self.actor.should_compute_prox_logp():
+                raise ValueError(
+                    "actor.enable_router_replay currently requires proximal log-probability "
+                    "recomputation to be disabled; forward-only replay is not implemented"
+                )
+            if self.actor.gradient_checkpointing and (
+                self.actor.megatron.recompute_granularity != "full" or self.actor.megatron.recompute_method != "uniform"
+            ):
+                raise ValueError(
+                    "actor.enable_router_replay with gradient checkpointing requires "
+                    "actor.megatron.recompute_granularity=full and recompute_method=uniform"
+                )
 
         _ensure_expandable_segments_env(getattr(self.rollout, "scheduling_spec", None))
         _ensure_expandable_segments_env(getattr(self.actor, "scheduling_spec", None))

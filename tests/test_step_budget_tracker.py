@@ -1,4 +1,3 @@
-import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -293,7 +292,7 @@ async def test_oversubscribed_children_blocked_by_reservation():
 
 
 @pytest.mark.asyncio
-async def test_subagent_budget_message_values_simple():
+async def test_subagent_return_omits_budget_metadata_simple():
     parent_max = 6
     child_max = 4
 
@@ -310,15 +309,15 @@ async def test_subagent_budget_message_values_simple():
     assert len(msg_steps) == 1
     msg_step = msg_steps[0]
     msg: str = msg_step["subagent_message"]
-    # Ensure format and numbers are correct
-    assert f"Budget used by subagent: {child_max}/{child_max} steps." in msg
-    m = re.search(r"Total remaining budget for the current task is (\d+) steps", msg)
-    assert m, msg
-    assert int(m.group(1)) == msg_step["remaining_at_capture"]
+    assert msg == "Subagent did not finish before its step budget was exhausted."
+    assert "Budget used by subagent" not in msg
+    assert "Total remaining budget" not in msg
+    assert "WARNING: Exhausted budget" not in msg
+    assert "Traceback" not in msg
 
 
 @pytest.mark.asyncio
-async def test_subagent_budget_message_values_nested():
+async def test_subagent_return_omits_budget_metadata_nested():
     parent_max = 10
     child_max = 6
     grandchild_max = 4
@@ -335,11 +334,11 @@ async def test_subagent_budget_message_values_nested():
     msg_step = msg_steps[0]
     msg: str = msg_step["subagent_message"]
 
-    # Subagent recursively used child_max steps across child + grandchild
-    assert f"Budget used by subagent: {child_max}/{child_max} steps." in msg
-    m = re.search(r"Total remaining budget for the current task is (\d+) steps", msg)
-    assert m, msg
-    assert int(m.group(1)) == msg_step["remaining_at_capture"]
+    assert msg == "Subagent did not finish before its step budget was exhausted."
+    assert "Budget used by subagent" not in msg
+    assert "Total remaining budget" not in msg
+    assert "WARNING: Exhausted budget" not in msg
+    assert "Traceback" not in msg
 
 
 @pytest.mark.asyncio

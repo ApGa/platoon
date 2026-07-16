@@ -1,0 +1,78 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head
+  - _self_
+
+# Fresh experiment: eight task groups x eight completions = 64 requested
+# rollout trajectories per optimizer update. Do not recover the earlier
+# batch-size-4 optimizer or rollout queue into this run.
+trial_name: toolathlon-openhands-32node-qwen3.6-35B-ptc-recursive-judged-r3-fp32-lm-head-bs8-trial2
+
+# The Slurm launcher validates the selected file before Hydra composes its
+# defaults, so retain this literal marker as well as the backend below.
+openreward: {}
+
+train_dataset:
+  batch_size: 8
+
+workflow_config:
+  # Keep the eight-way within-task group used by leave-one-out centering.
+  group_size: 8
+  # Keep every root datum and independently retain each post-merge non-root
+  # datum with probability 0.25. There is deliberately no per-trajectory
+  # minimum: a child may contribute zero datums to an optimizer update, while
+  # its verifier result still contributes to its parent's delegation reward.
+  # Depth weighting is recomputed from the Bernoulli-retained batch.
+  subagent_datum_keep_probability: 0.25
+  subagent_datum_sampling_seed: ${seed}
+  # Qwen3.6-A3B's Megatron-Bridge provider enables global MoE router auxiliary
+  # loss (coefficient 1e-3). A zero policy advantage therefore still has a
+  # legitimate router gradient, so dropping that datum would change the total
+  # objective. Keep the compute-only fast path off for this model.
+  filter_zero_advantage_datums: false
+  # Once six members return usable trajectories, give the remaining tail 15
+  # more minutes, then explicitly reap the group's dedicated subprocess pool.
+  # A retrospective trial-2 simulation retained 7.1/8 members on average.
+  # Reject groups with fewer than four usable members rather than constructing
+  # a degenerate baseline.
+  straggler_timeout_seconds: 900
+  straggler_quorum: 6
+  subprocess_shutdown_grace_seconds: 10
+  min_successful_group_size: 4
+  rollout_config:
+    # Trial-3 data contains legitimate recursive trajectories beyond 45m. A
+    # 60m total deadline retains about 93% of observed successful completions;
+    # the worker adds three minutes for initialization/cleanup before SIGKILL.
+    timeout: 3600
+    step_timeout: 2700
+
+# The rollout worker also owns the OpenAI proxy and its recursive subprocesses.
+# The previous 512-GiB rollout-node cgroup reached about 477 GiB RSS, leaving
+# too little headroom for recursive subprocess bursts and contributing to
+# rollout-controller stalls. Each node runs eight 1-GPU worker tasks, so a
+# 128-GiB per-task request gives the rollout step a 1-TiB per-node allowance
+# without increasing the actor or colocated reference-worker reservations.
+rollout:
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      mem: 128
+      cmd: python -m areal.infra.rpc.rpc_server
+      env_vars: {}
+
+sglang:
+  # The 0.8 inherited default left too little transient GPU headroom for a
+  # long GDN extend: SGLang OOMed while loading the Triton l2norm kernel for a
+  # 32k-token prefill. Reserve 70% for weights/static pools (principally KV)
+  # and leave the remaining 30% for GDN activations, Triton, and CUDA graphs.
+  mem_fraction_static: 0.70
+
+# The upstream Qwen template drops assistant reasoning before a later ordinary
+# user turn unless callers pass preserve_thinking=true. AReaL's experimental
+# OpenAI proxy currently drops that request-only template kwarg, so use the
+# local tokenizer overlay whose template defaults preservation on. The overlay
+# symlinks the exact upstream weights and changes only tokenizer/template files,
+# keeping rollout rendering, token counting, and trainer tokenization aligned.
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking

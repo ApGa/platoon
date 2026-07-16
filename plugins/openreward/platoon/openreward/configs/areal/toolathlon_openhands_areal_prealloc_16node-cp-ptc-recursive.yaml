@@ -10,8 +10,8 @@ openreward:
   enable_programmatic_tool_calling: true
   enable_recursive_subagents: true
   subagent_default_max_steps: 50
-  # Root is depth 0: permit children and grandchildren, but prevent unbounded
-  # recursive fan-out during the first training run.
+  # Root is depth 0. Keep the first training validation bounded to children and
+  # grandchildren; depth limits nesting, not the number of spawned subagents.
   subagent_max_depth: 2
 
 workflow_config:
@@ -19,6 +19,9 @@ workflow_config:
   # their contribution by depth so prolific deeper levels do not dominate.
   depth_level_weighting: true
   depth_level_discount_gamma: null
+  # Match the Oolong recursive setup: every trajectory in one rollout uses the
+  # mean root reward from the other group samples as its baseline.
+  leave_one_out_baseline: true
   rollout_config:
     # A child usually returns evidence to its parent rather than calling
     # claim_done itself. Train every trajectory toward the root task outcome.

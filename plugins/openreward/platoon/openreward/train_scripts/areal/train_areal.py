@@ -10,7 +10,8 @@ from platoon.train.areal import PlatoonArealRLTrainer
 from platoon.train.areal.workflows import GroupRolloutWorkflow
 
 from platoon.openreward.areal_config import OpenRewardArealTrainerConfig
-from platoon.openreward.rollout import reward_processor, run_rollout
+from platoon.openreward.rewards import reward_processor
+from platoon.openreward.rollout import run_rollout
 from platoon.openreward.tasks import get_task, get_task_ids
 
 
@@ -57,6 +58,10 @@ def main(args: list[str]) -> None:
 
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
+        # Datum sampling is a training-throughput policy.  Evaluation should
+        # always retain the complete trajectory tree.
+        eval_workflow_config.subagent_datum_keep_probability = 1.0
+        eval_workflow_config.filter_zero_advantage_datums = False
 
         eval_workflow = GroupRolloutWorkflow(
             run_rollout,

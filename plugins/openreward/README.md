@@ -64,8 +64,8 @@ child agents from PTC:
 
 ```python
 results = await asyncio.gather(
-    atools.launch_subagent(goal="inspect one candidate", max_steps=10),
-    atools.launch_subagent(goal="inspect another candidate", max_steps=10),
+    atools.launch_subagent(goal="inspect one candidate"),
+    atools.launch_subagent(goal="inspect another candidate"),
 )
 ```
 
@@ -75,8 +75,23 @@ agents reuse the parent's live MCP bridge tools, so parent and child tool calls
 operate on the same OpenReward session instead of spawning separate task
 sessions. Their trajectories are recorded in the same `TrajectoryCollection`
 with parent links, so existing AReaL/Tinker data processing can include
-depth-aware samples. Calls that omit `max_steps` use
+depth-aware samples. Child step budgets are configured through
 `openreward.subagent_default_max_steps`, which defaults to 50. Use
-`openreward.subagent_max_depth` to cap recursive depth. When recursive subagents
-are enabled, the rollout uses `DepthAwareStepBudgetTracker`, so each trajectory
-is bounded by its own step budget instead of charging child steps to the parent.
+`openreward.subagent_max_depth` to cap recursive depth. Successful subagent calls
+return the child `finish` message directly, without appending budget metadata;
+children that fail before finishing return a short failure status instead of raw
+episode-loop diagnostics.
+
+Set `openreward.enable_subagent_reward_judging: true` to automatically launch a
+verifier agent after each normal subagent finishes. The verifier receives the
+child goal, final message, and trajectory id, then inspects the shared
+environment with tools and returns a JSON verdict via `finish`. The judged child
+trajectory stores the normalized result in `misc.subagent_reward_judgment`; the
+verifier trajectory stores the judged child id in
+`misc.subagent_reward_verifies_trajectory_id`.
+`openreward.subagent_reward_judge_max_steps` controls the verifier step budget
+and defaults to 20. Verifier tasks do not receive `launch_subagent`, which
+avoids verifier-of-verifier recursion. Verifier trajectories are marked
+`misc.exclude_from_training: true`; judged worker trajectories expose
+`reward/subagent_judgment`, and OpenReward's reward processor uses that score as
+the worker subtrajectory reward.

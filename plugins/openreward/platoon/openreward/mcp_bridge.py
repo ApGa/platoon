@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import ctypes
 import inspect
 import json
 import os
 import re
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +16,64 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 DECLARED_RESOURCES_META_KEY = "openhands.dev/declared_resources"
+_PR_SET_PDEATHSIG = 1
+_BRIDGE_CLOSE_TIMEOUT_SECONDS = 30
+
+
+def _install_parent_death_signal() -> None:
+    """Ask Linux to terminate this detached MCP bridge with its parent.
+
+    MCP's stdio client starts servers in a new session.  That is useful for
+    terminal isolation, but it also places the bridge outside the rollout
+    worker's process group, so a hard rollout timeout used to orphan OpenReward
+    sessions.  PDEATHSIG follows the parent relationship rather than the
+    process group and therefore still fires for the detached bridge.
+    """
+
+    if os.name != "posix":
+        return
+    expected_parent_text = os.environ.get("PLATOON_ROLLOUT_PARENT_PID")
+    try:
+        expected_parent_pid = int(expected_parent_text) if expected_parent_text else None
+    except ValueError:
+        expected_parent_pid = None
+    parent_pid = os.getppid()
+    # The rollout may have died after spawning us but before Python imported
+    # this module. In that case PR_SET_PDEATHSIG is too late, so reject a
+    # bridge that is no longer attached to its expected rollout worker.
+    if expected_parent_pid is not None and parent_pid != expected_parent_pid:
+        os._exit(1)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+            return
+    except (AttributeError, OSError):
+        return
+    # Close the fork/exec race: if the parent exited before prctl was set, the
+    # kernel could not deliver the signal retroactively.
+    if os.getppid() != parent_pid:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _close_runtime_bounded(runtime: "OpenRewardMCPBridge") -> None:
+    """Close the remote session without allowing a detached bridge to linger."""
+
+    if os.name != "posix" or not hasattr(signal, "SIGALRM"):
+        runtime.close()
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _force_exit(_signum, _frame) -> None:
+        os._exit(1)
+
+    signal.signal(signal.SIGALRM, _force_exit)
+    signal.alarm(_BRIDGE_CLOSE_TIMEOUT_SECONDS)
+    try:
+        runtime.close()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _json_default(value: Any) -> Any:
@@ -397,6 +457,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _install_parent_death_signal()
     args = build_parser().parse_args(argv)
     runtime = OpenRewardMCPBridge(
         BridgeConfig(
@@ -411,7 +472,14 @@ def main(argv: list[str] | None = None) -> int:
             max_tool_calls=args.max_tool_calls,
         )
     )
-    atexit.register(runtime.close)
+    atexit.register(_close_runtime_bounded, runtime)
+
+    def _close_on_signal(signum, _frame) -> None:
+        _close_runtime_bounded(runtime)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _close_on_signal)
+    signal.signal(signal.SIGINT, _close_on_signal)
 
     mcp = FastMCP("openreward")
 
@@ -441,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mcp.run()
     finally:
-        runtime.close()
+        _close_runtime_bounded(runtime)
     return 0
 
 

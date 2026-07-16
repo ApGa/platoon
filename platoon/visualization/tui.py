@@ -74,6 +74,14 @@ def _collection_display_label(collection_id: Any, task_id: str | None = None) ->
     return f"collection:{collection_id}" if collection_id else "unlabeled"
 
 
+def _is_verifier_misc(misc: Any) -> bool:
+    return isinstance(misc, dict) and (
+        misc.get("subagent_reward_verifier_task") is True
+        or bool(misc.get("subagent_reward_verifies_trajectory_id"))
+        or bool(misc.get("platoon_subagent_verifies_trajectory_id"))
+    )
+
+
 def _is_openhands_step_payload(data: Any) -> bool:
     return isinstance(data, dict) and ("action_events" in data or "observation_events" in data)
 
@@ -1050,6 +1058,8 @@ class TrajectoryTree(Static):
         self.traj_rewards: Dict[str, float] = {}
         # Track whether a trajectory has reached a terminal state.
         self.traj_finished: Dict[str, bool] = {}
+        # Verifier trajectories are bookkeeping/judgment runs, not rewarded workers.
+        self.verifier_trajs: set[str] = set()
         # Track which trajectories are currently expanded (for efficient collapse_all_except)
         self.expanded_trajs: set[str] = set()
         # Bulk loading mode - when True, don't expand new trajectory nodes
@@ -1081,6 +1091,7 @@ class TrajectoryTree(Static):
         self.bridge_turn_nodes.clear()
         self.traj_rewards.clear()
         self.traj_finished.clear()
+        self.verifier_trajs.clear()
         self.expanded_trajs.clear()
         self.bulk_loading = False
         self.search_results.clear()
@@ -1346,8 +1357,37 @@ class SplitDivider(Static):
                 node.expand()
                 self.expanded_trajs.add(traj_id)
             self.traj_nodes[traj_id] = node
+        elif parent is not None and not self._is_collection_node(parent):
+            node = self.traj_nodes[traj_id]
+            self._reparent_traj_node(node, parent)
 
         return self.traj_nodes[traj_id]
+
+    def _is_collection_node(self, node: TreeNode[str]) -> bool:
+        return isinstance(node.data, dict) and node.data.get("type") == "collection"
+
+    def _reparent_traj_node(self, node: TreeNode[str], parent: TreeNode[str]) -> None:
+        if node.parent is parent or node is parent:
+            return
+        cursor: Optional[TreeNode[str]] = parent
+        while cursor is not None:
+            if cursor is node:
+                return
+            cursor = cursor.parent
+
+        old_parent = node.parent
+        old_children = getattr(old_parent, "_children", None)
+        if old_children is not None and node in old_children:
+            old_children.remove(node)
+        parent_children = getattr(parent, "_children", None)
+        if parent_children is not None and node not in parent_children:
+            parent_children.append(node)
+        setattr(node, "_parent", parent)
+        try:
+            parent.expand()
+            self.tree_widget._invalidate()
+        except Exception:
+            pass
 
     def _reward_color(self, reward: Optional[float]) -> Optional[str]:
         if reward is None:
@@ -1364,8 +1404,11 @@ class SplitDivider(Static):
 
     def _format_traj_label(self, traj_id: str) -> Text | str:
         reward = self.traj_rewards.get(traj_id)
-        base = f"traj:{traj_id}"
+        is_verifier = traj_id in self.verifier_trajs
+        base = f"verifier:{traj_id}" if is_verifier else f"traj:{traj_id}"
         label = f"{base} · reward:{reward:.3f}" if reward is not None else base
+        if is_verifier:
+            return Text(label, style="dim")
         # Color only when finished
         if self.traj_finished.get(traj_id):
             color = self._reward_color(reward)
@@ -1386,6 +1429,30 @@ class SplitDivider(Static):
         except Exception:
             # Best-effort: if neither works, leave existing label
             pass
+
+    def _parent_node_for_trajectory(
+        self,
+        trajectory: Dict[str, Any],
+        parent_info: Any,
+        group_node: Optional[TreeNode[str]],
+    ) -> Optional[TreeNode[str]]:
+        misc = trajectory.get("misc")
+        if isinstance(misc, dict):
+            verifier_parent_id = misc.get("subagent_reward_verifies_trajectory_id") or misc.get(
+                "platoon_subagent_verifies_trajectory_id"
+            )
+            if isinstance(verifier_parent_id, str) and verifier_parent_id:
+                if verifier_parent_id in self.traj_nodes:
+                    return self.traj_nodes[verifier_parent_id]
+                return self.ensure_traj_node(verifier_parent_id, parent=group_node, expand=not self.bulk_loading)
+        if not isinstance(parent_info, dict):
+            return group_node
+        parent_id = parent_info.get("id")
+        if not isinstance(parent_id, str) or not parent_id:
+            return group_node
+        if parent_id in self.traj_nodes:
+            return self.traj_nodes[parent_id]
+        return self.ensure_traj_node(parent_id, parent=group_node, expand=not self.bulk_loading)
 
     def ingest(self, event: Event) -> None:
         # Group strictly by collection_id to ensure all trajectories from the same
@@ -1425,6 +1492,8 @@ class SplitDivider(Static):
             traj = event.data["trajectory"]
             traj_id = traj["id"]
             parent_info = traj.get("parent_info")
+            if _is_verifier_misc(traj.get("misc")):
+                self.verifier_trajs.add(traj_id)
             # Initialize known reward (if present) and label accordingly
             try:
                 self.traj_rewards[traj_id] = float(traj.get("reward", 0.0))
@@ -1438,7 +1507,8 @@ class SplitDivider(Static):
             except Exception:
                 self.traj_finished[traj_id] = False
             label = self._format_traj_label(traj_id)
-            node = self.ensure_traj_node(traj_id, label=label, parent=group_node, expand=not self.bulk_loading)
+            parent_node = self._parent_node_for_trajectory(traj, parent_info, group_node)
+            node = self.ensure_traj_node(traj_id, label=label, parent=parent_node, expand=not self.bulk_loading)
             node.data = {"type": "trajectory", "payload": traj}
             # Render forks as a dedicated child under the child trajectory for clarity
             if parent_info:
@@ -1456,7 +1526,15 @@ class SplitDivider(Static):
         elif event.type == "trajectory_task_set":
             traj_id = event.data["trajectory_id"]
             task = event.data.get("task")
+            task_misc = task.get("misc") if isinstance(task, dict) else None
+            parent_node = self._parent_node_for_trajectory(
+                {"misc": task_misc} if isinstance(task_misc, dict) else {},
+                None,
+                group_node,
+            )
             task_id = _task_display_id(task)
+            if _is_verifier_misc(task_misc):
+                self.verifier_trajs.add(traj_id)
             if task_id and collection_id and group_node is not None:
                 self.collection_task_ids[str(collection_id)] = task_id
                 self._set_node_label(group_node, _collection_display_label(collection_id, task_id))
@@ -1464,7 +1542,8 @@ class SplitDivider(Static):
                     "type": "collection",
                     "payload": {"collection_id": collection_id, "task_id": task_id},
                 }
-            node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
+            node = self.ensure_traj_node(traj_id, parent=parent_node, expand=not self.bulk_loading)
+            self._set_node_label(node, self._format_traj_label(traj_id))
             if task:
                 task_goal = task.get("goal")
                 task_label = f"task: {task_id}" if task_id else "task"
@@ -1557,7 +1636,15 @@ class SplitDivider(Static):
 
         elif event.type == "trajectory_finished":
             traj_id = event.data["trajectory_id"]
-            node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
+            misc = event.data.get("misc")
+            if _is_verifier_misc(misc):
+                self.verifier_trajs.add(traj_id)
+            parent_node = self._parent_node_for_trajectory(
+                {"misc": misc} if isinstance(misc, dict) else {},
+                None,
+                group_node,
+            )
+            node = self.ensure_traj_node(traj_id, parent=parent_node, expand=not self.bulk_loading)
             # Update cached reward and terminal status
             try:
                 new_reward = event.data.get("reward")
@@ -1571,6 +1658,9 @@ class SplitDivider(Static):
                 if isinstance(node.data, dict):
                     payload = node.data.get("payload") if isinstance(node.data.get("payload"), dict) else None
                     if isinstance(payload, dict):
+                        payload["reward"] = self.traj_rewards.get(traj_id, payload.get("reward", 0.0))
+                        if isinstance(misc, dict):
+                            payload["misc"] = misc
                         if finish_msg is not None:
                             payload["finish_message"] = finish_msg
                         if error_msg is not None:
@@ -1734,9 +1824,12 @@ class SplitDivider(Static):
 # Bind methods accidentally nested under SplitDivider back onto TrajectoryTree
 try:
     TrajectoryTree.ensure_traj_node = SplitDivider.ensure_traj_node  # type: ignore[attr-defined]
+    TrajectoryTree._is_collection_node = SplitDivider._is_collection_node  # type: ignore[attr-defined]
+    TrajectoryTree._reparent_traj_node = SplitDivider._reparent_traj_node  # type: ignore[attr-defined]
     TrajectoryTree._reward_color = SplitDivider._reward_color  # type: ignore[attr-defined]
     TrajectoryTree._format_traj_label = SplitDivider._format_traj_label  # type: ignore[attr-defined]
     TrajectoryTree._set_node_label = SplitDivider._set_node_label  # type: ignore[attr-defined]
+    TrajectoryTree._parent_node_for_trajectory = SplitDivider._parent_node_for_trajectory  # type: ignore[attr-defined]
     TrajectoryTree.ingest = SplitDivider.ingest  # type: ignore[attr-defined]
     TrajectoryTree.focus_step = SplitDivider.focus_step  # type: ignore[attr-defined]
     TrajectoryTree.highlight_step = SplitDivider.highlight_step  # type: ignore[attr-defined]

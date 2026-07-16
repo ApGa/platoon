@@ -18,10 +18,15 @@ from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.rl.metrics import compute_kl_sample_train
 
 from platoon.train.tinker.batch_transforms import (
+    LOSS_NORMALIZATION_TOKENS_KEY,
     BatchTransform,
     BatchTransformContext,
     build_default_batch_transforms,
+    filter_zero_advantage_datums,
+    get_datum_counts,
+    get_loss_normalization_token_count,
     run_batch_transforms,
+    set_loss_normalization_token_counts,
 )
 from platoon.train.tinker.config_defs import (
     PlatoonTinkerRLTrainerConfig,
@@ -29,6 +34,7 @@ from platoon.train.tinker.config_defs import (
 )
 from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.workflows.base import RolloutWorkflow
+from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_logger import StatsLogger
 from platoon.utils.stats_tracker import StatsTracker
 from platoon.utils.stats_tracker import get as get_tracker
@@ -37,6 +43,36 @@ logger = logging.getLogger(__name__)
 
 # Global flag to track if we've already received a shutdown signal
 _SHUTDOWN_REQUESTED = False
+
+
+@dataclass(frozen=True)
+class _TaskWorkloadPayload:
+    """Validated workload sidechannel attached to a list-compatible result."""
+
+    workload: RolloutWorkload
+    requested_rollouts: int
+    observed_rollouts: int
+    trainable_rollouts: int
+    task_retained_datums: int
+
+
+def _get_task_workload_payload(rollout: Any) -> _TaskWorkloadPayload | None:
+    """Read optional workload metadata without constraining custom workflows."""
+
+    workload = getattr(rollout, "workload", None)
+    if not isinstance(workload, RolloutWorkload):
+        return None
+    count_names = (
+        "requested_rollouts",
+        "observed_rollouts",
+        "trainable_rollouts",
+        "task_retained_datums",
+    )
+    counts = [getattr(rollout, name, None) for name in count_names]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+        logger.warning("Ignoring malformed task workload rollout counts: %s", dict(zip(count_names, counts)))
+        return None
+    return _TaskWorkloadPayload(workload, *counts)
 
 
 def compute_training_metrics(
@@ -541,6 +577,16 @@ class PlatoonTinkerRLTrainer:
             tasks_per_microbatch = tasks_per_minibatch // self.config.train.num_microbatches
 
             total_datums = 0
+            batch_workload = RolloutWorkload()
+            batch_total_tasks = 0
+            batch_total_tasks_with_workload_metadata = 0
+            batch_total_requested_rollouts = 0
+            batch_total_observed_rollouts = 0
+            batch_total_workflow_trainable_rollouts = 0
+            batch_total_task_retained_datums = 0
+            batch_submitted_training_datums = 0
+            batch_submitted_training_attention_tokens = 0
+            batch_submitted_training_loss_tokens = 0
 
             # We perform num_minibatches weight updates per batch.
             for minibatch_num in range(self.config.train.num_minibatches):
@@ -564,6 +610,20 @@ class PlatoonTinkerRLTrainer:
                             f"(minibatch {minibatch_num}, microbatch {microbatch_num})"
                         )
                         rollout = await task_rollout_result_queue.get()
+                        batch_total_tasks += 1
+                        workload_payload = _get_task_workload_payload(rollout)
+                        if workload_payload is not None:
+                            # Attribute generation work when this outer batch
+                            # actually consumes the queue item.  Producer-side
+                            # recording would leak prefetched future tasks into
+                            # the current step.  Stale work is deliberately
+                            # included so wasted inference remains visible.
+                            batch_total_tasks_with_workload_metadata += 1
+                            batch_workload += workload_payload.workload
+                            batch_total_requested_rollouts += workload_payload.requested_rollouts
+                            batch_total_observed_rollouts += workload_payload.observed_rollouts
+                            batch_total_workflow_trainable_rollouts += workload_payload.trainable_rollouts
+                            batch_total_task_retained_datums += workload_payload.task_retained_datums
                         queue_wait_elapsed = time.perf_counter() - queue_wait_start
                         if queue_wait_elapsed > 60.0:
                             logger.warning(f"Waited {queue_wait_elapsed:.1f}s for rollout from queue (slow)")
@@ -609,6 +669,60 @@ class PlatoonTinkerRLTrainer:
                         )
                         continue
 
+                    # Depth weighting is part of the objective, so zero-signal
+                    # datums participate in that normalization before being
+                    # removed from model compute. Moving this filter into the
+                    # task workflow would change per-depth gradient weights.
+                    if self.config.train.workflow_config.filter_zero_advantage_datums:
+                        eligible_datums, eligible_attention_tokens, eligible_loss_tokens = get_datum_counts(
+                            task_rollout_results
+                        )
+                        task_rollout_results = filter_zero_advantage_datums(task_rollout_results)
+                        retained_datums, retained_attention_tokens, retained_loss_tokens = get_datum_counts(
+                            task_rollout_results
+                        )
+                        shared_state.train_tracker.scalar(
+                            **{
+                                "zero_advantage_filter/eligible_datums": float(eligible_datums),
+                                "zero_advantage_filter/retained_datums": float(retained_datums),
+                                "zero_advantage_filter/filtered_datums": float(eligible_datums - retained_datums),
+                                "zero_advantage_filter/eligible_attention_tokens": float(eligible_attention_tokens),
+                                "zero_advantage_filter/retained_attention_tokens": float(retained_attention_tokens),
+                                "zero_advantage_filter/filtered_attention_tokens": float(
+                                    eligible_attention_tokens - retained_attention_tokens
+                                ),
+                                "zero_advantage_filter/eligible_loss_tokens": float(eligible_loss_tokens),
+                                "zero_advantage_filter/retained_loss_tokens": float(retained_loss_tokens),
+                                "zero_advantage_filter/filtered_loss_tokens": float(
+                                    eligible_loss_tokens - retained_loss_tokens
+                                ),
+                            }
+                        )
+                        if task_rollout_results:
+                            # Preserve the pre-filter action-token denominator;
+                            # otherwise removing zero terms would amplify every
+                            # remaining gradient in this microbatch.
+                            set_loss_normalization_token_counts(
+                                task_rollout_results,
+                                represented_loss_tokens=eligible_loss_tokens,
+                            )
+
+                    if len(task_rollout_results) == 0:
+                        logger.warning(
+                            f"All datums had zero advantage for microbatch {microbatch_num} "
+                            f"(minibatch {minibatch_num})"
+                        )
+                        continue
+
+                    (
+                        submitted_datums,
+                        submitted_attention_tokens,
+                        submitted_loss_tokens,
+                    ) = get_datum_counts(task_rollout_results)
+                    batch_submitted_training_datums += submitted_datums
+                    batch_submitted_training_attention_tokens += submitted_attention_tokens
+                    batch_submitted_training_loss_tokens += submitted_loss_tokens
+
                     # Filter out mask and checkpoint_version from loss_fn_inputs before forward_backward
                     # Neither is needed in forward_backward computation.
                     # mask is redundant since advantages are 0 for masked tokens.
@@ -620,19 +734,24 @@ class PlatoonTinkerRLTrainer:
                             loss_fn_inputs={
                                 k: v
                                 for k, v in datum.loss_fn_inputs.items()
-                                if k not in ("mask", "checkpoint_version", "traj_depth", "traj_start")
+                                if k
+                                not in (
+                                    "mask",
+                                    "checkpoint_version",
+                                    "traj_depth",
+                                    "traj_start",
+                                    LOSS_NORMALIZATION_TOKENS_KEY,
+                                )
                             },
                         )
                         for datum in task_rollout_results
                     ]
 
-                    # Scale advantages by sum of mask allows us to get mean reduction for the objective instead of sum reduction.
-                    # Tinker implements objectives with sum reduction by default, so we need to do this to make sure objective and
+                    # Normalize by represented action-token mass so Tinker's
+                    # sum-reduced objective behaves like a mean reduction and
                     # grad_norm is not sensitive to batch size.
-                    scale_factor = 0.0
-                    for datum in task_rollout_results:
-                        scale_factor += datum.loss_fn_inputs["mask"].to_torch().sum()
-                    scale_factor = 1.0 / (scale_factor + 1e-8)
+                    normalization_token_count = get_loss_normalization_token_count(task_rollout_results)
+                    scale_factor = 1.0 / (normalization_token_count + 1e-8)
 
                     for datum in filtered_datums:
                         datum.loss_fn_inputs["advantages"] = TensorData.from_torch(
@@ -754,7 +873,55 @@ class PlatoonTinkerRLTrainer:
                     for key, value in optim_result.metrics.items():
                         shared_state.train_tracker.scalar(**{f"optim/{key}": value})
 
-            shared_state.train_tracker.scalar(total_datums_per_batch=total_datums)
+            exact_training_batch_metrics: dict[str, float] = {}
+            # A legacy/custom plain-list workflow has no generation sidechannel.
+            # Continue reporting the authoritative submitted payload, but do not
+            # subtract it from a known-workload subtotal and claim a negative or
+            # otherwise inexact non-submitted count.
+            if batch_total_tasks_with_workload_metadata == batch_total_tasks:
+                batch_non_submitted_datums = batch_workload.postmerge_datums - batch_submitted_training_datums
+                if batch_non_submitted_datums < 0:
+                    raise ValueError(
+                        "Submitted training datums exceed the consumed post-merge datum count: "
+                        f"submitted={batch_submitted_training_datums}, "
+                        f"postmerge={batch_workload.postmerge_datums}"
+                    )
+                exact_training_batch_metrics["workload/training_batch/total_non_submitted_datums"] = float(
+                    batch_non_submitted_datums
+                )
+            shared_state.train_tracker.scalar(
+                total_datums_per_batch=total_datums,
+                **batch_workload.to_metrics("workload/batch"),
+                **{
+                    "workload/batch/total_tasks": float(batch_total_tasks),
+                    "workload/batch/total_tasks_with_workload_metadata": float(
+                        batch_total_tasks_with_workload_metadata
+                    ),
+                    "workload/batch/total_requested_rollouts": float(batch_total_requested_rollouts),
+                    "workload/batch/total_observed_rollouts": float(batch_total_observed_rollouts),
+                    "workload/batch/total_workflow_trainable_rollouts": float(
+                        batch_total_workflow_trainable_rollouts
+                    ),
+                    "workload/batch/total_task_retained_datums": float(batch_total_task_retained_datums),
+                    "workload/batch/total_task_workflow_trainable_datums": float(
+                        batch_total_task_retained_datums
+                    ),
+                    "workload/batch/total_task_workflow_non_trainable_datums": float(
+                        batch_workload.postmerge_datums - batch_total_task_retained_datums
+                    ),
+                    "workload/batch/total_task_filter_dropped_datums": float(
+                        batch_workload.post_sampling_datums - batch_total_task_retained_datums
+                    ),
+                    "workload/training_batch/total_submitted_datums": float(batch_submitted_training_datums),
+                    "workload/training_batch/total_attention_tokens": float(
+                        batch_submitted_training_attention_tokens
+                    ),
+                    "workload/training_batch/total_action_tokens": float(
+                        batch_submitted_training_loss_tokens
+                    ),
+                    **exact_training_batch_metrics,
+                },
+            )
 
             # Update sampling client with timing
             update_start = time.perf_counter()

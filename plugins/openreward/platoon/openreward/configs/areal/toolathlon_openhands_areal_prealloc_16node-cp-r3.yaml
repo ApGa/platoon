@@ -1,0 +1,35 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_16node-cp
+  - _self_
+
+# The raw Slurm launcher validates this literal top-level marker before Hydra
+# composes the inherited OpenReward values.
+openreward: {}
+
+# R3 is intentionally isolated from the recoverable baseline trial. The base
+# config remains replay-disabled, so enabling this experiment cannot alter its
+# optimizer or checkpoint semantics.
+trial_name: toolathlon-openhands-16node-qwen3.6-35B-r3-trial0
+
+rollout:
+  # This is the upstream capture gate. It also enables SGLang's routed-expert
+  # response path; the recoverable baseline leaves it false/defaulted.
+  return_routed_experts: true
+
+sglang:
+  # Deliberately differs from PR #1207: Toolathlon sends custom text stops
+  # (for example </python>), and SGLang tail_str() needs tokenizer.decode.
+  # Strict S-1 route validation fails closed on any token-alignment drift.
+  skip_tokenizer_init: false
+
+actor:
+  # Repeat these inherited values because the Slurm launcher detects Megatron
+  # with a pre-Hydra grep and uses them to prepare cached TE/APEX wheels.
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: Qwen/Qwen3.6-35B-A3B
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  router_replay_num_experts: 256
+  megatron:
+    enable_mtp: false

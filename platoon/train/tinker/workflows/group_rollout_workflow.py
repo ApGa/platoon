@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import tinker
@@ -17,14 +18,99 @@ from tinker import TensorData
 from platoon.envs.base import Task
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo, TinkerLLMProxySession
+from platoon.utils.rollout_workload import (
+    RolloutWorkload,
+    record_workload_distribution,
+    sum_rollout_workloads,
+    trajectory_collection_shape,
+)
 from platoon.utils.stats_tracker import get as get_tracker
+from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.tinker_data_processing import (
+    SubagentDatumSamplingStats,
     TrajectoryCollectionResult,
     TrajectoryStats,
     get_train_data_for_trajectory_collection,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _SingleRolloutOutcome:
+    """Internal result that keeps raw generation work even if conversion fails."""
+
+    result: TrajectoryCollectionResult | None
+    workload: RolloutWorkload
+    observed: bool
+
+
+class _TaskRolloutOutput(list[tinker.Datum]):
+    """List-compatible task result with an out-of-band workload payload.
+
+    The trainer and legacy consumers can continue treating this as an ordinary
+    datum list.  In particular, an empty instance behaves like an empty list,
+    while still carrying the generation work for a task which produced no
+    trainable policy data.
+    """
+
+    def __init__(
+        self,
+        datums: list[tinker.Datum],
+        *,
+        workload: RolloutWorkload,
+        requested_rollouts: int,
+        observed_rollouts: int,
+        trainable_rollouts: int,
+        task_retained_datums: int,
+    ) -> None:
+        super().__init__(datums)
+        self.workload = workload
+        self.requested_rollouts = requested_rollouts
+        self.observed_rollouts = observed_rollouts
+        self.trainable_rollouts = trainable_rollouts
+        self.task_retained_datums = task_retained_datums
+
+
+def _workload_from_raw_rollout(
+    trajectory_collection: dict | None,
+    interactions: dict,
+) -> RolloutWorkload:
+    """Count one raw recursive tree and its unique proxy interactions."""
+
+    trajectories, environment_steps = trajectory_collection_shape(trajectory_collection)
+    # ``interactions`` is keyed by completion ID, so walking its values counts
+    # every logical model request exactly once even when a recursive tree later
+    # excludes, interrupts, or fails to convert one of its trajectories.
+    input_tokens = sum(int(interaction.obs.length) for interaction in interactions.values())
+    output_tokens = sum(len(interaction.action.tokens) for interaction in interactions.values())
+    return RolloutWorkload(
+        environment_steps=environment_steps,
+        model_calls=len(interactions),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        trajectories=trajectories,
+    )
+
+
+def _add_datum_funnel(
+    workload: RolloutWorkload,
+    result: TrajectoryCollectionResult | None,
+) -> RolloutWorkload:
+    """Attach post-merge, policy, and sampling counts to raw workload."""
+
+    if result is None:
+        return workload
+    postmerge = sum(stats.num_datums for stats in result.trajectory_stats)
+    policy_eligible = postmerge - result.num_policy_excluded_datums
+    post_sampling = len(result.datums)
+    # RolloutWorkload validates that the funnel is ordered and non-negative.
+    return replace(
+        workload,
+        postmerge_datums=postmerge,
+        policy_eligible_datums=policy_eligible,
+        post_sampling_datums=post_sampling,
+    )
 
 
 class GroupRolloutWorkflow:
@@ -69,6 +155,14 @@ class GroupRolloutWorkflow:
         self.filter_errors = filter_errors
         self.reward_processor = reward_processor
         self.tracker = get_tracker(stats_scope)
+        self.subagent_datum_sampler = (
+            DeterministicSubagentDatumSampler(
+                keep_probability=config.subagent_datum_keep_probability,
+                seed=config.subagent_datum_sampling_seed,
+            )
+            if config.subagent_datum_keep_probability < 1.0
+            else None
+        )
 
     def _get_rollout_config(self) -> RolloutConfig:
         """Get a copy of the rollout config with model info populated."""
@@ -85,33 +179,122 @@ class GroupRolloutWorkflow:
 
         return config
 
-    async def arun_episode(self, data: dict) -> list[tinker.Datum] | None:
+    def _make_task_output(
+        self,
+        datums: list[tinker.Datum],
+        *,
+        outcomes: list[_SingleRolloutOutcome],
+        trainable_rollouts: int,
+    ) -> _TaskRolloutOutput:
+        """Record unit distributions and attach exact totals to the queue item."""
+
+        rollout_workloads = [outcome.workload for outcome in outcomes]
+        task_workload = sum_rollout_workloads(rollout_workloads)
+        postmerge_datums = task_workload.postmerge_datums
+        policy_eligible_datums = task_workload.policy_eligible_datums
+        post_sampling_datums = task_workload.post_sampling_datums
+        task_retained_datums = len(datums)
+        if not 0 <= task_retained_datums <= post_sampling_datums <= policy_eligible_datums <= postmerge_datums:
+            raise ValueError(
+                "Invalid task datum funnel: "
+                f"postmerge={postmerge_datums}, policy_eligible={policy_eligible_datums}, "
+                f"post_sampling={post_sampling_datums}, task_retained={task_retained_datums}"
+            )
+        record_workload_distribution(
+            self.tracker,
+            prefix="workload/rollout",
+            workloads=rollout_workloads,
+        )
+        record_workload_distribution(
+            self.tracker,
+            prefix="workload/task",
+            workloads=[task_workload],
+        )
+
+        # The workload/task/count denominator was registered immediately above,
+        # so these are task-level distributions with the same sample boundary.
+        self.tracker.stat(
+            denominator="workload/task/count",
+            **{
+                "workload/task/requested_rollouts": torch.tensor(
+                    [float(self.config.group_size)], dtype=torch.float32
+                ),
+                "workload/task/observed_rollouts": torch.tensor(
+                    [float(sum(outcome.observed for outcome in outcomes))], dtype=torch.float32
+                ),
+                "workload/task/workflow_trainable_rollouts": torch.tensor(
+                    [float(trainable_rollouts)], dtype=torch.float32
+                ),
+                "workload/task/total_task_retained_datums": torch.tensor(
+                    [float(task_retained_datums)], dtype=torch.float32
+                ),
+                "workload/task/total_task_workflow_trainable_datums": torch.tensor(
+                    [float(task_retained_datums)], dtype=torch.float32
+                ),
+                "workload/task/total_task_workflow_non_trainable_datums": torch.tensor(
+                    [float(postmerge_datums - task_retained_datums)], dtype=torch.float32
+                ),
+                "workload/task/total_task_filter_dropped_datums": torch.tensor(
+                    [float(post_sampling_datums - task_retained_datums)], dtype=torch.float32
+                ),
+            },
+        )
+        return _TaskRolloutOutput(
+            datums,
+            workload=task_workload,
+            requested_rollouts=self.config.group_size,
+            observed_rollouts=sum(outcome.observed for outcome in outcomes),
+            trainable_rollouts=trainable_rollouts,
+            task_retained_datums=task_retained_datums,
+        )
+
+    async def arun_episode(self, data: dict) -> list[tinker.Datum]:
         """Run multiple rollouts for a task and return training data.
 
         Args:
             data: Dictionary containing 'task_id' and optionally other task data.
 
         Returns:
-            List of tinker.Datum with group-centered advantages, or None if no data.
+            A list-compatible datum result. An empty result still carries exact
+            task generation workload for trainer-side batch accounting.
         """
-        results = await asyncio.gather(*[self.arun_episode_single(data, i) for i in range(self.config.group_size)])
-        valid_results = [result for result in results if result is not None]
+        raw_outcomes = await asyncio.gather(
+            *[self.arun_episode_single(data, i) for i in range(self.config.group_size)]
+        )
+        # Accept legacy test/custom overrides that return the old result type,
+        # while the canonical single-rollout path always returns an outcome.
+        outcomes = [
+            outcome
+            if isinstance(outcome, _SingleRolloutOutcome)
+            else _SingleRolloutOutcome(
+                result=outcome,
+                workload=_add_datum_funnel(RolloutWorkload(), outcome),
+                observed=outcome is not None,
+            )
+            for outcome in raw_outcomes
+        ]
+        valid_results = [outcome.result for outcome in outcomes if outcome.result is not None]
 
         # Filter out None results and collect data
         all_data: list[tinker.Datum] = []
         task_rewards: list[float] = []
         all_trajectory_stats: list[TrajectoryStats] = []
         all_root_rewards_dicts: list[dict[str, float]] = []
+        subagent_sampling_stats = SubagentDatumSamplingStats()
 
         for result in valid_results:
             all_data.extend(result.datums)
             task_rewards.append(result.task_reward)
             all_trajectory_stats.extend(result.trajectory_stats)
             all_root_rewards_dicts.append(result.root_rewards_dict)
+            subagent_sampling_stats.merge(result.subagent_sampling_stats)
 
-        if not all_data:
+        if self.subagent_datum_sampler is not None:
+            self.tracker.scalar(**subagent_sampling_stats.to_metrics())
+
+        if not valid_results:
             logger.warning(f"No results found for task {data['task_id']}")
-            return None
+            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
 
         # === Track stats BEFORE early returns ===
         # This ensures we track stats even for groups that get filtered out
@@ -177,11 +360,14 @@ class GroupRolloutWorkflow:
             all_reward_keys.update(rewards_dict.keys())
 
         for key in all_reward_keys:
-            # Collect values for this key from all root trajectories (one per rollout)
-            values = torch.tensor([rewards_dict.get(key, 0.0) for rewards_dict in all_root_rewards_dicts])
+            # Optional reward components must be averaged only where present;
+            # zero-filling absent judgments would underreport the metric.
+            values = torch.tensor([rewards_dict[key] for rewards_dict in all_root_rewards_dicts if key in rewards_dict])
+            root_reward_mask = torch.ones_like(values, dtype=torch.bool)
+            root_mask_name = f"root_{key}_mask"
+            self.tracker.denominator(**{root_mask_name: root_reward_mask})
 
-            # Track root_* metrics with rollout mask (same as task_reward)
-            self.tracker.stat(**{f"root_{key}": values}, denominator="task_reward_mask")
+            self.tracker.stat(**{f"root_{key}": values}, denominator=root_mask_name)
             self.tracker.stat(
                 **{f"root_{key}_at_k_mean": torch.mean(values).unsqueeze(0)},
                 denominator="task_reward_at_k_mask",
@@ -203,29 +389,51 @@ class GroupRolloutWorkflow:
                     all_per_traj_reward_keys.add(key)
 
         for key in all_per_traj_reward_keys:
-            values = torch.tensor([stats.rewards_dict.get(key, 0.0) for stats in all_trajectory_stats])
+            values = torch.tensor(
+                [stats.rewards_dict[key] for stats in all_trajectory_stats if key in stats.rewards_dict]
+            )
             reward_mask = torch.ones_like(values, dtype=torch.bool)
             self.tracker.denominator(**{f"{key}_mask": reward_mask})
             self.tracker.stat(**{key: values}, denominator=f"{key}_mask")
 
         # === Now compute advantages and filter ===
 
-        # Compute group-centered advantages
-        mean_task_reward = sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
+        # Interrupted roots carry partial task rewards. Keep those rewards in all
+        # metrics above, but exclude them from the control-variate estimate used
+        # to center policy advantages.
+        valid_task_rewards = [result.task_reward for result in valid_results if result.task_reward_valid]
+        if not valid_task_rewards:
+            logger.warning(
+                "No completed root rewards available for task %s; retaining rollout stats but skipping training",
+                data["task_id"],
+            )
+            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
 
-        # Check if all rewards are the same across ALL trajectories in the group, including subagent trajectories
-        all_trajectory_rewards = [stats.reward for stats in all_trajectory_stats]
-        if len(all_trajectory_rewards) > 1 and max(all_trajectory_rewards) == min(all_trajectory_rewards):
-            logger.debug(f"All rewards are the same for task {data['task_id']}: {mean_task_reward:.2f}")
-            return None
+        if not all_data:
+            logger.warning(f"No train data found for task {data['task_id']}")
+            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+
+        # Compute group-centered advantages from completed root rewards only.
+        mean_task_reward = sum(valid_task_rewards) / len(valid_task_rewards)
 
         # Center advantages by rollout. The old_adv was set to trajectory_reward, so
         # this produces either reward - mean_reward or reward - loo_baseline.
-        if self.config.leave_one_out_baseline and len(valid_results) > 1:
-            total_task_reward = sum(task_rewards)
-            baselines = [
-                (total_task_reward - result.task_reward) / (len(valid_results) - 1) for result in valid_results
-            ]
+        if self.config.leave_one_out_baseline:
+            total_valid_task_reward = sum(valid_task_rewards)
+            num_valid_task_rewards = len(valid_task_rewards)
+            baselines = []
+            for result in valid_results:
+                if not result.task_reward_valid:
+                    # A completed child from a partial rollout can still train,
+                    # but the partial root must not affect its baseline.
+                    baselines.append(mean_task_reward)
+                elif num_valid_task_rewards > 1:
+                    baselines.append(
+                        (total_valid_task_reward - result.task_reward) / (num_valid_task_rewards - 1)
+                    )
+                else:
+                    # A singleton completed root has no leave-one-out peer.
+                    baselines.append(result.task_reward)
         else:
             baselines = [mean_task_reward] * len(valid_results)
 
@@ -236,9 +444,54 @@ class GroupRolloutWorkflow:
                 new_advantages = torch.where(mask > 0, old_advantages - baseline, old_advantages)
                 datum.loss_fn_inputs["advantages"] = TensorData.from_torch(new_advantages)
 
-        return all_data
+        # Full-tree reward/LOO statistics above intentionally include empty and
+        # policy-ineligible trajectories. The train/no-train decision must not:
+        # a sampled-out or invalid-verifier child with a different reward cannot
+        # turn an otherwise zero-signal retained batch into an optimizer step.
+        retained_action_advantages = [
+            datum.loss_fn_inputs["advantages"].to_torch()[datum.loss_fn_inputs["mask"].to_torch() > 0]
+            for datum in all_data
+        ]
+        retained_action_advantages = [values for values in retained_action_advantages if values.numel() > 0]
+        if not retained_action_advantages:
+            logger.debug("No retained policy action tokens for task %s", data["task_id"])
+            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+        flattened_advantages = torch.cat(retained_action_advantages)
+        if getattr(self.config, "filter_zero_advantage_datums", True) and bool(
+            torch.all(flattened_advantages == 0)
+        ):
+            logger.debug(
+                "Deferring all-zero policy datums for task %s to the post-transform "
+                "trainer filter (mean task reward %.2f)",
+                data["task_id"],
+                mean_task_reward,
+            )
+            # Keep these candidates until the trainer has assembled the
+            # cross-task microbatch. They must participate in depth-frequency
+            # normalization and the original action-token denominator even
+            # though they can be omitted from the expensive model pass.
 
-    async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> TrajectoryCollectionResult | None:
+        trainable_rollouts = sum(
+            any(
+                bool(
+                    torch.any(
+                        datum.loss_fn_inputs["advantages"].to_torch()[
+                            datum.loss_fn_inputs["mask"].to_torch() > 0
+                        ]
+                        != 0
+                    )
+                )
+                for datum in result.datums
+            )
+            for result in valid_results
+        )
+        return self._make_task_output(
+            all_data,
+            outcomes=outcomes,
+            trainable_rollouts=trainable_rollouts,
+        )
+
+    async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> _SingleRolloutOutcome:
         """Run a single rollout and return training data.
 
         Args:
@@ -246,9 +499,12 @@ class GroupRolloutWorkflow:
             rollout_number: Index of this rollout within the group.
 
         Returns:
-            TrajectoryCollectionResult with datums and stats, or None if failed.
+            Internal outcome containing converted data when usable and the raw
+            workload even when conversion or rollout execution failed.
         """
         task_id = data["task_id"]
+        trajectory_collection: dict | None = None
+        interactions: dict = {}
 
         try:
             task = self.get_task_fn(task_id)
@@ -267,19 +523,22 @@ class GroupRolloutWorkflow:
 
             # Use the proxy session to track LLM interactions
             async with TinkerLLMProxySession() as session:
-                # Run the rollout with the proper config
-                results = await asyncio.create_task(self.rollout_fn(task, rollout_config))
+                try:
+                    # Run the rollout with the proper config
+                    trajectory_collection = await asyncio.create_task(self.rollout_fn(task, rollout_config))
+                finally:
+                    # Copy before the context manager resets its ContextVar.
+                    interactions = dict(session.interactions)
 
-                if not results.get("trajectories"):
+                workload = _workload_from_raw_rollout(trajectory_collection, interactions)
+
+                if not trajectory_collection.get("trajectories"):
                     logger.warning(f"No trajectories found for task {task_id} and rollout {rollout_number}")
-                    return None
-
-                # Get the llm interactions recorded during this session
-                interactions = session.interactions
+                    return _SingleRolloutOutcome(result=None, workload=workload, observed=False)
 
                 # Extract training data
                 result = get_train_data_for_trajectory_collection(
-                    trajectory_collection=results,
+                    trajectory_collection=trajectory_collection,
                     interactions=interactions,
                     task_id=task_id,
                     checkpoint_version=checkpoint_version,
@@ -287,14 +546,39 @@ class GroupRolloutWorkflow:
                     reward_processor=self.reward_processor,
                     include_traj_depth=self.config.depth_level_weighting,
                     include_traj_start=self.config.depth_level_weighting,
+                    subagent_datum_sampler=self.subagent_datum_sampler,
                 )
+                workload = _add_datum_funnel(workload, result)
+
+                # Sampling is allowed to remove every converted datum, but it
+                # must not turn a genuinely unusable rollout into a baseline
+                # member merely because sampling happens to be enabled.  The
+                # per-trajectory counts are deliberately pre-sampling counts.
+                num_pre_sampling_datums = sum(stats.num_datums for stats in result.trajectory_stats)
+                if num_pre_sampling_datums == 0:
+                    logger.warning(
+                        "No pre-sampling train data found for task %s and rollout %s",
+                        task_id,
+                        rollout_number,
+                    )
+                    return _SingleRolloutOutcome(result=None, workload=workload, observed=True)
 
                 if not result.datums:
                     logger.warning(f"No train data found for task {task_id} and rollout {rollout_number}")
-                    return None
+                    # Retain an empty result produced by Bernoulli sampling or
+                    # policy exclusion: its reward and trajectory stats still
+                    # belong in group baselines/metrics, and a sibling rollout
+                    # may provide the group's actual training datums.
+                    if self.subagent_datum_sampler is None and result.num_policy_excluded_datums == 0:
+                        return _SingleRolloutOutcome(result=None, workload=workload, observed=True)
 
-                return result
+                return _SingleRolloutOutcome(result=result, workload=workload, observed=True)
 
         except Exception as e:
             logger.exception(f"Error in tinker workflow for task {task_id} and rollout {rollout_number}: {e}")
-            return None
+            workload = _workload_from_raw_rollout(trajectory_collection, interactions)
+            return _SingleRolloutOutcome(
+                result=None,
+                workload=workload,
+                observed=workload.trajectories > 0,
+            )

@@ -15,7 +15,8 @@ from platoon.inference import DefaultInferenceGroupWorkflow, InferenceBenchmarkR
 from platoon.utils.config import load_config
 
 from platoon.openreward.config_defs import OpenRewardInferenceConfig
-from platoon.openreward.rollout import reward_processor, run_rollout
+from platoon.openreward.rewards import reward_processor
+from platoon.openreward.rollout import run_rollout
 from platoon.openreward.tasks import get_task, get_task_ids
 
 logging.basicConfig(

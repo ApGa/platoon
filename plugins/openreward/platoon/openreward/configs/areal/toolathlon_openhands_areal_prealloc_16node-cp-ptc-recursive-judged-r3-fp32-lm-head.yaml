@@ -1,0 +1,67 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_16node-cp-ptc-recursive
+  - _self_
+
+# Keep this experiment separate from both the recursive baseline and the
+# non-recursive R3/FP32 trial so recovery cannot load an incompatible optimizer.
+trial_name: toolathlon-openhands-16node-qwen3.6-35B-ptc-recursive-judged-r3-fp32-lm-head-trial2
+
+openreward:
+  # Score each completed worker subagent with a verifier that can inspect the
+  # same environment. Verifier trajectories are retained for diagnostics but
+  # explicitly excluded from actor training.
+  enable_subagent_reward_judging: true
+  # Give the verifier enough budget to inspect longer child trajectories and
+  # gather any additional evidence it needs before emitting a judgment.
+  subagent_reward_judge_max_steps: 50
+  # Match Oolong recursive reward shaping. Each trajectory gets at most 0.4
+  # from the mean base verifier score of its own direct children.
+  subagent_delegation_reward_coefficient: 0.4
+
+workflow_config:
+  rollout_config:
+    # Judged child rewards should remain visible in trajectory metrics. The
+    # reward processor uses the judgment either way, but root propagation would
+    # overwrite the child reward/success telemetry after rollout.
+    propogate_root_success: false
+    # Child and verifier execution happens synchronously inside a parent step.
+    # Allow one such step 45 minutes and leave another 45 minutes for the rest
+    # of the root trajectory so the outer deadline does not preempt it first.
+    timeout: 5400
+    step_timeout: 2700
+
+rollout:
+  return_routed_experts: true
+  # The controller starts this clock when a workflow is submitted, including
+  # time spent queued behind another group on the same inference worker. With
+  # eight admitted groups on six workers, allow one 5580s cohort ahead of this
+  # workflow, its own 5580s hard deadline, and cleanup/export headroom.
+  request_timeout: 12600
+  agent:
+    # Session staleness is based on inactivity rather than total lifetime. Keep
+    # it above the longest individual rollout so a slow recursive tree is not
+    # reaped while its workflow remains valid.
+    session_timeout_seconds: 7200
+
+sglang:
+  # R3 requires SGLang tokenization so routed-expert rows can be aligned and
+  # validated against every generated token before training.
+  skip_tokenizer_init: false
+
+# Repeat backend/path because the Slurm launcher reads the selected file before
+# Hydra composes its defaults and uses these literals to prepare Megatron.
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: Qwen/Qwen3.6-35B-A3B
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  router_replay_num_experts: 256
+  megatron:
+    # R3 has no rollout routes for MTP layers.
+    enable_mtp: false
+    enable_fp32_lm_head: true
+
+ref:
+  megatron:
+    enable_fp32_lm_head: true

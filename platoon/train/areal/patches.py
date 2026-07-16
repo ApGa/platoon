@@ -18,6 +18,46 @@ from functools import lru_cache, wraps
 from typing import Any
 
 
+def _patch_areal_local_scalar_stats_export(stats_tracker_module=None) -> bool:
+    """Keep non-distributed scalar metric aggregation off accelerator devices.
+
+    AReaL's stats tracker creates CUDA tensors for every scalar metric whenever
+    the platform is initialized, even when the metric has no process group to
+    reduce across.  Rollout RPC workers do not need a device tensor for that
+    case, and creating their first CUDA allocation on a full inference GPU can
+    fail while merely exporting telemetry.
+    """
+
+    if stats_tracker_module is None:
+        import areal.utils.stats_tracker as stats_tracker_module  # pyright: ignore[reportMissingImports]
+
+    tracker_cls = stats_tracker_module.DistributedStatsTracker
+    reduce_type_cls = stats_tracker_module.ReduceType
+    original = tracker_cls._aggregate
+    if getattr(original, "__platoon_local_scalar_stats_export_patch__", False):
+        return False
+
+    @wraps(original)
+    def _aggregate_local_scalars_without_device_allocation(self, key, reduce_group):
+        reduce_type = self.reduce_types.get(key, reduce_type_cls.SCALAR)
+        effective_group = self._effective_reduce_group(key, reduce_group)
+        if reduce_type != reduce_type_cls.SCALAR or effective_group is not None:
+            return original(self, key, reduce_group)
+
+        values = self.stats[key]
+        value = stats_tracker_module.torch.tensor(
+            sum(values), dtype=stats_tracker_module.torch.float32, device="cpu"
+        )
+        count = stats_tracker_module.torch.tensor(
+            len(values), dtype=stats_tracker_module.torch.float32, device="cpu"
+        )
+        return {key: float(value / count), f"{key}__count": int(count)}
+
+    _aggregate_local_scalars_without_device_allocation.__platoon_local_scalar_stats_export_patch__ = True
+    tracker_cls._aggregate = _aggregate_local_scalars_without_device_allocation
+    return True
+
+
 def _patch_hf_tokenizer_download_race() -> None:
     """Avoid corrupt Hugging Face tokenizer JSON during proxy worker startup.
 
@@ -120,6 +160,260 @@ def _patch_model_response_custom_stop_sequences() -> None:
 
     _output_tokens_without_custom_stop_error.__platoon_custom_stop_patch__ = True
     ModelResponse.output_tokens_without_stop = property(_output_tokens_without_custom_stop_error)
+
+
+def _compact_routed_expert_ids(routed_experts):
+    """Copy routed expert IDs to the smallest lossless integer dtype.
+
+    SGLang currently returns ``int32`` IDs. Qwen3.5/3.6 have 256 routed
+    experts, so their non-negative IDs fit exactly in ``uint8``. Compacting at
+    the proxy boundary cuts both the HTTP serialization and rollout storage by
+    four without reserving any sentinel value (expert zero is a real expert).
+    """
+
+    import torch
+
+    routes = torch.as_tensor(routed_experts).detach().cpu()
+    if routes.dtype == torch.bool:
+        raise ValueError("routed expert IDs cannot have boolean dtype")
+    if torch.is_floating_point(routes):
+        if not torch.isfinite(routes).all() or not torch.equal(routes, routes.trunc()):
+            raise ValueError("routed expert IDs must be finite integers")
+
+    if routes.numel() == 0:
+        return routes.to(dtype=torch.uint8).contiguous()
+
+    minimum_tensor, maximum_tensor = torch.aminmax(routes)
+    minimum = int(minimum_tensor.item())
+    maximum = int(maximum_tensor.item())
+    if minimum >= 0 and maximum <= torch.iinfo(torch.uint8).max:
+        dtype = torch.uint8
+    elif minimum >= torch.iinfo(torch.int16).min and maximum <= torch.iinfo(torch.int16).max:
+        dtype = torch.int16
+    elif minimum >= torch.iinfo(torch.int32).min and maximum <= torch.iinfo(torch.int32).max:
+        dtype = torch.int32
+    else:
+        dtype = torch.int64
+    return routes.to(dtype=dtype).contiguous()
+
+
+def _patch_areal_openai_routed_experts_transport() -> None:
+    """Preserve SGLang MoE routes through AReaL's OpenAI proxy export.
+
+    AReaL keeps ``ModelResponse.routed_experts`` in the proxy process but its
+    interaction tensor dictionary historically omitted the field. The HTTP
+    exporter serializes that dictionary verbatim, so extending it here is
+    sufficient to transport routes to ``GroupRolloutWorkflow``. Capture itself
+    remains gated by AReaL's ``rollout.return_routed_experts`` option.
+
+    The transported mask describes the rows actually returned by SGLang. The
+    trajectory processor later aligns those rows to tokens and adds the
+    explicit invalid terminal-token row.
+    """
+
+    try:
+        from areal.experimental.openai.types import (  # pyright: ignore[reportMissingImports]
+            InteractionWithTokenLogpReward,
+        )
+    except Exception:
+        return
+
+    original = InteractionWithTokenLogpReward.to_tensor_dict
+    if getattr(original, "__platoon_routed_experts_transport_patch__", False):
+        return
+
+    @wraps(original)
+    def _to_tensor_dict_with_routed_experts(self):
+        import torch
+
+        result = original(self)
+        if "routed_experts" in result:
+            # Be forward-compatible with an AReaL release that transports the
+            # IDs itself while still compacting immediately and insisting on
+            # unambiguous row validity.
+            routes = _compact_routed_expert_ids(result["routed_experts"])
+            result["routed_experts"] = routes
+            if "routed_experts_valid" not in result:
+                if routes.ndim < 2:
+                    raise ValueError("AReaL routed_experts must have batch and route-row dimensions")
+                input_ids = result.get("input_ids")
+                if input_ids is None or input_ids.ndim != 2:
+                    raise ValueError("AReaL routed_experts requires 2D input_ids to establish row validity")
+                if routes.shape[1] > max(input_ids.shape[1] - 1, 0):
+                    raise ValueError(
+                        "AReaL supplied aligned/extra routed-expert rows without an explicit validity mask"
+                    )
+                result["routed_experts_valid"] = torch.ones((routes.shape[0], routes.shape[1]), dtype=torch.bool)
+            return result
+
+        response = getattr(self, "model_response", None)
+        raw_routes = getattr(response, "routed_experts", None)
+        if raw_routes is None:
+            return result
+
+        routes = _compact_routed_expert_ids(raw_routes)
+        if routes.ndim < 2:
+            raise ValueError(f"ModelResponse.routed_experts must be at least 2D [rows, ...], got {tuple(routes.shape)}")
+        # Drop the int32 backing array as soon as the lossless compact copy
+        # exists. The NumPy view and tensor-dict view share this compact CPU
+        # storage, avoiding a second retained route matrix in the proxy.
+        response.routed_experts = routes.numpy()
+        routes = routes.flatten(start_dim=1)
+        result["routed_experts"] = routes.unsqueeze(0)
+        result["routed_experts_valid"] = torch.ones((1, routes.shape[0]), dtype=torch.bool)
+        return result
+
+    _to_tensor_dict_with_routed_experts.__platoon_routed_experts_transport_patch__ = True
+    InteractionWithTokenLogpReward.to_tensor_dict = _to_tensor_dict_with_routed_experts
+
+
+def _patch_areal_sglang_routed_experts_launcher(sglang_config_cls=None) -> bool:
+    """Use Platoon's spawn-safe SGLang launcher only for route-capturing runs."""
+
+    if sglang_config_cls is None:
+        from areal.api.cli_args import SGLangConfig as sglang_config_cls  # pyright: ignore[reportMissingImports]
+
+    original = sglang_config_cls.build_cmd_from_args
+    if getattr(original, "__platoon_routed_experts_launcher_patch__", False):
+        return False
+
+    upstream_module = "areal.v2.inference_service.sglang.launch_server"
+    platoon_module = "platoon.sglang_server"
+
+    @wraps(original)
+    def _build_cmd_with_routed_experts_fix(args):
+        command = original(args)
+        if not bool(args.get("enable_return_routed_experts", False)):
+            return command
+        if not isinstance(command, list) or command.count(upstream_module) != 1:
+            raise RuntimeError(
+                "Unexpected AReaL SGLang launch command while enabling routed-expert capture: "
+                f"{command!r}"
+            )
+        patched_command = list(command)
+        patched_command[patched_command.index(upstream_module)] = platoon_module
+        return patched_command
+
+    _build_cmd_with_routed_experts_fix.__platoon_routed_experts_launcher_patch__ = True
+    sglang_config_cls.build_cmd_from_args = staticmethod(_build_cmd_with_routed_experts_fix)
+    return True
+
+
+def _trim_split_routed_experts_to_attention(split_result):
+    """Trim route sequence dim 1 using each already-unpadded attention mask.
+
+    AReaL's generic unpadding trims the final tensor dimension. That is correct
+    for token tensors shaped ``[B,S]`` but not routed-expert tensors shaped
+    ``[B,S,L,K]`` (or the proxy's temporarily flattened ``[B,S,L*K]``).
+    """
+
+    import torch
+
+    if not isinstance(split_result, list):
+        return split_result
+    for item in split_result:
+        if not isinstance(item, dict):
+            continue
+        routes = item.get("routed_experts")
+        if not torch.is_tensor(routes):
+            continue
+        attention_mask = item.get("attention_mask")
+        if not torch.is_tensor(attention_mask) or attention_mask.ndim < 2:
+            continue
+        if routes.ndim < 3 or routes.shape[0] != attention_mask.shape[0]:
+            continue
+
+        # The original function has already unpadded attention_mask, so its
+        # final width is the correct per-trajectory/group sequence width.
+        seq_width = attention_mask.shape[-1]
+        if routes.shape[1] > seq_width:
+            item["routed_experts"] = routes[:, :seq_width, ...].contiguous()
+
+        valid = item.get("routed_experts_valid")
+        if (
+            torch.is_tensor(valid)
+            and valid.ndim == 2
+            and valid.shape[0] == attention_mask.shape[0]
+            and valid.shape[1] > seq_width
+        ):
+            item["routed_experts_valid"] = valid[:, :seq_width].contiguous()
+    return split_result
+
+
+def _patch_areal_routed_experts_unpadding(data_module=None, dist_rollout_module=None) -> dict[str, bool]:
+    """Make AReaL's trajectory split/unpad route-sequence aware.
+
+    ``areal.infra.dist_rollout`` imports the utility by value, so update that
+    alias as well. A repository-wide audit of the pinned AReaL revision found
+    no other static imports; RTensor resolves it dynamically from
+    ``areal.utils.data`` and therefore picks up this patch automatically.
+    """
+
+    if data_module is None:
+        import areal.utils.data as data_module  # pyright: ignore[reportMissingImports]
+
+    original = data_module.split_and_unpad_tensor
+    data_changed = False
+    if getattr(original, "__platoon_routed_experts_unpadding_patch__", False):
+        patched = original
+    else:
+
+        @wraps(original)
+        def _split_and_unpad_routes_on_sequence_dim(*args, **kwargs):
+            import torch
+
+            result = args[0] if args else kwargs.get("result")
+            routes = result.get("routed_experts") if isinstance(result, dict) else None
+            if not torch.is_tensor(routes):
+                return original(*args, **kwargs)
+
+            # Upstream trims every tensor's final dimension. Remove [B,S,L,K]
+            # before that irreversible step (for short S it would truncate K),
+            # then split it ourselves along B and trim sequence dimension 1.
+            without_routes = dict(result)
+            without_routes.pop("routed_experts")
+            call_args = list(args)
+            call_kwargs = dict(kwargs)
+            if call_args:
+                call_args[0] = without_routes
+            else:
+                call_kwargs["result"] = without_routes
+            split_result = original(*call_args, **call_kwargs)
+            if not isinstance(split_result, list):
+                return split_result
+
+            n_trajs = call_args[1] if len(call_args) > 1 else call_kwargs["n_trajs"]
+            group_sizes = call_args[2] if len(call_args) > 2 else call_kwargs.get("traj_group_sizes", 1)
+            if isinstance(group_sizes, int):
+                group_sizes = [group_sizes] * n_trajs
+            if len(group_sizes) != n_trajs or sum(group_sizes) != routes.shape[0]:
+                raise ValueError(
+                    "routed_experts batch dimension does not match split_and_unpad_tensor groups: "
+                    f"routes B={routes.shape[0]}, groups={group_sizes}"
+                )
+            route_splits = routes.split(group_sizes, dim=0)
+            for item, route_split in zip(split_result, route_splits, strict=True):
+                attention_mask = item.get("attention_mask") if isinstance(item, dict) else None
+                if torch.is_tensor(attention_mask) and attention_mask.ndim >= 2:
+                    route_split = route_split[:, : attention_mask.shape[-1], ...]
+                item["routed_experts"] = route_split.contiguous()
+            return _trim_split_routed_experts_to_attention(split_result)
+
+        _split_and_unpad_routes_on_sequence_dim.__platoon_routed_experts_unpadding_patch__ = True
+        data_module.split_and_unpad_tensor = _split_and_unpad_routes_on_sequence_dim
+        patched = _split_and_unpad_routes_on_sequence_dim
+        data_changed = True
+
+    if dist_rollout_module is None:
+        try:
+            import areal.infra.dist_rollout as dist_rollout_module  # pyright: ignore[reportMissingImports]
+        except Exception:
+            dist_rollout_module = None
+    alias_changed = False
+    if dist_rollout_module is not None and getattr(dist_rollout_module, "split_and_unpad_tensor", None) is not patched:
+        dist_rollout_module.split_and_unpad_tensor = patched
+        alias_changed = True
+    return {"data": data_changed, "dist_rollout_alias": alias_changed}
 
 
 def _patch_megatron_bridge_attention_backend() -> None:
@@ -1339,6 +1633,16 @@ def _bounded_fp32_vocab_reduction(
         raise ValueError("Cannot reduce an empty vocabulary dimension.")
     if max_scratch_bytes <= 0:
         raise ValueError("max_scratch_bytes must be positive.")
+    if reduction not in {"mean", "norm"}:
+        raise ValueError(f"Unknown vocab reduction: {reduction!r}")
+
+    # FP32 LM-head output needs no cast and therefore cannot create the
+    # logits-sized temporary this helper is meant to avoid.  Reduce it in one
+    # kernel instead of paying for many row-chunk kernel launches.
+    if tensor.dtype == torch.float32:
+        if reduction == "mean":
+            return tensor.mean(dim=-1)
+        return tensor.norm(dim=-1)
 
     flat_logits = tensor.reshape(-1, vocab_size)
     result = torch.empty(flat_logits.shape[0], dtype=torch.float32, device=tensor.device)
@@ -1351,10 +1655,8 @@ def _bounded_fp32_vocab_reduction(
             _chunk_observer(fp32_chunk)
         if reduction == "mean":
             reduced = fp32_chunk.mean(dim=-1)
-        elif reduction == "norm":
-            reduced = fp32_chunk.norm(dim=-1)
         else:
-            raise ValueError(f"Unknown vocab reduction: {reduction!r}")
+            reduced = fp32_chunk.norm(dim=-1)
         result[start:end].copy_(reduced)
         del fp32_chunk, reduced
     return result.reshape(tensor.shape[:-1])
@@ -1779,6 +2081,132 @@ def _patch_batch_task_dispatcher_idle_submit() -> None:
     BatchTaskDispatcher.active_submit_and_wait = _active_submit_and_wait_with_idle_guard
 
 
+def _patch_rollout_controller_least_loaded_workers() -> None:
+    """Route each new rollout group to the least-loaded inference worker.
+
+    Upstream AReaL round-robins group workflows without tracking when a worker
+    becomes free.  With long, high-variance recursive groups, this can assign a
+    second group to a busy SGLang replica while a different replica sits idle.
+    Wrap the existing callback instead of copying its RPC/error logic so this
+    patch remains narrow and releases load accounting on every exit path.
+    """
+
+    from areal.infra.controller.rollout_controller import RolloutController  # pyright: ignore[reportMissingImports]
+
+    original_choose_worker = RolloutController._choose_worker
+    original_create_submit_callback = RolloutController._create_submit_callback
+    if getattr(original_choose_worker, "__platoon_least_loaded_worker_patch__", False):
+        return
+
+    task_context: contextvars.ContextVar[tuple[int, int] | None] = contextvars.ContextVar(
+        "platoon_rollout_worker_task",
+        default=None,
+    )
+
+    def _state(self):
+        workers = self.workers
+        state = getattr(self, "_platoon_worker_load_state", None)
+        if state is None or len(state["loads"]) != len(workers):
+            state = {
+                "loads": [0] * len(workers),
+                "assignments": {},
+                "lock": threading.Lock(),
+            }
+            self._platoon_worker_load_state = state
+        return state
+
+    @wraps(original_choose_worker)
+    def _choose_least_loaded_worker(self):
+        context = task_context.get()
+        if context is None or context[0] != id(self):
+            return original_choose_worker(self)
+        if not self.workers:
+            raise RuntimeError("No workers available to choose from.")
+
+        task_id = context[1]
+        state = _state(self)
+        with state["lock"]:
+            prior_rank = state["assignments"].get(task_id)
+            if prior_rank is not None:
+                return self.workers[prior_rank], prior_rank
+
+            minimum_load = min(state["loads"])
+            worker_count = len(self.workers)
+            start = self._current_worker_idx % worker_count
+            rank = start
+            for offset in range(worker_count):
+                candidate = (start + offset) % worker_count
+                if state["loads"][candidate] == minimum_load:
+                    rank = candidate
+                    break
+            state["loads"][rank] += 1
+            state["assignments"][task_id] = rank
+            self._current_worker_idx = (rank + 1) % worker_count
+        return self.workers[rank], rank
+
+    @wraps(original_create_submit_callback)
+    def _create_submit_callback_with_load_release(self, pending_task):
+        callback = original_create_submit_callback(self, pending_task)
+        task_id = pending_task.task_id
+
+        @wraps(callback)
+        async def _submit_then_wait_with_load_release():
+            token = task_context.set((id(self), task_id))
+            try:
+                return await callback()
+            finally:
+                task_context.reset(token)
+                state = getattr(self, "_platoon_worker_load_state", None)
+                if state is not None:
+                    with state["lock"]:
+                        rank = state["assignments"].pop(task_id, None)
+                        if rank is not None:
+                            state["loads"][rank] = max(0, state["loads"][rank] - 1)
+
+        return _submit_then_wait_with_load_release
+
+    _choose_least_loaded_worker.__platoon_least_loaded_worker_patch__ = True
+    _create_submit_callback_with_load_release.__platoon_least_loaded_worker_patch__ = True
+    RolloutController._choose_worker = _choose_least_loaded_worker
+    RolloutController._create_submit_callback = _create_submit_callback_with_load_release
+
+
+def _patch_rollout_controller_pause_rpc_policy(controller_cls=None) -> bool:
+    """Give rollout ``pause`` one long RPC attempt instead of unsafe retries.
+
+    AReaL's HTTP timeout is client-side: timing out a request does not remove an
+    already-enqueued engine call from the worker's serialized RPC queue. A
+    retry can therefore enqueue a duplicate pause which executes later, even
+    after a subsequent resume. Use one sufficiently long request for the
+    trainer's pause barrier and continue to propagate any failure so weight
+    synchronization never proceeds without an acknowledged pause.
+
+    Only ``pause`` is changed. Other collective RPCs retain their caller-
+    supplied timeout and retry policy exactly as provided by AReaL.
+    """
+
+    if controller_cls is None:
+        from areal.infra.controller.rollout_controller import (  # pyright: ignore[reportMissingImports]
+            RolloutController as controller_cls,
+        )
+
+    original = controller_cls._collective_rpc
+    if getattr(original, "__platoon_pause_rpc_policy_patch__", False):
+        return False
+
+    @wraps(original)
+    def _collective_rpc_with_pause_policy(self, method: str, *args, **kwargs):
+        if method == "pause":
+            kwargs = dict(kwargs)
+            kwargs["http_timeout"] = float(os.environ.get("PLATOON_AREAL_ROLLOUT_CONTROL_TIMEOUT_SECS", "300"))
+            kwargs["max_retries"] = 1
+        return original(self, method, *args, **kwargs)
+
+    _collective_rpc_with_pause_policy.__platoon_pause_rpc_policy_patch__ = True
+    controller_cls._collective_rpc = _collective_rpc_with_pause_policy
+    return True
+
+
 def _patch_local_scheduler_fork_ready_timeout() -> None:
     """Give forked proxy workers enough time to import and start serving.
 
@@ -1806,6 +2234,119 @@ def _patch_local_scheduler_fork_ready_timeout() -> None:
 
     _wait_for_fork_ready_with_platoon_timeout.__platoon_fork_ready_timeout_patch__ = True
     LocalScheduler._wait_for_fork_ready = staticmethod(_wait_for_fork_ready_with_platoon_timeout)
+
+
+class _RoutedExpertsPrefixAccumulator(list):
+    """Stitch full-prefix SGLang route matrices across interrupted requests."""
+
+    def __init__(self):
+        super().__init__()
+        self._width: int | None = None
+
+    def append(self, routes) -> None:
+        if getattr(routes, "ndim", None) != 2:
+            raise RuntimeError(
+                "SGLang routed experts must be 2D [sequence_rows, flattened_layer_topk], "
+                f"got {getattr(routes, 'shape', None)}"
+            )
+        width = int(routes.shape[1])
+        if self._width is None:
+            self._width = width
+        elif width != self._width:
+            raise RuntimeError(f"SGLang routed-expert width changed across a resumed request: {self._width} -> {width}")
+
+        previous_rows = sum(chunk.shape[0] for chunk in self)
+        if routes.shape[0] < previous_rows:
+            raise RuntimeError(
+                "A resumed SGLang routed-expert matrix is shorter than the already captured prefix: "
+                f"current_rows={routes.shape[0]}, previous_rows={previous_rows}"
+            )
+        if not self:
+            super().append(routes)
+            return
+
+        # Every resumed SGLang response contains routes for its entire prompt
+        # plus new completion, not only for the generated delta. Keep routes
+        # from the request that originally produced the prefix, then append the
+        # new suffix beginning at the old S-1 boundary. That first suffix row
+        # is the route for the former terminal token.
+        # NumPy slicing returns a view whose ``base`` is the entire resumed
+        # full-prefix matrix. Copy the small delta so a pause/resume does not
+        # retain every prior full response until generation finishes.
+        suffix = routes[previous_rows:].copy()
+        if suffix.shape[0]:
+            super().append(suffix)
+
+
+def _patch_remote_inf_engine_routed_expert_stitching(remote_inf_engine_module=None) -> bool:
+    """Prevent duplicated route prefixes after pause/resume generation.
+
+    AReaL's remote engine retries an interrupted generation with all tokens
+    produced so far in the prompt. SGLang consequently returns a full-prefix
+    route matrix again, while AReaL currently concatenates it as if it were a
+    delta. Replace only the local accumulator construction with a list-compatible
+    stitcher; final ``np.concatenate`` and all non-routing behavior stay intact.
+    """
+
+    if remote_inf_engine_module is None:
+        try:
+            import areal.infra.remote_inf_engine as remote_inf_engine_module  # pyright: ignore[reportMissingImports]
+        except Exception:
+            return False
+
+    engine_cls = remote_inf_engine_module.RemoteInfEngine
+    original = engine_cls.agenerate
+    if getattr(original, "__platoon_routed_expert_stitching_patch__", False):
+        return True
+
+    try:
+        source = textwrap.dedent(inspect.getsource(original))
+    except (OSError, TypeError):
+        return False
+
+    append_statement = "accumulated_routed_experts.append(gen_result.routed_experts)"
+    if source.count(append_statement) != 1:
+        # A newer AReaL may already own correct resumed-route stitching.
+        return False
+
+    initialization_candidates = (
+        "accumulated_routed_experts: list[np.ndarray] = []",
+        "accumulated_routed_experts = []",
+    )
+    initialization = next(
+        (candidate for candidate in initialization_candidates if source.count(candidate) == 1),
+        None,
+    )
+    if initialization is None:
+        return False
+
+    rewritten_source = source.replace(
+        initialization,
+        "accumulated_routed_experts = _PlatoonRoutedExpertsPrefixAccumulator()",
+        1,
+    )
+    remote_inf_engine_module._PlatoonRoutedExpertsPrefixAccumulator = _RoutedExpertsPrefixAccumulator
+    namespace: dict[str, Any] = {}
+    try:
+        exec(
+            compile(
+                rewritten_source,
+                inspect.getsourcefile(original) or "<areal-remote-inf-engine-routes>",
+                "exec",
+            ),
+            remote_inf_engine_module.__dict__,
+            namespace,
+        )
+    except Exception as exc:
+        raise RuntimeError("Failed to compile AReaL resumed-route stitching patch") from exc
+
+    rewritten = namespace.get(original.__name__)
+    if rewritten is None:
+        raise RuntimeError("AReaL resumed-route stitching patch did not produce agenerate")
+    rewritten = wraps(original)(rewritten)
+    rewritten.__platoon_routed_expert_stitching_patch__ = True
+    engine_cls.agenerate = rewritten
+    return True
 
 
 def _patch_remote_inf_engine_asyncio_teardown_race() -> None:
@@ -2159,8 +2700,12 @@ def apply_all_patches() -> None:
       chat templates; the remaining OpenAI patch only flattens text lists.
     """
 
+    _patch_areal_local_scalar_stats_export()
     _patch_hf_tokenizer_download_race()
     _patch_model_response_custom_stop_sequences()
+    _patch_areal_openai_routed_experts_transport()
+    _patch_areal_sglang_routed_experts_launcher()
+    _patch_areal_routed_experts_unpadding()
     _patch_triton_cache_for_qwen35_gdn_cp()
     _patch_megatron_bridge_attention_backend()
     _patch_megatron_bridge_qwen35_tp_validation()
@@ -2173,7 +2718,10 @@ def apply_all_patches() -> None:
     _patch_megatron_core_gdn_context_parallel_config_validation()
     _patch_megatron_core_gated_delta_net_context_parallel()
     _patch_batch_task_dispatcher_idle_submit()
+    _patch_rollout_controller_least_loaded_workers()
+    _patch_rollout_controller_pause_rpc_policy()
     _patch_local_scheduler_fork_ready_timeout()
+    _patch_remote_inf_engine_routed_expert_stitching()
     _patch_remote_inf_engine_asyncio_teardown_race()
     _patch_remote_inf_engine_proxy_resolution()
     _patch_areal_openai_message_content_flatten()

@@ -23,6 +23,7 @@ train:
   workflow_config:
     group_size: 4
     leave_one_out_baseline: true
+    filter_zero_advantage_datums: true
     rollout_config:
       max_steps: 100
       output_dir: ./rollout_results/openreward_toolathlon_tinker
@@ -40,6 +41,7 @@ eval:
   num_concurrent_rollout_workflow_workers: 8
   workflow_config:
     group_size: 1
+    filter_zero_advantage_datums: false
     rollout_config:
       max_steps: 100
       output_dir: ./eval_results/openreward_toolathlon_tinker
@@ -86,6 +88,8 @@ openreward:
   enable_recursive_subagents: false
   subagent_default_max_steps: 50
   subagent_max_depth: null
+  enable_subagent_reward_judging: false
+  subagent_reward_judge_max_steps: 20
   openhands_system_prompt_suffix: null
 
 seed: 42

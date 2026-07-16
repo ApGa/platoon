@@ -132,6 +132,141 @@ def test_openreward_config_defaults_subagent_budget_to_50():
     assert config.subagent_default_max_steps == 50
 
 
+def test_openreward_config_defaults_subagent_judging_off():
+    config_mod = _load_openreward_config_module()
+
+    config = config_mod.OpenRewardConfig.from_mapping({})
+
+    assert config.enable_subagent_reward_judging is False
+    assert config.subagent_reward_judge_max_steps == 20
+    assert config.subagent_delegation_reward_coefficient == 0.0
+
+
+def test_openreward_config_rejects_negative_delegation_reward_coefficient():
+    config_mod = _load_openreward_config_module()
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        config_mod.OpenRewardConfig.from_mapping({"subagent_delegation_reward_coefficient": -0.1})
+
+
+def test_openreward_config_accepts_legacy_subagent_judging_keys():
+    config_mod = _load_openreward_config_module()
+
+    config = config_mod.OpenRewardConfig.from_mapping(
+        {
+            "enable_subagent_judging": True,
+            "subagent_judge_max_steps": 7,
+        }
+    )
+
+    assert config.enable_subagent_reward_judging is True
+    assert config.subagent_reward_judge_max_steps == 7
+
+
+def test_openreward_reward_processor_uses_subagent_judgment(monkeypatch):
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rewards", raising=False)
+    rewards_mod = __import__("platoon.openreward.rewards", fromlist=["reward_processor"])
+
+    reward, components = rewards_mod.reward_processor(
+        {
+            "reward": 0.0,
+            "misc": {"subagent_reward_judgment": {"score": 0.75}},
+            "steps": [],
+        }
+    )
+
+    assert reward == 0.75
+    assert components["reward/success"] == 0.75
+    assert components["reward/openreward"] == 0.0
+    assert components["reward/subagent_judgment"] == 0.75
+    assert components["reward/subagent_launched"] == 0.0
+    assert components["reward/subagent_succeeded"] == 0.0
+    assert "reward/subagent_success_rate" not in components
+    assert components["reward/delegation_bonus"] == 0.0
+    assert components["reward/total"] == 0.75
+
+
+def test_openreward_recursive_delegation_bonus_is_direct_and_non_compounding(monkeypatch):
+    from platoon.utils.subagent_rewards import (
+        SUBAGENT_DELEGATION_REWARD_MISC_KEY,
+        add_direct_subagent_delegation_rewards,
+    )
+
+    def trajectory(
+        reward: float,
+        *,
+        parent_id: str | None = None,
+        excluded: bool = False,
+        policy_excluded: bool = False,
+    ) -> dict:
+        misc = {}
+        if excluded:
+            misc["exclude_from_training"] = True
+        if policy_excluded:
+            misc["exclude_from_policy_training"] = True
+        result = {
+            "reward": reward,
+            "misc": misc,
+            "steps": [{"misc": {"reward_misc": {"reward/success": reward}}}],
+        }
+        if parent_id is not None:
+            result["parent_info"] = {"id": parent_id}
+        return result
+
+    collection = {
+        "trajectories": {
+            "root": trajectory(1.0),
+            "child": trajectory(0.6, parent_id="root"),
+            "grandchild-success": trajectory(1.0, parent_id="child"),
+            # An invalid verifier suppresses this child's own policy datums but
+            # must not erase the delegation from full-tree accounting.
+            "grandchild-failure": trajectory(
+                0.0,
+                parent_id="child",
+                policy_excluded=True,
+            ),
+            # Verifiers have a real parent edge but must never count as a
+            # successful delegation by the trajectory they judge.
+            "verifier": trajectory(1.0, parent_id="child", excluded=True),
+        }
+    }
+
+    add_direct_subagent_delegation_rewards(collection, coefficient=0.4)
+
+    root_meta = collection["trajectories"]["root"]["misc"][SUBAGENT_DELEGATION_REWARD_MISC_KEY]
+    child_meta = collection["trajectories"]["child"]["misc"][SUBAGENT_DELEGATION_REWARD_MISC_KEY]
+    assert root_meta == {
+        "coefficient": 0.4,
+        "launched": 1.0,
+        "succeeded": 0.6,
+        "success_rate": 0.6,
+        "bonus": pytest.approx(0.24),
+    }
+    assert child_meta == {
+        "coefficient": 0.4,
+        "launched": 2.0,
+        "succeeded": 1.0,
+        "success_rate": 0.5,
+        "bonus": 0.2,
+    }
+
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rewards", raising=False)
+    rewards_mod = __import__("platoon.openreward.rewards", fromlist=["reward_processor"])
+    root_reward, root_components = rewards_mod.reward_processor(collection["trajectories"]["root"])
+    child_reward, child_components = rewards_mod.reward_processor(collection["trajectories"]["child"])
+
+    assert root_reward == pytest.approx(1.24)
+    assert root_components["reward/subagent_succeeded"] == 0.6
+    assert root_components["reward/delegation_bonus"] == pytest.approx(0.24)
+    # The child gets its own grandchild bonus, but the root's numerator above
+    # remains the child's base score (0.6), not this processed total (0.8).
+    assert child_reward == pytest.approx(0.8)
+    assert child_components["reward/subagent_launched"] == 2.0
+    assert child_components["reward/delegation_bonus"] == 0.2
+
+
 def test_openreward_rollout_condenser_keeps_system_prompt_and_goal_only():
     source = REPO_ROOT.joinpath("plugins/openreward/platoon/openreward/rollout.py").read_text()
     module = ast.parse(source)
@@ -166,11 +301,19 @@ def test_openreward_rollout_honors_root_success_propagation_flag():
         and node.test.attr == "propogate_root_success"
     ]
 
-    assert len(guarded_calls) == 1
-    assert any(
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "propogate_root_success"
-        for node in ast.walk(guarded_calls[0])
-    )
+    propagation_guards = [
+        guard
+        for guard in guarded_calls
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "propogate_root_success"
+            for node in ast.walk(guard)
+        )
+    ]
+    # The flag may also guard timeout and delegation-reward compatibility, but
+    # exactly one branch must own the actual root-success mutation.
+    assert len(propagation_guards) == 1
 
 
 def test_root_success_propagation_relabels_helpful_child_trajectory():
@@ -281,6 +424,9 @@ def test_openreward_goal_format_adds_child_tree_context(monkeypatch):
 
     assert "You are a sub-agent provided a task by a parent" in goal
     assert "Your Task:\nInspect the warehouse tables." in goal
+    assert "call `finish`" in goal
+    assert "returned verbatim to the parent" in goal
+    assert "return exactly that format" in goal
     assert "Parent Agent Task:\nBuild the KPI report." in goal
     assert "Root Agent Task:" not in goal
     assert "python_execute" not in goal
@@ -365,6 +511,7 @@ def test_openreward_shared_tools_are_non_owning(monkeypatch):
     agent = Agent(
         [
             Tool("get_task", executor, "openreward"),
+            Tool("claim_done", Executor(), "openreward"),
             Tool("other_tool", other_executor, "other"),
         ]
     )

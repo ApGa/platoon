@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import multiprocessing as mp
+import time
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
@@ -43,7 +43,12 @@ class InferenceRolloutRecord:
 class InferenceWorkflow(Protocol):
     config: InferenceWorkflowConfig
 
-    async def arun_rollout(self, data: dict[str, Any], rollout_index: int, output_dir: str) -> InferenceRolloutRecord: ...
+    async def arun_rollout(
+        self,
+        data: dict[str, Any],
+        rollout_index: int,
+        output_dir: str,
+    ) -> InferenceRolloutRecord: ...
 
     def record_from_collection(
         self,
@@ -69,7 +74,11 @@ def _count_steps(traj: dict[str, Any]) -> int:
 
 
 def _default_success_fn_factory(success_threshold: float) -> SuccessFn:
-    def _default_success_fn(collection: dict[str, Any], root_reward: float, reward_components: dict[str, float]) -> bool:
+    def _default_success_fn(
+        collection: dict[str, Any],
+        root_reward: float,
+        reward_components: dict[str, float],
+    ) -> bool:
         del reward_components  # intentionally unused in default logic
         root = _get_root_trajectory(collection)
         if root is not None:
@@ -228,6 +237,15 @@ class DefaultInferenceGroupWorkflow:
             self._process_pool = ProcessPoolExecutor(max_workers=max_workers, mp_context=mp.get_context("spawn"))
         return self._process_pool
 
+    def _shutdown_process_pool(self, *, wait: bool, cancel_futures: bool) -> None:
+        if self._process_pool is not None:
+            self._process_pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+            self._process_pool = None
+
+    @staticmethod
+    def _subprocess_hard_timeout_seconds(rollout_config: RolloutConfig) -> int:
+        return int((rollout_config.timeout or 900) + 120 + 60)
+
     async def arun_rollout(self, data: dict[str, Any], rollout_index: int, output_dir: str) -> InferenceRolloutRecord:
         task_id = str(data["task_id"])
         start = time.perf_counter()
@@ -238,7 +256,8 @@ class DefaultInferenceGroupWorkflow:
 
                 loop = asyncio.get_event_loop()
                 pool = self._get_or_create_process_pool()
-                result = await loop.run_in_executor(
+                hard_timeout = self._subprocess_hard_timeout_seconds(rollout_config)
+                future = loop.run_in_executor(
                     pool,
                     run_rollout_subprocess,
                     self.rollout_fn.__module__,
@@ -248,6 +267,11 @@ class DefaultInferenceGroupWorkflow:
                     task_id,
                     asdict(rollout_config),
                 )
+                try:
+                    result = await asyncio.wait_for(future, timeout=hard_timeout)
+                except asyncio.TimeoutError as exc:
+                    self._shutdown_process_pool(wait=False, cancel_futures=True)
+                    raise TimeoutError(f"Subprocess hard timeout after {hard_timeout}s") from exc
             else:
                 task = self.get_task_fn(task_id)
                 if rollout_config.max_steps is not None:
@@ -282,6 +306,4 @@ class DefaultInferenceGroupWorkflow:
             )
 
     async def aclose(self) -> None:
-        if self._process_pool is not None:
-            self._process_pool.shutdown(wait=True)
-            self._process_pool = None
+        self._shutdown_process_pool(wait=True, cancel_futures=True)

@@ -1,0 +1,40 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_16node-cp
+  - _self_
+
+# The Slurm launcher validates these literal fields before Hydra composes the
+# inherited config.
+openreward: {}
+
+# Keep the combined experiment separate from both the current baseline and the
+# single-feature trials. Do not point two live jobs at the same trial name.
+trial_name: toolathlon-openhands-16node-qwen3.6-35B-r3-fp32-lm-head-trial0
+
+workflow_config:
+  # Preserve Qwen3.6-A3B's default nonzero global MoE router auxiliary loss.
+  # Exact-zero policy advantages are not zero-gradient for that objective.
+  filter_zero_advantage_datums: false
+
+rollout:
+  return_routed_experts: true
+
+sglang:
+  # Keep SGLang's tokenizer for Toolathlon's custom text-stop matching. Route
+  # shape/alignment is checked exactly before a batch can reach training.
+  skip_tokenizer_init: false
+
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: Qwen/Qwen3.6-35B-A3B
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  router_replay_num_experts: 256
+  megatron:
+    # R3 has no rollout routes for MTP layers; keep the existing safety gate.
+    enable_mtp: false
+    enable_fp32_lm_head: true
+
+ref:
+  megatron:
+    enable_fp32_lm_head: true

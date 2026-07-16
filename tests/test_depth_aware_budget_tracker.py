@@ -5,7 +5,6 @@ This tracker differs from StepBudgetTracker in two key ways:
 2. An optional max_depth cap limits how deep subagent delegation can go.
 """
 
-import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -23,9 +22,7 @@ from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import (
     BudgetExceededError,
     DepthAwareStepBudgetTracker,
-    TrajectoryCollection,
 )
-
 
 # -----------------------------
 # Test doubles (reused from test_step_budget_tracker.py)
@@ -154,9 +151,7 @@ async def test_subagent_steps_do_not_consume_parent_budget():
     child_max = 3
 
     env = MockEnv(_task=Task(goal="root", max_steps=parent_max))
-    agent = MockAgent(
-        actions=[{"type": "SUBAGENT", "child_steps": child_max}] + [{"type": "NOP"}] * 20
-    )
+    agent = MockAgent(actions=[{"type": "SUBAGENT", "child_steps": child_max}] + [{"type": "NOP"}] * 20)
 
     traj = await run_episode(agent, env)
 
@@ -165,10 +160,7 @@ async def test_subagent_steps_do_not_consume_parent_budget():
 
     # The child should also have used its own max_steps
     collection = current_trajectory_collection.get()
-    child_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == traj.id
-    ]
+    child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
     assert len(child_ids) == 1
     child_traj = collection.trajectories[child_ids[0]]
     assert len(child_traj.steps) == child_max
@@ -187,7 +179,8 @@ async def test_multiple_subagents_parent_uses_all_budget():
         actions=[
             {"type": "SUBAGENT", "child_steps": child1_max},
             {"type": "SUBAGENT", "child_steps": child2_max},
-        ] + [{"type": "NOP"}] * 20,
+        ]
+        + [{"type": "NOP"}] * 20,
         fork_plan=[[], []],
     )
 
@@ -198,10 +191,7 @@ async def test_multiple_subagents_parent_uses_all_budget():
 
     # Both children launched successfully
     collection = current_trajectory_collection.get()
-    child_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == traj.id
-    ]
+    child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
     assert len(child_ids) == 2
 
 
@@ -228,18 +218,14 @@ async def test_nested_subagents_independent_budgets():
     assert len(traj.steps) == parent_max
 
     # Find child
-    child_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == traj.id
-    ]
+    child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
     assert len(child_ids) == 1
     child_traj = collection.trajectories[child_ids[0]]
     assert len(child_traj.steps) == child_max
 
     # Find grandchild
     grandchild_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == child_ids[0]
+        tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == child_ids[0]
     ]
     assert len(grandchild_ids) == 1
     grandchild_traj = collection.trajectories[grandchild_ids[0]]
@@ -269,10 +255,8 @@ async def test_depth_limit_blocks_subagent():
 
     # Only the root trajectory should exist (no child trajectories besides the blocked fork attempt)
     collection = current_trajectory_collection.get()
-    child_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == traj.id
-    ]
+    child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
+    assert child_ids == []
     # The forked env/agent are created before reserve_budget, but run_episode was never called
     # for the child because reserve_budget failed. So no child trajectory should have steps.
     # Actually, the fork happens before the check, but the episode is never started.
@@ -296,9 +280,12 @@ async def test_depth_limit_allows_within_limit():
     parent_actions = [{"type": "SUBAGENT", "child_steps": child_max}] + [{"type": "NOP"}] * 20
     agent = MockAgent(
         actions=parent_actions,
-        fork_plan=[[
-            {"type": "SUBAGENT", "child_steps": grandchild_max, "capture_message": True},
-        ] + [{"type": "NOP"}] * 20],
+        fork_plan=[
+            [
+                {"type": "SUBAGENT", "child_steps": grandchild_max, "capture_message": True},
+            ]
+            + [{"type": "NOP"}] * 20
+        ],
     )
 
     traj = await run_episode(agent, env)
@@ -309,19 +296,16 @@ async def test_depth_limit_allows_within_limit():
     assert len(traj.steps) == parent_max
 
     # Child was launched successfully
-    child_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == traj.id
-    ]
+    child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
     assert len(child_ids) == 1
     child_traj = collection.trajectories[child_ids[0]]
     assert len(child_traj.steps) == child_max
 
     # The grandchild launch should have been blocked by depth
     grandchild_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == child_ids[0]
+        tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == child_ids[0]
     ]
+    assert grandchild_ids == []
     # No grandchild trajectory should have been run
     # (the fork creates agent/env but run_episode is never called due to reserve_budget failure)
     # Check the child's captured message mentions depth
@@ -351,17 +335,13 @@ async def test_depth_limit_2_allows_grandchild():
     # All three levels should have been created
     assert len(traj.steps) == parent_max
 
-    child_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == traj.id
-    ]
+    child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
     assert len(child_ids) == 1
     child_traj = collection.trajectories[child_ids[0]]
     assert len(child_traj.steps) == child_max
 
     grandchild_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == child_ids[0]
+        tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == child_ids[0]
     ]
     assert len(grandchild_ids) == 1
     grandchild_traj = collection.trajectories[grandchild_ids[0]]
@@ -452,9 +432,7 @@ async def test_remaining_budget_only_counts_own_steps():
     child_max = 5
 
     env = MockEnv(_task=Task(goal="root", max_steps=parent_max), record_remaining=True)
-    agent = MockAgent(
-        actions=[{"type": "SUBAGENT", "child_steps": child_max}] + [{"type": "NOP"}] * 20
-    )
+    agent = MockAgent(actions=[{"type": "SUBAGENT", "child_steps": child_max}] + [{"type": "NOP"}] * 20)
 
     traj = await run_episode(agent, env)
 
@@ -476,9 +454,7 @@ async def test_used_budget_for_only_counts_own_steps():
     child_max = 4
 
     env = MockEnv(_task=Task(goal="root", max_steps=parent_max))
-    agent = MockAgent(
-        actions=[{"type": "SUBAGENT", "child_steps": child_max}] + [{"type": "NOP"}] * 20
-    )
+    agent = MockAgent(actions=[{"type": "SUBAGENT", "child_steps": child_max}] + [{"type": "NOP"}] * 20)
 
     traj = await run_episode(agent, env)
 
@@ -486,10 +462,7 @@ async def test_used_budget_for_only_counts_own_steps():
     assert budget_tracker.get().used_budget_for(traj.id) == parent_max
 
     collection = current_trajectory_collection.get()
-    child_ids = [
-        tid for tid, t in collection.trajectories.items()
-        if t.parent_info and t.parent_info.id == traj.id
-    ]
+    child_ids = [tid for tid, t in collection.trajectories.items() if t.parent_info and t.parent_info.id == traj.id]
     assert len(child_ids) == 1
     assert budget_tracker.get().used_budget_for(child_ids[0]) == child_max
 

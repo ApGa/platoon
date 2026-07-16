@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import threading
 from collections.abc import Sequence
 from concurrent.futures import Future
-from contextlib import redirect_stderr, redirect_stdout
 from contextvars import Context
 from copy import deepcopy
 from typing import Any, cast
 from uuid import uuid4
 
+from platoon.agents.actions.subagent import launch_subagent
 from pydantic import Field
 
 from openhands.sdk.agent.base import AgentBase
@@ -25,7 +24,6 @@ from openhands.sdk.tool import (
     ToolExecutor,
     register_tool,
 )
-from platoon.agents.actions.subagent import launch_subagent
 
 PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX = (
     "When programmatic_tool_calling is available, use it for multi-step tool "
@@ -42,13 +40,12 @@ RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (
     "parallel or make progress while you continue planning. Prefer delegating "
     "self-contained investigation, verification, summarization, or data-gathering "
     "subtasks to launch_subagent instead of doing all work in the root agent. "
-    "Give each child a clear goal and an appropriate max_steps budget. If you "
-    "omit max_steps, the configured default child budget is used.\n\n"
+    "Give each child a clear, self-contained goal.\n\n"
     "Use the task_tracker tool to maintain a plan for nontrivial tasks. When a "
     "plan item is self-contained, launch a subagent for that item, then update "
     "the plan with the result.\n\n"
     "If programmatic_tool_calling is also available, use "
-    "`await atools.launch_subagent(goal=..., max_steps=...)` from Python, and "
+    "`await atools.launch_subagent(goal=...)` from Python, and "
     "`await asyncio.gather(...)` to run independent child agents concurrently.\n\n"
     "At the start of a nontrivial task, consider whether at least one subagent "
     "can help decompose the work before you perform all tool calls yourself. "
@@ -71,13 +68,14 @@ RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX = (
     "`task_tracker` to maintain a plan. When a plan item is self-contained, "
     "delegate it with `launch_subagent` instead of doing all work yourself. "
     "When programmatic_tool_calling is available, prefer code shaped like "
-    '`child = await atools.launch_subagent(goal="...", max_steps=50)`. If '
+    '`child = await atools.launch_subagent(goal="...")`. If '
     "there are multiple independent child tasks, use `await asyncio.gather(...)` "
     "to run them concurrently."
 )
 
 LAUNCH_SUBAGENT_TOOL_NAME = "launch_subagent"
 DEFAULT_SUBAGENT_MAX_STEPS = 50
+FINISH_TOOL_CLASS_NAME = "FinishTool"
 
 _RUNTIMES: dict[str, "LaunchSubagentRuntime"] = {}
 _RUNTIMES_LOCK = threading.Lock()
@@ -85,21 +83,6 @@ _RUNTIMES_LOCK = threading.Lock()
 
 class LaunchSubagentAction(Action):
     goal: str = Field(description="Task goal for the child agent.")
-    max_steps: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Maximum number of child-agent steps. If omitted, Platoon's configured default for this rollout is used."
-        ),
-    )
-    task_misc: dict[str, Any] | None = Field(
-        default=None,
-        description="Optional metadata to attach to the forked child task.",
-    )
-    verbose: bool = Field(
-        default=True,
-        description=("Whether to include the child agent's budget summary in the returned text."),
-    )
 
 
 class LaunchSubagentObservation(Observation):
@@ -112,17 +95,85 @@ class LaunchSubagentRuntime:
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._context: Context | None = None
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._waiters: dict[asyncio.Task[Any], Future[Any]] = {}
+        self._closed = False
         with _RUNTIMES_LOCK:
             _RUNTIMES[self.id] = self
 
     def bind(self, loop: asyncio.AbstractEventLoop, context: Context) -> None:
         with self._lock:
+            if self._closed:
+                raise RuntimeError("cannot bind a closed launch_subagent runtime")
             self._loop = loop
             self._context = context
 
     def close(self) -> None:
         with _RUNTIMES_LOCK:
             _RUNTIMES.pop(self.id, None)
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            loop = self._loop
+
+        def _cancel_all() -> None:
+            with self._lock:
+                tasks = list(self._tasks)
+                waiters = list(self._waiters.values())
+            # Cancel the thread-facing Futures as well as their asyncio Tasks so
+            # a synchronous OpenHands tool executor unblocks immediately while
+            # cancellation cascades through child/grandchild episode cleanup.
+            for waiter in waiters:
+                waiter.cancel()
+            for task in tasks:
+                task.cancel()
+
+        if loop is None or loop.is_closed():
+            # asyncio Tasks cannot be safely touched from this thread once the
+            # loop is gone, but concurrent.futures.Future is thread-safe.  At
+            # least unblock every synchronous tool-executor caller.
+            with self._lock:
+                waiters = list(self._waiters.values())
+            for waiter in waiters:
+                waiter.cancel()
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            _cancel_all()
+        else:
+            try:
+                loop.call_soon_threadsafe(_cancel_all)
+            except RuntimeError:
+                # The loop can close after is_closed() above.  Preserve the
+                # same no-hanging-waiter guarantee in that race.
+                with self._lock:
+                    waiters = list(self._waiters.values())
+                for waiter in waiters:
+                    waiter.cancel()
+
+    async def aclose(self, timeout: float = 10.0) -> None:
+        """Cancel and briefly await every recursive child owned by this runtime."""
+
+        self.close()
+        with self._lock:
+            tasks = list(self._tasks)
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        # Never await cancellation without a bound here: a third-party SDK
+        # coroutine may suppress CancelledError.  The rollout subprocess's
+        # process-tree timeout remains the final backstop for such a task.
+        # Retrieve exceptions from completed tasks so teardown does not emit
+        # "Task exception was never retrieved" warnings.
+        for task in done:
+            if not task.cancelled():
+                task.exception()
 
     def run(
         self,
@@ -135,6 +186,9 @@ class LaunchSubagentRuntime:
         with self._lock:
             loop = self._loop
             context = self._context
+            closed = self._closed
+        if closed:
+            raise RuntimeError("launch_subagent runtime is closed")
         if loop is None or context is None:
             raise RuntimeError("launch_subagent runtime is not bound to an episode")
         if loop.is_closed():
@@ -150,38 +204,77 @@ class LaunchSubagentRuntime:
         future: Future[Any] = Future()
 
         async def _run_subagent() -> Any:
-            with (
-                redirect_stdout(sys.__stdout__ or sys.stdout),
-                redirect_stderr(sys.__stderr__ or sys.stderr),
-            ):
-                return await launch_subagent(
+            # Stream redirection mutates process-global state and cannot be
+            # held safely across an await: concurrent child agents can restore
+            # each other's streams out of order. Child logging already follows
+            # the rollout process's configured sinks, so schedule it directly.
+            try:
+                result = await launch_subagent(
                     goal=goal,
                     max_steps=max_steps,
                     task_misc=task_misc,
                     verbose=verbose,
                 )
+            except asyncio.CancelledError:
+                if not future.done():
+                    future.cancel()
+                raise
+            except BaseException as exc:
+                if not future.done():
+                    future.set_exception(exc)
+                raise
+            else:
+                # Resolve the thread-facing future inside the coroutine rather
+                # than waiting for a Task done callback on a later loop turn.
+                # This also wakes asyncio.to_thread's completion path promptly
+                # when the child finishes without ever suspending.
+                if not future.done():
+                    future.set_result(result)
+                return result
 
         def _start() -> None:
+            with self._lock:
+                if self._closed:
+                    future.cancel()
+                    return
             try:
                 task = asyncio.create_task(_run_subagent())
             except BaseException as exc:
                 future.set_exception(exc)
                 return
+            with self._lock:
+                self._tasks.add(task)
+                self._waiters[task] = future
 
             def _finish(done_task: asyncio.Task[Any]) -> None:
-                if future.done():
-                    return
+                with self._lock:
+                    self._tasks.discard(done_task)
+                    self._waiters.pop(done_task, None)
                 if done_task.cancelled():
-                    future.cancel()
+                    if not future.done():
+                        future.cancel()
                     return
                 try:
-                    future.set_result(done_task.result())
+                    done_task.result()
                 except BaseException as exc:
-                    future.set_exception(exc)
+                    # Retrieve the task exception even when ``close()`` already
+                    # cancelled the thread-facing Future.  Returning before
+                    # ``result()`` would trigger asyncio's un-retrieved-task
+                    # warning during teardown.
+                    if not future.done():
+                        future.set_exception(exc)
+                    return
 
             task.add_done_callback(_finish)
 
-        loop.call_soon_threadsafe(_start, context=context)
+        try:
+            loop.call_soon_threadsafe(_start, context=context)
+        except RuntimeError as exc:
+            # The loop may close between the explicit is_closed() check and
+            # scheduling.  Do not block forever on a Future that no loop can
+            # complete.
+            future.cancel()
+            raise RuntimeError("launch_subagent runtime loop closed while scheduling") from exc
         return future.result()
 
 
@@ -204,13 +297,12 @@ class LaunchSubagentExecutor(ToolExecutor[LaunchSubagentAction, LaunchSubagentOb
                 is_error=True,
             )
 
-        max_steps = action.max_steps if action.max_steps is not None else self._default_max_steps
         try:
             result = runtime.run(
                 goal=action.goal,
-                max_steps=max_steps,
-                task_misc=action.task_misc,
-                verbose=action.verbose,
+                max_steps=self._default_max_steps,
+                task_misc=None,
+                verbose=True,
             )
         except BaseException as exc:
             return LaunchSubagentObservation.from_text(
@@ -236,7 +328,8 @@ class LaunchSubagentTool(ToolDefinition[LaunchSubagentAction, LaunchSubagentObse
                 description=(
                     "Launch a recursive Platoon subagent on a child task. The "
                     "child runs with the same forkable agent and environment "
-                    "configuration, including programmatic tool calling when enabled."
+                    "configuration, including programmatic tool calling when enabled. "
+                    "Child step budget is configured by the rollout."
                 ),
                 action_type=LaunchSubagentAction,
                 observation_type=LaunchSubagentObservation,
@@ -295,6 +388,15 @@ def with_task_tracker_tool(agent: AgentBase) -> AgentBase:
     from openhands.tools.task_tracker import TaskTrackerTool
 
     return _replace_tool(agent, Tool(name=TaskTrackerTool.name))
+
+
+def with_finish_tool(agent: AgentBase) -> AgentBase:
+    if FINISH_TOOL_CLASS_NAME in agent.include_default_tools:
+        return agent
+    return cast(
+        AgentBase,
+        agent.model_copy(update={"include_default_tools": [*agent.include_default_tools, FINISH_TOOL_CLASS_NAME]}),
+    )
 
 
 def append_system_message_suffix(agent: AgentBase, suffix: str | None) -> AgentBase:

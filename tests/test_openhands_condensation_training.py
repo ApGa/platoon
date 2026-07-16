@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
+import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +70,12 @@ def _load_openhands_env_module(monkeypatch):
     package = types.ModuleType("platoon.openhands")
     package.__path__ = [str(OPENHANDS_PLUGIN_ROOT / "platoon/openhands")]
     monkeypatch.setitem(sys.modules, "platoon.openhands", package)
+    _module(
+        monkeypatch,
+        "platoon.openhands.recursive",
+        DEFAULT_SUBAGENT_MAX_STEPS=50,
+        copy_agent_config_for_fork=lambda agent: agent,
+    )
 
     spec = importlib.util.spec_from_file_location(
         "platoon.openhands.env",
@@ -120,6 +129,76 @@ def test_condensation_observation_emits_one_synthetic_trainable_step(monkeypatch
     assert step.misc["action_misc"] == {"completion_id": "chatcmpl-summary"}
     assert step.misc["reward_misc"] == {}
     assert step.misc["synthetic_step_type"] == "openhands_condensation"
+
+
+@pytest.mark.asyncio
+async def test_close_interrupts_async_conversation_before_recursive_children(monkeypatch):
+    env_mod = _load_openhands_env_module(monkeypatch)
+    order: list[str] = []
+
+    async def conversation_run():
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            order.append("conversation-cancelled")
+            return
+
+    class Conversation:
+        def interrupt(self):
+            order.append("conversation-interrupted")
+
+        def close(self):
+            order.append("conversation-closed")
+
+    class Runtime:
+        async def aclose(self):
+            order.append("children-cancelled")
+
+    env = env_mod.OpenHandsEnv.__new__(env_mod.OpenHandsEnv)
+    env._conversation_id = "test"
+    env._conversation = Conversation()
+    env._conversation_task = asyncio.create_task(conversation_run())
+    env._launch_subagent_runtime = Runtime()
+    await asyncio.sleep(0)
+
+    await env.close()
+
+    assert order[:3] == [
+        "conversation-interrupted",
+        "conversation-cancelled",
+        "children-cancelled",
+    ]
+    assert order[-1] == "conversation-closed"
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_join_hung_sdk_close_via_default_executor(monkeypatch):
+    env_mod = _load_openhands_env_module(monkeypatch)
+    monkeypatch.setattr(env_mod, "_CONVERSATION_CLOSE_TIMEOUT_SECONDS", 0.02)
+    close_started = threading.Event()
+    release_close = threading.Event()
+
+    class Conversation:
+        def interrupt(self):
+            return None
+
+        def close(self):
+            close_started.set()
+            release_close.wait()
+
+    env = env_mod.OpenHandsEnv.__new__(env_mod.OpenHandsEnv)
+    env._conversation_id = "test"
+    env._conversation = Conversation()
+    env._conversation_task = None
+    env._launch_subagent_runtime = None
+
+    started_at = asyncio.get_running_loop().time()
+    await env.close()
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert close_started.is_set()
+    assert elapsed < 0.2
+    release_close.set()
 
 
 def test_synthetic_step_uses_existing_areal_completion_extraction_path(monkeypatch):

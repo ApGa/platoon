@@ -12,9 +12,16 @@ from typing import cast
 from openhands.sdk import LLM
 from openhands.sdk import Agent as OpenHandsSDKAgent
 from openhands.sdk.context.condenser import LLMSummarizingCondenser
+from platoon.agents.actions.subagent import (
+    SubagentRewardJudgeConfig,
+)
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
-from platoon.episode.context import budget_tracker, current_trajectory_collection
+from platoon.episode.context import (
+    budget_tracker,
+    current_trajectory_collection,
+    subagent_reward_judge_config,
+)
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCollection
 from platoon.openhands.agent import OpenHandsAgent
@@ -28,7 +35,10 @@ from platoon.openhands.recursive import (
     with_programmatic_tool_calling,
     with_task_tracker_tool,
 )
-from platoon.utils.subagent_rewards import propogate_root_success
+from platoon.utils.subagent_rewards import (
+    add_direct_subagent_delegation_rewards,
+    propogate_root_success,
+)
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from platoon.openreward.config_defs import OpenRewardConfig
@@ -132,6 +142,11 @@ def _build_mcp_config(task: Task, config: RolloutConfig, openreward_config: Open
                 "env": {
                     "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
                     "OPENHANDS_SUPPRESS_BANNER": "1",
+                    # The MCP SDK launches stdio servers in a detached process
+                    # session.  Give the bridge the expected direct parent so
+                    # it can detect a rollout worker that died before Linux's
+                    # parent-death signal was installed.
+                    "PLATOON_ROLLOUT_PARENT_PID": str(os.getpid()),
                 },
             }
         }
@@ -141,16 +156,22 @@ def _build_mcp_config(task: Task, config: RolloutConfig, openreward_config: Open
 def _build_llm(config: RolloutConfig) -> LLM:
     inference_params = config.inference_params
     api_key = config.model_api_key
+    model_name = config.model_name or "openai/gpt-4o-mini"
+    # Keep OpenHands' local token counter on the exact tokenizer/template used
+    # by AReaL and SGLang.  This is especially important for local Qwen model
+    # overlays: using the old hard-coded Qwen3.5 tokenizer would make condenser
+    # thresholds disagree with the prompts that are actually sent for rollout.
+    custom_tokenizer = model_name.removeprefix("openai/")
     return LLM(
         usage_id="platoon-openreward-openhands",
-        model=config.model_name or "openai/gpt-4o-mini",
+        model=model_name,
         base_url=config.model_endpoint,
         api_key=api_key or None,
         temperature=inference_params.temperature,
         top_p=inference_params.top_p,
         max_output_tokens=inference_params.max_completion_tokens,
         timeout=config.step_timeout,
-        custom_tokenizer="Qwen/Qwen3.5-35B-A3B",  # TODO: Make this configurable
+        custom_tokenizer=custom_tokenizer,
     )
 
 
@@ -239,26 +260,49 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     agent = OpenHandsAgent()
 
     traj_collection = TrajectoryCollection()
-    current_trajectory_collection.set(traj_collection)
-    if openreward_config.enable_recursive_subagents:
-        budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=openreward_config.subagent_max_depth))
     events_path = os.path.join(config.output_dir, "events", f"events_{_slug(task_id)}_{traj_collection.id}.jsonl")
     traj_collection.register_event_handlers(
         JsonlFileSink(events_path, collection_id=traj_collection.id, process_id=os.getpid())
     )
+    tokens = [current_trajectory_collection.set(traj_collection)]
+    if openreward_config.enable_recursive_subagents:
+        tokens.append(budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=openreward_config.subagent_max_depth)))
+    tokens.append(
+        subagent_reward_judge_config.set(
+            SubagentRewardJudgeConfig(max_steps=openreward_config.subagent_reward_judge_max_steps)
+            if openreward_config.enable_subagent_reward_judging
+            else None
+        )
+    )
 
+    rollout_timed_out = False
     try:
         rollout_task = asyncio.create_task(run_episode(agent, env, timeout=config.step_timeout))
         await asyncio.wait_for(rollout_task, timeout=config.timeout)
     except asyncio.TimeoutError:
-        rollout_task.cancel()
-        try:
-            await asyncio.wait_for(rollout_task, timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            pass
-        raise
+        # ``asyncio.wait_for`` has already cancelled ``run_episode`` and waited
+        # for its bounded cleanup before raising.  The episode loop finalizes
+        # and marks every trajectory on the active cancellation stack, so the
+        # collection is now a coherent partial result: interrupted policy data
+        # is filtered downstream while completed siblings/descendants remain
+        # usable.  Root-success propagation cannot safely use a partial root,
+        # so preserve the historical discard behavior for that legacy mode.
+        if config.propogate_root_success:
+            raise
+        rollout_timed_out = True
+    finally:
+        for token in reversed(tokens):
+            token.var.reset(token)
 
-    result = current_trajectory_collection.get()
+    result = traj_collection
+    delegation_coefficient = openreward_config.subagent_delegation_reward_coefficient
+    if delegation_coefficient > 0:
+        if config.propogate_root_success:
+            raise ValueError(
+                "OpenReward delegation rewards require propogate_root_success=false "
+                "so direct child verifier scores remain intact"
+            )
+        add_direct_subagent_delegation_rewards(result, delegation_coefficient)
     if config.propogate_root_success:
         propogate_root_success(result)
 
@@ -270,17 +314,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             "bridge_output_dir": bridge_output_dir,
             "openhands_persistence_dir": openhands_persistence_dir,
             "openhands_conversation_id": str(openhands_conversation_id),
+            "rollout_timed_out": rollout_timed_out,
         }
         return result
     return result
-
-
-def reward_processor(traj: dict) -> tuple[float, dict]:
-    reward = float(traj.get("reward", 0.0))
-    rewards_dict: dict[str, float] = {"reward/success": reward, "reward/openreward": reward}
-    for step in traj.get("steps", []):
-        reward_misc = step.get("misc", {}).get("reward_misc", {})
-        for key, value in reward_misc.items():
-            if key.startswith("reward/") and isinstance(value, (int, float)):
-                rewards_dict[key] = float(value)
-    return reward, rewards_dict

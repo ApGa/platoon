@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import torch
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -132,3 +131,28 @@ def test_tinker_batch_transform_runner_passes_context_and_allows_custom_transfor
     assert transformed is datums
     assert seen == {"count": 1, "train_step": 11}
     assert torch.equal(datums[0].loss_fn_inputs["advantages"].to_torch(), torch.tensor([6.0]))
+
+
+def test_tinker_loss_normalization_uses_explicit_prefilter_token_mass():
+    batch_transforms = _load_tinker_batch_transforms_module()
+    key = batch_transforms.LOSS_NORMALIZATION_TOKENS_KEY
+    datums = [
+        DummyDatum(
+            {
+                "mask": DummyTensorData(torch.tensor([1.0, 1.0])),
+                # Includes this datum's two tokens plus three tokens removed by
+                # the zero-advantage filter in the same task group.
+                key: DummyTensorData(torch.tensor([5.0])),
+            }
+        ),
+        DummyDatum(
+            {
+                "mask": DummyTensorData(torch.tensor([1.0, 0.0])),
+                key: DummyTensorData(torch.tensor([1.0])),
+            }
+        ),
+        # Mixed metadata remains safe for custom workflow implementations.
+        DummyDatum({"mask": DummyTensorData(torch.tensor([1.0, 1.0, 0.0]))}),
+    ]
+
+    assert batch_transforms.get_loss_normalization_token_count(datums) == 8.0

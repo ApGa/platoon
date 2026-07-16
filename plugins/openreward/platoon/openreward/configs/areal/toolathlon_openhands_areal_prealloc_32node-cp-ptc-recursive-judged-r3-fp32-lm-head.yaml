@@ -1,0 +1,40 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_16node-cp-ptc-recursive-judged-r3-fp32-lm-head
+  - _self_
+
+# This allocation is a separate experiment and must not recover optimizer or
+# rollout state written by the 16-node topology.
+trial_name: toolathlon-openhands-32node-qwen3.6-35B-ptc-recursive-judged-r3-fp32-lm-head-trial3
+
+# Keep a literal section in this derived file because the Slurm launcher checks
+# it before Hydra composes defaults.
+openreward: {}
+
+cluster:
+  n_nodes: 32
+
+train_dataset:
+  # Four completed task groups are sufficient for each optimizer update. With
+  # twelve concurrent rollout groups, inference can keep three updates' worth
+  # of work in flight while reducing both the straggler barrier and the highly
+  # variable recursive PPO token volume. Keep workflow group_size=8 unchanged
+  # so leave-one-out baselines retain the same within-task semantics.
+  batch_size: 4
+
+rollout:
+  # 96 GPUs: twelve independent TP8 SGLang replicas. One group is admitted per
+  # replica, so the first four completed groups can form a training batch while
+  # eight additional groups absorb rollout-latency variance and feed later
+  # updates.
+  backend: sglang:d12p1t8
+  max_concurrent_rollouts: 12
+
+# Repeat backend/path because the launcher inspects this file before Hydra
+# composition to decide whether Megatron dependencies are required.
+actor:
+  # 160 GPUs: DP10 x PP2 x TP4 x CP2 for attention, and DP10 x PP2 x EP8 for FFN.
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: Qwen/Qwen3.6-35B-A3B
+
+ref:
+  backend: ${actor.backend}

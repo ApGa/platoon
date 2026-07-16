@@ -14,7 +14,8 @@ from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
 from platoon.utils.config import load_config
 
-from platoon.openreward.rollout import reward_processor, run_rollout
+from platoon.openreward.rewards import reward_processor
+from platoon.openreward.rollout import run_rollout
 from platoon.openreward.tasks import get_task, get_task_ids
 from platoon.openreward.tinker_config import OpenRewardTinkerTrainerConfig
 
@@ -79,12 +80,18 @@ async def main(args: list[str]) -> None:
         )
 
         eval_workflow_config = config.eval.workflow_config
+        # Evaluation reports rollout metrics but never trains, so datum-level
+        # compute filtering is deliberately a train-only policy.
+        eval_workflow_config.filter_zero_advantage_datums = False
         if eval_workflow_config.group_size != 1:
             eval_workflow_config = WorkflowConfig(
                 group_size=1,
                 rollout_config=eval_workflow_config.rollout_config,
                 leave_one_out_baseline=eval_workflow_config.leave_one_out_baseline,
                 depth_level_weighting=eval_workflow_config.depth_level_weighting,
+                subagent_datum_keep_probability=eval_workflow_config.subagent_datum_keep_probability,
+                subagent_datum_sampling_seed=eval_workflow_config.subagent_datum_sampling_seed,
+                filter_zero_advantage_datums=False,
             )
 
         eval_workflow = GroupRolloutWorkflow(

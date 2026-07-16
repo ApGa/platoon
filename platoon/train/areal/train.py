@@ -51,6 +51,10 @@ def run_areal_training(args: list[str] | None = None) -> None:
 
         eval_workflow_config = deepcopy(config.workflow_config)
         eval_workflow_config.group_size = 1
+        # Datum sampling is a training-throughput policy.  Evaluation should
+        # always retain the complete trajectory tree.
+        eval_workflow_config.subagent_datum_keep_probability = 1.0
+        eval_workflow_config.filter_zero_advantage_datums = False
         eval_workflow_kwargs = dict(environment.eval_workflow_kwargs)
         eval_workflow = workflow_cls(
             eval_rollout_fn,

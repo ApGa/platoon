@@ -1,0 +1,33 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_16node-cp
+  - _self_
+
+# The Slurm launcher validates this marker before Hydra composes the inherited
+# OpenReward section.
+openreward: {}
+
+# Keep this opt-in precision experiment isolated from the resumable trial1
+# baseline. FP32 logits require 2x the resident logit storage of BF16 and the
+# boundary cast briefly overlaps both representations. With sequence parallel
+# TP4 and CP2, a full 32,768-token microbatch has about 4,096 local tokens x
+# 62,080 local vocabulary entries. The FP32 logits are therefore about 0.95 GiB
+# per last-pipeline-stage rank versus 0.47 GiB for BF16 (roughly 0.47 GiB more
+# resident storage, with a transient cast allocation of up to 0.95 GiB).
+# Platoon's bounded vocab diagnostics recognize FP32 input and do not create
+# another logits-sized copy.
+trial_name: toolathlon-openhands-16node-qwen3.6-35B-fp32-lm-head-trial0
+
+# Repeat backend/path so the preallocation launcher can identify this as a
+# Megatron job before Hydra composes the inherited config and can prepare the
+# cached TE/APEX dependencies.
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: Qwen/Qwen3.6-35B-A3B
+  megatron:
+    enable_mtp: false
+    enable_fp32_lm_head: true
+
+# Reference log-probabilities use the same output precision as actor training.
+ref:
+  megatron:
+    enable_fp32_lm_head: true

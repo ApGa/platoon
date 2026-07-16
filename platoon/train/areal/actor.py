@@ -15,7 +15,19 @@ from areal.utils.data import split_padded_tensor_dict_into_mb_list
 from areal.utils.perf_tracer import trace_perf
 
 from platoon.train.areal.config_defs import PlatoonPPOActorConfig
+from platoon.train.areal.fp32_lm_head import install_fp32_lm_head_output_hooks
 from platoon.train.areal.loss_functions import build_loss_fn
+from platoon.train.areal.router_replay import (
+    ROUTED_EXPERTS_FIELD,
+    ROUTED_EXPERTS_VALID_FIELD,
+    assert_engine_router_replay_batch_consumed,
+    configure_router_replay_engine,
+    discard_staged_engine_router_replay_batch,
+    pop_and_split_actor_router_replay,
+    router_replay_initialization,
+    run_router_replay_forward_backward,
+    stage_engine_router_replay_batch,
+)
 
 if TYPE_CHECKING:
     # PlatoonMegatronPPOActor is built dynamically by _get_platoon_megatron_actor_cls
@@ -137,20 +149,30 @@ class PlatoonActorImpl(PPOActor):
             data.pop(key, None)
 
         self.engine.train()
+        replay_data = {"attention_mask": data["attention_mask"]}
+        for field_name in (ROUTED_EXPERTS_FIELD, ROUTED_EXPERTS_VALID_FIELD):
+            if field_name in data:
+                replay_data[field_name] = data.pop(field_name)
         mb_inputs = split_padded_tensor_dict_into_mb_list(
             data,
             mb_spec=MicroBatchSpec(n_mbs=self.config.ppo_n_minibatches),
         )
+        replay_batches = pop_and_split_actor_router_replay(replay_data, mb_inputs, self.config)
 
         with stats_tracker.scope("update"):
             current_version = self.engine.get_version()
             loss_fn = self._make_loss_fn(current_version)
-            for mb in mb_inputs.mbs:
-                train_stat = self.engine.train_batch(
-                    mb,
-                    loss_fn=loss_fn,
-                    loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
-                )
+            for mb, replay_batch in zip(mb_inputs.mbs, replay_batches, strict=True):
+                stage_engine_router_replay_batch(self.engine, replay_batch)
+                try:
+                    train_stat = self.engine.train_batch(
+                        mb,
+                        loss_fn=loss_fn,
+                        loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
+                    )
+                    assert_engine_router_replay_batch_consumed(self.engine)
+                finally:
+                    discard_staged_engine_router_replay_batch(self.engine)
                 stats_tracker.scalar(**train_stat)
 
 
@@ -216,6 +238,39 @@ def _get_platoon_megatron_actor_cls() -> type:
             super().__init__(config)
             self.actor = PlatoonActorImpl(config, self)
 
+        def initialize(self, *args: Any, **kwargs: Any) -> Any:
+            with router_replay_initialization(self):
+                result = super().initialize(*args, **kwargs)
+            configure_router_replay_engine(self)
+            enabled = bool(self.config.megatron.enable_fp32_lm_head)
+            hook_count = install_fp32_lm_head_output_hooks(
+                self.model,
+                enabled=enabled,
+                is_critic=self.config.is_critic,
+            )
+            if enabled and not self.config.is_critic:
+                logger.info(
+                    "FP32 LM-head output enabled; installed %d hook(s) on this pipeline rank",
+                    hook_count,
+                )
+            return result
+
+        def forward_backward_batch(
+            self,
+            mb_list,
+            process_output_fn,
+            forward_only: bool = False,
+            gather_cp_output: bool = False,
+        ):
+            return run_router_replay_forward_backward(
+                self,
+                super().forward_backward_batch,
+                mb_list,
+                process_output_fn,
+                forward_only=forward_only,
+                gather_cp_output=gather_cp_output,
+            )
+
         def clear_device_cache(self) -> None:
             """Release cached allocator blocks on this worker's GPU.
 
@@ -245,9 +300,7 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def create_actor(
-    config: PlatoonPPOActorConfig, backend: str = "fsdp"
-) -> "PlatoonPPOActor | PlatoonMegatronPPOActor":
+def create_actor(config: PlatoonPPOActorConfig, backend: str = "fsdp") -> "PlatoonPPOActor | PlatoonMegatronPPOActor":
     """Create the Platoon actor implementation for the configured loss/backend."""
 
     if backend == "megatron":

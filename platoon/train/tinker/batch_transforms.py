@@ -17,6 +17,74 @@ if TYPE_CHECKING:
     from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 
 
+# Internal per-datum metadata used to preserve Tinker's original action-token
+# loss denominator after zero-gradient datums are removed from model compute.
+LOSS_NORMALIZATION_TOKENS_KEY = "_loss_normalization_tokens"
+
+
+def has_zero_action_advantage(datum: tinker.Datum) -> bool:
+    """Return whether a datum can make no policy-gradient contribution."""
+
+    advantages = datum.loss_fn_inputs["advantages"].to_torch()
+    action_mask = datum.loss_fn_inputs["mask"].to_torch() > 0
+    action_advantages = advantages[action_mask]
+    if action_advantages.numel() == 0:
+        return True
+    # This optimization is enabled by default, so do not round a small but real
+    # policy-gradient signal down to zero.
+    return bool(torch.all(action_advantages == 0))
+
+
+def get_datum_counts(datums: list[tinker.Datum]) -> tuple[int, int, int]:
+    """Return datum, attention-token, and masked action-token counts."""
+
+    return (
+        len(datums),
+        sum(int(datum.model_input.length) for datum in datums),
+        sum(int(datum.loss_fn_inputs["mask"].to_torch().sum().item()) for datum in datums),
+    )
+
+
+def filter_zero_advantage_datums(datums: list[tinker.Datum]) -> list[tinker.Datum]:
+    """Remove datums whose masked action-token advantages are all zero."""
+
+    return [datum for datum in datums if not has_zero_action_advantage(datum)]
+
+
+def set_loss_normalization_token_counts(
+    datums: list[tinker.Datum],
+    *,
+    represented_loss_tokens: int,
+) -> None:
+    """Carry filtered action-token mass without sending its datums to the model."""
+
+    retained_loss_tokens = sum(int(datum.loss_fn_inputs["mask"].to_torch().sum().item()) for datum in datums)
+    filtered_loss_tokens = represented_loss_tokens - retained_loss_tokens
+    if filtered_loss_tokens < 0:
+        raise ValueError("represented_loss_tokens cannot be smaller than retained action-token count")
+
+    for datum_index, datum in enumerate(datums):
+        normalization_tokens = float(datum.loss_fn_inputs["mask"].to_torch().sum().item())
+        if datum_index == 0:
+            normalization_tokens += filtered_loss_tokens
+        datum.loss_fn_inputs[LOSS_NORMALIZATION_TOKENS_KEY] = TensorData.from_torch(
+            torch.tensor([normalization_tokens], dtype=torch.float32)
+        )
+
+
+def get_loss_normalization_token_count(datums: list[tinker.Datum]) -> float:
+    """Return the action-token denominator represented by a microbatch."""
+
+    total = 0.0
+    for datum in datums:
+        explicit_count = datum.loss_fn_inputs.get(LOSS_NORMALIZATION_TOKENS_KEY)
+        if explicit_count is not None:
+            total += float(explicit_count.to_torch().sum().item())
+        else:
+            total += float(datum.loss_fn_inputs["mask"].to_torch().sum().item())
+    return total
+
+
 @dataclass(frozen=True)
 class BatchTransformContext:
     """Stable trainer-side context exposed to Tinker batch transforms."""

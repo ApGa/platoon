@@ -23,7 +23,14 @@ class OpenRewardConfig:
     enable_recursive_subagents: bool = False
     subagent_default_max_steps: int = 50
     subagent_max_depth: int | None = None
+    enable_subagent_reward_judging: bool = False
+    subagent_reward_judge_max_steps: int = 20
+    subagent_delegation_reward_coefficient: float = 0.0
     openhands_system_prompt_suffix: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.subagent_delegation_reward_coefficient < 0:
+            raise ValueError("subagent_delegation_reward_coefficient must be non-negative")
 
     @classmethod
     def from_mapping(cls, value: OpenRewardConfig | dict[str, Any] | None) -> OpenRewardConfig:
@@ -32,7 +39,14 @@ class OpenRewardConfig:
         if isinstance(value, cls):
             return value
         if isinstance(value, dict):
-            return cls(**cast(dict[str, Any], value))
+            data = dict(cast(dict[str, Any], value))
+            legacy_enabled = data.pop("enable_subagent_judging", None)
+            if legacy_enabled is not None and "enable_subagent_reward_judging" not in data:
+                data["enable_subagent_reward_judging"] = legacy_enabled
+            legacy_max_steps = data.pop("subagent_judge_max_steps", None)
+            if legacy_max_steps is not None and "subagent_reward_judge_max_steps" not in data:
+                data["subagent_reward_judge_max_steps"] = legacy_max_steps
+            return cls(**data)
         raise TypeError(f"Unsupported OpenRewardConfig value: {type(value).__name__}")
 
 

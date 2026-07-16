@@ -26,6 +26,22 @@ class WorkflowConfig:
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)
     leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
     depth_level_weighting: bool = False  # Weight trajectories inversely by depth-level frequency
+    # Retain every root datum and independently sample each post-merge subagent
+    # datum. A value of one preserves the historical training batch exactly.
+    subagent_datum_keep_probability: float = 1.0
+    subagent_datum_sampling_seed: int = 0
+    # Zero-advantage datums have no policy-gradient contribution but still incur
+    # a model forward/backward. Baselines and rollout metrics are computed before
+    # this filter is applied.
+    filter_zero_advantage_datums: bool = True
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.subagent_datum_keep_probability <= 1.0:
+            raise ValueError("subagent_datum_keep_probability must be in [0, 1]")
+        if isinstance(self.subagent_datum_sampling_seed, bool) or not isinstance(
+            self.subagent_datum_sampling_seed, int
+        ):
+            raise ValueError("subagent_datum_sampling_seed must be an integer")
 
 
 # TODO:
@@ -75,7 +91,9 @@ class CheckpointConfig(TrainEventTriggerConfig):
 @dataclass
 class EvalConfig(TrainEventTriggerConfig):
     num_concurrent_rollout_workflow_workers: int = 256
-    workflow_config: WorkflowConfig = field(default_factory=lambda: WorkflowConfig(group_size=1))
+    workflow_config: WorkflowConfig = field(
+        default_factory=lambda: WorkflowConfig(group_size=1, filter_zero_advantage_datums=False)
+    )
 
 
 @dataclass

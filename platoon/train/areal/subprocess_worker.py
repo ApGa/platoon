@@ -14,6 +14,8 @@ import os
 import signal
 from typing import Any
 
+from platoon.utils.rollout_python_env import isolated_rollout_python_environment
+
 
 def _hard_timeout_handler(_signum, _frame):
     """SIGALRM handler: kill the subprocess process group when it hangs past the deadline.
@@ -80,35 +82,36 @@ def run_rollout_subprocess(
     hard_timeout = int(
         (config_dict.get("timeout") or 900)
         + 120  # AppWorld init budget (matches asyncio.wait_for in rollout.py)
-        + 60   # cleanup grace
+        + 60  # cleanup grace
     )
     old_handler = signal.signal(signal.SIGALRM, _hard_timeout_handler)
     signal.alarm(hard_timeout)
 
     try:
-        # Dynamic imports - allows subprocess to work with any plugin
-        rollout_module = importlib.import_module(rollout_fn_module)
-        rollout_fn = getattr(rollout_module, rollout_fn_name)
+        with isolated_rollout_python_environment():
+            # Dynamic imports - allows subprocess to work with any plugin
+            rollout_module = importlib.import_module(rollout_fn_module)
+            rollout_fn = getattr(rollout_module, rollout_fn_name)
 
-        task_module = importlib.import_module(get_task_fn_module)
-        get_task_fn = getattr(task_module, get_task_fn_name)
+            task_module = importlib.import_module(get_task_fn_module)
+            get_task_fn = getattr(task_module, get_task_fn_name)
 
-        # Reconstruct config from serialized dict
-        from platoon.config_defs import RolloutConfig
+            # Reconstruct config from serialized dict
+            from platoon.config_defs import RolloutConfig
 
-        config = RolloutConfig(**config_dict)
+            config = RolloutConfig(**config_dict)
 
-        # Get task and apply max_steps if specified
-        task = get_task_fn(task_id)
-        if config.max_steps is not None:
-            task.max_steps = config.max_steps
+            # Get task and apply max_steps if specified
+            task = get_task_fn(task_id)
+            if config.max_steps is not None:
+                task.max_steps = config.max_steps
 
-        # Run async rollout in subprocess's event loop
-        # The rollout function's internal timeouts (config.timeout, config.step_timeout)
-        # will be respected during execution
-        results = asyncio.run(rollout_fn(task, config))
+            # Run async rollout in subprocess's event loop
+            # The rollout function's internal timeouts (config.timeout, config.step_timeout)
+            # will be respected during execution
+            results = asyncio.run(rollout_fn(task, config))
 
-        return results
+            return results
 
     except Exception as e:
         # Log error to stderr (visible in parent process logs)

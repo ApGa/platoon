@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 
 BatchDict = dict[str, Any]
+_ROUTED_EXPERTS_FIELD = "routed_experts"
 
 
 @lru_cache(maxsize=1)
@@ -137,7 +138,19 @@ def split_batch_to_trajectories(batch: BatchDict) -> list[BatchDict]:
             splits = list(value.split(1, dim=0))
             if traj_seqlens is not None:
                 for i, seq_len in enumerate(traj_seqlens):
-                    if splits[i].ndim >= 2 and splits[i].shape[-1] > seq_len:
+                    if key == _ROUTED_EXPERTS_FIELD:
+                        if splits[i].ndim != 4:
+                            raise ValueError(
+                                "routed_experts must have shape [B,S,L,K] before trajectory dispatch, "
+                                f"got {tuple(splits[i].shape)}"
+                            )
+                        if splits[i].shape[1] < seq_len:
+                            raise ValueError(
+                                f"routed_experts sequence width {splits[i].shape[1]} is shorter than "
+                                f"attention length {seq_len}"
+                            )
+                        splits[i] = splits[i][:, :seq_len, :, :].contiguous()
+                    elif splits[i].ndim >= 2 and splits[i].shape[-1] > seq_len:
                         splits[i] = splits[i][..., :seq_len]
             for i, split_value in enumerate(splits):
                 split_items[i][key] = split_value

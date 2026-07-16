@@ -7,14 +7,8 @@ from dataclasses import replace
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
-from openhands.sdk.agent.base import AgentBase
-from openhands.sdk.conversation import get_agent_final_response
-from openhands.sdk.conversation.base import BaseConversation
-from openhands.sdk.conversation.conversation import Conversation
-from openhands.sdk.conversation.state import ConversationExecutionStatus
-from openhands.sdk.event.base import Event
-from openhands.sdk.workspace.base import BaseWorkspace
-from platoon.envs.base import Task
+from platoon.agents.actions.subagent import SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY
+from platoon.envs.base import SubTask, Task
 from platoon.episode.context import (
     current_trajectory,
     current_trajectory_collection,
@@ -23,8 +17,38 @@ from platoon.episode.context import (
 )
 from platoon.utils.openhands_utils import get_obs_for_last_action, is_finished
 
+from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.conversation import get_agent_final_response
+from openhands.sdk.conversation.base import BaseConversation
+from openhands.sdk.conversation.conversation import Conversation
+from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.event.base import Event
+from openhands.sdk.workspace.base import BaseWorkspace
+
 from .recursive import DEFAULT_SUBAGENT_MAX_STEPS, copy_agent_config_for_fork
 from .types import OpenHandsAction, OpenHandsObservation, OpenHandsTrajectoryStep
+
+_CONVERSATION_CLOSE_TIMEOUT_SECONDS = 10.0
+
+
+async def _wait_for_thread(thread: threading.Thread, timeout: float) -> bool:
+    """Wait without registering a possibly stuck thread in asyncio's executor.
+
+    ``asyncio.to_thread`` cannot stop its worker when the timeout expires, and
+    ``asyncio.run`` subsequently waits for every default-executor worker.  A
+    hung SDK ``close()`` could therefore defeat the rollout deadline.  The
+    OpenHands cleanup threads are daemon threads; bounded polling lets the
+    rollout subprocess return, with its process-level deadline as a backstop.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while thread.is_alive():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.1, remaining))
+    return True
 
 
 def _conversation_execution_status(conversation_state) -> ConversationExecutionStatus | None:
@@ -65,6 +89,7 @@ class OpenHandsEnv:
         self._persistence_dir = persistence_dir
         self._conversation_id = conversation_id
         self._conversation = None
+        self._conversation_task: asyncio.Task[None] | None = None
         self._synthetic_condensation_step_event_ids: set[str] = set()
         self._enable_recursive_subagents = enable_recursive_subagents
         self._subagent_default_max_steps = subagent_default_max_steps
@@ -75,8 +100,21 @@ class OpenHandsEnv:
             self._launch_subagent_runtime.close()
             self._launch_subagent_runtime = None
 
+    async def _aclose_launch_subagent_runtime(self) -> None:
+        runtime = self._launch_subagent_runtime
+        self._launch_subagent_runtime = None
+        if runtime is not None:
+            await runtime.aclose()
+
     def _prepare_agent_for_conversation(self) -> AgentBase:
-        if not self._enable_recursive_subagents:
+        configured_agent = self._agent
+        if isinstance(self._task, SubTask):
+            from platoon.openhands.recursive import with_finish_tool
+
+            configured_agent = with_finish_tool(configured_agent)
+
+        if not self._enable_recursive_subagents or self._task.misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
+            self._agent = configured_agent
             return self._agent
 
         from platoon.openhands.recursive import (
@@ -89,7 +127,7 @@ class OpenHandsEnv:
         runtime.bind(asyncio.get_running_loop(), copy_context())
         self._launch_subagent_runtime = runtime
         self._agent = with_launch_subagent_tool(
-            self._agent,
+            configured_agent,
             runtime=runtime,
             default_max_steps=self._subagent_default_max_steps,
         )
@@ -135,8 +173,14 @@ class OpenHandsEnv:
         self._task = replace(self._task, goal=initial_user_message)
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
         self._conversation.send_message(initial_user_message)
-        # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
-        threading.Thread(target=self._conversation.run, daemon=True).start()
+        # The OpenHands fork's async runner tracks its task and cancellation
+        # token, allowing interrupt() to stop an in-flight LLM request and
+        # pending tools.  Keeping this task on the episode loop also makes
+        # teardown observable instead of leaving an opaque sync daemon thread.
+        self._conversation_task = asyncio.create_task(
+            self._conversation.arun(),
+            name=f"openhands-conversation-{self._conversation_id or 'ephemeral'}",
+        )
 
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
@@ -144,6 +188,7 @@ class OpenHandsEnv:
         traj.reward = 0.0
         obs_events = get_obs_for_last_action(self._state)
         while not obs_events:
+            self._raise_if_conversation_failed()
             await asyncio.sleep(1)
             obs_events = get_obs_for_last_action(self._state)
         traj_collection.add_trajectory_step(
@@ -164,6 +209,7 @@ class OpenHandsEnv:
             self._state.last_step_action_id = action.action_events[-1].id
         obs_events = get_obs_for_last_action(self._state)
         while not obs_events and not is_finished(self._state):
+            self._raise_if_conversation_failed()
             await asyncio.sleep(0.2)
             obs_events = get_obs_for_last_action(self._state)
         if obs_events:
@@ -194,10 +240,47 @@ class OpenHandsEnv:
         return await self.observe()
 
     async def close(self) -> None:
-        if self._conversation is not None:
-            self._conversation.close()
+        conversation = self._conversation
+        conversation_task = self._conversation_task
         self._conversation = None
-        self._close_launch_subagent_runtime()
+        self._conversation_task = None
+        if conversation is not None:
+            try:
+                conversation.interrupt()
+            except BaseException:
+                pass
+        if conversation_task is not None and not conversation_task.done():
+            conversation_task.cancel()
+            done, _pending = await asyncio.wait({conversation_task}, timeout=10.0)
+            if done and not conversation_task.cancelled():
+                conversation_task.exception()
+        elif conversation_task is not None and not conversation_task.cancelled():
+            # Retrieve a terminal exception so it does not become an unhandled
+            # task warning during event-loop teardown.
+            conversation_task.exception()
+
+        # Stop recursive children only after the root conversation has been
+        # interrupted, so it cannot interpret child cancellation as a tool
+        # error and begin another model step while teardown is in progress.
+        await self._aclose_launch_subagent_runtime()
+        if conversation is not None:
+            close_thread = threading.Thread(
+                target=conversation.close,
+                daemon=True,
+                name=f"openhands-close-{self._conversation_id or 'ephemeral'}",
+            )
+            close_thread.start()
+            await _wait_for_thread(close_thread, _CONVERSATION_CLOSE_TIMEOUT_SECONDS)
+
+    def _raise_if_conversation_failed(self) -> None:
+        task = self._conversation_task
+        if task is None or not task.done():
+            return
+        if task.cancelled():
+            raise RuntimeError("OpenHands conversation was cancelled before producing an observation")
+        exception = task.exception()
+        if exception is not None:
+            raise exception
 
     # TODO: Consider adding a return_copy option here.
     async def observe(self) -> OpenHandsObservation:

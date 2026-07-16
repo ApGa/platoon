@@ -155,6 +155,34 @@ def _load_recursive_module(monkeypatch):
     return module
 
 
+async def _run_in_sdk_thread(callable_, /, *args, **kwargs):
+    """Run a synchronous SDK callback while continuing to drive the test loop.
+
+    This mirrors the SDK's own executor thread more directly than
+    ``asyncio.to_thread``. On some Slurm login nodes the latter's cross-thread
+    completion callback is not observed until another timer wakes the selector,
+    which can make an otherwise completed callback hang the test indefinitely.
+    """
+
+    result: list[Any] = []
+    errors: list[BaseException] = []
+
+    def target():
+        try:
+            result.append(callable_(*args, **kwargs))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    while thread.is_alive():
+        await asyncio.sleep(0.01)
+    thread.join()
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
 @pytest.mark.asyncio
 async def test_launch_subagent_runtime_preserves_bound_context(monkeypatch):
     recursive = _load_recursive_module(monkeypatch)
@@ -175,7 +203,7 @@ async def test_launch_subagent_runtime_preserves_bound_context(monkeypatch):
     runtime.bind(asyncio.get_running_loop(), contextvars.copy_context())
 
     try:
-        result = await asyncio.to_thread(
+        result = await _run_in_sdk_thread(
             runtime.run,
             goal="child",
             max_steps=3,
@@ -217,14 +245,14 @@ async def test_launch_subagent_runtime_allows_concurrent_children(monkeypatch):
 
     try:
         results = await asyncio.gather(
-            asyncio.to_thread(
+            _run_in_sdk_thread(
                 runtime.run,
                 goal="child-a",
                 max_steps=2,
                 task_misc=None,
                 verbose=True,
             ),
-            asyncio.to_thread(
+            _run_in_sdk_thread(
                 runtime.run,
                 goal="child-b",
                 max_steps=2,
@@ -240,12 +268,72 @@ async def test_launch_subagent_runtime_allows_concurrent_children(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_launch_subagent_runtime_uses_real_stdio(monkeypatch):
+async def test_launch_subagent_runtime_aclose_is_bounded_when_child_suppresses_cancellation(monkeypatch):
+    recursive = _load_recursive_module(monkeypatch)
+    started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def fake_launch_subagent(goal, max_steps, task_misc, verbose):
+        _ = goal, max_steps, task_misc, verbose
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            # Simulate third-party cleanup code which catches cancellation and
+            # remains stuck.  Runtime teardown must still respect its timeout.
+            while not release_cleanup.is_set():
+                try:
+                    await release_cleanup.wait()
+                except asyncio.CancelledError:
+                    pass
+        return "cleaned"
+
+    monkeypatch.setattr(recursive, "launch_subagent", fake_launch_subagent)
+    runtime = recursive.LaunchSubagentRuntime()
+    runtime.bind(asyncio.get_running_loop(), contextvars.copy_context())
+    caller_done = threading.Event()
+    caller_error: list[BaseException] = []
+
+    def call_runtime() -> None:
+        try:
+            runtime.run(
+                goal="child",
+                max_steps=3,
+                task_misc=None,
+                verbose=False,
+            )
+        except BaseException as exc:
+            caller_error.append(exc)
+        finally:
+            caller_done.set()
+
+    caller = threading.Thread(target=call_runtime, daemon=True)
+    caller.start()
+
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    child_task = next(iter(runtime._tasks))
+    started_at = asyncio.get_running_loop().time()
+    await runtime.aclose(timeout=0.02)
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert elapsed < 0.2
+    assert not child_task.done()
+    assert caller_done.wait(timeout=0.2)
+
+    release_cleanup.set()
+    await asyncio.wait_for(child_task, timeout=1.0)
+    caller.join(timeout=0.2)
+    assert not caller.is_alive()
+    assert caller_error
+
+
+@pytest.mark.asyncio
+async def test_launch_subagent_runtime_preserves_configured_stdio(monkeypatch):
     recursive = _load_recursive_module(monkeypatch)
 
     async def fake_launch_subagent(goal, max_steps, task_misc, verbose):
         _ = goal, max_steps, task_misc, verbose
-        return sys.stderr is sys.__stderr__ and sys.stdout is sys.__stdout__
+        return isinstance(sys.stderr, io.StringIO) and isinstance(sys.stdout, io.StringIO)
 
     monkeypatch.setattr(recursive, "launch_subagent", fake_launch_subagent)
     monkeypatch.setattr(sys, "stderr", io.StringIO())
@@ -254,7 +342,7 @@ async def test_launch_subagent_runtime_uses_real_stdio(monkeypatch):
     runtime.bind(asyncio.get_running_loop(), contextvars.copy_context())
 
     try:
-        result = await asyncio.to_thread(
+        result = await _run_in_sdk_thread(
             runtime.run,
             goal="child",
             max_steps=2,
@@ -290,6 +378,7 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
             runtime=runtime,
             default_max_steps=7,
         )
+        agent = recursive.with_finish_tool(agent)
         agent = recursive.append_system_message_suffix(agent, "extra")
         agent = recursive.append_user_message_suffix(agent, "user-extra")
     finally:
@@ -305,11 +394,14 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
         "runtime_id": runtime.id,
         "default_max_steps": 7,
     }
+    assert agent.include_default_tools == ["FinishTool"]
     assert agent.agent_context.system_message_suffix == "base\n\nextra"
     assert agent.agent_context.user_message_suffix == "user-base\n\nuser-extra"
     assert "task_tracker tool" in recursive.RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
     assert "launch at least one subagent" in recursive.RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX
     assert "Recursive coordination guidance" in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
+    assert "max_steps" not in recursive.RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
+    assert "max_steps" not in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
     assert "OpenReward" not in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
 
 
@@ -323,6 +415,7 @@ def test_launch_subagent_tool_declares_no_shared_resources(monkeypatch):
 
     resources = tool.declared_resources(action)
 
+    assert set(recursive.LaunchSubagentAction.model_fields) == {"goal"}
     assert resources.declared is True
     assert resources.keys == ()
 
@@ -454,7 +547,7 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
             if self._task.goal == "root":
                 assert self.programmatic_tool is not None
                 assert self.conversation is not None
-                obs = await asyncio.to_thread(
+                obs = await _run_in_sdk_thread(
                     self.programmatic_tool.executor,
                     action,
                     self.conversation,
@@ -532,15 +625,15 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
             action = ptc.ProgrammaticToolCallingAction(
                 code=(
                     "north, europe = await asyncio.gather(\n"
-                    '    atools.launch_subagent(goal="revenue north", max_steps=2, verbose=False),\n'
-                    '    atools.launch_subagent(goal="revenue europe", max_steps=2, verbose=False),\n'
+                    '    atools.launch_subagent(goal="revenue north"),\n'
+                    '    atools.launch_subagent(goal="revenue europe"),\n'
                     ")\n"
                     "grandchild_outputs = [north.text, europe.text]\n"
                     "grandchild_outputs"
                 )
             )
             try:
-                return await asyncio.to_thread(
+                return await _run_in_sdk_thread(
                     programmatic_tool.executor,
                     action,
                     conversation,
@@ -571,8 +664,8 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
     first_action = ptc.ProgrammaticToolCallingAction(
         code=(
             "child_a, child_b = await asyncio.gather(\n"
-            '    atools.launch_subagent(goal="collect revenue", max_steps=3, verbose=False),\n'
-            '    atools.launch_subagent(goal="collect support", max_steps=3, verbose=False),\n'
+            '    atools.launch_subagent(goal="collect revenue"),\n'
+            '    atools.launch_subagent(goal="collect support"),\n'
             ")\n"
             "child_outputs = [child_a.text, child_b.text]\n"
             "child_outputs"

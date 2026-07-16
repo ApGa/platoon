@@ -15,9 +15,32 @@ import tinker
 import torch
 from tinker import TensorData
 
+from platoon.agents.actions.subagent import (
+    EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY,
+    EXCLUDE_FROM_TRAINING_MISC_KEY,
+    SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
+)
 from platoon.train.tinker.proxy import TinkerLLMInteraction
+from platoon.utils.subagent_sampling import SubagentDatumSampler
+from platoon.utils.trajectory_status import trajectory_was_interrupted
 
 logger = logging.getLogger(__name__)
+
+
+def _exclude_from_training(trajectory: dict) -> bool:
+    misc = trajectory.get("misc", {})
+    if isinstance(misc, dict) and bool(misc.get(EXCLUDE_FROM_TRAINING_MISC_KEY)):
+        return True
+    task = trajectory.get("task")
+    task_misc = task.get("misc", {}) if isinstance(task, dict) else {}
+    return isinstance(task_misc, dict) and bool(task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY))
+
+
+def _exclude_from_policy_training(trajectory: dict) -> bool:
+    """Return whether policy datums should be dropped while retaining stats."""
+
+    misc = trajectory.get("misc", {})
+    return isinstance(misc, dict) and bool(misc.get(EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY))
 
 
 def create_rightshifted_model_input_and_leftshifted_targets(
@@ -71,6 +94,69 @@ class TrajectoryStats:
     is_root: bool = False
 
 
+_SAMPLING_COUNT_FIELDS = (
+    "eligible_datums",
+    "retained_datums",
+    "eligible_attention_tokens",
+    "retained_attention_tokens",
+    "eligible_loss_tokens",
+    "retained_loss_tokens",
+)
+
+
+@dataclass
+class DatumSamplingCounts:
+    """Post-merge datum and token counts for one depth level."""
+
+    eligible_datums: int = 0
+    retained_datums: int = 0
+    eligible_attention_tokens: int = 0
+    retained_attention_tokens: int = 0
+    eligible_loss_tokens: int = 0
+    retained_loss_tokens: int = 0
+
+    def merge(self, other: "DatumSamplingCounts") -> None:
+        for field_name in _SAMPLING_COUNT_FIELDS:
+            setattr(self, field_name, getattr(self, field_name) + getattr(other, field_name))
+
+
+@dataclass
+class SubagentDatumSamplingStats:
+    """Sampling counters retained with a Tinker rollout collection result."""
+
+    by_depth: dict[int, DatumSamplingCounts] = field(default_factory=dict)
+
+    def record(self, datum: tinker.Datum, *, depth: int, retained: bool) -> None:
+        counts = self.by_depth.setdefault(depth, DatumSamplingCounts())
+        attention_tokens = int(datum.model_input.length)
+        loss_tokens = int(datum.loss_fn_inputs["mask"].to_torch().sum().item())
+        counts.eligible_datums += 1
+        counts.eligible_attention_tokens += attention_tokens
+        counts.eligible_loss_tokens += loss_tokens
+        if retained:
+            counts.retained_datums += 1
+            counts.retained_attention_tokens += attention_tokens
+            counts.retained_loss_tokens += loss_tokens
+
+    def merge(self, other: "SubagentDatumSamplingStats") -> None:
+        for depth, other_counts in other.by_depth.items():
+            self.by_depth.setdefault(depth, DatumSamplingCounts()).merge(other_counts)
+
+    def to_metrics(self) -> dict[str, float]:
+        """Render backend-aligned overall and per-depth sampling metrics."""
+
+        total = DatumSamplingCounts()
+        metrics: dict[str, float] = {}
+        for depth, counts in sorted(self.by_depth.items()):
+            total.merge(counts)
+            prefix = f"subagent_sampling/depth_{depth}"
+            for field_name in _SAMPLING_COUNT_FIELDS:
+                metrics[f"{prefix}/{field_name}"] = float(getattr(counts, field_name))
+        for field_name in _SAMPLING_COUNT_FIELDS:
+            metrics[f"subagent_sampling/{field_name}"] = float(getattr(total, field_name))
+        return metrics
+
+
 @dataclass
 class TrajectoryCollectionResult:
     """Result from processing a trajectory collection."""
@@ -79,6 +165,11 @@ class TrajectoryCollectionResult:
     task_reward: float  # Reward of the root trajectory
     trajectory_stats: list[TrajectoryStats]
     root_rewards_dict: dict[str, float]  # Reward components from root trajectory
+    subagent_sampling_stats: SubagentDatumSamplingStats = field(default_factory=SubagentDatumSamplingStats)
+    num_policy_excluded_datums: int = 0
+    # Interrupted roots may carry a partial reward which is useful for metrics,
+    # but must not participate in group advantage centering.
+    task_reward_valid: bool = True
 
 
 FlatObElem = int | tinker.ModelInputChunk
@@ -330,6 +421,7 @@ def get_train_data_for_trajectory_collection(
     reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj["reward"], {}),
     include_traj_depth: bool = False,
     include_traj_start: bool = False,
+    subagent_datum_sampler: SubagentDatumSampler | None = None,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -344,6 +436,8 @@ def get_train_data_for_trajectory_collection(
         checkpoint_version: The checkpoint version for staleness checking.
         filter_errors: Whether to filter out error steps.
         reward_processor: Function to process trajectory rewards.
+        subagent_datum_sampler: Optional deterministic sampler applied to each
+            non-root trajectory after its steps have been merged into datums.
 
     Returns:
         TrajectoryCollectionResult with datums and per-trajectory statistics.
@@ -352,17 +446,50 @@ def get_train_data_for_trajectory_collection(
     trajectory_stats: list[TrajectoryStats] = []
     task_reward = 0.0
     root_rewards_dict: dict[str, float] = {}
-    is_first = True
-    depth_map = _compute_trajectory_depths(trajectory_collection) if include_traj_depth else {}
+    sampling_stats = SubagentDatumSamplingStats()
+    num_policy_excluded_datums = 0
+    trajectories = trajectory_collection["trajectories"]
+    root_trajectory_id = next(iter(trajectories), None)
+    task_reward_valid = True
+    if root_trajectory_id is not None:
+        task_reward_valid = not trajectory_was_interrupted(trajectories[root_trajectory_id])
+    need_depths = include_traj_depth or subagent_datum_sampler is not None
+    depth_map = _compute_trajectory_depths(trajectory_collection) if need_depths else {}
 
-    for trajectory_id, trajectory in trajectory_collection["trajectories"].items():
+    # Process every trainable trajectory's reward before sampling any datums.
+    # Recursive reward processors may depend on child outcomes attached to the
+    # complete tree, and reward/stat records must not depend on which child
+    # datums happen to survive the Bernoulli draw.
+    processed_trajectories: list[tuple[str, dict, float, dict[str, float], bool, int, bool]] = []
+    for trajectory_id, trajectory in trajectories.items():
+        if _exclude_from_training(trajectory):
+            continue
         trajectory_reward, rewards_dict = reward_processor(trajectory)
+        is_root = trajectory_id == root_trajectory_id
+        depth = depth_map.get(trajectory_id, 0)
+        # Roots are mandatory policy data. The source marker is child-only,
+        # but keep that invariant explicit at the converter boundary.
+        policy_ineligible = trajectory_was_interrupted(trajectory) or (
+            not is_root and _exclude_from_policy_training(trajectory)
+        )
+        processed_trajectories.append(
+            (trajectory_id, trajectory, trajectory_reward, rewards_dict, is_root, depth, policy_ineligible)
+        )
 
-        # Store the root (first) trajectory's reward as the task reward
-        if is_first:
-            task_reward = trajectory_reward
-            root_rewards_dict = rewards_dict
+    if processed_trajectories:
+        root_entry = next((entry for entry in processed_trajectories if entry[4]), processed_trajectories[0])
+        task_reward = root_entry[2]
+        root_rewards_dict = root_entry[3]
 
+    for (
+        trajectory_id,
+        trajectory,
+        trajectory_reward,
+        rewards_dict,
+        is_root,
+        depth,
+        policy_ineligible,
+    ) in processed_trajectories:
         # Advantage will be set later after all rollouts complete
         result = trajectory_to_data(
             trajectory=trajectory,
@@ -373,14 +500,49 @@ def get_train_data_for_trajectory_collection(
             checkpoint_version=checkpoint_version,
             filter_errors=filter_errors,
             trajectory_reward=trajectory_reward,
-            traj_depth=depth_map.get(trajectory_id) if include_traj_depth else None,
+            traj_depth=depth if include_traj_depth else None,
         )
 
-        if not include_traj_start:
-            for datum in result.datums:
+        if policy_ineligible:
+            # Keep reward processing and full TrajectoryStats above/below, but
+            # never train policy tokens from a child whose verifier failed or
+            # did not finish. These datums are outside Bernoulli eligibility.
+            keep_mask = [False] * len(result.datums)
+            num_policy_excluded_datums += len(result.datums)
+        elif subagent_datum_sampler is None:
+            keep_mask = [True] * len(result.datums)
+        else:
+            keep_mask = subagent_datum_sampler.sample_mask(
+                task_id=task_id,
+                trajectory_id=trajectory_id,
+                depth=depth,
+                num_datums=len(result.datums),
+            )
+            if len(keep_mask) != len(result.datums):
+                raise ValueError(
+                    "subagent datum sampler returned a mask with the wrong length: "
+                    f"trajectory={trajectory_id}, datums={len(result.datums)}, mask={len(keep_mask)}"
+                )
+
+        retained_datums: list[tinker.Datum] = []
+        for datum, retained in zip(result.datums, keep_mask, strict=True):
+            if subagent_datum_sampler is not None and not policy_ineligible:
+                sampling_stats.record(datum, depth=depth, retained=retained)
+            if retained:
+                retained_datums.append(datum)
+
+        # Sampling may remove the datum which originally carried traj_start.
+        # Mark the first *retained* datum so depth weighting counts only
+        # trajectories represented in the actual training batch.
+        for retained_index, datum in enumerate(retained_datums):
+            if include_traj_start:
+                datum.loss_fn_inputs["traj_start"] = TensorData.from_torch(
+                    torch.tensor([1.0 if retained_index == 0 else 0.0])
+                )
+            else:
                 datum.loss_fn_inputs.pop("traj_start", None)
 
-        train_data.extend(result.datums)
+        train_data.extend(retained_datums)
 
         # Record per-trajectory stats
         trajectory_stats.append(
@@ -390,13 +552,13 @@ def get_train_data_for_trajectory_collection(
                 num_steps=result.num_steps,
                 num_input_tokens=result.num_input_tokens,
                 num_output_tokens=result.num_output_tokens,
+                # Keep trajectory stats sampling-independent. Dedicated
+                # sampling metrics expose the retained datum count.
                 num_datums=len(result.datums),
                 rewards_dict=rewards_dict,
-                is_root=is_first,
+                is_root=is_root,
             )
         )
-
-        is_first = False
 
     if not train_data:
         logger.warning(f"No train data found for any trajectory for task {task_id}")
@@ -406,6 +568,9 @@ def get_train_data_for_trajectory_collection(
         task_reward=task_reward,
         trajectory_stats=trajectory_stats,
         root_rewards_dict=root_rewards_dict,
+        subagent_sampling_stats=sampling_stats,
+        num_policy_excluded_datums=num_policy_excluded_datums,
+        task_reward_valid=task_reward_valid,
     )
 
 

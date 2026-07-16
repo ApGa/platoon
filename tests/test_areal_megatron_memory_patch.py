@@ -173,6 +173,23 @@ def test_vocab_reduction_fp32_casts_are_bounded_by_complete_rows(reduction):
     assert observed_chunk_bytes == [row_bytes, row_bytes]
 
 
+@pytest.mark.parametrize("reduction", ["mean", "norm"])
+def test_vocab_reduction_uses_no_chunk_cast_for_fp32_logits(reduction):
+    patches = _load_patches_module()
+    logits = torch.randn(10, 31, dtype=torch.float32)
+    observed_chunks = []
+
+    actual = patches._bounded_fp32_vocab_reduction(
+        logits,
+        reduction,
+        _chunk_observer=observed_chunks.append,
+    )
+    expected = getattr(logits, reduction)(dim=-1)
+
+    assert observed_chunks == []
+    torch.testing.assert_close(actual, expected)
+
+
 def test_vocab_reduction_fails_closed_for_noncontiguous_logits():
     patches = _load_patches_module()
     logits = torch.randn(5, 7, 11, dtype=torch.bfloat16).transpose(0, 1)
