@@ -537,6 +537,7 @@ def test_rollout_idle_guard_command_uses_exact_resolved_topology(monkeypatch, tm
     assert "--nodes=6" in command
     assert "--ntasks=48" in command
     assert "--ntasks-per-node=8" in command
+    assert "--cpu-bind=none" in command
     assert "--gpus-per-task=1" in command
     assert "--gpu-bind=single:1" in command
     assert "--kill-on-bad-exit=1" in command

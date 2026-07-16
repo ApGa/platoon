@@ -441,6 +441,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             f"--nodes={nodes}",
             f"--ntasks={task_count}",
             f"--ntasks-per-node={self.n_gpus_per_node}",
+            "--cpu-bind=none",
             "--cpus-per-task=1",
             "--mem-per-cpu=1024M",
             "--gpus-per-task=1",
