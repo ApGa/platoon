@@ -141,8 +141,35 @@ def test_two_idle_samples_trigger_one_bounded_burst(guard_module):
     assert result.burst_elapsed_seconds == pytest.approx(1.01)
 
 
-def test_low_priority_uses_cuda_least_urgent_end_of_range(guard_module):
-    assert guard_module.low_stream_priority((0, -1)) == 0
+def test_burster_uses_public_default_stream_priority_without_range_query(
+    guard_module, monkeypatch
+):
+    class FakeCuda:
+        def __init__(self):
+            self.stream_args = None
+
+        def is_available(self):
+            return True
+
+        def device_count(self):
+            return 1
+
+        def set_device(self, _device):
+            return None
+
+        def Stream(self, *, device, priority):
+            self.stream_args = (device, priority)
+            return object()
+
+    cuda = FakeCuda()
+    fake_torch = type("FakeTorch", (), {"cuda": cuda})
+    assert not hasattr(cuda, "get_stream_priority_range")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    burster = guard_module.TorchBf16Burster(matrix_dim=1024, operations_per_sync=32)
+
+    assert burster.low_priority == 0
+    assert cuda.stream_args == (0, 0)
 
 
 def test_ready_marker_is_atomic_and_identifies_exact_gpu(guard_module, tmp_path, monkeypatch):

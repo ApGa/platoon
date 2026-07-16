@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Protocol
 
 PREFIX = "[rollout_gpu_idle_guard]"
+# PyTorch documents zero as its default stream priority; negative values request
+# higher urgency. This public constructor contract is available in Torch 2.9.
+LOW_PRIORITY_STREAM_PRIORITY = 0
 
 
 @dataclass(frozen=True)
@@ -186,16 +189,6 @@ class NvidiaSmiProbe:
         return matches[0]
 
 
-def low_stream_priority(priority_range: tuple[int, int]) -> int:
-    """Return CUDA's least-urgent stream priority.
-
-    PyTorch returns ``(least_priority, greatest_priority)``; CUDA commonly uses
-    zero for the least-urgent stream and negative values for higher priorities.
-    """
-
-    return priority_range[0]
-
-
 class TorchBf16Burster:
     def __init__(self, matrix_dim: int, operations_per_sync: int):
         import torch
@@ -208,7 +201,7 @@ class TorchBf16Burster:
         self._matrix_dim = matrix_dim
         self._operations_per_sync = operations_per_sync
         torch.cuda.set_device(0)
-        self.low_priority = low_stream_priority(torch.cuda.get_stream_priority_range())
+        self.low_priority = LOW_PRIORITY_STREAM_PRIORITY
         self._stream = torch.cuda.Stream(device=0, priority=self.low_priority)
         self._left = None
         self._right = None
