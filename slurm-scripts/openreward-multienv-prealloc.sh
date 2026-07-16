@@ -16,7 +16,36 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=${PLATOON_REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}
+
+platoon_repo_root_is_valid() {
+  local candidate=${1:-}
+  [[ -n "${candidate}" ]] || return 1
+  [[ -f "${candidate}/pyproject.toml" ]] || return 1
+  [[ -x "${candidate}/slurm-scripts/openreward-toolathlon-prealloc-base.sh" ]] || return 1
+  [[ -x "${candidate}/slurm-scripts/openreward-multienv-server.sh" ]] || return 1
+}
+
+if [[ -n "${PLATOON_REPO_ROOT:-}" ]]; then
+  repo_root_candidate=${PLATOON_REPO_ROOT}
+  repo_root_source=PLATOON_REPO_ROOT
+elif platoon_repo_root_is_valid "${SLURM_SUBMIT_DIR:-}"; then
+  # Slurm executes a copied script below its spool directory, so BASH_SOURCE is
+  # not inside the checkout. Jobs submitted from the checkout retain its path
+  # in SLURM_SUBMIT_DIR.
+  repo_root_candidate=${SLURM_SUBMIT_DIR}
+  repo_root_source=SLURM_SUBMIT_DIR
+else
+  repo_root_candidate=${SCRIPT_DIR}/..
+  repo_root_source=script-relative fallback
+fi
+
+if ! REPO_ROOT=$(cd "${repo_root_candidate}" 2>/dev/null && pwd -P) || \
+  ! platoon_repo_root_is_valid "${REPO_ROOT}"; then
+  echo "ERROR: could not locate a valid Platoon checkout from ${repo_root_source}: ${repo_root_candidate}." >&2
+  echo "Set PLATOON_REPO_ROOT to the checkout root (the directory containing pyproject.toml and slurm-scripts/)." >&2
+  exit 2
+fi
+
 USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd)}
 BASE_LAUNCHER=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc-base.sh
 SERVER_HELPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-server.sh

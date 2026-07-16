@@ -81,6 +81,50 @@ def test_multienv_launcher_isolates_rank_loss_and_reports_failed_pool_endpoint()
     assert "${issue_summary}" in launcher
 
 
+def test_multienv_launcher_resolves_checkout_from_slurm_submit_dir(tmp_path):
+    spool_dir = tmp_path / "cm" / "slurm" / "spool"
+    spool_dir.mkdir(parents=True)
+    spooled_launcher = spool_dir / "slurm_script"
+    spooled_launcher.write_bytes(MULTIENV_LAUNCHER.read_bytes())
+
+    missing_config = tmp_path / "stop-after-repo-resolution.yaml"
+    result = subprocess.run(
+        ["bash", str(spooled_launcher), str(missing_config)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "SLURM_SUBMIT_DIR": str(REPO_ROOT),
+            "PLATOON_USER_ROOT": str(tmp_path / "user"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert f"ERROR: config not found: {missing_config}" in result.stderr
+    assert "could not locate a valid Platoon checkout" not in result.stderr
+
+
+def test_multienv_launcher_rejects_invalid_explicit_repo_root(tmp_path):
+    result = subprocess.run(
+        ["bash", str(MULTIENV_LAUNCHER)],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "PLATOON_REPO_ROOT": str(tmp_path / "not-a-checkout"),
+            "SLURM_SUBMIT_DIR": str(REPO_ROOT),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "could not locate a valid Platoon checkout from PLATOON_REPO_ROOT" in result.stderr
+    assert "Set PLATOON_REPO_ROOT to the checkout root" in result.stderr
+
+
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body)
     path.chmod(0o755)
