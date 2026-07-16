@@ -62,9 +62,9 @@ class _NonOwningToolExecutor:
         return self._executor(action, conversation)
 
     def interrupt(self) -> None:
-        interrupt = getattr(self._executor, "interrupt", None)
-        if interrupt is not None:
-            interrupt()
+        # Child tools borrow the root conversation's executor. Interrupting the
+        # borrowed executor would also cancel in-flight root or sibling calls.
+        return None
 
     def close(self) -> None:
         return None

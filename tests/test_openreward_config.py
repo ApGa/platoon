@@ -471,24 +471,24 @@ def test_openreward_goal_format_adds_root_context_for_nested_child(monkeypatch):
     assert "Root Agent Task:\nBuild the KPI report." in goal
 
 
-def test_openreward_shared_tools_are_non_owning(monkeypatch):
+def test_openreward_shared_tools_do_not_close_or_interrupt_owner(monkeypatch):
     env_mod = _load_openreward_env_module(monkeypatch)
 
     class Executor:
         def __init__(self):
-            self.called = False
-            self.closed = False
-            self.interrupted = False
+            self.calls = []
+            self.close_calls = 0
+            self.interrupt_calls = 0
 
         def __call__(self, action, conversation):
-            self.called = True
+            self.calls.append((action, conversation))
             return {"action": action, "conversation": conversation}
 
         def interrupt(self):
-            self.interrupted = True
+            self.interrupt_calls += 1
 
         def close(self):
-            self.closed = True
+            self.close_calls += 1
 
     class Tool:
         def __init__(self, name, executor, server_name):
@@ -524,10 +524,10 @@ def test_openreward_shared_tools_are_non_owning(monkeypatch):
 
     assert set(shared_tools) == {"get_task"}
     assert result == {"action": {"ok": True}, "conversation": "conversation"}
-    assert executor.called is True
-    assert executor.interrupted is True
-    assert executor.closed is False
-    assert other_executor.called is False
+    assert executor.calls == [({"ok": True}, "conversation")]
+    assert executor.interrupt_calls == 0
+    assert executor.close_calls == 0
+    assert other_executor.calls == []
 
 
 @pytest.mark.asyncio
