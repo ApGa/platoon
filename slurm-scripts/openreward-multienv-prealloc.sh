@@ -7,10 +7,6 @@
 #SBATCH --exclusive
 #SBATCH --time=4:00:00
 #SBATCH --signal=B:USR1@300
-#SBATCH --output=/lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/logs/openreward-multienv-prealloc-%j.out
-#SBATCH --error=/lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/logs/openreward-multienv-prealloc-%j.err
-#SBATCH --mail-user=apurvag@nvidia.com
-#SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
 
 # Add one TMax and one SWE-rebench OpenReward service per allocated node, then
 # delegate Toolathlon and AReaL lifecycle management to the established
@@ -19,9 +15,10 @@
 
 set -euo pipefail
 
-USER_ROOT=/lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag
-REPO_ROOT=${USER_ROOT}/source/platoon
-BASE_LAUNCHER=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc.sh
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=${PLATOON_REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}
+USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd)}
+BASE_LAUNCHER=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc-base.sh
 SERVER_HELPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-server.sh
 DEFAULT_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-r3-fp32-lm-head.yaml
 CONFIG=${1:-${DEFAULT_CONFIG}}

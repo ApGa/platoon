@@ -6,8 +6,9 @@
 
 set -euo pipefail
 
-USER_ROOT=${PLATOON_USER_ROOT:-/lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag}
-REPO_ROOT=${PLATOON_REPO_ROOT:-${USER_ROOT}/source/platoon}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=${PLATOON_REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}
+USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd)}
 KIND=${OPENREWARD_SUPPLEMENTAL_KIND:?Set OPENREWARD_SUPPLEMENTAL_KIND to tmax or swe_rebench}
 JOB_ID=${SLURM_JOB_ID:-manual}
 LOCAL_ROOT=${SLURM_TMPDIR:-/tmp}/platoon-openreward-${JOB_ID}/${KIND}

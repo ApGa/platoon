@@ -102,6 +102,15 @@ The 16-node Toolathlon + TMax + SWE-rebench example is launched with
 runs the TMax and SWE-rebench Python services on the host so they can create
 writable Enroot task containers.
 
+The wrapper delegates Toolathlon and trainer lifecycle management to the
+tracked, sanitized `slurm-scripts/openreward-toolathlon-prealloc-base.sh`; its
+keepalive and immutable-environment helpers are tracked as well. Credential
+values and proxy URLs are never embedded in these scripts: provide any needed
+`WANDB_API_KEY`, `OPENAI_API_KEY`, `LITELLM_API_KEY`, `HF_TOKEN`,
+`OPENAI_BASE_URL`, and `LITELLM_BASE_URL` in the submission environment. Set
+`PLATOON_USER_ROOT` only when the checkout is not under the usual
+`<user-root>/source/platoon` layout.
+
 The Toolathlon launcher bind-mounts
 `plugins/openreward/scripts/openreward-toolathlon-resilient-entrypoint.sh`
 into each environment container. Nginx continues to hash sessions to stable
@@ -125,8 +134,9 @@ sbatch slurm-scripts/openreward-multienv-prealloc.sh \
 
 That variant enables PTC and recursive subagents with a 50-step child budget
 and maximum depth 2, plus depth-level weighting, leave-one-out baselines, and
-root-success propagation. SWE-rebench keeps its environment-specific
-`read_only` child policy; Toolathlon and TMax retain the default shared policy.
+root-success propagation. All three environments inherit the rollout-wide
+`read_only` child policy, so no child can mutate or finish the shared root
+session.
 Use a new `trial_name` for subsequent launches so recursive checkpoints cannot
 be recovered into the non-recursive experiment.
 

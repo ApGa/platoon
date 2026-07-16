@@ -9,6 +9,9 @@ trial_name: toolathlon-tmax-swe-openhands-16node-qwen3.6-35B-ptc-recursive-r3-fp
 openreward:
   enable_programmatic_tool_calling: true
   enable_recursive_subagents: true
+  # Until isolated write leases exist, every child is restricted to live,
+  # read-only inspection so it cannot race or finish the root session.
+  subagent_environment_access: read_only
   subagent_default_max_steps: 50
   # Root is depth 0. Match the established Toolathlon recursive run while
   # bounding a tree to children and grandchildren.
@@ -23,8 +26,8 @@ workflow_config:
   # rollout uses the mean root reward from the other group samples as baseline.
   leave_one_out_baseline: true
   rollout_config:
-    # Investigative SWE children cannot submit. Train all trajectories toward
-    # the root result; Toolathlon and TMax children use the same reward contract.
+    # Investigative children cannot submit in any environment. Train every
+    # trajectory toward the root result; all children use the same reward contract.
     propogate_root_success: true
 
 # The preallocation launcher reads these fields before Hydra composes defaults

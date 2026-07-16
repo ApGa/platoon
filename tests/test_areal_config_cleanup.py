@@ -349,6 +349,7 @@ def test_mixed_recursive_r3_fp32_yaml_composes_balancing_and_child_policies():
 
     assert composed.openreward.enable_programmatic_tool_calling is True
     assert composed.openreward.enable_recursive_subagents is True
+    assert composed.openreward.subagent_environment_access == "read_only"
     assert composed.openreward.subagent_default_max_steps == 50
     assert composed.openreward.subagent_max_depth == 2
     assert composed.workflow_config.depth_level_weighting is True

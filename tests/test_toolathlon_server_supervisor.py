@@ -8,11 +8,11 @@ import subprocess
 import time
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = REPO_ROOT / "plugins" / "openreward" / "scripts" / "openreward-toolathlon-resilient-entrypoint.sh"
-LAUNCHER = REPO_ROOT / "slurm-scripts" / "openreward-toolathlon-prealloc.sh"
+LAUNCHER = REPO_ROOT / "slurm-scripts" / "openreward-toolathlon-prealloc-base.sh"
+KEEPALIVE = REPO_ROOT / "slurm-scripts" / "gpu_keepalive.py"
+PREPARE_ENV = REPO_ROOT / "slurm-scripts" / "prepare_openreward_env.sh"
 
 
 def test_toolathlon_supervisor_has_stable_port_bounded_restart_semantics():
@@ -33,12 +33,20 @@ def test_toolathlon_supervisor_has_stable_port_bounded_restart_semantics():
 
 
 def test_toolathlon_launcher_mounts_supervisor_without_bad_exit_cascade():
-    if not LAUNCHER.exists():
-        # Cluster launchers are deployment-local and ignored by this repository.
-        pytest.skip("deployment-local Toolathlon launcher is not present")
-
     subprocess.run(["bash", "-n", str(LAUNCHER)], check=True)
     launcher = LAUNCHER.read_text()
+
+    assert LAUNCHER.stat().st_mode & 0o111
+    assert KEEPALIVE.is_file()
+    assert PREPARE_ENV.stat().st_mode & 0o111
+    assert "/users/apurvag" not in launcher
+    for secret_name in (
+        "WANDB_API_KEY",
+        "OPENAI_API_KEY",
+        "LITELLM_API_KEY",
+        "HF_TOKEN",
+    ):
+        assert f"export {secret_name}=" not in launcher
 
     assert (
         "TOOLATHLON_SERVER_ENTRYPOINT=${OPENREWARD_TOOLATHLON_SERVER_ENTRYPOINT:-"
@@ -47,6 +55,7 @@ def test_toolathlon_launcher_mounts_supervisor_without_bad_exit_cascade():
     ) in launcher
     assert ("TOOLATHLON_CONTAINER_ENTRYPOINT=/app/openreward-toolathlon-resilient-entrypoint.sh") in launcher
     assert "--kill-on-bad-exit=0" in launcher
+    assert "stop_gpu_keepalive_before_training" in launcher
     assert ("${TOOLATHLON_SERVER_ENTRYPOINT}:${TOOLATHLON_CONTAINER_ENTRYPOINT}:ro") in launcher
     assert "/app/entrypoint.sh" not in launcher
 
