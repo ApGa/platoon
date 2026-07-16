@@ -46,26 +46,20 @@ class OpenRewardEnvironmentConfig:
             self.subagent_environment_access is not None
             and self.subagent_environment_access not in SUBAGENT_ENVIRONMENT_ACCESS_MODES
         ):
-            raise ValueError(
-                "OpenReward environment subagent_environment_access must be "
-                "'shared' or 'read_only'"
-            )
+            raise ValueError("OpenReward environment subagent_environment_access must be 'shared' or 'read_only'")
         for field_name, limit in (
             ("train_task_limit", self.train_task_limit),
             ("eval_task_limit", self.eval_task_limit),
         ):
             if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
-                raise ValueError(
-                    f"OpenReward environment {field_name} must be a positive integer when set"
-                )
+                raise ValueError(f"OpenReward environment {field_name} must be a positive integer when set")
         if self.max_tool_calls < 0:
             raise ValueError("OpenReward environment max_tool_calls must be non-negative")
         if self.task_names is not None and self.task_indices is not None:
             raise ValueError("Configure task_names or task_indices for an environment, not both")
         if self.task_indices is not None:
             invalid = any(
-                isinstance(index, bool) or not isinstance(index, int) or index < 0
-                for index in self.task_indices
+                isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in self.task_indices
             )
             if invalid:
                 raise ValueError("OpenReward environment task_indices must contain non-negative integers")
@@ -78,9 +72,7 @@ class OpenRewardEnvironmentConfig:
         if self.session_urls_env_var is not None:
             self.session_urls_env_var = self.session_urls_env_var.strip()
             if not self.session_urls_env_var:
-                raise ValueError(
-                    "OpenReward environment session_urls_env_var must not be empty"
-                )
+                raise ValueError("OpenReward environment session_urls_env_var must not be empty")
 
     @property
     def resolved_label(self) -> str:
@@ -90,10 +82,7 @@ class OpenRewardEnvironmentConfig:
     def resolved_session_urls_env_var(self) -> str:
         if self.session_urls_env_var is not None:
             return self.session_urls_env_var
-        suffix = "".join(
-            char.upper() if char.isalnum() else "_"
-            for char in self.resolved_label
-        )
+        suffix = "".join(char.upper() if char.isalnum() else "_" for char in self.resolved_label)
         return f"OPENREWARD_SESSION_URLS_{suffix}"
 
     @classmethod
@@ -124,6 +113,11 @@ class OpenRewardConfig:
     # When present, these entries replace the legacy single-environment fields.
     # Equal sampling weights are the default auto-balanced mixture.
     environments: list[OpenRewardEnvironmentConfig] | None = None
+    # AReaL completion order can otherwise let a faster environment crowd a
+    # slower one out of an optimizer step. Strict balance admits exactly the
+    # sampler-derived weighted quota and retries only missing labels.
+    balance_accepted_batches: bool = True
+    accepted_batch_max_replacement_rounds: int = 8
     enable_programmatic_tool_calling: bool = False
     enable_recursive_subagents: bool = False
     # Forked agents share the root OpenReward session. ``read_only`` narrows
@@ -137,12 +131,18 @@ class OpenRewardConfig:
     openhands_system_prompt_suffix: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.balance_accepted_batches, bool):
+            raise ValueError("balance_accepted_batches must be a boolean")
+        if (
+            isinstance(self.accepted_batch_max_replacement_rounds, bool)
+            or not isinstance(self.accepted_batch_max_replacement_rounds, int)
+            or self.accepted_batch_max_replacement_rounds < 0
+        ):
+            raise ValueError("accepted_batch_max_replacement_rounds must be a non-negative integer")
         if self.subagent_delegation_reward_coefficient < 0:
             raise ValueError("subagent_delegation_reward_coefficient must be non-negative")
         if self.subagent_environment_access not in SUBAGENT_ENVIRONMENT_ACCESS_MODES:
-            raise ValueError(
-                "OpenReward subagent_environment_access must be 'shared' or 'read_only'"
-            )
+            raise ValueError("OpenReward subagent_environment_access must be 'shared' or 'read_only'")
         if self.environments is not None:
             self.environments = [OpenRewardEnvironmentConfig.from_mapping(value) for value in self.environments]
             if not self.environments:
@@ -150,14 +150,9 @@ class OpenRewardConfig:
             labels = [environment.resolved_label for environment in self.environments]
             if len(set(labels)) != len(labels):
                 raise ValueError("OpenReward environment labels must be unique")
-            session_pool_env_vars = [
-                environment.resolved_session_urls_env_var
-                for environment in self.environments
-            ]
+            session_pool_env_vars = [environment.resolved_session_urls_env_var for environment in self.environments]
             if len(set(session_pool_env_vars)) != len(session_pool_env_vars):
-                raise ValueError(
-                    "OpenReward environment session URL pool env-var names must be unique"
-                )
+                raise ValueError("OpenReward environment session URL pool env-var names must be unique")
         # Validate legacy environment fields through the same typed contract.
         if self.environments is None:
             self._legacy_environment()
@@ -191,17 +186,13 @@ class OpenRewardConfig:
         environments = self.resolved_environments()
         if label is None:
             if len(environments) != 1:
-                raise ValueError(
-                    "A mixed OpenReward config requires an environment label on every task"
-                )
+                raise ValueError("A mixed OpenReward config requires an environment label on every task")
             return environments[0]
         for environment in environments:
             if environment.resolved_label == label:
                 return environment
         available = [environment.resolved_label for environment in environments]
-        raise ValueError(
-            f"Unknown OpenReward environment label {label!r}; available: {available}"
-        )
+        raise ValueError(f"Unknown OpenReward environment label {label!r}; available: {available}")
 
     def subagent_environment_access_for(
         self,

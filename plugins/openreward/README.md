@@ -49,10 +49,12 @@ uv run python -m platoon.openreward.inference_scripts.run_inference \
 
 Set `openreward.environments` to route one training dataset across multiple
 OpenReward servers. Equal `sampling_weight` values are the default balanced
-mix; change them to request another submitted-task ratio.
+mix; change them to request another task-group ratio.
 
 ```yaml
 openreward:
+  balance_accepted_batches: true
+  accepted_batch_max_replacement_rounds: 8
   environments:
     - label: toolathlon
       env_name: toolathlongym
@@ -72,11 +74,28 @@ openreward:
 ```
 
 Both AReaL and Tinker construct deterministic, balanced submitted-task batches.
-AReaL keeps rollouts in flight asynchronously, so different environment
-latencies and rejected rollouts can temporarily change the accepted optimizer
-batch mix. Per-environment reward metrics expose that drift. Each environment
-may also set `train_task_limit`, `eval_task_limit`, `task_indices`, distinct
-train/evaluation splits, and a static `session_urls` pool.
+For mixed AReaL runs, `balance_accepted_batches` defaults to `true`: the training
+dispatcher admits exactly the weighted quota for the current optimizer step,
+waits for that round, and retries only environments whose groups were rejected.
+This prevents a faster environment from displacing a slower one. Repeated
+failures stop with a quota/attempt diagnostic after
+`accepted_batch_max_replacement_rounds` instead of silently changing the mix.
+Strict accepted balance is incompatible with AReaL `dynamic_bs`; set
+`balance_accepted_batches: false` to restore completion-order batching and
+multi-step prefetch when exact per-step composition is not required.
+
+Replacement routing keeps at most one global batch of lookahead records per
+environment. Overflow is skipped before rollout and reported through
+`openreward/accepted_batch/input_discards`, so differential rejection rates
+cannot grow controller memory without bound. Checkpoint recovery restores the
+quota phase and therefore the accepted environment composition, but it does not
+restore this small lookahead cache; exact task-record order can change after a
+restart.
+
+The quota is over task groups, not post-processing datums or tokens: recursive
+trees and filtering can still produce different per-environment token totals.
+Each environment may also set `train_task_limit`, `eval_task_limit`,
+`task_indices`, distinct splits, and a static `session_urls` pool.
 
 The 16-node Toolathlon + TMax + SWE-rebench example is launched with
 `slurm-scripts/openreward-multienv-prealloc.sh`; its companion server helper

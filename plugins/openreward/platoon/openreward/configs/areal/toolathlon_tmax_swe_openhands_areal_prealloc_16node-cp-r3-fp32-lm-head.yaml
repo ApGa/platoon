@@ -10,11 +10,12 @@ actor:
   backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
   path: Qwen/Qwen3.6-35B-A3B
 
-# Equal-weight, exact submitted-task input mix for the first multi-environment
-# run. AReaL consumes completed rollouts asynchronously, so optimizer-step
-# composition can drift temporarily when SWE tasks are slower; per-environment
-# reward metrics make that visible.
+# Equal-weight input and accepted optimizer-step mix. Strict admission prevents
+# fast environments from filling a step ahead of slower SWE groups; a rejected
+# group is replaced only by another task from the same missing quota.
 openreward:
+  balance_accepted_batches: true
+  accepted_batch_max_replacement_rounds: 8
   environments:
     - label: toolathlon
       env_name: toolathlongym

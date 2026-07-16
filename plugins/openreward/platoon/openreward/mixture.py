@@ -4,10 +4,278 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Iterator, Mapping, Sequence
-from typing import Any
+import time
+from collections import Counter, deque
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from typing import Any, TypeVar
 
 from torch.utils.data import Sampler
+
+TInput = TypeVar("TInput")
+TResult = TypeVar("TResult")
+
+
+class StrictEnvironmentBatchCoordinator:
+    """Admit exact per-step environment quotas without stale result backlogs.
+
+    AReaL normally prefetches several batches and consumes whichever rollout
+    groups finish first. A fast environment can then crowd a slower one out of
+    an optimizer step. This coordinator submits only the current sampler quota,
+    fully drains each round, and retries only labels which remain below quota.
+    No accepted surplus crosses a model-version boundary.
+    """
+
+    def __init__(
+        self,
+        environment_batches: Sequence[Sequence[str]],
+        *,
+        input_environment: Callable[[TInput], str],
+        start_batch_index: int = 0,
+        max_replacement_rounds: int = 8,
+    ) -> None:
+        if not environment_batches:
+            raise ValueError("Strict environment balancing requires target batches")
+        self.environment_batches = [list(map(str, batch)) for batch in environment_batches]
+        batch_sizes = {len(batch) for batch in self.environment_batches}
+        if len(batch_sizes) != 1 or not next(iter(batch_sizes)):
+            raise ValueError("Strict environment target batches must have one non-zero size")
+        self.batch_size = next(iter(batch_sizes))
+        self.environment_order = list(
+            dict.fromkeys(environment for batch in self.environment_batches for environment in batch)
+        )
+        if (
+            isinstance(max_replacement_rounds, bool)
+            or not isinstance(max_replacement_rounds, int)
+            or max_replacement_rounds < 0
+        ):
+            raise ValueError("max_replacement_rounds must be a non-negative integer")
+        self.max_replacement_rounds = max_replacement_rounds
+        self._known_environments = frozenset(self.environment_order)
+        self._input_environment = input_environment
+        self._buffer_limit_per_environment = self.batch_size
+        self._buffered_inputs: dict[str, deque[TInput]] = {
+            environment: deque() for environment in self.environment_order
+        }
+        self._batch_index = int(start_batch_index) % len(self.environment_batches)
+        self.last_target_counts: Counter[str] = Counter()
+        self.last_accepted_counts: Counter[str] = Counter()
+        self.last_attempt_counts: Counter[str] = Counter()
+        self.last_discarded_input_counts: Counter[str] = Counter()
+        self.total_discarded_input_counts: Counter[str] = Counter()
+        self.last_retry_rounds = 0
+
+    def _validated_environment(self, value: str, *, source: str) -> str:
+        environment = str(value)
+        if environment not in self._known_environments:
+            raise ValueError(f"Unknown {source} environment {environment!r}; expected one of {self.environment_order}")
+        return environment
+
+    def _take_inputs(
+        self,
+        input_generator: Generator[TInput, None, None],
+        slots: Sequence[str],
+        discarded_counts: Counter[str],
+    ) -> list[TInput]:
+        selected: list[TInput] = []
+        for raw_environment in slots:
+            environment = self._validated_environment(raw_environment, source="target")
+            buffered = self._buffered_inputs[environment]
+            if buffered:
+                selected.append(buffered.popleft())
+                continue
+
+            while True:
+                try:
+                    task_input = next(input_generator)
+                except StopIteration:
+                    raise RuntimeError(
+                        "Input generator exhausted before strict environment quota completion. "
+                        "Use cycle_dataloader() or provide an infinite generator."
+                    ) from None
+                task_environment = self._validated_environment(
+                    self._input_environment(task_input),
+                    source="input",
+                )
+                if task_environment == environment:
+                    selected.append(task_input)
+                    break
+                task_buffer = self._buffered_inputs[task_environment]
+                if len(task_buffer) < self._buffer_limit_per_environment:
+                    task_buffer.append(task_input)
+                else:
+                    discarded_counts[task_environment] += 1
+        return selected
+
+    @staticmethod
+    def _wait_for_round(dispatcher: Any, count: int) -> list[Any]:
+        last_log = 0.0
+        while True:
+            try:
+                return dispatcher.wait_results(count=count, timeout=1)
+            except TimeoutError:
+                now = time.monotonic()
+                if now - last_log < 30.0:
+                    continue
+                last_log = now
+                logger = getattr(dispatcher, "logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "Strict environment batch is waiting for %s current-quota results; stats=%s",
+                        count,
+                        dispatcher.staleness_manager.get_stats(),
+                    )
+
+    @staticmethod
+    def _missing_slots(
+        target_slots: Sequence[str],
+        accepted_counts: Counter[str],
+    ) -> list[str]:
+        remaining = Counter(target_slots)
+        remaining.subtract(accepted_counts)
+        missing: list[str] = []
+        for environment in target_slots:
+            if remaining[environment] <= 0:
+                continue
+            missing.append(environment)
+            remaining[environment] -= 1
+        return missing
+
+    def _record_outcome(
+        self,
+        target_counts: Counter[str],
+        accepted_counts: Counter[str],
+        attempt_counts: Counter[str],
+        discarded_input_counts: Counter[str],
+        retry_rounds: int,
+    ) -> None:
+        self.last_target_counts = target_counts.copy()
+        self.last_accepted_counts = accepted_counts.copy()
+        self.last_attempt_counts = attempt_counts.copy()
+        self.last_discarded_input_counts = discarded_input_counts.copy()
+        self.total_discarded_input_counts.update(discarded_input_counts)
+        self.last_retry_rounds = retry_rounds
+
+    def prepare_batch(
+        self,
+        dispatcher: Any,
+        input_generator: Generator[TInput, None, None],
+        batch_size: int,
+        dynamic_bs: bool = False,
+    ) -> list[TResult]:
+        if dynamic_bs:
+            raise ValueError("Strict accepted-environment balancing is incompatible with dynamic_bs=true")
+        if batch_size != self.batch_size:
+            raise ValueError(
+                f"Strict environment target batch size does not match the dispatcher: {self.batch_size} != {batch_size}"
+            )
+        if dispatcher.runner.max_queue_size < batch_size:
+            raise ValueError(
+                "Inference engine config's queue size is too small for strict environment "
+                f"balance: {dispatcher.runner.max_queue_size} < {batch_size}."
+            )
+
+        target_slots = self.environment_batches[self._batch_index]
+        target_counts = Counter(target_slots)
+        accepted_counts: Counter[str] = Counter()
+        attempt_counts: Counter[str] = Counter()
+        discarded_input_counts: Counter[str] = Counter()
+        accepted_results: list[TResult] = []
+        retry_rounds = 0
+        round_slots = list(target_slots)
+
+        while round_slots:
+            round_inputs = self._take_inputs(input_generator, round_slots, discarded_input_counts)
+            submitted_labels: dict[int, str] = {}
+            for task_input, environment in zip(round_inputs, round_slots, strict=True):
+                task_id = getattr(task_input, "task_id", None)
+                if isinstance(task_id, bool) or not isinstance(task_id, int):
+                    raise TypeError("Strict environment task inputs require an integer task_id")
+                if task_id in submitted_labels:
+                    raise ValueError(f"Duplicate strict environment task id {task_id}")
+                submitted_labels[task_id] = environment
+                attempt_counts[environment] += 1
+                dispatcher.submit_task_input(task_input)
+
+            arrived = self._wait_for_round(dispatcher, len(round_inputs))
+            if len(arrived) != len(round_inputs):
+                raise RuntimeError(
+                    "Strict environment dispatcher returned an incomplete drained round: "
+                    f"expected={len(round_inputs)}, received={len(arrived)}"
+                )
+            for result in arrived:
+                if result is None:
+                    continue
+                task_id = getattr(result, "task_id", None)
+                if task_id not in submitted_labels:
+                    raise RuntimeError(
+                        f"Strict environment dispatcher returned an unknown accepted task id: {task_id!r}"
+                    )
+                environment = submitted_labels[task_id]
+                if accepted_counts[environment] >= target_counts[environment]:
+                    raise RuntimeError(
+                        f"Strict environment batch received an accepted result beyond its quota for {environment!r}"
+                    )
+                accepted_counts[environment] += 1
+                accepted_results.append(result)
+
+            round_slots = self._missing_slots(target_slots, accepted_counts)
+            if not round_slots:
+                break
+            if retry_rounds >= self.max_replacement_rounds:
+                self._record_outcome(
+                    target_counts,
+                    accepted_counts,
+                    attempt_counts,
+                    discarded_input_counts,
+                    retry_rounds,
+                )
+                raise RuntimeError(
+                    "Strict environment batch exhausted replacement rounds after draining "
+                    f"all attempts: target={dict(target_counts)}, "
+                    f"accepted={dict(accepted_counts)}, attempts={dict(attempt_counts)}, "
+                    f"input_discards={dict(discarded_input_counts)}"
+                )
+            retry_rounds += 1
+
+        if len(accepted_results) != batch_size or accepted_counts != target_counts:
+            raise RuntimeError(
+                "Strict environment batch completed with inconsistent quotas: "
+                f"target={dict(target_counts)}, accepted={dict(accepted_counts)}"
+            )
+
+        self._record_outcome(
+            target_counts,
+            accepted_counts,
+            attempt_counts,
+            discarded_input_counts,
+            retry_rounds,
+        )
+        self._batch_index = (self._batch_index + 1) % len(self.environment_batches)
+        return accepted_results
+
+    def install(self, dispatcher: Any) -> None:
+        existing = getattr(
+            dispatcher,
+            "_platoon_strict_environment_batch_coordinator",
+            None,
+        )
+        if existing is not None and existing is not self:
+            raise RuntimeError("A strict environment batch coordinator is already installed")
+
+        def _active_submit_and_wait(
+            input_generator: Generator[TInput, None, None],
+            batch_size: int,
+            dynamic_bs: bool = False,
+        ) -> list[TResult]:
+            return self.prepare_batch(
+                dispatcher,
+                input_generator,
+                batch_size,
+                dynamic_bs,
+            )
+
+        dispatcher._platoon_strict_environment_batch_coordinator = self
+        dispatcher.active_submit_and_wait = _active_submit_and_wait
 
 
 class BalancedEnvironmentSampler(Sampler[int]):
@@ -42,8 +310,7 @@ class BalancedEnvironmentSampler(Sampler[int]):
             raise ValueError(f"rank must be in range 0..{num_replicas - 1}")
         if global_batch_size % num_replicas != 0:
             raise ValueError(
-                f"global batch size ({global_batch_size}) must be divisible by "
-                f"world size ({num_replicas})"
+                f"global batch size ({global_batch_size}) must be divisible by world size ({num_replicas})"
             )
 
         self.environment_ids = [str(value) for value in environment_ids]
@@ -57,11 +324,7 @@ class BalancedEnvironmentSampler(Sampler[int]):
 
         self.environment_order = list(dict.fromkeys(self.environment_ids))
         self._indices_by_environment = {
-            environment: [
-                index
-                for index, value in enumerate(self.environment_ids)
-                if value == environment
-            ]
+            environment: [index for index, value in enumerate(self.environment_ids) if value == environment]
             for environment in self.environment_order
         }
         weights_by_environment: dict[str, float] = {}
@@ -71,13 +334,10 @@ class BalancedEnvironmentSampler(Sampler[int]):
                 raise ValueError("Sampling weights must be finite and positive")
             previous = weights_by_environment.setdefault(environment, weight)
             if previous != weight:
-                raise ValueError(
-                    f"Environment {environment!r} has inconsistent sampling weights"
-                )
+                raise ValueError(f"Environment {environment!r} has inconsistent sampling weights")
         total_weight = sum(weights_by_environment.values())
         self._probabilities = [
-            weights_by_environment[environment] / total_weight
-            for environment in self.environment_order
+            weights_by_environment[environment] / total_weight for environment in self.environment_order
         ]
 
         task_count = len(self.environment_ids)
@@ -106,10 +366,7 @@ class BalancedEnvironmentSampler(Sampler[int]):
         cursor = 0
         result: list[str] = []
         for _ in range(size):
-            credits = [
-                credit + probability
-                for credit, probability in zip(credits, self._probabilities)
-            ]
+            credits = [credit + probability for credit, probability in zip(credits, self._probabilities)]
             maximum = max(credits)
             candidates = {
                 index
@@ -136,12 +393,7 @@ class BalancedEnvironmentSampler(Sampler[int]):
         environment = self.environment_order[environment_index]
         pool = list(self._indices_by_environment[environment])
         if self.shuffle:
-            cycle_seed = (
-                self.seed
-                + self.epoch * 1_000_003
-                + environment_index * 10_007
-                + cycle * 101
-            )
+            cycle_seed = self.seed + self.epoch * 1_000_003 + environment_index * 10_007 + cycle * 101
             random.Random(cycle_seed).shuffle(pool)
         return pool
 
@@ -149,10 +401,7 @@ class BalancedEnvironmentSampler(Sampler[int]):
         pools = [self._shuffled_pool(index, 0) for index in range(len(self.environment_order))]
         positions = [0] * len(pools)
         cycles = [0] * len(pools)
-        environment_indices = {
-            environment: index
-            for index, environment in enumerate(self.environment_order)
-        }
+        environment_indices = {environment: index for index, environment in enumerate(self.environment_order)}
         global_indices: list[int] = []
         for environment in self._slot_environments:
             environment_index = environment_indices[environment]
@@ -196,8 +445,5 @@ def materialize_balanced_record_order(
     )
     ordered = [dict(records[index]) for index in sampler]
     if preserve_order_key is not None:
-        ordered = [
-            {**record, preserve_order_key: True}
-            for record in ordered
-        ]
+        ordered = [{**record, preserve_order_key: True} for record in ordered]
     return ordered
