@@ -1,0 +1,64 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_16node-cp-r3-fp32-lm-head
+  - _self_
+
+
+# Keep the inherited model/backend visible in this concrete launch file. The
+# preallocation wrapper inspects the literal YAML before Hydra composition to
+# select the local tokenizer snapshot and build Megatron's TE/APEX extensions.
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: Qwen/Qwen3.6-35B-A3B
+
+# Equal-weight, exact submitted-task input mix for the first multi-environment
+# run. AReaL consumes completed rollouts asynchronously, so optimizer-step
+# composition can drift temporarily when SWE tasks are slower; per-environment
+# reward metrics make that visible.
+openreward:
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      split: train
+      eval_split: train
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      api_key: local
+      train_task_limit: 16
+      eval_task_limit: 4
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+    - label: tmax
+      env_name: tmax/TMax-15K-Harbor
+      split: train
+      eval_split: train
+      session_url: http://localhost:8083
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TMAX
+      api_key: local
+      train_task_limit: 16
+      eval_task_limit: 4
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+    - label: swe_rebench
+      env_name: nebius/SWE-rebench-V2
+      # Children inspect the parent's live SWE workspace with `view`; the root
+      # remains the sole editor and submitter. This does not create worktrees.
+      subagent_environment_access: read_only
+      split: train
+      eval_split: train
+      session_url: http://localhost:8084
+      session_urls_env_var: OPENREWARD_SESSION_URLS_SWE_REBENCH
+      api_key: local
+      train_task_limit: 16
+      eval_task_limit: 4
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+# Keep the same 48 selected task groups per epoch as the original small
+# Toolathlon trial (6 global batches x 8 tasks), now split 1:1:1.
+trial_name: toolathlon-tmax-swe-openhands-16node-qwen3.6-35B-r3-fp32-lm-head-trial0
+
+stats_logger:
+  wandb:
+    project: openreward-multienv-openhands

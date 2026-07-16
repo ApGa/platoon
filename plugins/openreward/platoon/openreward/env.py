@@ -14,10 +14,23 @@ from platoon.openhands.env import OpenHandsEnv
 _CURRENT_AGENT_TASK_GOAL_KEY = "openreward_current_agent_task_goal"
 _ROOT_AGENT_TASK_GOAL_KEY = "openreward_root_agent_task_goal"
 
+_READ_ONLY_OPENREWARD_TOOL_NAMES = frozenset(
+    {"get_task", "get_status", "get_tool_details", "view"}
+)
+_READ_ONLY_SUBAGENT_GOAL_SUFFIX = (
+    "Environment access for this child is read-only. You inspect the parent's "
+    "live OpenReward workspace; this is not an independent worktree. Use the "
+    "available inspection tools and return concrete evidence, file/line "
+    "references, and proposed replacements or patch text to the parent with "
+    "`finish`. You cannot edit files or submit the environment result. The "
+    "parent alone is responsible for applying changes and submitting."
+)
 
-def _claim_done_payload(event: Event) -> dict[str, Any] | None:
+
+def _finished_reward_payload(event: Event) -> dict[str, Any] | None:
     observation = getattr(event, "observation", None)
-    if getattr(observation, "tool_name", None) != "claim_done":
+    tool_name = getattr(observation, "tool_name", None)
+    if not isinstance(tool_name, str):
         return None
 
     for block in getattr(observation, "content", []) or []:
@@ -28,7 +41,15 @@ def _claim_done_payload(event: Event) -> dict[str, Any] | None:
             payload = json.loads(text)
         except json.JSONDecodeError:
             continue
-        if isinstance(payload, dict) and payload.get("finished") is True:
+        if not isinstance(payload, dict) or payload.get("finished") is not True:
+            continue
+
+        reward = payload.get("reward")
+        has_numeric_reward = isinstance(reward, (int, float)) and not isinstance(reward, bool)
+        # Preserve the bridge's explicit claim_done completion signal, while
+        # also accepting environments whose own terminal tool (for example
+        # submit_answer) returns the final reward directly.
+        if tool_name == "claim_done" or has_numeric_reward:
             return payload
     return None
 
@@ -54,18 +75,66 @@ def _non_owning_tool(tool: Any) -> Any:
     return tool.set_executor(_NonOwningToolExecutor(executable_tool.executor))
 
 
-def _openreward_mcp_tools(agent: Any) -> dict[str, Any]:
+def _filter_openreward_tools(
+    tools: dict[str, Any],
+    subagent_environment_access: str,
+) -> dict[str, Any]:
+    if subagent_environment_access == "shared":
+        if "claim_done" not in tools:
+            return tools
+        return {name: tool for name, tool in tools.items() if name != "claim_done"}
+    if subagent_environment_access == "read_only":
+        # This is deliberately an allowlist, not a mutator denylist. Generic
+        # dispatch/code tools (call_tool and python_execute) and unknown future
+        # tools could write or submit indirectly, so they are not safe here.
+        return {
+            name: tool
+            for name, tool in tools.items()
+            if name in _READ_ONLY_OPENREWARD_TOOL_NAMES
+        }
+    raise ValueError(
+        "subagent_environment_access must be 'shared' or 'read_only', got "
+        f"{subagent_environment_access!r}"
+    )
+
+
+def _openreward_mcp_tools(
+    agent: Any,
+    subagent_environment_access: str = "shared",
+) -> dict[str, Any]:
+    tools = {
+        name: tool
+        for name, tool in agent.tools_map.items()
+        if getattr(tool, "mcp_server_name", None) == "openreward"
+    }
     return {
         name: _non_owning_tool(tool)
-        for name, tool in agent.tools_map.items()
-        if getattr(tool, "mcp_server_name", None) == "openreward" and name != "claim_done"
+        for name, tool in _filter_openreward_tools(
+            tools,
+            subagent_environment_access,
+        ).items()
     }
 
 
-def _inject_shared_openreward_tools(agent: Any, tools: dict[str, Any]) -> None:
-    if not tools:
+def _inject_shared_openreward_tools(
+    agent: Any,
+    tools: dict[str, Any],
+    subagent_environment_access: str,
+) -> None:
+    existing_tools = agent.tools_map
+    if subagent_environment_access == "read_only":
+        # A copied SDK agent should not retain initialized MCP tools after its
+        # mcp_config is cleared. Remove any such stale tools defensively before
+        # installing the strict child allowlist.
+        existing_tools = {
+            name: tool
+            for name, tool in existing_tools.items()
+            if getattr(tool, "mcp_server_name", None) != "openreward"
+        }
+    elif not tools:
         return
-    agent._tools = {**agent.tools_map, **tools}
+
+    agent._tools = {**existing_tools, **tools}
 
 
 def _observation_json_payload(observation: Any) -> dict[str, Any]:
@@ -173,24 +242,36 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         *args,
         initial_goal_suffix: str | None = None,
         shared_openreward_tools: dict[str, Any] | None = None,
+        subagent_environment_access: str = "shared",
         **kwargs,
     ):
         self._final_payload: dict[str, Any] | None = None
         self._final_reward_consumed = False
         self._initial_goal_suffix = initial_goal_suffix
         self._shared_openreward_tools = shared_openreward_tools or {}
+        if subagent_environment_access not in {"shared", "read_only"}:
+            raise ValueError(
+                "subagent_environment_access must be 'shared' or 'read_only'"
+            )
+        self._subagent_environment_access = subagent_environment_access
         self._external_callbacks = list(kwargs.pop("callbacks", []) or [])
-        callbacks = [*self._external_callbacks, self._stop_on_claim_done]
+        callbacks = [*self._external_callbacks, self._stop_on_openreward_finished]
         super().__init__(*args, callbacks=callbacks, **kwargs)
 
     def _shared_tools_for_fork(self) -> dict[str, Any]:
         if self._shared_openreward_tools:
-            return self._shared_openreward_tools
+            return _filter_openreward_tools(
+                self._shared_openreward_tools,
+                self._subagent_environment_access,
+            )
         if self._conversation is None:
             return {}
         conversation = cast(Any, self._conversation)
         conversation._ensure_agent_ready()
-        return _openreward_mcp_tools(conversation.agent)
+        return _openreward_mcp_tools(
+            conversation.agent,
+            self._subagent_environment_access,
+        )
 
     def _fork_agent_with_shared_openreward_session(self) -> Any:
         from platoon.openhands.recursive import copy_agent_config_for_fork
@@ -210,6 +291,7 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             subagent_default_max_steps=self._subagent_default_max_steps,
             initial_goal_suffix=self._initial_goal_suffix,
             shared_openreward_tools=self._shared_tools_for_fork(),
+            subagent_environment_access=self._subagent_environment_access,
         )
 
     async def _initial_user_message(self) -> str:
@@ -219,6 +301,14 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             payload=payload,
             initial_goal_suffix=self._initial_goal_suffix,
         )
+        if (
+            isinstance(self._task, SubTask)
+            and self._subagent_environment_access == "read_only"
+        ):
+            initial_user_message = _append_suffix(
+                initial_user_message,
+                _READ_ONLY_SUBAGENT_GOAL_SUFFIX,
+            )
         current_task_goal = (
             (self._task.goal or "").strip()
             if isinstance(self._task, SubTask)
@@ -244,6 +334,7 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         _inject_shared_openreward_tools(
             conversation.agent,
             self._shared_openreward_tools,
+            self._subagent_environment_access,
         )
         tool = conversation.agent.tools_map.get("get_task")
         if tool is None:
@@ -252,8 +343,8 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         action = tool.action_from_arguments({})
         return _observation_json_payload(tool(action, conversation))
 
-    def _stop_on_claim_done(self, event: Event) -> None:
-        payload = _claim_done_payload(event)
+    def _stop_on_openreward_finished(self, event: Event) -> None:
+        payload = _finished_reward_payload(event)
         if payload is None:
             return
         self._final_payload = payload

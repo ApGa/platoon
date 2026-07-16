@@ -6,13 +6,13 @@ from dataclasses import asdict
 
 from areal.api.cli_args import load_expr_config
 from datasets import Dataset
-from platoon.train.areal import PlatoonArealRLTrainer
 from platoon.train.areal.workflows import GroupRolloutWorkflow
 
 from platoon.openreward.areal_config import OpenRewardArealTrainerConfig
+from platoon.openreward.areal_trainer import OpenRewardArealRLTrainer
 from platoon.openreward.rewards import reward_processor
 from platoon.openreward.rollout import run_rollout
-from platoon.openreward.tasks import get_task, get_task_ids
+from platoon.openreward.tasks import get_task, get_task_records
 
 
 def _attach_openreward_config(config: OpenRewardArealTrainerConfig) -> None:
@@ -26,21 +26,10 @@ def main(args: list[str]) -> None:
     config: OpenRewardArealTrainerConfig = config
     _attach_openreward_config(config)
 
-    train_task_ids = get_task_ids(
-        config.openreward,
-        split=config.openreward.split,
-        limit=config.openreward.train_task_limit,
-    )
-    eval_task_ids = get_task_ids(
-        config.openreward,
-        split=config.openreward.eval_split or config.openreward.split,
-        limit=config.openreward.eval_task_limit,
-    )
+    train_dataset = Dataset.from_list(get_task_records(config.openreward))
+    val_dataset = Dataset.from_list(get_task_records(config.openreward, evaluation=True))
 
-    train_dataset = Dataset.from_list([{"task_id": task_id} for task_id in train_task_ids])
-    val_dataset = Dataset.from_list([{"task_id": task_id} for task_id in eval_task_ids])
-
-    with PlatoonArealRLTrainer(
+    with OpenRewardArealRLTrainer(
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,

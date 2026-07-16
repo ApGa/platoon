@@ -8,7 +8,9 @@ authors = [
 ]
 dependencies = [
     "mcp>=1.0.0",
-    "openreward>=0.1.33",
+    # 0.1.43 introduced the scalable num_tasks/get_task client API used for
+    # large task catalogs and mixed-environment routing.
+    "openreward>=0.1.43",
     "platoon >= 0.1.0",
     "platoon-openhands >= 0.1.0",
 ]

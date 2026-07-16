@@ -8,9 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from platoon.agents.actions.subagent import launch_subagent
 from platoon.config_defs import RolloutConfig
-from platoon.envs.base import Task
+from platoon.envs.base import Observation, SubTask, Task
 from platoon.episode.context import current_trajectory, current_trajectory_collection
+from platoon.episode.trajectory import TrajectoryStep
 from platoon.utils.trajectory_status import TRAJECTORY_CANCELLED_MISC_KEY
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +27,12 @@ def _module(monkeypatch, name: str, **attrs):
     return module
 
 
-def _load_rollout_module(monkeypatch):
+def _load_rollout_module(
+    monkeypatch,
+    *,
+    agent_type=None,
+    env_type=None,
+):
     class _AcceptsKeywords:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -78,6 +85,9 @@ def _load_rollout_module(monkeypatch):
     def _identity(agent, *args, **kwargs):
         return agent
 
+    agent_type = agent_type or _Agent
+    env_type = env_type or _HangingEnv
+
     _module(monkeypatch, "openhands")
     _module(monkeypatch, "openhands.sdk", LLM=_AcceptsKeywords, Agent=_AcceptsKeywords)
     _module(monkeypatch, "openhands.sdk.context")
@@ -92,7 +102,7 @@ def _load_rollout_module(monkeypatch):
         SubagentRewardJudgeConfig=_AcceptsKeywords,
     )
     _module(monkeypatch, "platoon.openhands")
-    _module(monkeypatch, "platoon.openhands.agent", OpenHandsAgent=_Agent)
+    _module(monkeypatch, "platoon.openhands.agent", OpenHandsAgent=agent_type)
     _module(
         monkeypatch,
         "platoon.openhands.recursive",
@@ -105,7 +115,7 @@ def _load_rollout_module(monkeypatch):
         with_programmatic_tool_calling=_identity,
         with_task_tracker_tool=_identity,
     )
-    _module(monkeypatch, "platoon.openreward.env", OpenRewardOpenHandsEnv=_HangingEnv)
+    _module(monkeypatch, "platoon.openreward.env", OpenRewardOpenHandsEnv=env_type)
 
     package = types.ModuleType("platoon.openreward")
     package.__path__ = [str(OPENREWARD_ROOT)]
@@ -122,6 +132,70 @@ def _load_rollout_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "platoon.openreward.rollout", module)
     spec.loader.exec_module(module)
     return module
+
+
+def _counting_rollout_types(*, child_max_steps: int | None = None):
+    class CountingAgent:
+        async def reset(self) -> None:
+            return None
+
+        async def act(self, observation):
+            return "continue"
+
+        async def close(self) -> None:
+            return None
+
+        async def fork(self, task: Task):
+            return type(self)()
+
+    class CountingEnv:
+        instances = []
+
+        def __init__(self, *, task, **kwargs):
+            self._task = task
+            self._launched_child = False
+            self.step_calls = 0
+            self.instances.append(self)
+
+        @property
+        def task(self):
+            return self._task
+
+        async def reset(self):
+            collection = current_trajectory_collection.get()
+            trajectory = current_trajectory.get()
+            collection.set_trajectory_task(trajectory.id, self._task)
+            # OpenHands records its initial observation as a trajectory step.
+            collection.add_trajectory_step(trajectory.id, TrajectoryStep())
+            return Observation(task=self._task)
+
+        async def step(self, action):
+            if (
+                child_max_steps is not None
+                and not isinstance(self._task, SubTask)
+                and not self._launched_child
+            ):
+                self._launched_child = True
+                await launch_subagent(
+                    goal="bounded child",
+                    max_steps=child_max_steps,
+                )
+            self.step_calls += 1
+            collection = current_trajectory_collection.get()
+            trajectory = current_trajectory.get()
+            collection.add_trajectory_step(trajectory.id, TrajectoryStep())
+            return Observation(task=self._task)
+
+        async def observe(self):
+            return Observation(task=self._task)
+
+        async def close(self) -> None:
+            return None
+
+        async def fork(self, task: Task):
+            return type(self)(task=task)
+
+    return CountingAgent, CountingEnv
 
 
 @pytest.mark.asyncio
@@ -147,3 +221,78 @@ async def test_openreward_rollout_timeout_returns_marked_partial_collection(monk
     assert "Episode cancelled" in root["error_message"]
     assert child["finish_message"] == "child done"
     assert TRAJECTORY_CANCELLED_MISC_KEY not in child["misc"]
+
+
+@pytest.mark.asyncio
+async def test_openreward_rollout_applies_configured_root_step_cap(monkeypatch, tmp_path) -> None:
+    agent_type, env_type = _counting_rollout_types()
+    rollout = _load_rollout_module(
+        monkeypatch,
+        agent_type=agent_type,
+        env_type=env_type,
+    )
+    source_task = Task(id="bounded-root", goal="keep going")
+    config = RolloutConfig(
+        output_dir=str(tmp_path),
+        max_steps=3,
+        timeout=5,
+        step_timeout=1,
+        return_dict=True,
+    )
+
+    result = await rollout.run_rollout(source_task, config)
+
+    root = next(
+        trajectory
+        for trajectory in result["trajectories"].values()
+        if trajectory["parent_info"] is None
+    )
+    assert len(root["steps"]) == 3
+    assert env_type.instances[0]._task.max_steps == 3
+    assert env_type.instances[0].step_calls == 2
+    assert result["misc"]["rollout_timed_out"] is False
+    # Applying a rollout-local override should not mutate reusable task data.
+    assert source_task.max_steps is None
+
+
+@pytest.mark.asyncio
+async def test_openreward_root_cap_preserves_recursive_child_budget(monkeypatch, tmp_path) -> None:
+    agent_type, env_type = _counting_rollout_types(child_max_steps=2)
+    rollout = _load_rollout_module(
+        monkeypatch,
+        agent_type=agent_type,
+        env_type=env_type,
+    )
+    config = RolloutConfig(
+        output_dir=str(tmp_path),
+        max_steps=4,
+        timeout=5,
+        step_timeout=1,
+        return_dict=True,
+        extra={
+            "openreward": {
+                "enable_recursive_subagents": True,
+            }
+        },
+    )
+
+    result = await rollout.run_rollout(
+        Task(id="recursive-root", goal="delegate then continue"),
+        config,
+    )
+
+    root = next(
+        trajectory
+        for trajectory in result["trajectories"].values()
+        if trajectory["parent_info"] is None
+    )
+    child = next(
+        trajectory
+        for trajectory in result["trajectories"].values()
+        if trajectory["parent_info"] is not None
+    )
+    assert root["task"]["max_steps"] == 4
+    assert len(root["steps"]) == 4
+    assert child["task"]["max_steps"] == 2
+    assert len(child["steps"]) == 2
+    assert result["misc"]["rollout_timed_out"] is False

@@ -269,10 +269,6 @@ class OpenRewardMCPBridge:
 
         self.client = OpenReward(api_key=config.api_key)
         self.environment = self.client.environments.get(name=config.env_name)
-        self.tasks = list(self.environment.list_tasks(split=config.split))
-        if not self.tasks:
-            raise RuntimeError(f"No tasks found for {config.env_name} split={config.split!r}")
-
         self.task = self._select_task()
         self.task_name = _task_name(self.task, config.task_index)
         self.session_context = self.environment.session(task=self.task)
@@ -294,15 +290,29 @@ class OpenRewardMCPBridge:
 
     def _select_task(self) -> Any:
         if self.config.task_name:
-            for index, task in enumerate(self.tasks):
+            # Compatibility path for legacy callers. New Platoon datasets
+            # resolve names to indices once at startup and never scan a large
+            # catalog in every rollout subprocess.
+            tasks = list(self.environment.list_tasks(split=self.config.split))
+            for index, task in enumerate(tasks):
                 if _task_name(task, index) == self.config.task_name:
                     self.config.task_index = index
                     return task
             raise RuntimeError(f"Task {self.config.task_name!r} not found in split {self.config.split!r}")
 
-        if self.config.task_index < 0 or self.config.task_index >= len(self.tasks):
-            raise RuntimeError(f"task-index {self.config.task_index} outside range 0..{len(self.tasks) - 1}")
-        return self.tasks[self.config.task_index]
+        task_count = int(self.environment.num_tasks(split=self.config.split))
+        if task_count <= 0:
+            raise RuntimeError(
+                f"No tasks found for {self.config.env_name} split={self.config.split!r}"
+            )
+        if self.config.task_index < 0 or self.config.task_index >= task_count:
+            raise RuntimeError(
+                f"task-index {self.config.task_index} outside range 0..{task_count - 1}"
+            )
+        return self.environment.get_task(
+            split=self.config.split,
+            index=self.config.task_index,
+        )
 
     def _record(self, event_type: str, payload: dict[str, Any]) -> None:
         record = {

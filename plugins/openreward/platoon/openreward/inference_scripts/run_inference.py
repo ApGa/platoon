@@ -17,7 +17,7 @@ from platoon.utils.config import load_config
 from platoon.openreward.config_defs import OpenRewardInferenceConfig
 from platoon.openreward.rewards import reward_processor
 from platoon.openreward.rollout import run_rollout
-from platoon.openreward.tasks import get_task, get_task_ids
+from platoon.openreward.tasks import get_task, get_task_records
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,19 +34,15 @@ def _attach_openreward_config(config: OpenRewardInferenceConfig) -> None:
     config.inference.workflow.rollout_config.extra = rollout_extra
 
 
-def _dataset(config: OpenRewardInferenceConfig) -> list[dict[str, str]]:
+def _dataset(config: OpenRewardInferenceConfig) -> list[dict]:
     if config.task_id is not None:
         return [{"task_id": config.task_id}]
 
-    task_ids = get_task_ids(
-        config.openreward,
-        split=config.openreward.split,
-        limit=config.openreward.train_task_limit,
-    )
+    records = get_task_records(config.openreward)
     if config.shuffle_tasks:
         rng = random.Random(config.seed)
-        rng.shuffle(task_ids)
-    return [{"task_id": task_id} for task_id in task_ids]
+        rng.shuffle(records)
+    return records
 
 
 def _normalize_stage(stage: str) -> Literal["full", "rollouts", "report"]:

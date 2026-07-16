@@ -588,6 +588,40 @@ async def test_openreward_env_resolves_get_task_before_first_message(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_openreward_env_finishes_on_direct_submit_answer_reward(monkeypatch):
+    env_mod = _load_openreward_env_module(monkeypatch)
+    from platoon.envs.base import Task
+
+    conversation = types.SimpleNamespace(
+        state=types.SimpleNamespace(execution_status=None),
+    )
+    env = env_mod.OpenRewardOpenHandsEnv(
+        task=Task(id="task", goal="Task task"),
+        agent=object(),
+        workspace=".",
+    )
+    env._conversation = conversation
+    payload = {"finished": True, "reward": 1.0, "text": "2 passed"}
+    event = types.SimpleNamespace(
+        observation=types.SimpleNamespace(
+            tool_name="submit_answer",
+            content=[types.SimpleNamespace(text=json.dumps(payload))],
+        )
+    )
+
+    env._stop_on_openreward_finished(event)
+    reward, misc = await env.evaluate()
+
+    assert (
+        conversation.state.execution_status
+        == env_mod.ConversationExecutionStatus.FINISHED
+    )
+    assert reward == 1.0
+    assert misc["reward/openreward"] == 1.0
+    assert misc["openreward/final_payload"]["text"] == "2 passed"
+
+
+@pytest.mark.asyncio
 async def test_openreward_child_uses_shared_get_task_tool(monkeypatch):
     env_mod = _load_openreward_env_module(monkeypatch)
     from platoon.envs.base import SubTask, Task
@@ -708,3 +742,206 @@ async def test_openreward_fork_reuses_shared_tools_without_mcp_config(monkeypatc
     assert child._workspace == "workspace"
     assert child._initial_goal_suffix == "use subagents"
     assert child._enable_recursive_subagents is True
+
+
+def test_openreward_config_resolves_subagent_environment_access_override():
+    config_mod = _load_openreward_config_module()
+    default_config = config_mod.OpenRewardConfig.from_mapping({})
+    config = config_mod.OpenRewardConfig.from_mapping(
+        {
+            "subagent_environment_access": "read_only",
+            "environments": [
+                {
+                    "label": "swe_rebench",
+                    "env_name": "nebius/SWE-rebench-V2",
+                },
+                {
+                    "label": "toolathlon",
+                    "env_name": "toolathlongym",
+                    "subagent_environment_access": "shared",
+                },
+            ],
+        }
+    )
+
+    assert default_config.subagent_environment_access == "shared"
+    assert (
+        config.subagent_environment_access_for(config.environment("swe_rebench"))
+        == "read_only"
+    )
+    assert (
+        config.subagent_environment_access_for(config.environment("toolathlon"))
+        == "shared"
+    )
+
+
+def test_openreward_config_rejects_invalid_subagent_environment_access():
+    config_mod = _load_openreward_config_module()
+
+    with pytest.raises(ValueError, match="subagent_environment_access"):
+        config_mod.OpenRewardConfig.from_mapping(
+            {"subagent_environment_access": "worktree"}
+        )
+    with pytest.raises(ValueError, match="subagent_environment_access"):
+        config_mod.OpenRewardConfig.from_mapping(
+            {
+                "environments": [
+                    {
+                        "env_name": "nebius/SWE-rebench-V2",
+                        "subagent_environment_access": "write",
+                    }
+                ]
+            }
+        )
+
+
+def test_openreward_read_only_tools_are_strict_and_leave_parent_unchanged(monkeypatch):
+    env_mod = _load_openreward_env_module(monkeypatch)
+
+    class Executor:
+        def __call__(self, action, conversation):
+            return action, conversation
+
+    class Tool:
+        def __init__(self, name, server_name="openreward", executor=None):
+            self.name = name
+            self.mcp_server_name = server_name
+            self.executor = executor or Executor()
+
+        def as_executable(self):
+            return self
+
+        def set_executor(self, executor):
+            return Tool(self.name, self.mcp_server_name, executor)
+
+    class Agent:
+        def __init__(self, tools):
+            self.tools_map = {tool.name: tool for tool in tools}
+
+    safe_names = {"get_task", "get_status", "get_tool_details", "view"}
+    mutating_or_ambiguous_names = {
+        "bash",
+        "str_replace",
+        "create_file",
+        "submit_answer",
+        "claim_done",
+        "call_tool",
+        "python_execute",
+        "future_unknown_tool",
+    }
+    agent = Agent(
+        [
+            *(
+                Tool(name) for name in sorted(safe_names | mutating_or_ambiguous_names)
+            ),
+            Tool("foreign", server_name="other"),
+        ]
+    )
+    parent_tools_before = dict(agent.tools_map)
+
+    read_only_tools = env_mod._openreward_mcp_tools(agent, "read_only")
+    shared_tools = env_mod._openreward_mcp_tools(agent, "shared")
+
+    assert set(read_only_tools) == safe_names
+    assert "submit_answer" not in read_only_tools
+    assert "claim_done" not in read_only_tools
+    assert set(shared_tools) == safe_names | (
+        mutating_or_ambiguous_names - {"claim_done"}
+    )
+    assert agent.tools_map == parent_tools_before
+    assert all(
+        agent.tools_map[name] is tool for name, tool in parent_tools_before.items()
+    )
+
+
+def test_openreward_read_only_injection_purges_stale_mcp_tools(monkeypatch):
+    env_mod = _load_openreward_env_module(monkeypatch)
+
+    class Agent:
+        def __init__(self):
+            self._tools = {
+                "submit_answer": types.SimpleNamespace(mcp_server_name="openreward"),
+                "finish": types.SimpleNamespace(mcp_server_name=None),
+            }
+
+        @property
+        def tools_map(self):
+            return self._tools
+
+    agent = Agent()
+
+    env_mod._inject_shared_openreward_tools(agent, {}, "read_only")
+
+    assert set(agent.tools_map) == {"finish"}
+
+
+@pytest.mark.asyncio
+async def test_openreward_read_only_fork_has_no_child_submission_tool(monkeypatch):
+    env_mod = _load_openreward_env_module(monkeypatch)
+    from platoon.envs.base import Task
+
+    _module(
+        monkeypatch,
+        "platoon.openhands.recursive",
+        copy_agent_config_for_fork=lambda agent: agent,
+    )
+
+    class FakeAgent:
+        def __init__(self, mcp_config):
+            self.mcp_config = mcp_config
+
+        def model_copy(self, update):
+            return FakeAgent(update.get("mcp_config", self.mcp_config))
+
+    parent_tools = {
+        "get_task": object(),
+        "view": object(),
+        "bash": object(),
+        "str_replace": object(),
+        "create_file": object(),
+        "submit_answer": object(),
+        "claim_done": object(),
+    }
+    parent = env_mod.OpenRewardOpenHandsEnv(
+        task=Task(id="root", goal="root"),
+        agent=FakeAgent({"mcpServers": {"openreward": {}}}),
+        workspace="shared-live-workspace",
+        shared_openreward_tools=parent_tools,
+        subagent_environment_access="read_only",
+    )
+
+    child = await parent.fork(Task(id="child", goal="inspect"))
+
+    assert set(child._shared_openreward_tools) == {"get_task", "view"}
+    assert "submit_answer" not in child._shared_openreward_tools
+    assert "claim_done" not in child._shared_openreward_tools
+    assert child._workspace == "shared-live-workspace"
+    assert child._subagent_environment_access == "read_only"
+    assert set(parent._shared_openreward_tools) == set(parent_tools)
+
+
+@pytest.mark.asyncio
+async def test_openreward_read_only_child_prompt_assigns_edits_to_parent(monkeypatch):
+    env_mod = _load_openreward_env_module(monkeypatch)
+    from platoon.envs.base import SubTask, Task
+
+    root = Task(id="root", goal="Fix the bug")
+    child_task = SubTask(
+        id="child",
+        goal="Inspect the parser",
+        parent_tasks=[root],
+    )
+    env = env_mod.OpenRewardOpenHandsEnv(
+        task=child_task,
+        agent=object(),
+        workspace="shared-live-workspace",
+        subagent_environment_access="read_only",
+    )
+    env._get_openreward_task_payload = lambda: {"prompt": "Fix the bug"}
+
+    goal = await env._initial_user_message()
+
+    assert "read-only" in goal
+    assert "not an independent worktree" in goal
+    assert "parent alone is responsible for applying changes and submitting" in goal
+    assert "proposed replacements or patch text" in goal

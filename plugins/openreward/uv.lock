@@ -5065,7 +5065,7 @@ tinker = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=1.0.0" },
-    { name = "openreward", specifier = ">=0.1.33" },
+    { name = "openreward", specifier = ">=0.1.43" },
     { name = "platoon", editable = "../../" },
     { name = "platoon", extras = ["areal"], marker = "extra == 'areal'", editable = "../../" },
     { name = "platoon", extras = ["tinker"], marker = "extra == 'tinker'", editable = "../../" },

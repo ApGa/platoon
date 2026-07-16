@@ -10,13 +10,20 @@ from pathlib import Path
 
 from datasets import Dataset
 from platoon.train.tinker.config_defs import WorkflowConfig
+from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
 from platoon.utils.config import load_config
 
+from platoon.openreward.mixture import materialize_balanced_record_order
 from platoon.openreward.rewards import reward_processor
 from platoon.openreward.rollout import run_rollout
-from platoon.openreward.tasks import get_task, get_task_ids
+from platoon.openreward.tasks import (
+    OPENREWARD_ENVIRONMENT_COLUMN,
+    OPENREWARD_SAMPLING_WEIGHT_COLUMN,
+    get_task,
+    get_task_records,
+)
 from platoon.openreward.tinker_config import OpenRewardTinkerTrainerConfig
 
 
@@ -28,11 +35,27 @@ def _attach_openreward_config(config: OpenRewardTinkerTrainerConfig) -> None:
         workflow_config.rollout_config.extra = rollout_extra
 
 
-def _select_task_ids(config: OpenRewardTinkerTrainerConfig, *, split: str, limit: int | None, seed: int) -> list[str]:
-    task_ids = get_task_ids(config.openreward, split=split, limit=limit)
+def _select_task_records(
+    config: OpenRewardTinkerTrainerConfig,
+    *,
+    evaluation: bool,
+    seed: int,
+) -> list[dict]:
+    records = get_task_records(config.openreward, evaluation=evaluation)
+    if not evaluation and config.openreward.is_mixture:
+        ordered = materialize_balanced_record_order(
+            records,
+            environment_key=OPENREWARD_ENVIRONMENT_COLUMN,
+            sampling_weight_key=OPENREWARD_SAMPLING_WEIGHT_COLUMN,
+            global_batch_size=config.train.batch_size,
+            seed=seed,
+            preserve_order_key=PRESERVE_DATASET_ORDER_COLUMN,
+        )
+        return ordered
+
     rng = random.Random(seed)
-    rng.shuffle(task_ids)
-    return task_ids
+    rng.shuffle(records)
+    return records
 
 
 async def main(args: list[str]) -> None:
@@ -45,21 +68,19 @@ async def main(args: list[str]) -> None:
     config: OpenRewardTinkerTrainerConfig = config
     _attach_openreward_config(config)
 
-    train_task_ids = _select_task_ids(
+    train_records = _select_task_records(
         config,
-        split=config.openreward.split,
-        limit=config.openreward.train_task_limit,
+        evaluation=False,
         seed=config.seed,
     )
-    eval_task_ids = _select_task_ids(
+    eval_records = _select_task_records(
         config,
-        split=config.openreward.eval_split or config.openreward.split,
-        limit=config.openreward.eval_task_limit,
+        evaluation=True,
         seed=config.seed + 1,
     )
 
-    train_dataset = Dataset.from_list([{"task_id": task_id} for task_id in train_task_ids])
-    eval_dataset = Dataset.from_list([{"task_id": task_id} for task_id in eval_task_ids])
+    train_dataset = Dataset.from_list(train_records)
+    eval_dataset = Dataset.from_list(eval_records)
 
     trainer = PlatoonTinkerRLTrainer(
         config=config,

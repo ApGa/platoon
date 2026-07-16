@@ -1,0 +1,219 @@
+#!/bin/bash
+#SBATCH --job-name=openreward-multienv-prealloc
+#SBATCH --account=nvr_lacr_llm
+#SBATCH --partition=batch
+#SBATCH --nodes=16
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --time=4:00:00
+#SBATCH --signal=B:USR1@300
+#SBATCH --output=/lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/logs/openreward-multienv-prealloc-%j.out
+#SBATCH --error=/lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/logs/openreward-multienv-prealloc-%j.err
+#SBATCH --mail-user=apurvag@nvidia.com
+#SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
+
+# Add one TMax and one SWE-rebench OpenReward service per allocated node, then
+# delegate Toolathlon and AReaL lifecycle management to the established
+# preallocated launcher.  Each rollout remains pinned to one environment server
+# through a label-specific URL pool.
+
+set -euo pipefail
+
+USER_ROOT=/lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag
+REPO_ROOT=${USER_ROOT}/source/platoon
+BASE_LAUNCHER=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc.sh
+SERVER_HELPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-server.sh
+DEFAULT_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-r3-fp32-lm-head.yaml
+CONFIG=${1:-${DEFAULT_CONFIG}}
+
+WRAPPER=$(readlink -f "${BASH_SOURCE[0]}")
+[[ -x "${BASE_LAUNCHER}" ]] || {
+  echo "ERROR: base launcher is not executable: ${BASE_LAUNCHER}" >&2
+  exit 2
+}
+[[ -x "${SERVER_HELPER}" ]] || {
+  echo "ERROR: server helper is not executable: ${SERVER_HELPER}" >&2
+  exit 2
+}
+[[ -f "${CONFIG}" ]] || {
+  echo "ERROR: config not found: ${CONFIG}" >&2
+  exit 2
+}
+CONFIG=$(readlink -f "${CONFIG}")
+
+NNODES=${SLURM_NNODES:-16}
+TMAX_PORT=${OPENREWARD_TMAX_PORT:-8083}
+SWE_PORT=${OPENREWARD_SWE_REBENCH_PORT:-8084}
+TOOLATHLON_PORT=${OPENREWARD_PORT:-8082}
+SERVER_CPUS=${OPENREWARD_SUPPLEMENTAL_SERVER_CPUS:-8}
+SERVER_MEM=${OPENREWARD_SUPPLEMENTAL_SERVER_MEM:-48G}
+SERVER_WAIT_SECS=${OPENREWARD_SUPPLEMENTAL_SERVER_WAIT_SECS:-900}
+HEALTH_CHECK_SECS=${OPENREWARD_SUPPLEMENTAL_HEALTH_CHECK_SECS:-20}
+HEALTH_FAILURE_THRESHOLD=${OPENREWARD_SUPPLEMENTAL_HEALTH_FAILURE_THRESHOLD:-3}
+# Cold TMax/SWE tasks import multi-GB Enroot images while OpenHands waits for
+# the MCP bridge to list tools. Match the configured per-step timeout instead
+# of the rollout module's 120-second default.
+export OPENREWARD_MCP_TIMEOUT=${OPENREWARD_MCP_TIMEOUT:-1800}
+
+RUN_ID=${OPENREWARD_RUN_ID:-${SLURM_JOB_ID:-manual}}
+
+mapfile -t ALLOC_NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST:-$(hostname)}")
+if [[ "${#ALLOC_NODES[@]}" -ne "${NNODES}" ]]; then
+  echo "ERROR: expected ${NNODES} allocated nodes, found ${#ALLOC_NODES[@]}." >&2
+  exit 2
+fi
+NODELIST=$(IFS=,; echo "${ALLOC_NODES[*]}")
+
+urls_for_port() {
+  local port=$1
+  local result=
+  local node
+  for node in "${ALLOC_NODES[@]}"; do
+    result="${result:+${result},}http://${node}:${port}"
+  done
+  printf '%s' "${result}"
+}
+
+export OPENREWARD_SESSION_URLS_TOOLATHLON
+OPENREWARD_SESSION_URLS_TOOLATHLON=$(urls_for_port "${TOOLATHLON_PORT}")
+export OPENREWARD_SESSION_URLS_TMAX
+OPENREWARD_SESSION_URLS_TMAX=$(urls_for_port "${TMAX_PORT}")
+export OPENREWARD_SESSION_URLS_SWE_REBENCH
+OPENREWARD_SESSION_URLS_SWE_REBENCH=$(urls_for_port "${SWE_PORT}")
+export OPENREWARD_TMAX_PORT=${TMAX_PORT}
+export OPENREWARD_SWE_REBENCH_PORT=${SWE_PORT}
+export OPENREWARD_PORT=${TOOLATHLON_PORT}
+
+mkdir -p "${USER_ROOT}/logs"
+TMAX_LOG=${USER_ROOT}/logs/openreward-multienv-tmax-${RUN_ID}
+SWE_LOG=${USER_ROOT}/logs/openreward-multienv-swe-rebench-${RUN_ID}
+tmax_pid=
+swe_pid=
+base_pid=
+health_pid=
+
+cleanup() {
+  local pid
+  for pid in "${health_pid}" "${base_pid}" "${tmax_pid}" "${swe_pid}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+}
+
+forward_signal() {
+  local signal=$1
+  if [[ -n "${base_pid}" ]] && kill -0 "${base_pid}" 2>/dev/null; then
+    kill -s "${signal}" "${base_pid}" 2>/dev/null || true
+  fi
+}
+
+trap cleanup EXIT
+trap 'forward_signal USR1' USR1
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+
+start_server_pool() {
+  local kind=$1
+  local pid_variable=$3
+  local log_prefix=$2
+  OPENREWARD_SUPPLEMENTAL_KIND="${kind}" srun \
+    --overlap \
+    --unbuffered \
+    --nodes="${NNODES}" \
+    --kill-on-bad-exit=1 \
+    --ntasks="${NNODES}" \
+    --ntasks-per-node=1 \
+    --nodelist="${NODELIST}" \
+    --gpus-per-node=0 \
+    --cpus-per-task="${SERVER_CPUS}" \
+    --mem="${SERVER_MEM}" \
+    --output="${log_prefix}-%N.log" \
+    --error="${log_prefix}-%N.log" \
+    "${SERVER_HELPER}" &
+  printf -v "${pid_variable}" '%s' "$!"
+}
+
+server_pool_ready() {
+  local port=$1
+  local node
+  for node in "${ALLOC_NODES[@]}"; do
+    if ! (exec 3<>"/dev/tcp/${node}/${port}") 2>/dev/null; then
+      return 1
+    fi
+    exec 3>&- 3<&- || true
+  done
+}
+
+wait_for_server_pool() {
+  local name=$1
+  local port=$2
+  local pid=$3
+  local log_prefix=$4
+  local waited=0
+  while ! server_pool_ready "${port}"; do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      echo "ERROR: ${name} server pool exited during startup." >&2
+      tail -n 80 "${log_prefix}"-*.log 2>/dev/null || true
+      return 1
+    fi
+    if [[ "${waited}" -ge "${SERVER_WAIT_SECS}" ]]; then
+      echo "ERROR: timed out waiting for ${name} on port ${port}." >&2
+      tail -n 80 "${log_prefix}"-*.log 2>/dev/null || true
+      return 1
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  echo "All ${NNODES} ${name} servers are accepting connections on port ${port}."
+}
+
+echo "Starting TMax and SWE-rebench server pools on ${NNODES} nodes."
+start_server_pool tmax "${TMAX_LOG}" tmax_pid
+start_server_pool swe_rebench "${SWE_LOG}" swe_pid
+wait_for_server_pool TMax "${TMAX_PORT}" "${tmax_pid}" "${TMAX_LOG}"
+wait_for_server_pool SWE-rebench "${SWE_PORT}" "${swe_pid}" "${SWE_LOG}"
+
+# The delegated launcher's continuation logic must resubmit this wrapper so the
+# supplemental services are restored along with Toolathlon and the trainer.
+export OPENREWARD_JOB_SCRIPT=${WRAPPER}
+"${BASE_LAUNCHER}" "${CONFIG}" &
+base_pid=$!
+
+monitor_supplemental_servers() {
+  local failures=0
+  while kill -0 "${base_pid}" 2>/dev/null; do
+    if kill -0 "${tmax_pid}" 2>/dev/null && \
+       kill -0 "${swe_pid}" 2>/dev/null && \
+       server_pool_ready "${TMAX_PORT}" && \
+       server_pool_ready "${SWE_PORT}"; then
+      failures=0
+    else
+      failures=$((failures + 1))
+      echo "WARNING: supplemental environment health check failed (${failures}/${HEALTH_FAILURE_THRESHOLD})." >&2
+      if [[ "${failures}" -ge "${HEALTH_FAILURE_THRESHOLD}" ]]; then
+        echo "ERROR: supplemental environment servers remained unhealthy; terminating the base launcher." >&2
+        kill -TERM "${base_pid}" 2>/dev/null || true
+        return 1
+      fi
+    fi
+    sleep "${HEALTH_CHECK_SECS}"
+  done
+}
+
+monitor_supplemental_servers &
+health_pid=$!
+
+set +e
+while true; do
+  wait "${base_pid}"
+  status=$?
+  if [[ "${status}" -ge 128 ]] && kill -0 "${base_pid}" 2>/dev/null; then
+    continue
+  fi
+  break
+done
+set -e
+base_pid=
+exit "${status}"

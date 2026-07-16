@@ -32,6 +32,7 @@ from platoon.train.tinker.config_defs import (
     PlatoonTinkerRLTrainerConfig,
     TrainEventTriggerConfig,
 )
+from platoon.train.tinker.dataset_order import prepare_dataset_for_dataloader
 from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -259,8 +260,10 @@ class PlatoonTinkerDataloader:
         shuffle_seed: int | None = 42,
         drop_last: bool = True,
     ):
-        if shuffle_seed is not None:
-            dataset = dataset.shuffle(seed=shuffle_seed)
+        dataset = prepare_dataset_for_dataloader(
+            dataset,
+            shuffle_seed=shuffle_seed,
+        )
 
         self.dataset = dataset
         self.batched_dataset = self.dataset.batch(

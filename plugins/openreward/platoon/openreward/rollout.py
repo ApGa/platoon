@@ -5,7 +5,7 @@ import hashlib
 import os
 import sys
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import cast
 
@@ -41,7 +41,13 @@ from platoon.utils.subagent_rewards import (
 )
 from platoon.visualization.event_sinks import JsonlFileSink
 
-from platoon.openreward.config_defs import OpenRewardConfig
+from platoon.openreward.config_defs import OpenRewardConfig, OpenRewardEnvironmentConfig
+from platoon.openreward.constants import (
+    OPENREWARD_ENVIRONMENT_LABEL_KEY,
+    OPENREWARD_TASK_INDEX_KEY,
+    OPENREWARD_TASK_NAME_KEY,
+    OPENREWARD_TASK_SPLIT_KEY,
+)
 from platoon.openreward.env import OpenRewardOpenHandsEnv
 
 OPENREWARD_CONDENSER_KEEP_FIRST = 2
@@ -90,49 +96,72 @@ def _openreward_config(config: RolloutConfig) -> OpenRewardConfig:
     return OpenRewardConfig.from_mapping(extra.get("openreward"))
 
 
-def _select_session_url(default_url: str, shard_key: str) -> str:
+def _session_urls_env_var(environment: OpenRewardEnvironmentConfig) -> str:
+    return environment.resolved_session_urls_env_var
+
+
+def _select_session_url(
+    environment: OpenRewardEnvironmentConfig,
+    shard_key: str,
+    *,
+    allow_legacy_global_pool: bool,
+) -> str:
     """Pick one env-server backend for this rollout when sharding is enabled.
 
-    Multinode training runs the rollout workflow on a single controller node, so
-    every session would otherwise hit one env server and bottleneck. When
-    ``OPENREWARD_SESSION_URLS`` (comma-separated) is set, we spread rollouts over
-    those backends by hashing a per-rollout key. Each rollout is exactly one ORS
-    session, so binding the whole session to one backend keeps the gym's
-    in-container session affinity (consistent hash on X-Session-ID) intact end to
-    end -- no extra load balancer required. Unset -> use the config's session_url.
+    Mixed environments must never share one undifferentiated URL pool: each
+    server may expose a different environment name. Static ``session_urls`` or
+    ``OPENREWARD_SESSION_URLS_<LABEL>`` therefore take precedence. The original
+    process-global ``OPENREWARD_SESSION_URLS`` remains a legacy single-env path.
     """
-    urls = os.environ.get("OPENREWARD_SESSION_URLS", "").strip()
-    if not urls:
-        return default_url
-    candidates = [u.strip() for u in urls.split(",") if u.strip()]
+    candidates = list(environment.session_urls or [])
     if not candidates:
-        return default_url
+        urls = os.environ.get(_session_urls_env_var(environment), "").strip()
+        candidates = [url.strip() for url in urls.split(",") if url.strip()]
+    if not candidates and allow_legacy_global_pool:
+        urls = os.environ.get("OPENREWARD_SESSION_URLS", "").strip()
+        candidates = [url.strip() for url in urls.split(",") if url.strip()]
+    if not candidates:
+        return environment.session_url
     digest = hashlib.sha1(shard_key.encode("utf-8")).hexdigest()
     return candidates[int(digest, 16) % len(candidates)]
 
 
-def _build_mcp_config(task: Task, config: RolloutConfig, openreward_config: OpenRewardConfig, output_dir: str) -> dict:
-    session_url = _select_session_url(openreward_config.session_url, output_dir)
+def _build_mcp_config(
+    task: Task,
+    openreward_config: OpenRewardConfig,
+    environment: OpenRewardEnvironmentConfig,
+    output_dir: str,
+) -> dict:
+    session_url = _select_session_url(
+        environment,
+        output_dir,
+        allow_legacy_global_pool=not openreward_config.is_mixture,
+    )
+    split = str(task.misc.get(OPENREWARD_TASK_SPLIT_KEY) or environment.split)
     bridge_args = [
         "-m",
         "platoon.openreward.mcp_bridge",
         "--env-name",
-        openreward_config.env_name,
+        environment.env_name,
         "--split",
-        openreward_config.split,
-        "--task-name",
-        str(task.id),
+        split,
         "--session-url",
         session_url,
         "--api-key",
-        openreward_config.api_key,
+        environment.api_key,
         "--output-dir",
         output_dir,
         "--max-tool-calls",
-        str(openreward_config.max_tool_calls),
+        str(environment.max_tool_calls),
     ]
-    if openreward_config.api_url:
-        bridge_args.extend(["--api-url", openreward_config.api_url])
+    task_index = task.misc.get(OPENREWARD_TASK_INDEX_KEY)
+    task_name = task.misc.get(OPENREWARD_TASK_NAME_KEY)
+    if isinstance(task_index, int) and not isinstance(task_index, bool):
+        bridge_args.extend(["--task-index", str(task_index)])
+    else:
+        bridge_args.extend(["--task-name", str(task_name or task.id)])
+    if environment.api_url:
+        bridge_args.extend(["--api-url", environment.api_url])
 
     return {
         "mcpServers": {
@@ -162,6 +191,8 @@ def _build_llm(config: RolloutConfig) -> LLM:
     # overlays: using the old hard-coded Qwen3.5 tokenizer would make condenser
     # thresholds disagree with the prompts that are actually sent for rollout.
     custom_tokenizer = model_name.removeprefix("openai/")
+    if custom_tokenizer.startswith("openai/"):
+        custom_tokenizer = None
     return LLM(
         usage_id="platoon-openreward-openhands",
         model=model_name,
@@ -217,6 +248,15 @@ def _configure_openhands_agent(
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     openreward_config = _openreward_config(config)
+    # Higher-level training and inference workflows normally copy this value
+    # onto the task before calling the rollout. Keep the rollout entry point
+    # correct on its own as well: both Platoon's budget tracker and OpenHands'
+    # max_iteration_per_run read the budget from ``env.task.max_steps``.
+    if config.max_steps is not None:
+        task = replace(task, max_steps=config.max_steps)
+
+    environment_label = task.misc.get(OPENREWARD_ENVIRONMENT_LABEL_KEY)
+    environment = openreward_config.environment(environment_label)
     task_id = str(task.id)
     initial_goal_suffix = (
         RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX if openreward_config.enable_recursive_subagents else None
@@ -237,7 +277,12 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         OpenHandsSDKAgent(
             llm=llm,
             tools=[],
-            mcp_config=_build_mcp_config(task, config, openreward_config, bridge_output_dir),
+            mcp_config=_build_mcp_config(
+                task,
+                openreward_config,
+                environment,
+                bridge_output_dir,
+            ),
             include_default_tools=[],
             condenser=LLMSummarizingCondenser(
                 llm=llm,
@@ -255,6 +300,9 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         conversation_id=openhands_conversation_id,
         enable_recursive_subagents=openreward_config.enable_recursive_subagents,
         subagent_default_max_steps=openreward_config.subagent_default_max_steps,
+        subagent_environment_access=openreward_config.subagent_environment_access_for(
+            environment
+        ),
         initial_goal_suffix=initial_goal_suffix,
     )
     agent = OpenHandsAgent()
@@ -310,6 +358,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         result = result.to_dict()
         result["misc"] = {
             "openreward": asdict(openreward_config),
+            "openreward_environment": environment.resolved_label,
             "rollout_output_dir": rollout_output_dir,
             "bridge_output_dir": bridge_output_dir,
             "openhands_persistence_dir": openhands_persistence_dir,

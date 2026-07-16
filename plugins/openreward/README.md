@@ -34,7 +34,7 @@ uv run python -m platoon.openreward.train_scripts.areal.train_areal \
 ```bash
 uv run python -m platoon.openreward.train_scripts.tinker.train_tinker \
   --config platoon/openreward/configs/tinker/toolathlon_openhands_tinker.yaml \
-  openreward.session_url=http://localhost:8080
+  --openreward.session_url=http://localhost:8080
 ```
 
 ## Inference
@@ -42,8 +42,53 @@ uv run python -m platoon.openreward.train_scripts.tinker.train_tinker \
 ```bash
 uv run python -m platoon.openreward.inference_scripts.run_inference \
   --config platoon/openreward/configs/inference/toolathlon_openhands_inference.yaml \
-  openreward.session_url=http://localhost:8080
+  --openreward.session_url=http://localhost:8080
 ```
+
+## Multiple Environments
+
+Set `openreward.environments` to route one training dataset across multiple
+OpenReward servers. Equal `sampling_weight` values are the default balanced
+mix; change them to request another submitted-task ratio.
+
+```yaml
+openreward:
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      sampling_weight: 1
+    - label: tmax
+      env_name: tmax/TMax-15K-Harbor
+      session_url: http://localhost:8083
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TMAX
+      sampling_weight: 1
+    - label: swe_rebench
+      env_name: nebius/SWE-rebench-V2
+      session_url: http://localhost:8084
+      session_urls_env_var: OPENREWARD_SESSION_URLS_SWE_REBENCH
+      sampling_weight: 1
+```
+
+Both AReaL and Tinker construct deterministic, balanced submitted-task batches.
+AReaL keeps rollouts in flight asynchronously, so different environment
+latencies and rejected rollouts can temporarily change the accepted optimizer
+batch mix. Per-environment reward metrics expose that drift. Each environment
+may also set `train_task_limit`, `eval_task_limit`, `task_indices`, distinct
+train/evaluation splits, and a static `session_urls` pool.
+
+The 16-node Toolathlon + TMax + SWE-rebench example is launched with
+`slurm-scripts/openreward-multienv-prealloc.sh`; its companion server helper
+runs the TMax and SWE-rebench Python services on the host so they can create
+writable Enroot task containers.
+
+The helper verifies the external checkouts before starting: `external/tmax`
+must be at the tested TMax commit and
+`external/swe-rebench-v2-openrewardenv` at the tested SWE-rebench commit. The
+defaults are pinned directly in the helper. Override `TMAX_SOURCE_REVISION` or
+`SWE_REBENCH_SOURCE_REVISION` only after validating a newer fork revision and
+rebuilding its `.venv-openreward` runtime.
 
 The rollout attaches an OpenReward MCP bridge to OpenHands. The bridge owns the
 OpenReward session. At reset time, the env resolves `get_task` itself and uses
@@ -81,6 +126,37 @@ depth-aware samples. Child step budgets are configured through
 return the child `finish` message directly, without appending budget metadata;
 children that fail before finishing return a short failure status instead of raw
 episode-loop diagnostics.
+
+Child environment access defaults to the backward-compatible `shared` mode. To
+keep SWE-rebench children investigative while making the parent the sole writer
+and submitter, set a rollout-wide policy or an environment-specific override:
+
+```yaml
+openreward:
+  subagent_environment_access: shared
+  environments:
+    - label: swe_rebench
+      env_name: nebius/SWE-rebench-V2
+      subagent_environment_access: read_only
+```
+
+`read_only` affects forked children only; the root keeps every environment
+tool. Children receive the strict inspection allowlist `get_task`, `get_status`,
+`get_tool_details`, and `view`. They do not receive `bash`, `str_replace`,
+`create_file`, `submit_answer`, `claim_done`, generic `call_tool`,
+`python_execute`, or unknown future environment tools. A child should return
+file/line evidence and a proposed replacement or patch through its local
+`finish` tool; only the parent edits and submits.
+
+This phase-1 mode does **not** fork the OpenReward environment or create a Git
+worktree. Child `view` calls inspect the same live workspace/session as the
+parent, and concurrent parent activity can change what a child sees. In
+`shared` mode, concurrent edits can race and a child's terminal environment
+tool can finish the one shared session. A future write-capable fork protocol
+needs environment-native workspace tokens, one worktree per child, patch export
+before child teardown, an explicit ordered parent merge/apply operation with
+conflict reporting, and verification bound to the merged parent workspace.
+Read-only children can continue using the shared session under that protocol.
 
 Set `openreward.enable_subagent_reward_judging: true` to automatically launch a
 verifier agent after each normal subagent finishes. The verifier receives the

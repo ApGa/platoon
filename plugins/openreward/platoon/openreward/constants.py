@@ -1,1 +1,5 @@
 OPENREWARD_RESOLVE_GOAL_KEY = "openreward_resolve_goal"
+OPENREWARD_ENVIRONMENT_LABEL_KEY = "openreward_environment_label"
+OPENREWARD_TASK_INDEX_KEY = "openreward_task_index"
+OPENREWARD_TASK_NAME_KEY = "openreward_task_name"
+OPENREWARD_TASK_SPLIT_KEY = "openreward_task_split"
