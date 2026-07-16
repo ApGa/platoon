@@ -102,6 +102,19 @@ The 16-node Toolathlon + TMax + SWE-rebench example is launched with
 runs the TMax and SWE-rebench Python services on the host so they can create
 writable Enroot task containers.
 
+The Toolathlon launcher bind-mounts
+`plugins/openreward/scripts/openreward-toolathlon-resilient-entrypoint.sh`
+into each environment container. Nginx continues to hash sessions to stable
+internal ports, while the supervisor restarts only an unexpectedly exited
+Uvicorn worker at its original port. Other workers and their live sessions stay
+up. Restarts use bounded exponential backoff; tune
+`OPENREWARD_WORKER_RESTART_MAX_ATTEMPTS`,
+`OPENREWARD_WORKER_RESTART_RESET_SECS`,
+`OPENREWARD_WORKER_RESTART_BACKOFF_INITIAL_SECS`, and
+`OPENREWARD_WORKER_RESTART_BACKOFF_MAX_SECS` when needed. An nginx exit or an
+exhausted worker budget remains fatal so the launcher's environment health
+monitor can restart the allocation instead of serving a degraded node.
+
 The wrapper defaults to the non-recursive mixed config. To launch the bounded
 recursive variant explicitly, pass its config path to the same wrapper:
 
