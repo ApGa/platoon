@@ -22,6 +22,7 @@ platoon_repo_root_is_valid() {
   [[ -n "${candidate}" ]] || return 1
   [[ -f "${candidate}/pyproject.toml" ]] || return 1
   [[ -x "${candidate}/slurm-scripts/openreward-toolathlon-prealloc-base.sh" ]] || return 1
+  [[ -x "${candidate}/slurm-scripts/openreward-multienv-prealloc.sh" ]] || return 1
   [[ -x "${candidate}/slurm-scripts/openreward-multienv-server.sh" ]] || return 1
 }
 
@@ -52,7 +53,10 @@ SERVER_HELPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-server.sh
 DEFAULT_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-r3-fp32-lm-head.yaml
 CONFIG=${1:-${DEFAULT_CONFIG}}
 
-WRAPPER=$(readlink -f "${BASH_SOURCE[0]}")
+# BASH_SOURCE points into Slurm's ephemeral spool directory inside a batch job.
+# Continuations must always submit the tracked launcher from the checkout.
+WRAPPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-prealloc.sh
+export OPENREWARD_JOB_SCRIPT=${WRAPPER}
 [[ -x "${BASE_LAUNCHER}" ]] || {
   echo "ERROR: base launcher is not executable: ${BASE_LAUNCHER}" >&2
   exit 2
@@ -230,7 +234,6 @@ wait_for_server_pool SWE-rebench "${SWE_PORT}" "${swe_pid}" "${SWE_LOG}"
 
 # The delegated launcher's continuation logic must resubmit this wrapper so the
 # supplemental services are restored along with Toolathlon and the trainer.
-export OPENREWARD_JOB_SCRIPT=${WRAPPER}
 "${BASE_LAUNCHER}" "${CONFIG}" &
 base_pid=$!
 

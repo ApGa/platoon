@@ -89,7 +89,7 @@ def test_multienv_launcher_resolves_checkout_from_slurm_submit_dir(tmp_path):
 
     missing_config = tmp_path / "stop-after-repo-resolution.yaml"
     result = subprocess.run(
-        ["bash", str(spooled_launcher), str(missing_config)],
+        ["bash", "-x", str(spooled_launcher), str(missing_config)],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -104,6 +104,10 @@ def test_multienv_launcher_resolves_checkout_from_slurm_submit_dir(tmp_path):
     assert result.returncode == 2
     assert f"ERROR: config not found: {missing_config}" in result.stderr
     assert "could not locate a valid Platoon checkout" not in result.stderr
+    stable_launcher = REPO_ROOT / "slurm-scripts" / "openreward-multienv-prealloc.sh"
+    assert f"OPENREWARD_JOB_SCRIPT={stable_launcher}" in result.stderr
+    assert f"OPENREWARD_JOB_SCRIPT={spooled_launcher}" not in result.stderr
+    assert "WRAPPER=$(readlink -f" not in MULTIENV_LAUNCHER.read_text()
 
 
 def test_multienv_launcher_rejects_invalid_explicit_repo_root(tmp_path):
