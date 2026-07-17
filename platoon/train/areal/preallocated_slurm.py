@@ -197,6 +197,12 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         workdir = os.environ.get("PLATOON_AREAL_PREALLOC_CONTAINER_WORKDIR")
         if image:
             args.append(f"--container-image={image}")
+            # Worker commands are complete shell entrypoints. Do not execute
+            # an image's Docker entrypoint first: imported benchmark images can
+            # contain stale startup hooks (for example, sourcing a missing
+            # /usr/local/cargo/env), which makes Pyxis fail before our worker
+            # preamble can run.
+            args.append("--no-container-entrypoint")
         if mounts:
             args.append(f"--container-mounts={mounts}")
         if workdir:
@@ -331,7 +337,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         bash_cmds.extend(self._worker_preamble())
         bash_cmds.append(rpc_cmd)
         worker_script = ";\n".join(cmd.strip() for cmd in bash_cmds if cmd.strip())
-        worker_cmd = ["/bin/bash", "-lc", worker_script]
+        worker_cmd = ["/bin/bash", "-c", worker_script]
 
         base_srun_args = self._srun_base_args()
         exclusive_env = os.environ.get("PLATOON_AREAL_PREALLOC_WORKER_EXCLUSIVE")

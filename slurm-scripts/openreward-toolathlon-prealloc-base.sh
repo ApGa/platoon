@@ -541,10 +541,11 @@ start_env_servers() {
     --cpus-per-task="${OPENREWARD_SERVER_CPUS}" \
     --mem="${OPENREWARD_SERVER_MEM}" \
     --container-image="${OPENREWARD_SERVER_IMAGE}" \
+    --no-container-entrypoint \
     --container-mounts="/tmp:/tmp,${TOOLATHLON_SERVER_ENTRYPOINT}:${TOOLATHLON_CONTAINER_ENTRYPOINT}:ro" \
     --output="${SERVER_LOG_PREFIX}-%N.log" \
     --error="${SERVER_LOG_PREFIX}-%N.log" \
-    /bin/bash -lc "export NVIDIA_VISIBLE_DEVICES=void; export OPENREWARD_PORT=${OPENREWARD_PORT}; ${OPENREWARD_SERVER_CMD}" &
+    /bin/bash -c "export NVIDIA_VISIBLE_DEVICES=void; export OPENREWARD_PORT=${OPENREWARD_PORT}; ${OPENREWARD_SERVER_CMD}" &
   server_pid=$!
   echo "OpenReward env-server srun pid: ${server_pid}"
 }
@@ -836,11 +837,12 @@ if [[ "${OPENREWARD_GPU_KEEPALIVE}" == "1" ]]; then
     --ntasks-per-node=1 \
     --gpus-per-node="${GPUS_PER_NODE}" \
     --container-image="${CONTAINER_IMAGE}" \
+    --no-container-entrypoint \
     --container-mounts=/lustre:/lustre \
     --container-workdir="${OPENREWARD_JOB_STATE_DIR}" \
     --output="${USER_ROOT}/logs/gpu-keepalive-prealloc-${RUN_ID}-${JOB_INSTANCE_ID}-%N-%t.log" \
     --error="${USER_ROOT}/logs/gpu-keepalive-prealloc-${RUN_ID}-${JOB_INSTANCE_ID}-%N-%t.err" \
-    /bin/bash -lc "
+    /bin/bash -c "
       set -euo pipefail
       export HOME=${USER_ROOT}
       export UV_CACHE_DIR=${OPENREWARD_UV_CACHE_DIR}
@@ -896,9 +898,10 @@ else
     --cpus-per-task=${OPENREWARD_CONTROLLER_CPUS:-8} \
     --mem=${OPENREWARD_CONTROLLER_MEM:-64G} \
     --container-image="${CONTAINER_IMAGE}" \
+    --no-container-entrypoint \
     --container-mounts=/lustre:/lustre \
     --container-workdir="${OPENREWARD_JOB_STATE_DIR}" \
-    /bin/bash -lc "
+    /bin/bash -c "
       set -euo pipefail
       echo \"Container environment preparation started at \$(date -Is) on \$(hostname)\"
       export HOME=${USER_ROOT}
@@ -959,7 +962,7 @@ srun \
   --nodelist="${CONTROLLER_NODE}" \
   --cpus-per-task=${OPENREWARD_CONTROLLER_CPUS:-8} \
   --mem=${OPENREWARD_CONTROLLER_MEM:-64G} \
-  /bin/bash -lc "
+  /bin/bash -c "
     set -euo pipefail
     echo \"Controller entered host Slurm step at \$(date -Is) on \$(hostname)\"
     export HOME=${USER_ROOT}

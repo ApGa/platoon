@@ -366,9 +366,12 @@ def test_preallocated_command_uses_current_srun_allocation(monkeypatch):
     assert "--exclusive" in command
     assert "--gpus-per-node=8" in command
     assert "--container-image=/image.sqsh" in command
+    assert "--no-container-entrypoint" in command
     assert "CUDA_VISIBLE_DEVICES" in command
     assert "--experiment-name exp" in command
     assert "export PATH=/venv/bin:$PATH" in command
+    assert "/bin/bash -c" in command
+    assert "/bin/bash -lc" not in command
     assert "\n;\n" not in command
 
 

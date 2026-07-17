@@ -56,6 +56,17 @@ openreward:
       max_tool_calls: 0
       sampling_weight: 1.0
 
+# Match the proven 32-node recursive tail policy. Once six usable members of a
+# group finish, give the remaining two 15 more minutes before reaping their
+# dedicated subprocesses. A group with fewer than four usable members is
+# rejected and the strict mixture coordinator replaces it from the same
+# environment quota.
+workflow_config:
+  straggler_timeout_seconds: 900
+  straggler_quorum: 6
+  subprocess_shutdown_grace_seconds: 10
+  min_successful_group_size: 4
+
 # Keep the same 48 selected task groups per epoch as the original small
 # Toolathlon trial (6 global batches x 8 tasks), now split 1:1:1.
 trial_name: toolathlon-tmax-swe-openhands-16node-qwen3.6-35B-r3-fp32-lm-head-trial0

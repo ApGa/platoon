@@ -63,7 +63,7 @@ case "${KIND}" in
     ;;
   swe_rebench)
     ENV_ROOT=${REPO_ROOT}/external/swe-rebench-v2-openrewardenv
-    SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-035d99666931ae39395938f0fdf2deb1e1d2038f}
+    SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-15748ecb3c44fce0f44e424efa9644c90041d4ea}
     require_source_revision "${ENV_ROOT}" "${SWE_REBENCH_SOURCE_REVISION}"
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
     DATA_DIR=${SWE_REBENCH_DATA_DIR:-${REPO_ROOT}/.cache/swe-rebench-v2}

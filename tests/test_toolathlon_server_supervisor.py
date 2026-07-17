@@ -72,6 +72,7 @@ def test_toolathlon_launcher_mounts_supervisor_without_bad_exit_cascade():
     assert '--ntasks="${NNODES}"' in keepalive_step
     assert "--ntasks-per-node=1" in keepalive_step
     assert '--gpus-per-node="${GPUS_PER_NODE}"' in keepalive_step
+    assert "--no-container-entrypoint" in keepalive_step
     assert "export KEEPALIVE_START_DELAY_SEC=0" in keepalive_step
     assert "monitor_gpu_keepalive &" in launcher
     assert launcher.index("monitor_gpu_keepalive &") < launcher.index(
@@ -88,6 +89,21 @@ def test_toolathlon_launcher_mounts_supervisor_without_bad_exit_cascade():
         assert expected_default in launcher
     assert ("${TOOLATHLON_SERVER_ENTRYPOINT}:${TOOLATHLON_CONTAINER_ENTRYPOINT}:ro") in launcher
     assert "/app/entrypoint.sh" not in launcher
+    assert launcher.count("--no-container-entrypoint") == 3
+    assert "/bin/bash -lc" not in launcher
+
+
+def test_multienv_config_uses_proven_straggler_tail_policy():
+    config = REPO_ROOT / (
+        "plugins/openreward/platoon/openreward/configs/areal/"
+        "toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-r3-fp32-lm-head.yaml"
+    )
+    contents = config.read_text()
+
+    assert "straggler_timeout_seconds: 900" in contents
+    assert "straggler_quorum: 6" in contents
+    assert "subprocess_shutdown_grace_seconds: 10" in contents
+    assert "min_successful_group_size: 4" in contents
 
 
 def test_multienv_launcher_isolates_rank_loss_and_reports_failed_pool_endpoint():
