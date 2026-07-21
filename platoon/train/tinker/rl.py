@@ -526,6 +526,12 @@ class PlatoonTinkerRLTrainer:
 
         while shared_state.train_step < end_batch:
             batch_start_time = time.perf_counter()
+            rollout_queue_wait_total = 0.0
+            forward_backward_submit_total = 0.0
+            forward_backward_wait_total = 0.0
+            optim_step_submit_total = 0.0
+            optim_step_wait_total = 0.0
+            update_weights_total = 0.0
 
             assert self.config.train.batch_size % self.config.train.num_minibatches == 0, (
                 f"batch_size {self.config.train.batch_size} must be divisible by "
@@ -565,6 +571,7 @@ class PlatoonTinkerRLTrainer:
                         )
                         rollout = await task_rollout_result_queue.get()
                         queue_wait_elapsed = time.perf_counter() - queue_wait_start
+                        rollout_queue_wait_total += queue_wait_elapsed
                         if queue_wait_elapsed > 60.0:
                             logger.warning(f"Waited {queue_wait_elapsed:.1f}s for rollout from queue (slow)")
 
@@ -656,6 +663,7 @@ class PlatoonTinkerRLTrainer:
                         elapsed = time.perf_counter() - fwd_bwd_submit_start
                         logger.exception(f"forward_backward_async submission failed after {elapsed:.1f}s: {e}")
                         raise
+                    forward_backward_submit_total += time.perf_counter() - fwd_bwd_submit_start
                     logger.debug(
                         f"forward_backward_async submitted in {time.perf_counter() - fwd_bwd_submit_start:.1f}s"
                     )
@@ -674,6 +682,7 @@ class PlatoonTinkerRLTrainer:
                 except Exception as e:
                     logger.exception(f"optim_step_async submission failed: {e}")
                     raise
+                optim_step_submit_total += time.perf_counter() - optim_start
                 logger.debug(f"optim_step_async submitted in {time.perf_counter() - optim_start:.1f}s")
 
                 # Consume all forward backward results and compute training metrics.
@@ -691,7 +700,7 @@ class PlatoonTinkerRLTrainer:
                             name=f"forward_backward (microbatch {microbatch_num})",
                             heartbeat_interval=60.0,
                             watchdog=shared_state.watchdog,
-                            total_timeout=900.0,
+                            total_timeout=1800.0,
                         )
                     except Exception as e:
                         logger.exception(
@@ -699,6 +708,7 @@ class PlatoonTinkerRLTrainer:
                         )
                         raise
                     result_elapsed = time.perf_counter() - result_start
+                    forward_backward_wait_total += result_elapsed
                     if result_elapsed > 60.0:
                         logger.warning(f"forward_backward result took {result_elapsed:.1f}s (slow)")
                     else:
@@ -736,7 +746,7 @@ class PlatoonTinkerRLTrainer:
                         name="optim_step",
                         heartbeat_interval=60.0,
                         watchdog=shared_state.watchdog,
-                        total_timeout=300.0,
+                        total_timeout=600.0,
                     )
                 except Exception as e:
                     logger.exception(
@@ -744,6 +754,7 @@ class PlatoonTinkerRLTrainer:
                     )
                     raise
                 optim_elapsed = time.perf_counter() - optim_result_start
+                optim_step_wait_total += optim_elapsed
                 if optim_elapsed > 60.0:
                     logger.warning(f"optim_step result took {optim_elapsed:.1f}s (slow)")
                 else:
@@ -769,6 +780,7 @@ class PlatoonTinkerRLTrainer:
             shared_state.model_info.llm.update_sampling_client(sampling_client)
             shared_state.sampling_client = sampling_client
             update_elapsed = time.perf_counter() - update_start
+            update_weights_total += update_elapsed
             shared_state.train_tracker.scalar(update_weights_time=update_elapsed)
 
             shared_state.train_step += 1
@@ -791,6 +803,25 @@ class PlatoonTinkerRLTrainer:
             step_stats["progress/done_frac"] = shared_state.train_step / end_batch
             step_stats["optim/lr"] = self.config.train.optimizer.learning_rate
             step_stats["timing/batch_total"] = batch_elapsed
+            step_stats["timing/rollout_queue_wait"] = rollout_queue_wait_total
+            step_stats["timing/forward_backward_submit"] = forward_backward_submit_total
+            step_stats["timing/forward_backward_wait"] = forward_backward_wait_total
+            step_stats["timing/forward_backward_total"] = (
+                forward_backward_submit_total + forward_backward_wait_total
+            )
+            step_stats["timing/optim_step_submit"] = optim_step_submit_total
+            step_stats["timing/optim_step_wait"] = optim_step_wait_total
+            step_stats["timing/optim_step_total"] = optim_step_submit_total + optim_step_wait_total
+            step_stats["timing/update_weights"] = update_weights_total
+            measured_batch_time = (
+                rollout_queue_wait_total
+                + forward_backward_submit_total
+                + forward_backward_wait_total
+                + optim_step_submit_total
+                + optim_step_wait_total
+                + update_weights_total
+            )
+            step_stats["timing/batch_other"] = max(0.0, batch_elapsed - measured_batch_time)
             shared_state.stats_logger.log(step=shared_state.train_step, stats=step_stats)
 
             logger.info(
@@ -943,15 +974,29 @@ class PlatoonTinkerRLTrainer:
     ) -> tinker.TrainingClient:
         if resume_info:
             # Resuming interrupted training - load optimizer state for proper continuation
-            training_client = await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path
-            )
+            if self.config.train.lora_rank == 0:
+                training_client = await service_client.create_lora_training_client_async(
+                    self.config.train.model_name, rank=self.config.train.lora_rank
+                )
+                load_future = await training_client.load_state_with_optimizer_async(resume_info.state_path)
+                await load_future.result_async()
+            else:
+                training_client = await service_client.create_training_client_from_state_with_optimizer_async(
+                    resume_info.state_path
+                )
             logger.info(f"Resumed training from {resume_info.state_path}")
         elif self.config.checkpoint.load_checkpoint_path:
             # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-            training_client = await service_client.create_training_client_from_state_async(
-                self.config.checkpoint.load_checkpoint_path
-            )
+            if self.config.train.lora_rank == 0:
+                training_client = await service_client.create_lora_training_client_async(
+                    self.config.train.model_name, rank=self.config.train.lora_rank
+                )
+                load_future = await training_client.load_state_async(self.config.checkpoint.load_checkpoint_path)
+                await load_future.result_async()
+            else:
+                training_client = await service_client.create_training_client_from_state_async(
+                    self.config.checkpoint.load_checkpoint_path
+                )
             logger.info(f"Loaded weights from {self.config.checkpoint.load_checkpoint_path}")
         else:
             training_client = await service_client.create_lora_training_client_async(

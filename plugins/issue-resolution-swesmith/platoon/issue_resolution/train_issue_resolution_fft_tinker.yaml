@@ -1,0 +1,62 @@
+# SWEBench Tinker training configuration
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 32768
+  batch_size: 32
+  num_epochs: 20
+  max_training_steps: null
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 3
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 3e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      max_steps: 100
+      output_dir: /data/user_data/adityabs/platoon_skyrl_tinker/codescout-cispo-lora_mi300
+      verbose: true
+      timeout: 1200
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+    filter_zero_variance_groups: false 
+  num_concurrent_rollout_workflow_workers: 32 # number of task groups that run in paralle i.e. total concurrent rollouts = num_concurrent_rollout_workflow_workers * group_size
+
+# Eval configuration
+eval:
+  strategy: none
+
+# Checkpoint configuration
+checkpoint:
+  strategy: step
+  every: 60
+  load_checkpoint_path: null
+
+watchdog:
+  enabled: false
+
+log_path: /data/user_data/adityabs/platoon_skyrl_tinker/logs
+tinker_base_url: null
+
+stats:
+  experiment_name: issue_resolution-platoon-tinker
+  trial_name: qwen3_4b_instr_cispo_lora
+  wandb:
+    mode: online
+    project: issue_resolution-platoon-tinker
+    entity: null
+    tags:
+      - issue_resolution
+      - tinker

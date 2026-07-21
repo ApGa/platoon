@@ -21,6 +21,7 @@ from typing import (
 
 import litellm
 import tinker
+from litellm.exceptions import ContextWindowExceededError
 from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import (
     ChatCompletionMessageToolCall,
@@ -38,8 +39,11 @@ from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.renderers import Message as TinkerMessage
 from tinker_cookbook.renderers import Renderer, get_renderer
 from tinker_cookbook.renderers import ToolCall as TinkerToolCall
+from tinker_cookbook.renderers import ToolSpec
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from transformers import AutoProcessor, PreTrainedTokenizer
+
+from platoon.train.tinker.qwen3_exact_renderer import register_qwen3_exact_renderer
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +176,24 @@ class TinkerLLM(CustomLLM):
         # the correct format (coming from LiteLLM or manually constructed).
         if not isinstance(messages, list):
             raise ValueError(f"Expected list of messages, got {type(messages)}")
-        return cast(List[TinkerMessage], messages)
+        out: list[TinkerMessage] = []
+        for message in messages:
+            if hasattr(message, "model_dump"):
+                message = message.model_dump(mode="json", exclude_none=True)
+            tinker_message: TinkerMessage = {
+                "role": message["role"],
+                "content": message.get("content") or "",
+            }
+            if "name" in message:
+                tinker_message["name"] = message["name"]
+            if "tool_call_id" in message:
+                tinker_message["tool_call_id"] = message["tool_call_id"]
+            if "tool_calls" in message:
+                tinker_message["tool_calls"] = [
+                    TinkerToolCall.model_validate(tool_call) for tool_call in message["tool_calls"]
+                ]
+            out.append(tinker_message)
+        return out
 
     def _validate_role(self, role: str) -> TypeGuard[Literal["assistant", "user", "system", "tool", "function"]]:
         if role not in ["assistant", "user", "system", "tool", "function"]:
@@ -213,6 +234,42 @@ class TinkerLLM(CustomLLM):
             return "".join(parts)
         return str(content)
 
+    def _convert_openai_tools(self, tools: list[dict[str, Any]]) -> list[ToolSpec]:
+        """Convert OpenAI-format tool dicts to renderer ToolSpec."""
+        out: list[ToolSpec] = []
+        for tool in tools:
+            if tool.get("type") != "function":
+                continue
+            func = tool["function"]
+            out.append(
+                ToolSpec(
+                    name=func["name"],
+                    description=func.get("description", ""),
+                    parameters=func.get("parameters", {}),
+                )
+            )
+        return out
+
+    def _prepare_messages_with_tools(
+        self,
+        messages: list[TinkerMessage],
+        tools: list[dict[str, Any]],
+    ) -> list[TinkerMessage]:
+        """Inject tool declarations into the message list via the renderer."""
+        tool_specs = self._convert_openai_tools(tools)
+
+        system_prompt = ""
+        remaining: list[TinkerMessage]
+        if messages and messages[0]["role"] == "system":
+            content = messages[0].get("content") or ""
+            system_prompt = content if isinstance(content, str) else ""
+            remaining = list(messages[1:])
+        else:
+            remaining = list(messages)
+
+        prefix = self.renderer.create_conversation_prefix_with_tools(tool_specs, system_prompt)
+        return prefix + remaining
+
     def _get_optional_params(
         self,
         kwargs: Dict[str, Any],
@@ -246,7 +303,12 @@ class TinkerLLM(CustomLLM):
         """LiteLLM messages -> Tinker ModelInput."""
         messages = kwargs.pop("messages", None)
         canonical_messages = self._canonicalize_messages(messages)
-        # TODO: Needs to be updated for latest tinker cookbook version.
+        optional_params = cast(Dict[str, Any], kwargs.get("optional_params", {}))
+        if not isinstance(optional_params, dict):  # type: ignore
+            raise ValueError(f"Invalid optional params type: {type(optional_params)}")
+        tools = optional_params.get("tools")
+        if tools:
+            canonical_messages = self._prepare_messages_with_tools(canonical_messages, tools)
         return self.renderer.build_generation_prompt(canonical_messages)
 
     def _parse_response(self, model_input: ModelInput, response: SampleResponse) -> ModelResponse:
@@ -290,15 +352,14 @@ class TinkerLLM(CustomLLM):
                 # to just log a warning and go with the default path.
                 # if not content:
                 #     raise ValueError("Parsed content is empty. Original response: " + str(response))
-                if not content:
-                    logger.warning("Parsed content is empty. Original response: " + str(response))
                 tool_calls = parsed_response.get("tool_calls", None)
                 if tool_calls:
                     tool_calls = [self._parse_tool_call(tool_call) for tool_call in tool_calls]
+                finish_reason = "tool_calls" if tool_calls else seq.stop_reason
                 choices.append(
                     Choices(
                         message=LitellmMessage(role=role, content=content, tool_calls=tool_calls),
-                        finish_reason=seq.stop_reason,
+                        finish_reason=finish_reason,
                         logprobs=logprobs,
                         token_ids=seq.tokens,
                     )
@@ -347,10 +408,12 @@ class TinkerLLM(CustomLLM):
         prompt_length = model_input.length
         total_sequence_length = prompt_length + max_completion_tokens
         if self.context_window_length is not None and total_sequence_length > self.context_window_length:
-            raise ValueError(
+            raise ContextWindowExceededError(
                 f"Prompt length plus max_tokens exceeds the model's context window: "
                 f"{prompt_length} prompt tokens + {max_completion_tokens} max_tokens > "
-                f"{self.context_window_length} context window length."
+                f"{self.context_window_length} context window length.",
+                model=self.model_name,
+                llm_provider="platoon-tinker",
             )
 
     async def acompletion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
@@ -501,6 +564,7 @@ def register_tinker_llm(
             tokenizer = processor_tokenizer
         image_processor = getattr(processor, "image_processor", None)
 
+    register_qwen3_exact_renderer()
     renderer = get_renderer(renderer_name, tokenizer, image_processor=image_processor, model_name=model_name)
     for key, value in (renderer_kwargs or {}).items():
         if not hasattr(renderer, key):

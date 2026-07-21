@@ -8,7 +8,10 @@ https://raw.githubusercontent.com/thinking-machines-lab/tinker-cookbook/refs/hea
 """
 
 import logging
+import json
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 import tinker
@@ -85,6 +88,31 @@ FlatObElem = int | tinker.ModelInputChunk
 FlatOb = list[FlatObElem]
 
 
+def _debug_token_ids(flat_ob: FlatOb) -> list[int] | None:
+    token_ids: list[int] = []
+    for elem in flat_ob:
+        if isinstance(elem, int):
+            token_ids.append(elem)
+        else:
+            return None
+    return token_ids
+
+
+def _first_string_diff(text1: str, text2: str) -> int | None:
+    for idx, (char1, char2) in enumerate(zip(text1, text2)):
+        if char1 != char2:
+            return idx
+    if len(text1) != len(text2):
+        return min(len(text1), len(text2))
+    return None
+
+
+def _text_window(text: str, center: int, radius: int = 600) -> str:
+    start = max(0, center - radius)
+    end = min(len(text), center + radius)
+    return text[start:end]
+
+
 def _flatten_chunks(chunks: list[tinker.ModelInputChunk]) -> FlatOb:
     """Flatten ModelInput chunks into a list of ints and special chunks."""
     out: FlatOb = []
@@ -130,6 +158,58 @@ def _flat_ob_to_model_input(flat_ob: FlatOb) -> tinker.ModelInput:
             out.append(elem)
     flush_text_chunk()
     return tinker.ModelInput(chunks=out)
+
+
+def _log_prefix_merge_mismatch(
+    *,
+    debug_dir: str | None,
+    tokenizer,
+    task_id: str,
+    trajectory_id: str,
+    step_index: int,
+    completion_id: str,
+    accumulator_sequence: FlatOb,
+    next_observation: FlatOb,
+    previous_completion_id: str | None,
+    previous_action_tokens: list[int] | None,
+) -> None:
+    if not debug_dir or tokenizer is None:
+        return
+
+    expected_ids = _debug_token_ids(accumulator_sequence)
+    observed_ids = _debug_token_ids(next_observation)
+    if expected_ids is None or observed_ids is None:
+        return
+
+    expected_text = tokenizer.decode(expected_ids)
+    observed_text = tokenizer.decode(observed_ids)
+    if observed_text.startswith(expected_text):
+        # Token-level prefix failed, but string-level prefix held. This is the
+        # tokenizer round-trip failure mode we intentionally do not log.
+        return
+
+    diff_index = _first_string_diff(expected_text, observed_text)
+    previous_action_text = tokenizer.decode(previous_action_tokens) if previous_action_tokens else None
+    payload = {
+        "event": "tinker_prefix_merge_string_mismatch",
+        "task_id": task_id,
+        "trajectory_id": trajectory_id,
+        "step_index": step_index,
+        "current_completion_id": completion_id,
+        "previous_completion_id": previous_completion_id,
+        "note": (
+            "expected_context is previous accumulated prompt plus the raw sampled action; "
+            "actual_next_prompt is what the renderer produced for the next step."
+        ),
+        "previous_sampled_action": previous_action_text,
+        "expected_context_around_first_diff": _text_window(expected_text, diff_index or 0),
+        "actual_next_prompt_around_first_diff": _text_window(observed_text, diff_index or 0),
+    }
+
+    out_dir = Path(debug_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{uuid.uuid4()}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 @dataclass
@@ -208,6 +288,8 @@ def trajectory_to_data(
     filter_errors: bool = False,
     trajectory_reward: float = 0.0,
     traj_depth: int | None = None,
+    prefix_mismatch_tokenizer=None,
+    prefix_mismatch_debug_dir: str | None = None,
 ) -> TrajectoryDataResult:
     """Convert a trajectory to training data, merging sequences when possible.
 
@@ -232,6 +314,8 @@ def trajectory_to_data(
     count_found = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    previous_completion_id: str | None = None
+    previous_action_tokens: list[int] | None = None
 
     for i, step in enumerate(trajectory["steps"]):
         # Check if we should skip this step
@@ -273,6 +357,18 @@ def trajectory_to_data(
             # Observation extends the current sequence - we can merge
             delta_ob_flat = ob_flat[len(accumulator.full_sequence) :]
         else:
+            _log_prefix_merge_mismatch(
+                debug_dir=prefix_mismatch_debug_dir,
+                tokenizer=prefix_mismatch_tokenizer,
+                task_id=task_id,
+                trajectory_id=trajectory_id,
+                step_index=i,
+                completion_id=completion_id,
+                accumulator_sequence=accumulator.full_sequence,
+                next_observation=ob_flat,
+                previous_completion_id=previous_completion_id,
+                previous_action_tokens=previous_action_tokens,
+            )
             # New sequence doesn't extend current - flush and start new
             data.append(
                 make_datum_from_accumulator(
@@ -297,6 +393,8 @@ def trajectory_to_data(
         accumulator.sampled_logprobs.extend(ac_logprobs)
         accumulator.advantages.extend([trajectory_advantage] * len(ac_tokens))
         accumulator.mask.extend([1.0] * len(ac_tokens))
+        previous_completion_id = completion_id
+        previous_action_tokens = ac_tokens
 
     # Flush remaining accumulated data
     if accumulator.full_sequence:
@@ -309,9 +407,9 @@ def trajectory_to_data(
             )
         )
 
-    logger.debug(
-        f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}"
-    )
+    # print(
+    #     f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}"
+    # )
 
     return TrajectoryDataResult(
         datums=data,
@@ -330,6 +428,8 @@ def get_train_data_for_trajectory_collection(
     reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj["reward"], {}),
     include_traj_depth: bool = False,
     include_traj_start: bool = False,
+    prefix_mismatch_tokenizer=None,
+    prefix_mismatch_debug_dir: str | None = None,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -374,6 +474,8 @@ def get_train_data_for_trajectory_collection(
             filter_errors=filter_errors,
             trajectory_reward=trajectory_reward,
             traj_depth=depth_map.get(trajectory_id) if include_traj_depth else None,
+            prefix_mismatch_tokenizer=prefix_mismatch_tokenizer,
+            prefix_mismatch_debug_dir=prefix_mismatch_debug_dir,
         )
 
         if not include_traj_start:

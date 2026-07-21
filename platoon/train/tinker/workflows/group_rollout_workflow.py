@@ -216,8 +216,11 @@ class GroupRolloutWorkflow:
         # Check if all rewards are the same across ALL trajectories in the group, including subagent trajectories
         all_trajectory_rewards = [stats.reward for stats in all_trajectory_stats]
         if len(all_trajectory_rewards) > 1 and max(all_trajectory_rewards) == min(all_trajectory_rewards):
+            self.tracker.scalar(zero_variance_reward_group=1.0)
             logger.debug(f"All rewards are the same for task {data['task_id']}: {mean_task_reward:.2f}")
-            return None
+            if self.config.filter_zero_variance_groups:
+                return None
+            logger.debug(f"Keeping zero-advantage datums for task {data['task_id']}")
 
         # Center advantages by rollout. The old_adv was set to trajectory_reward, so
         # this produces either reward - mean_reward or reward - loo_baseline.
@@ -269,13 +272,18 @@ class GroupRolloutWorkflow:
             async with TinkerLLMProxySession() as session:
                 # Run the rollout with the proper config
                 results = await asyncio.create_task(self.rollout_fn(task, rollout_config))
+                has_returned_interactions = isinstance(results, dict) and "_tinker_interactions" in results
+                returned_interactions = results.pop("_tinker_interactions", {}) if has_returned_interactions else {}
 
                 if not results.get("trajectories"):
                     logger.warning(f"No trajectories found for task {task_id} and rollout {rollout_number}")
                     return None
 
                 # Get the llm interactions recorded during this session
-                interactions = session.interactions
+                if has_returned_interactions:
+                    interactions = returned_interactions
+                else:
+                    interactions = session.interactions
 
                 # Extract training data
                 result = get_train_data_for_trajectory_collection(
@@ -287,6 +295,8 @@ class GroupRolloutWorkflow:
                     reward_processor=self.reward_processor,
                     include_traj_depth=self.config.depth_level_weighting,
                     include_traj_start=self.config.depth_level_weighting,
+                    prefix_mismatch_tokenizer=self.model_info.llm.tokenizer,
+                    prefix_mismatch_debug_dir=os.environ.get("TINKER_PREFIX_MISMATCH_DEBUG_DIR"),
                 )
 
                 if not result.datums:
