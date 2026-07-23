@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from platoon.agents.actions.subagent import SUBAGENT_REWARD_JUDGMENT_MISC_KEY
 from platoon.utils.subagent_rewards import SUBAGENT_DELEGATION_REWARD_MISC_KEY
+from platoon.utils.token_efficiency import (
+    TOKEN_EFFICIENCY_PENALTY_REWARD_KEY,
+    trajectory_token_efficiency_metrics,
+)
 
 from platoon.openreward.constants import OPENREWARD_ENVIRONMENT_LABEL_KEY
 
@@ -32,7 +36,7 @@ def _environment_reward_key(traj: dict) -> str | None:
 
 
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
-    """Return base task success plus an Oolong-style delegation bonus."""
+    """Return task success plus delegation bonus minus subtree token cost."""
 
     openreward_score = float(traj.get("reward", 0.0))
     judgment_score = _judgment_score(traj)
@@ -58,7 +62,11 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     launched = float(delegation.get("launched", 0.0))
     succeeded = float(delegation.get("succeeded", 0.0))
     delegation_bonus = float(delegation.get("bonus", 0.0))
-    reward = base_reward + delegation_bonus
+    pre_efficiency_reward = base_reward + delegation_bonus
+    efficiency_metrics = trajectory_token_efficiency_metrics(traj)
+    efficiency_penalty = efficiency_metrics.get(TOKEN_EFFICIENCY_PENALTY_REWARD_KEY, 0.0)
+    rewards_dict.update(efficiency_metrics)
+    reward = pre_efficiency_reward - efficiency_penalty
 
     # Match Oolong's recursive reward contract. These are semantic zeros for
     # trajectories that did not delegate, not missing observations.
@@ -67,6 +75,7 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
             "reward/subagent_launched": launched,
             "reward/subagent_succeeded": succeeded,
             "reward/delegation_bonus": delegation_bonus,
+            "reward/total_before_efficiency": pre_efficiency_reward,
             "reward/total": reward,
         }
     )

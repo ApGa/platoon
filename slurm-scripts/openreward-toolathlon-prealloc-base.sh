@@ -112,10 +112,16 @@ fi
 OPENREWARD_TRIAL_NAME=${OPENREWARD_TRIAL_NAME:-}
 OPENREWARD_ACTOR_PATH=${OPENREWARD_ACTOR_PATH:-}
 OPENREWARD_LOCAL_MODEL_SNAPSHOT=${OPENREWARD_LOCAL_MODEL_SNAPSHOT:-}
+OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT=${OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT:-}
 OPENREWARD_WANDB_MODE=${OPENREWARD_WANDB_MODE:-${WANDB_MODE:-}}
 if [[ -n "${OPENREWARD_ACTOR_PATH}" && -z "${OPENREWARD_TRIAL_NAME}" ]]; then
   echo "ERROR: OPENREWARD_ACTOR_PATH requires OPENREWARD_TRIAL_NAME." >&2
   echo "       Reusing the configured trial could silently recover an incompatible optimizer." >&2
+  exit 2
+fi
+if [[ -n "${OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT}" ]] && \
+   [[ ! "${OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
+  echo "ERROR: OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT must be a non-negative number." >&2
   exit 2
 fi
 
@@ -184,6 +190,11 @@ if [[ -n "${OPENREWARD_ACTOR_PATH}" ]]; then
 fi
 if [[ -n "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
   TRAIN_OVERRIDE_ARGS+=("tokenizer_path=${OPENREWARD_LOCAL_MODEL_SNAPSHOT}")
+fi
+if [[ -n "${OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT}" ]]; then
+  TRAIN_OVERRIDE_ARGS+=(
+    "openreward.subagent_delegation_reward_coefficient=${OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT}"
+  )
 fi
 if [[ -n "${OPENREWARD_WANDB_MODE}" ]]; then
   export WANDB_MODE=${OPENREWARD_WANDB_MODE}
@@ -377,7 +388,7 @@ session_urls=""
 for n in "${SERVER_NODES[@]}"; do
   session_urls="${session_urls:+${session_urls},}http://${n}:${OPENREWARD_PORT}"
 done
-SERVER_LOG_PREFIX=${USER_ROOT}/logs/openreward-toolathlon-prealloc-server-${RUN_ID}
+SERVER_LOG_PREFIX=${USER_ROOT}/logs/openreward-toolathlon-prealloc-server-${RUN_ID}-job${SLURM_JOB_ID:-manual}
 
 # --- Lifecycle traps ----------------------------------------------------------
 launcher_pid=$$
@@ -530,6 +541,9 @@ start_env_servers() {
   echo "Server logs: ${SERVER_LOG_PREFIX}-<node>.log"
   # Overlapping pyxis step, no GPUs, host network -> rank-0 reaches every node at
   # http://<node>:${OPENREWARD_PORT}. One task per node, pinned via --nodelist.
+  # Keep the service independent of host shell dotfiles. Enroot starts through a
+  # login shell, while this deliberately minimal container does not mount paths
+  # that a user profile may reference.
   srun \
     --overlap \
     --kill-on-bad-exit=0 \
@@ -541,6 +555,7 @@ start_env_servers() {
     --cpus-per-task="${OPENREWARD_SERVER_CPUS}" \
     --mem="${OPENREWARD_SERVER_MEM}" \
     --container-image="${OPENREWARD_SERVER_IMAGE}" \
+    --no-container-mount-home \
     --no-container-entrypoint \
     --container-mounts="/tmp:/tmp,${TOOLATHLON_SERVER_ENTRYPOINT}:${TOOLATHLON_CONTAINER_ENTRYPOINT}:ro" \
     --output="${SERVER_LOG_PREFIX}-%N.log" \
@@ -553,17 +568,35 @@ start_env_servers() {
 ENV_SERVER_FAILURE_DETAIL=
 ENV_SERVER_SRUN_DIED=0
 
+toolathlon_backend_healthy() {
+  local node=$1
+  local status
+  # A proxied 404 is healthy: the Toolathlon server intentionally has no root
+  # route. Nginx returns 502/503/504 when its Python upstreams are gone, which a
+  # raw TCP probe cannot distinguish from a healthy service.
+  local -a curl_args=(
+    --silent
+    --show-error
+    --output /dev/null
+    --connect-timeout 2
+    --max-time 5
+    --write-out '%{http_code}'
+    --noproxy '*'
+  )
+  status=$(curl "${curl_args[@]}" "http://${node}:${OPENREWARD_PORT}/" 2>/dev/null) || return 1
+  [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]
+}
+
 env_servers_healthy() {
   local failed_endpoint=
   local n
   local srun_state=alive
 
   for n in "${SERVER_NODES[@]}"; do
-    if ! (exec 3<>"/dev/tcp/${n}/${OPENREWARD_PORT}") 2>/dev/null; then
+    if ! toolathlon_backend_healthy "${n}"; then
       failed_endpoint="${n}:${OPENREWARD_PORT}"
       break
     fi
-    exec 3>&- 3<&- || true
   done
 
   ENV_SERVER_SRUN_DIED=0

@@ -1,0 +1,46 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8
+  - _self_
+
+# Fresh model/optimizer experiment. The unique trial name prevents auto-recover
+# from loading the previous no-aux recursive checkpoint.
+trial_name: toolathlon-openhands-32node-qwen3.6-35B-ptc-recursive-judged-r3-fp32-lm-head-bs8-efficiency-v1-trial0
+
+# Keep the ablation independent of the earlier child-success delegation bonus.
+# The launcher also pins this to zero across wall-time successors.
+openreward:
+  subagent_delegation_reward_coefficient: 0.0
+
+train_dataset:
+  batch_size: 8
+
+workflow_config:
+  group_size: 8
+  # Treat policy-subtree compute as an ordinary auxiliary reward component:
+  #   effective = output_tokens + 0.01 * logical_input_tokens
+  #   penalty = min(0.20, 0.05 * log2(1 + effective / 20_000))
+  # Every policy agent pays for itself plus non-verifier descendants. Synthetic
+  # reward-verifier agents and their entire branches are excluded because they
+  # are absent at inference.
+  token_efficiency_reward:
+    enabled: true
+    coefficient: 0.05
+    reference_tokens: 20000
+    max_penalty: 0.20
+    input_token_weight: 0.01
+    output_token_weight: 1.0
+    attribution: policy_subtree
+
+# Checkpoint every completed update so a four-hour successor loses at most the
+# in-flight group, rather than replaying several expensive recursive updates.
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+# These literals are required by the pre-Hydra launcher validation. The path is
+# the untouched base-model overlay, not a prior experiment checkpoint.
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking

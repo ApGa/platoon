@@ -1,5 +1,6 @@
 """Configuration definitions for AReaL RL training."""
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -8,6 +9,45 @@ from areal.api.cli_args import GRPOConfig, PPOActorConfig
 from platoon.config_defs import RolloutConfig
 from platoon.train.components import EnvironmentConfig, normalize_environment_configs
 from platoon.utils.train import VariableBatchInferenceEngineConfig
+
+
+@dataclass
+class TokenEfficiencyRewardConfig:
+    """Post-baseline cost for deployable tokens used by an agent subtree."""
+
+    enabled: bool = False
+    # penalty = min(max_penalty, coefficient * log2(1 + effective/reference))
+    coefficient: float = 0.05
+    reference_tokens: float = 20_000.0
+    max_penalty: float = 0.20
+    # Exported AReaL prompts resend the full logical context even when the
+    # inference server can reuse a cached prefix, so discount them separately.
+    input_token_weight: float = 0.01
+    output_token_weight: float = 1.0
+    attribution: str = "policy_subtree"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("token_efficiency_reward.enabled must be a boolean")
+        values = {
+            "coefficient": self.coefficient,
+            "reference_tokens": self.reference_tokens,
+            "max_penalty": self.max_penalty,
+            "input_token_weight": self.input_token_weight,
+            "output_token_weight": self.output_token_weight,
+        }
+        if any(not math.isfinite(float(value)) for value in values.values()):
+            raise ValueError("token_efficiency_reward numeric settings must be finite")
+        if self.coefficient < 0 or self.max_penalty < 0:
+            raise ValueError("token_efficiency_reward coefficient and max_penalty must be non-negative")
+        if self.reference_tokens <= 0:
+            raise ValueError("token_efficiency_reward reference_tokens must be positive")
+        if self.input_token_weight < 0 or self.output_token_weight < 0:
+            raise ValueError("token_efficiency_reward token weights must be non-negative")
+        if self.enabled and self.input_token_weight == 0 and self.output_token_weight == 0:
+            raise ValueError("enabled token_efficiency_reward requires at least one positive token weight")
+        if self.attribution != "policy_subtree":
+            raise ValueError("token_efficiency_reward attribution must be 'policy_subtree'")
 
 
 @dataclass
@@ -21,9 +61,11 @@ class WorkflowConfig:
     # many additional seconds before reaping the dedicated group process pool.
     # None preserves the full absolute rollout timeout for every member.
     straggler_timeout_seconds: float | None = None
-    # Number of completed root rollouts that starts the tail-grace clock.
-    # Interrupted partial roots do not count. None uses group_size - 1 (the
-    # classic single-straggler policy).
+    # Number of terminal group members that starts the tail-grace clock.
+    # Completed roots, interrupted partials, and failed-closed members all
+    # count because each is a settled peer. None uses group_size - 1 (the
+    # classic single-straggler policy). Training eligibility remains governed
+    # independently by min_successful_group_size.
     straggler_quorum: int | None = None
     subprocess_shutdown_grace_seconds: float = 5.0
     # Reject/replenish groups that return too few valid members for a meaningful
@@ -36,6 +78,7 @@ class WorkflowConfig:
     # datum.  A value of one preserves the historical training batch exactly.
     subagent_datum_keep_probability: float = 1.0
     subagent_datum_sampling_seed: int = 0
+    token_efficiency_reward: TokenEfficiencyRewardConfig = field(default_factory=TokenEfficiencyRewardConfig)
     # Reward-only throughput fast path: identify exact-zero centered scalar
     # rewards after group centering and policy/Bernoulli masks, retain them
     # through global DP selection and multiplicative depth normalization, then
@@ -60,6 +103,8 @@ class WorkflowConfig:
     def __post_init__(self) -> None:
         if isinstance(self.rollout_config, dict):
             self.rollout_config = RolloutConfig(**self.rollout_config)
+        if isinstance(self.token_efficiency_reward, dict):
+            self.token_efficiency_reward = TokenEfficiencyRewardConfig(**self.token_efficiency_reward)
         if self.group_size < 1:
             raise ValueError("workflow group_size must be positive")
         if self.straggler_timeout_seconds is not None and self.straggler_timeout_seconds <= 0:

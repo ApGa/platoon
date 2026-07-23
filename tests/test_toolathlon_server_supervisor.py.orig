@@ -116,10 +116,10 @@ def test_multienv_config_uses_proven_straggler_tail_policy():
     contents = config.read_text()
 
     assert "straggler_timeout_seconds: 900" in contents
-    assert "group_size: 8" in contents
-    assert "straggler_quorum: 6" in contents
+    assert "group_size: 4" in contents
+    assert "straggler_quorum: 3" in contents
     assert "subprocess_shutdown_grace_seconds: 10" in contents
-    assert "min_successful_group_size: 4" in contents
+    assert "min_successful_group_size: 3" in contents
     assert "request_timeout: 12600" in contents
     assert "session_timeout_seconds: 7200" in contents
     assert "freq_steps: 1" in contents

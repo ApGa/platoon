@@ -27,11 +27,7 @@ def main(args: list[str]) -> None:
     _attach_openreward_config(config)
 
     train_dataset = Dataset.from_list(get_task_records(config.openreward))
-    val_dataset = (
-        Dataset.from_list(get_task_records(config.openreward, evaluation=True))
-        if config.valid_dataset is not None
-        else None
-    )
+    val_dataset = Dataset.from_list(get_task_records(config.openreward, evaluation=True))
 
     with OpenRewardArealRLTrainer(
         config=config,
@@ -49,25 +45,23 @@ def main(args: list[str]) -> None:
             filter_errors=False,
         )
 
-        eval_workflow = None
-        if config.valid_dataset is not None:
-            eval_workflow_config = deepcopy(config.workflow_config)
-            eval_workflow_config.group_size = 1
-            # Datum sampling is a training-throughput policy.  Evaluation should
-            # always retain the complete trajectory tree.
-            eval_workflow_config.subagent_datum_keep_probability = 1.0
-            eval_workflow_config.filter_zero_advantage_datums = False
+        eval_workflow_config = deepcopy(config.workflow_config)
+        eval_workflow_config.group_size = 1
+        # Datum sampling is a training-throughput policy.  Evaluation should
+        # always retain the complete trajectory tree.
+        eval_workflow_config.subagent_datum_keep_probability = 1.0
+        eval_workflow_config.filter_zero_advantage_datums = False
 
-            eval_workflow = GroupRolloutWorkflow(
-                run_rollout,
-                get_task,
-                eval_workflow_config,
-                trainer.eval_proxy_base_url or trainer.proxy_base_url,
-                trainer.proxy_admin_api_key,
-                output_subdir="eval_rollout",
-                reward_processor=reward_processor,
-                filter_errors=False,
-            )
+        eval_workflow = GroupRolloutWorkflow(
+            run_rollout,
+            get_task,
+            eval_workflow_config,
+            trainer.eval_proxy_base_url or trainer.proxy_base_url,
+            trainer.proxy_admin_api_key,
+            output_subdir="eval_rollout",
+            reward_processor=reward_processor,
+            filter_errors=False,
+        )
 
         trainer.train(
             workflow=workflow,

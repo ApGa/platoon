@@ -7,6 +7,7 @@ import random
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from torch.utils.data import Sampler
@@ -15,104 +16,19 @@ TInput = TypeVar("TInput")
 TResult = TypeVar("TResult")
 
 
-class AcceptedEnvironmentBatchObserver:
-    """Observe native asynchronous accepted batches without changing dispatch.
+@dataclass
+class _StrictBatchState:
+    """Bookkeeping for one exact-quota optimizer batch."""
 
-    The balanced sampler controls submission order, while AReaL's native
-    dispatcher returns whichever valid groups finish first. Results retain a
-    task ID but not their original input row, so remember that small piece of
-    metadata as inputs are consumed and summarize it after the native method
-    returns. Delegating to the original method preserves its prefetch,
-    staleness, rejection, and dynamic-batch behavior exactly.
-    """
-
-    def __init__(
-        self,
-        environment_order: Sequence[str],
-        *,
-        input_environment: Callable[[TInput], str],
-    ) -> None:
-        self.environment_order = list(dict.fromkeys(map(str, environment_order)))
-        if not self.environment_order:
-            raise ValueError("Accepted-environment observation requires at least one environment")
-        self._known_environments = frozenset(self.environment_order)
-        self._input_environment = input_environment
-        self._pending_environments: dict[int, str] = {}
-        self.last_accepted_counts: Counter[str] = Counter()
-        self.last_accepted_total = 0
-        self.last_unknown_results = 0
-
-    def _observed_inputs(
-        self,
-        input_generator: Generator[TInput, None, None],
-    ) -> Iterator[TInput]:
-        for task_input in input_generator:
-            task_id = getattr(task_input, "task_id", None)
-            if not isinstance(task_id, bool) and isinstance(task_id, int):
-                try:
-                    environment = str(self._input_environment(task_input))
-                except Exception:
-                    # Telemetry must never make an otherwise valid rollout fail.
-                    pass
-                else:
-                    self._pending_environments[task_id] = environment
-            yield task_input
-
-    def _record_results(self, dispatcher: Any, results: Sequence[TResult]) -> None:
-        accepted_counts: Counter[str] = Counter()
-        unknown_results = 0
-        for result in results:
-            task_id = getattr(result, "task_id", None)
-            environment = self._pending_environments.pop(task_id, None)
-            if environment not in self._known_environments:
-                unknown_results += 1
-                continue
-            accepted_counts[environment] += 1
-
-        # Native AReaL removes accepted and rejected IDs from this set. Using
-        # it when available prevents rejected-input labels from accumulating;
-        # pending prefetched tasks remain mapped for a later optimizer batch.
-        active_task_ids = getattr(dispatcher, "_active_task_ids", None)
-        if isinstance(active_task_ids, set):
-            try:
-                active_snapshot = set(active_task_ids)
-            except RuntimeError:
-                # A concurrent mutation is harmless; defer cleanup to the next
-                # completed batch instead of risking training for observability.
-                active_snapshot = None
-            if active_snapshot is not None:
-                self._pending_environments = {
-                    task_id: environment
-                    for task_id, environment in self._pending_environments.items()
-                    if task_id in active_snapshot
-                }
-
-        self.last_accepted_counts = accepted_counts
-        self.last_accepted_total = len(results)
-        self.last_unknown_results = unknown_results
-
-    def install(self, dispatcher: Any) -> None:
-        existing = getattr(dispatcher, "_platoon_accepted_environment_observer", None)
-        if existing is not None and existing is not self:
-            raise RuntimeError("An accepted-environment observer is already installed")
-
-        native_active_submit_and_wait = dispatcher.active_submit_and_wait
-
-        def _active_submit_and_wait(
-            input_generator: Generator[TInput, None, None],
-            batch_size: int,
-            dynamic_bs: bool = False,
-        ) -> list[TResult]:
-            results = native_active_submit_and_wait(
-                self._observed_inputs(input_generator),
-                batch_size,
-                dynamic_bs,
-            )
-            self._record_results(dispatcher, results)
-            return results
-
-        dispatcher._platoon_accepted_environment_observer = self
-        dispatcher.active_submit_and_wait = _active_submit_and_wait
+    batch_index: int
+    target_slots: list[str]
+    target_counts: Counter[str]
+    accepted_counts: Counter[str] = field(default_factory=Counter)
+    attempt_counts: Counter[str] = field(default_factory=Counter)
+    discarded_input_counts: Counter[str] = field(default_factory=Counter)
+    accepted_results: list[Any] = field(default_factory=list)
+    submitted_labels: dict[int, str] = field(default_factory=dict)
+    retry_rounds: int = 0
 
 
 class StrictEnvironmentBatchCoordinator:

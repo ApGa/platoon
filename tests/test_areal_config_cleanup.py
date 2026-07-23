@@ -165,6 +165,34 @@ def test_minimal_platoon_first_config_parses_and_injects_loss_settings():
     assert not hasattr(parsed.valid_dataset, "type")
 
 
+def test_token_efficiency_reward_config_parses_and_validates():
+    config_mod = _load_config_module()
+
+    workflow = config_mod.WorkflowConfig(
+        token_efficiency_reward={
+            "enabled": True,
+            "coefficient": 0.05,
+            "reference_tokens": 20_000,
+            "max_penalty": 0.2,
+            "input_token_weight": 0.01,
+            "output_token_weight": 1.0,
+            "attribution": "policy_subtree",
+        }
+    )
+    assert workflow.token_efficiency_reward.enabled is True
+    assert workflow.token_efficiency_reward.reference_tokens == 20_000
+    assert workflow.token_efficiency_reward.input_token_weight == 0.01
+
+    with pytest.raises(ValueError, match="reference_tokens must be positive"):
+        config_mod.TokenEfficiencyRewardConfig(enabled=True, reference_tokens=0)
+    with pytest.raises(ValueError, match="at least one positive token weight"):
+        config_mod.TokenEfficiencyRewardConfig(
+            enabled=True,
+            input_token_weight=0,
+            output_token_weight=0,
+        )
+
+
 def test_removed_top_level_legacy_keys_are_rejected():
     config_mod = _load_config_module()
     schema = OmegaConf.structured(config_mod.PlatoonArealRLTrainerConfig)
@@ -352,6 +380,17 @@ def test_mixed_recursive_r3_fp32_yaml_composes_balancing_and_child_policies():
     assert composed.openreward.subagent_environment_access == "read_only"
     assert composed.openreward.subagent_default_max_steps == 50
     assert composed.openreward.subagent_max_depth == 2
+    assert composed.openreward.balance_accepted_batches is False
+    assert composed.train_dataset.batch_size == 8
+    assert composed.rollout.consumer_batch_size == 8
+    assert composed.workflow_config.group_size == 8
+    assert composed.workflow_config.straggler_quorum == 6
+    assert composed.workflow_config.min_successful_group_size == 4
+    assert composed.rollout.request_timeout == 12600
+    assert composed.rollout.agent.session_timeout_seconds == 7200
+    assert composed.recover.freq_epochs is None
+    assert composed.recover.freq_steps == 1
+    assert composed.recover.freq_secs is None
     assert composed.workflow_config.depth_level_weighting is True
     assert composed.workflow_config.depth_level_discount_gamma is None
     assert composed.workflow_config.leave_one_out_baseline is True

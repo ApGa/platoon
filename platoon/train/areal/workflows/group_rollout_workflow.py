@@ -38,7 +38,9 @@ from platoon.utils.rollout_workload import (
     trajectory_collection_shape,
 )
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
-from platoon.utils.trajectory_status import trajectory_was_interrupted
+from platoon.utils.token_efficiency import (
+    annotate_policy_subtree_token_efficiency,
+)
 
 if TYPE_CHECKING:
     from concurrent.futures import ProcessPoolExecutor
@@ -122,9 +124,26 @@ def _interaction_token_counts(interaction: Any) -> tuple[int, int]:
     return total_tokens - output_tokens, output_tokens
 
 
+def _completion_token_counts(completions: dict[str, Any]) -> dict[str, tuple[int, int]]:
+    """Measure every valid exported request exactly once."""
+
+    counts: dict[str, tuple[int, int]] = {}
+    for completion_id, completion in completions.items():
+        try:
+            counts[completion_id] = _interaction_token_counts(completion)
+        except Exception:
+            logger.warning(
+                "Unable to account tokens for exported interaction %s; training-data processing remains independent",
+                completion_id,
+                exc_info=True,
+            )
+    return counts
+
+
 def _rollout_workload(
     trajectory_data: dict | None,
     completions: dict[str, Any],
+    completion_token_counts: dict[str, tuple[int, int]] | None = None,
 ) -> RolloutWorkload:
     """Account for raw recursive work without affecting training eligibility.
 
@@ -136,21 +155,10 @@ def _rollout_workload(
     """
 
     trajectory_count, environment_steps = trajectory_collection_shape(trajectory_data)
-    input_tokens = 0
-    output_tokens = 0
-    for completion_id, completion in completions.items():
-        try:
-            prompt_count, output_count = _interaction_token_counts(completion)
-        except Exception:
-            logger.warning(
-                "Unable to account tokens for exported interaction %s; "
-                "training-data processing remains independent",
-                completion_id,
-                exc_info=True,
-            )
-            continue
-        input_tokens += prompt_count
-        output_tokens += output_count
+    if completion_token_counts is None:
+        completion_token_counts = _completion_token_counts(completions)
+    input_tokens = sum(counts[0] for counts in completion_token_counts.values())
+    output_tokens = sum(counts[1] for counts in completion_token_counts.values())
     return RolloutWorkload(
         environment_steps=environment_steps,
         model_calls=len(completions),
@@ -233,26 +241,6 @@ def _measure_zero_centered_reward_candidates(train_data: dict) -> dict[str, floa
             per_datum_attention_tokens[zero_reward.to(per_datum_attention_tokens.device)].sum().item()
         ),
     }
-
-
-def _result_counts_toward_straggler_quorum(result: Any) -> bool:
-    """Count returned results unless they explicitly contain an interrupted root.
-
-    Older/custom rollout functions may return shapes other than Platoon's
-    trajectory-collection dictionary. Preserve their historical non-None
-    behavior; only the canonical shape gives us enough evidence to reject an
-    interrupted partial root from the completed-root quorum.
-    """
-
-    if result is None:
-        return False
-    if not isinstance(result, dict):
-        return True
-    trajectories = result.get("trajectories")
-    if not isinstance(trajectories, dict) or not trajectories:
-        return True
-    root_trajectory = next(iter(trajectories.values()))
-    return not trajectory_was_interrupted(root_trajectory)
 
 
 class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
@@ -833,7 +821,8 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         # is None. The proxy can still contain completed model interactions
         # from work performed before a timeout/cancellation.
         completions = await session.export_interactions()
-        workload = _rollout_workload(trajectory_data, completions)
+        completion_token_counts = _completion_token_counts(completions)
+        workload = _rollout_workload(trajectory_data, completions, completion_token_counts)
         observed = trajectory_data is not None
         if trajectory_data is None:
             logger.warning("Rollout %s returned None for task %s", rollout_number, task_id)
@@ -841,6 +830,32 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         if not trajectory_data.get("trajectories"):
             logger.warning("No trajectories found for task %s rollout %s", task_id, rollout_number)
             return _ProcessedRolloutResult(None, workload, observed)
+
+        efficiency_config = getattr(self.config, "token_efficiency_reward", None)
+        if efficiency_config is not None and efficiency_config.enabled:
+            attribution = annotate_policy_subtree_token_efficiency(
+                trajectory_data,
+                completion_token_counts,
+                coefficient=efficiency_config.coefficient,
+                reference_tokens=efficiency_config.reference_tokens,
+                max_penalty=efficiency_config.max_penalty,
+                input_token_weight=efficiency_config.input_token_weight,
+                output_token_weight=efficiency_config.output_token_weight,
+            )
+            logger.info(
+                "Policy-subtree token attribution for task %s rollout %s: "
+                "policy=%s verifier=%s attributed=%s verifier_calls=%s "
+                "ambiguous=%s unattributed=%s missing=%s",
+                task_id,
+                rollout_number,
+                attribution.policy_trajectories,
+                attribution.verifier_trajectories,
+                attribution.attributed_completions,
+                attribution.verifier_completions,
+                attribution.ambiguous_completions,
+                attribution.unattributed_completions,
+                attribution.malformed_or_missing_completions,
+            )
 
         use_depth_weighting = self.config.depth_level_weighting
         use_depth_discount = self.config.depth_level_discount_gamma is not None
@@ -999,7 +1014,7 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         rollout_tasks: dict[asyncio.Task[_SubprocessRolloutOutcome], int] = {}
         tail_cancelled = 0
         tail_cutoff_triggered = False
-        successful_outcomes = 0
+        settled_outcomes = 0
         force_pool_shutdown = False
         executor = ProcessPoolExecutor(max_workers=self.config.group_size, mp_context=mp.get_context("spawn"))
         proxy_base_url = self._require_proxy_base_url()
@@ -1051,18 +1066,20 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
                     rollout_number = rollout_tasks[task]
                     outcome = task.result()
                     outcomes[rollout_number] = outcome
-                    if _result_counts_toward_straggler_quorum(outcome.result):
-                        successful_outcomes += 1
+                    # Tail grace is relative to terminal peers, not to usable
+                    # training results. An interrupted partial or failed-closed
+                    # wrapper has still stopped making progress; excluding it
+                    # can leave the final live member waiting until its much
+                    # longer absolute rollout deadline. Training eligibility is
+                    # checked separately via min_successful_group_size.
+                    settled_outcomes += 1
                     force_pool_shutdown = force_pool_shutdown or outcome.force_pool_shutdown
 
                 if (
                     pending
                     and tail_deadline is None
                     and self.config.straggler_timeout_seconds is not None
-                    # Failed/None members do not establish the quorum.  Starting
-                    # tail grace after six fast failures could otherwise kill
-                    # the only two members capable of producing usable data.
-                    and successful_outcomes
+                    and settled_outcomes
                     >= (
                         self.config.straggler_quorum
                         if self.config.straggler_quorum is not None

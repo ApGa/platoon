@@ -10,11 +10,11 @@ actor:
   backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
   path: Qwen/Qwen3.6-35B-A3B
 
-# Equal-weight input and accepted optimizer-step mix. Strict admission prevents
-# fast environments from filling a step ahead of slower SWE groups; a rejected
-# group is replaced only by another task from the same missing quota.
+# Keep the equal-weight rotating submission mix, but consume completed groups
+# asynchronously so future rollouts overlap PPO. Accepted optimizer batches may
+# drift toward faster environments; per-environment telemetry tracks that drift.
 openreward:
-  balance_accepted_batches: true
+  balance_accepted_batches: false
   accepted_batch_max_replacement_rounds: 8
   environments:
     - label: toolathlon
@@ -56,16 +56,35 @@ openreward:
       max_tool_calls: 0
       sampling_weight: 1.0
 
-# Match the proven 32-node recursive tail policy. Once six usable members of a
-# group finish, give the remaining two 15 more minutes before reaping their
-# dedicated subprocesses. A group with fewer than four usable members is
-# rejected and the strict mixture coordinator replaces it from the same
-# environment quota.
+# Keep the requested 8x8 batch: eight task groups per optimizer step and eight
+# trajectories per group. Six completed members arm the proven 15-minute tail
+# grace; groups with at least four usable members can still train after tails
+# are reaped.
+train_dataset:
+  batch_size: 8
+
 workflow_config:
+  group_size: 8
   straggler_timeout_seconds: 900
   straggler_quorum: 6
   subprocess_shutdown_grace_seconds: 10
   min_successful_group_size: 4
+
+# The controller's inherited 3600s request deadline previously cancelled an
+# entire TMax group before its internal 3600s rollout bound plus tail cleanup
+# could return partial members. Match the proven recursive-job envelopes so the
+# workflow owns rollout/tail termination and the controller only backstops it.
+rollout:
+  request_timeout: 12600
+  agent:
+    session_timeout_seconds: 7200
+
+# Every update costs roughly an hour, so make each completed update durable.
+# Time-based recovery previously let a completed step disappear on requeue.
+recover:
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
 
 # Keep the same 48 selected task groups per epoch as the original small
 # Toolathlon trial (6 global batches x 8 tasks), now split 1:1:1.

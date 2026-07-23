@@ -1,0 +1,84 @@
+defaults:
+  - toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-r3-fp32-lm-head
+  - _self_
+
+# The preallocation wrapper reads these fields before Hydra composition.
+# Keep the replacement on the untouched base model; the unique trial below
+# prevents recovery from the earlier truncated mixed run.
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking
+
+openreward:
+  # Preserve equal-weight task submission while accepting completed groups
+  # asynchronously. Faster environments may contribute somewhat more to an
+  # individual update, but all three continue rotating in steady state.
+  balance_accepted_batches: false
+  accepted_batch_max_replacement_rounds: 8
+
+  # Expose the persistent Python and task-planning tools without enabling
+  # launch_subagent or any recursive/delegation prompt.
+  enable_programmatic_tool_calling: true
+  enable_task_tracker: true
+  enable_recursive_subagents: false
+
+  # Use every task in every training catalog. Eval is disabled below, and its
+  # limits are also explicitly null so this config contains no hidden truncation.
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      split: train
+      eval_split: train
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+    - label: tmax
+      env_name: tmax/TMax-15K-Harbor
+      split: train
+      eval_split: train
+      session_url: http://localhost:8083
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TMAX
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+    - label: swe_rebench
+      env_name: nebius/SWE-rebench-V2
+      subagent_environment_access: read_only
+      split: train
+      eval_split: train
+      session_url: http://localhost:8084
+      session_urls_env_var: OPENREWARD_SESSION_URLS_SWE_REBENCH
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+# Keep the requested optimizer shape.
+train_dataset:
+  batch_size: 8
+
+workflow_config:
+  group_size: 8
+
+# Do not construct or schedule an evaluation set for this throughput run.
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+trial_name: toolathlon-tmax-swe-openhands-16node-qwen3.6-35B-ptc-task-tracker-full-r3-fp32-lm-head-trial0
+
+stats_logger:
+  wandb:
+    project: openreward-multienv-openhands

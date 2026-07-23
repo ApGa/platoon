@@ -67,14 +67,7 @@ def _load_areal_trainer(monkeypatch):
     _install_openreward_package(monkeypatch)
 
     class BaseTrainer:
-        def _postprocess_rollout_batch(
-            self,
-            rollout_batch,
-            global_step,
-            epoch,
-            epoch_step,
-        ):
-            return rollout_batch
+        pass
 
     class StatefulDataLoader:
         def __init__(self, dataset, **kwargs):
@@ -83,7 +76,7 @@ def _load_areal_trainer(monkeypatch):
             self.sampler = kwargs["sampler"]
 
     _module(monkeypatch, "areal")
-    _module(monkeypatch, "areal.utils", stats_tracker=types.SimpleNamespace(scalar=lambda **_: None))
+    _module(monkeypatch, "areal.utils", stats_tracker=types.SimpleNamespace())
     _module(monkeypatch, "platoon.train.areal", PlatoonArealRLTrainer=BaseTrainer)
     _module(monkeypatch, "torchdata")
     _module(
@@ -149,36 +142,6 @@ def test_areal_trainer_keeps_training_sampler_when_validation_is_also_mixed(monk
     assert valid_loader.batch_size == 12
     assert trainer._openreward_train_sampler is train_loader.sampler
     assert valid_loader.sampler is not train_loader.sampler
-
-
-def test_async_accepted_environment_mix_is_logged_without_strict_admission(monkeypatch):
-    trainer_module = _load_areal_trainer(monkeypatch)
-    captured = {}
-    monkeypatch.setattr(
-        trainer_module.stats_tracker,
-        "scalar",
-        lambda **metrics: captured.update(metrics),
-    )
-    trainer = trainer_module.OpenRewardArealRLTrainer.__new__(trainer_module.OpenRewardArealRLTrainer)
-    trainer._strict_environment_batches = None
-    trainer._accepted_environment_observer = types.SimpleNamespace(
-        environment_order=["toolathlon", "tmax", "swe_rebench"],
-        last_accepted_counts=Counter({"toolathlon": 2, "tmax": 1}),
-        last_accepted_total=4,
-        last_unknown_results=1,
-    )
-    rollout_batch = [{"input_ids": "untouched"}]
-
-    assert trainer._postprocess_rollout_batch(rollout_batch, 7, 1, 2) is rollout_batch
-    assert captured["openreward/accepted_batch/strict"] == 0.0
-    assert captured["openreward/accepted_batch/toolathlon/groups"] == 2.0
-    assert captured["openreward/accepted_batch/toolathlon/fraction"] == 0.5
-    assert captured["openreward/accepted_batch/tmax/groups"] == 1.0
-    assert captured["openreward/accepted_batch/tmax/fraction"] == 0.25
-    assert captured["openreward/accepted_batch/swe_rebench/groups"] == 0.0
-    assert captured["openreward/accepted_batch/swe_rebench/fraction"] == 0.0
-    assert captured["openreward/accepted_batch/unknown_groups"] == 1.0
-    assert captured["openreward/accepted_batch/unknown_fraction"] == 0.25
 
 
 def test_mixed_config_defaults_to_equal_weights_and_validates_labels(monkeypatch):
@@ -521,54 +484,6 @@ def _strict_batch_input_stream(environment_batches):
                     data={"environment": environment},
                 )
                 task_id += 1
-
-
-def test_async_accepted_environment_observer_preserves_native_prefetch():
-    sampler_module = _load_mixture_module()
-
-    class Dispatcher:
-        def __init__(self):
-            self._active_task_ids = set()
-            self.pending = {}
-            self.submitted = []
-            self.plans = [[1, 2, 4], [0, 3, 5]]
-            self.native_calls = []
-
-        def active_submit_and_wait(self, input_generator, batch_size, dynamic_bs=False):
-            self.native_calls.append((batch_size, dynamic_bs))
-            while len(self.pending) < 2 * batch_size:
-                task_input = next(input_generator)
-                self.pending[task_input.task_id] = task_input
-                self.submitted.append(task_input)
-                self._active_task_ids.add(task_input.task_id)
-            selected = self.plans.pop(0)
-            results = []
-            for task_id in selected:
-                self.pending.pop(task_id)
-                self._active_task_ids.remove(task_id)
-                results.append(types.SimpleNamespace(task_id=task_id))
-            return results
-
-    dispatcher = Dispatcher()
-    observer = sampler_module.AcceptedEnvironmentBatchObserver(
-        ["a", "b", "c"],
-        input_environment=lambda task_input: task_input.data["environment"],
-    )
-    observer.install(dispatcher)
-    input_stream = _strict_batch_input_stream([["a", "b", "c"]])
-
-    first = dispatcher.active_submit_and_wait(input_stream, batch_size=3)
-    assert [result.task_id for result in first] == [1, 2, 4]
-    assert observer.last_accepted_counts == Counter({"b": 2, "c": 1})
-    assert observer.last_accepted_total == 3
-    assert observer.last_unknown_results == 0
-
-    second = dispatcher.active_submit_and_wait(input_stream, batch_size=3, dynamic_bs=True)
-    assert [result.task_id for result in second] == [0, 3, 5]
-    assert observer.last_accepted_counts == Counter({"a": 2, "c": 1})
-    assert dispatcher.native_calls == [(3, False), (3, True)]
-    assert [task.data["environment"] for task in dispatcher.submitted] == list("abcabcabc")
-    assert observer._pending_environments == {6: "a", 7: "b", 8: "c"}
 
 
 class _StrictBatchDispatcher:

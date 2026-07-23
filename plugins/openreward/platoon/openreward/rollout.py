@@ -219,11 +219,12 @@ def _configure_openhands_agent(
             with_programmatic_tool_calling(configured_agent),
         )
         suffix_parts.append(PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX)
-    if openreward_config.enable_recursive_subagents:
+    if openreward_config.enable_task_tracker or openreward_config.enable_recursive_subagents:
         configured_agent = cast(
             OpenHandsSDKAgent,
             with_task_tracker_tool(configured_agent),
         )
+    if openreward_config.enable_recursive_subagents:
         suffix_parts.append(RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX)
         user_suffix_parts.append(RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX)
         if openreward_config.subagent_max_depth is not None:

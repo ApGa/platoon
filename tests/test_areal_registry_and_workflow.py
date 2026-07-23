@@ -177,28 +177,6 @@ def test_group_rollout_workflow_exports_primary_class():
     assert not hasattr(workflow_mod, "StepWiseArealWorkflow")
 
 
-def test_interrupted_partial_root_does_not_satisfy_straggler_quorum():
-    workflow_mod = _load_group_workflow_module()
-
-    partial = {
-        "trajectories": {
-            "root": {
-                "misc": {"trajectory_timed_out": True},
-                "error_message": "Episode timed out",
-            },
-            "completed-child": {"misc": {}},
-        }
-    }
-    complete = {"trajectories": {"root": {"misc": {}}}}
-
-    assert not workflow_mod._result_counts_toward_straggler_quorum(None)
-    assert not workflow_mod._result_counts_toward_straggler_quorum(partial)
-    assert workflow_mod._result_counts_toward_straggler_quorum(complete)
-    # Unknown legacy/custom shapes retain the old non-None success semantics.
-    assert workflow_mod._result_counts_toward_straggler_quorum({"rollout": 0})
-    assert workflow_mod._result_counts_toward_straggler_quorum("legacy-result")
-
-
 def test_areal_rollout_workload_counts_raw_recursive_tree_and_unique_exports():
     workflow_mod = _load_group_workflow_module()
 
@@ -880,8 +858,8 @@ async def test_zero_variance_filter_ignores_policy_excluded_verifier_rewards():
 
 
 @pytest.mark.asyncio
-async def test_group_tail_kills_process_pool_before_waiting_for_cancelled_wrapper(monkeypatch):
-    """Cancellation-suppressing SDK code cannot deadlock straggler cleanup."""
+async def test_group_tail_counts_interrupted_members_before_killing_process_pool(monkeypatch):
+    """Four usable plus three interrupted peers arm grace for the last member."""
 
     workflow_mod = _load_group_workflow_module()
     events: list[str] = []
@@ -915,9 +893,9 @@ async def test_group_tail_kills_process_pool_before_waiting_for_cancelled_wrappe
 
     workflow = workflow_mod.GroupRolloutWorkflow.__new__(workflow_mod.GroupRolloutWorkflow)
     workflow.config = types.SimpleNamespace(
-        group_size=2,
+        group_size=8,
         straggler_timeout_seconds=0.01,
-        straggler_quorum=1,
+        straggler_quorum=6,
         subprocess_shutdown_grace_seconds=0.0,
     )
     workflow.proxy_base_url = "http://proxy"
@@ -925,10 +903,22 @@ async def test_group_tail_kills_process_pool_before_waiting_for_cancelled_wrappe
 
     async def fake_run(self, executor, engine, task_id, rollout_number, session):
         _ = self, executor, engine, task_id, session
-        if rollout_number == 0:
+        if rollout_number < 4:
             return workflow_mod._SubprocessRolloutOutcome(
-                result={"rollout": 0},
+                result={"rollout": rollout_number},
                 elapsed_seconds=0.001,
+            )
+        if rollout_number < 7:
+            return workflow_mod._SubprocessRolloutOutcome(
+                result={
+                    "trajectories": {
+                        "root": {
+                            "misc": {"trajectory_timed_out": True},
+                            "error_message": "Episode timed out",
+                        }
+                    }
+                },
+                elapsed_seconds=0.002,
             )
         try:
             await asyncio.Future()
@@ -960,6 +950,12 @@ async def test_group_tail_kills_process_pool_before_waiting_for_cancelled_wrappe
         timeout=0.5,
     )
 
-    assert result == [{"rollout": 0}, None]
+    assert [result[index]["rollout"] for index in range(4)] == list(range(4))
+    assert all(
+        result[index]["trajectories"]["root"]["misc"]["trajectory_timed_out"]
+        for index in range(4, 7)
+    )
+    assert result[7] is None
     assert events.index("terminate") < events.index("wrapper_released")
     assert "shutdown:False:True" in events
+    assert workflow_mod._test_recording_tracker.values["group_tail_cancelled"] == [1.0]

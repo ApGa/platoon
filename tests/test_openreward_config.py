@@ -109,17 +109,20 @@ def _load_openreward_env_module(monkeypatch):
     return __import__("platoon.openreward.env", fromlist=["OpenRewardOpenHandsEnv"])
 
 
-def test_openreward_config_splits_ptc_and_recursion_flags():
+def test_openreward_config_splits_ptc_task_tracker_and_recursion_flags():
     config_mod = _load_openreward_config_module()
     config = config_mod.OpenRewardConfig.from_mapping(
         {
             "enable_programmatic_tool_calling": True,
+            "enable_task_tracker": True,
             "enable_recursive_subagents": False,
             "subagent_max_depth": 2,
         }
     )
 
     assert config.enable_programmatic_tool_calling is True
+    assert config.enable_task_tracker is True
+    assert config_mod.OpenRewardConfig().enable_task_tracker is False
     assert config.enable_recursive_subagents is False
     assert config.subagent_max_depth == 2
 
@@ -185,6 +188,40 @@ def test_openreward_reward_processor_uses_subagent_judgment(monkeypatch):
     assert "reward/subagent_success_rate" not in components
     assert components["reward/delegation_bonus"] == 0.0
     assert components["reward/total"] == 0.75
+
+
+def test_openreward_reward_processor_subtracts_efficiency_as_aux_penalty(monkeypatch):
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rewards", raising=False)
+    rewards_mod = __import__("platoon.openreward.rewards", fromlist=["reward_processor"])
+
+    reward, components = rewards_mod.reward_processor(
+        {
+            "reward": 0.0,
+            "misc": {
+                "subagent_reward_judgment": {"score": 0.75},
+                "policy_subtree_token_efficiency": {
+                    "penalty": 0.05,
+                    "self_input_tokens": 100,
+                    "self_output_tokens": 10,
+                    "self_effective_tokens": 11.0,
+                    "subtree_input_tokens": 300,
+                    "subtree_output_tokens": 30,
+                    "subtree_effective_tokens": 33.0,
+                    "subtree_policy_trajectories": 2,
+                    "normalized_cost": 1.0,
+                },
+            },
+            "steps": [],
+        }
+    )
+
+    assert reward == pytest.approx(0.70)
+    assert components["reward/success"] == 0.75
+    assert components["reward/efficiency_penalty"] == 0.05
+    assert components["reward/total_before_efficiency"] == 0.75
+    assert components["reward/total"] == pytest.approx(0.70)
+    assert components["efficiency/subtree_policy_trajectories"] == 2.0
 
 
 def test_openreward_recursive_delegation_bonus_is_direct_and_non_compounding(monkeypatch):

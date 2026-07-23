@@ -26,13 +26,16 @@ from openhands.sdk.tool import (
 )
 
 PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX = (
-    "When programmatic_tool_calling is available, use it for multi-step tool "
+    "When programmatic_tool_calling (PTC) is available, use it for multi-step tool "
     "orchestration, persistent Python state, and concurrent independent work.\n\n"
     "Inside programmatic_tool_calling, OpenHands tools are available as Python "
     "callables. Use `await asyncio.gather(...)` when launching independent async "
     "tool calls concurrently. Store observations in variables, inspect their "
     "`.text` when needed, combine the results in Python, and then continue with "
-    "the task."
+    "the task. Do not use PTC to perform fileIO, OS or system operations directly "
+    "in via python packages or modules. Instead, you may interact with filesystem using the tools "
+    "provided to you (which you may call using PTC if you would like to). To summarize, "
+    "PTC provides you with a powerful runtime to call and orchestrate other tool calls."
 )
 
 RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (

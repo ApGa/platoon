@@ -3,6 +3,12 @@
 # Start one of the host-native OpenReward environments used by the mixed
 # training launcher.  The Python server stays on the host because both TMax and
 # SWE-rebench create writable Enroot task containers themselves.
+#
+# Both backends put every model-authored command in a session-private PID
+# namespace. Keep the server and its restart supervisor in the job's original
+# user namespace: Enroot's image importer needs the file capabilities on
+# enroot-aufs2ovlfs to translate OCI whiteouts, and Linux intentionally drops
+# those host capabilities inside a nested user namespace.
 
 set -euo pipefail
 
@@ -24,6 +30,94 @@ export ENROOT_MAX_PROCESSORS=${OPENREWARD_ENROOT_MAX_PROCESSORS:-4}
 export ENROOT_MOUNT_HOME=
 mkdir -p "${ENROOT_CACHE_PATH}" "${ENROOT_DATA_PATH}" "${ENROOT_RUNTIME_PATH}"
 
+MAX_RESTARTS=${OPENREWARD_SUPPLEMENTAL_SERVER_MAX_RESTARTS:-20}
+RESTART_RESET_SECS=${OPENREWARD_SUPPLEMENTAL_SERVER_RESTART_RESET_SECS:-300}
+BACKOFF_INITIAL_SECS=${OPENREWARD_SUPPLEMENTAL_SERVER_RESTART_BACKOFF_INITIAL_SECS:-1}
+BACKOFF_MAX_SECS=${OPENREWARD_SUPPLEMENTAL_SERVER_RESTART_BACKOFF_MAX_SECS:-30}
+
+require_uint() {
+  local name=$1
+  local value=$2
+  local minimum=$3
+  if [[ -z "${value}" || "${value}" == *[!0-9]* ]] || ((10#${value} < minimum)); then
+    echo "ERROR: ${name} must be an integer >= ${minimum}; got ${value@Q}." >&2
+    exit 2
+  fi
+}
+
+require_uint OPENREWARD_SUPPLEMENTAL_SERVER_MAX_RESTARTS "${MAX_RESTARTS}" 0
+require_uint OPENREWARD_SUPPLEMENTAL_SERVER_RESTART_RESET_SECS "${RESTART_RESET_SECS}" 1
+require_uint OPENREWARD_SUPPLEMENTAL_SERVER_RESTART_BACKOFF_INITIAL_SECS "${BACKOFF_INITIAL_SECS}" 0
+require_uint OPENREWARD_SUPPLEMENTAL_SERVER_RESTART_BACKOFF_MAX_SECS "${BACKOFF_MAX_SECS}" 0
+
+server_pid=
+stop_requested=0
+
+request_stop() {
+  stop_requested=1
+  if [[ -n "${server_pid}" ]] && kill -0 "${server_pid}" 2>/dev/null; then
+    kill -TERM "${server_pid}" 2>/dev/null || true
+  fi
+}
+
+trap request_stop TERM INT
+
+restart_backoff() {
+  local attempt=$1
+  local delay=${BACKOFF_INITIAL_SECS}
+  local n
+  for ((n = 1; n < attempt; n++)); do
+    if ((delay >= BACKOFF_MAX_SECS)); then
+      break
+    fi
+    delay=$((delay * 2))
+  done
+  if ((delay > BACKOFF_MAX_SECS)); then
+    delay=${BACKOFF_MAX_SECS}
+  fi
+  printf '%s' "${delay}"
+}
+
+supervise_server() {
+  local failures=0
+  local started_at
+  local runtime
+  local status
+  local delay
+
+  while ((stop_requested == 0)); do
+    started_at=${SECONDS}
+    "$@" &
+    server_pid=$!
+    set +e
+    wait "${server_pid}"
+    status=$?
+    set -e
+
+    if ((stop_requested)); then
+      kill -TERM "${server_pid}" 2>/dev/null || true
+      wait "${server_pid}" 2>/dev/null || true
+      server_pid=
+      return 0
+    fi
+    server_pid=
+
+    runtime=$((SECONDS - started_at))
+    if ((runtime >= RESTART_RESET_SECS)); then
+      failures=0
+    fi
+    failures=$((failures + 1))
+    if ((failures > MAX_RESTARTS)); then
+      echo "ERROR: ${KIND} server exhausted its restart budget after status=${status}." >&2
+      ((status == 0)) && status=1
+      return "${status}"
+    fi
+    delay=$(restart_backoff "${failures}")
+    echo "WARNING: ${KIND} server exited unexpectedly (status=${status}, runtime=${runtime}s); restart ${failures}/${MAX_RESTARTS} in ${delay}s." >&2
+    sleep "${delay}"
+  done
+}
+
 require_source_revision() {
   local repository=$1
   local expected=$2
@@ -42,7 +136,7 @@ require_source_revision() {
 case "${KIND}" in
   tmax)
     ENV_ROOT=${REPO_ROOT}/external/tmax
-    TMAX_SOURCE_REVISION=${TMAX_SOURCE_REVISION:-00607489e4a433f24db3b791185b0d1f652246cb}
+    TMAX_SOURCE_REVISION=${TMAX_SOURCE_REVISION:-e46281fd8b076a3e06da767f6896115075c614de}
     require_source_revision "${ENV_ROOT}" "${TMAX_SOURCE_REVISION}"
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
     [[ -x "${PYTHON}" ]] || {
@@ -59,11 +153,11 @@ case "${KIND}" in
     export TMAX_ENROOT_IMAGE_CACHE=${TMAX_ENROOT_IMAGE_CACHE:-${REPO_ROOT}/.cache/tmax-enroot-images}
     mkdir -p "${TMAX_HF_CACHE_DIR}" "${TMAX_HF_EXTRACT_DIR}" "${TMAX_ENROOT_IMAGE_CACHE}"
     cd "${ENV_ROOT}"
-    exec "${PYTHON}" -m openreward_env.server
+    SERVER_COMMAND=("${PYTHON}" -m openreward_env.server)
     ;;
   swe_rebench)
     ENV_ROOT=${REPO_ROOT}/external/swe-rebench-v2-openrewardenv
-    SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-5beda9ea96009aafd9a5b993135e50aadc5e9ac7}
+    SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-663369667fae3c71e58f48a18fcc09d11e76985f}
     require_source_revision "${ENV_ROOT}" "${SWE_REBENCH_SOURCE_REVISION}"
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
     DATA_DIR=${SWE_REBENCH_DATA_DIR:-${REPO_ROOT}/.cache/swe-rebench-v2}
@@ -82,10 +176,12 @@ case "${KIND}" in
     export SWE_ENROOT_IMAGE_CACHE=${SWE_ENROOT_IMAGE_CACHE:-${REPO_ROOT}/.cache/swe-rebench-enroot-images}
     mkdir -p "${SWE_ENROOT_IMAGE_CACHE}"
     cd "${ENV_ROOT}"
-    exec "${PYTHON}" server.py
+    SERVER_COMMAND=("${PYTHON}" server.py)
     ;;
   *)
     echo "ERROR: unsupported OpenReward environment kind: ${KIND}" >&2
     exit 2
     ;;
 esac
+
+supervise_server "${SERVER_COMMAND[@]}"

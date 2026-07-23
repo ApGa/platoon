@@ -9,6 +9,7 @@ from platoon.train.areal import PlatoonArealRLTrainer
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from platoon.openreward.mixture import (
+    AcceptedEnvironmentBatchObserver,
     BalancedEnvironmentSampler,
     StrictEnvironmentBatchCoordinator,
 )
@@ -31,6 +32,7 @@ class OpenRewardArealRLTrainer(PlatoonArealRLTrainer):
     ) -> None:
         self._openreward_train_sampler: BalancedEnvironmentSampler | None = None
         self._strict_environment_batches: StrictEnvironmentBatchCoordinator | None = None
+        self._accepted_environment_observer: AcceptedEnvironmentBatchObserver | None = None
         if config.openreward.is_mixture and config.openreward.balance_accepted_batches and config.dynamic_bs:
             raise ValueError("OpenReward balance_accepted_batches=true is incompatible with dynamic_bs=true")
 
@@ -54,6 +56,16 @@ class OpenRewardArealRLTrainer(PlatoonArealRLTrainer):
             )
             coordinator.install(self.rollout.dispatcher)
             self._strict_environment_batches = coordinator
+        elif config.openreward.is_mixture:
+            sampler = self._openreward_train_sampler
+            if sampler is None:
+                raise RuntimeError("OpenReward mixture expected a mixed training sampler")
+            observer = AcceptedEnvironmentBatchObserver(
+                sampler.environment_order,
+                input_environment=self._task_input_environment,
+            )
+            self._accepted_environment_observer = observer
+            observer.install(self.rollout.dispatcher)
 
     @staticmethod
     def _task_input_environment(task_input: Any) -> str:
@@ -139,6 +151,24 @@ class OpenRewardArealRLTrainer(PlatoonArealRLTrainer):
                     coordinator.last_discarded_input_counts[environment]
                 )
                 metrics[f"openreward/accepted_batch/{label}/fraction"] = float(accepted) / total if total else 0.0
+            stats_tracker.scalar(**metrics)
+        elif self._accepted_environment_observer is not None:
+            observer = self._accepted_environment_observer
+            total = observer.last_accepted_total
+            metrics = {
+                "openreward/accepted_batch/strict": 0.0,
+                "openreward/accepted_batch/unknown_groups": float(observer.last_unknown_results),
+                "openreward/accepted_batch/unknown_fraction": (
+                    float(observer.last_unknown_results) / total if total else 0.0
+                ),
+            }
+            for environment in observer.environment_order:
+                label = "".join(char if char.isalnum() or char in "._-" else "_" for char in environment)
+                accepted = observer.last_accepted_counts[environment]
+                metrics[f"openreward/accepted_batch/{label}/groups"] = float(accepted)
+                metrics[f"openreward/accepted_batch/{label}/fraction"] = (
+                    float(accepted) / total if total else 0.0
+                )
             stats_tracker.scalar(**metrics)
         return super()._postprocess_rollout_batch(
             rollout_batch,

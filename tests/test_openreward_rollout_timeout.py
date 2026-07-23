@@ -32,6 +32,7 @@ def _load_rollout_module(
     *,
     agent_type=None,
     env_type=None,
+    recursive_overrides=None,
 ):
     class _AcceptsKeywords:
         def __init__(self, **kwargs):
@@ -103,17 +104,21 @@ def _load_rollout_module(
     )
     _module(monkeypatch, "platoon.openhands")
     _module(monkeypatch, "platoon.openhands.agent", OpenHandsAgent=agent_type)
+    recursive_attrs = {
+        "PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX": "",
+        "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "",
+        "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "",
+        "RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX": "",
+        "append_system_message_suffix": _identity,
+        "append_user_message_suffix": _identity,
+        "with_programmatic_tool_calling": _identity,
+        "with_task_tracker_tool": _identity,
+    }
+    recursive_attrs.update(recursive_overrides or {})
     _module(
         monkeypatch,
         "platoon.openhands.recursive",
-        PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX="",
-        RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX="",
-        RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX="",
-        RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX="",
-        append_system_message_suffix=_identity,
-        append_user_message_suffix=_identity,
-        with_programmatic_tool_calling=_identity,
-        with_task_tracker_tool=_identity,
+        **recursive_attrs,
     )
     _module(monkeypatch, "platoon.openreward.env", OpenRewardOpenHandsEnv=env_type)
 
@@ -132,6 +137,82 @@ def _load_rollout_module(
     monkeypatch.setitem(sys.modules, "platoon.openreward.rollout", module)
     spec.loader.exec_module(module)
     return module
+
+
+def _agent_configuration_spies():
+    prompts = {"system": [], "user": []}
+
+    def _with_tool(name):
+        def _configure(agent):
+            agent.tools.append(name)
+            return agent
+
+        return _configure
+
+    def _append_prompt(kind):
+        def _append(agent, suffix):
+            prompts[kind].append(suffix)
+            return agent
+
+        return _append
+
+    return prompts, {
+        "PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX": "ptc-guidance",
+        "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "recursive-initial-guidance",
+        "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "recursive-system-guidance",
+        "RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX": "recursive-user-guidance",
+        "append_system_message_suffix": _append_prompt("system"),
+        "append_user_message_suffix": _append_prompt("user"),
+        "with_programmatic_tool_calling": _with_tool("programmatic_tool_calling"),
+        "with_task_tracker_tool": _with_tool("task_tracker"),
+    }
+
+
+def test_nonrecursive_ptc_and_task_tracker_do_not_add_delegation(monkeypatch) -> None:
+    prompts, recursive_overrides = _agent_configuration_spies()
+    rollout = _load_rollout_module(
+        monkeypatch,
+        recursive_overrides=recursive_overrides,
+    )
+    agent = types.SimpleNamespace(tools=[])
+    config = rollout.OpenRewardConfig.from_mapping(
+        {
+            "enable_programmatic_tool_calling": True,
+            "enable_task_tracker": True,
+            "enable_recursive_subagents": False,
+        }
+    )
+
+    configured = rollout._configure_openhands_agent(agent, config)
+
+    assert configured.tools == ["programmatic_tool_calling", "task_tracker"]
+    assert "launch_subagent" not in configured.tools
+    assert prompts["system"] == ["ptc-guidance"]
+    assert prompts["user"] == [""]
+    assert all("recursive" not in prompt for values in prompts.values() for prompt in values)
+
+
+def test_recursive_mode_still_installs_task_tracker_and_delegation_prompts(monkeypatch) -> None:
+    prompts, recursive_overrides = _agent_configuration_spies()
+    rollout = _load_rollout_module(
+        monkeypatch,
+        recursive_overrides=recursive_overrides,
+    )
+    agent = types.SimpleNamespace(tools=[])
+    config = rollout.OpenRewardConfig.from_mapping(
+        {
+            "enable_recursive_subagents": True,
+            "subagent_max_depth": 2,
+        }
+    )
+
+    configured = rollout._configure_openhands_agent(agent, config)
+
+    assert configured.tools == ["task_tracker"]
+    assert prompts["system"] == [
+        "recursive-system-guidance\n\nRecursive subagents are limited to maximum depth 2; the root agent is depth 0."
+    ]
+    assert prompts["user"] == ["recursive-user-guidance"]
 
 
 def _counting_rollout_types(*, child_max_steps: int | None = None):

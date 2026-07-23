@@ -80,6 +80,11 @@ SERVER_MEM=${OPENREWARD_SUPPLEMENTAL_SERVER_MEM:-48G}
 SERVER_WAIT_SECS=${OPENREWARD_SUPPLEMENTAL_SERVER_WAIT_SECS:-900}
 HEALTH_CHECK_SECS=${OPENREWARD_SUPPLEMENTAL_HEALTH_CHECK_SECS:-20}
 HEALTH_FAILURE_THRESHOLD=${OPENREWARD_SUPPLEMENTAL_HEALTH_FAILURE_THRESHOLD:-3}
+# A mixed batch has at most eight concurrent roots across all environments.
+# Eight Toolathlon workers per node leave ample headroom while avoiding 512
+# mostly idle Python servers across the 16-node allocation.
+export OPENREWARD_SERVER_CPUS=${OPENREWARD_SERVER_CPUS:-8}
+export OPENREWARD_WORKERS=${OPENREWARD_WORKERS:-${OPENREWARD_SERVER_CPUS}}
 # Cold TMax/SWE tasks import multi-GB Enroot images while OpenHands waits for
 # the MCP bridge to list tools. Match the configured per-step timeout instead
 # of the rollout module's 120-second default.
@@ -115,8 +120,9 @@ export OPENREWARD_SWE_REBENCH_PORT=${SWE_PORT}
 export OPENREWARD_PORT=${TOOLATHLON_PORT}
 
 mkdir -p "${USER_ROOT}/logs"
-TMAX_LOG=${USER_ROOT}/logs/openreward-multienv-tmax-${RUN_ID}
-SWE_LOG=${USER_ROOT}/logs/openreward-multienv-swe-rebench-${RUN_ID}
+LOG_INSTANCE_ID=${SLURM_JOB_ID:-manual}
+TMAX_LOG=${USER_ROOT}/logs/openreward-multienv-tmax-${RUN_ID}-job${LOG_INSTANCE_ID}
+SWE_LOG=${USER_ROOT}/logs/openreward-multienv-swe-rebench-${RUN_ID}-job${LOG_INSTANCE_ID}
 tmax_pid=
 swe_pid=
 base_pid=

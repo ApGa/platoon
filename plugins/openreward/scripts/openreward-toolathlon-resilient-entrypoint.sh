@@ -23,6 +23,7 @@ NGINX_CONFIG=${OPENREWARD_NGINX_CONFIG:-/etc/nginx/nginx.conf}
 NGINX_PID_FILE=${OPENREWARD_NGINX_PID_FILE:-/run/nginx.pid}
 NGINX_LOG_DIR=${OPENREWARD_NGINX_LOG_DIR:-/var/log/nginx}
 SKIP_POSTGRES=${OPENREWARD_ENTRYPOINT_SKIP_POSTGRES:-0}
+WORKER_PID_ISOLATION=${OPENREWARD_WORKER_PID_ISOLATION:-1}
 
 require_uint() {
     local name=$1
@@ -58,6 +59,32 @@ fi
 if [[ "${SKIP_POSTGRES}" != 0 && "${SKIP_POSTGRES}" != 1 ]]; then
     echo "[entrypoint] OPENREWARD_ENTRYPOINT_SKIP_POSTGRES must be 0 or 1" >&2
     exit 2
+fi
+if [[ "${WORKER_PID_ISOLATION}" != 0 && "${WORKER_PID_ISOLATION}" != 1 ]]; then
+    echo "[entrypoint] OPENREWARD_WORKER_PID_ISOLATION must be 0 or 1" >&2
+    exit 2
+fi
+
+declare -a worker_namespace_args=()
+if [[ "${WORKER_PID_ISOLATION}" == 1 ]]; then
+    worker_namespace_args=(
+        unshare
+        --user
+        --map-current-user
+        --pid
+        --fork
+        --kill-child=SIGKILL
+        --mount-proc
+        --
+    )
+    if ! command -v unshare >/dev/null 2>&1; then
+        echo "[entrypoint] private worker PID isolation requires unshare" >&2
+        exit 2
+    fi
+    if ! "${worker_namespace_args[@]}" true >/dev/null 2>&1; then
+        echo "[entrypoint] this host does not permit private worker PID namespaces" >&2
+        exit 2
+    fi
 fi
 
 declare -a worker_pids=()
@@ -176,7 +203,7 @@ start_worker() {
     local pid
 
     echo "[entrypoint] starting worker ${index} on 127.0.0.1:${port}"
-    env -u OPENREWARD_PORT PORT="${port}" "${WORKER_PYTHON}" "${WORKER_APP}" &
+    "${worker_namespace_args[@]}" env -u OPENREWARD_PORT PORT="${port}" "${WORKER_PYTHON}" "${WORKER_APP}" &
     pid=$!
     worker_pids[index]=${pid}
     worker_started_at[index]=${SECONDS}

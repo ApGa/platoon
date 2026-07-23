@@ -119,6 +119,7 @@ class OpenRewardConfig:
     balance_accepted_batches: bool = True
     accepted_batch_max_replacement_rounds: int = 8
     enable_programmatic_tool_calling: bool = False
+    enable_task_tracker: bool = False
     enable_recursive_subagents: bool = False
     # Forked agents share the root OpenReward session. ``read_only`` narrows
     # only child tool schemas; the root retains the full environment tool set.

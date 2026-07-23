@@ -2682,6 +2682,133 @@ def _install_process_stall_watchdog() -> None:
     )
 
 
+def _patch_areal_recover_checkpoint_rotation() -> None:
+    """Write recovery checkpoints to a staging dir then rotate atomically.
+
+    AReaL's RecoverHandler overwrites the single ``recover_checkpoint`` slot
+    in place.  When Slurm kills the job mid-write the slot is left with a
+    truncated (and therefore unreadable) PyTorch ZIP archive, making recovery
+    impossible.
+
+    This patch changes the save path to ``recover_checkpoint_new``, then
+    performs two atomic directory renames:
+        recover_checkpoint       → recover_checkpoint_old  (preserve previous)
+        recover_checkpoint_new   → recover_checkpoint      (promote new)
+    followed by a cleanup of ``_old``.  If the job is killed during the write
+    phase the canonical slot is untouched.  If it is killed between the two
+    renames, ``_load_checkpoint`` falls back to ``recover_checkpoint_old``.
+    """
+
+    import shutil
+
+    import areal.utils.recover as recover_module  # pyright: ignore[reportMissingImports]
+
+    handler_cls = recover_module.RecoverHandler
+
+    original_save = handler_cls._save_checkpoint
+    if getattr(original_save, "__platoon_recover_rotation_patch__", False):
+        return
+
+    @wraps(original_save)
+    def _save_checkpoint_with_rotation(
+        self,
+        engine,
+        name="default",
+        tokenizer=None,
+        processor=None,
+        base_model_path=None,
+    ):
+        from areal.utils.saver import Saver  # pyright: ignore[reportMissingImports]
+        from areal.api import SaveLoadMeta  # pyright: ignore[reportMissingImports]
+
+        path = Saver.get_recover_checkpoint_path(
+            self.config.experiment_name,
+            self.config.trial_name,
+            self.config.fileroot,
+            name=name,
+        )
+        path_new = path + "_new"
+        path_old = path + "_old"
+
+        if os.path.exists(path_new):
+            shutil.rmtree(path_new)
+        os.makedirs(path_new, exist_ok=True)
+
+        weight_format = "dcp"
+        with_optim = not self.config.no_save_optim
+        meta = SaveLoadMeta(
+            path=path_new,
+            weight_format=weight_format,
+            with_optim=with_optim,
+            tokenizer=tokenizer,
+            processor=processor,
+            base_model_path=base_model_path,
+        )
+        engine.save(meta)
+
+        if os.path.exists(path_old):
+            shutil.rmtree(path_old)
+        if os.path.exists(path):
+            os.rename(path, path_old)
+        os.rename(path_new, path)
+        if os.path.exists(path_old):
+            shutil.rmtree(path_old)
+
+        recover_module.logger.info(
+            f"Saved recover checkpoint to {path} (with_optim={with_optim})"
+        )
+
+    _save_checkpoint_with_rotation.__platoon_recover_rotation_patch__ = True
+    handler_cls._save_checkpoint = _save_checkpoint_with_rotation
+
+    original_load = handler_cls._load_checkpoint
+    if getattr(original_load, "__platoon_recover_rotation_patch__", False):
+        return
+
+    @wraps(original_load)
+    def _load_checkpoint_with_old_fallback(
+        self,
+        engine,
+        name="default",
+        tokenizer=None,
+        base_model_path=None,
+    ):
+        from areal.utils.saver import Saver  # pyright: ignore[reportMissingImports]
+        from areal.api import SaveLoadMeta  # pyright: ignore[reportMissingImports]
+
+        path = Saver.get_recover_checkpoint_path(
+            self.config.experiment_name,
+            self.config.trial_name,
+            self.config.fileroot,
+            name=name,
+        )
+        if not os.path.exists(path):
+            path_old = path + "_old"
+            if os.path.exists(path_old):
+                recover_module.logger.warning(
+                    f"Canonical checkpoint {path} not found; "
+                    f"falling back to {path_old}"
+                )
+                path = path_old
+            else:
+                raise FileNotFoundError(f"Checkpoint path {path} does not exist.")
+
+        weight_format = "dcp"
+        with_optim = not self.config.no_load_optim
+        meta = SaveLoadMeta(
+            path=path,
+            weight_format=weight_format,
+            with_optim=with_optim,
+            tokenizer=None,
+            processor=None,
+            base_model_path=None,
+        )
+        engine.load(meta)
+
+    _load_checkpoint_with_old_fallback.__platoon_recover_rotation_patch__ = True
+    handler_cls._load_checkpoint = _load_checkpoint_with_old_fallback
+
+
 def apply_all_patches() -> None:
     """Apply Platoon compatibility patches for the current AReaL release.
 
@@ -2725,4 +2852,5 @@ def apply_all_patches() -> None:
     _patch_remote_inf_engine_asyncio_teardown_race()
     _patch_remote_inf_engine_proxy_resolution()
     _patch_areal_openai_message_content_flatten()
+    _patch_areal_recover_checkpoint_rotation()
     _install_process_stall_watchdog()

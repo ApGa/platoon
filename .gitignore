@@ -228,3 +228,5 @@ inference_results/
 .te-wheels/
 .apex-wheels/
 *.deb
+slurm*.out
+external/
