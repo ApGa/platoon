@@ -80,22 +80,6 @@ uv run python3 -m areal.launcher.local \
     trial_name=trial0
 ```
 
-## Configuration
-
-### Tinker Config (`number_search_tinker.yaml`)
-
-Key configuration options:
-- `train.num_steps`: Number of training steps
-- `train.batch_size`: Batch size for training
-- `train.rollouts_per_task`: Number of rollouts per task for group advantage
-- `train.learning_rate`: Learning rate
-- `workflow.timeout`: Timeout for each rollout (seconds)
-- `stats.wandb.enabled`: Enable WandB logging
-
-### AReaL Config (`number_search_areal.yaml`)
-
-See the config file for available options.
-
 ## Environment Details
 
 ### Actions

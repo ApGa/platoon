@@ -59,8 +59,7 @@ override-dependencies = [
 no-build-isolation-package = ['flash-attn']
 
 [tool.uv.sources]
-areal = { git = "https://github.com/inclusionAI/AReaL.git", rev = "35b57e2d2743f7158894239acda8b71f7226b955" }
-
+areal = { git = "https://github.com/areal-project/AReaL.git", rev = "35b57e2d2743f7158894239acda8b71f7226b955" }
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
