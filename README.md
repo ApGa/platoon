@@ -83,6 +83,10 @@ uv run -m platoon.visualization.cli --help
 
 See [`platoon/visualization/README.md`](platoon/visualization/README.md).
 
+## Experiment Reproduction
+To reproduce experiments for [Recursive Agent Optimization (RAO)](https://arxiv.org/abs/2605.06639), 
+you may refer to this [branch](https://github.com/ApGa/platoon/tree/apga/rao-snapshot/), 
+which is a snapshot of the codebase used for the RAO paper.
 
 ## Acknowledgements
 Parts of platoon's design and optimizations were inspired by many existing great RL 
@@ -91,7 +95,6 @@ frameworks and projects including [AReaL](https://github.com/areal-project/AReaL
 and [agent-lightning](https://github.com/microsoft/agent-lightning).
 
 ## Citation
-
 Platoon was originally designed for the paper 
 [Recursive Agent Optimization (RAO)](https://arxiv.org/abs/2605.06639). 
 Please cite the following if you found platoon to be useful in your work:
