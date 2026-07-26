@@ -124,6 +124,7 @@ def _tool_result_to_payload(result: Any) -> dict[str, Any]:
         text = getattr(block, "text", None)
         block_texts.append(text if isinstance(text, str) else str(block))
     data = getattr(result, "data", None)
+    metadata = getattr(result, "metadata", None)
     reward = getattr(result, "reward", None)
     finished = bool(getattr(result, "finished", False))
 
@@ -136,6 +137,8 @@ def _tool_result_to_payload(result: Any) -> dict[str, Any]:
         payload["blocks"] = block_texts
     if data is not None:
         payload["data"] = data
+    if metadata is not None:
+        payload["metadata"] = metadata
     if not block_texts and data is None:
         payload["raw"] = repr(result)
     return payload

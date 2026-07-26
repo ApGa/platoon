@@ -9,7 +9,9 @@ from uuid import uuid4
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event.base import Event
 from platoon.envs.base import SubTask, Task
+from platoon.episode.context import current_trajectory
 from platoon.openhands.env import OpenHandsEnv
+from platoon.utils.trajectory_status import TRAJECTORY_INVALID_MISC_KEY
 
 _CURRENT_AGENT_TASK_GOAL_KEY = "openreward_current_agent_task_goal"
 _ROOT_AGENT_TASK_GOAL_KEY = "openreward_root_agent_task_goal"
@@ -363,8 +365,19 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         reward = self._final_payload.get("reward", 0.0)
         if not isinstance(reward, (int, float)):
             reward = 0.0
+        metadata = self._final_payload.get("metadata")
+        invalid = (
+            isinstance(metadata, dict)
+            and metadata.get("invalid") is True
+        )
+        if invalid:
+            reward = 0.0
+            trajectory = current_trajectory.get(None)
+            if trajectory is not None:
+                trajectory.misc[TRAJECTORY_INVALID_MISC_KEY] = True
         return float(reward), {
             "reward/success": float(reward),
             "reward/openreward": float(reward),
+            "openreward/invalid": float(invalid),
             "openreward/final_payload": self._final_payload,
         }

@@ -6,6 +6,7 @@ from typing import Any
 
 TRAJECTORY_CANCELLED_MISC_KEY = "trajectory_cancelled"
 TRAJECTORY_TIMED_OUT_MISC_KEY = "trajectory_timed_out"
+TRAJECTORY_INVALID_MISC_KEY = "trajectory_invalid"
 
 
 def trajectory_was_cancelled(trajectory: Any) -> bool:
@@ -46,7 +47,24 @@ def trajectory_was_timed_out(trajectory: Any) -> bool:
     )
 
 
-def trajectory_was_interrupted(trajectory: Any) -> bool:
-    """Return whether cancellation/timeout makes policy tokens ineligible."""
+def trajectory_was_invalid(trajectory: Any) -> bool:
+    """Return whether an environment marked the completed result invalid."""
 
-    return trajectory_was_cancelled(trajectory) or trajectory_was_timed_out(trajectory)
+    misc = (
+        trajectory.get("misc", {})
+        if isinstance(trajectory, dict)
+        else getattr(trajectory, "misc", {})
+    )
+    return isinstance(misc, dict) and bool(
+        misc.get(TRAJECTORY_INVALID_MISC_KEY)
+    )
+
+
+def trajectory_was_interrupted(trajectory: Any) -> bool:
+    """Return whether the trajectory's policy tokens are ineligible."""
+
+    return (
+        trajectory_was_cancelled(trajectory)
+        or trajectory_was_timed_out(trajectory)
+        or trajectory_was_invalid(trajectory)
+    )

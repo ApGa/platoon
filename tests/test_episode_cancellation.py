@@ -10,6 +10,7 @@ from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import StepBudgetTracker, TrajectoryCollection
 from platoon.utils.trajectory_status import (
     TRAJECTORY_CANCELLED_MISC_KEY,
+    TRAJECTORY_INVALID_MISC_KEY,
     TRAJECTORY_TIMED_OUT_MISC_KEY,
     trajectory_was_interrupted,
 )
@@ -112,4 +113,10 @@ async def test_run_episode_marks_internal_step_timeout_ineligible() -> None:
     assert trajectory.misc[TRAJECTORY_TIMED_OUT_MISC_KEY] is True
     assert trajectory.error_message is not None
     assert "Episode timed out" in trajectory.error_message
+    assert trajectory_was_interrupted(trajectory)
+
+
+def test_environment_invalid_marker_is_policy_ineligible() -> None:
+    trajectory = {"misc": {TRAJECTORY_INVALID_MISC_KEY: True}}
+
     assert trajectory_was_interrupted(trajectory)

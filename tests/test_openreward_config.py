@@ -394,6 +394,24 @@ def test_openreward_mcp_bridge_declares_tools_lockfree(monkeypatch):
     assert bridge_mod._lockfree_tool_meta() == {bridge_mod.DECLARED_RESOURCES_META_KEY: []}
 
 
+def test_openreward_mcp_bridge_preserves_tool_metadata(monkeypatch):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+    result = types.SimpleNamespace(
+        blocks=[],
+        data=None,
+        metadata={
+            "invalid": True,
+            "failure_class": "infrastructure",
+        },
+        reward=0.0,
+        finished=True,
+    )
+
+    payload = bridge_mod._tool_result_to_payload(result)
+
+    assert payload["metadata"] == result.metadata
+
+
 def test_openreward_task_loader_marks_goal_for_env_resolution(monkeypatch):
     tasks_mod = _load_openreward_tasks_module(monkeypatch)
 
@@ -666,6 +684,54 @@ async def test_openreward_env_finishes_on_direct_submit_answer_reward(monkeypatc
     assert reward == 1.0
     assert misc["reward/openreward"] == 1.0
     assert misc["openreward/final_payload"]["text"] == "2 passed"
+
+
+@pytest.mark.asyncio
+async def test_openreward_env_marks_invalid_terminal_result_ineligible(
+    monkeypatch,
+):
+    env_mod = _load_openreward_env_module(monkeypatch)
+    from platoon.envs.base import Task
+    from platoon.episode.context import current_trajectory
+    from platoon.utils.trajectory_status import (
+        TRAJECTORY_INVALID_MISC_KEY,
+        trajectory_was_interrupted,
+    )
+
+    env = env_mod.OpenRewardOpenHandsEnv(
+        task=Task(id="task", goal="Task task"),
+        agent=object(),
+        workspace=".",
+    )
+    env._conversation = types.SimpleNamespace(
+        state=types.SimpleNamespace(execution_status=None),
+    )
+    payload = {
+        "finished": True,
+        "reward": 0.0,
+        "metadata": {
+            "invalid": True,
+            "failure_class": "infrastructure",
+        },
+    }
+    event = types.SimpleNamespace(
+        observation=types.SimpleNamespace(
+            tool_name="submit_answer",
+            content=[types.SimpleNamespace(text=json.dumps(payload))],
+        )
+    )
+    trajectory = types.SimpleNamespace(misc={})
+    token = current_trajectory.set(trajectory)
+    try:
+        env._stop_on_openreward_finished(event)
+        reward, misc = await env.evaluate()
+    finally:
+        current_trajectory.reset(token)
+
+    assert reward == 0.0
+    assert misc["openreward/invalid"] == 1.0
+    assert trajectory.misc[TRAJECTORY_INVALID_MISC_KEY] is True
+    assert trajectory_was_interrupted(trajectory)
 
 
 @pytest.mark.asyncio
