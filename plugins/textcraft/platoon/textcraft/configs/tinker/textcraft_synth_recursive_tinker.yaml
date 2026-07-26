@@ -1,5 +1,6 @@
-# TextCraft-Synth Tinker Training Configuration
-# Uses synthetic crafting recipes with deeper hierarchies and difficulty tagging
+# TextCraft-Synth Depth-Aware Tinker Training Configuration
+# Uses DepthAwareStepBudgetTracker: each agent gets 25 independent steps,
+# subagent steps do NOT consume parent budget, tree depth capped at 12.
 
 # Training configuration
 train:
@@ -7,7 +8,7 @@ train:
   renderer_name: qwen3_instruct
   batch_size: 16
   num_epochs: 30
-  max_training_steps: 200
+  max_training_steps: 100
   num_minibatches: 1
   num_microbatches: 2
   max_staleness: 3
@@ -54,7 +55,7 @@ eval:
 checkpoint:
   strategy: step
   every: 1
-  load_checkpoint_path: null #tinker://a6363f51-8b55-5974-b3f2-2e3954991c15:train:0/weights/000019
+  load_checkpoint_path: null
 
 # Logging
 log_path: ./logs/runs
@@ -67,7 +68,7 @@ watchdog:
 # Stats and WandB configuration
 stats:
   experiment_name: recursive-agents
-  trial_name: textcraft-synth-single-target-ctx8192-cispo-4b-recursive-medium-trial-4
+  trial_name: textcraft-synth-depth-aware-ctx8192-cispo-4b-medium-trial-0
   wandb:
     mode: online
     project: recursive-agents
@@ -75,3 +76,4 @@ stats:
     tags:
       - textcraft-synth
       - tinker
+      - depth-aware

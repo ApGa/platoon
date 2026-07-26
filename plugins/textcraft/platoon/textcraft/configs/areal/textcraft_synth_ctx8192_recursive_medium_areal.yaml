@@ -1,12 +1,12 @@
 experiment_name: recursive-agents
-trial_name: textcraft-synth-single-target-areal-ctx8192-cispo-4b-recursive-medium-trial-0
+trial_name: textcraft-synth-single-target-areal-ctx8192-cispo-4b-depth-aware-medium-trial-0
 
 seed: 343
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
 train_difficulties: ["medium"]
 eval_difficulties: null
-recursive: true
+depth_aware: true
 #enable_offload: false
 
 
@@ -18,12 +18,12 @@ cluster:
     type: nfs
     nfs_record_root: /mnt/efs/tmp/areal/name_resolve
 
-allocation_mode: sglang:d6p1t1+d2p1t1
+allocation_mode: sglang:d4p1t1+d4p1t1
 
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 16
+  max_concurrent_rollouts: 8
   queue_size: null 
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 3
@@ -41,13 +41,16 @@ gconfig:
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 200
-    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx8192-cispo-4b-recursive-medium-trial-0
+    max_steps: 25
+    output_dir: /mnt/efs/tmp/areal/experiments/textcraft-synth-single-target-areal-ctx8192-cispo-4b-depth-aware-medium-trial-0
     verbose: True
     train: true
     timeout: 7200
     step_timeout: 7200
   group_size: 8
+  leave_one_out_baseline: True  # Use leave-one-out baseline for advantage centering
+  depth_level_weighting: True  # Weight trajectories inversely by depth-level frequency
+  depth_level_discount_gamma: null  # Alternate strategy: discount rewards by trajectory depth as gamma^d
 
 # CISPO loss function configuration (matches tinker settings)
 loss_fn_config:
@@ -64,7 +67,7 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 60000
   optimizer:
     type: adam
     lr: 3e-6
@@ -110,7 +113,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 60000
   optimizer: null
 
 # SGLang
@@ -120,7 +123,7 @@ sglang:
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 8193
+  context_length: 40001
   mem_fraction_static: 0.8
   enable_lora: ${actor.use_lora}
   max_lora_rank: ${actor.lora_rank}
@@ -161,7 +164,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 5
+  freq_steps: null
   freq_secs: null
 
 stats_logger:
@@ -177,4 +180,3 @@ launcher:
   inference_server_mem_per_gpu: 32768
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 32768
-
