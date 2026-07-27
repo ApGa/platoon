@@ -213,13 +213,16 @@ class OpenHandsEnv:
     async def step(self, action: OpenHandsAction) -> OpenHandsObservation:
         if action.action_events:
             self._state.last_step_action_id = action.action_events[-1].id
-        obs_events = get_obs_for_last_action(self._state)
+        obs_events = get_obs_for_last_action(self._state, action.action_events)
         while not obs_events and not is_finished(self._state):
             self._raise_if_conversation_failed()
             await asyncio.sleep(0.2)
-            obs_events = get_obs_for_last_action(self._state)
+            obs_events = get_obs_for_last_action(self._state, action.action_events)
         if obs_events:
-            self._state.last_step_observation_id = obs_events[-1].id
+            observed_event_ids = {event.id for event in obs_events}
+            self._state.last_step_observation_id = next(
+                event.id for event in reversed(self._state.conversation_state.events) if event.id in observed_event_ids
+            )
         step = OpenHandsTrajectoryStep(
             action_events=action.action_events,
             observation_events=obs_events,

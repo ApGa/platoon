@@ -3,7 +3,14 @@ from collections import defaultdict
 from typing import Sequence
 
 from openhands.sdk.conversation.state import ConversationExecutionStatus
-from openhands.sdk.event import ActionEvent, AgentErrorEvent, Event, EventID, MessageEvent
+from openhands.sdk.event import (
+    ActionEvent,
+    AgentErrorEvent,
+    Event,
+    EventID,
+    MessageEvent,
+    ObservationBaseEvent,
+)
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.tool.builtins.finish import FinishAction
 
@@ -53,114 +60,201 @@ def group_actions(events: Sequence[Event]):
     return batches, action_id_to_response_id, tool_call_id_to_action_id, action_id_to_tool_call_id
 
 
+def _event_cursor(events: Sequence[Event], event_id: EventID | None) -> int:
+    """Return the index immediately after event_id, or the start of the stream."""
+    if event_id is None:
+        return 0
+    for index, event in enumerate(events):
+        if event.id == event_id:
+            return index + 1
+    return 0
+
+
+def _next_action_batch(
+    events: Sequence[Event],
+    start_index: int,
+) -> tuple[list[Event], int | None, int]:
+    """Return the oldest action batch after start_index and its event window."""
+    actions: list[Event] = []
+    batch_start: int | None = None
+    llm_response_id: EventID | None = None
+
+    for index in range(start_index, len(events)):
+        event = events[index]
+        if not is_action(event):
+            continue
+
+        event_response_id = event.llm_response_id
+        if batch_start is None:
+            batch_start = index
+            llm_response_id = event_response_id
+        elif event_response_id != llm_response_id:
+            return actions, batch_start, index
+
+        actions.append(event)
+
+    return actions, batch_start, len(events)
+
+
+def _batch_results(
+    events: Sequence[Event],
+    actions: Sequence[Event],
+) -> tuple[dict[EventID, list[Event]], list[Event]]:
+    """Associate result events with actions, retaining unrelated batch events."""
+    action_ids = {action.id for action in actions}
+    tool_call_id_to_action_id = {
+        action.tool_call_id: action.id
+        for action in actions
+        if isinstance(action, ActionEvent) and getattr(action, "tool_call_id", None) is not None
+    }
+    results: dict[EventID, list[Event]] = defaultdict(list)
+    unrelated: list[Event] = []
+
+    for event in events:
+        if is_action(event):
+            continue
+
+        action_id = None
+        if isinstance(event, ObservationBaseEvent):
+            action_id = getattr(event, "action_id", None)
+            if action_id not in action_ids and isinstance(event, AgentErrorEvent):
+                action_id = tool_call_id_to_action_id.get(getattr(event, "tool_call_id", None))
+
+        if action_id in action_ids:
+            results[action_id].append(event)
+        else:
+            unrelated.append(event)
+
+    return results, unrelated
+
+
+def _action_is_self_observing(action: Event, conversation_state) -> bool:
+    if isinstance(action, MessageEvent) and action.source == "agent":
+        return True
+    return (
+        isinstance(action, ActionEvent)
+        and action.source == "agent"
+        and (isinstance(action.action, FinishAction) or _is_terminal_status(conversation_state))
+    )
+
+
 def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm_call_id: bool = True) -> list[Event]:
     """Collect all actions since the last observation, once each has a corresponding future observation."""
     events = observation.conversation_state.events
-    new_actions: list[Event] = list()
-    seen_action_ids: set[EventID] = set()
-    at_least_one_future_obs_seen = False
-    at_least_one_future_error_event_seen = False
-    batches, action_id_to_response_id, tool_call_id_to_action_id, action_id_to_tool_call_id = group_actions(events)
+    start_index = _event_cursor(events, observation.last_step_observation_id)
+    actions, batch_start, batch_end = _next_action_batch(events, start_index)
+    if not actions or batch_start is None:
+        return []
 
-    for event in reversed(events):
-        # Only consider events after the last observed event.
-        if event.id == observation.last_step_observation_id:
-            break
-
-        if not is_action(event):
-            new_actions.clear()
-            at_least_one_future_obs_seen = True
-            if hasattr(event, "action_id"):
-                seen_action_ids.add(event.action_id)
-
-            tool_call_id = getattr(event, "tool_call_id", None)
-            if (
-                isinstance(event, AgentErrorEvent)
-                and tool_call_id is not None
-                and tool_call_id in tool_call_id_to_action_id
-            ):
-                seen_action_ids.add(tool_call_id_to_action_id[tool_call_id])
-
-            if isinstance(event, ConversationErrorEvent):
-                at_least_one_future_error_event_seen = True
-            continue
-
-        new_actions.append(event)
-        if isinstance(event, MessageEvent) and event.source == "agent":
-            seen_action_ids.add(event.id)
-            at_least_one_future_obs_seen = True
-        elif (
-            isinstance(event, ActionEvent)
-            and event.source == "agent"
-            and (isinstance(event.action, FinishAction) or _is_terminal_status(observation.conversation_state))
-        ):
-            seen_action_ids.add(event.id)
-            at_least_one_future_obs_seen = True
-
-    if len(new_actions) == 0:
-        return new_actions
-
-    last_event_seen = new_actions[0].id if new_actions else None
-    if not is_finished(observation, last_event_seen=last_event_seen) and not at_least_one_future_error_event_seen:
-        for action in new_actions:
-            if action.id not in seen_action_ids:
-                logger.debug(
-                    "Clearing new_actions due to action event that has not been observed "
-                    f"in a future observation: {action.id} {action.kind}",
-                )
-                new_actions.clear()
-                break
-
-        if not at_least_one_future_obs_seen:
-            new_actions.clear()
-
-    if require_same_llm_call_id and new_actions:
-        llm_call_id = new_actions[0].llm_response_id
-        if any(action.llm_response_id != llm_call_id for action in new_actions):
+    if require_same_llm_call_id:
+        llm_response_id = actions[0].llm_response_id
+        if any(action.llm_response_id != llm_response_id for action in actions):
             raise ValueError(
                 "Detected at least two actions in a step with differing llm_response_id. "
                 "This is unexpected and can lead to undefined behavior."
             )
-        if len(new_actions) != len(batches[llm_call_id]):
-            logger.debug(
-                "Warning: The number of new actions detected does not match the number of actions in the batch "
-                "for the corresponding llm_response_id. This could indicate that some actions are not being "
-                "properly observed or that there are unexpected events in the conversation history.",
-            )
 
-    return list(reversed(new_actions))
+    batch_events = events[batch_start:batch_end]
+    results, unrelated = _batch_results(batch_events, actions)
+    conversation_error_seen = any(isinstance(event, ConversationErrorEvent) for event in unrelated)
+    if not conversation_error_seen:
+        for action in actions:
+            if action.id not in results and not _action_is_self_observing(
+                action,
+                observation.conversation_state,
+            ):
+                logger.debug(
+                    "Waiting for a result for action event %s from response %s",
+                    action.id,
+                    action.llm_response_id,
+                )
+                return []
+
+    return actions
 
 
-def get_obs_for_last_action(observation: OpenHandsObservation) -> list[Event]:
+def _action_batch_containing(
+    events: Sequence[Event],
+    action_id: EventID,
+) -> tuple[list[Event], int | None, int]:
+    selected_index = next(
+        (index for index, event in enumerate(events) if is_action(event) and event.id == action_id),
+        None,
+    )
+    if selected_index is None:
+        return [], None, len(events)
+
+    llm_response_id = events[selected_index].llm_response_id
+    batch_start = selected_index
+    for index in range(selected_index - 1, -1, -1):
+        event = events[index]
+        if not is_action(event):
+            continue
+        if event.llm_response_id != llm_response_id:
+            break
+        batch_start = index
+
+    actions: list[Event] = []
+    batch_end = len(events)
+    for index in range(batch_start, len(events)):
+        event = events[index]
+        if not is_action(event):
+            continue
+        if event.llm_response_id != llm_response_id:
+            batch_end = index
+            break
+        actions.append(event)
+
+    return actions, batch_start, batch_end
+
+
+def get_obs_for_last_action(
+    observation: OpenHandsObservation,
+    action_events: Sequence[Event] | None = None,
+) -> list[Event]:
     """Collect event(s) that immediately follow a past ActionEvent and are
     fully observed by a subsequent ObservationBaseEvent referencing them.
     """
     events = observation.conversation_state.events
-    new_obs: list[Event] = list()
-    at_least_one_future_action_seen = False
-    for event in reversed(events):
-        if event.id == observation.last_step_action_id:
-            break
+    if observation.last_step_action_id is None:
+        first_action_index = next((index for index, event in enumerate(events) if is_action(event)), None)
+        if first_action_index is None:
+            if not _is_terminal_status(observation.conversation_state):
+                return []
+            first_action_index = len(events)
+        return [event for event in events[:first_action_index] if not is_action(event)]
 
-        if is_action(event):
-            at_least_one_future_action_seen = True
-            new_obs.clear()
-            continue
-        else:
-            new_obs.append(event)
-
-    # If not at least one future action seen and if this obs is not the final one, empty the list.
-    oh_conversation_finished = _is_terminal_status(observation.conversation_state)
-    if oh_conversation_finished and len(new_obs) == 0:
-        logger.debug("Conversation is finished and no new obs seen, returning empty obs list.")
+    actions, batch_start, batch_end = _action_batch_containing(events, observation.last_step_action_id)
+    if not actions or batch_start is None:
         return []
-    if len(new_obs) == 0:
-        return new_obs
 
-    if not at_least_one_future_action_seen and not oh_conversation_finished:
-        new_obs.clear()
+    if action_events:
+        expected_action_ids = {action.id for action in action_events}
+        batch_action_ids = {action.id for action in actions}
+        if expected_action_ids != batch_action_ids:
+            logger.warning(
+                "Action events passed to observation parsing do not match response batch: expected=%s actual=%s",
+                expected_action_ids,
+                batch_action_ids,
+            )
 
-    return list(reversed(new_obs))
+    batch_events = events[batch_start:batch_end]
+    results, unrelated = _batch_results(batch_events, actions)
+    conversation_error_seen = any(isinstance(event, ConversationErrorEvent) for event in unrelated)
+    batch_is_closed = batch_end < len(events) or _is_terminal_status(observation.conversation_state)
+    if not batch_is_closed and not conversation_error_seen:
+        return []
+
+    if not conversation_error_seen:
+        for action in actions:
+            if action.id not in results and not _action_is_self_observing(
+                action,
+                observation.conversation_state,
+            ):
+                return []
+
+    ordered_results = [event for action in actions for event in results.get(action.id, [])]
+    return ordered_results + unrelated
 
 
 def is_finished(observation: OpenHandsObservation, last_event_seen: EventID | None = None) -> bool:
