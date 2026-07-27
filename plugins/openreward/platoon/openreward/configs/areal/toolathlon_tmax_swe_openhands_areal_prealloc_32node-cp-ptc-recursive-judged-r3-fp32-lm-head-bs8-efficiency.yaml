@@ -87,6 +87,9 @@ evaluator:
 stats_logger:
   wandb:
     project: openreward-multienv-openhands
+    # AReaL otherwise concatenates experiment_name and trial_name, which is
+    # longer than W&B's 128-character GroupName limit for this trial.
+    group: mix32-rec-eff-v1
 
 # Literal values are required by the pre-Hydra launcher validation. The model
 # overlay changes only tokenizer/template behavior and points to untouched base
