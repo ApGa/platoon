@@ -4,12 +4,19 @@ defaults:
 
 # Start a completely new model/optimizer lineage. The previous trial's recovery
 # state contains the step-134 non-finite update and must never be auto-loaded.
-trial_name: toolathlon-tmax-swe-openhands-16node-qwen3.6-35B-ptc-task-tracker-full-r3-fp32-lm-head-hardened-v1-trial0
+# Keep this short: AReaL constructs the W&B run ID as
+# <experiment_name>_<trial_name>_<id_suffix>, and W&B caps it at 128 chars.
+trial_name: mix16-ptc-full-hard-v2-trial0
 
 # Keep literal sections for the pre-Hydra launcher checks. All mixed catalog,
 # asynchronous 8x8, task-tracker/PTC, straggler, no-eval, and per-step recovery
 # settings are inherited from the proven full nonrecursive configuration.
 openreward: {}
+
+# Use stable, short W&B grouping independently of the recovery lineage.
+stats_logger:
+  wandb:
+    group: mix16-ptc-full-hard-v2
 
 actor:
   backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
