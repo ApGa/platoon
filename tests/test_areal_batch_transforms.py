@@ -57,6 +57,12 @@ def _load_trainer_module(batch_transforms_module):
     config_mod.PlatoonPPOActorConfig = object
     sys.modules["platoon.train.areal.config_defs"] = config_mod
 
+    deadline_mod = types.ModuleType("platoon.train.areal.deadline")
+    deadline_mod.StepDeadlineGuard = SimpleNamespace(
+        from_environment=lambda: None
+    )
+    sys.modules["platoon.train.areal.deadline"] = deadline_mod
+
     preallocated_mod = types.ModuleType("platoon.train.areal.preallocated_slurm")
     preallocated_mod.PreallocatedSlurmScheduler = type("PreallocatedSlurmScheduler", (), {})
     sys.modules["platoon.train.areal.preallocated_slurm"] = preallocated_mod
@@ -1054,3 +1060,85 @@ def test_advance_logical_versions_updates_every_engine_without_weight_operations
         "rollout": [17],
         "eval_rollout": [17],
     }
+
+
+def test_deadline_drain_forces_latest_completed_step_recoverable(monkeypatch, tmp_path):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+
+    class FakeStepInfo:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    dumped = {}
+
+    class FakeRecoverInfo:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def dump(self, path):
+            dumped["path"] = path
+            dumped["info"] = self
+
+    sys.modules["areal.api"].StepInfo = FakeStepInfo
+    recover_module = types.ModuleType("areal.utils.recover")
+    recover_module.RecoverInfo = FakeRecoverInfo
+    monkeypatch.setitem(sys.modules, "areal.utils.recover", recover_module)
+
+    saved = []
+    handler = SimpleNamespace(
+        config=SimpleNamespace(
+            mode="auto",
+            experiment_name="experiment",
+            trial_name="trial",
+            fileroot=str(tmp_path),
+        ),
+        last_step_info=FakeStepInfo(global_step=3),
+        freq_ctl=SimpleNamespace(state_dict=lambda: {"frequency": "preserved"}),
+        _ensure_recover_supported=lambda engines: None,
+        _normalize_recover_engines=lambda engines: engines,
+        _save_checkpoint=lambda engine, **kwargs: saved.append((engine, kwargs)),
+        recover_info_path=lambda *args: str(tmp_path / "recover_info"),
+    )
+
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.recover_handler = handler
+    trainer.actor = object()
+    trainer.critic = None
+    trainer.tokenizer = object()
+    trainer.processor = object()
+    trainer.saver = SimpleNamespace(state_dict=lambda: {"saver": 1})
+    trainer.evaluator = SimpleNamespace(state_dict=lambda: {"evaluator": 2})
+    trainer.stats_logger = SimpleNamespace(state_dict=lambda: {"logger": 3})
+
+    # Special methods are resolved on the type, so use a tiny concrete fake
+    # rather than SimpleNamespace for len().
+    class FakeDataloader:
+        def __len__(self):
+            return 10
+
+        def state_dict(self):
+            return {"dataloader": 4}
+
+    trainer.train_dataloader = FakeDataloader()
+
+    assert trainer._ensure_recover_checkpoint_at(
+        epoch=0,
+        epoch_step=4,
+        global_step=4,
+    )
+    assert len(saved) == 1
+    assert saved[0][0] is trainer.actor
+    assert saved[0][1]["name"] == "default"
+    assert handler.last_step_info.global_step == 4
+    assert dumped["path"] == str(tmp_path / "recover_info")
+    assert dumped["info"].checkpoint_info == {"frequency": "preserved"}
+    assert dumped["info"].dataloader_info == {"dataloader": 4}
+
+    # Rechecking the same boundary is idempotent and does not rewrite DCP.
+    assert not trainer._ensure_recover_checkpoint_at(
+        epoch=0,
+        epoch_step=4,
+        global_step=4,
+    )
+    assert len(saved) == 1

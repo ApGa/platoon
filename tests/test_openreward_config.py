@@ -135,6 +135,20 @@ def test_openreward_config_defaults_subagent_budget_to_50():
     assert config.subagent_default_max_steps == 50
 
 
+def test_openreward_config_defaults_to_bounded_non_thinking_condensations():
+    config_mod = _load_openreward_config_module()
+
+    config = config_mod.OpenRewardConfig.from_mapping({})
+
+    assert config.condenser_disable_thinking is True
+    assert config.condenser_max_completion_tokens == 2_048
+
+    with pytest.raises(ValueError, match="condenser_disable_thinking"):
+        config_mod.OpenRewardConfig.from_mapping({"condenser_disable_thinking": 1})
+    with pytest.raises(ValueError, match="condenser_max_completion_tokens"):
+        config_mod.OpenRewardConfig.from_mapping({"condenser_max_completion_tokens": 0})
+
+
 def test_openreward_config_defaults_subagent_judging_off():
     config_mod = _load_openreward_config_module()
 
@@ -412,6 +426,24 @@ def test_openreward_mcp_bridge_preserves_tool_metadata(monkeypatch):
     assert payload["metadata"] == result.metadata
 
 
+def test_openreward_mcp_bridge_completion_policy_uses_available_terminal_tool(
+    monkeypatch,
+):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+
+    submit_policy = bridge_mod._completion_policy(
+        [{"name": "view"}, {"name": "submit_answer"}]
+    )
+    claim_policy = bridge_mod._completion_policy(
+        [{"name": "call_tool"}, {"name": "claim_done"}]
+    )
+
+    assert "call `submit_answer`" in submit_policy
+    assert "claim_done" not in submit_policy
+    assert "call `claim_done`" in claim_policy
+    assert "normal assistant message" in submit_policy
+
+
 def test_openreward_task_loader_marks_goal_for_env_resolution(monkeypatch):
     tasks_mod = _load_openreward_tasks_module(monkeypatch)
 
@@ -445,7 +477,12 @@ def test_openreward_goal_format_uses_resolved_prompt_directly(monkeypatch):
         initial_goal_suffix="Use subagents when helpful.",
     )
 
-    assert goal == "Build the KPI report.\n\nUse subagents when helpful."
+    assert goal == (
+        "Build the KPI report.\n\n"
+        "## Completion Contract\n\n"
+        "Call claim_done when complete.\n\n"
+        "Use subagents when helpful."
+    )
     assert "fetch_rows" not in goal
     assert "OpenReward" not in goal
     assert "get_task" not in goal

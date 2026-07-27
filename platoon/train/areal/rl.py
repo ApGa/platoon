@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import secrets
+import time
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from platoon.train.areal.batch_transforms import (
     split_batch_to_trajectories,
 )
 from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig, PlatoonPPOActorConfig
+from platoon.train.areal.deadline import StepDeadlineGuard
 from platoon.train.areal.preallocated_slurm import PreallocatedSlurmScheduler
 from platoon.train.areal.workflow_serialization import normalize_remote_workflow
 from platoon.utils.areal_data_processing import OPTIONAL_REWARD_METRIC_MASK_PREFIX
@@ -723,6 +725,91 @@ class PlatoonArealRLTrainer(PPOTrainer):
         if self.eval_rollout is not None:
             self.eval_rollout.set_version(new_version)
 
+    def _ensure_recover_checkpoint_at(
+        self,
+        *,
+        epoch: int,
+        epoch_step: int,
+        global_step: int,
+    ) -> bool:
+        """Force a recovery checkpoint when a clean deadline drain needs one.
+
+        ``RecoverHandler.dump`` is frequency-gated. A normal step calls it
+        before returning, but configs with ``freq_steps > 1`` can still have
+        several completed updates newer than the canonical recovery checkpoint.
+        A deadline drain must make the last completed update durable before it
+        advertises a clean exit to the continuation launcher.
+
+        Returns ``True`` when a checkpoint was written and ``False`` when the
+        requested step was already durable.
+        """
+
+        recover_handler = self.recover_handler
+        last_step_info = getattr(recover_handler, "last_step_info", None)
+        if (
+            last_step_info is not None
+            and int(getattr(last_step_info, "global_step", -1)) >= global_step
+        ):
+            return False
+        if recover_handler.config.mode in ("disabled", "off"):
+            raise RuntimeError(
+                "Cannot drain before the allocation deadline because recovery "
+                "checkpointing is disabled."
+            )
+
+        # These imports are kept local so FSDP/test-only imports of this module
+        # do not eagerly load AReaL's recovery implementation.
+        from areal.api import StepInfo
+        from areal.utils.recover import RecoverInfo
+
+        to_save: dict[str, Any] = {"default": self.actor}
+        if self.critic is not None:
+            to_save["critic"] = self.critic
+        step_info = StepInfo(
+            global_step=global_step,
+            epoch=epoch,
+            epoch_step=epoch_step,
+            steps_per_epoch=len(self.train_dataloader),
+        )
+
+        # Mirror RecoverHandler.dump after its frequency gate. Keeping the
+        # frequency-controller state untouched preserves the configured cadence
+        # after the successor loads this forced boundary checkpoint.
+        recover_handler._ensure_recover_supported(to_save)
+        normalized_engines = recover_handler._normalize_recover_engines(to_save)
+        for name, engine in normalized_engines.items():
+            recover_handler._save_checkpoint(
+                engine,
+                name=name,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+            )
+
+        recover_handler.last_step_info = step_info
+        recover_info = RecoverInfo(
+            last_step_info=step_info,
+            saver_info=self.saver.state_dict(),
+            evaluator_info=self.evaluator.state_dict(),
+            stats_logger_info=self.stats_logger.state_dict(),
+            dataloader_info=self.train_dataloader.state_dict(),
+            checkpoint_info=recover_handler.freq_ctl.state_dict(),
+        )
+        recover_info_path = recover_handler.recover_info_path(
+            recover_handler.config.experiment_name,
+            recover_handler.config.trial_name,
+            recover_handler.config.fileroot,
+        )
+        recover_info.dump(recover_info_path)
+
+        if not is_single_controller():
+            dist.barrier(group=self.actor.cpu_group)
+            current_platform.synchronize()
+        logger.info(
+            "Forced recovery checkpoint for deadline drain at global step %d.",
+            global_step,
+        )
+        return True
+
     @staticmethod
     def _maybe_clear_device_cache(engine: Any) -> None:
         """Release cached CUDA blocks on an engine's GPU workers.
@@ -956,6 +1043,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
     ):
         config = self.config
         start_step = self.recover_info.last_step_info.next().global_step if self.recover_info is not None else 0
+        deadline_guard = StepDeadlineGuard.from_environment()
         workflow, workflow_kwargs = normalize_remote_workflow(
             workflow,
             workflow_kwargs,
@@ -988,6 +1076,36 @@ class PlatoonArealRLTrainer(PPOTrainer):
         for global_step in range(start_step, max_steps):
             if config.total_train_steps is not None and global_step >= config.total_train_steps:
                 break
+            if deadline_guard is not None:
+                deadline_decision = deadline_guard.decide()
+                if deadline_decision.should_drain:
+                    # Stop any asynchronous inference before taking a missing
+                    # boundary checkpoint. The trainer exits with rollout
+                    # paused, so no new work can race the clean shutdown.
+                    self.rollout.pause()
+                    last_completed_step = global_step - 1
+                    if last_completed_step >= 0:
+                        self._ensure_recover_checkpoint_at(
+                            epoch=last_completed_step // steps_per_epoch,
+                            epoch_step=last_completed_step % steps_per_epoch,
+                            global_step=last_completed_step,
+                        )
+                    deadline_guard.write_drain_marker(
+                        deadline_decision,
+                        global_step=global_step,
+                    )
+                    logger.info(
+                        "Draining before global step %d: %.0fs remain before the "
+                        "allocation deadline, while a complete step plus shutdown "
+                        "headroom requires %.0fs (step estimate %.0fs, safety %.0fs).",
+                        global_step,
+                        deadline_decision.remaining_seconds,
+                        deadline_decision.required_seconds,
+                        deadline_decision.estimated_step_seconds,
+                        deadline_decision.safety_seconds,
+                    )
+                    break
+            step_started_monotonic = time.monotonic()
             epoch = global_step // steps_per_epoch
             step = global_step % steps_per_epoch
 
@@ -1186,16 +1304,24 @@ class PlatoonArealRLTrainer(PPOTrainer):
                             args={"global_step": global_step},
                         ),
                     ):
-                        self.actor.ppo_update(optimizer_batch)
-                        self.actor.step_lr_scheduler()
+                        actor_update_successful = self.actor.ppo_update(optimizer_batch)
+                        if actor_update_successful:
+                            self.actor.step_lr_scheduler()
                         self.actor.get_device_stats().log("ppo update")
+                    stats_tracker.scalar(
+                        **{
+                            "ppo_actor/optimizer_update_skipped": float(
+                                not actor_update_successful
+                            )
+                        }
+                    )
                     # Free the training-peak allocator cache before the NCCL-heavy
                     # weight-update broadcast and checkpoint phases below.
                     self._maybe_clear_device_cache(self.actor)
                     if self._should_offload_actor:
                         self._offload_model(self.actor, role="actor")
 
-                    if self.critic is not None:
+                    if actor_update_successful and self.critic is not None:
                         if self._should_offload_critic:
                             self._onload_model(self.critic, role="critic")
                         with (
@@ -1213,23 +1339,32 @@ class PlatoonArealRLTrainer(PPOTrainer):
                         if self._should_offload_critic:
                             self._offload_model(self.critic, role="critic")
 
-                    self.rollout.pause()
+                    if actor_update_successful:
+                        self.rollout.pause()
 
-                    with (
-                        stats_tracker.record_timing("update_weights"),
-                        perf_tracer.trace_scope(
-                            "train.update_weights",
-                            category=Category.COMM,
-                            args={"global_step": global_step},
-                        ),
-                    ):
-                        new_version = global_step + 1
-                        versioned_meta = self.weight_update_meta.with_version(new_version)
-                        self.actor.update_weights(versioned_meta)
-                        self._advance_logical_versions(new_version)
-                    # The bucketed broadcast leaves gathered full-parameter buckets
-                    # in the cache; drop them before DCP save's NCCL collectives.
-                    self._maybe_clear_device_cache(self.actor)
+                        with (
+                            stats_tracker.record_timing("update_weights"),
+                            perf_tracer.trace_scope(
+                                "train.update_weights",
+                                category=Category.COMM,
+                                args={"global_step": global_step},
+                            ),
+                        ):
+                            new_version = global_step + 1
+                            versioned_meta = self.weight_update_meta.with_version(new_version)
+                            self.actor.update_weights(versioned_meta)
+                            self._advance_logical_versions(new_version)
+                        # The bucketed broadcast leaves gathered full-parameter buckets
+                        # in the cache; drop them before DCP save's NCCL collectives.
+                        self._maybe_clear_device_cache(self.actor)
+                    else:
+                        logger.error(
+                            "Skipped optimizer, scheduler, and weight broadcast "
+                            "for global step %d after a non-finite/unsuccessful "
+                            "actor update; checkpointing the unchanged finite state.",
+                            global_step,
+                        )
+                        self._advance_logical_versions(global_step + 1)
                 else:
                     # Match AReaL's empty-rollout behavior: do not step the
                     # optimizer/LR or broadcast unchanged weights, but advance
@@ -1330,6 +1465,8 @@ class PlatoonArealRLTrainer(PPOTrainer):
             self.rollout.resume()
             current_platform.synchronize()
             self._save_perf_tracer(step=global_step)
+            if deadline_guard is not None:
+                deadline_guard.record_completed_step(time.monotonic() - step_started_monotonic)
 
     def _evaluate_fn(
         self,

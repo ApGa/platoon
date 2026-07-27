@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import sys
 import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from openhands.sdk import LLM
 from openhands.sdk import Agent as OpenHandsSDKAgent
-from openhands.sdk.context.condenser import LLMSummarizingCondenser
 from platoon.agents.actions.subagent import (
     SubagentRewardJudgeConfig,
 )
@@ -25,11 +25,13 @@ from platoon.episode.context import (
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCollection
 from platoon.openhands.agent import OpenHandsAgent
+from platoon.openhands.condenser import SafeLLMSummarizingCondenser
 from platoon.openhands.recursive import (
     PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX,
     RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX,
     RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX,
     RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX,
+    TASK_TRACKER_SYSTEM_PROMPT_SUFFIX,
     append_system_message_suffix,
     append_user_message_suffix,
     with_programmatic_tool_calling,
@@ -51,6 +53,66 @@ from platoon.openreward.constants import (
 from platoon.openreward.env import OpenRewardOpenHandsEnv
 
 OPENREWARD_CONDENSER_KEEP_FIRST = 2
+logger = logging.getLogger(__name__)
+
+
+class OpenRewardAgent(OpenHandsSDKAgent):
+    """Require an environment terminal tool instead of accepting plain text."""
+
+    def _handle_content_response(
+        self,
+        message: Any,
+        llm_response: Any,
+        conversation: Any,
+        state: Any,
+        on_event: Any,
+    ) -> None:
+        from openhands.sdk.event import MessageEvent
+        from openhands.sdk.llm import Message, TextContent
+
+        self._emit_message_event(message, llm_response, conversation, on_event)
+        self._maybe_emit_vllm_tokens(llm_response, on_event)
+
+        tool_names = set(self.tools_map)
+        completion_tool = next(
+            (
+                name
+                for name in ("finish", "submit_answer", "claim_done")
+                if name in tool_names
+            ),
+            None,
+        )
+        if completion_tool is None:
+            completion_instruction = (
+                "Use the terminal environment tool identified by the task prompt "
+                "when the work is complete."
+            )
+        else:
+            completion_instruction = (
+                f"When the work is complete, call `{completion_tool}`."
+            )
+        logger.warning(
+            "OpenReward agent returned text without a terminal tool call; "
+            "continuing the rollout"
+        )
+        on_event(
+            MessageEvent(
+                source="user",
+                llm_message=Message(
+                    role="user",
+                    content=[
+                        TextContent(
+                            text=(
+                                "Your text response did not submit the environment, "
+                                "so the task is still active. Continue using tools and "
+                                "do not use a normal assistant message to end the task. "
+                                f"{completion_instruction}"
+                            )
+                        )
+                    ],
+                ),
+            )
+        )
 
 
 def _patch_mcp_boot_timeout() -> None:
@@ -182,7 +244,14 @@ def _build_mcp_config(
     }
 
 
-def _build_llm(config: RolloutConfig) -> LLM:
+def _build_llm(
+    config: RolloutConfig,
+    *,
+    usage_id: str = "platoon-openreward-openhands",
+    max_output_tokens: int | None = None,
+    litellm_extra_body: dict | None = None,
+    load_custom_tokenizer: bool = True,
+) -> LLM:
     inference_params = config.inference_params
     api_key = config.model_api_key
     model_name = config.model_name or "openai/gpt-4o-mini"
@@ -193,16 +262,54 @@ def _build_llm(config: RolloutConfig) -> LLM:
     custom_tokenizer = model_name.removeprefix("openai/")
     if custom_tokenizer.startswith("openai/"):
         custom_tokenizer = None
+    if not load_custom_tokenizer:
+        # Condensation thresholds are computed with the agent LLM's tokenizer.
+        # The dedicated condenser only performs the completion, so loading a
+        # second copy of a large local tokenizer in every rollout subprocess is
+        # unnecessary and can materially delay startup.
+        custom_tokenizer = None
     return LLM(
-        usage_id="platoon-openreward-openhands",
+        usage_id=usage_id,
         model=model_name,
         base_url=config.model_endpoint,
         api_key=api_key or None,
         temperature=inference_params.temperature,
         top_p=inference_params.top_p,
-        max_output_tokens=inference_params.max_completion_tokens,
+        max_output_tokens=max_output_tokens or inference_params.max_completion_tokens,
         timeout=config.step_timeout,
         custom_tokenizer=custom_tokenizer,
+        litellm_extra_body=litellm_extra_body or {},
+    )
+
+
+def _build_condenser_llm(
+    config: RolloutConfig,
+    openreward_config: OpenRewardConfig,
+) -> LLM:
+    max_output_tokens = min(
+        config.inference_params.max_completion_tokens,
+        openreward_config.condenser_max_completion_tokens,
+    )
+    extra_body: dict = {}
+    # AReaL exposes a local HTTP OpenAI proxy and forwards chat-template kwargs.
+    # Hosted LiteLLM providers may reject provider-specific extra-body fields;
+    # the safe output validator still protects those paths.
+    if (
+        openreward_config.condenser_disable_thinking
+        and (config.model_endpoint or "").lower().startswith("http://")
+    ):
+        extra_body = {
+            "chat_template_kwargs": {
+                "enable_thinking": False,
+                "preserve_thinking": False,
+            }
+        }
+    return _build_llm(
+        config,
+        usage_id="platoon-openreward-openhands-condenser",
+        max_output_tokens=max_output_tokens,
+        litellm_extra_body=extra_body,
+        load_custom_tokenizer=False,
     )
 
 
@@ -224,6 +331,11 @@ def _configure_openhands_agent(
             OpenHandsSDKAgent,
             with_task_tracker_tool(configured_agent),
         )
+    if (
+        openreward_config.enable_task_tracker
+        and not openreward_config.enable_recursive_subagents
+    ):
+        suffix_parts.append(TASK_TRACKER_SYSTEM_PROMPT_SUFFIX)
     if openreward_config.enable_recursive_subagents:
         suffix_parts.append(RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX)
         user_suffix_parts.append(RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX)
@@ -274,8 +386,9 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
 
     llm = _build_llm(config)
+    condenser_llm = _build_condenser_llm(config, openreward_config)
     oh_agent = _configure_openhands_agent(
-        OpenHandsSDKAgent(
+        OpenRewardAgent(
             llm=llm,
             tools=[],
             mcp_config=_build_mcp_config(
@@ -285,8 +398,8 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
                 bridge_output_dir,
             ),
             include_default_tools=[],
-            condenser=LLMSummarizingCondenser(
-                llm=llm,
+            condenser=SafeLLMSummarizingCondenser(
+                llm=condenser_llm,
                 keep_first=OPENREWARD_CONDENSER_KEEP_FIRST,
                 max_tokens=int(0.8 * 32768),  # TODO: Make this configurable
             ),

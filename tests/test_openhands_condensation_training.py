@@ -116,6 +116,12 @@ def test_condensation_observation_emits_one_synthetic_trainable_step(monkeypatch
         kind="Condensation",
         id="condensation-1",
         llm_response_id="chatcmpl-summary",
+        summary=(
+            "USER_CONTEXT: Fix the parser.\n"
+            "COMPLETED: Located the implementation.\n"
+            "PENDING: Apply and test the patch.\n"
+            "CURRENT_STATE: No files changed yet."
+        ),
     )
 
     env._add_trainable_condensation_steps(collection, "trajectory-1", [condensation])
@@ -129,6 +135,29 @@ def test_condensation_observation_emits_one_synthetic_trainable_step(monkeypatch
     assert step.misc["action_misc"] == {"completion_id": "chatcmpl-summary"}
     assert step.misc["reward_misc"] == {}
     assert step.misc["synthetic_step_type"] == "openhands_condensation"
+
+
+def test_unsafe_condensation_does_not_emit_trainable_step(monkeypatch):
+    env_mod = _load_openhands_env_module(monkeypatch)
+    env = env_mod.OpenHandsEnv.__new__(env_mod.OpenHandsEnv)
+    env._synthetic_condensation_step_event_ids = set()
+    collection = _TrajectoryCollection()
+
+    condensation = SimpleNamespace(
+        kind="Condensation",
+        id="condensation-unsafe",
+        llm_response_id="chatcmpl-unsafe-summary",
+        summary=(
+            "Here's a thinking process:\n"
+            "1. Analyze the user's instructions.\n"
+            "</think>\n\n"
+            "USER_CONTEXT: Fix the parser."
+        ),
+    )
+
+    env._add_trainable_condensation_steps(collection, "trajectory-1", [condensation])
+
+    assert collection.steps == []
 
 
 @pytest.mark.asyncio

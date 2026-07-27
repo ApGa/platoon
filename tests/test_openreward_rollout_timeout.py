@@ -104,11 +104,17 @@ def _load_rollout_module(
     )
     _module(monkeypatch, "platoon.openhands")
     _module(monkeypatch, "platoon.openhands.agent", OpenHandsAgent=agent_type)
+    _module(
+        monkeypatch,
+        "platoon.openhands.condenser",
+        SafeLLMSummarizingCondenser=_AcceptsKeywords,
+    )
     recursive_attrs = {
         "PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX": "",
         "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "",
         "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "",
         "RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX": "",
+        "TASK_TRACKER_SYSTEM_PROMPT_SUFFIX": "",
         "append_system_message_suffix": _identity,
         "append_user_message_suffix": _identity,
         "with_programmatic_tool_calling": _identity,
@@ -161,6 +167,7 @@ def _agent_configuration_spies():
         "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "recursive-initial-guidance",
         "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "recursive-system-guidance",
         "RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX": "recursive-user-guidance",
+        "TASK_TRACKER_SYSTEM_PROMPT_SUFFIX": "task-tracker-guidance",
         "append_system_message_suffix": _append_prompt("system"),
         "append_user_message_suffix": _append_prompt("user"),
         "with_programmatic_tool_calling": _with_tool("programmatic_tool_calling"),
@@ -187,9 +194,95 @@ def test_nonrecursive_ptc_and_task_tracker_do_not_add_delegation(monkeypatch) ->
 
     assert configured.tools == ["programmatic_tool_calling", "task_tracker"]
     assert "launch_subagent" not in configured.tools
-    assert prompts["system"] == ["ptc-guidance"]
+    assert prompts["system"] == ["ptc-guidance\n\ntask-tracker-guidance"]
     assert prompts["user"] == [""]
     assert all("recursive" not in prompt for values in prompts.values() for prompt in values)
+
+
+def test_openreward_agent_rejects_plain_message_completion(monkeypatch) -> None:
+    rollout = _load_rollout_module(monkeypatch)
+
+    class TextContent:
+        def __init__(self, *, text):
+            self.text = text
+
+    class Message:
+        def __init__(self, *, role, content):
+            self.role = role
+            self.content = content
+
+    class MessageEvent:
+        def __init__(self, *, source, llm_message):
+            self.source = source
+            self.llm_message = llm_message
+
+    _module(monkeypatch, "openhands.sdk.event", MessageEvent=MessageEvent)
+    _module(
+        monkeypatch,
+        "openhands.sdk.llm",
+        Message=Message,
+        TextContent=TextContent,
+    )
+
+    emitted = []
+    agent = rollout.OpenRewardAgent(tools_map={"submit_answer": object()})
+    agent._emit_message_event = lambda *args: emitted.append("assistant")
+    agent._maybe_emit_vllm_tokens = lambda *args: None
+    state = types.SimpleNamespace(execution_status="running")
+
+    agent._handle_content_response(
+        message=object(),
+        llm_response=object(),
+        conversation=object(),
+        state=state,
+        on_event=emitted.append,
+    )
+
+    assert state.execution_status == "running"
+    assert emitted[0] == "assistant"
+    nudge = emitted[1]
+    assert nudge.source == "user"
+    assert "did not submit" in nudge.llm_message.content[0].text
+    assert "call `submit_answer`" in nudge.llm_message.content[0].text
+
+
+def test_local_condenser_uses_bounded_non_thinking_completion(monkeypatch) -> None:
+    rollout = _load_rollout_module(monkeypatch)
+    config = RolloutConfig(
+        model_name="openai/Qwen/Qwen3.6-35B-A3B",
+        model_endpoint="http://127.0.0.1:8000/v1",
+        model_api_key="local",
+        inference_params={"max_completion_tokens": 4096},
+    )
+
+    llm = rollout._build_condenser_llm(config, rollout.OpenRewardConfig())
+
+    assert llm.usage_id == "platoon-openreward-openhands-condenser"
+    assert llm.max_output_tokens == 2048
+    assert llm.custom_tokenizer is None
+    assert llm.litellm_extra_body == {
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+            "preserve_thinking": False,
+        }
+    }
+
+
+def test_condenser_thinking_override_can_be_disabled(monkeypatch) -> None:
+    rollout = _load_rollout_module(monkeypatch)
+    config = RolloutConfig(
+        model_name="openai/hosted-model",
+        model_endpoint="http://127.0.0.1:8000/v1",
+        model_api_key="local",
+        inference_params={"max_completion_tokens": 4096},
+    )
+
+    llm = rollout._build_condenser_llm(
+        config,
+        rollout.OpenRewardConfig(condenser_disable_thinking=False),
+    )
+
+    assert llm.litellm_extra_body == {}
 
 
 def test_recursive_mode_still_installs_task_tracker_and_delegation_prompts(monkeypatch) -> None:

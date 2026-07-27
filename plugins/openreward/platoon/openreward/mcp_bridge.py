@@ -144,6 +144,31 @@ def _tool_result_to_payload(result: Any) -> dict[str, Any]:
     return payload
 
 
+def _completion_policy(tools: list[dict[str, Any]]) -> str:
+    tool_names = {
+        str(tool.get("name"))
+        for tool in tools
+        if isinstance(tool, dict) and tool.get("name")
+    }
+    if "submit_answer" in tool_names:
+        terminal_instruction = "call `submit_answer`"
+    elif "claim_done" in tool_names:
+        terminal_instruction = "call `claim_done`"
+    else:
+        terminal_instruction = (
+            "call the terminal environment tool identified by the task prompt"
+        )
+
+    return (
+        "Use the listed environment tools directly by name. If this environment "
+        "exposes a catalog/meta tool such as `call_tool`, follow the environment "
+        "prompt for when to use it. Completion requires an environment tool call: "
+        f"when the task is complete, {terminal_instruction}. Do not end with a "
+        "normal assistant message; a text response does not submit the environment "
+        "and will be rejected so that the rollout can continue."
+    )
+
+
 def _normalize_arguments(arguments: Any) -> dict[str, Any]:
     if arguments is None:
         return {}
@@ -344,11 +369,7 @@ class OpenRewardMCPBridge:
             "task_index": self.config.task_index,
             "prompt": self.prompt_text,
             "environment_tools": self.tools,
-            "policy": (
-                "Use the listed environment tools directly by name. If this environment "
-                "exposes a catalog/meta tool such as call_tool, follow that environment's "
-                "prompt for when to use it. Call claim_done when the task is complete."
-            ),
+            "policy": _completion_policy(self.tools),
         }
         self._record(
             "task_requested",

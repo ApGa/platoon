@@ -130,10 +130,23 @@ class OpenRewardConfig:
     subagent_reward_judge_max_steps: int = 20
     subagent_delegation_reward_coefficient: float = 0.0
     openhands_system_prompt_suffix: str | None = None
+    # Context condensation is a separate state-maintenance completion. It
+    # should not spend output budget on private reasoning or place that
+    # reasoning back into the agent's context/training data.
+    condenser_disable_thinking: bool = True
+    condenser_max_completion_tokens: int = 2_048
 
     def __post_init__(self) -> None:
         if not isinstance(self.balance_accepted_batches, bool):
             raise ValueError("balance_accepted_batches must be a boolean")
+        if not isinstance(self.condenser_disable_thinking, bool):
+            raise ValueError("condenser_disable_thinking must be a boolean")
+        if (
+            isinstance(self.condenser_max_completion_tokens, bool)
+            or not isinstance(self.condenser_max_completion_tokens, int)
+            or self.condenser_max_completion_tokens <= 0
+        ):
+            raise ValueError("condenser_max_completion_tokens must be a positive integer")
         if (
             isinstance(self.accepted_batch_max_replacement_rounds, bool)
             or not isinstance(self.accepted_batch_max_replacement_rounds, int)

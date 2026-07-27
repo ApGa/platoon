@@ -38,6 +38,14 @@ PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX = (
     "PTC provides you with a powerful runtime to call and orchestrate other tool calls."
 )
 
+TASK_TRACKER_SYSTEM_PROMPT_SUFFIX = (
+    "For every nontrivial multi-step task, use `task_tracker` to maintain a "
+    "short plan. Create the plan before beginning substantive environment work, "
+    "keep exactly one item in progress, and update it as work completes or the "
+    "plan changes. Skip the tracker only for a genuinely atomic task that can be "
+    "completed in one or two tool calls."
+)
+
 RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (
     "For multi-part tasks, actively look for independent work that can run in "
     "parallel or make progress while you continue planning. Prefer delegating "

@@ -222,6 +222,48 @@ OPENREWARD_JOB_STATE_DIR=${OPENREWARD_JOB_STATE_ROOT}/${JOB_INSTANCE_ID}
 OPENREWARD_ENV_READY_FILE=${OPENREWARD_JOB_STATE_DIR}/env-ready
 OPENREWARD_RUNTIME_GUARD_BIN=${OPENREWARD_JOB_STATE_DIR}/runtime-guard-bin
 KEEPALIVE_READY_DIR=${OPENREWARD_JOB_STATE_DIR}/keepalive-ready
+# Continuations inherit the predecessor's complete exported environment. Never
+# reuse its absolute deadline or job-local marker path; resolve both against the
+# current allocation below. A caller can supply the explicit OPENREWARD override
+# for non-Slurm integration tests.
+unset PLATOON_TRAINING_DEADLINE_EPOCH PLATOON_TRAINING_DRAIN_FILE
+OPENREWARD_TRAINING_DEADLINE_EPOCH=${OPENREWARD_TRAINING_DEADLINE_EPOCH:-}
+PLATOON_TRAINING_DRAIN_FILE=${OPENREWARD_JOB_STATE_DIR}/deadline-drain-requested.json
+export PLATOON_TRAINING_DRAIN_FILE
+export PLATOON_DEADLINE_INITIAL_STEP_SECONDS=${OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-1800}
+export PLATOON_DEADLINE_SAFETY_SECONDS=${OPENREWARD_DEADLINE_SAFETY_SECONDS:-300}
+export PLATOON_DEADLINE_HISTORY_SIZE=${OPENREWARD_DEADLINE_HISTORY_SIZE:-8}
+export PLATOON_DEADLINE_HISTORY_MULTIPLIER=${OPENREWARD_DEADLINE_HISTORY_MULTIPLIER:-1.15}
+
+resolve_slurm_deadline_epoch() {
+  local job_record end_time
+  [[ -n "${SLURM_JOB_ID:-}" ]] || return 1
+  job_record=$(scontrol show job "${SLURM_JOB_ID}" -o 2>/dev/null) || return 1
+  [[ "${job_record}" == *"EndTime="* ]] || return 1
+  end_time=${job_record#*EndTime=}
+  end_time=${end_time%% *}
+  [[ -n "${end_time}" && "${end_time}" != "Unknown" && "${end_time}" != "N/A" ]] || return 1
+  date --date="${end_time}" +%s
+}
+
+if [[ -n "${OPENREWARD_TRAINING_DEADLINE_EPOCH}" ]]; then
+  PLATOON_TRAINING_DEADLINE_EPOCH=${OPENREWARD_TRAINING_DEADLINE_EPOCH}
+  # An explicit absolute override applies only to this allocation. Do not let
+  # `sbatch --export=ALL` give a continuation its predecessor's deadline.
+  unset OPENREWARD_TRAINING_DEADLINE_EPOCH
+elif PLATOON_TRAINING_DEADLINE_EPOCH=$(resolve_slurm_deadline_epoch); then
+  :
+else
+  PLATOON_TRAINING_DEADLINE_EPOCH=
+  echo "WARNING: unable to resolve the Slurm allocation deadline; step-boundary draining is disabled." >&2
+fi
+if [[ -n "${PLATOON_TRAINING_DEADLINE_EPOCH}" ]]; then
+  [[ "${PLATOON_TRAINING_DEADLINE_EPOCH}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+    echo "ERROR: invalid training deadline epoch: ${PLATOON_TRAINING_DEADLINE_EPOCH@Q}" >&2
+    exit 2
+  }
+  export PLATOON_TRAINING_DEADLINE_EPOCH
+fi
 # The old project venv is no longer mutated. It provides torch immediately to
 # the keepalive while a first content-addressed training environment is built.
 OPENREWARD_KEEPALIVE_PYTHON=${OPENREWARD_KEEPALIVE_PYTHON:-${OPENREWARD_DIR}/.venv/bin/python}
@@ -353,6 +395,7 @@ mkdir -p "${USER_ROOT}/experiments/areal/experiments"
 mkdir -p "${USER_ROOT}/experiments/areal/name_resolve"
 mkdir -p "${OPENREWARD_JOB_STATE_DIR}"
 rm -f "${OPENREWARD_ENV_READY_FILE}"
+rm -f "${PLATOON_TRAINING_DRAIN_FILE}"
 # Keep pip entrypoints out of the parent trainer process. A rollout subprocess
 # prepends its own disposable environment and pip shim; uv must remain available
 # there so programmatic tool calling can install task-specific packages safely.
@@ -837,6 +880,9 @@ echo "Environment key: ${OPENREWARD_ENV_KEY}"
 echo "Immutable training venv: ${OPENREWARD_JOB_VENV}"
 echo "Nodes: ${NNODES} (gpus/node: ${GPUS_PER_NODE}); controller node: ${CONTROLLER_NODE}"
 echo "Sharding: ${OPENREWARD_SHARD} -> session URLs: ${session_urls}"
+if [[ -n "${PLATOON_TRAINING_DEADLINE_EPOCH:-}" ]]; then
+  echo "Step-boundary deadline drain: deadline epoch ${PLATOON_TRAINING_DEADLINE_EPOCH}, initial step ${PLATOON_DEADLINE_INITIAL_STEP_SECONDS}s, safety ${PLATOON_DEADLINE_SAFETY_SECONDS}s."
+fi
 echo "To stop after the current job: touch ${STOP_FILE}"
 echo "To stop immediately without recovery: touch ${STOP_FILE}; scancel ${SLURM_JOB_ID:-<job-id>}"
 
@@ -1054,7 +1100,13 @@ done
 set -e
 
 restart_reason=
-if [[ -f "${SERVER_HEALTH_FAILURE_FILE}" || -f "${ENVIRONMENT_HEALTH_FAILURE_FILE}" ]]; then
+successor_infrastructure_restart=1
+if [[ -f "${PLATOON_TRAINING_DRAIN_FILE}" && "${status}" -eq 0 ]]; then
+  restart_reason="step-boundary deadline drain"
+  successor_infrastructure_restart=0
+  echo "Trainer drained cleanly before starting an update that would overrun the allocation:"
+  cat "${PLATOON_TRAINING_DRAIN_FILE}"
+elif [[ -f "${SERVER_HEALTH_FAILURE_FILE}" || -f "${ENVIRONMENT_HEALTH_FAILURE_FILE}" ]]; then
   status=1
   restart_reason="environment service/runtime health failure"
 elif [[ "${status}" -eq 1 ]]; then
@@ -1072,7 +1124,7 @@ if [[ -n "${restart_reason}" ]]; then
   # cleanup trap remains installed, and the original trainer status is preserved
   # below regardless of whether submission succeeds.
   trap '' TERM INT USR1
-  submit_successor "${restart_reason}" 1 || true
+  submit_successor "${restart_reason}" "${successor_infrastructure_restart}" || true
 fi
 
 exit "${status}"

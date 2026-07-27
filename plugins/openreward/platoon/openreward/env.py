@@ -235,6 +235,9 @@ def _format_openreward_task_goal(
             initial_goal_suffix=initial_goal_suffix,
         )
 
+    policy = str(payload.get("policy") or "").strip()
+    if policy:
+        prompt = _append_suffix(prompt, f"## Completion Contract\n\n{policy}")
     return _append_suffix(prompt, initial_goal_suffix)
 
 

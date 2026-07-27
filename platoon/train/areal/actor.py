@@ -11,12 +11,18 @@ from areal.infra import current_platform
 from areal.trainer.ppo.actor import PPOActor, PPOActorController
 from areal.trainer.ppo.stats import infer_token_denominator
 from areal.utils import logging, stats_tracker
-from areal.utils.data import split_padded_tensor_dict_into_mb_list
+from areal.utils.data import batched_call, split_padded_tensor_dict_into_mb_list
 from areal.utils.perf_tracer import trace_perf
 
 from platoon.train.areal.config_defs import PlatoonPPOActorConfig
 from platoon.train.areal.fp32_lm_head import install_fp32_lm_head_output_hooks
 from platoon.train.areal.loss_functions import build_loss_fn
+from platoon.train.areal.numerical_stability import (
+    aggregate_optimizer_update_results,
+    install_nonfinite_gradient_guard,
+    make_optimizer_update_result,
+    optimizer_update_succeeded,
+)
 from platoon.train.areal.router_replay import (
     ROUTED_EXPERTS_FIELD,
     ROUTED_EXPERTS_VALID_FIELD,
@@ -76,10 +82,13 @@ class PlatoonActorImpl(PPOActor):
 
     @trace_perf("platoon_ppo_actor.ppo_update", category="compute")
     @stats_tracker.scope_func_wrapper("ppo_actor")
-    def ppo_update(self, data: list[dict[str, Any]]) -> None:
-        return super().ppo_update(data)
+    def ppo_update(
+        self,
+        data: list[dict[str, Any]],
+    ) -> dict[str, list[bool]]:
+        return batched_call(self._ppo_update, data, unpack=False)
 
-    def _ppo_update(self, data: dict[str, Any]) -> None:
+    def _ppo_update(self, data: dict[str, Any]) -> dict[str, list[bool]]:
         attn_mask = data["attention_mask"]
         loss_mask = data["loss_mask"]
         reward_score = data["rewards"]
@@ -162,6 +171,7 @@ class PlatoonActorImpl(PPOActor):
         with stats_tracker.scope("update"):
             current_version = self.engine.get_version()
             loss_fn = self._make_loss_fn(current_version)
+            minibatch_update_successes: list[bool] = []
             for mb, replay_batch in zip(mb_inputs.mbs, replay_batches, strict=True):
                 stage_engine_router_replay_batch(self.engine, replay_batch)
                 try:
@@ -174,10 +184,40 @@ class PlatoonActorImpl(PPOActor):
                 finally:
                     discard_staged_engine_router_replay_batch(self.engine)
                 stats_tracker.scalar(**train_stat)
+                minibatch_update_successes.append(
+                    optimizer_update_succeeded(
+                        train_stat,
+                        require_finite_grad_norm=bool(
+                            self.config.optimizer is not None and self.config.optimizer.gradient_clipping > 0
+                        ),
+                    )
+                )
+            applied_minibatches = sum(minibatch_update_successes)
+            attempted_minibatches = len(minibatch_update_successes)
+            stats_tracker.scalar(
+                optimizer_minibatches_attempted=float(attempted_minibatches),
+                optimizer_minibatches_applied=float(applied_minibatches),
+                optimizer_minibatches_skipped=float(
+                    attempted_minibatches - applied_minibatches
+                ),
+                optimizer_partial_update=float(
+                    0 < applied_minibatches < attempted_minibatches
+                ),
+            )
+            return make_optimizer_update_result(minibatch_update_successes)
 
 
 class PlatoonPPOActorController(PPOActorController):
     """Actor controller exposing Platoon's worker-side memory hygiene RPC."""
+
+    def ppo_update(self, *args: Any, **kwargs: Any) -> bool:
+        results = self._custom_function_call(
+            "ppo_update",
+            *args,
+            rpc_meta={"broadcast": True},
+            **kwargs,
+        )
+        return aggregate_optimizer_update_results(results)
 
     def clear_device_cache(self) -> None:
         self._custom_function_call("clear_device_cache")
@@ -242,6 +282,7 @@ def _get_platoon_megatron_actor_cls() -> type:
             with router_replay_initialization(self):
                 result = super().initialize(*args, **kwargs)
             configure_router_replay_engine(self)
+            install_nonfinite_gradient_guard(self.optimizer, logger=logger)
             enabled = bool(self.config.megatron.enable_fp32_lm_head)
             hook_count = install_fp32_lm_head_output_hooks(
                 self.model,

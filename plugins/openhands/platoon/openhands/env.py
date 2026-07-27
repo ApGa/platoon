@@ -25,6 +25,7 @@ from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event.base import Event
 from openhands.sdk.workspace.base import BaseWorkspace
 
+from .condensation_safety import is_safe_condensation_summary
 from .recursive import DEFAULT_SUBAGENT_MAX_STEPS, copy_agent_config_for_fork
 from .types import OpenHandsAction, OpenHandsObservation, OpenHandsTrajectoryStep
 
@@ -142,7 +143,12 @@ class OpenHandsEnv:
         for event in obs_events or []:
             completion_id = _condensation_completion_id(event)
             event_id = getattr(event, "id", None)
-            if completion_id is None or event_id is None:
+            # Never attach policy loss to a reasoning-bearing, malformed, or
+            # truncated condensation. SafeLLMSummarizingCondenser rejects these
+            # before emitting an event; this remains a defense for alternate
+            # SDK condensers and persisted legacy conversations.
+            summary = getattr(event, "summary", None)
+            if completion_id is None or event_id is None or not is_safe_condensation_summary(summary):
                 continue
             event_id = str(event_id)
             if event_id in self._synthetic_condensation_step_event_ids:
