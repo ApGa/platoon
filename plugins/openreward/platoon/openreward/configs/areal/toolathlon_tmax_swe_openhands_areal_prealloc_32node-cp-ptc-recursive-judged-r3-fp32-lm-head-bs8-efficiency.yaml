@@ -1,0 +1,96 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8-efficiency
+  - _self_
+
+# Fresh mixed recursive lineage: do not load the earlier Toolathlon-only
+# optimizer/recovery state, and do not load the poisoned nonrecursive mixed run.
+trial_name: toolathlon-tmax-swe-openhands-32node-qwen3.6-35B-ptc-recursive-judged-r3-fp32-lm-head-bs8-efficiency-v1-trial0
+
+openreward:
+  # Preserve equal rotating submissions while accepting completed groups
+  # asynchronously. Environment-specific telemetry records any steady-state
+  # drift caused by differing rollout latency.
+  balance_accepted_batches: false
+  accepted_batch_max_replacement_rounds: 8
+
+  enable_programmatic_tool_calling: true
+  enable_task_tracker: true
+  enable_recursive_subagents: true
+  # Until child worktrees/write leases are implemented, roots remain the sole
+  # editors and submitters. Children and reward judges can inspect live state.
+  subagent_environment_access: read_only
+  subagent_default_max_steps: 50
+  subagent_max_depth: 2
+  enable_subagent_reward_judging: true
+  subagent_reward_judge_max_steps: 50
+  # Keep the latest recursive ablation: child success does not give the parent
+  # a delegation bonus. Judgments still provide child-level training signals.
+  subagent_delegation_reward_coefficient: 0.0
+
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      split: train
+      eval_split: train
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+    - label: tmax
+      env_name: tmax/TMax-15K-Harbor
+      split: train
+      eval_split: train
+      session_url: http://localhost:8083
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TMAX
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+    - label: swe_rebench
+      env_name: nebius/SWE-rebench-V2
+      subagent_environment_access: read_only
+      split: train
+      eval_split: train
+      session_url: http://localhost:8084
+      session_urls_env_var: OPENREWARD_SESSION_URLS_SWE_REBENCH
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+# Keep the requested eight task groups by eight root samples. The inherited
+# recursive config retains 12 TP8 rollout replicas, Bernoulli child-datum
+# retention, quorum-6/15-minute straggler handling, and per-step recovery.
+train_dataset:
+  batch_size: 8
+
+workflow_config:
+  group_size: 8
+
+# Train on every task in each catalog and avoid spending this throughput run on
+# a separately constructed evaluation set.
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+# Keep the mixed runs separate in W&B.
+stats_logger:
+  wandb:
+    project: openreward-multienv-openhands
+
+# Literal values are required by the pre-Hydra launcher validation. The model
+# overlay changes only tokenizer/template behavior and points to untouched base
+# weights, so this starts with a fresh optimizer.
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking

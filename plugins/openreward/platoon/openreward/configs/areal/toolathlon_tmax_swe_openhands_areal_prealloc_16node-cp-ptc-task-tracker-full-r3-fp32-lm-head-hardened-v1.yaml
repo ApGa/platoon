@@ -1,0 +1,16 @@
+defaults:
+  - toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-ptc-task-tracker-full-r3-fp32-lm-head
+  - _self_
+
+# Start a completely new model/optimizer lineage. The previous trial's recovery
+# state contains the step-134 non-finite update and must never be auto-loaded.
+trial_name: toolathlon-tmax-swe-openhands-16node-qwen3.6-35B-ptc-task-tracker-full-r3-fp32-lm-head-hardened-v1-trial0
+
+# Keep literal sections for the pre-Hydra launcher checks. All mixed catalog,
+# asynchronous 8x8, task-tracker/PTC, straggler, no-eval, and per-step recovery
+# settings are inherited from the proven full nonrecursive configuration.
+openreward: {}
+
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking

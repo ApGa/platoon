@@ -443,7 +443,7 @@ def test_32node_recursive_bs8_config_composes_all_features_with_preserved_thinki
         REPO_ROOT / ".cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking"
     )
     assert composed.cluster.n_nodes == 32
-    assert composed.trial_name.endswith("fp32-lm-head-bs8-trial1")
+    assert composed.trial_name.endswith("fp32-lm-head-bs8-trial2")
     assert composed.train_dataset.batch_size == 8
     assert composed.rollout.consumer_batch_size == 8
     assert composed.workflow_config.group_size == 8

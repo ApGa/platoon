@@ -160,7 +160,9 @@ case "${KIND}" in
     SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-eb6a32ac6a14b6ec7e6fb1e2536d4f0a3fd5b9d0}
     require_source_revision "${ENV_ROOT}" "${SWE_REBENCH_SOURCE_REVISION}"
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
-    DATA_DIR=${SWE_REBENCH_DATA_DIR:-${REPO_ROOT}/.cache/swe-rebench-v2}
+    # Train on Prime Intellect's full verified-solvable subset by default. The
+    # environment name remains stable; DATA_DIR selects its 6,272-task catalog.
+    DATA_DIR=${SWE_REBENCH_DATA_DIR:-${REPO_ROOT}/.cache/swe-rebench-v2-filtered-verified}
     [[ -x "${PYTHON}" ]] || {
       echo "ERROR: missing SWE-rebench runtime: ${PYTHON}" >&2
       exit 2
