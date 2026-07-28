@@ -267,7 +267,7 @@ def test_openreward_agent_rejects_plain_message_completion(monkeypatch) -> None:
     assert "call `submit_answer`" in nudge.llm_message.content[0].text
 
 
-def test_local_condenser_uses_bounded_non_thinking_completion(monkeypatch) -> None:
+def test_local_condenser_defaults_to_bounded_reasoning_completion(monkeypatch) -> None:
     rollout = _load_rollout_module(monkeypatch)
     config = RolloutConfig(
         model_name="openai/Qwen/Qwen3.6-35B-A3B",
@@ -279,18 +279,18 @@ def test_local_condenser_uses_bounded_non_thinking_completion(monkeypatch) -> No
     llm = rollout._build_condenser_llm(config, rollout.OpenRewardConfig())
 
     assert llm.usage_id == "platoon-openreward-openhands-condenser"
-    assert llm.max_output_tokens == 4096
+    assert llm.max_output_tokens == 26_214
     assert llm.custom_tokenizer is None
     assert llm.litellm_extra_body == {
-        "reasoning_effort": "none",
+        "reasoning_effort": "high",
         "chat_template_kwargs": {
-            "enable_thinking": False,
+            "enable_thinking": True,
             "preserve_thinking": False,
-        }
+        },
     }
 
 
-def test_condenser_thinking_override_can_be_disabled(monkeypatch) -> None:
+def test_condenser_thinking_can_be_explicitly_disabled(monkeypatch) -> None:
     rollout = _load_rollout_module(monkeypatch)
     config = RolloutConfig(
         model_name="openai/hosted-model",
@@ -301,10 +301,16 @@ def test_condenser_thinking_override_can_be_disabled(monkeypatch) -> None:
 
     llm = rollout._build_condenser_llm(
         config,
-        rollout.OpenRewardConfig(condenser_disable_thinking=False),
+        rollout.OpenRewardConfig(condenser_disable_thinking=True),
     )
 
-    assert llm.litellm_extra_body == {}
+    assert llm.litellm_extra_body == {
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+            "preserve_thinking": False,
+        }
+    }
 
 
 def test_recursive_mode_still_installs_task_tracker_and_delegation_prompts(monkeypatch) -> None:

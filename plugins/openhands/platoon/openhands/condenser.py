@@ -63,9 +63,9 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
             raise NoCondensationAvailableException("Condensation completion was truncated")
         text = cls._completion_text(llm_response)
         try:
-            # Reasoning-capable local models may return an in-band reasoning
-            # prefix even when the request asks the chat template to disable
-            # thinking. Only the public suffix is inserted into future context.
+            # Reasoning is intentionally enabled for summary quality. Qwen may
+            # return that reasoning in-band, followed by ``</think>`` and the
+            # public summary. Only the public suffix enters future context.
             return validate_condensation_summary(extract_visible_condensation_text(text))
         except ValueError as exc:
             raise NoCondensationAvailableException(f"Unsafe condensation completion: {exc}") from exc

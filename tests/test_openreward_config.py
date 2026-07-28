@@ -135,13 +135,13 @@ def test_openreward_config_defaults_subagent_budget_to_50():
     assert config.subagent_default_max_steps == 50
 
 
-def test_openreward_config_defaults_to_bounded_non_thinking_condensations():
+def test_openreward_config_defaults_to_bounded_reasoning_condensations():
     config_mod = _load_openreward_config_module()
 
     config = config_mod.OpenRewardConfig.from_mapping({})
 
-    assert config.condenser_disable_thinking is True
-    assert config.condenser_max_completion_tokens == 4_096
+    assert config.condenser_disable_thinking is False
+    assert config.condenser_max_completion_tokens == 26_214
 
     with pytest.raises(ValueError, match="condenser_disable_thinking"):
         config_mod.OpenRewardConfig.from_mapping({"condenser_disable_thinking": 1})

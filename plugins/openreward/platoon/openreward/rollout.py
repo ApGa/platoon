@@ -301,25 +301,19 @@ def _build_condenser_llm(
     config: RolloutConfig,
     openreward_config: OpenRewardConfig,
 ) -> LLM:
-    max_output_tokens = min(
-        config.inference_params.max_completion_tokens,
-        openreward_config.condenser_max_completion_tokens,
-    )
+    # Condensation has its own reasoning + summary budget. AReaL additionally
+    # clips this to the model context remaining after the condensation prompt.
+    max_output_tokens = openreward_config.condenser_max_completion_tokens
     extra_body: dict = {}
-    # AReaL exposes a local HTTP OpenAI proxy and forwards chat-template kwargs.
-    # Hosted LiteLLM providers may reject provider-specific extra-body fields;
-    # the safe output validator still protects those paths.
-    if (
-        openreward_config.condenser_disable_thinking
-        and (config.model_endpoint or "").lower().startswith("http://")
-    ):
+    # AReaL exposes a local HTTP OpenAI proxy. Send a standard reasoning hint
+    # that Platoon's proxy bridge translates into Qwen chat-template kwargs.
+    # The safe condenser strips the reasoning span from the retained summary.
+    if (config.model_endpoint or "").lower().startswith("http://"):
+        enable_thinking = not openreward_config.condenser_disable_thinking
         extra_body = {
-            # This standard field survives OpenAI/FastAPI request validation.
-            # Platoon's AReaL compatibility patch translates it to the nested
-            # chat-template kwargs consumed by the local tokenizer.
-            "reasoning_effort": "none",
+            "reasoning_effort": "high" if enable_thinking else "none",
             "chat_template_kwargs": {
-                "enable_thinking": False,
+                "enable_thinking": enable_thinking,
                 "preserve_thinking": False,
             }
         }

@@ -2536,25 +2536,26 @@ def _patch_areal_openai_message_content_flatten() -> None:
     client_module._ensure_message_dict_list = _ensure_message_dict_list_with_flatten
 
 
-def _patch_areal_openai_non_thinking_chat_template() -> None:
-    """Forward the standard non-thinking hint to AReaL's chat template.
+def _patch_areal_openai_reasoning_chat_template() -> None:
+    """Forward the standard reasoning hint to AReaL's chat template.
 
     OpenAI-compatible clients merge ``extra_body`` fields into the top-level
     HTTP request.  AReaL's proxy accepts the standard ``reasoning_effort``
     field, but its client does not consume that field and the proxy therefore
-    drops it before generation.  Translate ``reasoning_effort="none"`` into
-    the nested ``extra_body.chat_template_kwargs`` shape expected by
-    ``ArealOpenAI`` after FastAPI has validated the request.
+    drops it before generation. Translate it into the nested
+    ``extra_body.chat_template_kwargs`` shape expected by ``ArealOpenAI``
+    after FastAPI has validated the request. Qwen's local template exposes a
+    binary thinking switch, so every effort other than ``none`` enables it.
     """
 
     import areal.experimental.openai.proxy.proxy_rollout_server as proxy_server  # pyright: ignore[reportMissingImports]
 
     original = proxy_server._call_client_create
-    if getattr(original, "__platoon_non_thinking_chat_template_patch__", False):
+    if getattr(original, "__platoon_reasoning_chat_template_patch__", False):
         return
 
     @wraps(original)
-    async def _call_client_create_with_non_thinking_template(
+    async def _call_client_create_with_reasoning_template(
         create_fn,
         request,
         session_id: str,
@@ -2566,7 +2567,7 @@ def _patch_areal_openai_non_thinking_chat_template() -> None:
         else:
             reasoning_effort = getattr(request, "reasoning_effort", None)
 
-        if reasoning_effort == "none":
+        if reasoning_effort is not None:
             if hasattr(request, "model_dump"):
                 forwarded_request = request.model_dump()
             else:
@@ -2586,7 +2587,7 @@ def _patch_areal_openai_non_thinking_chat_template() -> None:
                 else {}
             )
             chat_template_kwargs.update(
-                enable_thinking=False,
+                enable_thinking=reasoning_effort != "none",
                 preserve_thinking=False,
             )
             extra_body["chat_template_kwargs"] = chat_template_kwargs
@@ -2601,8 +2602,8 @@ def _patch_areal_openai_non_thinking_chat_template() -> None:
             stream=stream,
         )
 
-    _call_client_create_with_non_thinking_template.__platoon_non_thinking_chat_template_patch__ = True
-    proxy_server._call_client_create = _call_client_create_with_non_thinking_template
+    _call_client_create_with_reasoning_template.__platoon_reasoning_chat_template_patch__ = True
+    proxy_server._call_client_create = _call_client_create_with_reasoning_template
 
 
 def apply_proxy_patches() -> None:
@@ -2611,7 +2612,7 @@ def apply_proxy_patches() -> None:
     _patch_hf_tokenizer_download_race()
     _patch_model_response_custom_stop_sequences()
     _patch_areal_openai_message_content_flatten()
-    _patch_areal_openai_non_thinking_chat_template()
+    _patch_areal_openai_reasoning_chat_template()
 
 
 # ---------------------------------------------------------------------------
@@ -2970,6 +2971,6 @@ def apply_all_patches() -> None:
     _patch_remote_inf_engine_proxy_resolution()
     _patch_areal_proxy_rollout_fork_command()
     _patch_areal_openai_message_content_flatten()
-    _patch_areal_openai_non_thinking_chat_template()
+    _patch_areal_openai_reasoning_chat_template()
     _patch_areal_recover_checkpoint_rotation()
     _install_process_stall_watchdog()

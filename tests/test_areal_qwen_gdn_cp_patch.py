@@ -928,10 +928,10 @@ def test_openai_non_thinking_hint_reaches_chat_template(monkeypatch):
         proxy_mod,
     )
 
-    patches._patch_areal_openai_non_thinking_chat_template()
+    patches._patch_areal_openai_reasoning_chat_template()
     patched = proxy_mod._call_client_create
     assert patched is not call_client_create
-    patches._patch_areal_openai_non_thinking_chat_template()
+    patches._patch_areal_openai_reasoning_chat_template()
     assert proxy_mod._call_client_create is patched
 
     result = asyncio.run(
@@ -962,7 +962,7 @@ def test_openai_non_thinking_hint_reaches_chat_template(monkeypatch):
     }
 
 
-def test_openai_reasoning_hint_is_untouched_when_enabled(monkeypatch):
+def test_openai_reasoning_hint_enables_chat_template(monkeypatch):
     patches = _load_patches_module(
         "platoon_areal_patches_reasoning_enabled_test"
     )
@@ -990,8 +990,8 @@ def test_openai_reasoning_hint_is_untouched_when_enabled(monkeypatch):
         proxy_mod,
     )
 
-    patches._patch_areal_openai_non_thinking_chat_template()
-    request = {"reasoning_effort": "low"}
+    patches._patch_areal_openai_reasoning_chat_template()
+    request = {"reasoning_effort": "high"}
     asyncio.run(
         proxy_mod._call_client_create(
             create_fn="create",
@@ -1000,7 +1000,13 @@ def test_openai_reasoning_hint_is_untouched_when_enabled(monkeypatch):
         )
     )
 
-    assert captured[0]["request"] is request
+    forwarded = captured[0]["request"]
+    assert forwarded is not request
+    assert "reasoning_effort" not in forwarded
+    assert forwarded["extra_body"]["chat_template_kwargs"] == {
+        "enable_thinking": True,
+        "preserve_thinking": False,
+    }
 
 
 def test_proxy_fork_command_uses_platoon_entrypoint(monkeypatch):

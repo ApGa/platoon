@@ -183,9 +183,25 @@ def test_safe_prompt_does_not_include_action_reasoning():
     system_prompt, user_prompt = safety.build_safe_condensation_prompt([event])
 
     assert "Never reveal" in system_prompt
+    assert "8192 tokens" in system_prompt
     assert safety.CONTEXT_SUMMARY_OPEN in system_prompt
     assert "SECRET" not in user_prompt
     assert "src/main.py" in user_prompt
+
+
+def test_public_summary_has_an_approximately_8192_token_size_cap():
+    safety = _safety_module()
+    summary = (
+        "USER_CONTEXT: Fix the parser.\n"
+        "COMPLETED: Located the implementation.\n"
+        "PENDING: Apply and test the patch.\n"
+        "CURRENT_STATE: "
+    )
+
+    with pytest.raises(safety.UnsafeCondensationSummary, match="size limit"):
+        safety.validate_condensation_summary(
+            summary + "x" * safety.DEFAULT_MAX_SUMMARY_CHARS
+        )
 
 
 def test_validate_condensation_summary_extracts_exact_wrapper():

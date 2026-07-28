@@ -130,12 +130,12 @@ class OpenRewardConfig:
     subagent_reward_judge_max_steps: int = 20
     subagent_delegation_reward_coefficient: float = 0.0
     openhands_system_prompt_suffix: str | None = None
-    # Context condensation is a separate state-maintenance completion. It
-    # should not place private reasoning back into the agent's context. Keep
-    # the normal rollout output budget: reasoning-capable local models often
-    # need more than 2k tokens before producing the public summary.
-    condenser_disable_thinking: bool = True
-    condenser_max_completion_tokens: int = 4_096
+    # Context condensation is a separate state-maintenance completion. Allow
+    # the model to reason for summary quality, but keep that reasoning out of
+    # the public summary and training data.
+    condenser_disable_thinking: bool = False
+    # Total generation budget shared by reasoning and the public summary.
+    condenser_max_completion_tokens: int = int(0.8 * 32_768)
 
     def __post_init__(self) -> None:
         if not isinstance(self.balance_accepted_batches, bool):

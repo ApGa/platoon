@@ -98,12 +98,14 @@ def test_hardened_nonrecursive_config_starts_a_fresh_full_mixed_trial():
         "tracker-full-r3-fp32-lm-head-hardened-v1"
     )
 
-    assert config.trial_name == "mix16-ptc-full-hard-v5-trial0"
-    assert config.stats_logger.wandb.group == "mix16-ptc-full-hard-v5"
+    assert config.trial_name == "mix16-ptc-full-hard-v6-trial0"
+    assert config.stats_logger.wandb.group == "mix16-ptc-full-hard-v6"
     _assert_wandb_identifiers_fit(config)
     assert config.openreward.enable_recursive_subagents is False
     assert config.openreward.enable_programmatic_tool_calling is True
     assert config.openreward.enable_task_tracker is True
+    assert config.openreward.condenser_disable_thinking is False
+    assert config.openreward.condenser_max_completion_tokens == 26_214
     assert config.train_dataset.batch_size == 8
     assert config.workflow_config.group_size == 8
     assert config.valid_dataset is None
@@ -128,7 +130,7 @@ def test_mixed_recursive_32node_config_combines_latest_proven_settings():
         assert environment.eval_task_limit is None
         assert environment.sampling_weight == 1.0
 
-    assert config.trial_name == "mix32-rec-eff-v5-trial0"
+    assert config.trial_name == "mix32-rec-eff-v6-trial0"
     assert config.cluster.n_nodes == 32
     assert config.actor.backend == "megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)"
     assert config.rollout.backend == "sglang:d12p1t8"
@@ -141,6 +143,8 @@ def test_mixed_recursive_32node_config_combines_latest_proven_settings():
     assert config.openreward.balance_accepted_batches is False
     assert config.openreward.enable_programmatic_tool_calling is True
     assert config.openreward.enable_task_tracker is True
+    assert config.openreward.condenser_disable_thinking is False
+    assert config.openreward.condenser_max_completion_tokens == 26_214
     assert config.openreward.enable_recursive_subagents is True
     assert config.openreward.subagent_environment_access == "read_only"
     assert config.openreward.enable_subagent_reward_judging is True
@@ -166,7 +170,7 @@ def test_mixed_recursive_32node_config_combines_latest_proven_settings():
     assert config.valid_dataset is None
     assert config.evaluator.eval_before_train is False
     assert config.stats_logger.wandb.project == "openreward-multienv-openhands"
-    assert config.stats_logger.wandb.group == "mix32-rec-eff-v5"
+    assert config.stats_logger.wandb.group == "mix32-rec-eff-v6"
     _assert_wandb_identifiers_fit(config)
 
 
