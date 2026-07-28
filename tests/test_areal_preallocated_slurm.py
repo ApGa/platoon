@@ -92,6 +92,14 @@ class FakeWorkerNotFoundError(FakeWorkerError):
     pass
 
 
+class FakeEngineCreationError(FakeWorkerError):
+    def __init__(self, worker_id, reason, status_code=None):
+        self.worker_id = worker_id
+        self.reason = reason
+        self.status_code = status_code
+        super().__init__(reason)
+
+
 class FakeLogger:
     def info(self, *args, **kwargs):
         pass
@@ -139,6 +147,20 @@ class FakeSlurmScheduler:
     def _configure_worker(self, worker_info, worker_rank):
         pass
 
+    async def create_engine(
+        self,
+        worker_id,
+        engine,
+        engine_name=None,
+        *args,
+        **kwargs,
+    ):
+        return {
+            "worker_id": worker_id,
+            "engine": engine,
+            "engine_name": engine_name,
+        }
+
 
 def _install_fake_areal(monkeypatch):
     areal_mod = types.ModuleType("areal")
@@ -154,6 +176,7 @@ def _install_fake_areal(monkeypatch):
     monkeypatch.setitem(sys.modules, "areal.api.cli_args", cli_args_mod)
 
     exceptions_mod = types.ModuleType("areal.infra.scheduler.exceptions")
+    exceptions_mod.EngineCreationError = FakeEngineCreationError
     exceptions_mod.WorkerCreationError = FakeWorkerCreationError
     exceptions_mod.WorkerFailedError = FakeWorkerFailedError
     exceptions_mod.WorkerNotFoundError = FakeWorkerNotFoundError
@@ -198,6 +221,81 @@ def _worker_info(role: str, rank: int, host: str) -> FakeSlurmWorkerInfo:
         spec=FakeSchedulingSpec(),
         node=host,
     )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_engine_creation_is_idempotent(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+
+    async def duplicate_create(
+        _self,
+        worker_id,
+        engine,
+        engine_name=None,
+        *args,
+        **kwargs,
+    ):
+        raise FakeEngineCreationError(
+            worker_id,
+            f"Engine '{engine_name}' already exists. Use a different name.",
+            400,
+        )
+
+    monkeypatch.setattr(FakeSlurmScheduler, "create_engine", duplicate_create)
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    result = await scheduler.create_engine(
+        "actor/36",
+        "example.Actor",
+        engine_name="actor/36",
+        config={"world_size": 160},
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_engine_name_can_be_passed_positionally(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    result = await scheduler.create_engine(
+        "actor/36",
+        "example.Actor",
+        "named-actor",
+        {"world_size": 160},
+    )
+
+    assert result == {
+        "worker_id": "actor/36",
+        "engine": "example.Actor",
+        "engine_name": "named-actor",
+    }
+
+
+@pytest.mark.asyncio
+async def test_engine_creation_preserves_other_failures(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    failure = FakeEngineCreationError(
+        "actor/36",
+        "Failed to instantiate engine: CUDA out of memory",
+        500,
+    )
+
+    async def failed_create(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(FakeSlurmScheduler, "create_engine", failed_create)
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    with pytest.raises(FakeEngineCreationError) as caught:
+        await scheduler.create_engine(
+            "actor/36",
+            "example.Actor",
+            engine_name="actor/36",
+        )
+
+    assert caught.value is failure
 
 
 def test_worker_configuration_is_parallel_across_hosts_and_serial_per_host(monkeypatch):

@@ -13,6 +13,7 @@ from typing import Any
 
 CONTEXT_SUMMARY_OPEN = "<context_summary>"
 CONTEXT_SUMMARY_CLOSE = "</context_summary>"
+NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX = "platoon-nontrainable-condensation-"
 DEFAULT_MAX_EVENT_CHARS = 2_000
 DEFAULT_MAX_SUMMARY_CHARS = 12_000
 
@@ -219,9 +220,8 @@ def validate_condensation_summary(
     """Validate and extract a public state summary.
 
     A response with any thinking tag or text outside the requested wrapper is
-    rejected rather than cleaned up. That distinction is important for RL:
-    cleaning the event would still leave the raw reasoning tokens referenced by
-    the synthetic trainable completion.
+    rejected here. Callers that support an in-band reasoning protocol must
+    explicitly extract its public suffix before invoking this validator.
     """
 
     if not isinstance(text, str) or not text.strip():
@@ -277,6 +277,37 @@ def validate_condensation_summary(
     ):
         raise UnsafeCondensationSummary("condenser summary contains deliberation")
     return summary
+
+
+def extract_visible_condensation_text(text: str | None) -> str:
+    """Return only the public portion of a condenser completion.
+
+    Qwen's thinking-mode template supplies the opening ``<think>`` token in the
+    prompt, so the completion commonly contains an unmarked reasoning body,
+    ``</think>``, and then the requested public summary.  The AReaL proxy does
+    not currently honor per-request chat-template kwargs reliably.  Keeping
+    only the suffix after the final closing tag prevents that private
+    deliberation from being inserted back into the agent's context.
+
+    Validation remains deliberately strict after extraction: an unmatched
+    opening tag, text outside the summary wrapper, or reasoning inside the
+    public suffix is still rejected.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        raise UnsafeCondensationSummary("condenser returned an empty summary")
+
+    visible = text.strip()
+    lower = visible.lower()
+    if "</think>" in lower:
+        close_at = lower.rfind("</think>")
+        visible = visible[close_at + len("</think>") :].strip()
+    elif _THINK_TAG_RE.search(visible):
+        raise UnsafeCondensationSummary("condenser response contains an incomplete reasoning tag")
+
+    if not visible:
+        raise UnsafeCondensationSummary("condenser returned no public summary after reasoning")
+    return visible
 
 
 def is_safe_condensation_summary(text: str | None) -> bool:
@@ -344,11 +375,9 @@ def _message_contains_reasoning(message: Any) -> bool:
 def completion_contains_reasoning(response: Any) -> bool:
     """Detect normalized or provider-specific reasoning on a completion.
 
-    Condensation summaries are linked back to their raw completion for policy
-    training. A clean visible ``content`` field is therefore insufficient: if
-    the same completion also carries reasoning metadata, accepting it would
-    still make those private tokens trainable. Usage-only reasoning-token
-    counts are ignored because they do not contain output payloads.
+    This is a diagnostic helper for callers that need to distinguish visible
+    content from provider reasoning payloads. Usage-only reasoning-token counts
+    are ignored because they do not contain output payloads.
     """
 
     message = _value(response, "message")

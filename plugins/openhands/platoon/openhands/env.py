@@ -25,7 +25,10 @@ from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event.base import Event
 from openhands.sdk.workspace.base import BaseWorkspace
 
-from .condensation_safety import is_safe_condensation_summary
+from .condensation_safety import (
+    NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX,
+    is_safe_condensation_summary,
+)
 from .recursive import DEFAULT_SUBAGENT_MAX_STEPS, copy_agent_config_for_fork
 from .types import OpenHandsAction, OpenHandsObservation, OpenHandsTrajectoryStep
 
@@ -66,7 +69,10 @@ def _condensation_completion_id(event: Event) -> str | None:
     llm_response_id = getattr(event, "llm_response_id", None)
     if llm_response_id is None:
         return None
-    return str(llm_response_id)
+    completion_id = str(llm_response_id)
+    if completion_id.startswith(NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX):
+        return None
+    return completion_id
 
 
 class OpenHandsEnv:
@@ -143,10 +149,9 @@ class OpenHandsEnv:
         for event in obs_events or []:
             completion_id = _condensation_completion_id(event)
             event_id = getattr(event, "id", None)
-            # Never attach policy loss to a reasoning-bearing, malformed, or
-            # truncated condensation. SafeLLMSummarizingCondenser rejects these
-            # before emitting an event; this remains a defense for alternate
-            # SDK condensers and persisted legacy conversations.
+            # Attach policy loss only to safe, genuinely model-generated public
+            # summaries. Reasoning-bearing summaries are sanitized for context
+            # but receive a nontrainable synthetic response ID.
             summary = getattr(event, "summary", None)
             if completion_id is None or event_id is None or not is_safe_condensation_summary(summary):
                 continue

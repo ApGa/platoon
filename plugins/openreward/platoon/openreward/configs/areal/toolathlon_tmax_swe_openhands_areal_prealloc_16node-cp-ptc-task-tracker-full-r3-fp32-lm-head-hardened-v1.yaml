@@ -6,7 +6,7 @@ defaults:
 # state contains the step-134 non-finite update and must never be auto-loaded.
 # Keep this short: AReaL constructs the W&B run ID as
 # <experiment_name>_<trial_name>_<id_suffix>, and W&B caps it at 128 chars.
-trial_name: mix16-ptc-full-hard-v2-trial0
+trial_name: mix16-ptc-full-hard-v5-trial0
 
 # Keep literal sections for the pre-Hydra launcher checks. All mixed catalog,
 # asynchronous 8x8, task-tracker/PTC, straggler, no-eval, and per-step recovery
@@ -16,7 +16,7 @@ openreward: {}
 # Use stable, short W&B grouping independently of the recovery lineage.
 stats_logger:
   wandb:
-    group: mix16-ptc-full-hard-v2
+    group: mix16-ptc-full-hard-v5
 
 actor:
   backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)

@@ -203,6 +203,32 @@ CURRENT_STATE: No files changed yet.
     assert "<context_summary>" not in summary
 
 
+def test_extract_visible_condensation_text_drops_in_band_qwen_reasoning():
+    safety = _safety_module()
+    response = """Private deliberation supplied after the template's opening tag.
+</think>
+
+<context_summary>
+USER_CONTEXT: Fix the parser.
+COMPLETED: Located the implementation.
+PENDING: Apply and test the patch.
+CURRENT_STATE: No files changed yet.
+</context_summary>"""
+
+    visible = safety.extract_visible_condensation_text(response)
+
+    assert "Private deliberation" not in visible
+    assert visible.startswith("<context_summary>")
+    assert safety.validate_condensation_summary(visible).startswith("USER_CONTEXT:")
+
+
+def test_extract_visible_condensation_text_rejects_unclosed_reasoning():
+    safety = _safety_module()
+
+    with pytest.raises(safety.UnsafeCondensationSummary, match="incomplete reasoning tag"):
+        safety.extract_visible_condensation_text("<think>private and truncated")
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -450,8 +476,8 @@ def test_reasoning_usage_counts_without_payload_are_allowed():
     assert not safety.completion_contains_reasoning(response)
 
 
-def test_provider_reasoning_prevents_condensation_event_and_trainable_link(monkeypatch):
-    condenser, TextContent, error_type = _condenser_module(monkeypatch)
+def test_provider_reasoning_metadata_does_not_enter_condensation_context(monkeypatch):
+    condenser, TextContent, _error_type = _condenser_module(monkeypatch)
     response = SimpleNamespace(
         id="chatcmpl-private-reasoning",
         message=SimpleNamespace(
@@ -486,9 +512,123 @@ def test_provider_reasoning_prevents_condensation_event_and_trainable_link(monke
         },
     )
 
-    with pytest.raises(error_type, match="private reasoning"):
-        condenser.SafeLLMSummarizingCondenser._event(
-            forgotten_events=[SimpleNamespace(id="event-1")],
-            summary_offset=0,
-            llm_response=response,
-        )
+    event = condenser.SafeLLMSummarizingCondenser._event(
+        forgotten_events=[SimpleNamespace(id="event-1")],
+        summary_offset=0,
+        llm_response=response,
+    )
+
+    assert event.summary.startswith("USER_CONTEXT:")
+    assert "private reasoning" not in event.summary
+    assert event.llm_response_id.startswith(
+        condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX
+    )
+
+
+def test_in_band_reasoning_is_removed_before_condensation_event(monkeypatch):
+    condenser, TextContent, _error_type = _condenser_module(monkeypatch)
+    response = SimpleNamespace(
+        id="chatcmpl-in-band-reasoning",
+        message=SimpleNamespace(
+            content=[
+                TextContent(
+                    text=(
+                        "Private chain of thought from the reasoning model.\n"
+                        "</think>\n\n"
+                        "<context_summary>\n"
+                        "USER_CONTEXT: Fix the parser.\n"
+                        "COMPLETED: Located the implementation.\n"
+                        "PENDING: Apply and test the patch.\n"
+                        "CURRENT_STATE: No files changed yet.\n"
+                        "</context_summary>"
+                    )
+                )
+            ]
+        ),
+        raw_response={"choices": [{"finish_reason": "stop"}]},
+    )
+
+    event = condenser.SafeLLMSummarizingCondenser._event(
+        forgotten_events=[SimpleNamespace(id="event-1")],
+        summary_offset=0,
+        llm_response=response,
+    )
+
+    assert "Private chain of thought" not in event.summary
+    assert event.summary.startswith("USER_CONTEXT:")
+    assert event.llm_response_id.startswith(
+        condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX
+    )
+
+
+def test_fully_public_condensation_retains_trainable_completion_id(monkeypatch):
+    condenser, TextContent, _error_type = _condenser_module(monkeypatch)
+    response = SimpleNamespace(
+        id="chatcmpl-public-summary",
+        message=SimpleNamespace(
+            content=[
+                TextContent(
+                    text=(
+                        "<context_summary>\n"
+                        "USER_CONTEXT: Fix the parser.\n"
+                        "COMPLETED: Located the implementation.\n"
+                        "PENDING: Apply and test the patch.\n"
+                        "CURRENT_STATE: No files changed yet.\n"
+                        "</context_summary>"
+                    )
+                )
+            ],
+            reasoning_content=None,
+            thinking_blocks=[],
+            responses_reasoning_item=None,
+        ),
+        raw_response={"choices": [{"finish_reason": "stop"}]},
+    )
+
+    event = condenser.SafeLLMSummarizingCondenser._event(
+        forgotten_events=[SimpleNamespace(id="event-1")],
+        summary_offset=0,
+        llm_response=response,
+    )
+
+    assert event.llm_response_id == response.id
+
+
+def test_hard_reset_uses_safe_nontrainable_fallback_after_one_failed_retry(monkeypatch):
+    condenser, _TextContent, error_type = _condenser_module(monkeypatch)
+    instance = condenser.SafeLLMSummarizingCondenser()
+    attempts = []
+
+    def fail_generation(**kwargs):
+        attempts.append(kwargs)
+        raise error_type("Condensation completion was truncated")
+
+    instance._generate_condensation = fail_generation
+    events = [
+        SimpleNamespace(
+            id="event-user",
+            kind="MessageEvent",
+            source="user",
+            llm_message=SimpleNamespace(content=[]),
+            __str__=lambda self: "Fix the parser.",
+        ),
+        SimpleNamespace(
+            id="event-action",
+            kind="ActionEvent",
+            source="agent",
+            thought=[SimpleNamespace(text="PRIVATE DELIBERATION")],
+            tool_name="bash",
+            summary="inspect parser",
+            tool_call=SimpleNamespace(arguments='{"command":"sed -n 1,80p parser.py"}'),
+        ),
+    ]
+
+    event = instance.hard_context_reset(SimpleNamespace(events=events))
+
+    assert len(attempts) == 1
+    assert event.llm_response_id.startswith(
+        condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX
+    )
+    assert "PRIVATE DELIBERATION" not in event.summary
+    assert "parser.py" in event.summary
+    assert _safety_module().is_safe_condensation_summary(event.summary)

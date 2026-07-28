@@ -175,6 +175,27 @@ def _agent_configuration_spies():
     }
 
 
+def test_openreward_agent_uses_openhands_sdk_prompt_directory(monkeypatch, tmp_path) -> None:
+    rollout = _load_rollout_module(monkeypatch)
+    sdk_agent_dir = tmp_path / "openhands" / "sdk" / "agent"
+    prompt_dir = sdk_agent_dir / "prompts"
+    prompt_dir.mkdir(parents=True)
+    (prompt_dir / "system_prompt.j2").write_text("OpenHands system prompt")
+
+    sdk_agent_module = _module(monkeypatch, "fake_openhands_sdk_agent")
+    sdk_agent_module.__file__ = str(sdk_agent_dir / "agent.py")
+    monkeypatch.setattr(
+        rollout.OpenHandsSDKAgent,
+        "__module__",
+        sdk_agent_module.__name__,
+    )
+
+    agent = rollout.OpenRewardAgent()
+
+    assert Path(agent.prompt_dir) == prompt_dir
+    assert (Path(agent.prompt_dir) / "system_prompt.j2").is_file()
+
+
 def test_nonrecursive_ptc_and_task_tracker_do_not_add_delegation(monkeypatch) -> None:
     prompts, recursive_overrides = _agent_configuration_spies()
     rollout = _load_rollout_module(
@@ -258,9 +279,10 @@ def test_local_condenser_uses_bounded_non_thinking_completion(monkeypatch) -> No
     llm = rollout._build_condenser_llm(config, rollout.OpenRewardConfig())
 
     assert llm.usage_id == "platoon-openreward-openhands-condenser"
-    assert llm.max_output_tokens == 2048
+    assert llm.max_output_tokens == 4096
     assert llm.custom_tokenizer is None
     assert llm.litellm_extra_body == {
+        "reasoning_effort": "none",
         "chat_template_kwargs": {
             "enable_thinking": False,
             "preserve_thinking": False,

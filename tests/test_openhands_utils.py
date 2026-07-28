@@ -117,6 +117,81 @@ def test_interleaved_agent_error_does_not_split_parallel_tool_batch(monkeypatch)
     assert [event.id for event in step_observations] == ["observation-1", "error-2", "observation-3"]
 
 
+def test_condensation_between_action_batches_is_observed_exactly_once(monkeypatch):
+    events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
+    condenser_events = pytest.importorskip("openhands.sdk.event.condenser")
+
+    initial = events.MessageEvent.model_construct(id="initial", source="user")
+    action_1 = _action_event(events, "action-1", "call-1", "response-1")
+    observation_1 = _observation_event(events, "observation-1", "action-1", "call-1")
+    condensation = condenser_events.Condensation.model_construct(
+        id="condensation-1",
+        source="environment",
+        forgotten_event_ids=set(),
+        summary=(
+            "USER_CONTEXT: Fix the parser.\n"
+            "COMPLETED: Located the implementation.\n"
+            "PENDING: Apply and test the patch.\n"
+            "CURRENT_STATE: No files changed yet."
+        ),
+        summary_offset=0,
+        llm_response_id="response-condensation",
+    )
+    action_2 = _action_event(events, "action-2", "call-2", "response-2")
+    observation_2 = _observation_event(events, "observation-2", "action-2", "call-2")
+    action_3 = _action_event(events, "action-3", "call-3", "response-3")
+
+    event_stream = [
+        initial,
+        action_1,
+        observation_1,
+        condensation,
+        action_2,
+        observation_2,
+        action_3,
+    ]
+    observation = openhands_types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(events=event_stream, execution_status=None),
+        last_step_observation_id=initial.id,
+    )
+
+    first_actions = openhands_utils.get_actions_for_last_obs(observation)
+    assert [event.id for event in first_actions] == [action_1.id]
+    observation.last_step_action_id = first_actions[-1].id
+
+    first_observations = openhands_utils.get_obs_for_last_action(
+        observation,
+        first_actions,
+    )
+    assert [event.id for event in first_observations] == [
+        observation_1.id,
+        condensation.id,
+    ]
+
+    first_observation_ids = {event.id for event in first_observations}
+    observation.last_step_observation_id = next(
+        event.id
+        for event in reversed(event_stream)
+        if event.id in first_observation_ids
+    )
+    second_actions = openhands_utils.get_actions_for_last_obs(observation)
+    assert [event.id for event in second_actions] == [action_2.id]
+    observation.last_step_action_id = second_actions[-1].id
+
+    second_observations = openhands_utils.get_obs_for_last_action(
+        observation,
+        second_actions,
+    )
+    assert [event.id for event in second_observations] == [observation_2.id]
+    assert sum(
+        event.id == condensation.id
+        for event in [*first_observations, *second_observations]
+    ) == 1
+    assert condensation.summary_event.id not in {
+        event.id for event in observation.conversation_state.events
+    }
+
+
 def test_parallel_tool_batch_waits_for_every_action_result(monkeypatch):
     events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
 

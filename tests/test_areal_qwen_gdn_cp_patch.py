@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -891,6 +892,164 @@ def test_openai_content_patch_leaves_tool_argument_decoding_to_upstream(monkeypa
     assert normalized[0]["content"] == "hello world"
     assert normalized[1]["tool_calls"][0]["function"]["arguments"] == arguments
     assert isinstance(normalized[2]["content"], list)
+
+
+def test_openai_non_thinking_hint_reaches_chat_template(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_non_thinking_test")
+
+    proxy_mod = types.ModuleType(
+        "areal.experimental.openai.proxy.proxy_rollout_server"
+    )
+    captured = []
+
+    async def call_client_create(
+        create_fn,
+        request,
+        session_id,
+        extra_ignored_args=None,
+        stream=False,
+    ):
+        captured.append(
+            (create_fn, request, session_id, extra_ignored_args, stream)
+        )
+        return "response"
+
+    proxy_mod._call_client_create = call_client_create
+    for name in (
+        "areal",
+        "areal.experimental",
+        "areal.experimental.openai",
+        "areal.experimental.openai.proxy",
+    ):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "areal.experimental.openai.proxy.proxy_rollout_server",
+        proxy_mod,
+    )
+
+    patches._patch_areal_openai_non_thinking_chat_template()
+    patched = proxy_mod._call_client_create
+    assert patched is not call_client_create
+    patches._patch_areal_openai_non_thinking_chat_template()
+    assert proxy_mod._call_client_create is patched
+
+    result = asyncio.run(
+        patched(
+            create_fn="create",
+            request={
+                "messages": [{"role": "user", "content": "summarize"}],
+                "reasoning_effort": "none",
+                "chat_template_kwargs": {"ignored": True},
+            },
+            session_id="session",
+            extra_ignored_args=["ignored"],
+            stream=True,
+        )
+    )
+
+    assert result == "response"
+    create_fn, request, session_id, ignored, stream = captured.pop()
+    assert create_fn == "create"
+    assert session_id == "session"
+    assert ignored == ["ignored"]
+    assert stream is True
+    assert "reasoning_effort" not in request
+    assert "chat_template_kwargs" not in request
+    assert request["extra_body"]["chat_template_kwargs"] == {
+        "enable_thinking": False,
+        "preserve_thinking": False,
+    }
+
+
+def test_openai_reasoning_hint_is_untouched_when_enabled(monkeypatch):
+    patches = _load_patches_module(
+        "platoon_areal_patches_reasoning_enabled_test"
+    )
+
+    proxy_mod = types.ModuleType(
+        "areal.experimental.openai.proxy.proxy_rollout_server"
+    )
+    captured = []
+
+    async def call_client_create(**kwargs):
+        captured.append(kwargs)
+        return "response"
+
+    proxy_mod._call_client_create = call_client_create
+    for name in (
+        "areal",
+        "areal.experimental",
+        "areal.experimental.openai",
+        "areal.experimental.openai.proxy",
+    ):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "areal.experimental.openai.proxy.proxy_rollout_server",
+        proxy_mod,
+    )
+
+    patches._patch_areal_openai_non_thinking_chat_template()
+    request = {"reasoning_effort": "low"}
+    asyncio.run(
+        proxy_mod._call_client_create(
+            create_fn="create",
+            request=request,
+            session_id="session",
+        )
+    )
+
+    assert captured[0]["request"] is request
+
+
+def test_proxy_fork_command_uses_platoon_entrypoint(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_proxy_fork_test")
+
+    class LocalScheduler:
+        def fork_workers(self, role, target_role, command=None):
+            return role, target_role, command
+
+    class SlurmScheduler:
+        def fork_workers(self, role, target_role, command=None):
+            return role, target_role, command
+
+    local_mod = types.ModuleType("areal.infra.scheduler.local")
+    local_mod.LocalScheduler = LocalScheduler
+    slurm_mod = types.ModuleType("areal.infra.scheduler.slurm")
+    slurm_mod.SlurmScheduler = SlurmScheduler
+    for name in (
+        "areal",
+        "areal.infra",
+        "areal.infra.scheduler",
+    ):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "areal.infra.scheduler.local", local_mod)
+    monkeypatch.setitem(sys.modules, "areal.infra.scheduler.slurm", slurm_mod)
+
+    patches._patch_areal_proxy_rollout_fork_command()
+    local_patched = LocalScheduler.fork_workers
+    slurm_patched = SlurmScheduler.fork_workers
+    patches._patch_areal_proxy_rollout_fork_command()
+    assert LocalScheduler.fork_workers is local_patched
+    assert SlurmScheduler.fork_workers is slurm_patched
+
+    upstream = "areal.experimental.openai.proxy.proxy_rollout_server"
+    assert LocalScheduler().fork_workers("proxy", "rollout", upstream) == (
+        "proxy",
+        "rollout",
+        "platoon.areal_proxy_rollout",
+    )
+    assert SlurmScheduler().fork_workers(
+        role="proxy",
+        target_role="rollout",
+        command=upstream,
+    ) == ("proxy", "rollout", "platoon.areal_proxy_rollout")
+    assert LocalScheduler().fork_workers("other", "rollout", "custom.module") == (
+        "other",
+        "rollout",
+        "custom.module",
+    )
 
 
 @pytest.mark.parametrize(

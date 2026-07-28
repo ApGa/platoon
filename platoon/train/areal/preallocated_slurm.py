@@ -15,6 +15,7 @@ from dataclasses import asdict
 from areal.api import Job, Worker
 from areal.api.cli_args import SchedulingSpec, SchedulingStrategyType
 from areal.infra.scheduler.exceptions import (
+    EngineCreationError,
     WorkerCreationError,
     WorkerFailedError,
     WorkerNotFoundError,
@@ -70,6 +71,46 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             )
         self._configure_lock = threading.Lock()
         self._configured_worker_generations: dict[str, tuple[int, ...]] = {}
+
+    async def create_engine(
+        self,
+        worker_id: str,
+        engine: str,
+        engine_name: str | None = None,
+        *args,
+        **kwargs,
+    ):
+        """Make engine creation idempotent for duplicated controller requests.
+
+        At large worker counts an RPC can reach the guard twice even though the
+        controller issued one logical request. The first request successfully
+        installs the engine; the duplicate then receives AReaL's exact
+        HTTP-400 "already exists" response. Treat only that worker/name-specific
+        response as success so startup can proceed without hiding other engine
+        construction errors.
+        """
+        expected_engine_name = engine_name or worker_id
+        try:
+            return await super().create_engine(
+                worker_id,
+                engine,
+                engine_name,
+                *args,
+                **kwargs,
+            )
+        except EngineCreationError as exc:
+            duplicate_marker = (
+                f"Engine '{expected_engine_name}' already exists"
+            )
+            if exc.status_code == 400 and duplicate_marker in exc.reason:
+                logger.warning(
+                    "Engine '%s' already exists on worker '%s'; treating the "
+                    "duplicate create request as idempotent success",
+                    expected_engine_name,
+                    worker_id,
+                )
+                return None
+            raise
 
     @staticmethod
     def _worker_host_key(worker_info: SlurmWorkerInfo) -> str:

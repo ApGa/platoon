@@ -2444,6 +2444,45 @@ def _patch_remote_inf_engine_proxy_resolution() -> None:
     RemoteInfEngine._resolve_workflow = _resolve_workflow_with_proxy_addr
 
 
+def _patch_areal_proxy_rollout_fork_command() -> None:
+    """Run forked AReaL proxy workers through Platoon's patched entrypoint."""
+
+    from areal.infra.scheduler.local import LocalScheduler  # pyright: ignore[reportMissingImports]
+    from areal.infra.scheduler.slurm import SlurmScheduler  # pyright: ignore[reportMissingImports]
+
+    areal_proxy_module = "areal.experimental.openai.proxy.proxy_rollout_server"
+    platoon_proxy_module = "platoon.areal_proxy_rollout"
+
+    def patch_scheduler(scheduler_cls) -> None:
+        original = scheduler_cls.fork_workers
+        if getattr(original, "__platoon_proxy_fork_patch__", False):
+            return
+
+        @wraps(original)
+        def _fork_workers_with_platoon_proxy(
+            self,
+            role: str,
+            target_role: str,
+            command: str | None = None,
+        ):
+            if command == areal_proxy_module:
+                command = platoon_proxy_module
+            return original(
+                self,
+                role=role,
+                target_role=target_role,
+                command=command,
+            )
+
+        _fork_workers_with_platoon_proxy.__platoon_proxy_fork_patch__ = True
+        scheduler_cls.fork_workers = _fork_workers_with_platoon_proxy
+
+    # PreallocatedSlurmScheduler inherits SlurmScheduler.fork_workers, while
+    # local development and unit runs use LocalScheduler.
+    patch_scheduler(LocalScheduler)
+    patch_scheduler(SlurmScheduler)
+
+
 def _flatten_message_list_content(messages: list[dict[str, Any]]) -> None:
     """Convert OpenAI list-shaped text content blocks to plain strings.
 
@@ -2495,6 +2534,84 @@ def _patch_areal_openai_message_content_flatten() -> None:
 
     _ensure_message_dict_list_with_flatten.__platoon_message_content_patch__ = True
     client_module._ensure_message_dict_list = _ensure_message_dict_list_with_flatten
+
+
+def _patch_areal_openai_non_thinking_chat_template() -> None:
+    """Forward the standard non-thinking hint to AReaL's chat template.
+
+    OpenAI-compatible clients merge ``extra_body`` fields into the top-level
+    HTTP request.  AReaL's proxy accepts the standard ``reasoning_effort``
+    field, but its client does not consume that field and the proxy therefore
+    drops it before generation.  Translate ``reasoning_effort="none"`` into
+    the nested ``extra_body.chat_template_kwargs`` shape expected by
+    ``ArealOpenAI`` after FastAPI has validated the request.
+    """
+
+    import areal.experimental.openai.proxy.proxy_rollout_server as proxy_server  # pyright: ignore[reportMissingImports]
+
+    original = proxy_server._call_client_create
+    if getattr(original, "__platoon_non_thinking_chat_template_patch__", False):
+        return
+
+    @wraps(original)
+    async def _call_client_create_with_non_thinking_template(
+        create_fn,
+        request,
+        session_id: str,
+        extra_ignored_args: list[str] | None = None,
+        stream: bool = False,
+    ):
+        if isinstance(request, dict):
+            reasoning_effort = request.get("reasoning_effort")
+        else:
+            reasoning_effort = getattr(request, "reasoning_effort", None)
+
+        if reasoning_effort == "none":
+            if hasattr(request, "model_dump"):
+                forwarded_request = request.model_dump()
+            else:
+                forwarded_request = dict(request)
+
+            # The hint has now been translated and should not trigger AReaL's
+            # unsupported-argument warning.
+            forwarded_request.pop("reasoning_effort", None)
+            forwarded_request.pop("chat_template_kwargs", None)
+
+            extra_body = forwarded_request.get("extra_body")
+            extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
+            chat_template_kwargs = extra_body.get("chat_template_kwargs")
+            chat_template_kwargs = (
+                dict(chat_template_kwargs)
+                if isinstance(chat_template_kwargs, dict)
+                else {}
+            )
+            chat_template_kwargs.update(
+                enable_thinking=False,
+                preserve_thinking=False,
+            )
+            extra_body["chat_template_kwargs"] = chat_template_kwargs
+            forwarded_request["extra_body"] = extra_body
+            request = forwarded_request
+
+        return await original(
+            create_fn=create_fn,
+            request=request,
+            session_id=session_id,
+            extra_ignored_args=extra_ignored_args,
+            stream=stream,
+        )
+
+    _call_client_create_with_non_thinking_template.__platoon_non_thinking_chat_template_patch__ = True
+    proxy_server._call_client_create = _call_client_create_with_non_thinking_template
+
+
+def apply_proxy_patches() -> None:
+    """Apply patches needed inside a forked AReaL OpenAI proxy process."""
+
+    _patch_hf_tokenizer_download_race()
+    _patch_model_response_custom_stop_sequences()
+    _patch_areal_openai_message_content_flatten()
+    _patch_areal_openai_non_thinking_chat_template()
 
 
 # ---------------------------------------------------------------------------
@@ -2718,8 +2835,8 @@ def _patch_areal_recover_checkpoint_rotation() -> None:
         processor=None,
         base_model_path=None,
     ):
-        from areal.utils.saver import Saver  # pyright: ignore[reportMissingImports]
         from areal.api import SaveLoadMeta  # pyright: ignore[reportMissingImports]
+        from areal.utils.saver import Saver  # pyright: ignore[reportMissingImports]
 
         path = Saver.get_recover_checkpoint_path(
             self.config.experiment_name,
@@ -2773,8 +2890,8 @@ def _patch_areal_recover_checkpoint_rotation() -> None:
         tokenizer=None,
         base_model_path=None,
     ):
-        from areal.utils.saver import Saver  # pyright: ignore[reportMissingImports]
         from areal.api import SaveLoadMeta  # pyright: ignore[reportMissingImports]
+        from areal.utils.saver import Saver  # pyright: ignore[reportMissingImports]
 
         path = Saver.get_recover_checkpoint_path(
             self.config.experiment_name,
@@ -2851,6 +2968,8 @@ def apply_all_patches() -> None:
     _patch_remote_inf_engine_routed_expert_stitching()
     _patch_remote_inf_engine_asyncio_teardown_race()
     _patch_remote_inf_engine_proxy_resolution()
+    _patch_areal_proxy_rollout_fork_command()
     _patch_areal_openai_message_content_flatten()
+    _patch_areal_openai_non_thinking_chat_template()
     _patch_areal_recover_checkpoint_rotation()
     _install_process_stall_watchdog()

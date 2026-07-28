@@ -141,7 +141,7 @@ def test_openreward_config_defaults_to_bounded_non_thinking_condensations():
     config = config_mod.OpenRewardConfig.from_mapping({})
 
     assert config.condenser_disable_thinking is True
-    assert config.condenser_max_completion_tokens == 2_048
+    assert config.condenser_max_completion_tokens == 4_096
 
     with pytest.raises(ValueError, match="condenser_disable_thinking"):
         config_mod.OpenRewardConfig.from_mapping({"condenser_disable_thinking": 1})

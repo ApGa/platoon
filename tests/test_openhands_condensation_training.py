@@ -42,6 +42,7 @@ def _install_openhands_stubs(monkeypatch) -> None:
     conversation_error_event = type("ConversationErrorEvent", (), {})
     event = type("Event", (), {})
     message_event = type("MessageEvent", (), {})
+    observation_base_event = type("ObservationBaseEvent", (), {})
     event_pkg = _module(
         monkeypatch,
         "openhands.sdk.event",
@@ -50,6 +51,7 @@ def _install_openhands_stubs(monkeypatch) -> None:
         Event=event,
         EventID=str,
         MessageEvent=message_event,
+        ObservationBaseEvent=observation_base_event,
     )
     event_pkg.__path__ = []
     _module(monkeypatch, "openhands.sdk.event.base", Event=object)
@@ -152,6 +154,31 @@ def test_unsafe_condensation_does_not_emit_trainable_step(monkeypatch):
             "1. Analyze the user's instructions.\n"
             "</think>\n\n"
             "USER_CONTEXT: Fix the parser."
+        ),
+    )
+
+    env._add_trainable_condensation_steps(collection, "trajectory-1", [condensation])
+
+    assert collection.steps == []
+
+
+def test_deterministic_fallback_condensation_is_not_linked_as_model_completion(
+    monkeypatch,
+):
+    env_mod = _load_openhands_env_module(monkeypatch)
+    env = env_mod.OpenHandsEnv.__new__(env_mod.OpenHandsEnv)
+    env._synthetic_condensation_step_event_ids = set()
+    collection = _TrajectoryCollection()
+
+    condensation = SimpleNamespace(
+        kind="Condensation",
+        id="condensation-fallback",
+        llm_response_id="platoon-nontrainable-condensation-abc123",
+        summary=(
+            "USER_CONTEXT: Fix the parser.\n"
+            "COMPLETED: Earlier history was compacted.\n"
+            "PENDING: Continue and test.\n"
+            "CURRENT_STATE: Inspect parser.py."
         ),
     )
 

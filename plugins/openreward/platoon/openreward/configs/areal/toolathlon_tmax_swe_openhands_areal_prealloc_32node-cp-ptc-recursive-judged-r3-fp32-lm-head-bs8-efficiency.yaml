@@ -6,7 +6,7 @@ defaults:
 # optimizer/recovery state, and do not load the poisoned nonrecursive mixed run.
 # Keep this short: AReaL constructs the W&B run ID as
 # <experiment_name>_<trial_name>_<id_suffix>, and W&B caps it at 128 chars.
-trial_name: mix32-rec-eff-v2-trial0
+trial_name: mix32-rec-eff-v5-trial0
 
 openreward:
   # Preserve equal rotating submissions while accepting completed groups
@@ -89,7 +89,7 @@ evaluator:
 stats_logger:
   wandb:
     project: openreward-multienv-openhands
-    group: mix32-rec-eff-v2
+    group: mix32-rec-eff-v5
 
 # Literal values are required by the pre-Hydra launcher validation. The model
 # overlay changes only tokenizer/template behavior and points to untouched base

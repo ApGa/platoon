@@ -59,6 +59,21 @@ logger = logging.getLogger(__name__)
 class OpenRewardAgent(OpenHandsSDKAgent):
     """Require an environment terminal tool instead of accepting plain text."""
 
+    @property
+    def prompt_dir(self) -> str:
+        """Use the prompts shipped with the OpenHands SDK agent.
+
+        ``AgentBase.prompt_dir`` derives the prompt directory from
+        ``self.__class__.__module__``. Since this subclass lives in the
+        OpenReward plugin, inheriting that property incorrectly points at
+        ``platoon/openreward/prompts`` instead of OpenHands' bundled prompts.
+        """
+        agent_module = sys.modules[OpenHandsSDKAgent.__module__]
+        module_file = getattr(agent_module, "__file__", None)
+        if module_file is None:
+            raise ValueError(f"Cannot determine prompt directory for {OpenHandsSDKAgent.__module__}")
+        return os.path.join(os.path.dirname(module_file), "prompts")
+
     def _handle_content_response(
         self,
         message: Any,
@@ -299,6 +314,10 @@ def _build_condenser_llm(
         and (config.model_endpoint or "").lower().startswith("http://")
     ):
         extra_body = {
+            # This standard field survives OpenAI/FastAPI request validation.
+            # Platoon's AReaL compatibility patch translates it to the nested
+            # chat-template kwargs consumed by the local tokenizer.
+            "reasoning_effort": "none",
             "chat_template_kwargs": {
                 "enable_thinking": False,
                 "preserve_thinking": False,
