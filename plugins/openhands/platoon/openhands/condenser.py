@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Sequence
 from uuid import uuid4
 
-from openhands.sdk.context.condenser import LLMSummarizingCondenser
+from openhands.sdk.context.condenser import (
+    LLMSummarizingCondenser,
+)
+from openhands.sdk.context.condenser import (
+    llm_summarizing_condenser as openhands_summarizing_condenser,
+)
 from openhands.sdk.context.condenser.base import NoCondensationAvailableException
+from openhands.sdk.context.prompts import render_template
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.condenser import Condensation
 from openhands.sdk.llm import Message, TextContent
+from openhands.sdk.utils import maybe_truncate
 
 from .condensation_safety import (
-    DEFAULT_MAX_EVENT_CHARS,
     NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX,
-    build_safe_condensation_prompt,
     completion_contains_reasoning,
     completion_was_truncated,
     extract_visible_condensation_text,
@@ -35,27 +41,28 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         forgotten_events: Sequence[LLMConvertibleEvent],
         max_event_str_length: int | None = None,
     ) -> list[Message]:
-        prompt_kwargs = (
-            {"max_event_chars": max_event_str_length}
-            if max_event_str_length is not None
-            else {}
-        )
-        system_prompt, user_prompt = build_safe_condensation_prompt(
-            forgotten_events,
-            **prompt_kwargs,
+        event_strings = [
+            maybe_truncate(
+                render_event_for_condensation(event),
+                truncate_after=max_event_str_length,
+            )
+            for event in forgotten_events
+        ]
+        prompt = render_template(
+            os.path.join(
+                os.path.dirname(openhands_summarizing_condenser.__file__),
+                "prompts",
+            ),
+            "summarizing_prompt.j2",
+            events=event_strings,
         )
         return [
-            Message(role="system", content=[TextContent(text=system_prompt)]),
-            Message(role="user", content=[TextContent(text=user_prompt)]),
+            Message(role="user", content=[TextContent(text=prompt)]),
         ]
 
     @staticmethod
     def _completion_text(llm_response) -> str:
-        return "\n".join(
-            item.text
-            for item in llm_response.message.content
-            if isinstance(item, TextContent)
-        )
+        return "\n".join(item.text for item in llm_response.message.content if isinstance(item, TextContent))
 
     @classmethod
     def _summary_text(cls, llm_response) -> str:
@@ -84,28 +91,20 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         """
 
         def encoded(event: LLMConvertibleEvent, max_chars: int) -> str:
-            rendered = render_event_for_condensation(event, max_chars=max_chars)
-            return json.dumps(rendered, ensure_ascii=True).replace("<", "\\u003c").replace(
-                ">", "\\u003e"
+            rendered = maybe_truncate(
+                render_event_for_condensation(event),
+                truncate_after=max_chars,
             )
+            return json.dumps(rendered, ensure_ascii=True).replace("<", "\\u003c").replace(">", "\\u003e")
 
         user_context = "Retain the original task and constraints from the conversation."
         for event in forgotten_events:
-            if getattr(event, "kind", None) == "MessageEvent" and str(
-                getattr(event, "source", "")
-            ) == "user":
+            if getattr(event, "kind", None) == "MessageEvent" and str(getattr(event, "source", "")) == "user":
                 user_context = f"Initial public task event: {encoded(event, 2_500)}"
                 break
 
-        tail = [
-            event
-            for event in forgotten_events
-            if getattr(event, "kind", None) != "SystemPromptEvent"
-        ][-8:]
-        snapshots = [
-            f"- {getattr(event, 'kind', type(event).__name__)}: {encoded(event, 900)}"
-            for event in tail
-        ]
+        tail = [event for event in forgotten_events if getattr(event, "kind", None) != "SystemPromptEvent"][-8:]
+        snapshots = [f"- {getattr(event, 'kind', type(event).__name__)}: {encoded(event, 900)}" for event in tail]
         current_state = (
             "Recent public event excerpts:\n" + "\n".join(snapshots)
             if snapshots
@@ -157,10 +156,7 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         llm_response,
     ) -> Condensation:
         raw_text = cls._completion_text(llm_response)
-        contains_nonpublic_reasoning = (
-            "</think>" in raw_text.lower()
-            or completion_contains_reasoning(llm_response)
-        )
+        contains_nonpublic_reasoning = "</think>" in raw_text.lower() or completion_contains_reasoning(llm_response)
         return Condensation(
             forgotten_event_ids={event.id for event in forgotten_events},
             summary=cls._summary_text(llm_response),
@@ -184,9 +180,7 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
     ) -> Condensation:
         assert forgotten_events, "No events to condense."
         try:
-            response = self.llm.completion(
-                messages=self._messages(forgotten_events, max_event_str_length)
-            )
+            response = self.llm.completion(messages=self._messages(forgotten_events, max_event_str_length))
         except NoCondensationAvailableException:
             raise
         except Exception as exc:
@@ -205,9 +199,7 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
     ) -> Condensation:
         assert forgotten_events, "No events to condense."
         try:
-            response = await self.llm.acompletion(
-                messages=self._messages(forgotten_events, max_event_str_length)
-            )
+            response = await self.llm.acompletion(messages=self._messages(forgotten_events, max_event_str_length))
         except NoCondensationAvailableException:
             raise
         except Exception as exc:
@@ -219,45 +211,82 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         )
 
     def hard_context_reset(self, view, agent_llm=None) -> Condensation | None:  # noqa: ARG002
-        """Try one compact model summary, then use a nonfatal public fallback."""
+        """Use OpenHands' native retry/truncation policy, then a safe fallback."""
 
         if not view.events:
             return None
-        try:
-            return self._generate_condensation(
-                forgotten_events=view.events,
-                summary_offset=0,
-                max_event_str_length=DEFAULT_MAX_EVENT_CHARS // 2,
-            )
-        except Exception as exc:
+
+        max_event_str_length: int | None = None
+        attempts_remaining = self.hard_context_reset_max_retries
+        last_error: Exception | None = None
+        while attempts_remaining > 0:
+            try:
+                return self._generate_condensation(
+                    forgotten_events=view.events,
+                    summary_offset=0,
+                    max_event_str_length=max_event_str_length,
+                )
+            except Exception as exc:
+                last_error = exc
+                if max_event_str_length is None:
+                    max_event_str_length = max(len(render_event_for_condensation(event)) for event in view.events)
+                max_event_str_length = int(max_event_str_length * self.hard_context_reset_context_scaling)
+                attempts_remaining -= 1
+                logger.warning(
+                    "Hard context reset summarization failed (%s); reducing max "
+                    "event size to %d and retrying (%d attempts remain).",
+                    exc,
+                    max_event_str_length,
+                    attempts_remaining,
+                )
+
+        if last_error is not None:
             logger.warning(
-                "Hard context reset model summary failed (%s); using deterministic "
-                "public-state fallback.",
-                exc,
+                "Hard context reset model summary exhausted retries (%s); using deterministic public-state fallback.",
+                last_error,
             )
-            return self._fallback_event(
-                forgotten_events=view.events,
-                summary_offset=0,
-            )
+        return self._fallback_event(
+            forgotten_events=view.events,
+            summary_offset=0,
+        )
 
     async def ahard_context_reset(self, view, agent_llm=None) -> Condensation | None:  # noqa: ARG002
-        """Async hard reset with the same bounded nonfatal fallback."""
+        """Async hard reset with the native retry policy and safe fallback."""
 
         if not view.events:
             return None
-        try:
-            return await self._agenerate_condensation(
-                forgotten_events=view.events,
-                summary_offset=0,
-                max_event_str_length=DEFAULT_MAX_EVENT_CHARS // 2,
-            )
-        except Exception as exc:
+
+        max_event_str_length: int | None = None
+        attempts_remaining = self.hard_context_reset_max_retries
+        last_error: Exception | None = None
+        while attempts_remaining > 0:
+            try:
+                return await self._agenerate_condensation(
+                    forgotten_events=view.events,
+                    summary_offset=0,
+                    max_event_str_length=max_event_str_length,
+                )
+            except Exception as exc:
+                last_error = exc
+                if max_event_str_length is None:
+                    max_event_str_length = max(len(render_event_for_condensation(event)) for event in view.events)
+                max_event_str_length = int(max_event_str_length * self.hard_context_reset_context_scaling)
+                attempts_remaining -= 1
+                logger.warning(
+                    "Async hard context reset summarization failed (%s); reducing "
+                    "max event size to %d and retrying (%d attempts remain).",
+                    exc,
+                    max_event_str_length,
+                    attempts_remaining,
+                )
+
+        if last_error is not None:
             logger.warning(
-                "Async hard context reset model summary failed (%s); using deterministic "
-                "public-state fallback.",
-                exc,
+                "Async hard context reset model summary exhausted retries (%s); "
+                "using deterministic public-state fallback.",
+                last_error,
             )
-            return self._fallback_event(
-                forgotten_events=view.events,
-                summary_offset=0,
-            )
+        return self._fallback_event(
+            forgotten_events=view.events,
+            summary_offset=0,
+        )

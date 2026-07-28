@@ -9,14 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = (
-    REPO_ROOT
-    / "plugins"
-    / "openhands"
-    / "platoon"
-    / "openhands"
-    / "condensation_safety.py"
-)
+MODULE_PATH = REPO_ROOT / "plugins" / "openhands" / "platoon" / "openhands" / "condensation_safety.py"
 
 
 def _safety_module():
@@ -39,6 +32,10 @@ def _condenser_module(monkeypatch):
     class NoCondensationAvailableException(Exception):
         pass
 
+    class LLMSummarizingCondenser:
+        hard_context_reset_max_retries = 5
+        hard_context_reset_context_scaling = 0.8
+
     class TextContent:
         def __init__(self, *, text):
             self.text = text
@@ -55,15 +52,33 @@ def _condenser_module(monkeypatch):
     _module(monkeypatch, "openhands")
     _module(monkeypatch, "openhands.sdk")
     _module(monkeypatch, "openhands.sdk.context")
-    _module(
+    condenser_package = _module(
         monkeypatch,
         "openhands.sdk.context.condenser",
-        LLMSummarizingCondenser=object,
+        LLMSummarizingCondenser=LLMSummarizingCondenser,
     )
+    native_condenser = _module(
+        monkeypatch,
+        "openhands.sdk.context.condenser.llm_summarizing_condenser",
+        LLMSummarizingCondenser=LLMSummarizingCondenser,
+    )
+    native_condenser.__file__ = "/fake/openhands/condenser/llm_summarizing_condenser.py"
+    condenser_package.llm_summarizing_condenser = native_condenser
     _module(
         monkeypatch,
         "openhands.sdk.context.condenser.base",
         NoCondensationAvailableException=NoCondensationAvailableException,
+    )
+
+    def render_template(_directory, template_name, *, events):
+        assert template_name == "summarizing_prompt.j2"
+        serialized = "\n".join(f"<EVENT>\n{event}\n</EVENT>" for event in events)
+        return f"OPENHANDS_NATIVE_SUMMARIZING_PROMPT\n{serialized}"
+
+    _module(
+        monkeypatch,
+        "openhands.sdk.context.prompts",
+        render_template=render_template,
     )
     _module(monkeypatch, "openhands.sdk.event")
     _module(
@@ -81,6 +96,23 @@ def _condenser_module(monkeypatch):
         "openhands.sdk.llm",
         Message=Message,
         TextContent=TextContent,
+    )
+
+    def maybe_truncate(content, truncate_after=None):
+        if not truncate_after or len(content) <= truncate_after:
+            return content
+        notice = "<response clipped>"
+        if len(notice) >= truncate_after:
+            return notice[:truncate_after]
+        available = truncate_after - len(notice)
+        head = available // 2 + available % 2
+        tail = available - head
+        return content[:head] + notice + content[-tail:]
+
+    _module(
+        monkeypatch,
+        "openhands.sdk.utils",
+        maybe_truncate=maybe_truncate,
     )
 
     package = types.ModuleType("platoon.openhands")
@@ -132,11 +164,7 @@ def test_agent_message_renderer_keeps_only_content_after_thinking_close():
         kind="MessageEvent",
         source="agent",
         llm_message=SimpleNamespace(
-            content=[
-                SimpleNamespace(
-                    text="PRIVATE DELIBERATION\n</think>\n\nImplemented the parser fix."
-                )
-            ]
+            content=[SimpleNamespace(text="PRIVATE DELIBERATION\n</think>\n\nImplemented the parser fix.")]
         ),
     )
 
@@ -153,13 +181,7 @@ def test_agent_message_renderer_omits_ambiguous_text_without_thinking_close():
         source="agent",
         # Qwen's opening tag may be part of the prompt. A completion truncated
         # during reasoning therefore has neither an opening nor a closing tag.
-        llm_message=SimpleNamespace(
-            content=[
-                SimpleNamespace(
-                    text="PRIVATE DELIBERATION FROM A TRUNCATED COMPLETION"
-                )
-            ]
-        ),
+        llm_message=SimpleNamespace(content=[SimpleNamespace(text="PRIVATE DELIBERATION FROM A TRUNCATED COMPLETION")]),
     )
 
     rendered = safety.render_event_for_condensation(event)
@@ -168,8 +190,8 @@ def test_agent_message_renderer_omits_ambiguous_text_without_thinking_close():
     assert "[no public text content]" in rendered
 
 
-def test_safe_prompt_does_not_include_action_reasoning():
-    safety = _safety_module()
+def test_native_openhands_prompt_receives_safe_public_events(monkeypatch):
+    condenser, _TextContent, _error_type = _condenser_module(monkeypatch)
     event = SimpleNamespace(
         kind="ActionEvent",
         source="agent",
@@ -180,17 +202,47 @@ def test_safe_prompt_does_not_include_action_reasoning():
         tool_call=SimpleNamespace(arguments='{"path":"src/main.py"}'),
     )
 
-    system_prompt, user_prompt = safety.build_safe_condensation_prompt([event])
+    messages = condenser.SafeLLMSummarizingCondenser._messages([event])
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    prompt = messages[0].content[0].text
 
-    assert "Never reveal" in system_prompt
-    assert "as concise as possible" in system_prompt
-    assert "8192" not in system_prompt
-    assert safety.CONTEXT_SUMMARY_OPEN in system_prompt
-    assert "SECRET" not in user_prompt
-    assert "src/main.py" in user_prompt
+    assert "OPENHANDS_NATIVE_SUMMARIZING_PROMPT" in prompt
+    assert "SECRET" not in prompt
+    assert "src/main.py" in prompt
 
 
-def test_public_summary_has_an_approximately_8192_token_size_cap():
+def test_event_truncation_uses_native_head_and_tail_only_when_requested(monkeypatch):
+    condenser, _TextContent, _error_type = _condenser_module(monkeypatch)
+    payload = "HEAD" + "x" * 4_000 + "TAIL"
+    event = SimpleNamespace(
+        kind="ActionEvent",
+        source="agent",
+        thought=[SimpleNamespace(text="SECRET CHAIN OF THOUGHT")],
+        tool_name="bash",
+        summary="run a long command",
+        tool_call=SimpleNamespace(arguments=payload),
+    )
+
+    full_prompt = condenser.SafeLLMSummarizingCondenser._messages([event])[0].content[0].text
+    clipped_prompt = (
+        condenser.SafeLLMSummarizingCondenser._messages(
+            [event],
+            max_event_str_length=1_000,
+        )[0]
+        .content[0]
+        .text
+    )
+
+    assert payload in full_prompt
+    assert "<response clipped>" not in full_prompt
+    assert "<response clipped>" in clipped_prompt
+    assert "HEAD" in clipped_prompt
+    assert "TAIL" in clipped_prompt
+    assert payload not in clipped_prompt
+
+
+def test_retained_public_summary_has_a_character_safety_cap():
     safety = _safety_module()
     summary = (
         "USER_CONTEXT: Fix the parser.\n"
@@ -200,9 +252,22 @@ def test_public_summary_has_an_approximately_8192_token_size_cap():
     )
 
     with pytest.raises(safety.UnsafeCondensationSummary, match="size limit"):
-        safety.validate_condensation_summary(
-            summary + "x" * safety.DEFAULT_MAX_SUMMARY_CHARS
-        )
+        safety.validate_condensation_summary(summary + "x" * safety.MAX_RETAINED_SUMMARY_CHARS)
+
+
+def test_prior_condensation_summary_is_not_reduced_to_sdk_preview():
+    safety = _safety_module()
+    long_state = "task-state-" * 200
+    event = SimpleNamespace(
+        kind="CondensationSummaryEvent",
+        source="environment",
+        summary=long_state,
+    )
+
+    rendered = safety.render_event_for_condensation(event)
+
+    assert long_state in rendered
+    assert len(rendered) > 500
 
 
 def test_validate_condensation_summary_extracts_exact_wrapper():
@@ -274,12 +339,7 @@ def test_extract_visible_condensation_text_rejects_unclosed_reasoning():
             "</context_summary>"
         ),
         "<context_summary>arbitrary prose without durable state sections</context_summary>",
-        (
-            "<context_summary>\n"
-            "USER_CONTEXT: Fix it.\n"
-            "CURRENT_STATE: No files changed.\n"
-            "</context_summary>"
-        ),
+        ("<context_summary>\nUSER_CONTEXT: Fix it.\nCURRENT_STATE: No files changed.\n</context_summary>"),
         "TASK_TRACKING: item-1 is pending.",
         "Here is the summary.\nUSER_CONTEXT: Fix it.\nCURRENT_STATE: No files changed.",
     ],
@@ -300,6 +360,16 @@ CURRENT_STATE: No files changed yet."""
 
     assert safety.validate_condensation_summary(response) == response
     assert safety.is_safe_condensation_summary(response)
+
+
+def test_native_code_summary_format_can_omit_current_state():
+    safety = _safety_module()
+    response = """USER_CONTEXT: Fix the parser.
+COMPLETED: Located the implementation.
+PENDING: Apply and test the patch.
+CODE_STATE: parser.py contains parse_step()."""
+
+    assert safety.validate_condensation_summary(response) == response
 
 
 @pytest.mark.parametrize(
@@ -397,9 +467,7 @@ def _clean_message():
                     "message": SimpleNamespace(
                         content="clean summary",
                         provider_specific_fields=SimpleNamespace(
-                            thinking_blocks=[
-                                {"type": "thinking", "thinking": "private"}
-                            ]
+                            thinking_blocks=[{"type": "thinking", "thinking": "private"}]
                         ),
                     )
                 }
@@ -410,11 +478,7 @@ def _clean_message():
                 {
                     "message": {
                         "content": "clean summary",
-                        "provider_specific_fields": {
-                            "reasoningContentBlocks": [
-                                {"text": "private reasoning"}
-                            ]
-                        },
+                        "provider_specific_fields": {"reasoningContentBlocks": [{"text": "private reasoning"}]},
                     }
                 }
             ]
@@ -520,9 +584,7 @@ def test_provider_reasoning_metadata_does_not_enter_condensation_context(monkeyp
                     "finish_reason": "stop",
                     "message": {
                         "content": "clean summary",
-                        "provider_specific_fields": {
-                            "reasoning_content": "private chain of thought"
-                        },
+                        "provider_specific_fields": {"reasoning_content": "private chain of thought"},
                     },
                 }
             ]
@@ -537,9 +599,7 @@ def test_provider_reasoning_metadata_does_not_enter_condensation_context(monkeyp
 
     assert event.summary.startswith("USER_CONTEXT:")
     assert "private reasoning" not in event.summary
-    assert event.llm_response_id.startswith(
-        condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX
-    )
+    assert event.llm_response_id.startswith(condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX)
 
 
 def test_in_band_reasoning_is_removed_before_condensation_event(monkeypatch):
@@ -573,9 +633,7 @@ def test_in_band_reasoning_is_removed_before_condensation_event(monkeypatch):
 
     assert "Private chain of thought" not in event.summary
     assert event.summary.startswith("USER_CONTEXT:")
-    assert event.llm_response_id.startswith(
-        condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX
-    )
+    assert event.llm_response_id.startswith(condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX)
 
 
 def test_fully_public_condensation_retains_trainable_completion_id(monkeypatch):
@@ -611,7 +669,7 @@ def test_fully_public_condensation_retains_trainable_completion_id(monkeypatch):
     assert event.llm_response_id == response.id
 
 
-def test_hard_reset_uses_safe_nontrainable_fallback_after_one_failed_retry(monkeypatch):
+def test_hard_reset_uses_native_retries_then_safe_nontrainable_fallback(monkeypatch):
     condenser, _TextContent, error_type = _condenser_module(monkeypatch)
     instance = condenser.SafeLLMSummarizingCondenser()
     attempts = []
@@ -642,10 +700,12 @@ def test_hard_reset_uses_safe_nontrainable_fallback_after_one_failed_retry(monke
 
     event = instance.hard_context_reset(SimpleNamespace(events=events))
 
-    assert len(attempts) == 1
-    assert event.llm_response_id.startswith(
-        condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX
-    )
+    assert len(attempts) == instance.hard_context_reset_max_retries
+    assert attempts[0]["max_event_str_length"] is None
+    retry_limits = [attempt["max_event_str_length"] for attempt in attempts[1:]]
+    assert all(isinstance(limit, int) and limit > 0 for limit in retry_limits)
+    assert retry_limits == sorted(retry_limits, reverse=True)
+    assert event.llm_response_id.startswith(condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX)
     assert "PRIVATE DELIBERATION" not in event.summary
     assert "parser.py" in event.summary
     assert _safety_module().is_safe_condensation_summary(event.summary)
