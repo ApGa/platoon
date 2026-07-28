@@ -183,7 +183,8 @@ def test_safe_prompt_does_not_include_action_reasoning():
     system_prompt, user_prompt = safety.build_safe_condensation_prompt([event])
 
     assert "Never reveal" in system_prompt
-    assert "8192 tokens" in system_prompt
+    assert "as concise as possible" in system_prompt
+    assert "8192" not in system_prompt
     assert safety.CONTEXT_SUMMARY_OPEN in system_prompt
     assert "SECRET" not in user_prompt
     assert "src/main.py" in user_prompt
