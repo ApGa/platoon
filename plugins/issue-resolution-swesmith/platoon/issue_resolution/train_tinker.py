@@ -308,7 +308,7 @@ async def main(args: list[str]):
 "kayak__pypika.1c9646f0.combine_file__7tqllwvr"
 ]
     train_datamap, val_datamap = load_data()
-    train_dataset = Dataset.from_list([{ "task_id": x } for x in train_datamap.keys() if train_datamap[x].id in instance_ids])
+    train_dataset = Dataset.from_list([{ "task_id": x } for x in train_datamap.keys()]) # if train_datamap[x].id in instance_ids])
     # val_dataset = Dataset.from_list([{ "task_id": x } for x in val_datamap.keys()])
     # Create trainer and run with context manager for proper cleanup
     print(f"Training dataset size: {len(train_dataset)}")

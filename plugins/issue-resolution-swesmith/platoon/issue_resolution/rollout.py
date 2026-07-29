@@ -282,11 +282,11 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             )
         )
 
-        rollout_task = asyncio.create_task(run_episode(agent_wrapper_platoon, env, timeout=300))
+        rollout_task = asyncio.create_task(run_episode(agent_wrapper_platoon, env, timeout=600))
         try:
             # Apply a hard timeout to the entire rollout, not just individual steps
             agent_loop_start = time.perf_counter()
-            traj = await asyncio.wait_for(rollout_task, timeout=1230)
+            traj = await asyncio.wait_for(rollout_task, timeout=1800)
             agent_loop_s = time.perf_counter() - agent_loop_start
         except asyncio.TimeoutError:
             agent_loop_s = time.perf_counter() - agent_loop_start

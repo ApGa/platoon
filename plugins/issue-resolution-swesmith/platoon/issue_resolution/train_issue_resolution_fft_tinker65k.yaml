@@ -2,7 +2,7 @@
 train:
   model_name: Qwen/Qwen3-4B-Instruct-2507
   renderer_name: qwen3_instruct_exact
-  context_window_length: 32768
+  context_window_length: 65000
   batch_size: 32
   num_epochs: 1
   max_training_steps: null
