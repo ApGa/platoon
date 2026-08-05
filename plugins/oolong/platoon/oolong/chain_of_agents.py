@@ -134,10 +134,8 @@ for chunk_index, chunk in enumerate(chunks):
         "Previous communication unit:",
         communication or "No prior information.",
         "",
-        "Read only your provided context chunk. Return an updated communication unit for the next worker. "
-        "Keep it concise but complete. Include only information useful for answering the question, and "
-        "explicitly say if this chunk adds no useful evidence. Do not submit the final answer unless the "
-        "chunk provides decisive evidence; preserve exact names, numbers, dates, and intermediate counts.",
+        "Process your chunk and the communication unit from the previous worker. Return an updated communication unit for the next worker that includes all relevant information "
+        "from the previous communication unit and the current chunk for answering the question."
     ])
     communication = await launch_subagent(goal=worker_goal, context=chunk)
     if len(communication) > max_communication_chars:

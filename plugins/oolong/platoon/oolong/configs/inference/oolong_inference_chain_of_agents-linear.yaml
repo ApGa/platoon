@@ -2,8 +2,8 @@
 inference:
   model_name: openai/Qwen3-30B-Oolong-Real-Linear
   model_endpoint: http://127.0.0.1:30000/v1
-  model_api_key: null
-  output_dir: /mnt/efs/platoon/plugins/oolong/inference_results/oolong_chain_of_agents-linear-trial-0
+  model_api_key: None
+  output_dir: /mnt/efs/platoon/plugins/oolong/inference_results/oolong_chain_of_agents-linear-trial-1
   resume: true
   workflow:
     num_rollouts_per_task: 1
@@ -14,7 +14,7 @@ inference:
     subprocess_max_workers: null
     rollout_config:
       max_steps: 1
-      output_dir: /mnt/efs/platoon/plugins/oolong/inference_results/oolong_chain_of_agents-linear-trial-0/rollouts
+      output_dir: /mnt/efs/platoon/plugins/oolong/inference_results/oolong_chain_of_agents-linear-trial-1/rollouts
       verbose: true
       timeout: 1200
       step_timeout: 300
