@@ -300,19 +300,52 @@ class DeepDiveEnv(CodeActEnv):
         if self._state.finished:
             if 'deepdive' not in self._task.id:
                 try:
-                    rubric_checklist = RubricChecklistFast(self._task.goal)
+                #     rubric_checklist = RubricChecklistFast(self._task.goal)
+                #     prompt_builder = DeepDivePromptBuilder()
+                #     action_history = prompt_builder.build_action_history_description(await self.observe())
+                    
+                #     rubric_context = f"We need to judge the performance of an agent on the task. The agent may use subagents to solve parts of the task. Do not penalize the model for relying on subagents, unless the subtasks delegated to the subagents are not meaningful or useful for the task.\n\n# Agent Trajectory Info\n## Action History\n{action_history}\n\n## Final Message\n{final_message}\n\n## Error Message\n{err_message}"
+                #     score, reason = await rubric_checklist.aevaluate(include_reason=True, context=rubric_context)
+
+                #     reward_misc["reason"] = reason
+                #     reward_misc["rubric_dict"] = rubric_checklist.to_dict()
+
+                # except Exception as e:
+                #     reward_misc["reason"] = f"Failed rubric-based evaluation: {e}"
+                #     score = 0.
+                    rubric_client = rubric_create_llm_client()
                     prompt_builder = DeepDivePromptBuilder()
                     action_history = prompt_builder.build_action_history_description(await self.observe())
-                    
-                    rubric_context = f"We need to judge the performance of an agent on the task. The agent may use subagents to solve parts of the task. Do not penalize the model for relying on subagents, unless the subtasks delegated to the subagents are not meaningful or useful for the task.\n\n# Agent Trajectory Info\n## Action History\n{action_history}\n\n## Final Message\n{final_message}\n\n## Error Message\n{err_message}"
-                    score, reason = await rubric_checklist.aevaluate(include_reason=True, context=rubric_context)
 
+                    rubric_response = await rubric_client.asystem_completion(
+                        system_prompt=(
+                            "We need to judge the performance of an deep research agent on a task which requires searching the web for information across various sources and synthesizing information together to answer a question. You should mark the task as successful if both the agent's final answer is correct AND if the agent delegates, its delegation strategy is useful and efficient. "
+                            "The agent may use subagents to solve parts of the task, and good, useful delegation is allowed. But degenerate delegation strategies should not be rewarded."
+                            "Reward delegation only when it is genuinely useful: the subtasks should be concrete, non-overlapping, and should help the agent search or read emails more effectively.\n\n"
+                            "Mark the task as unsuccessful for degenerate delegation behavior even if the final answer is correct. "
+                            "Degenerate behavior includes repeated delegation of (forwarding) nearly the same/whole goal to a subagent without doing any meaningful search/reading work or decomposition or wasteful failed launches caused by trying to delegate past the depth limit.\n\n"
+                            "It is acceptable for the agent to do all the work itself, part of the work itself, or to use subagents heavily if those subagents do distinct useful work. "
+                            "Do not give credit just because the wording of child tasks changes slightly from the agent's own goal; judge whether the decomposition is actually useful and efficient. "
+                            "Please provide a reason and success flag (boolean value) in the following JSON format:\n"
+                            '```json\n{"reason": "Brief reasoning here.", "success": true}\n```'
+                        ),
+                        user_prompt=(
+                            f"# Agent Trajectory Info\n## Action History\n{action_history}\n\n"
+                            f"## Final Message\n{final_message}\n\n"
+                            f"## Error Message\n{err_message}"
+                        ),
+                        temperature=1,
+                    )
+                    score, reason = self.parse_rubric_response(rubric_response)
                     reward_misc["reason"] = reason
-                    reward_misc["rubric_dict"] = rubric_checklist.to_dict()
-
-                except Exception as e:
-                    reward_misc["reason"] = f"Failed rubric-based evaluation: {e}"
-                    score = 0.
+                    reward_misc["reward/success"] = score
+                    reward_misc["success"] = score >= 1.0
+                    return score, reward_misc
+                except Exception as exc:
+                    reward_misc["reason"] = f"Failed rubric-based evaluation: {exc}"
+                    reward_misc["reward/success"] = 0.0
+                    reward_misc["success"] = False
+                    score = 0.0
             else:
                 try:
                     if not final_message:

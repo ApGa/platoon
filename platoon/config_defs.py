@@ -39,6 +39,8 @@ class RolloutConfig:
     return_dict: bool = False
     propogate_root_success: bool = False
     skip_subagent_reward_computation: bool = False
+    chain_chunk_chars: int = 32000
+    chain_max_communication_chars: int = 6000
     inference_params: InferenceParams = field(default_factory=InferenceParams)
 
     def __post_init__(self) -> None:

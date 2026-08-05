@@ -1,0 +1,33 @@
+# DeepDive inference benchmark config.
+inference:
+  model_name: openai/deepdive-4b-75-recursive #litellm_proxy/azure/gpt-4.1-mini
+  model_endpoint: http://127.0.0.1:30000/v1 #https://cmu.litellm.ai 
+  model_api_key: null
+  output_dir: ./inference_results/deepdive_qwen_4b_recursive
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 1
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 25
+      output_dir: ./inference_results/deepdive_4b_75_recursive/rollouts
+      verbose: true
+      timeout: 7200
+      step_timeout: 7200
+      skip_subagent_reward_computation: true
+      inference_params:
+        temperature: 0.0
+        top_p: null
+        max_completion_tokens: 2048
+
+dataset_split: qa_sft
+num_tasks: 50
+use_recursive_agent: true
+task_id: null
+stage: full
+shuffle_tasks: true
+seed: 42

@@ -224,7 +224,8 @@ class DefaultInferenceGroupWorkflow:
 
     def _get_or_create_process_pool(self) -> ProcessPoolExecutor:
         if self._process_pool is None:
-            max_workers = self.config.subprocess_max_workers or self.config.num_concurrent_workers
+            default_max_workers = self.config.num_concurrent_workers * self.config.num_rollouts_per_task
+            max_workers = self.config.subprocess_max_workers or default_max_workers
             self._process_pool = ProcessPoolExecutor(max_workers=max_workers, mp_context=mp.get_context("spawn"))
         return self._process_pool
 

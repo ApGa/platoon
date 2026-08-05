@@ -80,7 +80,7 @@ async def run_synth_rollout(task: Task, config: RolloutConfig) -> dict | Traject
             await env.close()
 
 
-_TEXTCRAFT_SYNTH_MAX_DEPTH = 6
+_TEXTCRAFT_SYNTH_MAX_DEPTH = 12
 
 
 async def run_synth_depth_aware_rollout(

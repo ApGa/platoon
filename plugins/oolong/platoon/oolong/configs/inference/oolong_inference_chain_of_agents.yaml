@@ -1,0 +1,45 @@
+# Oolong Chain-of-Agents inference baseline.
+inference:
+  model_name: openai/Qwen/Qwen3-VL-30B-A3B-Instruct
+  model_endpoint: http://127.0.0.1:30000/v1
+  model_api_key: null
+  output_dir: /mnt/efs/platoon/plugins/oolong/inference_results/oolong_chain_of_agents-trial-1
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 50
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 1
+      output_dir: /mnt/efs/platoon/plugins/oolong/inference_results/oolong_chain_of_agents-trial-1/rollouts
+      verbose: true
+      timeout: 1200
+      step_timeout: 300
+      chain_chunk_chars: 128000
+      chain_max_communication_chars: 32000
+      inference_params:
+        temperature: 0.0
+        top_p: null
+        max_completion_tokens: 8192
+
+# Dataset configuration
+oolong_dataset: real
+dataset_split: test
+num_tasks: 650
+use_recursive_agent: false
+use_chain_of_agents: true
+task_id: null
+# Filtering options (null means no filter)
+task_group: null
+answer_type: null
+min_context_len: null
+max_context_len: 700000
+# full: run rollouts + report
+# rollouts: only write rollouts to disk (resume-friendly)
+# report: only read existing rollouts and generate report
+stage: full
+shuffle_tasks: true
+seed: 42

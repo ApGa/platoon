@@ -19,8 +19,9 @@ from platoon.utils.span_profile import profile_span
 
 # NOTE: Call using asyncio.create_task() to make sure edits to contextvars do not leak to parent context
 async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: int | None = 300) -> Trajectory:
+    step_count = 0
+    cancellation: asyncio.CancelledError | None = None
     try:
-        step_count = 0
         set_context_vars(agent, env, timeout=timeout)
         traj = current_trajectory.get()
         async with profile_span(
@@ -39,7 +40,23 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
                 action = await asyncio.wait_for(agent.act(obs), timeout=timeout)
                 obs = await asyncio.wait_for(env.step(action), timeout=timeout)
                 step_count += 1
-    except (Exception, asyncio.CancelledError) as e:
+    except asyncio.CancelledError as e:
+        cancellation = e
+        tb_summary = traceback.extract_tb(e.__traceback__)
+        origin = ""
+        if tb_summary:
+            last_frame = tb_summary[-1]
+            origin = f"{last_frame.filename}:{last_frame.lineno} in {last_frame.name}"
+        detailed_msg = (
+            f"Error in episode loop at step {step_count}"
+            + (f" ({origin})" if origin else "")
+            + f"\n{e.__class__.__name__}: {e}\n"
+            + traceback.format_exc()
+        )
+        if verbose:
+            print(detailed_msg)
+        error_message.set(detailed_msg)
+    except Exception as e:
         tb_summary = traceback.extract_tb(e.__traceback__)
         origin = ""
         if tb_summary:
@@ -70,7 +87,9 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
         traj.finish_message = finish_message.get()
         # TODO: We could move trajectory finish logic (rewards, finish message, etc.) from env to here.
         traj_collection.finish_trajectory(traj.id)
-        return traj
+    if cancellation is not None:
+        raise cancellation
+    return current_trajectory.get()
 
 
 def set_context_vars(agent: Agent, env: Env, timeout: int | None):

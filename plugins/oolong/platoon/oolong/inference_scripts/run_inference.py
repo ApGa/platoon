@@ -20,7 +20,7 @@ from platoon.inference import (
     InferenceBenchmarkConfig,
     InferenceBenchmarkRunner,
 )
-from platoon.oolong.rollout import run_rollout, run_recursive_rollout
+from platoon.oolong.rollout import run_chain_of_agents_rollout, run_rollout, run_recursive_rollout
 from platoon.oolong.tasks import (
     AnswerType,
     TaskGroup,
@@ -46,6 +46,7 @@ class OolongInferenceConfig:
     dataset_split: Literal["validation", "test"] = "validation"
     num_tasks: int = 100
     use_recursive_agent: bool = False
+    use_chain_of_agents: bool = False
     task_id: str | None = None
     # Optional filters
     task_group: str | None = None  # counting, user, timeline
@@ -131,7 +132,14 @@ async def main(args: list[str]) -> None:
         default_config_path=str(default_config),
     )
 
-    rollout_fn = run_recursive_rollout if config.use_recursive_agent else run_rollout
+    if config.use_chain_of_agents and config.use_recursive_agent:
+        raise ValueError("use_chain_of_agents and use_recursive_agent are mutually exclusive")
+    if config.use_chain_of_agents:
+        rollout_fn = run_chain_of_agents_rollout
+    elif config.use_recursive_agent:
+        rollout_fn = run_recursive_rollout
+    else:
+        rollout_fn = run_rollout
     if config.stage == "report":
         dataset = []
     else:

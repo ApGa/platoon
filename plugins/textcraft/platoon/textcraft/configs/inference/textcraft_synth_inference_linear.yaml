@@ -1,20 +1,20 @@
 # TextCraft-Synth inference benchmark config.
 inference:
-  model_name: openai/sparse-no-weight #openai/satyakic/satyakic/linear-8k-textcraft-medium-step-249 #Qwen/Qwen3-4B-Instruct-2507
+  model_name: openai/satyakic/satyakic/linear-40k-textcraft-medium-step-249 #Qwen/Qwen3-4B-Instruct-2507
   model_endpoint: http://127.0.0.1:30000/v1
   model_api_key: null
-  output_dir: ./inference_results/textcraft_synth/sparse_no-weight-4
+  output_dir: ./inference_results/textcraft_synth/linear-best-of-3
   resume: true
   workflow:
-    num_rollouts_per_task: 1
+    num_rollouts_per_task: 3
     num_concurrent_workers: 1
     success_threshold: 1.0
     fail_fast: false
     use_subprocesses: false
     subprocess_max_workers: null
     rollout_config:
-      max_steps: 25 #800
-      output_dir: ./inference_results/textcraft_synth/sparse_no-weight-4/rollouts
+      max_steps: 800
+      how_output_dir: ./inference_results/textcraft_synth/linear-best-of-3/rollouts
       verbose: true
       timeout: 1200
       step_timeout: 300
@@ -26,7 +26,7 @@ inference:
 dataset_split: val
 difficulty: ['easy', 'medium', 'hard']
 num_tasks: 100
-use_recursive_agent: true
+use_recursive_agent: false
 task_id: null
 # full: run rollouts + report
 # rollouts: only write rollouts to disk (resume-friendly)

@@ -157,17 +157,19 @@ class InferenceBenchmarkRunner:
         self.rollout_dir.mkdir(parents=True, exist_ok=True)
         sem = asyncio.Semaphore(self.workflow.config.num_concurrent_workers)
 
-        async def _guarded_single(data: dict[str, Any], rollout_index: int) -> InferenceRolloutRecord:
+        async def _guarded_group(data: dict[str, Any]) -> list[InferenceRolloutRecord]:
             async with sem:
-                return await self._arun_single_rollout(data=data, rollout_index=rollout_index, resume=resume)
+                return await asyncio.gather(
+                    *[
+                        self._arun_single_rollout(data=data, rollout_index=rollout_index, resume=resume)
+                        for rollout_index in range(self.workflow.config.num_rollouts_per_task)
+                    ]
+                )
 
         start = time.perf_counter()
-        tasks = [
-            _guarded_single(data, rollout_index)
-            for data in dataset
-            for rollout_index in range(self.workflow.config.num_rollouts_per_task)
-        ]
-        records = await asyncio.gather(*tasks)
+        group_tasks = [_guarded_group(data) for data in dataset]
+        grouped_records = await asyncio.gather(*group_tasks)
+        records = [record for group in grouped_records for record in group]
         self._last_rollout_stage_elapsed_seconds = time.perf_counter() - start
 
         if self.workflow.config.fail_fast:
@@ -176,7 +178,7 @@ class InferenceBenchmarkRunner:
                 raise RuntimeError(f"Fail-fast enabled, aborting benchmark: {first_error}")
 
         return {
-            "num_rollouts_requested": len(tasks),
+            "num_rollouts_requested": len(dataset) * self.workflow.config.num_rollouts_per_task,
             "num_rollouts_completed": len(records),
             "num_rollouts_with_errors": len([r for r in records if r.error is not None]),
             "elapsed_seconds": self._last_rollout_stage_elapsed_seconds,

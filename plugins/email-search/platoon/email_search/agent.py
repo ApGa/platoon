@@ -82,7 +82,7 @@ RESEARCH STRATEGY:
 DELEGATION STRATEGY:
 - Prefer a small number of high-value subagents over long delegation chains.
 - Provide enough context to the subagent to avoid redundant work and if helpful, you may also provide the subagent with additional context about what the overall task is so that it can contextualize its own goal.
-- Strongly prefer parallel sibling subagents with `await asyncio.gather(...)` when several independent subtasks can be pursued at once.
+- **Strongly prefer parallel sibling subagents with `await asyncio.gather(...)` when several independent subtasks can be pursued at once.**
 - Example: if you have several independent hypotheses like "search finance emails from this sender", "search messages near this date", and "search for alternate keyword phrasing", launch sibling subagents to investigate those hypotheses in parallel and return candidate message IDs or findings.
 - Do not delegate a subtask that is just a lightly reworded version of the parent goal or your goal.
 - Delegation should be used to restrategize and try alternate strategies if one fails or to break down the current task into smaller/different subtasks.
@@ -97,6 +97,8 @@ ANSWER SUBMISSION:
 - `json` and `asyncio` are already available in the notebook; do not import them.
 - If the inbox does not support an answer, use
   `finish(json.dumps({"answer": "I don't know", "sources": []}))`.
+- When performing delegated tasks, you may look at the parent goal to provide more context on the task, but do not directly answer just the parent task. 
+Instead, you should provide an answer for your own task. Additional context in the answer that might be helpful for the parent agent is allowed as long as you first answer your own task directly.
 
 OTHER TIPS:
 - `search_emails(...)`, `read_email(...)`, and `launch_subagent(...)` are async and must be awaited or parallelized using `await asyncio.gather(...)`.

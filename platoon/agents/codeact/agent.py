@@ -10,7 +10,7 @@ from platoon.config_defs import InferenceParams
 from platoon.agents.codeact.prompt_builder import CodeActPromptBuilder, PromptMode
 from platoon.envs.base import Task
 from platoon.envs.codeact import CodeActAction, CodeActObservation
-from platoon.episode.context import current_trajectory
+from platoon.episode.context import current_trajectory, episode_step_timeout
 from platoon.utils import async_hang_debug
 from platoon.utils.llm_client import LLMClient
 from platoon.utils.span_profile import profile_span
@@ -131,11 +131,13 @@ class CodeActAgent:
         prompt = cast(list[ChatCompletionMessageParam], self.prompt_builder.build_messages(obs))
         current_traj = current_trajectory.get(None)
         request_id = str(uuid.uuid4())
+        request_timeout = episode_step_timeout.get()
         request_kwargs = {
             "stop": ["</python>"],
             "max_completion_tokens": self.inference_params.max_completion_tokens,
-            "timeout": 1800, # TODO: Make configurable and move to LiteLLM utils?
         }
+        if request_timeout is not None:
+            request_kwargs["timeout"] = request_timeout
         if self.inference_params.temperature is not None:
             request_kwargs["temperature"] = self.inference_params.temperature
         if self.inference_params.top_p is not None:
@@ -155,7 +157,7 @@ class CodeActAgent:
                 "step_index": len(obs.history),
                 "message_count": len(prompt),
                 "model": getattr(self.llm_client, "model", None),
-                "timeout": request_kwargs["timeout"],
+                "timeout": request_kwargs.get("timeout"),
             },
         )
         try:

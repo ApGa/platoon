@@ -251,7 +251,7 @@ class EmailSearchRecursiveCodeExecutor(EmailSearchCodeExecutor):
 
 class EmailSearchEnv(CodeActEnv):
     def __init__(self, task: Task):
-        task.fork_strategy = "task"
+        #task.fork_strategy = "task"
         super().__init__(task, EmailSearchCodeExecutor(task))
 
     def _parse_json_payload(self, response: str) -> dict[str, Any]:

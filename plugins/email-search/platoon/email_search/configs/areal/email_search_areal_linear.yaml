@@ -1,5 +1,5 @@
 experiment_name: email-search
-trial_name: email-search-qwen-4b-linear-trial-0
+trial_name: email-search-qwen-14b-linear-trial-1
 
 seed: 343
 total_train_epochs: 10
@@ -42,7 +42,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 50
-    output_dir: /mnt/efs/tmp/areal/experiments/email-search-qwen-4b-linear-trial-0
+    output_dir: /mnt/efs/tmp/areal/experiments/email-search-qwen-14b-linear-trial-1
     verbose: true
     train: true
     timeout: 7200
@@ -60,7 +60,7 @@ loss_fn_config:
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-4B-Instruct-2507
+  path: OpenPipe/Qwen3-14B-Instruct
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true

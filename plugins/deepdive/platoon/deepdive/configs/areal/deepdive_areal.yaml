@@ -1,5 +1,5 @@
 experiment_name: deepdive
-trial_name: deepdive-recursive-trial-1
+trial_name: deepdive-recursive-trial-3
 
 seed: 343
 total_train_epochs: 10
@@ -40,7 +40,7 @@ workflow_config:
   rollout_config:
     model_name: ${actor.path}
     max_steps: 25
-    output_dir: /mnt/efs/tmp/areal/experiments/deepdive-recursive-trial-0
+    output_dir: /mnt/efs/tmp/areal/experiments/deepdive-recursive-trial-3
     verbose: true
     train: true
     timeout: 7200
@@ -49,6 +49,8 @@ workflow_config:
       temperature: 1.0
       max_completion_tokens: 2048
   group_size: 8
+  leave_one_out_baseline: true
+  depth_level_weighting: true
 
 loss_fn_config:
   loss_fn: cispo
@@ -64,7 +66,7 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 40000
+    max_tokens_per_mb: 60000
   optimizer:
     type: adam
     lr: 3e-6
@@ -109,7 +111,7 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 4000
+    max_tokens_per_mb: 60000
   optimizer: null
 
 sglang:

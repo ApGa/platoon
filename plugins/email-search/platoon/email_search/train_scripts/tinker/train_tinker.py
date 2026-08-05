@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 
 logging.getLogger("platoon").setLevel(logging.DEBUG)
-_EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.1
+_EMAIL_SEARCH_DELEGATION_REWARD_CAP = 0.25
 _DEFAULT_REWARD_KEYS = {
     "reward/success": 0.0,
     "reward/subagent_launched": 0.0,

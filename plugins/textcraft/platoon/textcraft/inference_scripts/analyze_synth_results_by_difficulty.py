@@ -493,7 +493,7 @@ def _difficulty_rows(result: dict[str, Any]) -> list[list[str]]:
                 str(summary["total_tasks"]),
                 _format_percent(summary["success_at_k"]),
                 _format_percent(summary["success_rate"]),
-                _format_float(summary["reward_at_k_mean"]),
+                _format_float(summary["reward_at_k_max"]),
                 _format_float(summary["reward_mean"]),
                 _format_float(stats["num_steps_total"]["overall"]["mean"]),
                 _format_float(stats["rollout_wall_time_seconds"]["overall"]["mean"]),
@@ -634,7 +634,7 @@ def print_text_report(results: list[dict[str, Any]]) -> None:
                     str(summary["total_tasks"]),
                     _format_percent(summary["success_at_k"]),
                     _format_percent(summary["success_rate"]),
-                    _format_float(summary["reward_at_k_mean"]),
+                    _format_float(summary["reward_at_k_max"]),
                     _format_float(stats["num_steps_total"]["overall"]["mean"]),
                     _format_float(stats["rollout_wall_time_seconds"]["overall"]["mean"]),
                 ]

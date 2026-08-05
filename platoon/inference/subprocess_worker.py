@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import signal
 from typing import Any
+
+
+def _timeout_handler(_signum: int, _frame: Any) -> None:
+    raise TimeoutError("Inference rollout subprocess hard timeout exceeded")
 
 
 def run_rollout_subprocess(
@@ -16,16 +21,20 @@ def run_rollout_subprocess(
     rollout_config_dict: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Execute a single rollout in a subprocess."""
+    old_handler = signal.getsignal(signal.SIGALRM)
     try:
+        from platoon.config_defs import RolloutConfig
+
+        rollout_config = RolloutConfig(**rollout_config_dict)
+        hard_timeout = int((rollout_config.timeout or 900) + 120)
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(hard_timeout)
+
         rollout_module = importlib.import_module(rollout_fn_module)
         rollout_fn = getattr(rollout_module, rollout_fn_name)
 
         task_module = importlib.import_module(get_task_fn_module)
         get_task_fn = getattr(task_module, get_task_fn_name)
-
-        from platoon.config_defs import RolloutConfig
-
-        rollout_config = RolloutConfig(**rollout_config_dict)
 
         task = get_task_fn(task_id)
         if rollout_config.max_steps is not None:
@@ -43,3 +52,6 @@ def run_rollout_subprocess(
 
         traceback.print_exc()
         return None
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
