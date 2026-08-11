@@ -4,7 +4,7 @@ import asyncio
 import threading
 from contextvars import copy_context
 from dataclasses import replace
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from uuid import UUID, uuid4
 
 from platoon.agents.actions.subagent import SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY
@@ -28,6 +28,7 @@ from openhands.sdk.workspace.base import BaseWorkspace
 from .condensation_safety import (
     NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX,
     is_safe_condensation_summary,
+    take_condensation_reasoning,
 )
 from .recursive import DEFAULT_SUBAGENT_MAX_STEPS, copy_agent_config_for_fork
 from .types import OpenHandsAction, OpenHandsObservation, OpenHandsTrajectoryStep
@@ -116,8 +117,12 @@ class OpenHandsEnv:
     def _prepare_agent_for_conversation(self) -> AgentBase:
         configured_agent = self._agent
         if isinstance(self._task, SubTask):
-            from platoon.openhands.recursive import with_finish_tool
+            from platoon.openhands.recursive import (
+                with_finish_tool,
+                with_shared_workspace_subagent_prompt,
+            )
 
+            configured_agent = with_shared_workspace_subagent_prompt(configured_agent)
             configured_agent = with_finish_tool(configured_agent)
 
         if not self._enable_recursive_subagents or self._task.misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
@@ -144,14 +149,15 @@ class OpenHandsEnv:
         self,
         traj_collection,
         trajectory_id: str,
-        obs_events: list[Event] | None,
+        events: Sequence[Event] | None,
     ) -> None:
-        for event in obs_events or []:
+        for event in events or []:
             completion_id = _condensation_completion_id(event)
             event_id = getattr(event, "id", None)
             # Attach policy loss only to safe, genuinely model-generated public
-            # summaries. Reasoning-bearing summaries are sanitized for context
-            # but receive a nontrainable synthetic response ID.
+            # summaries. Reasoning is sanitized out of the retained summary but
+            # remains part of the sampled completion trained through its ID.
+            # Deterministic fallbacks have a nontrainable synthetic response ID.
             summary = getattr(event, "summary", None)
             if completion_id is None or event_id is None or not is_safe_condensation_summary(summary):
                 continue
@@ -164,6 +170,11 @@ class OpenHandsEnv:
             step.misc["action_misc"] = {"completion_id": completion_id}
             step.misc["reward_misc"] = {}
             step.misc["synthetic_step_type"] = "openhands_condensation"
+            reasoning = take_condensation_reasoning(event_id)
+            if reasoning:
+                # Diagnostic-only metadata is serialized for the TUI but is
+                # never converted into an OpenHands message or future context.
+                step.misc["condensation_reasoning"] = reasoning
             traj_collection.add_trajectory_step(trajectory_id, step)
 
     async def _initial_user_message(self) -> str:
@@ -208,7 +219,15 @@ class OpenHandsEnv:
                 observation_events=obs_events,
             ),
         )
-        self._add_trainable_condensation_steps(traj_collection, traj.id, obs_events)
+        # Condensation is internal OpenHands context-management state rather
+        # than a direct action result.  Discover it independently so it remains
+        # a standalone synthetic training/TUI step without becoming Platoon's
+        # observation cursor.
+        self._add_trainable_condensation_steps(
+            traj_collection,
+            traj.id,
+            self._state.conversation_state.events,
+        )
         self._state.last_step_observation_id = obs_events[-1].id
         return await self.observe()
 
@@ -248,7 +267,11 @@ class OpenHandsEnv:
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
         traj_collection.add_trajectory_step(traj.id, step)
-        self._add_trainable_condensation_steps(traj_collection, traj.id, obs_events)
+        self._add_trainable_condensation_steps(
+            traj_collection,
+            traj.id,
+            self._state.conversation_state.events,
+        )
         if self._state.finished:
             traj.reward = self._state.reward
         return await self.observe()

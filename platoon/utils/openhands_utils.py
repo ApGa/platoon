@@ -8,6 +8,7 @@ from openhands.sdk.event import (
     AgentErrorEvent,
     Event,
     EventID,
+    LLMConvertibleEvent,
     MessageEvent,
     ObservationBaseEvent,
 )
@@ -138,6 +139,20 @@ def _action_is_self_observing(action: Event, conversation_state) -> bool:
     )
 
 
+def _last_llm_convertible_event(events: Sequence[Event]) -> LLMConvertibleEvent | None:
+    """Return the last event that is part of the conversation seen by the LLM.
+
+    Remote OpenHands conversations append internal events (for example,
+    ConversationStateUpdateEvent) after the final action or observation.  Those
+    events synchronize remote state, but they are not trajectory progress and
+    must not move Platoon's caught-up cursor.
+    """
+    return next(
+        (event for event in reversed(events) if isinstance(event, LLMConvertibleEvent)),
+        None,
+    )
+
+
 def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm_call_id: bool = True) -> list[Event]:
     """Collect all actions since the last observation, once each has a corresponding future observation."""
     events = observation.conversation_state.events
@@ -222,7 +237,11 @@ def get_obs_for_last_action(
             if not _is_terminal_status(observation.conversation_state):
                 return []
             first_action_index = len(events)
-        return [event for event in events[:first_action_index] if not is_action(event)]
+        return [
+            event
+            for event in events[:first_action_index]
+            if isinstance(event, LLMConvertibleEvent) and not is_action(event)
+        ]
 
     actions, batch_start, batch_end = _action_batch_containing(events, observation.last_step_action_id)
     if not actions or batch_start is None:
@@ -254,31 +273,42 @@ def get_obs_for_last_action(
                 return []
 
     ordered_results = [event for action in actions for event in results.get(action.id, [])]
-    return ordered_results + unrelated
+    # Some semantically meaningful messages are not direct action results.  In
+    # particular, OpenReward can add a user correction after an agent returns
+    # plain text instead of calling finish.  Keep those LLM-visible events, but
+    # do not turn state synchronization, hooks, token accounting, or other
+    # internal events into observations.
+    llm_convertible_sideband = [event for event in unrelated if isinstance(event, LLMConvertibleEvent)]
+    return ordered_results + llm_convertible_sideband
 
 
 def is_finished(observation: OpenHandsObservation, last_event_seen: EventID | None = None) -> bool:
     conversation_state = observation.conversation_state
     oh_conversation_finished = _is_terminal_status(conversation_state)
-    last_event_id = conversation_state.events[-1].id
-    assert last_event_id is not None, "Last event in conversation must have a non-None ID"
+    last_llm_event = _last_llm_convertible_event(conversation_state.events)
+    last_llm_event_id = last_llm_event.id if last_llm_event is not None else None
     valid_ids = [
         event_id
         for event_id in [observation.last_step_action_id, observation.last_step_observation_id, last_event_seen]
         if event_id is not None
     ]
-    platoon_episode_caught_up = last_event_id in valid_ids
+    # A terminal conversation with no LLM-visible events has nothing for
+    # Platoon to consume.  Otherwise, only an LLM-visible event can establish
+    # whether all model-facing trajectory progress has been observed.
+    platoon_episode_caught_up = last_llm_event is None or last_llm_event_id in valid_ids
     if oh_conversation_finished and platoon_episode_caught_up:
         try:
             logger.debug(
                 "is_finished: conversation finished with status "
-                f"{_conversation_execution_status(conversation_state)}, last_event_id: {last_event_id}, "
-                f"valid_ids: {valid_ids}, last_event_seen: {conversation_state.events[-1].kind}"
+                f"{_conversation_execution_status(conversation_state)}, "
+                f"last_llm_event_id: {last_llm_event_id}, valid_ids: {valid_ids}, "
+                f"last_llm_event_kind: {getattr(last_llm_event, 'kind', None)}"
             )
         except Exception as e:
             logger.debug(
                 "is_finished: conversation finished with status "
-                f"{_conversation_execution_status(conversation_state)}, last_event_id: {last_event_id}, "
-                f"valid_ids: {valid_ids}, unable to print last event kind due to error: {e}"
+                f"{_conversation_execution_status(conversation_state)}, "
+                f"last_llm_event_id: {last_llm_event_id}, valid_ids: {valid_ids}, "
+                f"unable to print last LLM event kind due to error: {e}"
             )
     return oh_conversation_finished and platoon_episode_caught_up

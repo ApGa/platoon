@@ -11,9 +11,6 @@ from uuid import uuid4
 from openhands.sdk.context.condenser import (
     LLMSummarizingCondenser,
 )
-from openhands.sdk.context.condenser import (
-    llm_summarizing_condenser as openhands_summarizing_condenser,
-)
 from openhands.sdk.context.condenser.base import NoCondensationAvailableException
 from openhands.sdk.context.prompts import render_template
 from openhands.sdk.event.base import LLMConvertibleEvent
@@ -23,9 +20,12 @@ from openhands.sdk.utils import maybe_truncate
 
 from .condensation_safety import (
     NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX,
+    add_condensation_handoff_prefix,
     completion_contains_reasoning,
     completion_was_truncated,
+    extract_completion_reasoning_text,
     extract_visible_condensation_text,
+    remember_condensation_reasoning,
     render_event_for_condensation,
     validate_condensation_summary,
 )
@@ -49,10 +49,7 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
             for event in forgotten_events
         ]
         prompt = render_template(
-            os.path.join(
-                os.path.dirname(openhands_summarizing_condenser.__file__),
-                "prompts",
-            ),
+            os.path.join(os.path.dirname(__file__), "prompts"),
             "summarizing_prompt.j2",
             events=event_strings,
         )
@@ -73,7 +70,8 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
             # Reasoning is intentionally enabled for summary quality. Qwen may
             # return that reasoning in-band, followed by ``</think>`` and the
             # public summary. Only the public suffix enters future context.
-            return validate_condensation_summary(extract_visible_condensation_text(text))
+            summary = validate_condensation_summary(extract_visible_condensation_text(text))
+            return add_condensation_handoff_prefix(summary)
         except ValueError as exc:
             raise NoCondensationAvailableException(f"Unsafe condensation completion: {exc}") from exc
 
@@ -118,11 +116,11 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
             f"CURRENT_STATE: {current_state}"
         )
         try:
-            return validate_condensation_summary(summary)
+            return add_condensation_handoff_prefix(validate_condensation_summary(summary))
         except ValueError:
             # This fixed form is intentionally independent of event-controlled
             # text and therefore remains a safe last resort.
-            return (
+            return add_condensation_handoff_prefix(
                 "USER_CONTEXT: Continue the original retained task and constraints.\n"
                 "COMPLETED: Earlier public interaction history was compacted.\n"
                 "PENDING: Reinspect the environment, continue the task, verify outputs, "
@@ -156,21 +154,24 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         llm_response,
     ) -> Condensation:
         raw_text = cls._completion_text(llm_response)
-        contains_nonpublic_reasoning = "</think>" in raw_text.lower() or completion_contains_reasoning(llm_response)
-        return Condensation(
+        event = Condensation(
             forgotten_event_ids={event.id for event in forgotten_events},
             summary=cls._summary_text(llm_response),
             summary_offset=summary_offset,
-            # The sanitized summary is safe for future context, but a raw
-            # completion with stripped/provider reasoning should not receive
-            # synthetic policy loss. Only fully public completions retain their
-            # AReaL interaction ID.
-            llm_response_id=(
-                f"{NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX}{uuid4().hex}"
-                if contains_nonpublic_reasoning
-                else llm_response.id
-            ),
+            # Train the actual sampled completion, including any reasoning
+            # tokens, while retaining only the sanitized public summary in
+            # future agent context. Deterministic fallbacks remain nontrainable
+            # because they have no corresponding cached model completion.
+            llm_response_id=llm_response.id,
         )
+        reasoning = extract_completion_reasoning_text(
+            llm_response,
+            completion_text=raw_text,
+        )
+        if reasoning is None and completion_contains_reasoning(llm_response):
+            reasoning = "[Reasoning payload was redacted or unavailable for display.]"
+        remember_condensation_reasoning(str(event.id), reasoning)
+        return event
 
     def _generate_condensation(
         self,

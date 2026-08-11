@@ -1126,7 +1126,7 @@ def test_openreward_read_only_tools_are_strict_and_leave_parent_unchanged(monkey
     assert "submit_answer" not in read_only_tools
     assert "claim_done" not in read_only_tools
     assert set(shared_tools) == safe_names | (
-        mutating_or_ambiguous_names - {"claim_done"}
+        mutating_or_ambiguous_names - {"claim_done", "submit_answer"}
     )
     assert agent.tools_map == parent_tools_before
     assert all(
@@ -1201,6 +1201,52 @@ async def test_openreward_read_only_fork_has_no_child_submission_tool(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_openreward_shared_fork_keeps_reward_verifier_read_only(monkeypatch):
+    env_mod = _load_openreward_env_module(monkeypatch)
+    from platoon.envs.base import SubTask, Task
+
+    _module(
+        monkeypatch,
+        "platoon.openhands.recursive",
+        copy_agent_config_for_fork=lambda agent: agent,
+    )
+
+    class FakeAgent:
+        def __init__(self, mcp_config):
+            self.mcp_config = mcp_config
+
+        def model_copy(self, update):
+            return FakeAgent(update.get("mcp_config", self.mcp_config))
+
+    root = Task(id="root", goal="root")
+    verifier_task = SubTask(
+        id="verifier",
+        goal="verify",
+        parent_tasks=[root],
+        misc={"subagent_reward_verifier_task": True},
+    )
+    parent_tools = {
+        "get_task": object(),
+        "view": object(),
+        "str_replace": object(),
+        "submit_answer": object(),
+    }
+    parent = env_mod.OpenRewardOpenHandsEnv(
+        task=root,
+        agent=FakeAgent({"mcpServers": {"openreward": {}}}),
+        workspace="shared-live-workspace",
+        shared_openreward_tools=parent_tools,
+        subagent_environment_access="shared",
+    )
+
+    verifier = await parent.fork(verifier_task)
+
+    assert verifier._subagent_environment_access == "read_only"
+    assert set(verifier._shared_openreward_tools) == {"get_task", "view"}
+    assert verifier._workspace == parent._workspace
+
+
+@pytest.mark.asyncio
 async def test_openreward_read_only_child_prompt_assigns_edits_to_parent(monkeypatch):
     env_mod = _load_openreward_env_module(monkeypatch)
     from platoon.envs.base import SubTask, Task
@@ -1222,6 +1268,8 @@ async def test_openreward_read_only_child_prompt_assigns_edits_to_parent(monkeyp
     goal = await env._initial_user_message()
 
     assert "read-only" in goal
-    assert "not an independent worktree" in goal
     assert "parent alone is responsible for applying changes and submitting" in goal
     assert "proposed replacements or patch text" in goal
+    assert "live workspace" not in goal
+    assert "worktree" not in goal
+    assert "OpenReward" not in goal

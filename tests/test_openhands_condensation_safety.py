@@ -10,6 +10,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "plugins" / "openhands" / "platoon" / "openhands" / "condensation_safety.py"
+PROMPT_PATH = MODULE_PATH.parent / "prompts" / "summarizing_prompt.j2"
 
 
 def _safety_module():
@@ -47,6 +48,7 @@ def _condenser_module(monkeypatch):
 
     class Condensation:
         def __init__(self, **kwargs):
+            kwargs.setdefault("id", "condensation-event")
             self.__dict__.update(kwargs)
 
     _module(monkeypatch, "openhands")
@@ -70,10 +72,11 @@ def _condenser_module(monkeypatch):
         NoCondensationAvailableException=NoCondensationAvailableException,
     )
 
-    def render_template(_directory, template_name, *, events):
+    def render_template(directory, template_name, *, events):
+        assert Path(directory) == PROMPT_PATH.parent
         assert template_name == "summarizing_prompt.j2"
         serialized = "\n".join(f"<EVENT>\n{event}\n</EVENT>" for event in events)
-        return f"OPENHANDS_NATIVE_SUMMARIZING_PROMPT\n{serialized}"
+        return f"PLATOON_SUMMARIZING_PROMPT\n{serialized}"
 
     _module(
         monkeypatch,
@@ -190,7 +193,7 @@ def test_agent_message_renderer_omits_ambiguous_text_without_thinking_close():
     assert "[no public text content]" in rendered
 
 
-def test_native_openhands_prompt_receives_safe_public_events(monkeypatch):
+def test_platoon_prompt_receives_safe_public_events(monkeypatch):
     condenser, _TextContent, _error_type = _condenser_module(monkeypatch)
     event = SimpleNamespace(
         kind="ActionEvent",
@@ -207,9 +210,22 @@ def test_native_openhands_prompt_receives_safe_public_events(monkeypatch):
     assert messages[0].role == "user"
     prompt = messages[0].content[0].text
 
-    assert "OPENHANDS_NATIVE_SUMMARIZING_PROMPT" in prompt
+    assert "PLATOON_SUMMARIZING_PROMPT" in prompt
     assert "SECRET" not in prompt
     assert "src/main.py" in prompt
+
+
+def test_platoon_prompt_is_a_generic_continuation_checkpoint():
+    prompt = PROMPT_PATH.read_text()
+
+    assert "another agent that will resume this trajectory" in prompt
+    assert "KEY_DECISIONS:" in prompt
+    assert "LEARNED_PATTERNS:" in prompt
+    assert "CRITICAL_CONTEXT:" in prompt
+    assert "Do not continue the task" in prompt
+    assert "do not pad the summary or aim" in prompt
+    assert "FITS card" not in prompt
+    assert "haikus" not in prompt
 
 
 def test_event_truncation_uses_native_head_and_tail_only_when_requested(monkeypatch):
@@ -304,6 +320,45 @@ CURRENT_STATE: No files changed yet.
     assert safety.validate_condensation_summary(visible).startswith("USER_CONTEXT:")
 
 
+def test_extract_completion_reasoning_text_reads_in_band_qwen_prefix():
+    safety = _safety_module()
+    completion = (
+        "Inspect the forgotten events and preserve exact task state.\n"
+        "</think>\n\n"
+        "USER_CONTEXT: Fix the parser.\n"
+        "COMPLETED: Located the implementation.\n"
+        "PENDING: Apply and test the patch."
+    )
+
+    reasoning = safety.extract_completion_reasoning_text(
+        SimpleNamespace(message=SimpleNamespace(content=[])),
+        completion_text=completion,
+    )
+
+    assert reasoning == "Inspect the forgotten events and preserve exact task state."
+    assert "USER_CONTEXT" not in reasoning
+
+
+def test_extract_completion_reasoning_text_reads_provider_field_without_redacted_data():
+    safety = _safety_module()
+    response = SimpleNamespace(
+        message=SimpleNamespace(
+            reasoning_content="Readable provider reasoning.",
+            thinking_blocks=[
+                {"type": "redacted_thinking", "data": "encrypted-secret"},
+            ],
+            responses_reasoning_item=None,
+            content=[],
+        ),
+        raw_response=None,
+    )
+
+    reasoning = safety.extract_completion_reasoning_text(response)
+
+    assert reasoning == "Readable provider reasoning."
+    assert "encrypted-secret" not in reasoning
+
+
 def test_extract_visible_condensation_text_rejects_unclosed_reasoning():
     safety = _safety_module()
 
@@ -360,6 +415,20 @@ CURRENT_STATE: No files changed yet."""
 
     assert safety.validate_condensation_summary(response) == response
     assert safety.is_safe_condensation_summary(response)
+
+
+def test_handoff_prefix_is_retained_and_structured_summary_remains_valid():
+    safety = _safety_module()
+    structured_summary = """USER_CONTEXT: Fix the parser.
+COMPLETED: Located the implementation.
+PENDING: Apply and test the patch.
+CURRENT_STATE: No files changed yet."""
+    handoff = safety.add_condensation_handoff_prefix(structured_summary)
+
+    assert handoff.startswith(safety.CONDENSATION_HANDOFF_PREFIX)
+    assert f"\n\n{structured_summary}" in handoff
+    assert safety.validate_condensation_summary(handoff) == handoff
+    assert safety.is_safe_condensation_summary(handoff)
 
 
 def test_native_code_summary_format_can_omit_current_state():
@@ -557,7 +626,7 @@ def test_reasoning_usage_counts_without_payload_are_allowed():
     assert not safety.completion_contains_reasoning(response)
 
 
-def test_provider_reasoning_metadata_does_not_enter_condensation_context(monkeypatch):
+def test_provider_reasoning_does_not_enter_context_and_retains_trainable_id(monkeypatch):
     condenser, TextContent, _error_type = _condenser_module(monkeypatch)
     response = SimpleNamespace(
         id="chatcmpl-private-reasoning",
@@ -597,12 +666,15 @@ def test_provider_reasoning_metadata_does_not_enter_condensation_context(monkeyp
         llm_response=response,
     )
 
-    assert event.summary.startswith("USER_CONTEXT:")
+    safety = sys.modules["platoon.openhands.condensation_safety"]
+    assert event.summary.startswith(safety.CONDENSATION_HANDOFF_PREFIX)
+    assert "\n\nUSER_CONTEXT:" in event.summary
     assert "private reasoning" not in event.summary
-    assert event.llm_response_id.startswith(condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX)
+    assert event.llm_response_id == response.id
+    assert safety.take_condensation_reasoning(event.id) == "private chain of thought"
 
 
-def test_in_band_reasoning_is_removed_before_condensation_event(monkeypatch):
+def test_in_band_reasoning_is_removed_from_context_and_retains_trainable_id(monkeypatch):
     condenser, TextContent, _error_type = _condenser_module(monkeypatch)
     response = SimpleNamespace(
         id="chatcmpl-in-band-reasoning",
@@ -631,9 +703,12 @@ def test_in_band_reasoning_is_removed_before_condensation_event(monkeypatch):
         llm_response=response,
     )
 
+    safety = sys.modules["platoon.openhands.condensation_safety"]
     assert "Private chain of thought" not in event.summary
-    assert event.summary.startswith("USER_CONTEXT:")
-    assert event.llm_response_id.startswith(condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX)
+    assert event.summary.startswith(safety.CONDENSATION_HANDOFF_PREFIX)
+    assert "\n\nUSER_CONTEXT:" in event.summary
+    assert event.llm_response_id == response.id
+    assert safety.take_condensation_reasoning(event.id) == ("Private chain of thought from the reasoning model.")
 
 
 def test_fully_public_condensation_retains_trainable_completion_id(monkeypatch):

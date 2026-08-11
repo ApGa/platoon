@@ -45,6 +45,15 @@ def _observation_event(events, event_id: str, action_id: str, tool_call_id: str)
     )
 
 
+def _state_update_event(event_id: str):
+    """A representative non-LLM-convertible remote state synchronization event."""
+    return SimpleNamespace(
+        id=event_id,
+        kind="ConversationStateUpdate",
+        source="environment",
+    )
+
+
 def test_pending_action_polling_does_not_write_stdout(capsys, monkeypatch):
     monkeypatch.setenv("OPENHANDS_SUPPRESS_BANNER", "1")
     litellm = pytest.importorskip("litellm")
@@ -117,7 +126,7 @@ def test_interleaved_agent_error_does_not_split_parallel_tool_batch(monkeypatch)
     assert [event.id for event in step_observations] == ["observation-1", "error-2", "observation-3"]
 
 
-def test_condensation_between_action_batches_is_observed_exactly_once(monkeypatch):
+def test_condensation_between_action_batches_is_not_an_action_observation(monkeypatch):
     events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
     condenser_events = pytest.importorskip("openhands.sdk.event.condenser")
 
@@ -137,6 +146,7 @@ def test_condensation_between_action_batches_is_observed_exactly_once(monkeypatc
         summary_offset=0,
         llm_response_id="response-condensation",
     )
+    state_update = _state_update_event("state-update-after-condensation")
     action_2 = _action_event(events, "action-2", "call-2", "response-2")
     observation_2 = _observation_event(events, "observation-2", "action-2", "call-2")
     action_3 = _action_event(events, "action-3", "call-3", "response-3")
@@ -146,6 +156,7 @@ def test_condensation_between_action_batches_is_observed_exactly_once(monkeypatc
         action_1,
         observation_1,
         condensation,
+        state_update,
         action_2,
         observation_2,
         action_3,
@@ -163,10 +174,7 @@ def test_condensation_between_action_batches_is_observed_exactly_once(monkeypatc
         observation,
         first_actions,
     )
-    assert [event.id for event in first_observations] == [
-        observation_1.id,
-        condensation.id,
-    ]
+    assert [event.id for event in first_observations] == [observation_1.id]
 
     first_observation_ids = {event.id for event in first_observations}
     observation.last_step_observation_id = next(
@@ -183,13 +191,134 @@ def test_condensation_between_action_batches_is_observed_exactly_once(monkeypatc
         second_actions,
     )
     assert [event.id for event in second_observations] == [observation_2.id]
-    assert sum(
-        event.id == condensation.id
+    # Condensation is scanned independently by OpenHandsEnv and emitted as its
+    # own synthetic step.  It must not become this action batch's cursor.
+    assert all(
+        event.id != condensation.id
         for event in [*first_observations, *second_observations]
-    ) == 1
+    )
     assert condensation.summary_event.id not in {
         event.id for event in observation.conversation_state.events
     }
+
+
+def test_get_obs_excludes_unrelated_non_llm_state_updates(monkeypatch):
+    events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
+
+    initial = events.MessageEvent.model_construct(id="initial", source="user")
+    action = _action_event(events, "action-1", "call-1", "response-1")
+    result = _observation_event(events, "observation-1", "action-1", "call-1")
+    state_update_1 = _state_update_event("state-update-1")
+    state_update_2 = _state_update_event("state-update-2")
+    next_action = _action_event(events, "action-2", "call-2", "response-2")
+
+    observation = openhands_types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(
+            events=[
+                initial,
+                action,
+                result,
+                state_update_1,
+                state_update_2,
+                next_action,
+            ],
+            execution_status=None,
+        ),
+        last_step_action_id=action.id,
+    )
+
+    step_observations = openhands_utils.get_obs_for_last_action(observation, [action])
+
+    assert [event.id for event in step_observations] == [result.id]
+
+
+def test_initial_observations_exclude_non_llm_state_updates(monkeypatch):
+    events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
+
+    initial = events.MessageEvent.model_construct(id="initial", source="user")
+    state_update = _state_update_event("state-update-1")
+    action = _action_event(events, "action-1", "call-1", "response-1")
+    observation = openhands_types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(
+            events=[initial, state_update, action],
+            execution_status=None,
+        ),
+    )
+
+    initial_observations = openhands_utils.get_obs_for_last_action(observation)
+
+    assert [event.id for event in initial_observations] == [initial.id]
+
+
+def test_get_obs_retains_unrelated_llm_visible_user_correction(monkeypatch):
+    events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
+
+    initial = events.MessageEvent.model_construct(id="initial", source="user")
+    action = _action_event(events, "action-1", "call-1", "response-1")
+    result = _observation_event(events, "observation-1", "action-1", "call-1")
+    correction = events.MessageEvent.model_construct(id="correction", source="user")
+    next_action = _action_event(events, "action-2", "call-2", "response-2")
+
+    observation = openhands_types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(
+            events=[initial, action, result, correction, next_action],
+            execution_status=None,
+        ),
+        last_step_action_id=action.id,
+    )
+
+    step_observations = openhands_utils.get_obs_for_last_action(observation, [action])
+
+    assert [event.id for event in step_observations] == [result.id, correction.id]
+
+
+def test_is_finished_ignores_trailing_non_llm_state_updates(monkeypatch):
+    events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
+
+    initial = events.MessageEvent.model_construct(id="initial", source="user")
+    action = _action_event(events, "action-1", "call-1", "response-1")
+    result = _observation_event(events, "observation-1", "action-1", "call-1")
+    observation = openhands_types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(
+            events=[
+                initial,
+                action,
+                result,
+                _state_update_event("state-update-1"),
+                _state_update_event("state-update-2"),
+            ],
+            execution_status=openhands_utils.ConversationExecutionStatus.FINISHED,
+        ),
+        last_step_action_id=action.id,
+        last_step_observation_id=result.id,
+    )
+
+    assert openhands_utils.is_finished(observation)
+
+
+def test_is_finished_waits_for_unconsumed_llm_event_before_state_updates(monkeypatch):
+    events, openhands_types, openhands_utils = _parser_modules(monkeypatch)
+
+    initial = events.MessageEvent.model_construct(id="initial", source="user")
+    action_1 = _action_event(events, "action-1", "call-1", "response-1")
+    result_1 = _observation_event(events, "observation-1", "action-1", "call-1")
+    action_2 = _action_event(events, "action-2", "call-2", "response-2")
+    observation = openhands_types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(
+            events=[
+                initial,
+                action_1,
+                result_1,
+                action_2,
+                _state_update_event("state-update-1"),
+            ],
+            execution_status=openhands_utils.ConversationExecutionStatus.FINISHED,
+        ),
+        last_step_action_id=action_1.id,
+        last_step_observation_id=result_1.id,
+    )
+
+    assert not openhands_utils.is_finished(observation)
 
 
 def test_parallel_tool_batch_waits_for_every_action_result(monkeypatch):

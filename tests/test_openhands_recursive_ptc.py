@@ -376,6 +376,8 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
             agent,
             mode="orchestration_only",
         )
+        agent = recursive.with_shared_workspace_subagent_prompt(agent)
+        agent = recursive.with_shared_workspace_subagent_prompt(agent)
         agent = recursive.with_launch_subagent_tool(
             agent,
             runtime=runtime,
@@ -389,7 +391,7 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
 
     assert [tool.name for tool in agent.tools] == [
         "existing",
-        "task_tracker",
+        "platoon_parallel_task_tracker",
         "programmatic_tool_calling",
         "launch_subagent",
     ]
@@ -399,14 +401,54 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
     }
     assert agent.tools[2].params == {"mode": "orchestration_only"}
     assert agent.include_default_tools == ["FinishTool"]
-    assert agent.agent_context.system_message_suffix == "base\n\nextra"
+    assert agent.agent_context.system_message_suffix == (
+        "base\n\n"
+        f"{recursive.SHARED_WORKSPACE_SUBAGENT_SYSTEM_PROMPT_SUFFIX}\n\n"
+        "extra"
+    )
+    assert (
+        agent.agent_context.system_message_suffix.count(
+            recursive.SHARED_WORKSPACE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
+        )
+        == 1
+    )
     assert agent.agent_context.user_message_suffix == "user-base\n\nuser-extra"
-    assert "task_tracker tool" in recursive.RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
+    assert "task_tracker" in recursive.TASK_TRACKER_SYSTEM_PROMPT_SUFFIX
+    assert "task_tracker" in recursive.TASK_TRACKER_INITIAL_TASK_SUFFIX
+    assert "exactly one" not in recursive.TASK_TRACKER_SYSTEM_PROMPT_SUFFIX
+    assert "exactly one" not in recursive.TASK_TRACKER_INITIAL_TASK_SUFFIX
+    assert "task_tracker" not in recursive.RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
     assert "launch at least one subagent" in recursive.RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX
     assert "Recursive coordination guidance" in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
     assert "max_steps" not in recursive.RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX
     assert "max_steps" not in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
     assert "OpenReward" not in recursive.RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX
+    workspace_guidance = (
+        recursive.SHARED_WORKSPACE_SUBAGENT_SYSTEM_PROMPT_SUFFIX.lower()
+    )
+    assert "same live workspace as your parent" in workspace_guidance
+    assert "sibling subagents" in workspace_guidance
+    assert "isolation" in workspace_guidance
+    assert all(
+        environment not in workspace_guidance
+        for environment in ("swe-rebench", "tmax", "toolathlon", "openreward")
+    )
+
+
+def test_parallel_task_tracker_description_allows_concurrent_items(monkeypatch):
+    recursive = _load_recursive_module(monkeypatch)
+    description = (
+        "   - in_progress: Currently active (maintain single focus)\n"
+        "   - Limit active work to ONE task at any given time\n"
+        "   - Complete current activities before initiating new ones\n"
+    )
+
+    updated = recursive._parallel_task_tracker_description(description)
+
+    assert "maintain single focus" not in updated
+    assert "Limit active work to ONE task" not in updated
+    assert "Complete current activities before initiating new ones" not in updated
+    assert "Multiple delegated items may be in progress concurrently" in updated
 
 
 def test_launch_subagent_tool_declares_no_shared_resources(monkeypatch):

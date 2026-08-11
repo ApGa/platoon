@@ -8,12 +8,19 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from threading import Lock
 from typing import Any
 
 CONTEXT_SUMMARY_OPEN = "<context_summary>"
 CONTEXT_SUMMARY_CLOSE = "</context_summary>"
 NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX = "platoon-nontrainable-condensation-"
+CONDENSATION_HANDOFF_PREFIX = (
+    "The following is a summary provided by a previous agent working on this "
+    "trajectory. Resume the task from this point onward, using the handoff below "
+    "to avoid repeating completed work."
+)
 # This is a tokenizer-independent guard on the public summary retained in the
 # agent's next context, not a generation target.  It is intentionally separate
 # from the shared reasoning-plus-summary completion budget.
@@ -22,11 +29,12 @@ MAX_RETAINED_SUMMARY_CHARS = 32_768
 _SUMMARY_HEADER_RE = re.compile(
     r"(?im)^\s*(?:[`*#]+\s*)?"
     r"(?:USER_CONTEXT|TASK_TRACKING|COMPLETED|PENDING|CURRENT_STATE|"
-    r"CODE_STATE|TESTS|CHANGES|DEPS|VERSION_CONTROL_STATUS)"
+    r"KEY_DECISIONS|LEARNED_PATTERNS|CRITICAL_CONTEXT|CODE_STATE|TESTS|CHANGES|DEPS|"
+    r"VERSION_CONTROL_STATUS)"
     r"(?:\s*[`*#]+)?\s*:"
 )
-# These are the common sections in both native OpenHands examples.
-# CURRENT_STATE is optional for code tasks in the stock template.
+# Keep the validator compatible with existing native OpenHands summaries while
+# the Platoon prompt requests the richer schema (including CURRENT_STATE).
 _REQUIRED_SUMMARY_HEADERS = (
     "USER_CONTEXT",
     "COMPLETED",
@@ -69,10 +77,48 @@ _REASONING_BLOCK_TYPES = frozenset(
         "reasoning_content",
     }
 )
+_READABLE_REASONING_KEYS = (
+    "text",
+    "thinking",
+    "reasoning",
+    "content",
+    "summary",
+)
+_MAX_PENDING_CONDENSATION_REASONING = 4_096
+_PENDING_CONDENSATION_REASONING: OrderedDict[str, str] = OrderedDict()
+_PENDING_CONDENSATION_REASONING_LOCK = Lock()
 
 
 class UnsafeCondensationSummary(ValueError):
     """Raised when a condenser response is unsafe or structurally incomplete."""
+
+
+def add_condensation_handoff_prefix(summary: str) -> str:
+    """Mark a public condensation as state handed off by the previous agent."""
+
+    summary = summary.strip()
+    if summary.startswith(CONDENSATION_HANDOFF_PREFIX):
+        return summary
+    return f"{CONDENSATION_HANDOFF_PREFIX}\n\n{summary}"
+
+
+def remember_condensation_reasoning(event_id: str, reasoning: str | None) -> None:
+    """Retain display-only reasoning until the synthetic trajectory step is emitted."""
+
+    if not isinstance(event_id, str) or not event_id or not isinstance(reasoning, str) or not reasoning.strip():
+        return
+    with _PENDING_CONDENSATION_REASONING_LOCK:
+        _PENDING_CONDENSATION_REASONING[event_id] = reasoning.strip()
+        _PENDING_CONDENSATION_REASONING.move_to_end(event_id)
+        while len(_PENDING_CONDENSATION_REASONING) > _MAX_PENDING_CONDENSATION_REASONING:
+            _PENDING_CONDENSATION_REASONING.popitem(last=False)
+
+
+def take_condensation_reasoning(event_id: str) -> str | None:
+    """Pop reasoning captured for an emitted condensation event."""
+
+    with _PENDING_CONDENSATION_REASONING_LOCK:
+        return _PENDING_CONDENSATION_REASONING.pop(str(event_id), None)
 
 
 def _kind(event: Any) -> str:
@@ -182,6 +228,9 @@ def validate_condensation_summary(
     if not isinstance(text, str) or not text.strip():
         raise UnsafeCondensationSummary("condenser returned an empty summary")
     raw = text.strip()
+    has_handoff_prefix = raw.startswith(CONDENSATION_HANDOFF_PREFIX)
+    if has_handoff_prefix:
+        raw = raw[len(CONDENSATION_HANDOFF_PREFIX) :].lstrip()
     if len(raw) > max_chars + len(CONTEXT_SUMMARY_OPEN) + len(CONTEXT_SUMMARY_CLOSE):
         raise UnsafeCondensationSummary("condenser summary exceeds the size limit")
     if _THINK_TAG_RE.search(raw) or _REASONING_TAG_RE.search(raw):
@@ -229,6 +278,8 @@ def validate_condensation_summary(
         or _REASONING_SECTION_RE.search(summary)
     ):
         raise UnsafeCondensationSummary("condenser summary contains deliberation")
+    if has_handoff_prefix:
+        return add_condensation_handoff_prefix(summary)
     return summary
 
 
@@ -274,6 +325,104 @@ def _value(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def _reasoning_fragments(value: Any) -> list[str]:
+    """Extract readable reasoning text without persisting opaque provider data."""
+
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, Mapping):
+        if str(value.get("type", "")).lower() == "redacted_thinking":
+            return []
+        fragments: list[str] = []
+        for key in _READABLE_REASONING_KEYS:
+            if key in value:
+                fragments.extend(_reasoning_fragments(value[key]))
+        return fragments
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [fragment for item in value for fragment in _reasoning_fragments(item)]
+
+    fragments = []
+    for key in _READABLE_REASONING_KEYS:
+        field = getattr(value, key, None)
+        if field is not None:
+            fragments.extend(_reasoning_fragments(field))
+    return fragments
+
+
+def _message_reasoning_fragments(message: Any) -> list[str]:
+    if message is None:
+        return []
+
+    fragments: list[str] = []
+    for field_name in _REASONING_FIELD_NAMES:
+        fragments.extend(_reasoning_fragments(_value(message, field_name)))
+
+    provider_fields = _value(message, "provider_specific_fields")
+    for field_name in _REASONING_FIELD_NAMES:
+        fragments.extend(_reasoning_fragments(_value(provider_fields, field_name)))
+
+    responses_reasoning_item = _value(message, "responses_reasoning_item")
+    fragments.extend(_reasoning_fragments(responses_reasoning_item))
+
+    content = _value(message, "content")
+    if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
+        for block in content:
+            block_type = str(_value(block, "type", "")).lower()
+            if block_type in _REASONING_BLOCK_TYPES and block_type != "redacted_thinking":
+                fragments.extend(_reasoning_fragments(block))
+    return fragments
+
+
+def extract_completion_reasoning_text(
+    response: Any,
+    *,
+    completion_text: str | None = None,
+) -> str | None:
+    """Return readable reasoning for diagnostics, never for retained context.
+
+    Current Qwen/AReaL completions place an unmarked reasoning prefix before
+    ``</think>`` because the opening tag comes from the chat template. Provider
+    reasoning fields and Responses API reasoning summaries are also supported.
+    Encrypted/redacted payloads, signatures, and arbitrary provider metadata are
+    deliberately ignored.
+    """
+
+    fragments: list[str] = []
+    if isinstance(completion_text, str):
+        lower = completion_text.lower()
+        if "</think>" in lower:
+            close_at = lower.rfind("</think>")
+            reasoning = completion_text[:close_at].strip()
+            reasoning_lower = reasoning.lower()
+            if "<think" in reasoning_lower:
+                open_match = list(re.finditer(r"<think(?:\s+[^>]*)?>", reasoning, re.IGNORECASE))
+                if open_match:
+                    reasoning = reasoning[open_match[-1].end() :].strip()
+            if reasoning:
+                fragments.append(reasoning)
+
+    message = _value(response, "message")
+    fragments.extend(_message_reasoning_fragments(message))
+
+    raw = _value(response, "raw_response")
+    choices = _value(raw, "choices", ()) if raw is not None else ()
+    for choice in choices or ():
+        fragments.extend(_message_reasoning_fragments(_value(choice, "message")))
+        fragments.extend(_message_reasoning_fragments(_value(choice, "delta")))
+
+    output = _value(raw, "output", ()) if raw is not None else ()
+    for item in output or ():
+        if str(_value(item, "type", "")).lower() in _REASONING_BLOCK_TYPES:
+            fragments.extend(_reasoning_fragments(item))
+
+    unique: list[str] = []
+    for fragment in fragments:
+        normalized = fragment.strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return "\n\n".join(unique) or None
 
 
 def completion_was_truncated(response: Any) -> bool:

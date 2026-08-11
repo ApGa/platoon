@@ -116,6 +116,7 @@ def _load_rollout_module(
         "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "",
         "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "",
         "RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX": "",
+        "TASK_TRACKER_INITIAL_TASK_SUFFIX": "",
         "TASK_TRACKER_SYSTEM_PROMPT_SUFFIX": "",
         "append_system_message_suffix": _identity,
         "append_user_message_suffix": _identity,
@@ -170,6 +171,7 @@ def _agent_configuration_spies():
         "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "recursive-initial-guidance",
         "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "recursive-system-guidance",
         "RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX": "recursive-user-guidance",
+        "TASK_TRACKER_INITIAL_TASK_SUFFIX": "task-tracker-initial-guidance",
         "TASK_TRACKER_SYSTEM_PROMPT_SUFFIX": "task-tracker-guidance",
         "append_system_message_suffix": _append_prompt("system"),
         "append_user_message_suffix": _append_prompt("user"),
@@ -286,6 +288,36 @@ def test_mcp_bridge_receives_environment_routing_overrides(monkeypatch, tmp_path
     assert json.loads(args[option_index + 1]) == {"call_tool": routing}
 
 
+def test_task_tracker_initial_guidance_is_shared_by_recursive_and_nonrecursive(
+    monkeypatch,
+) -> None:
+    _, recursive_overrides = _agent_configuration_spies()
+    rollout = _load_rollout_module(
+        monkeypatch,
+        recursive_overrides=recursive_overrides,
+    )
+    nonrecursive = rollout.OpenRewardConfig.from_mapping(
+        {
+            "enable_task_tracker": True,
+            "enable_recursive_subagents": False,
+        }
+    )
+    recursive = rollout.OpenRewardConfig.from_mapping(
+        {
+            "enable_task_tracker": True,
+            "enable_recursive_subagents": True,
+        }
+    )
+
+    assert (
+        rollout._initial_task_prompt_suffix(nonrecursive)
+        == "task-tracker-initial-guidance"
+    )
+    assert rollout._initial_task_prompt_suffix(recursive) == (
+        "task-tracker-initial-guidance\n\nrecursive-initial-guidance"
+    )
+
+
 def test_openreward_agent_rejects_plain_message_completion(monkeypatch) -> None:
     rollout = _load_rollout_module(monkeypatch)
 
@@ -397,7 +429,8 @@ def test_recursive_mode_still_installs_task_tracker_and_delegation_prompts(monke
 
     assert configured.tools == ["task_tracker"]
     assert prompts["system"] == [
-        "recursive-system-guidance\n\nRecursive subagents are limited to maximum depth 2; the root agent is depth 0."
+        "task-tracker-guidance\n\nrecursive-system-guidance\n\n"
+        "Recursive subagents are limited to maximum depth 2; the root agent is depth 0."
     ]
     assert prompts["user"] == ["recursive-user-guidance"]
 

@@ -41,6 +41,7 @@ def _install_openhands_stubs(monkeypatch) -> None:
     agent_error_event = type("AgentErrorEvent", (), {})
     conversation_error_event = type("ConversationErrorEvent", (), {})
     event = type("Event", (), {})
+    llm_convertible_event = type("LLMConvertibleEvent", (), {})
     message_event = type("MessageEvent", (), {})
     observation_base_event = type("ObservationBaseEvent", (), {})
     event_pkg = _module(
@@ -50,11 +51,17 @@ def _install_openhands_stubs(monkeypatch) -> None:
         AgentErrorEvent=agent_error_event,
         Event=event,
         EventID=str,
+        LLMConvertibleEvent=llm_convertible_event,
         MessageEvent=message_event,
         ObservationBaseEvent=observation_base_event,
     )
     event_pkg.__path__ = []
-    _module(monkeypatch, "openhands.sdk.event.base", Event=object)
+    _module(
+        monkeypatch,
+        "openhands.sdk.event.base",
+        Event=object,
+        LLMConvertibleEvent=llm_convertible_event,
+    )
     _module(monkeypatch, "openhands.sdk.event.conversation_error", ConversationErrorEvent=conversation_error_event)
     _module(monkeypatch, "openhands.sdk.event.llm_convertible")
     _module(monkeypatch, "openhands.sdk.event.llm_convertible.action", ActionEvent=action_event)
@@ -108,7 +115,7 @@ class _Completion:
         }
 
 
-def test_condensation_observation_emits_one_synthetic_trainable_step(monkeypatch):
+def test_sanitized_model_condensation_emits_one_synthetic_trainable_step(monkeypatch):
     env_mod = _load_openhands_env_module(monkeypatch)
     env = env_mod.OpenHandsEnv.__new__(env_mod.OpenHandsEnv)
     env._synthetic_condensation_step_event_ids = set()
@@ -117,13 +124,19 @@ def test_condensation_observation_emits_one_synthetic_trainable_step(monkeypatch
     condensation = SimpleNamespace(
         kind="Condensation",
         id="condensation-1",
-        llm_response_id="chatcmpl-summary",
+        # A reasoning-enabled condenser retains this real completion ID after
+        # removing private reasoning from the public summary below.
+        llm_response_id="chatcmpl-reasoning-summary",
         summary=(
             "USER_CONTEXT: Fix the parser.\n"
             "COMPLETED: Located the implementation.\n"
             "PENDING: Apply and test the patch.\n"
             "CURRENT_STATE: No files changed yet."
         ),
+    )
+    sys.modules["platoon.openhands.condensation_safety"].remember_condensation_reasoning(
+        condensation.id,
+        "Inspect forgotten events and identify the durable parser state.",
     )
 
     env._add_trainable_condensation_steps(collection, "trajectory-1", [condensation])
@@ -134,9 +147,10 @@ def test_condensation_observation_emits_one_synthetic_trainable_step(monkeypatch
     assert trajectory_id == "trajectory-1"
     assert step.action_events is None
     assert step.observation_events == [condensation]
-    assert step.misc["action_misc"] == {"completion_id": "chatcmpl-summary"}
+    assert step.misc["action_misc"] == {"completion_id": "chatcmpl-reasoning-summary"}
     assert step.misc["reward_misc"] == {}
     assert step.misc["synthetic_step_type"] == "openhands_condensation"
+    assert step.misc["condensation_reasoning"] == ("Inspect forgotten events and identify the durable parser state.")
 
 
 def test_unsafe_condensation_does_not_emit_trainable_step(monkeypatch):
@@ -150,10 +164,7 @@ def test_unsafe_condensation_does_not_emit_trainable_step(monkeypatch):
         id="condensation-unsafe",
         llm_response_id="chatcmpl-unsafe-summary",
         summary=(
-            "Here's a thinking process:\n"
-            "1. Analyze the user's instructions.\n"
-            "</think>\n\n"
-            "USER_CONTEXT: Fix the parser."
+            "Here's a thinking process:\n1. Analyze the user's instructions.\n</think>\n\nUSER_CONTEXT: Fix the parser."
         ),
     )
 

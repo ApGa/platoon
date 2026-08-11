@@ -15,17 +15,18 @@ from platoon.utils.trajectory_status import TRAJECTORY_INVALID_MISC_KEY
 
 _CURRENT_AGENT_TASK_GOAL_KEY = "openreward_current_agent_task_goal"
 _ROOT_AGENT_TASK_GOAL_KEY = "openreward_root_agent_task_goal"
+_SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY = "subagent_reward_verifier_task"
 
 _READ_ONLY_OPENREWARD_TOOL_NAMES = frozenset(
     {"get_task", "get_status", "get_tool_details", "view"}
 )
+_CHILD_TERMINAL_TOOL_NAMES = frozenset({"claim_done", "submit_answer"})
 _READ_ONLY_SUBAGENT_GOAL_SUFFIX = (
-    "Environment access for this child is read-only. You inspect the parent's "
-    "live OpenReward workspace; this is not an independent worktree. Use the "
-    "available inspection tools and return concrete evidence, file/line "
-    "references, and proposed replacements or patch text to the parent with "
-    "`finish`. You cannot edit files or submit the environment result. The "
-    "parent alone is responsible for applying changes and submitting."
+    "Environment access for this child is read-only. Use the available inspection "
+    "tools and return concrete evidence, file/line references, and proposed "
+    "replacements or patch text to the parent with `finish`. You cannot edit files "
+    "or submit the environment result. The parent alone is responsible for "
+    "applying changes and submitting."
 )
 
 
@@ -82,9 +83,13 @@ def _filter_openreward_tools(
     subagent_environment_access: str,
 ) -> dict[str, Any]:
     if subagent_environment_access == "shared":
-        if "claim_done" not in tools:
+        if _CHILD_TERMINAL_TOOL_NAMES.isdisjoint(tools):
             return tools
-        return {name: tool for name, tool in tools.items() if name != "claim_done"}
+        return {
+            name: tool
+            for name, tool in tools.items()
+            if name not in _CHILD_TERMINAL_TOOL_NAMES
+        }
     if subagent_environment_access == "read_only":
         # This is deliberately an allowlist, not a mutator denylist. Generic
         # dispatch/code tools (call_tool and python_execute) and unknown future
@@ -263,11 +268,14 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         callbacks = [*self._external_callbacks, self._stop_on_openreward_finished]
         super().__init__(*args, callbacks=callbacks, **kwargs)
 
-    def _shared_tools_for_fork(self) -> dict[str, Any]:
+    def _shared_tools_for_fork(
+        self,
+        subagent_environment_access: str,
+    ) -> dict[str, Any]:
         if self._shared_openreward_tools:
             return _filter_openreward_tools(
                 self._shared_openreward_tools,
-                self._subagent_environment_access,
+                subagent_environment_access,
             )
         if self._conversation is None:
             return {}
@@ -275,7 +283,7 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         conversation._ensure_agent_ready()
         return _openreward_mcp_tools(
             conversation.agent,
-            self._subagent_environment_access,
+            subagent_environment_access,
         )
 
     def _fork_agent_with_shared_openreward_session(self) -> Any:
@@ -285,6 +293,11 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         return agent.model_copy(update={"mcp_config": {}})
 
     async def fork(self, task: Task) -> "OpenRewardOpenHandsEnv":
+        subagent_environment_access = (
+            "read_only"
+            if task.misc.get(_SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY) is True
+            else self._subagent_environment_access
+        )
         return type(self)(
             task=task,
             agent=self._fork_agent_with_shared_openreward_session(),
@@ -295,8 +308,10 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             enable_recursive_subagents=self._enable_recursive_subagents,
             subagent_default_max_steps=self._subagent_default_max_steps,
             initial_goal_suffix=self._initial_goal_suffix,
-            shared_openreward_tools=self._shared_tools_for_fork(),
-            subagent_environment_access=self._subagent_environment_access,
+            shared_openreward_tools=self._shared_tools_for_fork(
+                subagent_environment_access
+            ),
+            subagent_environment_access=subagent_environment_access,
         )
 
     async def _initial_user_message(self) -> str:

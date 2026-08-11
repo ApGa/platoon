@@ -33,6 +33,7 @@ from platoon.openhands.recursive import (
     RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX,
     RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX,
     RECURSIVE_SUBAGENT_USER_MESSAGE_SUFFIX,
+    TASK_TRACKER_INITIAL_TASK_SUFFIX,
     TASK_TRACKER_SYSTEM_PROMPT_SUFFIX,
     append_system_message_suffix,
     append_user_message_suffix,
@@ -346,6 +347,10 @@ def _configure_openhands_agent(
     suffix_parts: list[str] = []
     user_suffix_parts: list[str] = []
     configured_agent = agent
+    task_tracker_enabled = (
+        openreward_config.enable_task_tracker
+        or openreward_config.enable_recursive_subagents
+    )
     if openreward_config.enable_programmatic_tool_calling:
         orchestration_only = (
             openreward_config.programmatic_tool_calling_mode
@@ -363,15 +368,11 @@ def _configure_openhands_agent(
             suffix_parts.append(
                 PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX
             )
-    if openreward_config.enable_task_tracker or openreward_config.enable_recursive_subagents:
+    if task_tracker_enabled:
         configured_agent = cast(
             OpenHandsSDKAgent,
             with_task_tracker_tool(configured_agent),
         )
-    if (
-        openreward_config.enable_task_tracker
-        and not openreward_config.enable_recursive_subagents
-    ):
         suffix_parts.append(TASK_TRACKER_SYSTEM_PROMPT_SUFFIX)
     if openreward_config.enable_recursive_subagents:
         suffix_parts.append(RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX)
@@ -396,6 +397,18 @@ def _configure_openhands_agent(
     )
 
 
+def _initial_task_prompt_suffix(openreward_config: OpenRewardConfig) -> str | None:
+    parts: list[str] = []
+    if (
+        openreward_config.enable_task_tracker
+        or openreward_config.enable_recursive_subagents
+    ):
+        parts.append(TASK_TRACKER_INITIAL_TASK_SUFFIX)
+    if openreward_config.enable_recursive_subagents:
+        parts.append(RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX)
+    return "\n\n".join(parts) or None
+
+
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     openreward_config = _openreward_config(config)
     # Higher-level training and inference workflows normally copy this value
@@ -408,9 +421,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     environment_label = task.misc.get(OPENREWARD_ENVIRONMENT_LABEL_KEY)
     environment = openreward_config.environment(environment_label)
     task_id = str(task.id)
-    initial_goal_suffix = (
-        RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX if openreward_config.enable_recursive_subagents else None
-    )
+    initial_goal_suffix = _initial_task_prompt_suffix(openreward_config)
 
     rollout_id = uuid.uuid4().hex[:8]
     openhands_conversation_id = uuid.uuid4()

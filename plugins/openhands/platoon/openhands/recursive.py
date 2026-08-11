@@ -24,6 +24,7 @@ from openhands.sdk.tool import (
     ToolExecutor,
     register_tool,
 )
+from openhands.tools.task_tracker import TaskTrackerTool
 
 PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX = (
     "When programmatic_tool_calling (PTC) is available, use it for multi-step tool "
@@ -46,9 +47,27 @@ PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX = (
 TASK_TRACKER_SYSTEM_PROMPT_SUFFIX = (
     "For every nontrivial multi-step task, use `task_tracker` to maintain a "
     "short plan. Create the plan before beginning substantive environment work, "
-    "keep exactly one item in progress, and update it as work completes or the "
-    "plan changes. Skip the tracker only for a genuinely atomic task that can be "
-    "completed in one or two tool calls."
+    "and update it as work completes or the plan changes. Skip the tracker only "
+    "for a genuinely atomic task that can be completed in one or two tool calls."
+)
+
+TASK_TRACKER_INITIAL_TASK_SUFFIX = (
+    "Task-tracking guidance: for nontrivial multi-step work, use `task_tracker` "
+    "to maintain a short plan. Create it before beginning substantive environment "
+    "work and update it as work completes or the plan changes."
+)
+
+SHARED_WORKSPACE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (
+    "Subagent workspace coordination: you start in the same live workspace as "
+    "your parent, and sibling subagents may use that workspace concurrently. "
+    "Changes are visible across agents immediately, so inspect the current state "
+    "before editing and preserve unrelated concurrent work. Use the shared "
+    "workspace directly when that is safe. If your assigned work needs isolation "
+    "to avoid conflicts, create an isolated directory or Git worktree only when "
+    "the available tools and repository support it. Before calling `finish`, "
+    "either integrate the intended changes into the parent's shared workspace or "
+    "clearly tell the parent where the isolated changes, commit, or patch are and "
+    "what remains to integrate."
 )
 
 RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (
@@ -57,9 +76,6 @@ RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX = (
     "self-contained investigation, verification, summarization, or data-gathering "
     "subtasks to launch_subagent instead of doing all work in the root agent. "
     "Give each child a clear, self-contained goal.\n\n"
-    "Use the task_tracker tool to maintain a plan for nontrivial tasks. When a "
-    "plan item is self-contained, launch a subagent for that item, then update "
-    "the plan with the result.\n\n"
     "If programmatic_tool_calling is also available, use "
     "`await atools.launch_subagent(goal=...)` from Python, and "
     "`await asyncio.gather(...)` to run independent child agents concurrently.\n\n"
@@ -90,6 +106,7 @@ RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX = (
 )
 
 LAUNCH_SUBAGENT_TOOL_NAME = "launch_subagent"
+PARALLEL_TASK_TRACKER_TOOL_SPEC_NAME = "platoon_parallel_task_tracker"
 DEFAULT_SUBAGENT_MAX_STEPS = 50
 FINISH_TOOL_CLASS_NAME = "FinishTool"
 
@@ -103,6 +120,38 @@ class LaunchSubagentAction(Action):
 
 class LaunchSubagentObservation(Observation):
     pass
+
+
+def _parallel_task_tracker_description(description: str) -> str:
+    description = description.replace(" (maintain single focus)", "")
+    description = description.replace(
+        "   - Limit active work to ONE task at any given time\n",
+        "   - Multiple delegated items may be in progress concurrently\n",
+    )
+    return description.replace(
+        "   - Complete current activities before initiating new ones\n",
+        "",
+    )
+
+
+class ParallelTaskTrackerTool(TaskTrackerTool):
+    name = TaskTrackerTool.name
+
+    @classmethod
+    def create(cls, conv_state: Any) -> Sequence["ParallelTaskTrackerTool"]:
+        return [
+            tool.model_copy(
+                update={
+                    "description": _parallel_task_tracker_description(
+                        tool.description
+                    )
+                }
+            )
+            for tool in super().create(conv_state)
+        ]
+
+
+register_tool(PARALLEL_TASK_TRACKER_TOOL_SPEC_NAME, ParallelTaskTrackerTool)
 
 
 class LaunchSubagentRuntime:
@@ -411,9 +460,14 @@ def with_programmatic_tool_calling(
 
 
 def with_task_tracker_tool(agent: AgentBase) -> AgentBase:
-    from openhands.tools.task_tracker import TaskTrackerTool
-
-    return _replace_tool(agent, Tool(name=TaskTrackerTool.name))
+    tools = [
+        existing
+        for existing in agent.tools
+        if existing.name
+        not in {TaskTrackerTool.name, PARALLEL_TASK_TRACKER_TOOL_SPEC_NAME}
+    ]
+    tools.append(Tool(name=PARALLEL_TASK_TRACKER_TOOL_SPEC_NAME))
+    return cast(AgentBase, agent.model_copy(update={"tools": tools}))
 
 
 def with_finish_tool(agent: AgentBase) -> AgentBase:
@@ -430,9 +484,18 @@ def append_system_message_suffix(agent: AgentBase, suffix: str | None) -> AgentB
         return agent
 
     context = agent.agent_context or AgentContext()
+    if suffix.strip() in (context.system_message_suffix or ""):
+        return agent
     parts = [value.strip() for value in (context.system_message_suffix, suffix) if value is not None and value.strip()]
     merged_context = context.model_copy(update={"system_message_suffix": "\n\n".join(parts)})
     return cast(AgentBase, agent.model_copy(update={"agent_context": merged_context}))
+
+
+def with_shared_workspace_subagent_prompt(agent: AgentBase) -> AgentBase:
+    return append_system_message_suffix(
+        agent,
+        SHARED_WORKSPACE_SUBAGENT_SYSTEM_PROMPT_SUFFIX,
+    )
 
 
 def append_user_message_suffix(agent: AgentBase, suffix: str | None) -> AgentBase:
