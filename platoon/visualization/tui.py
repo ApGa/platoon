@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import queue
 import sys
@@ -38,6 +40,7 @@ BRIDGE_EVENT_TYPES = {
 }
 
 VISUALIZATION_MODES = {"auto", "codeact", "openhands"}
+OPENREWARD_TASK_REFERENCE_PREFIX = "openreward:v1:"
 
 MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
 MOUSE_CAPTURE_DISABLE = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
@@ -57,21 +60,207 @@ def _normalize_visualization_mode(mode: str | None) -> str:
     return "auto"
 
 
-def _task_display_id(task: Any) -> str | None:
-    if not isinstance(task, dict):
-        return None
-    for key in ("id", "task_id", "name"):
-        value = task.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+@dataclass(frozen=True)
+class _TaskDisplayMetadata:
+    environment: str | None = None
+    task_name: str | None = None
+    task_index: str | None = None
+    split: str | None = None
+    raw_task_id: str | None = None
+
+    @property
+    def display_id(self) -> str | None:
+        return self.task_name or self.task_index or self.raw_task_id
+
+
+@dataclass(frozen=True)
+class _TrajectorySubtreeCounts:
+    solver: int = 0
+    verifier: int = 0
+
+    def __add__(self, other: "_TrajectorySubtreeCounts") -> "_TrajectorySubtreeCounts":
+        return _TrajectorySubtreeCounts(
+            solver=self.solver + other.solver,
+            verifier=self.verifier + other.verifier,
+        )
+
+
+def _nonempty_text(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
     return None
 
 
-def _collection_display_label(collection_id: Any, task_id: str | None = None) -> str:
-    if task_id:
-        short_id = _shorten_text(collection_id, 8) if collection_id else "unlabeled"
-        return f"collection:{task_id} · id:{short_id}"
-    return f"collection:{collection_id}" if collection_id else "unlabeled"
+def _short_identifier(value: Any, max_chars: int = 8) -> str:
+    text = str(value).strip()
+    return text[:max_chars] if max_chars > 0 else text
+
+
+def _decode_openreward_task_id(task_id: str | None) -> Dict[str, Any]:
+    if not task_id or not task_id.startswith(OPENREWARD_TASK_REFERENCE_PREFIX):
+        return {}
+    token = task_id.removeprefix(OPENREWARD_TASK_REFERENCE_PREFIX)
+    try:
+        raw = base64.b64decode(
+            token + "=" * (-len(token) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw)
+    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _task_display_metadata(task: Any) -> _TaskDisplayMetadata:
+    if not isinstance(task, dict):
+        return _TaskDisplayMetadata()
+
+    raw_task_id = None
+    for key in ("id", "task_id", "name"):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            raw_task_id = value.strip()
+            break
+
+    decoded = _decode_openreward_task_id(raw_task_id)
+    misc = task.get("misc")
+    if not isinstance(misc, dict):
+        misc = {}
+
+    environment = (
+        _nonempty_text(misc.get("openreward_environment_label"))
+        or _nonempty_text(decoded.get("environment"))
+        or _nonempty_text(task.get("environment"))
+        or _nonempty_text(misc.get("environment"))
+    )
+    task_name = _nonempty_text(misc.get("openreward_task_name")) or _nonempty_text(decoded.get("name"))
+    task_index = (
+        _nonempty_text(misc.get("openreward_task_index"))
+        or _nonempty_text(decoded.get("index"))
+        or _nonempty_text(task.get("task_index"))
+    )
+    split = (
+        _nonempty_text(misc.get("openreward_task_split"))
+        or _nonempty_text(decoded.get("split"))
+        or _nonempty_text(task.get("split"))
+    )
+    return _TaskDisplayMetadata(
+        environment=environment,
+        task_name=task_name,
+        task_index=task_index,
+        split=split,
+        raw_task_id=raw_task_id,
+    )
+
+
+def _merge_task_display_metadata(
+    existing: _TaskDisplayMetadata | None,
+    candidate: _TaskDisplayMetadata,
+    *,
+    prefer_candidate: bool = False,
+) -> _TaskDisplayMetadata:
+    if existing is None:
+        return candidate
+    if prefer_candidate:
+        return _TaskDisplayMetadata(
+            environment=candidate.environment or existing.environment,
+            task_name=candidate.task_name or existing.task_name,
+            task_index=candidate.task_index or existing.task_index,
+            split=candidate.split or existing.split,
+            raw_task_id=candidate.raw_task_id or existing.raw_task_id,
+        )
+    # The first root task normally supplies these fields. Recursive child and
+    # verifier task-set events may carry opaque UUIDs, so only fill missing
+    # collection metadata rather than replacing already meaningful values.
+    return _TaskDisplayMetadata(
+        environment=existing.environment or candidate.environment,
+        task_name=existing.task_name or candidate.task_name,
+        task_index=existing.task_index or candidate.task_index,
+        split=existing.split or candidate.split,
+        raw_task_id=existing.raw_task_id or candidate.raw_task_id,
+    )
+
+
+def _task_display_id(task: Any) -> str | None:
+    return _task_display_metadata(task).display_id
+
+
+def _collection_display_label(
+    collection_id: Any,
+    task_id: str | None = None,
+    *,
+    environment: str | None = None,
+    task_name: str | None = None,
+    task_index: str | None = None,
+    split: str | None = None,
+    trajectory_counts: _TrajectorySubtreeCounts | None = None,
+) -> str:
+    parts = []
+    collection_id_text = str(collection_id).strip() if collection_id is not None else ""
+    is_bridge_collection = collection_id_text == "bridge" or collection_id_text.startswith("bridge:")
+    if environment:
+        parts.append(environment)
+    elif is_bridge_collection:
+        parts.append(collection_id_text)
+    if task_name:
+        parts.append(f"task:{task_name}")
+    elif task_id:
+        task_descriptor = f"{split}#{task_id}" if split else task_id
+        parts.append(f"task:{task_descriptor}")
+    if task_index and task_name:
+        index_descriptor = f"{split}#{task_index}" if split else task_index
+        parts.append(f"index:{index_descriptor}")
+    elif task_index and task_index != task_id:
+        parts.append(f"index:{task_index}")
+    if split and task_name and not task_index:
+        parts.append(f"split:{split}")
+    elif split and not task_id and not task_name:
+        parts.append(f"split:{split}")
+    counts = trajectory_counts or _TrajectorySubtreeCounts()
+    parts.append(f"trajs:solver={counts.solver},verifier={counts.verifier}")
+    if collection_id and not is_bridge_collection:
+        parts.append(f"id:{_short_identifier(collection_id)}")
+    return "collection: " + " · ".join(parts)
+
+
+def _collection_label_from_metadata(
+    collection_id: Any,
+    metadata: _TaskDisplayMetadata | None,
+    trajectory_counts: _TrajectorySubtreeCounts | None = None,
+) -> str:
+    metadata = metadata or _TaskDisplayMetadata()
+    return _collection_display_label(
+        collection_id,
+        metadata.display_id,
+        environment=metadata.environment,
+        task_name=metadata.task_name,
+        task_index=metadata.task_index,
+        split=metadata.split,
+        trajectory_counts=trajectory_counts,
+    )
+
+
+def _collection_payload(
+    collection_id: Any,
+    metadata: _TaskDisplayMetadata | None,
+    trajectory_counts: _TrajectorySubtreeCounts | None = None,
+) -> Dict[str, Any]:
+    metadata = metadata or _TaskDisplayMetadata()
+    counts = trajectory_counts or _TrajectorySubtreeCounts()
+    return {
+        "collection_id": collection_id,
+        "environment": metadata.environment,
+        "task_id": metadata.display_id,
+        "task_name": metadata.task_name,
+        "task_index": metadata.task_index,
+        "task_split": metadata.split,
+        "raw_task_id": metadata.raw_task_id,
+        "solver_trajectory_count": counts.solver,
+        "verifier_trajectory_count": counts.verifier,
+    }
 
 
 def _is_verifier_misc(misc: Any) -> bool:
@@ -236,6 +425,23 @@ def _condensation_summary_text(event: Dict[str, Any]) -> str | None:
     summary = event.get("summary")
     if isinstance(summary, str) and summary.strip():
         return summary.strip()
+    return None
+
+
+def _condensation_reasoning_text(step: Dict[str, Any]) -> str | None:
+    """Return diagnostic reasoning that is kept outside retained agent context."""
+
+    for event in _step_observation_events(step):
+        if event.get("kind") == "Condensation":
+            reasoning = _reasoning_text(event)
+            if reasoning:
+                return reasoning
+
+    misc = step.get("misc")
+    if isinstance(misc, dict):
+        reasoning = misc.get("condensation_reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
     return None
 
 
@@ -513,6 +719,9 @@ def _openhands_search_text(step: Dict[str, Any]) -> str:
     summary = _openhands_step_summary(step)
     if summary:
         parts.append(summary)
+    condensation_reasoning = _condensation_reasoning_text(step)
+    if condensation_reasoning:
+        parts.append(condensation_reasoning)
     for event in _step_action_events(step):
         parts.append(_openhands_event_summary(event))
         tool_name, arguments = _tool_call_display(event)
@@ -1039,11 +1248,24 @@ class TrajectoryTree(Static):
         self.mode = _normalize_visualization_mode(mode)
         self.tree_widget: Optional[PlayPauseFriendlyTree[str]] = None
         self.traj_nodes: Dict[str, TreeNode[str]] = {}
+        self.trajectory_ids_by_node: Dict[int, str] = {}
         # Map grouping label -> group node to avoid duplicate "unlabeled" nodes
         self.group_nodes: Dict[str, TreeNode[str]] = {}
-        # Map collection_id -> task id once trajectory_task_set arrives. Group
-        # nodes are created before task metadata, so labels are upgraded later.
-        self.collection_task_ids: Dict[str, str] = {}
+        self.collection_group_keys_by_node: Dict[int, str] = {}
+        # Map collection_id -> semantic task metadata once trajectory_task_set
+        # arrives. Group nodes are created first and upgraded in place later.
+        self.collection_task_metadata: Dict[str, _TaskDisplayMetadata] = {}
+        # Cache metadata per trajectory so a root task can become authoritative
+        # even when task-set and trajectory-created events arrive out of order.
+        self.trajectory_task_metadata: Dict[str, _TaskDisplayMetadata] = {}
+        # Root task metadata is authoritative for a collection. Child and
+        # verifier task IDs are often ephemeral UUIDs.
+        self.root_trajectories: set[str] = set()
+        # Disjoint solver/verifier counts include each trajectory node itself
+        # and all trajectory descendants in its visible tree branch.
+        self.trajectory_subtree_counts: Dict[str, _TrajectorySubtreeCounts] = {}
+        self.collection_subtree_counts: Dict[str, _TrajectorySubtreeCounts] = {}
+        self.dirty_subtree_count_groups: set[str] = set()
         # Remember which group label a trajectory belongs to so later events are
         # attached consistently even if they don't repeat collection/process/task.
         self.traj_to_group_label: Dict[str, str] = {}
@@ -1054,6 +1276,7 @@ class TrajectoryTree(Static):
         self.step_nodes: Dict[tuple[str, int], TreeNode[str]] = {}
         # Map (bridge collection, turn) -> node for raw OpenReward bridge JSONL files.
         self.bridge_turn_nodes: Dict[tuple[str, int], TreeNode[str]] = {}
+        self.active_bridge_collection_id: str | None = None
         # Track the latest known reward per trajectory for quick label updates
         self.traj_rewards: Dict[str, float] = {}
         # Track whether a trajectory has reached a terminal state.
@@ -1083,12 +1306,20 @@ class TrajectoryTree(Static):
             pass
         # Clear internal maps
         self.traj_nodes.clear()
+        self.trajectory_ids_by_node.clear()
         self.group_nodes.clear()
-        self.collection_task_ids.clear()
+        self.collection_group_keys_by_node.clear()
+        self.collection_task_metadata.clear()
+        self.trajectory_task_metadata.clear()
+        self.root_trajectories.clear()
+        self.trajectory_subtree_counts.clear()
+        self.collection_subtree_counts.clear()
+        self.dirty_subtree_count_groups.clear()
         self.traj_to_group_label.clear()
         self.traj_steps_nodes.clear()
         self.step_nodes.clear()
         self.bridge_turn_nodes.clear()
+        self.active_bridge_collection_id = None
         self.traj_rewards.clear()
         self.traj_finished.clear()
         self.verifier_trajs.clear()
@@ -1357,14 +1588,31 @@ class SplitDivider(Static):
                 node.expand()
                 self.expanded_trajs.add(traj_id)
             self.traj_nodes[traj_id] = node
-        elif parent is not None and not self._is_collection_node(parent):
+        elif parent is not None and (
+            not self._is_collection_node(parent)
+            or (
+                self.traj_nodes[traj_id].parent is not parent
+                and self.traj_nodes[traj_id].parent is not None
+                and self._is_collection_node(self.traj_nodes[traj_id].parent)
+            )
+        ):
             node = self.traj_nodes[traj_id]
             self._reparent_traj_node(node, parent)
 
+        self.trajectory_ids_by_node[id(self.traj_nodes[traj_id])] = traj_id
         return self.traj_nodes[traj_id]
 
     def _is_collection_node(self, node: TreeNode[str]) -> bool:
         return isinstance(node.data, dict) and node.data.get("type") == "collection"
+
+    def _collection_group_key_for_node(self, node: TreeNode[str] | None) -> str | None:
+        cursor = node
+        while cursor is not None:
+            group_key = self.collection_group_keys_by_node.get(id(cursor))
+            if group_key is not None:
+                return group_key
+            cursor = cursor.parent
+        return None
 
     def _reparent_traj_node(self, node: TreeNode[str], parent: TreeNode[str]) -> None:
         if node.parent is parent or node is parent:
@@ -1375,6 +1623,8 @@ class SplitDivider(Static):
                 return
             cursor = cursor.parent
 
+        old_group_key = self._collection_group_key_for_node(node)
+        new_group_key = self._collection_group_key_for_node(parent)
         old_parent = node.parent
         old_children = getattr(old_parent, "_children", None)
         if old_children is not None and node in old_children:
@@ -1383,6 +1633,9 @@ class SplitDivider(Static):
         if parent_children is not None and node not in parent_children:
             parent_children.append(node)
         setattr(node, "_parent", parent)
+        self.dirty_subtree_count_groups.update(
+            key for key in (old_group_key, new_group_key) if isinstance(key, str) and key
+        )
         try:
             parent.expand()
             self.tree_widget._invalidate()
@@ -1402,11 +1655,84 @@ class SplitDivider(Static):
             return "green"
         return "yellow"
 
+    def _refresh_subtree_counts(self, group_keys: set[str] | None = None) -> None:
+        """Refresh disjoint solver/verifier counts and all affected labels."""
+
+        if self.tree_widget is None:
+            return
+
+        node_to_trajectory = self.trajectory_ids_by_node
+        memo: Dict[str, _TrajectorySubtreeCounts] = {}
+        visiting: set[str] = set()
+
+        def count_trajectory_node(node: TreeNode[str]) -> _TrajectorySubtreeCounts:
+            traj_id = node_to_trajectory.get(id(node))
+            if traj_id is None:
+                return _TrajectorySubtreeCounts()
+            if traj_id in memo:
+                return memo[traj_id]
+            # _reparent_traj_node already prevents cycles, but keep malformed
+            # partial logs from recursing indefinitely.
+            if traj_id in visiting:
+                return _TrajectorySubtreeCounts()
+            visiting.add(traj_id)
+            counts = (
+                _TrajectorySubtreeCounts(verifier=1)
+                if traj_id in self.verifier_trajs
+                else _TrajectorySubtreeCounts(solver=1)
+            )
+            for child in node.children:
+                if id(child) in node_to_trajectory:
+                    counts += count_trajectory_node(child)
+            visiting.discard(traj_id)
+            memo[traj_id] = counts
+            return counts
+
+        target_groups = (
+            self.group_nodes.items()
+            if group_keys is None
+            else ((group_key, self.group_nodes[group_key]) for group_key in group_keys if group_key in self.group_nodes)
+        )
+        for group_key, group_node in target_groups:
+            counts = _TrajectorySubtreeCounts()
+            for child in group_node.children:
+                if id(child) in node_to_trajectory:
+                    counts += count_trajectory_node(child)
+            self.collection_subtree_counts[group_key] = counts
+
+            payload = (
+                group_node.data.get("payload")
+                if isinstance(group_node.data, dict) and isinstance(group_node.data.get("payload"), dict)
+                else {}
+            )
+            collection_id = payload.get("collection_id")
+            metadata = self.collection_task_metadata.get(str(collection_id)) if collection_id is not None else None
+            self._set_node_label(
+                group_node,
+                _collection_label_from_metadata(collection_id, metadata, counts),
+            )
+            group_node.data = {
+                "type": "collection",
+                "payload": _collection_payload(collection_id, metadata, counts),
+            }
+
+        self.trajectory_subtree_counts.update(memo)
+        for traj_id in memo:
+            node = self.traj_nodes.get(traj_id)
+            if node is not None:
+                self._set_node_label(node, self._format_traj_label(traj_id))
+
     def _format_traj_label(self, traj_id: str) -> Text | str:
         reward = self.traj_rewards.get(traj_id)
         is_verifier = traj_id in self.verifier_trajs
         base = f"verifier:{traj_id}" if is_verifier else f"traj:{traj_id}"
-        label = f"{base} · reward:{reward:.3f}" if reward is not None else base
+        counts = self.trajectory_subtree_counts.get(
+            traj_id,
+            _TrajectorySubtreeCounts(verifier=1) if is_verifier else _TrajectorySubtreeCounts(solver=1),
+        )
+        label = f"{base} · subtree:solver={counts.solver},verifier={counts.verifier}"
+        if reward is not None:
+            label = f"{label} · reward:{reward:.3f}"
         if is_verifier:
             return Text(label, style="dim")
         # Color only when finished
@@ -1442,16 +1768,12 @@ class SplitDivider(Static):
                 "platoon_subagent_verifies_trajectory_id"
             )
             if isinstance(verifier_parent_id, str) and verifier_parent_id:
-                if verifier_parent_id in self.traj_nodes:
-                    return self.traj_nodes[verifier_parent_id]
                 return self.ensure_traj_node(verifier_parent_id, parent=group_node, expand=not self.bulk_loading)
         if not isinstance(parent_info, dict):
             return group_node
         parent_id = parent_info.get("id")
         if not isinstance(parent_id, str) or not parent_id:
             return group_node
-        if parent_id in self.traj_nodes:
-            return self.traj_nodes[parent_id]
         return self.ensure_traj_node(parent_id, parent=group_node, expand=not self.bulk_loading)
 
     def ingest(self, event: Event) -> None:
@@ -1459,7 +1781,10 @@ class SplitDivider(Static):
         # dump or live session appear under a single root node.
         collection_id = event.data.get("collection_id")
         if not collection_id and event.type in BRIDGE_EVENT_TYPES:
-            collection_id = _bridge_collection_id(event.data)
+            inferred_bridge_collection = _bridge_collection_id(event.data)
+            if event.type == "session_started":
+                self.active_bridge_collection_id = inferred_bridge_collection
+            collection_id = self.active_bridge_collection_id or inferred_bridge_collection
 
         # Extract trajectory id (if present) for stable grouping between events
         traj_id_for_group: Optional[str] = None
@@ -1471,22 +1796,37 @@ class SplitDivider(Static):
             traj_id_for_group = event.data.get("trajectory_id")
 
         group_node: Optional[TreeNode[str]] = None
+        group_key: str | None = None
+        previous_group_key = self.traj_to_group_label.get(traj_id_for_group) if traj_id_for_group else None
         if self.tree_widget is not None:
-            label = f"collection:{collection_id}" if collection_id else "unlabeled"
+            # Later events often omit collection_id. Reuse the trajectory's
+            # established collection rather than spawning a stale "unlabeled"
+            # group that can never receive semantic task metadata.
+            if collection_id is None and previous_group_key is not None:
+                group_key = previous_group_key
+                group_node = self.group_nodes.get(group_key)
+                if group_node is not None and isinstance(group_node.data, dict):
+                    payload = group_node.data.get("payload")
+                    if isinstance(payload, dict):
+                        collection_id = payload.get("collection_id")
+
+            group_key = group_key or (f"collection:{collection_id}" if collection_id else "unlabeled")
             # find or create grouping node via our map to avoid duplicates
-            group_node = self.group_nodes.get(label)
+            group_node = group_node or self.group_nodes.get(group_key)
             if group_node is None:
-                task_id = self.collection_task_ids.get(str(collection_id)) if collection_id else None
-                group_node = self.tree_widget.root.add(_collection_display_label(collection_id, task_id))
+                metadata = self.collection_task_metadata.get(str(collection_id)) if collection_id else None
+                counts = self.collection_subtree_counts.get(group_key, _TrajectorySubtreeCounts())
+                group_node = self.tree_widget.root.add(_collection_label_from_metadata(collection_id, metadata, counts))
                 group_node.expand()
                 group_node.data = {
                     "type": "collection",
-                    "payload": {"collection_id": collection_id, "task_id": task_id},
+                    "payload": _collection_payload(collection_id, metadata, counts),
                 }
-                self.group_nodes[label] = group_node
+                self.group_nodes[group_key] = group_node
+                self.collection_group_keys_by_node[id(group_node)] = group_key
             # Remember association of this trajectory to the chosen group label
             if traj_id_for_group is not None:
-                self.traj_to_group_label[traj_id_for_group] = label
+                self.traj_to_group_label[traj_id_for_group] = group_key
 
         if event.type == "trajectory_created":
             traj = event.data["trajectory"]
@@ -1494,6 +1834,17 @@ class SplitDivider(Static):
             parent_info = traj.get("parent_info")
             if _is_verifier_misc(traj.get("misc")):
                 self.verifier_trajs.add(traj_id)
+                self.root_trajectories.discard(traj_id)
+            elif not parent_info:
+                self.root_trajectories.add(traj_id)
+                cached_metadata = self.trajectory_task_metadata.get(traj_id)
+                if collection_id is not None and cached_metadata is not None:
+                    collection_key = str(collection_id)
+                    self.collection_task_metadata[collection_key] = _merge_task_display_metadata(
+                        self.collection_task_metadata.get(collection_key),
+                        cached_metadata,
+                        prefer_candidate=True,
+                    )
             # Initialize known reward (if present) and label accordingly
             try:
                 self.traj_rewards[traj_id] = float(traj.get("reward", 0.0))
@@ -1532,21 +1883,42 @@ class SplitDivider(Static):
                 None,
                 group_node,
             )
-            task_id = _task_display_id(task)
+            task_metadata = _task_display_metadata(task)
+            self.trajectory_task_metadata[traj_id] = task_metadata
+            task_id = task_metadata.display_id
             if _is_verifier_misc(task_misc):
                 self.verifier_trajs.add(traj_id)
-            if task_id and collection_id and group_node is not None:
-                self.collection_task_ids[str(collection_id)] = task_id
-                self._set_node_label(group_node, _collection_display_label(collection_id, task_id))
+                self.root_trajectories.discard(traj_id)
+            if collection_id and group_node is not None:
+                collection_key = str(collection_id)
+                collection_metadata = _merge_task_display_metadata(
+                    self.collection_task_metadata.get(collection_key),
+                    task_metadata,
+                    prefer_candidate=traj_id in self.root_trajectories,
+                )
+                self.collection_task_metadata[collection_key] = collection_metadata
+                self._set_node_label(
+                    group_node,
+                    _collection_label_from_metadata(collection_id, collection_metadata),
+                )
                 group_node.data = {
                     "type": "collection",
-                    "payload": {"collection_id": collection_id, "task_id": task_id},
+                    "payload": _collection_payload(collection_id, collection_metadata),
                 }
             node = self.ensure_traj_node(traj_id, parent=parent_node, expand=not self.bulk_loading)
             self._set_node_label(node, self._format_traj_label(traj_id))
             if task:
                 task_goal = task.get("goal")
-                task_label = f"task: {task_id}" if task_id else "task"
+                task_label_parts = []
+                if task_metadata.environment:
+                    task_label_parts.append(f"env:{task_metadata.environment}")
+                if task_id:
+                    task_label_parts.append(f"task:{task_id}")
+                if task_metadata.task_index and task_metadata.task_index != task_id:
+                    task_label_parts.append(f"index:{task_metadata.task_index}")
+                if task_metadata.split:
+                    task_label_parts.append(f"split:{task_metadata.split}")
+                task_label = " · ".join(task_label_parts) if task_label_parts else "task"
                 if isinstance(task_goal, str) and task_goal.strip():
                     task_label = f"{task_label} · {_shorten_text(task_goal, 160)}"
             else:
@@ -1639,6 +2011,7 @@ class SplitDivider(Static):
             misc = event.data.get("misc")
             if _is_verifier_misc(misc):
                 self.verifier_trajs.add(traj_id)
+                self.root_trajectories.discard(traj_id)
             parent_node = self._parent_node_for_trajectory(
                 {"misc": misc} if isinstance(misc, dict) else {},
                 None,
@@ -1687,6 +2060,24 @@ class SplitDivider(Static):
             else:
                 bridge_node = group_node.add(_bridge_record_summary(event.data))
             bridge_node.data = {"type": "bridge_event", "payload": event.data}
+            if event.type == "session_closing":
+                self.active_bridge_collection_id = None
+
+        if event.type in {"trajectory_created", "trajectory_task_set", "trajectory_finished"}:
+            affected_groups = {key for key in (previous_group_key, group_key) if isinstance(key, str) and key}
+            affected_groups.update(self.dirty_subtree_count_groups)
+            self.dirty_subtree_count_groups.clear()
+            self._refresh_subtree_counts(affected_groups)
+            for affected_group_key in affected_groups:
+                affected_group = self.group_nodes.get(affected_group_key)
+                if affected_group is not None and not affected_group.children:
+                    try:
+                        affected_group.remove()
+                    except Exception:
+                        pass
+                    self.collection_group_keys_by_node.pop(id(affected_group), None)
+                    self.group_nodes.pop(affected_group_key, None)
+                    self.collection_subtree_counts.pop(affected_group_key, None)
 
     def focus_step(self, traj_id: str, step_index: int) -> None:
         if self.tree_widget is None:
@@ -1825,8 +2216,10 @@ class SplitDivider(Static):
 try:
     TrajectoryTree.ensure_traj_node = SplitDivider.ensure_traj_node  # type: ignore[attr-defined]
     TrajectoryTree._is_collection_node = SplitDivider._is_collection_node  # type: ignore[attr-defined]
+    TrajectoryTree._collection_group_key_for_node = SplitDivider._collection_group_key_for_node  # type: ignore[attr-defined]
     TrajectoryTree._reparent_traj_node = SplitDivider._reparent_traj_node  # type: ignore[attr-defined]
     TrajectoryTree._reward_color = SplitDivider._reward_color  # type: ignore[attr-defined]
+    TrajectoryTree._refresh_subtree_counts = SplitDivider._refresh_subtree_counts  # type: ignore[attr-defined]
     TrajectoryTree._format_traj_label = SplitDivider._format_traj_label  # type: ignore[attr-defined]
     TrajectoryTree._set_node_label = SplitDivider._set_node_label  # type: ignore[attr-defined]
     TrajectoryTree._parent_node_for_trajectory = SplitDivider._parent_node_for_trajectory  # type: ignore[attr-defined]
@@ -2587,6 +2980,14 @@ class DetailsPanel(Static):
 
         action_events = _step_action_events(data)
         observation_events = _step_observation_events(data)
+        condensation_reasoning = _condensation_reasoning_text(data)
+        if condensation_reasoning:
+            panels.append(
+                Panel(
+                    Text(condensation_reasoning, no_wrap=False, overflow="fold"),
+                    title="condensation reasoning",
+                )
+            )
         system_events = [event for event in observation_events if event.get("kind") == "SystemPromptEvent"]
         visible_observations = [event for event in observation_events if event.get("kind") != "SystemPromptEvent"]
 
@@ -2601,6 +3002,11 @@ class DetailsPanel(Static):
         for key, value in data.items():
             if key in {"action_events", "observation_events"}:
                 continue
+            if key == "misc" and condensation_reasoning and isinstance(value, dict):
+                value = dict(value)
+                value.pop("condensation_reasoning", None)
+                if not value:
+                    continue
             panels.append(self._render_key_value(key, value))
         return Group(*panels) if panels else Text("<empty>")
 

@@ -23,6 +23,7 @@ from platoon.visualization.tui import (  # noqa: E402
     _openhands_step_summary,
     _step_action_events,
     _task_display_id,
+    _task_display_metadata,
     _tool_call_display,
 )
 
@@ -63,13 +64,329 @@ def test_nested_action_events_are_normalized():
 def test_collection_label_prefers_task_id_when_available():
     label = _collection_display_label("0338e49c-8572-4348-af60-1fb38d686bc0", "canvas-assessment-quality-audit")
 
-    assert label == "collection:canvas-assessment-quality-audit · id:0338e..."
+    assert label == ("collection: task:canvas-assessment-quality-audit · trajs:solver=0,verifier=0 · id:0338e49c")
+
+
+def test_collection_label_keeps_named_task_and_numeric_index_distinct():
+    label = _collection_display_label(
+        "0338e49c-8572-4348-af60-1fb38d686bc0",
+        "canvas-assessment-quality-audit",
+        environment="toolathlon",
+        task_name="canvas-assessment-quality-audit",
+        task_index="114",
+        split="train",
+    )
+
+    assert label == (
+        "collection: toolathlon · task:canvas-assessment-quality-audit "
+        "· index:train#114 · trajs:solver=0,verifier=0 · id:0338e49c"
+    )
 
 
 def test_task_display_id_uses_task_id_field():
     assert _task_display_id({"id": "canvas-assessment-quality-audit", "goal": "Call get_task"}) == (
         "canvas-assessment-quality-audit"
     )
+
+
+def test_task_display_metadata_prefers_openreward_semantic_fields():
+    task = {
+        "id": ("openreward:v1:eyJlbnZpcm9ubWVudCI6InN3ZV9yZWJlbmNoIiwiaW5kZXgiOjI0NDQsInNwbGl0IjoidHJhaW4ifQ"),
+        "misc": {
+            "openreward_environment_label": "swe_rebench",
+            "openreward_task_index": 2444,
+            "openreward_task_split": "train",
+        },
+    }
+
+    metadata = _task_display_metadata(task)
+
+    assert metadata.environment == "swe_rebench"
+    assert metadata.display_id == "2444"
+    assert metadata.task_index == "2444"
+    assert metadata.split == "train"
+    assert _task_display_id(task) == "2444"
+
+
+def test_encoded_openreward_id_is_a_backward_compatible_metadata_fallback():
+    task = {"id": ("openreward:v1:eyJlbnZpcm9ubWVudCI6InRtYXgiLCJpbmRleCI6NDc4OSwic3BsaXQiOiJ0cmFpbiJ9")}
+
+    metadata = _task_display_metadata(task)
+
+    assert metadata.environment == "tmax"
+    assert metadata.display_id == "4789"
+    assert metadata.split == "train"
+
+
+def test_malformed_encoded_openreward_id_falls_back_to_the_raw_id():
+    raw_task_id = "openreward:v1:not-valid-base64"
+
+    metadata = _task_display_metadata({"id": raw_task_id})
+
+    assert metadata.environment is None
+    assert metadata.display_id == raw_task_id
+
+
+def test_collection_label_shows_env_task_and_ignores_recursive_child_ids():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "068cf326-e654-4035-8cc3-8872bfd08fed"
+    root_id = "root"
+    child_id = "child"
+    verifier_id = "verifier"
+    task_misc = {
+        "openreward_environment_label": "swe_rebench",
+        "openreward_task_index": 2444,
+        "openreward_task_split": "train",
+    }
+    root_task_id = "openreward:v1:eyJlbnZpcm9ubWVudCI6InN3ZV9yZWJlbmNoIiwiaW5kZXgiOjI0NDQsInNwbGl0IjoidHJhaW4ifQ"
+
+    for trajectory in (
+        {"id": root_id, "reward": 0.0},
+        {
+            "id": child_id,
+            "reward": 0.0,
+            "parent_info": {"id": root_id, "fork_step": 2},
+        },
+        {
+            "id": verifier_id,
+            "reward": 0.0,
+            "parent_info": {"id": child_id, "fork_step": 3},
+        },
+    ):
+        tree.ingest(
+            Event(
+                type="trajectory_created",
+                data={"collection_id": collection_id, "trajectory": trajectory},
+            )
+        )
+
+    for trajectory_id, task_id, extra_misc in (
+        (root_id, root_task_id, {}),
+        (child_id, "422de74e-27de-4921-9471-97c12663ec40", {}),
+        (
+            verifier_id,
+            "2603c91e-0fd7-4eba-b636-fac017d543c5",
+            {"subagent_reward_verifier_task": True},
+        ),
+    ):
+        tree.ingest(
+            Event(
+                type="trajectory_task_set",
+                data={
+                    "collection_id": collection_id,
+                    "trajectory_id": trajectory_id,
+                    "task": {
+                        "id": task_id,
+                        "goal": "Fix the pingsource service-account configuration.",
+                        "misc": {**task_misc, **extra_misc},
+                    },
+                },
+            )
+        )
+
+    group = tree.group_nodes[f"collection:{collection_id}"]
+    label = str(group.label)
+
+    assert label == ("collection: swe_rebench · task:train#2444 · trajs:solver=2,verifier=1 · id:068cf326")
+    assert "422de74e" not in label
+    assert "2603c91e" not in label
+    assert group.data["payload"]["environment"] == "swe_rebench"
+    assert group.data["payload"]["task_index"] == "2444"
+    assert group.data["payload"]["raw_task_id"] == root_task_id
+    assert group.data["payload"]["solver_trajectory_count"] == 2
+    assert group.data["payload"]["verifier_trajectory_count"] == 1
+    root_task_labels = [str(node.label) for node in tree.traj_nodes[root_id].children]
+    assert any("env:swe_rebench" in label and "task:2444" in label for label in root_task_labels)
+    assert "subtree:solver=2,verifier=1" in str(tree.traj_nodes[root_id].label)
+    assert "subtree:solver=1,verifier=1" in str(tree.traj_nodes[child_id].label)
+    assert "subtree:solver=0,verifier=1" in str(tree.traj_nodes[verifier_id].label)
+
+
+def test_missing_collection_id_reuses_the_trajectory_collection():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+
+    tree.ingest(
+        Event(
+            type="trajectory_created",
+            data={"collection_id": collection_id, "trajectory": {"id": "root", "reward": 0.0}},
+        )
+    )
+    tree.ingest(
+        Event(
+            type="trajectory_task_set",
+            data={
+                "trajectory_id": "root",
+                "task": {"id": "openreward:v1:eyJlbnZpcm9ubWVudCI6InRtYXgiLCJpbmRleCI6NDc4OSwic3BsaXQiOiJ0cmFpbiJ9"},
+            },
+        )
+    )
+
+    assert set(tree.group_nodes) == {f"collection:{collection_id}"}
+    assert tree.traj_nodes["root"].parent is tree.group_nodes[f"collection:{collection_id}"]
+    assert "collection: tmax · task:train#4789" in str(tree.group_nodes[f"collection:{collection_id}"].label)
+
+
+def test_late_collection_repairs_an_unlabeled_placeholder_group():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+
+    tree.ingest(
+        Event(
+            type="trajectory_step_added",
+            data={"trajectory_id": "root", "step_index": 0, "step": {"output": "working"}},
+        )
+    )
+    assert tree.traj_nodes["root"].parent is tree.group_nodes["unlabeled"]
+
+    tree.ingest(
+        Event(
+            type="trajectory_created",
+            data={"collection_id": collection_id, "trajectory": {"id": "root", "reward": 0.0}},
+        )
+    )
+
+    assert "unlabeled" not in tree.group_nodes
+    assert tree.traj_nodes["root"].parent is tree.group_nodes[f"collection:{collection_id}"]
+    assert "trajs:solver=1,verifier=0" in str(tree.group_nodes[f"collection:{collection_id}"].label)
+
+
+def test_child_collection_repairs_an_unlabeled_parent_placeholder():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+
+    tree.ingest(
+        Event(
+            type="trajectory_step_added",
+            data={"trajectory_id": "root", "step_index": 0, "step": {"output": "working"}},
+        )
+    )
+    tree.ingest(
+        Event(
+            type="trajectory_created",
+            data={
+                "collection_id": collection_id,
+                "trajectory": {
+                    "id": "child",
+                    "reward": 0.0,
+                    "parent_info": {"id": "root", "fork_step": 1},
+                },
+            },
+        )
+    )
+
+    group = tree.group_nodes[f"collection:{collection_id}"]
+    assert "unlabeled" not in tree.group_nodes
+    assert tree.traj_nodes["root"].parent is group
+    assert tree.traj_nodes["child"].parent is tree.traj_nodes["root"]
+    assert "trajs:solver=2,verifier=0" in str(group.label)
+    assert "subtree:solver=2,verifier=0" in str(tree.traj_nodes["root"].label)
+
+
+def test_root_task_metadata_wins_when_task_events_precede_creation():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+    root_task_id = "openreward:v1:eyJlbnZpcm9ubWVudCI6InN3ZV9yZWJlbmNoIiwiaW5kZXgiOjQyLCJzcGxpdCI6InRyYWluIn0"
+    task_misc = {
+        "openreward_environment_label": "swe_rebench",
+        "openreward_task_index": 42,
+        "openreward_task_split": "train",
+    }
+
+    for trajectory_id, task_id in (
+        ("child", "opaque-child-task-id"),
+        ("root", root_task_id),
+    ):
+        tree.ingest(
+            Event(
+                type="trajectory_task_set",
+                data={
+                    "collection_id": collection_id,
+                    "trajectory_id": trajectory_id,
+                    "task": {"id": task_id, "misc": task_misc},
+                },
+            )
+        )
+    tree.ingest(
+        Event(
+            type="trajectory_created",
+            data={
+                "collection_id": collection_id,
+                "trajectory": {
+                    "id": "child",
+                    "reward": 0.0,
+                    "parent_info": {"id": "root", "fork_step": 1},
+                },
+            },
+        )
+    )
+    tree.ingest(
+        Event(
+            type="trajectory_created",
+            data={"collection_id": collection_id, "trajectory": {"id": "root", "reward": 0.0}},
+        )
+    )
+
+    group = tree.group_nodes[f"collection:{collection_id}"]
+    assert group.data["payload"]["raw_task_id"] == root_task_id
+    assert "task:train#42" in str(group.label)
+    assert "subtree:solver=2,verifier=0" in str(tree.traj_nodes["root"].label)
+
+
+def test_bridge_session_records_share_one_semantic_collection():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+
+    for event_type, data in (
+        ("session_started", {"env": "tmax", "split": "train"}),
+        ("task_requested", {"prompt_chars": 123}),
+        ("tool_call", {"tool_name": "get_task", "arguments": {}}),
+        ("session_closing", {"finished": True}),
+    ):
+        tree.ingest(Event(type=event_type, data=data))
+
+    assert set(tree.group_nodes) == {"collection:bridge:tmax"}
+    group = tree.group_nodes["collection:bridge:tmax"]
+    assert str(group.label) == "collection: bridge:tmax · trajs:solver=0,verifier=0"
+    assert len(group.children) == 4
+    assert tree.active_bridge_collection_id is None
+
+
+def test_every_trajectory_node_shows_both_subtree_count_categories():
+    tree = TrajectoryTree()
+    tree.tree_widget = PlayPauseFriendlyTree("Trajectory Collections")
+    collection_id = "collection-1"
+    trajectories = (
+        {"id": "root", "reward": 0.0},
+        {
+            "id": "verifier",
+            "reward": 0.0,
+            "parent_info": {"id": "root", "fork_step": 1},
+            "misc": {"subagent_reward_verifier_task": True},
+        },
+        {
+            "id": "verifier-child",
+            "reward": 0.0,
+            "parent_info": {"id": "verifier", "fork_step": 1},
+        },
+    )
+
+    for trajectory in trajectories:
+        tree.ingest(
+            Event(
+                type="trajectory_created",
+                data={"collection_id": collection_id, "trajectory": trajectory},
+            )
+        )
+
+    assert "subtree:solver=2,verifier=1" in str(tree.traj_nodes["root"].label)
+    assert "subtree:solver=1,verifier=1" in str(tree.traj_nodes["verifier"].label)
+    assert "subtree:solver=1,verifier=0" in str(tree.traj_nodes["verifier-child"].label)
 
 
 def test_trajectory_tree_nests_child_trajectories_by_parent_info():
@@ -106,6 +423,9 @@ def test_trajectory_tree_nests_child_trajectories_by_parent_info():
     assert tree.traj_nodes["child"].parent is tree.traj_nodes["root"]
     assert tree.traj_nodes["verifier"].parent is tree.traj_nodes["child"]
     assert "verifier:verifier" in str(tree.traj_nodes["verifier"].label)
+    assert "subtree:solver=2,verifier=1" in str(tree.traj_nodes["root"].label)
+    assert "subtree:solver=1,verifier=1" in str(tree.traj_nodes["child"].label)
+    assert "subtree:solver=0,verifier=1" in str(tree.traj_nodes["verifier"].label)
     assert getattr(tree.traj_nodes["verifier"].label, "style", None) == "dim"
 
     for event_type, extra in (
@@ -122,6 +442,9 @@ def test_trajectory_tree_nests_child_trajectories_by_parent_info():
 
     assert tree.traj_nodes["verifier"].parent is tree.traj_nodes["child"]
     assert "verifier:verifier" in str(tree.traj_nodes["verifier"].label)
+    assert "subtree:solver=2,verifier=1" in str(tree.traj_nodes["root"].label)
+    assert "subtree:solver=1,verifier=1" in str(tree.traj_nodes["child"].label)
+    assert "subtree:solver=0,verifier=1" in str(tree.traj_nodes["verifier"].label)
     assert getattr(tree.traj_nodes["verifier"].label, "style", None) == "dim"
 
 
@@ -169,6 +492,9 @@ def test_trajectory_tree_repairs_verifier_parent_from_task_misc():
     )
 
     assert tree.traj_nodes["verifier"].parent is tree.traj_nodes["child"]
+    assert "subtree:solver=2,verifier=1" in str(tree.traj_nodes["root"].label)
+    assert "subtree:solver=1,verifier=1" in str(tree.traj_nodes["child"].label)
+    assert "subtree:solver=0,verifier=1" in str(tree.traj_nodes["verifier"].label)
 
 
 def test_trajectory_tree_updates_reward_from_late_finished_event():
@@ -235,6 +561,9 @@ def test_trajectory_tree_repairs_out_of_order_deep_parent_chain():
     assert tree.traj_nodes["root"].parent is tree.group_nodes[f"collection:{collection_id}"]
     assert tree.traj_nodes["child"].parent is tree.traj_nodes["root"]
     assert tree.traj_nodes["grandchild"].parent is tree.traj_nodes["child"]
+    assert "subtree:solver=3,verifier=0" in str(tree.traj_nodes["root"].label)
+    assert "subtree:solver=2,verifier=0" in str(tree.traj_nodes["child"].label)
+    assert "subtree:solver=1,verifier=0" in str(tree.traj_nodes["grandchild"].label)
 
 
 def test_call_tool_display_uses_catalog_tool_name():
@@ -415,6 +744,37 @@ def test_condensation_detail_panel_renders_summary():
     assert "KPI State" in output
     assert "Revenue" in output
     assert "Near" in output
+
+
+def test_condensation_reasoning_is_searchable_and_rendered_separately():
+    step = {
+        "misc": {
+            "synthetic_step_type": "openhands_condensation",
+            "condensation_reasoning": ("Review the forgotten events and identify the durable implementation state."),
+        },
+        "action_events": None,
+        "observation_events": [
+            {
+                "kind": "Condensation",
+                "summary": (
+                    "USER_CONTEXT: Fix the parser.\n"
+                    "COMPLETED: Located the implementation.\n"
+                    "PENDING: Apply and test the patch."
+                ),
+            }
+        ],
+    }
+    panel = DetailsPanel(mode="openhands")
+    rendered = panel._render_openhands_step(step)
+    console = Console(record=True, width=120)
+
+    console.print(rendered)
+    output = console.export_text()
+
+    assert "condensation reasoning" in output
+    assert "Review the forgotten events" in output
+    assert "Review the forgotten events" in _openhands_search_text(step)
+    assert "Review the forgotten events" not in step["observation_events"][0]["summary"]
 
 
 def test_python_execute_arguments_render_code_panel():
