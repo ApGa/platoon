@@ -19,6 +19,7 @@ openreward:
   # Expose the persistent Python and task-planning tools without enabling
   # launch_subagent or any recursive/delegation prompt.
   enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
   enable_task_tracker: true
   enable_recursive_subagents: false
 

@@ -8,6 +8,7 @@ trial_name: toolathlon-tmax-swe-openhands-16node-qwen3.6-35B-ptc-recursive-r3-fp
 
 openreward:
   enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
   enable_recursive_subagents: true
   # Until isolated write leases exist, every child is restricted to live,
   # read-only inspection so it cannot race or finish the root session.

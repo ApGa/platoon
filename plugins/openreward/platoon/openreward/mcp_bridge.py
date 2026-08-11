@@ -9,13 +9,15 @@ import os
 import re
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 DECLARED_RESOURCES_META_KEY = "openhands.dev/declared_resources"
+TOOL_ROUTING_META_KEY = "openhands.dev/tool-routing"
+OPENREWARD_TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
 _PR_SET_PDEATHSIG = 1
 _BRIDGE_CLOSE_TIMEOUT_SECONDS = 30
 
@@ -210,8 +212,42 @@ def _tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
     return parameters if isinstance(parameters, dict) else {}
 
 
-def _lockfree_tool_meta() -> dict[str, Any]:
-    return {DECLARED_RESOURCES_META_KEY: []}
+def _tool_meta(
+    tool: dict[str, Any] | None = None,
+    routing_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Preserve provider metadata and attach OpenHands routing information.
+
+    OpenReward ToolSpec versions that predate arbitrary metadata support can
+    still let the tool provider own this declaration through the root-level
+    ``x-openhands-tool-routing`` JSON-Schema extension. The bridge translates
+    that compatibility representation into canonical MCP ``_meta``.
+    """
+
+    meta: dict[str, Any] = {}
+    if tool is not None:
+        for key in ("_meta", "meta", "metadata"):
+            provider_meta = tool.get(key)
+            if isinstance(provider_meta, dict):
+                meta.update(provider_meta)
+
+        schema_routing = _tool_parameters(tool).get(
+            OPENREWARD_TOOL_ROUTING_SCHEMA_KEY
+        )
+        if (
+            TOOL_ROUTING_META_KEY not in meta
+            and isinstance(schema_routing, dict)
+        ):
+            meta[TOOL_ROUTING_META_KEY] = dict(schema_routing)
+
+    if routing_override is not None:
+        meta[TOOL_ROUTING_META_KEY] = dict(routing_override)
+
+    # The OpenReward bridge serializes access to its remote session itself. An
+    # empty declaration tells OpenHands not to acquire an unrelated global
+    # resource lock around calls into this bridge.
+    meta[DECLARED_RESOURCES_META_KEY] = []
+    return meta
 
 
 def _make_environment_tool(runtime: "OpenRewardMCPBridge", tool: dict[str, Any]):
@@ -225,7 +261,9 @@ def _make_environment_tool(runtime: "OpenRewardMCPBridge", tool: dict[str, Any])
         return json.dumps(payload, default=_json_default)
 
     _environment_tool.__name__ = _slug(tool_name).replace("-", "_")
-    _environment_tool.__doc__ = tool.get("description") or f"Invoke OpenReward tool {tool_name}."
+    _environment_tool.__doc__ = (
+        tool.get("description") or f"Invoke environment tool {tool_name}."
+    )
     signature_parameters = []
     for name, property_schema in properties.items():
         default = inspect.Parameter.empty if name in required else None
@@ -270,6 +308,7 @@ class BridgeConfig:
     api_key: str
     output_dir: Path
     max_tool_calls: int
+    tool_routing_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _configure_openreward_urls(session_url: str | None, api_url: str | None) -> None:
@@ -487,7 +526,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", default=os.getenv("OPENREWARD_API_KEY", "local"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-tool-calls", type=int, default=0)
+    parser.add_argument("--tool-routing-overrides-json", default="{}")
     return parser
+
+
+def _parse_tool_routing_overrides(value: str) -> dict[str, dict[str, Any]]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"--tool-routing-overrides-json must be a JSON object: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict) or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(routing, dict)
+        for name, routing in parsed.items()
+    ):
+        raise ValueError(
+            "--tool-routing-overrides-json must map non-empty tool names "
+            "to routing objects"
+        )
+    return {name: dict(routing) for name, routing in parsed.items()}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -504,6 +564,9 @@ def main(argv: list[str] | None = None) -> int:
             api_key=args.api_key,
             output_dir=args.output_dir.resolve(),
             max_tool_calls=args.max_tool_calls,
+            tool_routing_overrides=_parse_tool_routing_overrides(
+                args.tool_routing_overrides_json
+            ),
         )
     )
     atexit.register(_close_runtime_bounded, runtime)
@@ -517,13 +580,13 @@ def main(argv: list[str] | None = None) -> int:
 
     mcp = FastMCP("openreward")
 
-    @mcp.tool(meta=_lockfree_tool_meta())
+    @mcp.tool(meta=_tool_meta())
     def get_task() -> str:
-        """Return the OpenReward task prompt and environment tool catalog."""
+        """Return the task prompt and environment tool catalog."""
 
         return runtime.get_task()
 
-    @mcp.tool(meta=_lockfree_tool_meta())
+    @mcp.tool(meta=_tool_meta())
     def get_status() -> str:
         """Return bridge state including turn count, reward, and finished flag."""
 
@@ -536,8 +599,13 @@ def main(argv: list[str] | None = None) -> int:
         mcp.add_tool(
             _make_environment_tool(runtime, tool),
             name=str(tool_name),
-            description=tool.get("description") or f"Invoke OpenReward tool {tool_name}.",
-            meta=_lockfree_tool_meta(),
+            description=(
+                tool.get("description") or f"Invoke environment tool {tool_name}."
+            ),
+            meta=_tool_meta(
+                tool,
+                runtime.config.tool_routing_overrides.get(str(tool_name)),
+            ),
         )
 
     try:

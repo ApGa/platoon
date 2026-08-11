@@ -20,6 +20,7 @@ openreward:
   accepted_batch_max_replacement_rounds: 8
 
   enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
   enable_task_tracker: true
   enable_recursive_subagents: true
   # Until child worktrees/write leases are implemented, roots remain the sole

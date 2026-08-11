@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -110,6 +111,7 @@ def _load_rollout_module(
         SafeLLMSummarizingCondenser=_AcceptsKeywords,
     )
     recursive_attrs = {
+        "PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX": "",
         "PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX": "",
         "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "",
         "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "",
@@ -149,7 +151,7 @@ def _agent_configuration_spies():
     prompts = {"system": [], "user": []}
 
     def _with_tool(name):
-        def _configure(agent):
+        def _configure(agent, **_kwargs):
             agent.tools.append(name)
             return agent
 
@@ -163,6 +165,7 @@ def _agent_configuration_spies():
         return _append
 
     return prompts, {
+        "PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX": "ptc-orchestration-guidance",
         "PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX": "ptc-guidance",
         "RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX": "recursive-initial-guidance",
         "RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX": "recursive-system-guidance",
@@ -215,9 +218,72 @@ def test_nonrecursive_ptc_and_task_tracker_do_not_add_delegation(monkeypatch) ->
 
     assert configured.tools == ["programmatic_tool_calling", "task_tracker"]
     assert "launch_subagent" not in configured.tools
-    assert prompts["system"] == ["ptc-guidance\n\ntask-tracker-guidance"]
+    assert prompts["system"] == [
+        "ptc-guidance\n\nptc-orchestration-guidance\n\ntask-tracker-guidance"
+    ]
     assert prompts["user"] == [""]
     assert all("recursive" not in prompt for values in prompts.values() for prompt in values)
+
+
+def test_unrestricted_ptc_omits_orchestration_policy_and_passes_mode(monkeypatch):
+    calls = []
+
+    def with_ptc(agent, **kwargs):
+        calls.append(kwargs)
+        return agent
+
+    prompts, recursive_overrides = _agent_configuration_spies()
+    recursive_overrides["with_programmatic_tool_calling"] = with_ptc
+    rollout = _load_rollout_module(
+        monkeypatch,
+        recursive_overrides=recursive_overrides,
+    )
+    config = rollout.OpenRewardConfig.from_mapping(
+        {
+            "enable_programmatic_tool_calling": True,
+            "programmatic_tool_calling_mode": "unrestricted",
+        }
+    )
+
+    rollout._configure_openhands_agent(types.SimpleNamespace(tools=[]), config)
+
+    assert calls == [{"mode": "unrestricted"}]
+    assert prompts["system"] == ["ptc-guidance"]
+
+
+def test_mcp_bridge_receives_environment_routing_overrides(monkeypatch, tmp_path):
+    rollout = _load_rollout_module(monkeypatch)
+    routing = {
+        "version": 1,
+        "execution_domain": "task",
+        "capabilities": ["tool.dispatch"],
+        "invocation": {
+            "kind": "dispatcher",
+            "name_argument": "name",
+            "arguments_argument": "arguments",
+            "targets": [],
+        },
+    }
+    environment = rollout.OpenRewardEnvironmentConfig(
+        env_name="legacy",
+        tool_routing_overrides={"call_tool": routing},
+    )
+    task = Task(
+        id="task-7",
+        goal="test",
+        misc={rollout.OPENREWARD_TASK_INDEX_KEY: 7},
+    )
+
+    config = rollout._build_mcp_config(
+        task,
+        rollout.OpenRewardConfig(),
+        environment,
+        str(tmp_path),
+    )
+    args = config["mcpServers"]["openreward"]["args"]
+    option_index = args.index("--tool-routing-overrides-json")
+
+    assert json.loads(args[option_index + 1]) == {"call_tool": routing}
 
 
 def test_openreward_agent_rejects_plain_message_completion(monkeypatch) -> None:

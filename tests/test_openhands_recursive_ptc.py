@@ -372,7 +372,10 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
 
     try:
         agent = recursive.with_task_tracker_tool(agent)
-        agent = recursive.with_programmatic_tool_calling(agent)
+        agent = recursive.with_programmatic_tool_calling(
+            agent,
+            mode="orchestration_only",
+        )
         agent = recursive.with_launch_subagent_tool(
             agent,
             runtime=runtime,
@@ -394,6 +397,7 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
         "runtime_id": runtime.id,
         "default_max_steps": 7,
     }
+    assert agent.tools[2].params == {"mode": "orchestration_only"}
     assert agent.include_default_tools == ["FinishTool"]
     assert agent.agent_context.system_message_suffix == "base\n\nextra"
     assert agent.agent_context.user_message_suffix == "user-base\n\nuser-extra"

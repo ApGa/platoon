@@ -8,6 +8,9 @@ from typing import Any, cast
 from platoon.inference import InferenceBenchmarkConfig
 
 SUBAGENT_ENVIRONMENT_ACCESS_MODES = frozenset({"shared", "read_only"})
+PROGRAMMATIC_TOOL_CALLING_MODES = frozenset(
+    {"unrestricted", "orchestration_only"}
+)
 
 
 @dataclass
@@ -32,6 +35,10 @@ class OpenRewardEnvironmentConfig:
     task_indices: list[int] | None = None
     max_tool_calls: int = 0
     sampling_weight: float = 1.0
+    # Compatibility overrides for environments whose OpenReward ToolSpec
+    # version cannot carry provider-owned routing metadata. Keys are exposed
+    # tool names and values are ``openhands.dev/tool-routing`` payloads.
+    tool_routing_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Override the rollout-wide child access policy for this environment.
     subagent_environment_access: str | None = None
 
@@ -42,6 +49,22 @@ class OpenRewardEnvironmentConfig:
             raise ValueError("OpenReward environment label must not be empty")
         if not math.isfinite(self.sampling_weight) or self.sampling_weight <= 0:
             raise ValueError("OpenReward environment sampling_weight must be finite and positive")
+        invalid_routing_overrides = [
+            tool_name
+            for tool_name, routing in self.tool_routing_overrides.items()
+            if not isinstance(tool_name, str)
+            or not tool_name.strip()
+            or not isinstance(routing, dict)
+        ]
+        if invalid_routing_overrides:
+            raise ValueError(
+                "OpenReward environment tool_routing_overrides must map "
+                "non-empty tool names to dictionaries"
+            )
+        self.tool_routing_overrides = {
+            tool_name.strip(): dict(routing)
+            for tool_name, routing in self.tool_routing_overrides.items()
+        }
         if (
             self.subagent_environment_access is not None
             and self.subagent_environment_access not in SUBAGENT_ENVIRONMENT_ACCESS_MODES
@@ -119,6 +142,11 @@ class OpenRewardConfig:
     balance_accepted_batches: bool = True
     accepted_batch_max_replacement_rounds: int = 8
     enable_programmatic_tool_calling: bool = False
+    # The OpenReward environments live in separate containers, so PTC should
+    # normally orchestrate their tools instead of touching the rollout worker's
+    # local filesystem or processes. Unrestricted mode remains available for
+    # deployments where PTC intentionally owns the execution environment.
+    programmatic_tool_calling_mode: str = "orchestration_only"
     enable_task_tracker: bool = False
     enable_recursive_subagents: bool = False
     # Forked agents share the root OpenReward session. ``read_only`` narrows
@@ -140,6 +168,12 @@ class OpenRewardConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.balance_accepted_batches, bool):
             raise ValueError("balance_accepted_batches must be a boolean")
+        if self.programmatic_tool_calling_mode not in PROGRAMMATIC_TOOL_CALLING_MODES:
+            allowed = ", ".join(sorted(PROGRAMMATIC_TOOL_CALLING_MODES))
+            raise ValueError(
+                "programmatic_tool_calling_mode must be one of "
+                f"{allowed}; got {self.programmatic_tool_calling_mode!r}"
+            )
         if not isinstance(self.condenser_disable_thinking, bool):
             raise ValueError("condenser_disable_thinking must be a boolean")
         if (

@@ -8,6 +8,7 @@ trial_name: toolathlon-openhands-16node-qwen3.6-35B-ptc-recursive-trial0
 
 openreward:
   enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
   enable_recursive_subagents: true
   subagent_default_max_steps: 50
   # Root is depth 0. Keep the first training validation bounded to children and

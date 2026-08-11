@@ -114,6 +114,7 @@ def test_openreward_config_splits_ptc_task_tracker_and_recursion_flags():
     config = config_mod.OpenRewardConfig.from_mapping(
         {
             "enable_programmatic_tool_calling": True,
+            "programmatic_tool_calling_mode": "unrestricted",
             "enable_task_tracker": True,
             "enable_recursive_subagents": False,
             "subagent_max_depth": 2,
@@ -121,10 +122,40 @@ def test_openreward_config_splits_ptc_task_tracker_and_recursion_flags():
     )
 
     assert config.enable_programmatic_tool_calling is True
+    assert config.programmatic_tool_calling_mode == "unrestricted"
     assert config.enable_task_tracker is True
     assert config_mod.OpenRewardConfig().enable_task_tracker is False
     assert config.enable_recursive_subagents is False
     assert config.subagent_max_depth == 2
+
+    assert (
+        config_mod.OpenRewardConfig().programmatic_tool_calling_mode
+        == "orchestration_only"
+    )
+    with pytest.raises(ValueError, match="programmatic_tool_calling_mode"):
+        config_mod.OpenRewardConfig.from_mapping(
+            {"programmatic_tool_calling_mode": "container"}
+        )
+
+
+def test_openreward_environment_accepts_tool_routing_compatibility_overrides():
+    config_mod = _load_openreward_config_module()
+    routing = {
+        "version": 1,
+        "execution_domain": "task",
+        "capabilities": ["tool.dispatch"],
+        "invocation": {"kind": "dispatcher", "targets": []},
+    }
+
+    environment = config_mod.OpenRewardEnvironmentConfig.from_mapping(
+        {"env_name": "legacy", "tool_routing_overrides": {"call_tool": routing}}
+    )
+
+    assert environment.tool_routing_overrides == {"call_tool": routing}
+    with pytest.raises(ValueError, match="tool_routing_overrides"):
+        config_mod.OpenRewardEnvironmentConfig.from_mapping(
+            {"env_name": "legacy", "tool_routing_overrides": {"call_tool": "bad"}}
+        )
 
 
 def test_openreward_config_defaults_subagent_budget_to_50():
@@ -405,7 +436,90 @@ def test_root_success_propagation_relabels_helpful_child_trajectory():
 def test_openreward_mcp_bridge_declares_tools_lockfree(monkeypatch):
     bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
 
-    assert bridge_mod._lockfree_tool_meta() == {bridge_mod.DECLARED_RESOURCES_META_KEY: []}
+    assert bridge_mod._tool_meta() == {bridge_mod.DECLARED_RESOURCES_META_KEY: []}
+
+
+def test_openreward_mcp_bridge_translates_and_overrides_provider_routing(monkeypatch):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+    provider_routing = {
+        "version": 1,
+        "execution_domain": "task",
+        "capabilities": ["filesystem.read"],
+        "invocation": {"kind": "direct"},
+    }
+    override = {
+        **provider_routing,
+        "capabilities": ["filesystem.read", "filesystem.write"],
+    }
+    tool = {
+        "name": "view",
+        "input_schema": {
+            "type": "object",
+            bridge_mod.OPENREWARD_TOOL_ROUTING_SCHEMA_KEY: provider_routing,
+        },
+        "_meta": {"provider.dev/value": 7},
+    }
+
+    translated = bridge_mod._tool_meta(tool)
+    overridden = bridge_mod._tool_meta(tool, override)
+
+    assert translated[bridge_mod.TOOL_ROUTING_META_KEY] == provider_routing
+    assert translated["provider.dev/value"] == 7
+    assert translated[bridge_mod.DECLARED_RESOURCES_META_KEY] == []
+    assert overridden[bridge_mod.TOOL_ROUTING_META_KEY] == override
+
+
+def test_openreward_mcp_bridge_extracts_routing_from_openai_parameters(monkeypatch):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+    routing = {
+        "version": 1,
+        "execution_domain": "task",
+        "capabilities": ["tool.dispatch"],
+        "invocation": {
+            "kind": "dispatcher",
+            "name_argument": "name",
+            "arguments_argument": "arguments",
+            "targets": [
+                {
+                    "name": "catalog_python",
+                    "capabilities": ["python.execute", "filesystem.read"],
+                }
+            ],
+        },
+    }
+    # This is the shape returned by
+    # session.list_tools(format="openai"): OpenReward moves input_schema to
+    # parameters while retaining namespaced root schema extensions.
+    openai_tool = {
+        "type": "function",
+        "name": "call_tool",
+        "description": "Invoke a catalog tool.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "arguments": {"type": "object"},
+            },
+            bridge_mod.OPENREWARD_TOOL_ROUTING_SCHEMA_KEY: routing,
+        },
+    }
+
+    translated = bridge_mod._tool_meta(openai_tool)
+
+    assert translated[bridge_mod.TOOL_ROUTING_META_KEY] == routing
+    assert translated[bridge_mod.DECLARED_RESOURCES_META_KEY] == []
+
+
+def test_openreward_mcp_bridge_validates_routing_override_json(monkeypatch):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+
+    assert bridge_mod._parse_tool_routing_overrides(
+        '{"call_tool":{"version":1}}'
+    ) == {"call_tool": {"version": 1}}
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        bridge_mod._parse_tool_routing_overrides("{")
+    with pytest.raises(ValueError, match="must map"):
+        bridge_mod._parse_tool_routing_overrides('{"call_tool":"bad"}')
 
 
 def test_openreward_mcp_bridge_preserves_tool_metadata(monkeypatch):
@@ -583,38 +697,54 @@ def test_openreward_shared_tools_do_not_close_or_interrupt_owner(monkeypatch):
             self.close_calls += 1
 
     class Tool:
-        def __init__(self, name, executor, server_name):
+        def __init__(self, name, executor, server_name, meta=None):
             self.name = name
             self.executor = executor
             self.mcp_server_name = server_name
+            self.meta = meta or {}
 
         def as_executable(self):
             return self
 
         def set_executor(self, executor):
-            return Tool(self.name, executor, self.mcp_server_name)
+            return Tool(self.name, executor, self.mcp_server_name, self.meta)
 
     class Agent:
         def __init__(self, tools):
-            self.tools_map = {tool.name: tool for tool in tools}
+            self._tools = {tool.name: tool for tool in tools}
+
+        @property
+        def tools_map(self):
+            return self._tools
 
     executor = Executor()
     other_executor = Executor()
+    routing = {
+        "openhands.dev/tool-routing": {
+            "version": 1,
+            "execution_domain": "task",
+            "capabilities": ["filesystem.read"],
+            "invocation": {"kind": "direct"},
+        }
+    }
     agent = Agent(
         [
-            Tool("get_task", executor, "openreward"),
+            Tool("get_task", executor, "openreward", routing),
             Tool("claim_done", Executor(), "openreward"),
             Tool("other_tool", other_executor, "other"),
         ]
     )
 
     shared_tools = env_mod._openreward_mcp_tools(agent)
+    child = Agent([])
+    env_mod._inject_shared_openreward_tools(child, shared_tools, "shared")
     shared_executor = shared_tools["get_task"].executor
     result = shared_executor({"ok": True}, "conversation")
     shared_executor.interrupt()
     shared_executor.close()
 
     assert set(shared_tools) == {"get_task"}
+    assert child.tools_map["get_task"].meta == routing
     assert result == {"action": {"ok": True}, "conversation": "conversation"}
     assert executor.calls == [({"ok": True}, "conversation")]
     assert executor.interrupt_calls == 0

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -27,6 +28,7 @@ from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCo
 from platoon.openhands.agent import OpenHandsAgent
 from platoon.openhands.condenser import SafeLLMSummarizingCondenser
 from platoon.openhands.recursive import (
+    PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX,
     PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX,
     RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX,
     RECURSIVE_SUBAGENT_SYSTEM_PROMPT_SUFFIX,
@@ -239,6 +241,17 @@ def _build_mcp_config(
         bridge_args.extend(["--task-name", str(task_name or task.id)])
     if environment.api_url:
         bridge_args.extend(["--api-url", environment.api_url])
+    if environment.tool_routing_overrides:
+        bridge_args.extend(
+            [
+                "--tool-routing-overrides-json",
+                json.dumps(
+                    environment.tool_routing_overrides,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            ]
+        )
 
     return {
         "mcpServers": {
@@ -334,11 +347,22 @@ def _configure_openhands_agent(
     user_suffix_parts: list[str] = []
     configured_agent = agent
     if openreward_config.enable_programmatic_tool_calling:
+        orchestration_only = (
+            openreward_config.programmatic_tool_calling_mode
+            == "orchestration_only"
+        )
         configured_agent = cast(
             OpenHandsSDKAgent,
-            with_programmatic_tool_calling(configured_agent),
+            with_programmatic_tool_calling(
+                configured_agent,
+                mode=openreward_config.programmatic_tool_calling_mode,
+            ),
         )
         suffix_parts.append(PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX)
+        if orchestration_only:
+            suffix_parts.append(
+                PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX
+            )
     if openreward_config.enable_task_tracker or openreward_config.enable_recursive_subagents:
         configured_agent = cast(
             OpenHandsSDKAgent,

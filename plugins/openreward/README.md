@@ -150,11 +150,12 @@ rebuilding its `.venv-openreward` runtime.
 The rollout attaches an OpenReward MCP bridge to OpenHands. The bridge owns the
 OpenReward session. At reset time, the env resolves `get_task` itself and uses
 the returned task prompt as the agent's first goal, so the root agent does not
-spend its first model step bootstrapping the task. Catalog tool calls,
-`python_execute`, and `claim_done` still run through the same bridge session and
-are exposed through OpenHands tool schemas. Bridge tools declare an empty
-OpenHands resource set, so PTC can run independent MCP calls concurrently with
-`asyncio.gather(...)`.
+spend its first model step bootstrapping the task. Environment tools still run
+through the same bridge session and are exposed through OpenHands tool schemas.
+Direct tools such as Toolathlon's `python_execute` remain direct; catalog tools
+use the environment's advertised dispatcher/meta-tool. Bridge tools declare an
+empty OpenHands resource set, so PTC can run independent MCP calls concurrently
+with `asyncio.gather(...)`.
 
 ## Recursive Programmatic Tool Calling
 
@@ -170,6 +171,17 @@ results = await asyncio.gather(
     atools.launch_subagent(goal="inspect another candidate"),
 )
 ```
+
+OpenReward defaults PTC to `programmatic_tool_calling_mode:
+orchestration_only`. In this mode its local Python runtime can transform values
+and orchestrate `tools`/`atools`, while common direct filesystem, process,
+shell, and network operations raise corrective errors because they would act on
+the rollout worker rather than the task container. This is a behavioral guard,
+not a security boundary. Set the mode to `unrestricted` only when PTC
+intentionally owns the execution environment. Environment tools can advertise
+task-side capabilities and direct or catalog-dispatch invocation routes; older
+OpenReward providers can supply equivalent per-tool declarations through an
+environment's `tool_routing_overrides` mapping.
 
 Child agents reuse the forked Platoon agent and environment, including whichever
 PTC and recursion capabilities are enabled on the parent. OpenReward child

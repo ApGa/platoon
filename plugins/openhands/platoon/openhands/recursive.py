@@ -32,10 +32,15 @@ PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX = (
     "callables. Use `await asyncio.gather(...)` when launching independent async "
     "tool calls concurrently. Store observations in variables, inspect their "
     "`.text` when needed, combine the results in Python, and then continue with "
-    "the task. Do not use PTC to perform fileIO, OS or system operations directly "
-    "in via python packages or modules. Instead, you may interact with filesystem using the tools "
-    "provided to you (which you may call using PTC if you would like to). To summarize, "
-    "PTC provides you with a powerful runtime to call and orchestrate other tool calls."
+    "the task."
+)
+
+PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX = (
+    "PTC is in orchestration-only mode. Its Python runtime is outside the task "
+    "environment, so do not use Python file, operating-system, process, shell, "
+    "or network APIs to interact with the task. Call the environment tools "
+    "available through `tools` or `atools` instead. Catalog-only tools must be "
+    "invoked through the environment's advertised dispatcher/meta-tool."
 )
 
 TASK_TRACKER_SYSTEM_PROMPT_SUFFIX = (
@@ -389,10 +394,20 @@ def with_launch_subagent_tool(
     )
 
 
-def with_programmatic_tool_calling(agent: AgentBase) -> AgentBase:
+def with_programmatic_tool_calling(
+    agent: AgentBase,
+    *,
+    mode: str = "unrestricted",
+) -> AgentBase:
     from openhands.tools.programmatic_tool_calling import ProgrammaticToolCallingTool
 
-    return _replace_tool(agent, Tool(name=ProgrammaticToolCallingTool.name))
+    return _replace_tool(
+        agent,
+        Tool(
+            name=ProgrammaticToolCallingTool.name,
+            params={"mode": mode},
+        ),
+    )
 
 
 def with_task_tracker_tool(agent: AgentBase) -> AgentBase:
