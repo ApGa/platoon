@@ -8,11 +8,11 @@
 #SBATCH --time=4:00:00
 #SBATCH --signal=B:USR1@300
 
-# Add one TMax and one SWE-rebench OpenReward service per allocated node, then
+# Add the requested supplemental OpenReward services per allocated node, then
 # delegate Toolathlon and AReaL lifecycle management to the established
-# preallocated launcher. Each rollout remains pinned to one environment server
-# through a label-specific URL pool. This dedicated wrapper resubmits itself so
-# every continuation retains the full-dataset PTC/task-tracker configuration.
+# preallocated launcher. TMax can be disabled for Toolathlon+SWE curricula with
+# OPENREWARD_ENABLE_TMAX=0. Each rollout remains pinned to one environment
+# server through a label-specific URL pool.
 
 set -euo pipefail
 
@@ -114,6 +114,11 @@ fi
 TMAX_PORT=${OPENREWARD_TMAX_PORT:-8083}
 SWE_PORT=${OPENREWARD_SWE_REBENCH_PORT:-8084}
 TOOLATHLON_PORT=${OPENREWARD_PORT:-8082}
+ENABLE_TMAX=${OPENREWARD_ENABLE_TMAX:-1}
+if [[ "${ENABLE_TMAX}" != 0 && "${ENABLE_TMAX}" != 1 ]]; then
+  echo "ERROR: OPENREWARD_ENABLE_TMAX must be 0 or 1; got ${ENABLE_TMAX}." >&2
+  exit 2
+fi
 SERVER_CPUS=${OPENREWARD_SUPPLEMENTAL_SERVER_CPUS:-8}
 SERVER_MEM=${OPENREWARD_SUPPLEMENTAL_SERVER_MEM:-48G}
 SERVER_WAIT_SECS=${OPENREWARD_SUPPLEMENTAL_SERVER_WAIT_SECS:-900}
@@ -280,10 +285,16 @@ wait_for_server_pool() {
   echo "All ${NNODES} ${name} servers are accepting connections on port ${port}."
 }
 
-echo "Starting TMax and SWE-rebench server pools on ${NNODES} nodes."
-start_server_pool tmax "${TMAX_LOG}" tmax_pid
+if [[ "${ENABLE_TMAX}" -eq 1 ]]; then
+  echo "Starting TMax and SWE-rebench server pools on ${NNODES} nodes."
+  start_server_pool tmax "${TMAX_LOG}" tmax_pid
+else
+  echo "Starting SWE-rebench server pool on ${NNODES} nodes (TMax disabled)."
+fi
 start_server_pool swe_rebench "${SWE_LOG}" swe_pid
-wait_for_server_pool TMax "${TMAX_PORT}" "${tmax_pid}" "${TMAX_LOG}"
+if [[ "${ENABLE_TMAX}" -eq 1 ]]; then
+  wait_for_server_pool TMax "${TMAX_PORT}" "${tmax_pid}" "${TMAX_LOG}"
+fi
 wait_for_server_pool SWE-rebench "${SWE_PORT}" "${swe_pid}" "${SWE_LOG}"
 
 # The delegated launcher's continuation logic must resubmit this wrapper so the
@@ -296,7 +307,8 @@ monitor_supplemental_servers() {
   local issue_summary
   while kill -0 "${base_pid}" 2>/dev/null; do
     issue_summary=
-    if ! server_pool_healthy TMax "${TMAX_PORT}" "${tmax_pid}"; then
+    if [[ "${ENABLE_TMAX}" -eq 1 ]] && \
+       ! server_pool_healthy TMax "${TMAX_PORT}" "${tmax_pid}"; then
       issue_summary="${SERVER_POOL_FAILURE_DETAIL}"
     fi
     if ! server_pool_healthy SWE-rebench "${SWE_PORT}" "${swe_pid}"; then

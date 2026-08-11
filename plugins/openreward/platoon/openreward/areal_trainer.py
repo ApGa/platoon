@@ -11,6 +11,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from platoon.openreward.mixture import (
     AcceptedEnvironmentBatchObserver,
     BalancedEnvironmentSampler,
+    EnvironmentSamplingStartGate,
     StrictEnvironmentBatchCoordinator,
 )
 from platoon.openreward.tasks import (
@@ -33,6 +34,7 @@ class OpenRewardArealRLTrainer(PlatoonArealRLTrainer):
         self._openreward_train_sampler: BalancedEnvironmentSampler | None = None
         self._strict_environment_batches: StrictEnvironmentBatchCoordinator | None = None
         self._accepted_environment_observer: AcceptedEnvironmentBatchObserver | None = None
+        self._environment_sampling_start_gate: EnvironmentSamplingStartGate | None = None
         if config.openreward.is_mixture and config.openreward.balance_accepted_batches and config.dynamic_bs:
             raise ValueError("OpenReward balance_accepted_batches=true is incompatible with dynamic_bs=true")
 
@@ -66,6 +68,20 @@ class OpenRewardArealRLTrainer(PlatoonArealRLTrainer):
             )
             self._accepted_environment_observer = observer
             observer.install(self.rollout.dispatcher)
+            environment_start_steps = {
+                environment.resolved_label: environment.sampling_start_step
+                for environment in config.openreward.resolved_environments()
+            }
+            if any(start_step > 0 for start_step in environment_start_steps.values()):
+                gate = EnvironmentSamplingStartGate(
+                    environment_start_steps,
+                    input_environment=self._task_input_environment,
+                    current_step=self.rollout.get_version,
+                )
+                # Keep this outermost: the observer should see only inputs
+                # admitted by the curriculum, not candidates which are skipped.
+                gate.install(self.rollout.dispatcher)
+                self._environment_sampling_start_gate = gate
 
     @staticmethod
     def _task_input_environment(task_input: Any) -> str:
@@ -96,6 +112,19 @@ class OpenRewardArealRLTrainer(PlatoonArealRLTrainer):
                 dataset_config=dataset_config,
                 rank=rank,
                 world_size=world_size,
+            )
+
+        if (
+            dataset_config is self.config.train_dataset
+            and world_size != 1
+            and any(
+                environment.sampling_start_step > 0
+                for environment in self.config.openreward.resolved_environments()
+            )
+        ):
+            raise ValueError(
+                "Staged OpenReward environment admission currently requires the "
+                "single-controller AReaL dataloader (world_size=1)"
             )
 
         global_batch_size = int(dataset_config.batch_size)
@@ -170,6 +199,35 @@ class OpenRewardArealRLTrainer(PlatoonArealRLTrainer):
                     float(accepted) / total if total else 0.0
                 )
             stats_tracker.scalar(**metrics)
+        gate = getattr(self, "_environment_sampling_start_gate", None)
+        if gate is not None:
+            curriculum_metrics: dict[str, float] = {
+                "openreward/curriculum/logical_step": float(gate.last_step),
+                "openreward/curriculum/admitted_environments": float(
+                    len(gate.last_admitted_environments)
+                ),
+                "openreward/curriculum/skipped_inputs": float(
+                    sum(gate.last_skipped_input_counts.values())
+                ),
+            }
+            for environment in gate.environment_order:
+                label = "".join(
+                    char if char.isalnum() or char in "._-" else "_"
+                    for char in environment
+                )
+                curriculum_metrics[f"openreward/curriculum/{label}/start_step"] = float(
+                    gate.environment_start_steps[environment]
+                )
+                curriculum_metrics[f"openreward/curriculum/{label}/active"] = float(
+                    environment in gate.last_admitted_environments
+                )
+                curriculum_metrics[f"openreward/curriculum/{label}/admitted_inputs"] = float(
+                    gate.last_admitted_input_counts[environment]
+                )
+                curriculum_metrics[f"openreward/curriculum/{label}/skipped_inputs"] = float(
+                    gate.last_skipped_input_counts[environment]
+                )
+            stats_tracker.scalar(**curriculum_metrics)
         return super()._postprocess_rollout_batch(
             rollout_batch,
             global_step=global_step,

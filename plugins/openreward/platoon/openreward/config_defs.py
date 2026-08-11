@@ -35,6 +35,12 @@ class OpenRewardEnvironmentConfig:
     task_indices: list[int] | None = None
     max_tool_calls: int = 0
     sampling_weight: float = 1.0
+    # Admit this environment once AReaL's durable logical model/global step
+    # reaches this value. The logical step also advances when an attempted
+    # update is skipped; it is restored from recovery checkpoints. This keeps a
+    # staged curriculum restart-safe while preserving asynchronous completion
+    # order after admission.
+    sampling_start_step: int = 0
     # Compatibility overrides for environments whose OpenReward ToolSpec
     # version cannot carry provider-owned routing metadata. Keys are exposed
     # tool names and values are ``openhands.dev/tool-routing`` payloads.
@@ -49,6 +55,14 @@ class OpenRewardEnvironmentConfig:
             raise ValueError("OpenReward environment label must not be empty")
         if not math.isfinite(self.sampling_weight) or self.sampling_weight <= 0:
             raise ValueError("OpenReward environment sampling_weight must be finite and positive")
+        if (
+            isinstance(self.sampling_start_step, bool)
+            or not isinstance(self.sampling_start_step, int)
+            or self.sampling_start_step < 0
+        ):
+            raise ValueError(
+                "OpenReward environment sampling_start_step must be a non-negative integer"
+            )
         invalid_routing_overrides = [
             tool_name
             for tool_name, routing in self.tool_routing_overrides.items()
@@ -202,6 +216,17 @@ class OpenRewardConfig:
             session_pool_env_vars = [environment.resolved_session_urls_env_var for environment in self.environments]
             if len(set(session_pool_env_vars)) != len(session_pool_env_vars):
                 raise ValueError("OpenReward environment session URL pool env-var names must be unique")
+            if not any(environment.sampling_start_step == 0 for environment in self.environments):
+                raise ValueError(
+                    "At least one OpenReward environment must have sampling_start_step=0"
+                )
+            if self.balance_accepted_batches and any(
+                environment.sampling_start_step > 0 for environment in self.environments
+            ):
+                raise ValueError(
+                    "Staged OpenReward environment admission requires "
+                    "balance_accepted_batches=false"
+                )
         # Validate legacy environment fields through the same typed contract.
         if self.environments is None:
             self._legacy_environment()

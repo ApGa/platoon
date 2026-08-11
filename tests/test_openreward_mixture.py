@@ -151,6 +151,43 @@ def test_areal_trainer_keeps_training_sampler_when_validation_is_also_mixed(monk
     assert valid_loader.sampler is not train_loader.sampler
 
 
+def test_staged_areal_sampler_rejects_post_shard_multi_controller_gating(monkeypatch):
+    trainer_module = _load_areal_trainer(monkeypatch)
+
+    class Dataset:
+        column_names = ["environment", "mixture", "weight"]
+
+        def __getitem__(self, key):
+            return {
+                "environment": ["toolathlon", "swe_rebench"] * 8,
+                "weight": [1.0] * 16,
+            }[key]
+
+    train_config = types.SimpleNamespace(
+        batch_size=8,
+        shuffle=False,
+        drop_last=True,
+        num_workers=0,
+    )
+    trainer = trainer_module.OpenRewardArealRLTrainer.__new__(
+        trainer_module.OpenRewardArealRLTrainer
+    )
+    trainer.config = types.SimpleNamespace(
+        seed=7,
+        train_dataset=train_config,
+        openreward=types.SimpleNamespace(
+            resolved_environments=lambda: [
+                types.SimpleNamespace(sampling_start_step=0),
+                types.SimpleNamespace(sampling_start_step=20),
+            ]
+        ),
+    )
+    trainer._openreward_train_sampler = None
+
+    with pytest.raises(ValueError, match="single-controller"):
+        trainer._create_dataloader(Dataset(), train_config, rank=0, world_size=2)
+
+
 def test_async_accepted_environment_mix_is_logged_without_strict_admission(monkeypatch):
     trainer_module = _load_areal_trainer(monkeypatch)
     captured = {}
@@ -167,6 +204,14 @@ def test_async_accepted_environment_mix_is_logged_without_strict_admission(monke
         last_accepted_total=4,
         last_unknown_results=1,
     )
+    trainer._environment_sampling_start_gate = types.SimpleNamespace(
+        environment_order=["toolathlon", "swe_rebench"],
+        environment_start_steps={"toolathlon": 0, "swe_rebench": 20},
+        last_step=19,
+        last_admitted_environments={"toolathlon"},
+        last_admitted_input_counts=Counter({"toolathlon": 8}),
+        last_skipped_input_counts=Counter({"swe_rebench": 8}),
+    )
     rollout_batch = [{"input_ids": "untouched"}]
 
     assert trainer._postprocess_rollout_batch(rollout_batch, 7, 1, 2) is rollout_batch
@@ -179,6 +224,12 @@ def test_async_accepted_environment_mix_is_logged_without_strict_admission(monke
     assert captured["openreward/accepted_batch/swe_rebench/fraction"] == 0.0
     assert captured["openreward/accepted_batch/unknown_groups"] == 1.0
     assert captured["openreward/accepted_batch/unknown_fraction"] == 0.25
+    assert captured["openreward/curriculum/logical_step"] == 19.0
+    assert captured["openreward/curriculum/admitted_environments"] == 1.0
+    assert captured["openreward/curriculum/toolathlon/active"] == 1.0
+    assert captured["openreward/curriculum/swe_rebench/active"] == 0.0
+    assert captured["openreward/curriculum/swe_rebench/start_step"] == 20.0
+    assert captured["openreward/curriculum/swe_rebench/skipped_inputs"] == 8.0
 
 
 def test_mixed_config_defaults_to_equal_weights_and_validates_labels(monkeypatch):
@@ -221,6 +272,56 @@ def test_mixed_config_defaults_to_equal_weights_and_validates_labels(monkeypatch
         tasks.OpenRewardConfig.from_mapping({"balance_accepted_batches": 1})
     with pytest.raises(ValueError, match="max_replacement_rounds"):
         tasks.OpenRewardConfig.from_mapping({"accepted_batch_max_replacement_rounds": -1})
+
+
+def test_mixed_config_validates_staged_environment_admission(monkeypatch):
+    tasks = _load_tasks(monkeypatch)
+    config = tasks.OpenRewardConfig.from_mapping(
+        {
+            "balance_accepted_batches": False,
+            "environments": [
+                {
+                    "label": "toolathlon",
+                    "env_name": "toolathlongym",
+                    "sampling_start_step": 0,
+                },
+                {
+                    "label": "swe_rebench",
+                    "env_name": "nebius/SWE-rebench-V2",
+                    "sampling_start_step": 20,
+                },
+            ],
+        }
+    )
+
+    assert {
+        environment.resolved_label: environment.sampling_start_step
+        for environment in config.resolved_environments()
+    } == {"toolathlon": 0, "swe_rebench": 20}
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        tasks.OpenRewardConfig.from_mapping(
+            {"environments": [{"env_name": "one", "sampling_start_step": True}]}
+        )
+    with pytest.raises(ValueError, match="sampling_start_step=0"):
+        tasks.OpenRewardConfig.from_mapping(
+            {
+                "balance_accepted_batches": False,
+                "environments": [
+                    {"env_name": "one", "sampling_start_step": 3},
+                    {"env_name": "two", "sampling_start_step": 4},
+                ],
+            }
+        )
+    with pytest.raises(ValueError, match="balance_accepted_batches=false"):
+        tasks.OpenRewardConfig.from_mapping(
+            {
+                "environments": [
+                    {"env_name": "one"},
+                    {"env_name": "two", "sampling_start_step": 20},
+                ]
+            }
+        )
 
 
 def test_task_reference_round_trip_and_malformed_payload(monkeypatch):
@@ -569,6 +670,67 @@ def test_async_accepted_environment_observer_preserves_native_prefetch():
     assert dispatcher.native_calls == [(3, False), (3, True)]
     assert [task.data["environment"] for task in dispatcher.submitted] == list("abcabcabc")
     assert observer._pending_environments == {6: "a", 7: "b", 8: "c"}
+
+
+def test_async_sampling_start_gate_uses_logical_step_and_precedes_observation():
+    sampler_module = _load_mixture_module()
+
+    class Dispatcher:
+        def __init__(self):
+            self.submitted = []
+
+        def active_submit_and_wait(self, input_generator, batch_size, dynamic_bs=False):
+            inputs = [next(input_generator) for _ in range(batch_size)]
+            self.submitted.extend(inputs)
+            return [types.SimpleNamespace(task_id=task_input.task_id) for task_input in inputs]
+
+    logical_step = {"value": 19}
+    dispatcher = Dispatcher()
+    observer = sampler_module.AcceptedEnvironmentBatchObserver(
+        ["toolathlon", "swe_rebench"],
+        input_environment=lambda task_input: task_input.data["environment"],
+    )
+    observer.install(dispatcher)
+    gate = sampler_module.EnvironmentSamplingStartGate(
+        {"toolathlon": 0, "swe_rebench": 20},
+        input_environment=lambda task_input: task_input.data["environment"],
+        current_step=lambda: logical_step["value"],
+    )
+    gate.install(dispatcher)
+    input_stream = _strict_batch_input_stream(
+        [["toolathlon", "swe_rebench"]]
+    )
+
+    dispatcher.active_submit_and_wait(input_stream, batch_size=4)
+    assert [item.data["environment"] for item in dispatcher.submitted] == [
+        "toolathlon"
+    ] * 4
+    assert gate.last_step == 19
+    assert gate.last_admitted_environments == {"toolathlon"}
+    assert gate.last_admitted_input_counts == Counter({"toolathlon": 4})
+    assert gate.last_skipped_input_counts == Counter({"swe_rebench": 3})
+    assert observer.last_accepted_counts == Counter({"toolathlon": 4})
+    assert not observer._pending_environments
+
+    # A recovered controller whose logical version is already 20 enters the
+    # mixed phase immediately; the dataloader cursor is deliberately unchanged.
+    logical_step["value"] = 20
+    dispatcher.active_submit_and_wait(input_stream, batch_size=4)
+    assert [item.data["environment"] for item in dispatcher.submitted[-4:]] == [
+        "swe_rebench",
+        "toolathlon",
+        "swe_rebench",
+        "toolathlon",
+    ]
+    assert gate.last_step == 20
+    assert gate.last_admitted_environments == {"toolathlon", "swe_rebench"}
+    assert gate.last_admitted_input_counts == Counter(
+        {"toolathlon": 2, "swe_rebench": 2}
+    )
+    assert not gate.last_skipped_input_counts
+    assert observer.last_accepted_counts == Counter(
+        {"toolathlon": 2, "swe_rebench": 2}
+    )
 
 
 class _StrictBatchDispatcher:

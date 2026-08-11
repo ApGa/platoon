@@ -1,0 +1,52 @@
+defaults:
+  - toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-ptc-task-tracker-full-r3-fp32-lm-head-hardened-v1
+  - _self_
+
+# Fresh recovery lineage: the previous mixed run is already beyond step 20 and
+# would therefore skip the Toolathlon-only warmup if its optimizer were reused.
+trial_name: ta-swe16-ptc-ta20-v1-trial0
+
+openreward:
+  # Keep native completion-order batching asynchronous. Environment weights
+  # control submitted work; accepted updates can drift with rollout latency.
+  balance_accepted_batches: false
+
+  # Logical steps 0..19 submit only Toolathlon. From version/step 20 onward,
+  # the weighted-fair input stream submits Toolathlon and SWE-rebench 1:1 in
+  # steady state. No task catalog is truncated and TMax is intentionally absent.
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      split: train
+      eval_split: train
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+      sampling_start_step: 0
+
+    - label: swe_rebench
+      env_name: nebius/SWE-rebench-V2
+      split: train
+      eval_split: train
+      session_url: http://localhost:8084
+      session_urls_env_var: OPENREWARD_SESSION_URLS_SWE_REBENCH
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+      sampling_start_step: 20
+
+stats_logger:
+  wandb:
+    project: openreward-multienv-openhands
+    group: ta-swe16-ptc-ta20-v1
+
+# Keep these literal in the leaf config for the pre-Hydra launcher checks.
+actor:
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking

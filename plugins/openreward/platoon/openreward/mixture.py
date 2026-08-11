@@ -115,6 +115,119 @@ class AcceptedEnvironmentBatchObserver:
         dispatcher.active_submit_and_wait = _active_submit_and_wait
 
 
+class EnvironmentSamplingStartGate:
+    """Skip environment inputs until their configured logical model version.
+
+    AReaL's asynchronous dispatcher consumes ahead of the optimizer and keeps
+    work in flight across accepted batches.  Gating the persistent input stream
+    at dispatch time therefore gives the curriculum a durable clock (the
+    rollout/controller version) without coupling it to a dataloader cursor or
+    buffering inactive tasks.  Relative ``sampling_weight`` behavior is
+    unchanged among environments which are currently admitted.
+
+    Install this *after* :class:`AcceptedEnvironmentBatchObserver` so telemetry
+    records only inputs which pass the curriculum gate and can actually be
+    submitted.
+    """
+
+    def __init__(
+        self,
+        environment_start_steps: Mapping[str, int],
+        *,
+        input_environment: Callable[[TInput], str],
+        current_step: Callable[[], int],
+    ) -> None:
+        if not environment_start_steps:
+            raise ValueError("Environment sampling start gate requires at least one environment")
+        self.environment_order = list(map(str, environment_start_steps))
+        if len(set(self.environment_order)) != len(self.environment_order):
+            raise ValueError("Environment sampling start gate labels must be unique")
+        self._known_environments = frozenset(self.environment_order)
+        self.environment_start_steps: dict[str, int] = {}
+        for environment, raw_start_step in environment_start_steps.items():
+            if (
+                isinstance(raw_start_step, bool)
+                or not isinstance(raw_start_step, int)
+                or raw_start_step < 0
+            ):
+                raise ValueError(
+                    "Environment sampling start steps must be non-negative integers"
+                )
+            self.environment_start_steps[str(environment)] = raw_start_step
+        if not any(step == 0 for step in self.environment_start_steps.values()):
+            raise ValueError("At least one environment sampling start step must be zero")
+
+        self._input_environment = input_environment
+        self._current_step = current_step
+        self.last_step = 0
+        self.last_admitted_environments = frozenset(
+            environment
+            for environment, start_step in self.environment_start_steps.items()
+            if start_step == 0
+        )
+        self.last_admitted_input_counts: Counter[str] = Counter()
+        self.last_skipped_input_counts: Counter[str] = Counter()
+        self.total_skipped_input_counts: Counter[str] = Counter()
+
+    def _validated_step(self) -> int:
+        step = self._current_step()
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+            raise ValueError(
+                "Environment sampling curriculum requires a non-negative integer logical step"
+            )
+        return step
+
+    def _admitted_inputs(
+        self,
+        input_generator: Generator[TInput, None, None],
+        *,
+        step: int,
+    ) -> Iterator[TInput]:
+        for task_input in input_generator:
+            environment = str(self._input_environment(task_input))
+            if environment not in self._known_environments:
+                raise ValueError(
+                    f"Unknown input environment {environment!r}; expected one of "
+                    f"{self.environment_order}"
+                )
+            if step < self.environment_start_steps[environment]:
+                self.last_skipped_input_counts[environment] += 1
+                self.total_skipped_input_counts[environment] += 1
+                continue
+            self.last_admitted_input_counts[environment] += 1
+            yield task_input
+
+    def install(self, dispatcher: Any) -> None:
+        existing = getattr(dispatcher, "_platoon_environment_sampling_start_gate", None)
+        if existing is not None and existing is not self:
+            raise RuntimeError("An environment sampling start gate is already installed")
+
+        native_active_submit_and_wait = dispatcher.active_submit_and_wait
+
+        def _active_submit_and_wait(
+            input_generator: Generator[TInput, None, None],
+            batch_size: int,
+            dynamic_bs: bool = False,
+        ) -> list[TResult]:
+            step = self._validated_step()
+            self.last_step = step
+            self.last_admitted_environments = frozenset(
+                environment
+                for environment, start_step in self.environment_start_steps.items()
+                if step >= start_step
+            )
+            self.last_admitted_input_counts = Counter()
+            self.last_skipped_input_counts = Counter()
+            return native_active_submit_and_wait(
+                self._admitted_inputs(input_generator, step=step),
+                batch_size,
+                dynamic_bs,
+            )
+
+        dispatcher._platoon_environment_sampling_start_gate = self
+        dispatcher.active_submit_and_wait = _active_submit_and_wait
+
+
 class StrictEnvironmentBatchCoordinator:
     """Admit exact per-step environment quotas without stale result backlogs.
 
