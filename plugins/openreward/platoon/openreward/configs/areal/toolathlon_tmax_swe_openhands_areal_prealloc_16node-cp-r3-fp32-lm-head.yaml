@@ -43,9 +43,6 @@ openreward:
 
     - label: swe_rebench
       env_name: nebius/SWE-rebench-V2
-      # Children inspect the parent's live SWE workspace with `view`; the root
-      # remains the sole editor and submitter. This does not create worktrees.
-      subagent_environment_access: read_only
       split: train
       eval_split: train
       session_url: http://localhost:8084

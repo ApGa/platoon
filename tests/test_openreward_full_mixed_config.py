@@ -54,6 +54,7 @@ def test_mixed_ptc_tracker_full_config_is_untruncated_nonrecursive_and_no_eval()
         assert environment.eval_task_limit is None
         assert environment.get("task_names") is None
         assert environment.get("task_indices") is None
+        assert environment.get("subagent_environment_access") is None
         assert environment.sampling_weight == 1.0
 
     model_path = str(
@@ -128,6 +129,7 @@ def test_mixed_recursive_32node_config_combines_latest_proven_settings():
     for environment in environments.values():
         assert environment.train_task_limit is None
         assert environment.eval_task_limit is None
+        assert environment.get("subagent_environment_access") is None
         assert environment.sampling_weight == 1.0
 
     assert config.trial_name == "mix32-rec-eff-v6-trial0"
@@ -146,7 +148,7 @@ def test_mixed_recursive_32node_config_combines_latest_proven_settings():
     assert config.openreward.condenser_disable_thinking is False
     assert config.openreward.condenser_max_completion_tokens == 26_214
     assert config.openreward.enable_recursive_subagents is True
-    assert config.openreward.subagent_environment_access == "read_only"
+    assert config.openreward.subagent_environment_access == "shared"
     assert config.openreward.enable_subagent_reward_judging is True
     assert config.openreward.subagent_delegation_reward_coefficient == 0.0
 

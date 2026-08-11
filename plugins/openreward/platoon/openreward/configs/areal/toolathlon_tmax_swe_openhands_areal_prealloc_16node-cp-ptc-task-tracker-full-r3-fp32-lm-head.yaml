@@ -52,7 +52,6 @@ openreward:
 
     - label: swe_rebench
       env_name: nebius/SWE-rebench-V2
-      subagent_environment_access: read_only
       split: train
       eval_split: train
       session_url: http://localhost:8084

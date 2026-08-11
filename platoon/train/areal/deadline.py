@@ -63,11 +63,13 @@ class DeadlineDecision:
 class StepDeadlineGuard:
     """Estimate complete-step time and stop only at a checkpoint boundary.
 
-    The guard is deliberately conservative: the configured cold-start estimate
-    is a permanent floor, while the maximum recent complete-step duration is
-    multiplied by a headroom factor.  A decision is made before rollout starts,
-    so a drain never leaves an optimizer update or recovery checkpoint half
-    written.
+    The guard is deliberately conservative: the configured estimate is a
+    permanent floor, while the maximum recent steady-state complete-step
+    duration is multiplied by a headroom factor. The first completed step is
+    excluded from timing history because cold asynchronous rollout startup is
+    not representative of later steps in the same allocation. A decision is
+    made before rollout starts, so a drain never leaves an optimizer update or
+    recovery checkpoint half written.
     """
 
     deadline_epoch: float
@@ -170,7 +172,11 @@ class StepDeadlineGuard:
         elapsed = float(elapsed_seconds)
         if not math.isfinite(elapsed) or elapsed < 0:
             raise ValueError(f"Completed-step duration must be finite and non-negative, got {elapsed_seconds!r}")
-        self._durations.append(elapsed)
+        # The first update in each allocation starts from an empty async rollout
+        # buffer and includes cold-start latency. Keep it out of the recent
+        # steady-state timing window while still counting it as completed.
+        if self._completed_steps > 0:
+            self._durations.append(elapsed)
         self._completed_steps += 1
 
     def write_drain_marker(

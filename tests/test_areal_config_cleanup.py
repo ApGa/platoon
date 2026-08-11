@@ -371,13 +371,14 @@ def test_mixed_recursive_r3_fp32_yaml_composes_balancing_and_child_policies():
         "tmax": 1.0,
         "swe_rebench": 1.0,
     }
-    assert environments["swe_rebench"].subagent_environment_access == "read_only"
-    assert "subagent_environment_access" not in environments["toolathlon"]
-    assert "subagent_environment_access" not in environments["tmax"]
+    assert all(
+        "subagent_environment_access" not in environment
+        for environment in environments.values()
+    )
 
     assert composed.openreward.enable_programmatic_tool_calling is True
     assert composed.openreward.enable_recursive_subagents is True
-    assert composed.openreward.subagent_environment_access == "read_only"
+    assert composed.openreward.subagent_environment_access == "shared"
     assert composed.openreward.subagent_default_max_steps == 50
     assert composed.openreward.subagent_max_depth == 2
     assert composed.openreward.balance_accepted_batches is False

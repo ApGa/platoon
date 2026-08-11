@@ -23,9 +23,9 @@ openreward:
   programmatic_tool_calling_mode: orchestration_only
   enable_task_tracker: true
   enable_recursive_subagents: true
-  # Until child worktrees/write leases are implemented, roots remain the sole
-  # editors and submitters. Children and reward judges can inspect live state.
-  subagent_environment_access: read_only
+  # Children edit the parent's live workspace directly and report with `finish`;
+  # the parent retains terminal submission. No child worktrees are created.
+  subagent_environment_access: shared
   subagent_default_max_steps: 50
   subagent_max_depth: 2
   enable_subagent_reward_judging: true
@@ -61,7 +61,6 @@ openreward:
 
     - label: swe_rebench
       env_name: nebius/SWE-rebench-V2
-      subagent_environment_access: read_only
       split: train
       eval_split: train
       session_url: http://localhost:8084

@@ -55,11 +55,10 @@ export OPENREWARD_CONTROLLER_MEM=${OPENREWARD_CONTROLLER_MEM:-128G}
 export PLATOON_AREAL_PREALLOC_SRUN_ARGS=${PLATOON_AREAL_PREALLOC_SRUN_ARGS:-"--unbuffered --mpi=pmi2 -K --overlap --cpu-bind=none"}
 export NCCL_RAS_ENABLE=${NCCL_RAS_ENABLE:-0}
 
-# The latest recursive run's complete steps ranged up to roughly 50 minutes.
-# Do not start the first step of an allocation with less than one hour plus
-# checkpoint/shutdown headroom; the adaptive guard becomes more conservative
-# if recent mixed steps take longer.
-export OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS=${OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-3600}
+# Use a 30-minute bootstrap floor while steady-state timing history is empty.
+# The first cold async step is excluded from that history; later complete steps
+# can still make the adaptive guard more conservative when they take longer.
+export OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS=${OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-1800}
 export OPENREWARD_DEADLINE_SAFETY_SECONDS=${OPENREWARD_DEADLINE_SAFETY_SECONDS:-600}
 
 # Pin the no-delegation-bonus ablation across continuations. The YAML separately

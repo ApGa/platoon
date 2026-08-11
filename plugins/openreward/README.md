@@ -196,17 +196,13 @@ return the child `finish` message directly, without appending budget metadata;
 children that fail before finishing return a short failure status instead of raw
 episode-loop diagnostics.
 
-Child environment access defaults to the backward-compatible `shared` mode. To
-keep SWE-rebench children investigative while making the parent the sole writer
-and submitter, set a rollout-wide policy or an environment-specific override:
+Child environment access defaults to `shared`. To make every child
+investigative while keeping the parent as sole writer, set the rollout-wide
+policy:
 
 ```yaml
 openreward:
-  subagent_environment_access: shared
-  environments:
-    - label: swe_rebench
-      env_name: nebius/SWE-rebench-V2
-      subagent_environment_access: read_only
+  subagent_environment_access: read_only
 ```
 
 `read_only` affects forked children only; the root keeps every environment
@@ -220,12 +216,15 @@ file/line evidence and a proposed replacement or patch through its local
 This phase-1 mode does **not** fork the OpenReward environment or create a Git
 worktree. Child `view` calls inspect the same live workspace/session as the
 parent, and concurrent parent activity can change what a child sees. In
-`shared` mode, concurrent edits can race and a child's terminal environment
-tool can finish the one shared session. A future write-capable fork protocol
-needs environment-native workspace tokens, one worktree per child, patch export
-before child teardown, an explicit ordered parent merge/apply operation with
-conflict reporting, and verification bound to the merged parent workspace.
-Read-only children can continue using the shared session under that protocol.
+`shared` mode, concurrent edits can race. Children receive mutating tools but
+not the known terminal tools (`submit_answer` and `claim_done`); they report
+through their local `finish`, and the parent submits the shared result. Reward
+verifiers stay read-only. Every subagent receives the same environment-neutral
+system guidance explaining that its parent and siblings may share the live
+workspace. It can use the shared tree directly or, when conflict risk warrants
+it, create an isolated directory or Git worktree and then integrate the result
+or return its location, commit, or patch to the parent. Roots do not receive
+this child-only guidance.
 
 Set `openreward.enable_subagent_reward_judging: true` to automatically launch a
 verifier agent after each normal subagent finishes. The verifier receives the

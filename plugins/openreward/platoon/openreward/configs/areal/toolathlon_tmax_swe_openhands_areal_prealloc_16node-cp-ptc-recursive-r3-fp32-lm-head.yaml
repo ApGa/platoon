@@ -10,9 +10,9 @@ openreward:
   enable_programmatic_tool_calling: true
   programmatic_tool_calling_mode: orchestration_only
   enable_recursive_subagents: true
-  # Until isolated write leases exist, every child is restricted to live,
-  # read-only inspection so it cannot race or finish the root session.
-  subagent_environment_access: read_only
+  # Children edit the parent's live workspace directly and report with `finish`;
+  # the parent retains terminal submission. No child worktrees are created.
+  subagent_environment_access: shared
   subagent_default_max_steps: 50
   # Root is depth 0. Match the established Toolathlon recursive run while
   # bounding a tree to children and grandchildren.
@@ -27,8 +27,8 @@ workflow_config:
   # rollout uses the mean root reward from the other group samples as baseline.
   leave_one_out_baseline: true
   rollout_config:
-    # Investigative children cannot submit in any environment. Train every
-    # trajectory toward the root result; all children use the same reward contract.
+    # Train every trajectory toward the root result; all children use the same
+    # reward contract.
     propogate_root_success: true
 
 # The preallocation launcher reads these fields before Hydra composes defaults
