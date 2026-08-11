@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 # Fresh recovery lineage: the prior mixed recursive run is beyond step 20.
-trial_name: ta-swe32-rec-ta20-v2-trial0
+trial_name: ta-swe32-rec-ta20-v3-trial0
 
 openreward:
   balance_accepted_batches: false
@@ -46,7 +46,7 @@ openreward:
 stats_logger:
   wandb:
     project: openreward-multienv-openhands
-    group: ta-swe32-rec-ta20-v2
+    group: ta-swe32-rec-ta20-v3
 
 # Literal values are required by the pre-Hydra launcher setup.
 actor:

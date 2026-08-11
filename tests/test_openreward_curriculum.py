@@ -58,8 +58,8 @@ def test_nonrecursive_toolathlon_swe_curriculum_composes_from_fresh_trial():
     config = _compose(CONFIG_16)
 
     _assert_two_phase_catalog(config)
-    assert config.trial_name == "ta-swe16-ptc-ta20-v2-trial0"
-    assert config.stats_logger.wandb.group == "ta-swe16-ptc-ta20-v2"
+    assert config.trial_name == "ta-swe16-ptc-ta20-v3-trial0"
+    assert config.stats_logger.wandb.group == "ta-swe16-ptc-ta20-v3"
     assert config.openreward.enable_recursive_subagents is False
     assert config.openreward.enable_programmatic_tool_calling is True
     assert config.openreward.enable_task_tracker is True
@@ -69,8 +69,8 @@ def test_recursive_toolathlon_swe_curriculum_preserves_efficiency_settings():
     config = _compose(CONFIG_32)
 
     _assert_two_phase_catalog(config)
-    assert config.trial_name == "ta-swe32-rec-ta20-v2-trial0"
-    assert config.stats_logger.wandb.group == "ta-swe32-rec-ta20-v2"
+    assert config.trial_name == "ta-swe32-rec-ta20-v3-trial0"
+    assert config.stats_logger.wandb.group == "ta-swe32-rec-ta20-v3"
     assert config.cluster.n_nodes == 32
     assert config.openreward.enable_recursive_subagents is True
     assert config.openreward.subagent_environment_access == "shared"
