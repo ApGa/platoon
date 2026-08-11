@@ -30,6 +30,9 @@ class WorkflowConfig:
     # datum. A value of one preserves the historical training batch exactly.
     subagent_datum_keep_probability: float = 1.0
     subagent_datum_sampling_seed: int = 0
+    # Defer typed action errors until group centering, then suppress only error
+    # tokens that would otherwise receive positive policy credit.
+    filter_errors: bool = True
     # Zero-advantage datums have no policy-gradient contribution but still incur
     # a model forward/backward. Baselines and rollout metrics are computed before
     # this filter is applied.
@@ -92,7 +95,11 @@ class CheckpointConfig(TrainEventTriggerConfig):
 class EvalConfig(TrainEventTriggerConfig):
     num_concurrent_rollout_workflow_workers: int = 256
     workflow_config: WorkflowConfig = field(
-        default_factory=lambda: WorkflowConfig(group_size=1, filter_zero_advantage_datums=False)
+        default_factory=lambda: WorkflowConfig(
+            group_size=1,
+            filter_errors=False,
+            filter_zero_advantage_datums=False,
+        )
     )
 
 

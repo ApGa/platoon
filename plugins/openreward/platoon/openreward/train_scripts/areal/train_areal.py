@@ -46,7 +46,7 @@ def main(args: list[str]) -> None:
             trainer.proxy_admin_api_key,
             output_subdir="train_rollout",
             reward_processor=reward_processor,
-            filter_errors=False,
+            filter_errors=config.workflow_config.filter_errors,
         )
 
         eval_workflow = None

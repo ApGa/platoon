@@ -19,6 +19,10 @@ from platoon.utils.areal_data_processing import (
     harmonize_optional_reward_metrics,
     reward_metric_presence_key,
 )
+from platoon.utils.trajectory_error_filtering import (
+    ERROR_ACTION_MASK_KEY,
+    step_reports_error,
+)
 from platoon.utils.trajectory_status import TRAJECTORY_CANCELLED_MISC_KEY
 
 
@@ -180,7 +184,7 @@ def test_distinct_completion_ids_with_identical_tokens_are_not_deduplicated(merg
 
 
 @pytest.mark.parametrize("merge_prefixes", [True, False])
-def test_filtered_occurrence_does_not_suppress_later_eligible_duplicate(merge_prefixes: bool):
+def test_error_on_one_occurrence_marks_the_whole_parallel_completion(merge_prefixes: bool):
     trajectory = {
         "reward": 1.0,
         "steps": [
@@ -200,10 +204,154 @@ def test_filtered_occurrence_does_not_suppress_later_eligible_duplicate(merge_pr
     )
 
     assert train_data is not None
-    assert train_data["input_ids"].shape[0] == 1
     assert train_data["loss_mask"].sum().item() == 2
-    assert torch.equal(train_data["num_output_tokens"], torch.tensor([2.0]))
-    assert torch.equal(train_data["num_steps"], torch.tensor([2.0]))
+    assert torch.equal(
+        train_data[ERROR_ACTION_MASK_KEY],
+        torch.tensor([[False, False, True, True]]),
+    )
+
+
+@pytest.mark.parametrize("merge_prefixes", [True, False])
+@pytest.mark.parametrize(
+    "error_event",
+    [
+        {"kind": "AgentErrorEvent", "error": "invalid arguments"},
+        {
+            "kind": "UserRejectObservation",
+            "rejection_source": "hook",
+            "rejection_reason": "blocked by policy",
+        },
+        {
+            "kind": "ObservationEvent",
+            "observation": {
+                "kind": "ProgrammaticToolCallingObservation",
+                "is_error": True,
+                "content": [{"text": "NameError: missing_tool"}],
+            },
+        },
+    ],
+)
+def test_typed_openhands_errors_are_deferred_as_token_aligned_masks(
+    merge_prefixes: bool,
+    error_event: dict,
+):
+    trajectory = {
+        # Reward interpretation happens only after group centering; the
+        # exporter is responsible solely for loss-token alignment.
+        "reward": -0.25,
+        "steps": [
+            _step("completion-a"),
+            {
+                **_step("completion-a"),
+                "observation_events": {"observation_events": [[error_event]]},
+            },
+            _step("completion-b"),
+        ],
+    }
+
+    train_data = get_train_data_for_trajectory(
+        trajectory,
+        {
+            "completion-a": _Completion([10, 11], [12, 13], version=3),
+            "completion-b": _Completion([20, 21], [22, 23], version=4),
+        },
+        task_id="task",
+        trajectory_id="trajectory",
+        filter_errors=True,
+        reward_processor=lambda _trajectory: (-0.25, {"reward/success": 1.0}),
+        merge_prefixes=merge_prefixes,
+        concat_fn=_concat_same_length,
+    )
+
+    assert train_data is not None
+    assert torch.equal(
+        train_data["input_ids"],
+        torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]]),
+    )
+    assert train_data["loss_mask"].sum().item() == 4
+    assert torch.equal(
+        train_data[ERROR_ACTION_MASK_KEY],
+        torch.tensor(
+            [
+                [False, False, True, True],
+                [False, False, False, False],
+            ]
+        ),
+    )
+
+
+@pytest.mark.parametrize("merge_prefixes", [True, False])
+def test_openhands_errors_remain_as_negative_signal_when_task_did_not_succeed(
+    merge_prefixes: bool,
+):
+    step = {
+        **_step("completion-a"),
+        "observation_events": [
+            {
+                "kind": "ObservationEvent",
+                "observation": {"kind": "MCPToolObservation", "is_error": True},
+            }
+        ],
+    }
+    trajectory = {"reward": 0.4, "steps": [step]}
+
+    train_data = get_train_data_for_trajectory(
+        trajectory,
+        {"completion-a": _Completion([10, 11], [12, 13], version=3)},
+        task_id="task",
+        trajectory_id="trajectory",
+        filter_errors=True,
+        # An auxiliary shaped bonus must not turn a failed task's error into a
+        # filtered positive-success example.
+        reward_processor=lambda _trajectory: (0.4, {"reward/success": 0.0}),
+        merge_prefixes=merge_prefixes,
+        concat_fn=_concat_same_length,
+    )
+
+    assert train_data is not None
+    assert train_data["loss_mask"].sum().item() == 2
+    assert train_data[ERROR_ACTION_MASK_KEY].sum().item() == 2
+
+
+def test_standalone_step_filter_uses_explicit_success_as_fallback():
+    step = _step("completion-a", error="python failed")
+    completions = {"completion-a": _Completion([10, 11], [12, 13], version=3)}
+
+    assert (
+        get_train_data_for_step(
+            step,
+            completions,
+            "task",
+            filter_errors=True,
+            trajectory_reward=-0.25,
+            trajectory_rewards_dict={"reward/success": 1.0},
+        )
+        is None
+    )
+    retained = get_train_data_for_step(
+        step,
+        completions,
+        "task",
+        filter_errors=True,
+        trajectory_reward=0.4,
+        trajectory_rewards_dict={"reward/success": 0.0},
+    )
+    assert retained is not None
+    assert ERROR_ACTION_MASK_KEY not in retained
+
+
+def test_interactive_user_rejection_is_not_classified_as_scaffold_error():
+    assert not step_reports_error(
+        {
+            "observation_events": [
+                {
+                    "kind": "UserRejectObservation",
+                    "rejection_source": "user",
+                    "rejection_reason": "declined confirmation",
+                }
+            ]
+        }
+    )
 
 
 def test_router_replay_aligns_s_minus_one_rows_and_keeps_expert_zero_valid():

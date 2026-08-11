@@ -32,6 +32,7 @@ from platoon.utils.tinker_data_processing import (
     TrajectoryStats,
     get_train_data_for_trajectory_collection,
 )
+from platoon.utils.trajectory_error_filtering import ERROR_ACTION_MASK_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,38 @@ def _add_datum_funnel(
     )
 
 
+def _filter_positive_centered_error_tokens(
+    datum: tinker.Datum,
+) -> tuple[bool, dict[str, float]]:
+    """Consume the error side channel and mask only positive-advantage errors."""
+
+    encoded_error_mask = datum.loss_fn_inputs.pop(ERROR_ACTION_MASK_KEY, None)
+    if encoded_error_mask is None:
+        return True, {}
+    error_mask = encoded_error_mask.to_torch().bool()
+    action_mask = datum.loss_fn_inputs["mask"].to_torch()
+    advantages = datum.loss_fn_inputs["advantages"].to_torch()
+    if error_mask.shape != action_mask.shape or advantages.shape != action_mask.shape:
+        raise ValueError(
+            "Deferred Tinker error filtering requires aligned error/mask/advantage tensors: "
+            f"error={tuple(error_mask.shape)}, mask={tuple(action_mask.shape)}, "
+            f"advantages={tuple(advantages.shape)}"
+        )
+
+    action_tokens = action_mask > 0
+    error_actions = error_mask & action_tokens
+    suppressed = error_actions & (advantages > 0)
+    filtered_mask = torch.where(suppressed, torch.zeros_like(action_mask), action_mask)
+    datum.loss_fn_inputs["mask"] = TensorData.from_torch(filtered_mask)
+    keep = bool(torch.any(filtered_mask > 0))
+    return keep, {
+        "detected_action_tokens": float(error_actions.sum().item()),
+        "suppressed_positive_action_tokens": float(suppressed.sum().item()),
+        "retained_nonpositive_action_tokens": float((error_actions & ~suppressed).sum().item()),
+        "emptied_datums": float(not keep and bool(action_tokens.any())),
+    }
+
+
 class GroupRolloutWorkflow:
     """Workflow that runs multiple rollouts per task and computes group-centered advantages.
 
@@ -143,7 +176,8 @@ class GroupRolloutWorkflow:
             log_path: Base log directory for the training run. If provided, rollout results
                       will be stored at {log_path}/rollouts/{stats_scope}/.
             stats_scope: Name for the stats tracker scope (e.g., "train" or "eval").
-            filter_errors: Whether to filter out error steps from successful trajectories.
+            filter_errors: Whether to suppress erroneous action tokens only when
+                their final group-centered advantage is positive.
             reward_processor: Function to process trajectory rewards.
         """
         self.rollout_fn = rollout_fn
@@ -443,6 +477,25 @@ class GroupRolloutWorkflow:
                 mask = datum.loss_fn_inputs["mask"].to_torch()
                 new_advantages = torch.where(mask > 0, old_advantages - baseline, old_advantages)
                 datum.loss_fn_inputs["advantages"] = TensorData.from_torch(new_advantages)
+
+        error_filter_totals: dict[str, float] = {}
+        error_filter_active = False
+        for result in valid_results:
+            retained_datums: list[tinker.Datum] = []
+            for datum in result.datums:
+                keep, metrics = _filter_positive_centered_error_tokens(datum)
+                if metrics:
+                    error_filter_active = True
+                    for key, value in metrics.items():
+                        error_filter_totals[key] = error_filter_totals.get(key, 0.0) + value
+                if keep:
+                    retained_datums.append(datum)
+            result.datums[:] = retained_datums
+        if error_filter_active:
+            self.tracker.scalar(
+                **{f"error_filter/{key}": value for key, value in error_filter_totals.items()}
+            )
+        all_data = [datum for result in valid_results for datum in result.datums]
 
         # Full-tree reward/LOO statistics above intentionally include empty and
         # policy-ineligible trajectories. The train/no-train decision must not:

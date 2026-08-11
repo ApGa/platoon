@@ -268,6 +268,103 @@ def test_zero_centered_reward_candidates_are_measured_without_mutating_training_
     assert torch.equal(train_data["trainable_datums"], trainable_datums)
 
 
+def test_areal_error_filter_uses_centered_reward_sign_and_preserves_mixed_datums():
+    workflow_mod = _load_group_workflow_module()
+    sidechannel = workflow_mod.ERROR_ACTION_MASK_KEY
+    train_data = {
+        "rewards": torch.tensor([1.0, -1.0, 0.0, 2.0]),
+        "loss_mask": torch.tensor(
+            [
+                [False, True, True],   # positive, one error plus one clean
+                [False, True, True],   # negative: retain both error tokens
+                [False, True, False],  # zero: retain the error token
+                [False, True, True],   # positive and all-error: drop datum
+            ]
+        ),
+        sidechannel: torch.tensor(
+            [
+                [False, True, False],
+                [False, True, True],
+                [False, True, False],
+                [False, True, True],
+            ]
+        ),
+    }
+
+    metrics = workflow_mod._filter_positive_centered_error_tokens(train_data)
+
+    assert sidechannel not in train_data
+    assert torch.equal(
+        train_data["loss_mask"],
+        torch.tensor(
+            [
+                [False, False, True],
+                [False, True, True],
+                [False, True, False],
+                [False, False, False],
+            ]
+        ),
+    )
+    assert torch.equal(train_data["trainable_datums"], torch.tensor([True, True, True, False]))
+    assert metrics == {
+        "error_filter/detected_action_tokens": 6.0,
+        "error_filter/suppressed_positive_action_tokens": 3.0,
+        "error_filter/retained_nonpositive_action_tokens": 3.0,
+        "error_filter/emptied_datums": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_areal_group_filters_errors_only_after_leave_one_out_centering():
+    workflow_mod = _load_group_workflow_module()
+    workflow = workflow_mod.GroupRolloutWorkflow.__new__(workflow_mod.GroupRolloutWorkflow)
+    workflow.config = types.SimpleNamespace(
+        group_size=2,
+        use_subprocesses=False,
+        min_successful_group_size=1,
+        leave_one_out_baseline=True,
+        filter_zero_variance_groups=False,
+        filter_zero_advantage_datums=False,
+    )
+    sidechannel = workflow_mod.ERROR_ACTION_MASK_KEY
+    results = [
+        {
+            "rewards": torch.tensor([2.0]),
+            "task_reward": torch.tensor([2.0]),
+            "task_reward_valid": torch.tensor([True]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.bool),
+            "loss_mask": torch.tensor([[False, True, True]]),
+            sidechannel: torch.tensor([[False, True, True]]),
+        },
+        {
+            "rewards": torch.tensor([0.0]),
+            "task_reward": torch.tensor([0.0]),
+            "task_reward_valid": torch.tensor([True]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.bool),
+            "loss_mask": torch.tensor([[False, True, True]]),
+            sidechannel: torch.tensor([[False, True, True]]),
+        },
+    ]
+
+    async def fake_episode(self, engine, data, rollout_number):
+        _ = self, engine, data
+        return results[rollout_number]
+
+    workflow._arun_episode_single = types.MethodType(fake_episode, workflow)
+    workflow._record_stats = lambda _train_data: None
+
+    train_data = await workflow.arun_episode(object(), {"task_id": "task"})
+
+    assert train_data is not None
+    assert sidechannel not in train_data
+    assert torch.equal(train_data["rewards"], torch.tensor([2.0, -2.0]))
+    assert torch.equal(
+        train_data["loss_mask"],
+        torch.tensor([[False, False, False], [False, True, True]]),
+    )
+    assert torch.equal(train_data["trainable_datums"], torch.tensor([False, True]))
+
+
 @pytest.mark.asyncio
 async def test_areal_exports_interactions_even_when_raw_rollout_is_none():
     workflow_mod = _load_group_workflow_module()

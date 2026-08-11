@@ -96,7 +96,7 @@ async def main(args: list[str]) -> None:
             model_info=trainer.model_info,
             log_path=trainer.run_log_path,
             stats_scope="train",
-            filter_errors=False,
+            filter_errors=config.train.workflow_config.filter_errors,
             reward_processor=reward_processor,
         )
 
@@ -112,6 +112,7 @@ async def main(args: list[str]) -> None:
                 depth_level_weighting=eval_workflow_config.depth_level_weighting,
                 subagent_datum_keep_probability=eval_workflow_config.subagent_datum_keep_probability,
                 subagent_datum_sampling_seed=eval_workflow_config.subagent_datum_sampling_seed,
+                filter_errors=False,
                 filter_zero_advantage_datums=False,
             )
 

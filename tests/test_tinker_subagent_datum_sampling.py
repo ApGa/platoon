@@ -31,9 +31,13 @@ class DummyTensorData:
 
 
 class DummyModelInput:
-    def __init__(self, length: int):
-        self.length = length
-        self.chunks = []
+    def __init__(self, length: int | None = None, chunks=None):
+        self.chunks = list(chunks or [])
+        self.length = (
+            int(length)
+            if length is not None
+            else sum(chunk.length for chunk in self.chunks)
+        )
 
 
 class DummyDatum:
@@ -183,6 +187,170 @@ def _install_fake_trajectory_conversion(module, events):
         )
 
     module.trajectory_to_data = fake_trajectory_to_data
+
+
+@pytest.mark.parametrize(
+    "error_event",
+    [
+        {"kind": "AgentErrorEvent", "error": "unknown tool"},
+        {
+            "kind": "UserRejectObservation",
+            "rejection_source": "hook",
+            "rejection_reason": "blocked by policy",
+        },
+        {
+            "kind": "ObservationEvent",
+            "observation": {
+                "kind": "ProgrammaticToolCallingObservation",
+                "is_error": True,
+            },
+        },
+    ],
+)
+def test_tinker_marks_typed_openhands_errors_by_completion_id(monkeypatch, error_event):
+    processing = _load_tinker_data_processing(monkeypatch)
+    interactions = {
+        "completion-a": types.SimpleNamespace(
+            obs=types.SimpleNamespace(chunks=[DummyEncodedTextChunk([10, 11])]),
+            action=types.SimpleNamespace(tokens=[12, 13], logprobs=[-0.1, -0.1]),
+        ),
+        "completion-b": types.SimpleNamespace(
+            obs=types.SimpleNamespace(chunks=[DummyEncodedTextChunk([20, 21])]),
+            action=types.SimpleNamespace(tokens=[22], logprobs=[-0.1]),
+        ),
+    }
+    step_a = {"misc": {"action_misc": {"completion_id": "completion-a"}}}
+    trajectory = {
+        "steps": [
+            step_a,
+            {
+                **step_a,
+                "observation_events": {"observation_events": [[error_event]]},
+            },
+            {"misc": {"action_misc": {"completion_id": "completion-b"}}},
+        ]
+    }
+
+    result = processing.trajectory_to_data(
+        trajectory=trajectory,
+        interactions=interactions,
+        task_id="task",
+        trajectory_id="trajectory",
+        trajectory_advantage=-0.25,
+        checkpoint_version=3,
+        filter_errors=True,
+        trajectory_reward=-0.25,
+    )
+
+    # The later error occurrence marks the earlier clean-looking occurrence of
+    # the same parallel response, but reward-sign filtering is deferred.
+    assert result.num_steps == 2
+    assert result.num_input_tokens == 4
+    assert result.num_output_tokens == 3
+    assert len(result.datums) == 2
+    sidechannel = "_platoon_error_action_mask"
+    assert result.datums[0].model_input.length == 3
+    assert torch.equal(
+        result.datums[0].loss_fn_inputs[sidechannel].to_torch(),
+        torch.tensor([False, True, True]),
+    )
+    assert not result.datums[1].loss_fn_inputs[sidechannel].to_torch().any()
+
+
+def test_tinker_error_filter_uses_final_centered_advantage_sign(monkeypatch):
+    processing = _load_tinker_data_processing(monkeypatch)
+    tracker = _RecordingTracker()
+    workflow_module = _load_tinker_group_workflow(monkeypatch, processing, tracker)
+    sidechannel = workflow_module.ERROR_ACTION_MASK_KEY
+
+    mixed = _datum(attention_tokens=4, loss_tokens=4, depth=None, start=False)
+    mixed.loss_fn_inputs["advantages"] = DummyTensorData(
+        torch.tensor([1.0, -1.0, 0.0, 2.0])
+    )
+    mixed.loss_fn_inputs[sidechannel] = DummyTensorData(torch.ones(4, dtype=torch.bool))
+
+    keep, metrics = workflow_module._filter_positive_centered_error_tokens(mixed)
+
+    assert keep is True
+    assert sidechannel not in mixed.loss_fn_inputs
+    assert torch.equal(
+        mixed.loss_fn_inputs["mask"].to_torch(),
+        torch.tensor([0.0, 1.0, 1.0, 0.0]),
+    )
+    assert metrics == {
+        "detected_action_tokens": 4.0,
+        "suppressed_positive_action_tokens": 2.0,
+        "retained_nonpositive_action_tokens": 2.0,
+        "emptied_datums": 0.0,
+    }
+
+    all_positive = _datum(attention_tokens=2, loss_tokens=2, depth=None, start=False)
+    all_positive.loss_fn_inputs["advantages"] = DummyTensorData(torch.tensor([0.5, 1.5]))
+    all_positive.loss_fn_inputs[sidechannel] = DummyTensorData(torch.ones(2, dtype=torch.bool))
+
+    keep, metrics = workflow_module._filter_positive_centered_error_tokens(all_positive)
+
+    assert keep is False
+    assert not all_positive.loss_fn_inputs["mask"].to_torch().any()
+    assert metrics["emptied_datums"] == 1.0
+
+
+def test_tinker_group_filters_errors_only_after_leave_one_out_centering(monkeypatch):
+    processing = _load_tinker_data_processing(monkeypatch)
+    tracker = _RecordingTracker()
+    workflow_module = _load_tinker_group_workflow(monkeypatch, processing, tracker)
+    sidechannel = workflow_module.ERROR_ACTION_MASK_KEY
+
+    def result(trajectory_id: str, reward: float):
+        datum = _datum(attention_tokens=2, loss_tokens=2, depth=None, start=False)
+        datum.loss_fn_inputs["advantages"] = DummyTensorData(torch.full((2,), reward))
+        datum.loss_fn_inputs[sidechannel] = DummyTensorData(torch.ones(2, dtype=torch.bool))
+        return processing.TrajectoryCollectionResult(
+            datums=[datum],
+            task_reward=reward,
+            trajectory_stats=[
+                processing.TrajectoryStats(
+                    trajectory_id=trajectory_id,
+                    reward=reward,
+                    num_steps=1,
+                    num_input_tokens=2,
+                    num_output_tokens=2,
+                    num_datums=1,
+                    is_root=True,
+                )
+            ],
+            root_rewards_dict={"reward/success": reward},
+        )
+
+    high = result("high", 2.0)
+    low = result("low", 0.0)
+    workflow = workflow_module.GroupRolloutWorkflow.__new__(workflow_module.GroupRolloutWorkflow)
+    workflow.config = types.SimpleNamespace(group_size=2, leave_one_out_baseline=True)
+    workflow.tracker = tracker
+    workflow.subagent_datum_sampler = None
+
+    async def fake_single(_data, rollout_number):
+        return [high, low][rollout_number]
+
+    workflow.arun_episode_single = fake_single
+    output = asyncio.run(workflow.arun_episode({"task_id": "task"}))
+
+    # LOO produces +2 for high and -2 for low. The same typed error is removed
+    # from the positive member but retained as useful negative policy signal.
+    assert output == [low.datums[0]]
+    assert high.datums == []
+    assert sidechannel not in low.datums[0].loss_fn_inputs
+    assert torch.equal(
+        low.datums[0].loss_fn_inputs["advantages"].to_torch(),
+        torch.tensor([-2.0, -2.0]),
+    )
+    assert torch.equal(low.datums[0].loss_fn_inputs["mask"].to_torch(), torch.ones(2))
+    assert tracker.scalars[-1] == {
+        "error_filter/detected_action_tokens": 4.0,
+        "error_filter/suppressed_positive_action_tokens": 2.0,
+        "error_filter/retained_nonpositive_action_tokens": 2.0,
+        "error_filter/emptied_datums": 1.0,
+    }
 
 
 def test_tinker_raw_workload_counts_full_recursive_tree_and_unique_proxy_calls(monkeypatch):
@@ -1158,7 +1326,9 @@ def test_tinker_workflow_sampling_config_defaults_off_and_validates_inputs():
     assert config.subagent_datum_keep_probability == 1.0
     assert config.subagent_datum_sampling_seed == 0
     assert config.filter_zero_advantage_datums is True
+    assert config.filter_errors is True
     assert module.EvalConfig().workflow_config.filter_zero_advantage_datums is False
+    assert module.EvalConfig().workflow_config.filter_errors is False
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
         module.WorkflowConfig(subagent_datum_keep_probability=-0.1)
     with pytest.raises(ValueError, match="integer"):

@@ -78,6 +78,9 @@ class WorkflowConfig:
     # datum.  A value of one preserves the historical training batch exactly.
     subagent_datum_keep_probability: float = 1.0
     subagent_datum_sampling_seed: int = 0
+    # Defer typed action errors until group centering, then suppress only error
+    # tokens that would otherwise receive positive policy credit.
+    filter_errors: bool = True
     token_efficiency_reward: TokenEfficiencyRewardConfig = field(default_factory=TokenEfficiencyRewardConfig)
     # Reward-only throughput fast path: identify exact-zero centered scalar
     # rewards after group centering and policy/Bernoulli masks, retain them

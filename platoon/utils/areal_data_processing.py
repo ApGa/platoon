@@ -20,6 +20,13 @@ from platoon.agents.actions.subagent import (
     SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
 )
 from platoon.utils.subagent_sampling import SubagentDatumSampler
+from platoon.utils.trajectory_error_filtering import (
+    ERROR_ACTION_MASK_KEY,
+    completion_id_for_step,
+    detected_error_completion_ids,
+    step_reports_error,
+    trajectory_has_positive_error_credit,
+)
 from platoon.utils.trajectory_status import trajectory_was_interrupted
 
 logger = logging.getLogger(__name__)
@@ -170,6 +177,10 @@ class SequenceAccumulator:
     logprobs: list[float] = field(default_factory=list)
     loss_mask: list[int] = field(default_factory=list)
     versions: list[int] = field(default_factory=list)
+    # ``None`` means error filtering is disabled. An enabled list is aligned
+    # one-for-one with ``full_sequence`` and survives prefix merging until the
+    # group-centered reward sign is known.
+    error_action_mask: list[bool] | None = None
     # Track original token counts (before merging) for consistent metrics
     num_input_tokens: int = 0  # Sum of full observation lengths per step
     num_output_tokens: int = 0  # Sum of action lengths per step
@@ -182,6 +193,8 @@ class SequenceAccumulator:
         self.logprobs = []
         self.loss_mask = []
         self.versions = []
+        if self.error_action_mask is not None:
+            self.error_action_mask = []
         self.num_input_tokens = 0
         self.num_output_tokens = 0
         self.routed_expert_chunks = []
@@ -259,6 +272,16 @@ class SequenceAccumulator:
             rewards=torch.tensor([trajectory_reward]),
             token_rewards=torch.full((1, seq_len), float(trajectory_reward), dtype=torch.float32),
         )
+        if self.error_action_mask is not None:
+            if len(self.error_action_mask) != seq_len:
+                raise ValueError(
+                    "error-action mask/token alignment mismatch: "
+                    f"tokens={seq_len}, mask={len(self.error_action_mask)}"
+                )
+            result[ERROR_ACTION_MASK_KEY] = torch.tensor(
+                self.error_action_mask,
+                dtype=torch.bool,
+            ).unsqueeze(0)
         if self.router_replay_config is not None:
             routes = torch.cat(self.routed_expert_chunks, dim=0)
             valid = torch.cat(self.routed_expert_valid_chunks, dim=0)
@@ -414,6 +437,9 @@ def get_train_data_for_step(
     filter_errors: bool = False,
     trajectory_reward: float = 0.0,
     router_replay_config: RouterReplayConfig | None = None,
+    *,
+    trajectory_rewards_dict: dict | None = None,
+    deferred_error_completion_ids: set[str] | None = None,
 ) -> dict | None:
     """Extract training data from a single step (non-aggregated version).
 
@@ -421,29 +447,34 @@ def get_train_data_for_step(
         step: Step dictionary from trajectory.
         completions: Dict mapping completion_id to completion data.
         task_id: Task identifier for logging.
-        filter_errors: Whether to filter out error steps from successful trajectories.
-        trajectory_reward: Reward for the trajectory (used for error filtering).
+        filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
+        trajectory_reward: Reward for the trajectory (used for legacy error-filter fallback).
+        trajectory_rewards_dict: Explicit reward components used to determine
+            whether an error would receive positive task-success credit.
+        deferred_error_completion_ids: Completion-level errors computed from
+            the complete trajectory. When supplied, sampled tokens are marked
+            for post-centering filtering instead of being dropped here.
 
     Returns:
         Training data dict or None if step should be skipped.
     """
-    if "action_misc" not in step.get("misc", {}) or "completion_id" not in step["misc"]["action_misc"]:
+    completion_id = completion_id_for_step(step)
+    if completion_id is None:
         return None
 
-    # Only filter error steps from trajectories with reward >= 1 (successful trajectories)
-    if (
-        filter_errors
-        and trajectory_reward >= 1
-        and (
-            ("error" in step and step["error"])
-            or ("output" in step and step["output"] and "traceback" in step["output"].lower())
+    if deferred_error_completion_ids is None:
+        # Direct callers have no group-centering stage. Retain the historical
+        # fallback, preferring explicit task success over shaped reward.
+        should_filter = (
+            filter_errors
+            and trajectory_has_positive_error_credit(trajectory_reward, trajectory_rewards_dict)
+            and step_reports_error(step)
         )
-    ):
-        error_info = step.get("error") or step.get("output", "Unknown error")
-        logger.debug(f"Filtering Step: Error in step for task {task_id}: {error_info}")
-        return None
+        if should_filter:
+            error_info = step.get("error") or step.get("output", "Unknown error")
+            logger.debug(f"Filtering Step: Error in step for task {task_id}: {error_info}")
+            return None
 
-    completion_id = step["misc"]["action_misc"]["completion_id"]
     parts = _extract_completion_tokens(completions[completion_id], router_replay_config)
     if parts is None:
         logger.warning("Completion ID %s for task %s has no trainable tokens", completion_id, task_id)
@@ -470,6 +501,12 @@ def get_train_data_for_step(
         num_input_tokens=num_input_tokens,
         num_output_tokens=num_output_tokens,
     )
+    if deferred_error_completion_ids is not None:
+        result[ERROR_ACTION_MASK_KEY] = torch.tensor(
+            [False] * len(ob_tokens)
+            + [completion_id in deferred_error_completion_ids] * len(ac_tokens),
+            dtype=torch.bool,
+        ).unsqueeze(0)
     if router_replay_config is not None:
         assert parts.routed_experts is not None
         assert parts.routed_experts_valid is not None
@@ -500,7 +537,7 @@ def get_train_data_for_trajectory(
         completions: Dict mapping completion_id to completion data.
         task_id: Task identifier for logging.
         trajectory_id: Trajectory identifier for logging.
-        filter_errors: Whether to filter out error steps.
+        filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
         reward_processor: Function to process trajectory rewards.
         merge_prefixes: Whether to merge prefix sequences (default True).
         concat_fn: Function to concatenate training data dicts (required).
@@ -512,6 +549,11 @@ def get_train_data_for_trajectory(
         raise ValueError("concat_fn is required for get_train_data_for_trajectory")
 
     trajectory_reward, trajectory_rewards_dict = reward_processor(trajectory)
+    deferred_error_completion_ids = (
+        detected_error_completion_ids(trajectory.get("steps", ()))
+        if filter_errors
+        else set()
+    )
 
     if not merge_prefixes:
         # Fall back to non-aggregated version
@@ -525,10 +567,14 @@ def get_train_data_for_trajectory(
             trajectory_rewards_dict,
             concat_fn,
             router_replay_config,
+            deferred_error_completion_ids,
         )
 
     train_data = []
-    accumulator = SequenceAccumulator(router_replay_config=router_replay_config)
+    accumulator = SequenceAccumulator(
+        router_replay_config=router_replay_config,
+        error_action_mask=[] if filter_errors else None,
+    )
     seen_completion_ids: set[str] = set()
     count_found = 0
     count_duplicates = 0
@@ -538,21 +584,10 @@ def get_train_data_for_trajectory(
 
     for i, step in enumerate(trajectory["steps"]):
         # Check if we should skip this step
-        if "action_misc" not in step.get("misc", {}) or "completion_id" not in step["misc"]["action_misc"]:
+        completion_id = completion_id_for_step(step)
+        if completion_id is None:
             continue
 
-        # Filter error steps from successful trajectories
-        if (
-            filter_errors
-            and trajectory_reward >= 1
-            and (
-                ("error" in step and step["error"])
-                or ("output" in step and step["output"] and "traceback" in step["output"].lower())
-            )
-        ):
-            continue
-
-        completion_id = step["misc"]["action_misc"]["completion_id"]
         # OpenHands may expose one parallel model response over multiple
         # environment steps as individual tool observations arrive. Every such
         # step carries the same completion ID, while the exported completion
@@ -642,6 +677,8 @@ def get_train_data_for_trajectory(
         accumulator.logprobs.extend([0.0] * len(delta_ob_tokens))
         accumulator.loss_mask.extend([0] * len(delta_ob_tokens))
         accumulator.versions.extend([-1] * len(delta_ob_tokens))
+        if accumulator.error_action_mask is not None:
+            accumulator.error_action_mask.extend([False] * len(delta_ob_tokens))
         # Track FULL observation length for consistent metrics (not delta)
         accumulator.num_input_tokens += len(ob_tokens)
 
@@ -650,6 +687,10 @@ def get_train_data_for_trajectory(
         accumulator.logprobs.extend(ac_logprobs)
         accumulator.loss_mask.extend([1] * len(ac_tokens))
         accumulator.versions.extend(ac_versions)
+        if accumulator.error_action_mask is not None:
+            accumulator.error_action_mask.extend(
+                [completion_id in deferred_error_completion_ids] * len(ac_tokens)
+            )
         accumulator.num_output_tokens += len(ac_tokens)
 
     # Flush remaining accumulated data
@@ -690,6 +731,7 @@ def _get_train_data_for_trajectory_no_merge(
     trajectory_rewards_dict: dict,
     concat_fn: Callable[[list[dict]], dict],
     router_replay_config: RouterReplayConfig | None,
+    deferred_error_completion_ids: set[str],
 ) -> dict | None:
     """Non-aggregated version for comparison/fallback."""
     train_data = []
@@ -697,7 +739,7 @@ def _get_train_data_for_trajectory_no_merge(
     count_found_train_data = 0
 
     for i, step in enumerate(trajectory["steps"]):
-        completion_id = step.get("misc", {}).get("action_misc", {}).get("completion_id")
+        completion_id = completion_id_for_step(step)
         if completion_id is not None and completion_id in seen_completion_ids:
             continue
 
@@ -708,6 +750,8 @@ def _get_train_data_for_trajectory_no_merge(
             filter_errors,
             trajectory_reward,
             router_replay_config,
+            trajectory_rewards_dict=trajectory_rewards_dict,
+            deferred_error_completion_ids=deferred_error_completion_ids,
         )
         if step_train_data:
             # See the merged path above: one exported completion may back
@@ -805,7 +849,7 @@ def get_train_data_for_trajectory_collection(
         trajectory_collection: Collection of trajectories.
         completions: Dict mapping completion_id to completion data.
         task_id: Task identifier for logging.
-        filter_errors: Whether to filter out error steps.
+        filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
         reward_processor: Function to process trajectory rewards.
         merge_prefixes: Whether to merge prefix sequences for efficiency.
         concat_fn: Function to concatenate training data dicts (required).

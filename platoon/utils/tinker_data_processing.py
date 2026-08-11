@@ -22,6 +22,11 @@ from platoon.agents.actions.subagent import (
 )
 from platoon.train.tinker.proxy import TinkerLLMInteraction
 from platoon.utils.subagent_sampling import SubagentDatumSampler
+from platoon.utils.trajectory_error_filtering import (
+    ERROR_ACTION_MASK_KEY,
+    completion_id_for_step,
+    detected_error_completion_ids,
+)
 from platoon.utils.trajectory_status import trajectory_was_interrupted
 
 logger = logging.getLogger(__name__)
@@ -231,12 +236,15 @@ class SequenceAccumulator:
     sampled_logprobs: list[float] = field(default_factory=list)
     advantages: list[float] = field(default_factory=list)
     mask: list[float] = field(default_factory=list)
+    error_action_mask: list[bool] | None = None
 
     def clear(self):
         self.full_sequence = []
         self.sampled_logprobs = []
         self.advantages = []
         self.mask = []
+        if self.error_action_mask is not None:
+            self.error_action_mask = []
 
 
 def make_datum_from_accumulator(
@@ -269,6 +277,15 @@ def make_datum_from_accumulator(
         # Store checkpoint_version for staleness checking (will be stripped before forward_backward)
         "checkpoint_version": TensorData.from_torch(torch.tensor([checkpoint_version])),
     }
+    if accumulator.error_action_mask is not None:
+        if len(accumulator.error_action_mask) != len(accumulator.full_sequence):
+            raise ValueError(
+                "error-action mask/token alignment mismatch: "
+                f"tokens={len(accumulator.full_sequence)}, mask={len(accumulator.error_action_mask)}"
+            )
+        loss_fn_inputs[ERROR_ACTION_MASK_KEY] = TensorData.from_torch(
+            torch.tensor(accumulator.error_action_mask[1:], dtype=torch.bool)
+        )
     if traj_depth is not None:
         loss_fn_inputs["traj_depth"] = TensorData.from_torch(torch.tensor([traj_depth], dtype=torch.long))
         loss_fn_inputs["traj_start"] = TensorData.from_torch(torch.tensor([1.0 if traj_start else 0.0]))
@@ -312,37 +329,42 @@ def trajectory_to_data(
         trajectory_id: Trajectory identifier for logging.
         trajectory_advantage: The advantage for this trajectory (reward - mean_reward).
         checkpoint_version: The checkpoint version for staleness checking.
-        filter_errors: Whether to filter out error steps.
-        trajectory_reward: The reward for the trajectory (used for error filtering).
+        filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
+        trajectory_reward: Retained for call-site compatibility. Error
+            filtering is deferred until centered advantages are available.
 
     Returns:
         TrajectoryDataResult with datums and statistics.
     """
     data: list[tinker.Datum] = []
-    accumulator = SequenceAccumulator()
+    accumulator = SequenceAccumulator(error_action_mask=[] if filter_errors else None)
     count_found = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    seen_completion_ids: set[str] = set()
+    deferred_error_completion_ids = (
+        detected_error_completion_ids(trajectory.get("steps", ()))
+        if filter_errors
+        else set()
+    )
 
     for i, step in enumerate(trajectory["steps"]):
         # Check if we should skip this step
-        if "action_misc" not in step.get("misc", {}) or "completion_id" not in step["misc"]["action_misc"]:
+        completion_id = completion_id_for_step(step)
+        if completion_id is None:
             continue
 
-        # Filter error steps from successful trajectories
-        if filter_errors and trajectory_reward >= 1:
-            has_error = ("error" in step and step["error"]) or (
-                "output" in step and step["output"] and "traceback" in step["output"].lower()
-            )
-            if has_error:
-                continue
+        if completion_id in seen_completion_ids:
+            continue
 
-        completion_id = step["misc"]["action_misc"]["completion_id"]
         if completion_id not in interactions:
             logger.warning(f"Completion ID {completion_id} not found in interactions for task {task_id}")
             continue
 
         interaction = interactions[completion_id]
+        # OpenHands can serialize one parallel LLM response over several
+        # environment steps. Its sampled tokens belong in the batch once.
+        seen_completion_ids.add(completion_id)
         count_found += 1
 
         # Get observation and action
@@ -382,12 +404,18 @@ def trajectory_to_data(
         accumulator.sampled_logprobs.extend([0.0] * delta_ob_len)
         accumulator.advantages.extend([0.0] * delta_ob_len)
         accumulator.mask.extend([0.0] * delta_ob_len)
+        if accumulator.error_action_mask is not None:
+            accumulator.error_action_mask.extend([False] * delta_ob_len)
 
         # Add action tokens (with actual logprobs and advantages)
         accumulator.full_sequence.extend(ac_tokens)
         accumulator.sampled_logprobs.extend(ac_logprobs)
         accumulator.advantages.extend([trajectory_advantage] * len(ac_tokens))
         accumulator.mask.extend([1.0] * len(ac_tokens))
+        if accumulator.error_action_mask is not None:
+            accumulator.error_action_mask.extend(
+                [completion_id in deferred_error_completion_ids] * len(ac_tokens)
+            )
 
     # Flush remaining accumulated data
     if accumulator.full_sequence:
@@ -434,7 +462,7 @@ def get_train_data_for_trajectory_collection(
         interactions: Dict mapping completion_id to TinkerLLMInteraction.
         task_id: Task identifier for logging.
         checkpoint_version: The checkpoint version for staleness checking.
-        filter_errors: Whether to filter out error steps.
+        filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
         reward_processor: Function to process trajectory rewards.
         subagent_datum_sampler: Optional deterministic sampler applied to each
             non-root trajectory after its steps have been merged into datums.

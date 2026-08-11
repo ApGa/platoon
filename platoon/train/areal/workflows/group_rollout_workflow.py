@@ -41,6 +41,7 @@ from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.token_efficiency import (
     annotate_policy_subtree_token_efficiency,
 )
+from platoon.utils.trajectory_error_filtering import ERROR_ACTION_MASK_KEY
 
 if TYPE_CHECKING:
     from concurrent.futures import ProcessPoolExecutor
@@ -240,6 +241,63 @@ def _measure_zero_centered_reward_candidates(train_data: dict) -> dict[str, floa
         "workflow_zero_reward_candidate_attention_tokens": float(
             per_datum_attention_tokens[zero_reward.to(per_datum_attention_tokens.device)].sum().item()
         ),
+    }
+
+
+def _filter_positive_centered_error_tokens(train_data: dict) -> dict[str, float]:
+    """Mask erroneous action tokens only when their centered reward is positive.
+
+    The token-aligned side channel is produced before group rewards exist.  It
+    is always consumed here, before actor dispatch, and never becomes a model
+    input.  A merged datum can therefore retain clean/negative-signal actions
+    while suppressing only the positively reinforced erroneous completion.
+    """
+
+    error_mask = train_data.pop(ERROR_ACTION_MASK_KEY, None)
+    if error_mask is None:
+        return {}
+    loss_mask = train_data.get("loss_mask")
+    rewards = train_data.get("rewards")
+    if not torch.is_tensor(error_mask) or not torch.is_tensor(loss_mask) or not torch.is_tensor(rewards):
+        raise TypeError("Deferred error filtering requires tensor error, loss, and reward fields")
+    if error_mask.shape != loss_mask.shape:
+        raise ValueError(
+            "Deferred error/loss masks must be token-aligned: "
+            f"error={tuple(error_mask.shape)}, loss={tuple(loss_mask.shape)}"
+        )
+    batch_size = int(loss_mask.shape[0])
+    centered_rewards = rewards.reshape(-1)
+    if centered_rewards.numel() != batch_size:
+        raise ValueError(
+            "Deferred error filtering requires one centered reward per datum: "
+            f"rewards={centered_rewards.numel()}, datums={batch_size}"
+        )
+
+    action_mask = loss_mask.bool()
+    error_actions = error_mask.bool() & action_mask
+    positive = centered_rewards > 0
+    positive_shape = (batch_size,) + (1,) * (loss_mask.ndim - 1)
+    suppressed = error_actions & positive.reshape(positive_shape).to(error_actions.device)
+    train_data["loss_mask"] = torch.where(suppressed, torch.zeros_like(loss_mask), loss_mask)
+
+    has_trainable_tokens = train_data["loss_mask"].bool().reshape(batch_size, -1).any(dim=1)
+    existing = train_data.get("trainable_datums")
+    if existing is not None:
+        existing = existing.detach().bool().reshape(-1).to(has_trainable_tokens.device)
+        if existing.numel() != batch_size:
+            raise ValueError("trainable_datums does not match deferred error mask")
+        train_data["trainable_datums"] = existing & has_trainable_tokens
+    elif not bool(has_trainable_tokens.all()):
+        train_data["trainable_datums"] = has_trainable_tokens
+
+    emptied = action_mask.reshape(batch_size, -1).any(dim=1) & ~has_trainable_tokens
+    return {
+        "error_filter/detected_action_tokens": float(error_actions.sum().item()),
+        "error_filter/suppressed_positive_action_tokens": float(suppressed.sum().item()),
+        "error_filter/retained_nonpositive_action_tokens": float(
+            (error_actions & ~suppressed).sum().item()
+        ),
+        "error_filter/emptied_datums": float(emptied.sum().item()),
     }
 
 
@@ -772,6 +830,9 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
 
         self._record_stats(train_data)
         self._activate_subagent_datum_sampling(train_data)
+        error_filter_metrics = _filter_positive_centered_error_tokens(train_data)
+        if error_filter_metrics:
+            tracker.scalar(**error_filter_metrics)
 
         # Trainer-side full-batch transforms may still need batch metadata like
         # traj_depth, so the workflow only signals which datums are trainable.
