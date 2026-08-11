@@ -69,8 +69,8 @@ def test_recursive_toolathlon_swe_curriculum_preserves_efficiency_settings():
     config = _compose(CONFIG_32)
 
     _assert_two_phase_catalog(config)
-    assert config.trial_name == "ta-swe32-rec-ta20-v3-trial0"
-    assert config.stats_logger.wandb.group == "ta-swe32-rec-ta20-v3"
+    assert config.trial_name == "ta-swe32-rec-ta20-v4-trial0"
+    assert config.stats_logger.wandb.group == "ta-swe32-rec-ta20-v4"
     assert config.cluster.n_nodes == 32
     assert config.openreward.enable_recursive_subagents is True
     assert config.openreward.subagent_environment_access == "shared"

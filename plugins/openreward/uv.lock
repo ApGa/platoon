@@ -26,10 +26,10 @@ overrides = [
     { name = "nvidia-cudnn-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==9.16.0.29" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "openai", specifier = ">=2.8.0" },
-    { name = "openhands-agent-server", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-agent-server&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" },
-    { name = "openhands-sdk", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-sdk&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" },
-    { name = "openhands-tools", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-tools&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" },
-    { name = "openhands-workspace", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-workspace&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" },
+    { name = "openhands-agent-server", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-agent-server&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28" },
+    { name = "openhands-sdk", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-sdk&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28" },
+    { name = "openhands-tools", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-tools&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28" },
+    { name = "openhands-workspace", git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-workspace&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28" },
     { name = "rich", specifier = "==14.3.1" },
     { name = "soundfile", specifier = ">=0.12.1,<0.13.0" },
     { name = "timm", specifier = "==1.0.16" },
@@ -4469,7 +4469,7 @@ wheels = [
 [[package]]
 name = "openhands-agent-server"
 version = "1.29.0"
-source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-agent-server&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a#a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" }
+source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-agent-server&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28#2b37d0bb0ee80699a428302d80a739d8ea9cdb28" }
 dependencies = [
     { name = "aiosqlite", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
     { name = "alembic", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
@@ -4488,7 +4488,7 @@ dependencies = [
 [[package]]
 name = "openhands-sdk"
 version = "1.29.0"
-source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-sdk&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a#a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" }
+source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-sdk&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28#2b37d0bb0ee80699a428302d80a739d8ea9cdb28" }
 dependencies = [
     { name = "agent-client-protocol", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
     { name = "deprecation", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
@@ -4513,7 +4513,7 @@ dependencies = [
 [[package]]
 name = "openhands-tools"
 version = "1.29.0"
-source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-tools&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a#a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" }
+source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-tools&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28#2b37d0bb0ee80699a428302d80a739d8ea9cdb28" }
 dependencies = [
     { name = "binaryornot", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
     { name = "browser-use", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
@@ -4531,7 +4531,7 @@ dependencies = [
 [[package]]
 name = "openhands-workspace"
 version = "1.29.0"
-source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-workspace&rev=a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a#a6b1cb7b9f1036baded0b1549ee7c01b5d0d641a" }
+source = { git = "https://github.com/ApGa/openhands-agent-sdk.git?subdirectory=openhands-workspace&rev=2b37d0bb0ee80699a428302d80a739d8ea9cdb28#2b37d0bb0ee80699a428302d80a739d8ea9cdb28" }
 dependencies = [
     { name = "openhands-agent-server", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },
     { name = "openhands-sdk", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'darwin' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker') or (sys_platform == 'linux' and extra == 'extra-18-platoon-openreward-areal' and extra == 'extra-18-platoon-openreward-tinker')" },

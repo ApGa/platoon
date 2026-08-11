@@ -2,8 +2,9 @@ defaults:
   - toolathlon_tmax_swe_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8-efficiency
   - _self_
 
-# Fresh recovery lineage: the prior mixed recursive run is beyond step 20.
-trial_name: ta-swe32-rec-ta20-v3-trial0
+# Fresh recovery lineage: v3 used the pre-timeout PTC executor and was stopped
+# before its first update after a rollout entered an unbounded orchestration loop.
+trial_name: ta-swe32-rec-ta20-v4-trial0
 
 openreward:
   balance_accepted_batches: false
@@ -46,7 +47,7 @@ openreward:
 stats_logger:
   wandb:
     project: openreward-multienv-openhands
-    group: ta-swe32-rec-ta20-v3
+    group: ta-swe32-rec-ta20-v4
 
 # Literal values are required by the pre-Hydra launcher setup.
 actor:
