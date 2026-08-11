@@ -249,7 +249,12 @@ def test_unrestricted_ptc_omits_orchestration_policy_and_passes_mode(monkeypatch
 
     rollout._configure_openhands_agent(types.SimpleNamespace(tools=[]), config)
 
-    assert calls == [{"mode": "unrestricted"}]
+    assert calls == [
+        {
+            "mode": "unrestricted",
+            "max_tool_calls_per_execution": 1024,
+        }
+    ]
     assert prompts["system"] == ["ptc-guidance"]
 
 

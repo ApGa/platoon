@@ -7,6 +7,8 @@ defaults:
 trial_name: ta-swe16-ptc-ta20-v3-trial0
 
 openreward:
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+
   # Keep native completion-order batching asynchronous. Environment weights
   # control submitted work; accepted updates can drift with rollout latency.
   balance_accepted_batches: false

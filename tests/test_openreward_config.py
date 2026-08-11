@@ -115,6 +115,7 @@ def test_openreward_config_splits_ptc_task_tracker_and_recursion_flags():
         {
             "enable_programmatic_tool_calling": True,
             "programmatic_tool_calling_mode": "unrestricted",
+            "programmatic_tool_calling_max_tool_calls_per_execution": 17,
             "enable_task_tracker": True,
             "enable_recursive_subagents": False,
             "subagent_max_depth": 2,
@@ -123,6 +124,7 @@ def test_openreward_config_splits_ptc_task_tracker_and_recursion_flags():
 
     assert config.enable_programmatic_tool_calling is True
     assert config.programmatic_tool_calling_mode == "unrestricted"
+    assert config.programmatic_tool_calling_max_tool_calls_per_execution == 17
     assert config.enable_task_tracker is True
     assert config_mod.OpenRewardConfig().enable_task_tracker is False
     assert config.enable_recursive_subagents is False
@@ -135,6 +137,13 @@ def test_openreward_config_splits_ptc_task_tracker_and_recursion_flags():
     with pytest.raises(ValueError, match="programmatic_tool_calling_mode"):
         config_mod.OpenRewardConfig.from_mapping(
             {"programmatic_tool_calling_mode": "container"}
+        )
+    with pytest.raises(
+        ValueError,
+        match="programmatic_tool_calling_max_tool_calls_per_execution",
+    ):
+        config_mod.OpenRewardConfig.from_mapping(
+            {"programmatic_tool_calling_max_tool_calls_per_execution": 0}
         )
 
 

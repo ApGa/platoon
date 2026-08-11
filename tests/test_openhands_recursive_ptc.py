@@ -375,6 +375,7 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
         agent = recursive.with_programmatic_tool_calling(
             agent,
             mode="orchestration_only",
+            max_tool_calls_per_execution=17,
         )
         agent = recursive.with_shared_workspace_subagent_prompt(agent)
         agent = recursive.with_shared_workspace_subagent_prompt(agent)
@@ -399,7 +400,10 @@ def test_recursive_helpers_install_tools_and_prompt_suffix(monkeypatch):
         "runtime_id": runtime.id,
         "default_max_steps": 7,
     }
-    assert agent.tools[2].params == {"mode": "orchestration_only"}
+    assert agent.tools[2].params == {
+        "mode": "orchestration_only",
+        "max_tool_calls_per_execution": 17,
+    }
     assert agent.include_default_tools == ["FinishTool"]
     assert agent.agent_context.system_message_suffix == (
         "base\n\n"
@@ -502,7 +506,10 @@ def test_copy_agent_config_for_fork_drops_private_runtime_state(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeypatch):
+async def test_programmatic_tool_calling_launches_subagents_mechanically(
+    monkeypatch,
+    tmp_path: Path,
+):
     monkeypatch.setenv("OPENHANDS_SUPPRESS_BANNER", "1")
     ptc = pytest.importorskip("openhands.tools.programmatic_tool_calling")
     recursive = pytest.importorskip("platoon.openhands.recursive")
@@ -573,7 +580,10 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
                     asyncio.get_running_loop(),
                     contextvars.copy_context(),
                 )
-                self.programmatic_tool = ptc.ProgrammaticToolCallingTool.create(conv_state=None)[0]
+                self.programmatic_tool = ptc.ProgrammaticToolCallingTool.create(
+                    conv_state=None,
+                    max_tool_calls_per_execution=2,
+                )[0]
                 launch_tool = recursive.LaunchSubagentTool.create(
                     conv_state=None,
                     runtime_id=self.launch_runtime.id,
@@ -654,7 +664,10 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
         async def _launch_revenue_grandchildren(self):
             runtime = recursive.LaunchSubagentRuntime()
             runtime.bind(asyncio.get_running_loop(), contextvars.copy_context())
-            programmatic_tool = ptc.ProgrammaticToolCallingTool.create(conv_state=None)[0]
+            programmatic_tool = ptc.ProgrammaticToolCallingTool.create(
+                conv_state=None,
+                max_tool_calls_per_execution=2,
+            )[0]
             launch_tool = recursive.LaunchSubagentTool.create(
                 conv_state=None,
                 runtime_id=runtime.id,
@@ -723,7 +736,7 @@ async def test_programmatic_tool_calling_launches_subagents_mechanically(monkeyp
         root_actions=[first_action, second_action],
     )
     root_env = DeterministicEnv(_task=root_task, state=state)
-    events_path = Path("/private/tmp/openreward-recursive-ptc-recursive-mock-events/events.jsonl")
+    events_path = tmp_path / "openreward-recursive-ptc-recursive-mock-events.jsonl"
     traj_collection = TrajectoryCollection()
     traj_collection.register_event_handlers(
         JsonlFileSink(

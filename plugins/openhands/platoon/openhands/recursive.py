@@ -447,6 +447,7 @@ def with_programmatic_tool_calling(
     agent: AgentBase,
     *,
     mode: str = "unrestricted",
+    max_tool_calls_per_execution: int = 1024,
 ) -> AgentBase:
     from openhands.tools.programmatic_tool_calling import ProgrammaticToolCallingTool
 
@@ -454,7 +455,10 @@ def with_programmatic_tool_calling(
         agent,
         Tool(
             name=ProgrammaticToolCallingTool.name,
-            params={"mode": mode},
+            params={
+                "mode": mode,
+                "max_tool_calls_per_execution": max_tool_calls_per_execution,
+            },
         ),
     )
 

@@ -49,6 +49,10 @@ def _assert_two_phase_catalog(config) -> None:
         assert environment.train_task_limit is None
         assert environment.eval_task_limit is None
     assert config.openreward.balance_accepted_batches is False
+    assert (
+        config.openreward.programmatic_tool_calling_max_tool_calls_per_execution
+        == 1024
+    )
     assert config.train_dataset.batch_size == 8
     assert config.workflow_config.group_size == 8
     assert config.valid_dataset is None

@@ -161,6 +161,10 @@ class OpenRewardConfig:
     # local filesystem or processes. Unrestricted mode remains available for
     # deployments where PTC intentionally owns the execution environment.
     programmatic_tool_calling_mode: str = "orchestration_only"
+    # Bound direct calls issued by one PTC cell without charging time or calls
+    # inside a delegated agent subtree. This prevents runaway orchestration
+    # loops while allowing a single launch_subagent call to run to completion.
+    programmatic_tool_calling_max_tool_calls_per_execution: int = 1024
     enable_task_tracker: bool = False
     enable_recursive_subagents: bool = False
     # Forked agents share the root OpenReward session. ``read_only`` narrows
@@ -187,6 +191,21 @@ class OpenRewardConfig:
             raise ValueError(
                 "programmatic_tool_calling_mode must be one of "
                 f"{allowed}; got {self.programmatic_tool_calling_mode!r}"
+            )
+        if (
+            isinstance(
+                self.programmatic_tool_calling_max_tool_calls_per_execution,
+                bool,
+            )
+            or not isinstance(
+                self.programmatic_tool_calling_max_tool_calls_per_execution,
+                int,
+            )
+            or self.programmatic_tool_calling_max_tool_calls_per_execution <= 0
+        ):
+            raise ValueError(
+                "programmatic_tool_calling_max_tool_calls_per_execution must be "
+                "a positive integer"
             )
         if not isinstance(self.condenser_disable_thinking, bool):
             raise ValueError("condenser_disable_thinking must be a boolean")

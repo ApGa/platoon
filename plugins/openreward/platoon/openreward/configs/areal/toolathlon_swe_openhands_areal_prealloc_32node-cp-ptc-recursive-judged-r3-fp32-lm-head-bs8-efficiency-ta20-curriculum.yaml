@@ -7,6 +7,7 @@ defaults:
 trial_name: ta-swe32-rec-ta20-v4-trial0
 
 openreward:
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
   balance_accepted_batches: false
 
   # Preserve the latest recursive workspace semantics explicitly rather than

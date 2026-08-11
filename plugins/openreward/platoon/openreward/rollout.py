@@ -361,6 +361,9 @@ def _configure_openhands_agent(
             with_programmatic_tool_calling(
                 configured_agent,
                 mode=openreward_config.programmatic_tool_calling_mode,
+                max_tool_calls_per_execution=(
+                    openreward_config.programmatic_tool_calling_max_tool_calls_per_execution
+                ),
             ),
         )
         suffix_parts.append(PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX)
