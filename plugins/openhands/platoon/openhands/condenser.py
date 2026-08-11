@@ -33,11 +33,27 @@ from .condensation_safety import (
 logger = logging.getLogger(__name__)
 
 
+class _CondensationPromptCannotFit(NoCondensationAvailableException):
+    """Raised before an LLM call when even maximally clipped events do not fit."""
+
+
 class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
     """Summarize public task state without putting reasoning back into context."""
 
     @staticmethod
+    def _messages_from_event_strings(event_strings: Sequence[str]) -> list[Message]:
+        prompt = render_template(
+            os.path.join(os.path.dirname(__file__), "prompts"),
+            "summarizing_prompt.j2",
+            events=event_strings,
+        )
+        return [
+            Message(role="user", content=[TextContent(text=prompt)]),
+        ]
+
+    @classmethod
     def _messages(
+        cls,
         forgotten_events: Sequence[LLMConvertibleEvent],
         max_event_str_length: int | None = None,
     ) -> list[Message]:
@@ -48,14 +64,117 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
             )
             for event in forgotten_events
         ]
-        prompt = render_template(
-            os.path.join(os.path.dirname(__file__), "prompts"),
-            "summarizing_prompt.j2",
-            events=event_strings,
+        return cls._messages_from_event_strings(event_strings)
+
+    @staticmethod
+    def _prompt_token_count(messages: list[Message], agent_llm) -> int | None:
+        """Count with the agent's exact tokenizer/template when it is available."""
+
+        if agent_llm is None:
+            return None
+        try:
+            token_count = agent_llm.get_token_count(messages)
+        except Exception:
+            logger.warning(
+                "Unable to count condensation prompt tokens; retaining native request/retry behavior.",
+                exc_info=True,
+            )
+            return None
+        if isinstance(token_count, bool) or not isinstance(token_count, int) or token_count <= 0:
+            logger.warning(
+                "Condensation prompt token counter returned %r; retaining native request/retry behavior.",
+                token_count,
+            )
+            return None
+        return token_count
+
+    def _messages_fitted_to_prompt_budget(
+        self,
+        forgotten_events: Sequence[LLMConvertibleEvent],
+        *,
+        agent_llm=None,
+        max_event_str_length: int | None = None,
+    ) -> list[Message]:
+        """Fit a summary prompt before sending it to the completion endpoint.
+
+        ``max_tokens`` is already configured to 80% of the model's 32K context
+        for these rollouts. Reusing it as the maximum condensation *input*
+        leaves at least the remaining 20% for reasoning plus summary text. The
+        condenser LLM's separately configured 80%-of-context generation limit
+        remains a ceiling, not a target; the AReaL endpoint clips it to the
+        request's actual remaining context.
+
+        Truncation deliberately uses OpenHands' native policy: one uniform
+        character limit per event and ``maybe_truncate``'s head/notice/tail
+        rendering. A binary search only chooses that character limit; it does
+        not introduce a second event serialization policy.
+        """
+
+        rendered_events = [render_event_for_condensation(event) for event in forgotten_events]
+
+        def messages_for_limit(limit: int | None) -> list[Message]:
+            return self._messages_from_event_strings(
+                [maybe_truncate(rendered, truncate_after=limit) for rendered in rendered_events]
+            )
+
+        requested_messages = messages_for_limit(max_event_str_length)
+        prompt_budget = self.max_tokens
+        if not prompt_budget or agent_llm is None:
+            return requested_messages
+
+        requested_tokens = self._prompt_token_count(requested_messages, agent_llm)
+        if requested_tokens is None or requested_tokens <= prompt_budget:
+            return requested_messages
+
+        largest_event = max(len(rendered) for rendered in rendered_events)
+        upper_limit = largest_event
+        if max_event_str_length is not None:
+            upper_limit = min(upper_limit, max_event_str_length)
+        upper_limit = max(upper_limit, 1)
+
+        # ``maybe_truncate(..., truncate_after=1)`` is the smallest prompt we
+        # can form while retaining one placeholder character per native event.
+        minimum_messages = messages_for_limit(1)
+        minimum_tokens = self._prompt_token_count(minimum_messages, agent_llm)
+        if minimum_tokens is None:
+            return requested_messages
+        if minimum_tokens > prompt_budget:
+            raise _CondensationPromptCannotFit(
+                "Condensation prompt cannot fit its input budget even with "
+                f"one character per event (prompt_tokens={minimum_tokens}, "
+                f"budget={prompt_budget}, events={len(forgotten_events)})"
+            )
+
+        best_limit = 1
+        best_messages = minimum_messages
+        best_tokens = minimum_tokens
+        low = 2
+        high = upper_limit
+        while low <= high:
+            candidate_limit = (low + high) // 2
+            candidate_messages = messages_for_limit(candidate_limit)
+            candidate_tokens = self._prompt_token_count(candidate_messages, agent_llm)
+            if candidate_tokens is None:
+                # We already have a verified fitting candidate. Prefer that
+                # conservative prompt over sending the known-oversize original.
+                break
+            if candidate_tokens <= prompt_budget:
+                best_limit = candidate_limit
+                best_messages = candidate_messages
+                best_tokens = candidate_tokens
+                low = candidate_limit + 1
+            else:
+                high = candidate_limit - 1
+
+        logger.info(
+            "Fitted condensation prompt to context budget: prompt_tokens=%d->%d budget=%d max_event_chars=%d events=%d",
+            requested_tokens,
+            best_tokens,
+            prompt_budget,
+            best_limit,
+            len(forgotten_events),
         )
-        return [
-            Message(role="user", content=[TextContent(text=prompt)]),
-        ]
+        return best_messages
 
     @staticmethod
     def _completion_text(llm_response) -> str:
@@ -178,10 +297,16 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         forgotten_events: Sequence[LLMConvertibleEvent],
         summary_offset: int,
         max_event_str_length: int | None = None,
+        agent_llm=None,
     ) -> Condensation:
         assert forgotten_events, "No events to condense."
+        messages = self._messages_fitted_to_prompt_budget(
+            forgotten_events,
+            agent_llm=agent_llm,
+            max_event_str_length=max_event_str_length,
+        )
         try:
-            response = self.llm.completion(messages=self._messages(forgotten_events, max_event_str_length))
+            response = self.llm.completion(messages=messages)
         except NoCondensationAvailableException:
             raise
         except Exception as exc:
@@ -197,10 +322,16 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         forgotten_events: Sequence[LLMConvertibleEvent],
         summary_offset: int,
         max_event_str_length: int | None = None,
+        agent_llm=None,
     ) -> Condensation:
         assert forgotten_events, "No events to condense."
+        messages = self._messages_fitted_to_prompt_budget(
+            forgotten_events,
+            agent_llm=agent_llm,
+            max_event_str_length=max_event_str_length,
+        )
         try:
-            response = await self.llm.acompletion(messages=self._messages(forgotten_events, max_event_str_length))
+            response = await self.llm.acompletion(messages=messages)
         except NoCondensationAvailableException:
             raise
         except Exception as exc:
@@ -211,7 +342,50 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
             llm_response=response,
         )
 
-    def hard_context_reset(self, view, agent_llm=None) -> Condensation | None:  # noqa: ARG002
+    def _condensation_inputs(self, view, agent_llm=None):
+        """Apply the native forgotten-event and minimum-progress checks."""
+
+        try:
+            forgotten_events, summary_offset = self._get_forgotten_events(
+                view,
+                agent_llm=agent_llm,
+            )
+        except ValueError as exc:
+            raise NoCondensationAvailableException("Unable to compute forgotten events") from exc
+
+        if not forgotten_events:
+            raise NoCondensationAvailableException(
+                "Cannot condense 0 events. This typically occurs when a tool loop "
+                "spans almost the entire view, leaving no valid range for forgetting "
+                "events. Consider adjusting keep_first or max_size parameters."
+            )
+        if len(forgotten_events) < len(view) * self.minimum_progress:
+            raise NoCondensationAvailableException(
+                "Cannot apply condensation: events forgotten below minimum progress threshold."
+            )
+        return forgotten_events, summary_offset
+
+    def get_condensation(self, view, agent_llm=None) -> Condensation:
+        """Generate a normal condensation with proactive prompt fitting."""
+
+        forgotten_events, summary_offset = self._condensation_inputs(view, agent_llm)
+        return self._generate_condensation(
+            forgotten_events=forgotten_events,
+            summary_offset=summary_offset,
+            agent_llm=agent_llm,
+        )
+
+    async def aget_condensation(self, view, agent_llm=None) -> Condensation:
+        """Async normal condensation with proactive prompt fitting."""
+
+        forgotten_events, summary_offset = self._condensation_inputs(view, agent_llm)
+        return await self._agenerate_condensation(
+            forgotten_events=forgotten_events,
+            summary_offset=summary_offset,
+            agent_llm=agent_llm,
+        )
+
+    def hard_context_reset(self, view, agent_llm=None) -> Condensation | None:
         """Use OpenHands' native retry/truncation policy, then a safe fallback."""
 
         if not view.events:
@@ -226,7 +400,17 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
                     forgotten_events=view.events,
                     summary_offset=0,
                     max_event_str_length=max_event_str_length,
+                    agent_llm=agent_llm,
                 )
+            except _CondensationPromptCannotFit as exc:
+                last_error = exc
+                logger.warning(
+                    "Hard context reset prompt cannot fit after maximum native "
+                    "event clipping (%s); using deterministic fallback without "
+                    "an impossible LLM request.",
+                    exc,
+                )
+                break
             except Exception as exc:
                 last_error = exc
                 if max_event_str_length is None:
@@ -251,7 +435,7 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
             summary_offset=0,
         )
 
-    async def ahard_context_reset(self, view, agent_llm=None) -> Condensation | None:  # noqa: ARG002
+    async def ahard_context_reset(self, view, agent_llm=None) -> Condensation | None:
         """Async hard reset with the native retry policy and safe fallback."""
 
         if not view.events:
@@ -266,7 +450,17 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
                     forgotten_events=view.events,
                     summary_offset=0,
                     max_event_str_length=max_event_str_length,
+                    agent_llm=agent_llm,
                 )
+            except _CondensationPromptCannotFit as exc:
+                last_error = exc
+                logger.warning(
+                    "Async hard context reset prompt cannot fit after maximum "
+                    "native event clipping (%s); using deterministic fallback "
+                    "without an impossible LLM request.",
+                    exc,
+                )
+                break
             except Exception as exc:
                 last_error = exc
                 if max_event_str_length is None:

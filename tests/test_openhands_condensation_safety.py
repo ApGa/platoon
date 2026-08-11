@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -256,6 +257,211 @@ def test_event_truncation_uses_native_head_and_tail_only_when_requested(monkeypa
     assert "HEAD" in clipped_prompt
     assert "TAIL" in clipped_prompt
     assert payload not in clipped_prompt
+
+
+def _valid_summary_response(TextContent, response_id="chatcmpl-condensation"):
+    return SimpleNamespace(
+        id=response_id,
+        message=SimpleNamespace(
+            content=[
+                TextContent(
+                    text=(
+                        "USER_CONTEXT: Fix the parser.\n"
+                        "COMPLETED: Located the implementation.\n"
+                        "PENDING: Apply and test the patch.\n"
+                        "CURRENT_STATE: No files changed yet."
+                    )
+                )
+            ],
+            reasoning_content=None,
+            thinking_blocks=[],
+            responses_reasoning_item=None,
+        ),
+        raw_response={"choices": [{"finish_reason": "stop"}]},
+    )
+
+
+def test_normal_condensation_fits_prompt_before_the_llm_request(monkeypatch):
+    condenser, TextContent, _error_type = _condenser_module(monkeypatch)
+    instance = condenser.SafeLLMSummarizingCondenser()
+    instance.max_tokens = 1_000
+    instance.minimum_progress = 0.1
+
+    payload = "HEAD" + "x" * 4_000 + "TAIL"
+    event = SimpleNamespace(
+        id="event-action",
+        kind="ActionEvent",
+        source="agent",
+        thought=[SimpleNamespace(text="PRIVATE CHAIN OF THOUGHT")],
+        tool_name="bash",
+        summary="inspect a large result",
+        tool_call=SimpleNamespace(arguments=payload),
+    )
+    view = [event]
+    instance._get_forgotten_events = lambda supplied_view, agent_llm: (
+        supplied_view,
+        0,
+    )
+
+    requests = []
+
+    class SummaryLLM:
+        def completion(self, **kwargs):
+            requests.append(kwargs)
+            return _valid_summary_response(TextContent)
+
+    instance.llm = SummaryLLM()
+    agent_llm = SimpleNamespace(
+        # Character counting makes the fitted boundary deterministic while
+        # still verifying that Platoon uses the agent LLM's counter.
+        get_token_count=lambda messages: len(messages[0].content[0].text)
+    )
+
+    result = instance.get_condensation(view, agent_llm=agent_llm)
+
+    assert result.llm_response_id == "chatcmpl-condensation"
+    assert len(requests) == 1
+    assert set(requests[0]) == {"messages"}
+    sent_prompt = requests[0]["messages"][0].content[0].text
+    assert len(sent_prompt) <= instance.max_tokens
+    assert "<response clipped>" in sent_prompt
+    assert "HEAD" in sent_prompt
+    assert "TAIL" in sent_prompt
+    assert payload not in sent_prompt
+    assert "PRIVATE CHAIN OF THOUGHT" not in sent_prompt
+
+
+def test_small_condensation_prompt_is_not_truncated(monkeypatch):
+    condenser, _TextContent, _error_type = _condenser_module(monkeypatch)
+    instance = condenser.SafeLLMSummarizingCondenser()
+    instance.max_tokens = 1_000
+    event = SimpleNamespace(
+        kind="ActionEvent",
+        source="agent",
+        thought=[],
+        tool_name="bash",
+        summary="inspect parser",
+        tool_call=SimpleNamespace(arguments='{"command":"pwd"}'),
+    )
+    agent_llm = SimpleNamespace(get_token_count=lambda messages: len(messages[0].content[0].text))
+
+    original = instance._messages([event])[0].content[0].text
+    fitted = (
+        instance._messages_fitted_to_prompt_budget(
+            [event],
+            agent_llm=agent_llm,
+        )[0]
+        .content[0]
+        .text
+    )
+
+    assert fitted == original
+    assert "<response clipped>" not in fitted
+
+
+def test_unavailable_prompt_counter_retains_native_unfitted_request(monkeypatch):
+    condenser, _TextContent, _error_type = _condenser_module(monkeypatch)
+    instance = condenser.SafeLLMSummarizingCondenser()
+    instance.max_tokens = 100
+    payload = "HEAD" + "z" * 2_000 + "TAIL"
+    event = SimpleNamespace(
+        kind="ActionEvent",
+        source="agent",
+        thought=[],
+        tool_name="bash",
+        summary="inspect output",
+        tool_call=SimpleNamespace(arguments=payload),
+    )
+    # OpenHands returns zero when its token counter cannot resolve the model.
+    # In that case Platoon must preserve the SDK's native request/retry path.
+    agent_llm = SimpleNamespace(get_token_count=lambda _messages: 0)
+
+    original = instance._messages([event])[0].content[0].text
+    fitted = (
+        instance._messages_fitted_to_prompt_budget(
+            [event],
+            agent_llm=agent_llm,
+        )[0]
+        .content[0]
+        .text
+    )
+
+    assert fitted == original
+    assert payload in fitted
+    assert "<response clipped>" not in fitted
+
+
+def test_async_condensation_uses_the_same_proactive_prompt_fit(monkeypatch):
+    condenser, TextContent, _error_type = _condenser_module(monkeypatch)
+    instance = condenser.SafeLLMSummarizingCondenser()
+    instance.max_tokens = 900
+    payload = "HEAD" + "y" * 3_000 + "TAIL"
+    event = SimpleNamespace(
+        id="event-action",
+        kind="ActionEvent",
+        source="agent",
+        thought=[],
+        tool_name="bash",
+        summary="inspect output",
+        tool_call=SimpleNamespace(arguments=payload),
+    )
+    requests = []
+
+    class SummaryLLM:
+        async def acompletion(self, **kwargs):
+            requests.append(kwargs)
+            return _valid_summary_response(TextContent, "chatcmpl-async-condensation")
+
+    instance.llm = SummaryLLM()
+    agent_llm = SimpleNamespace(get_token_count=lambda messages: len(messages[0].content[0].text))
+
+    result = asyncio.run(
+        instance._agenerate_condensation(
+            forgotten_events=[event],
+            summary_offset=0,
+            agent_llm=agent_llm,
+        )
+    )
+
+    assert result.llm_response_id == "chatcmpl-async-condensation"
+    assert len(requests) == 1
+    sent_prompt = requests[0]["messages"][0].content[0].text
+    assert len(sent_prompt) <= instance.max_tokens
+    assert "<response clipped>" in sent_prompt
+    assert "HEAD" in sent_prompt
+    assert "TAIL" in sent_prompt
+
+
+def test_hard_reset_does_not_send_or_retry_a_prompt_that_cannot_fit(monkeypatch):
+    condenser, _TextContent, _error_type = _condenser_module(monkeypatch)
+    instance = condenser.SafeLLMSummarizingCondenser()
+    instance.max_tokens = 10
+    event = SimpleNamespace(
+        id="event-action",
+        kind="ActionEvent",
+        source="agent",
+        thought=[],
+        tool_name="bash",
+        summary="inspect parser",
+        tool_call=SimpleNamespace(arguments='{"command":"pwd"}'),
+    )
+    requests = []
+
+    class SummaryLLM:
+        def completion(self, **kwargs):
+            requests.append(kwargs)
+            raise AssertionError("an impossible prompt must not be sent")
+
+    instance.llm = SummaryLLM()
+    agent_llm = SimpleNamespace(get_token_count=lambda messages: len(messages[0].content[0].text))
+
+    result = instance.hard_context_reset(
+        SimpleNamespace(events=[event]),
+        agent_llm=agent_llm,
+    )
+
+    assert requests == []
+    assert result.llm_response_id.startswith(condenser.NONTRAINABLE_CONDENSATION_RESPONSE_PREFIX)
 
 
 def test_retained_public_summary_has_a_character_safety_cap():

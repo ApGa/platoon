@@ -4,7 +4,7 @@ defaults:
 
 # Fresh recovery lineage: the previous mixed run is already beyond step 20 and
 # would therefore skip the Toolathlon-only warmup if its optimizer were reused.
-trial_name: ta-swe16-ptc-ta20-v1-trial0
+trial_name: ta-swe16-ptc-ta20-v2-trial0
 
 openreward:
   # Keep native completion-order batching asynchronous. Environment weights
@@ -44,7 +44,7 @@ openreward:
 stats_logger:
   wandb:
     project: openreward-multienv-openhands
-    group: ta-swe16-ptc-ta20-v1
+    group: ta-swe16-ptc-ta20-v2
 
 # Keep these literal in the leaf config for the pre-Hydra launcher checks.
 actor:
