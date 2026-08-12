@@ -7,7 +7,7 @@ defaults:
 # prevents recovery from the earlier truncated mixed run.
 actor:
   backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
-  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking
+  path: apurvaga/Qwen3.6-35B-A3B-preserve-thinking
 
 openreward:
   # Preserve equal-weight task submission while accepting completed groups

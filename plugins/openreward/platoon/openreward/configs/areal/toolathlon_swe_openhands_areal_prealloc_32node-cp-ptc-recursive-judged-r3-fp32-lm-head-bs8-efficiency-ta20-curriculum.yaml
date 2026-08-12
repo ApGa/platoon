@@ -53,4 +53,4 @@ stats_logger:
 # Literal values are required by the pre-Hydra launcher setup.
 actor:
   backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
-  path: /lustre/fsw/portfolios/nvr/projects/nvr_lacr_llm/users/apurvag/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking
+  path: apurvaga/Qwen3.6-35B-A3B-preserve-thinking
