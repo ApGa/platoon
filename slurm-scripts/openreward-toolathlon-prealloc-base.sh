@@ -326,7 +326,7 @@ OPENREWARD_JOB_PYTHON=${OPENREWARD_JOB_VENV}/bin/python
 
 # --- OpenReward toolathlon env server (runs alongside training, no GPUs) -------
 OPENREWARD_PORT=${OPENREWARD_PORT:-8082}
-OPENREWARD_SERVER_IMAGE=${OPENREWARD_SERVER_IMAGE:-${USER_ROOT}/images/openreward/apga+openreward-toolathlon-gym+latest.sqsh}
+OPENREWARD_SERVER_IMAGE=${OPENREWARD_SERVER_IMAGE:-${USER_ROOT}/images/openreward/apga+openreward-toolathlon-gym+43c1179fd7b8.sqsh}
 # Shard rollouts across one env server per node (1) or run a single server on the
 # controller node only (0). See header for the affinity rationale.
 OPENREWARD_SHARD=${OPENREWARD_SHARD:-1}
