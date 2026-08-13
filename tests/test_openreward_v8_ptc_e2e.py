@@ -29,7 +29,7 @@ def test_v8_ptc_wrapper_uses_one_node_exact_release_and_passed_gate2() -> None:
 
     assert "#PBS -l select=1:mpiprocs=8" in source
     assert "#PBS -l walltime=00:30:00" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0" in source
     assert "OPENREWARD_V8_PTC_GATE2_RESULT" in source
     assert '[[ "$(result_value "${GATE2_RESULT}" gate2)" == passed ]]' in source
     assert '"${current_source_sha}" == "${source_sha}"' in source
@@ -47,22 +47,28 @@ def test_v8_ptc_wrapper_runs_exact_production_service_and_cleans_it_before_pass(
     launch = '"${PBSDSH}" -n 0 -- /usr/bin/env'
     health = "exact production service endpoints are healthy"
     driver = '"${controller_python}" -I "${DRIVER_SNAPSHOT}"'
-    teardown = 'kill -TERM "${service_pid}"'
+    request = '"${controller_python}" -I "${SHUTDOWN_REQUEST_HELPER}" publish'
+    teardown = 'teardown_service || die "production node-service cleanup handshake attestation failed"'
     publish = "openreward_v8_ptc_e2e=PASS"
-    for marker in (launch, health, driver, teardown, publish):
+    for marker in (launch, health, driver, request, teardown, publish):
         assert marker in source
     assert source.index(launch) < source.index(health) < source.index(driver)
-    assert source.rindex(teardown) < source.rindex(publish)
-    assert "production node-service cleanup attestation failed" in source
+    natural_request_call = source.rindex("request_service_shutdown || die")
+    assert source.rindex(driver) < natural_request_call < source.rindex(teardown) < source.rindex(publish)
+    assert "production node-service cleanup handshake attestation failed" in source
     assert "node-service helper died after the PTC driver" in source
     assert "an environment endpoint became unhealthy after the PTC driver" in source
     assert "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT" in source
-    assert "--primary-status 143" in source
+    assert "expected_primary_status=0" in source
+    assert "expected_primary_status=143" in source
+    assert '--primary-status "${expected_primary_status}"' in source
     assert "assert-tcp-closed" in source
     assert "assert-empty-swe" in source
     assert "trap cleanup EXIT" in source
     assert "trap 'exit 143' TERM" in source
     assert "trap 'exit 130' INT" in source
+    assert "service_shutdown_requested=1" in source
+    assert '"PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${SERVICE_REQUEST}"' in source
     assert "PLATOON_STAGE_TOOLATHLON_SIF=1" in source
     assert "PLATOON_STAGE_TRAINING_SIF=0" in source
     assert '"PLATOON_ABCI_ENV_FILE=${ABCI_ENV}"' in source

@@ -128,6 +128,10 @@ def test_common_wrapper_runs_bounded_barrier_before_node_service_teardown():
     services = cleanup.index("request_all_service_shutdowns")
     assert controller < barrier < services
     assert "service_shutdown_deadline=$((SECONDS + 180))" in cleanup
-    assert "--primary-status 143" in cleanup
+    publication = cleanup.index("publish_all_service_shutdown_requests")
+    assert barrier < publication
+    assert "expected_primary_status=0" in cleanup
+    assert "expected_primary_status=143" in cleanup
+    assert '--primary-status "${expected_primary_status}"' in cleanup
     assert "PLATOON_AREAL_PBS_CLEANUP_BARRIER_TIMEOUT" in common
     assert '--state-dir "${JOB_STATE_DIR}/pbs-prealloc/${JOB_ID_SAFE}/${EXPECTED_TRIAL}"' in cleanup

@@ -97,6 +97,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 for relative in (
     "pbs-scripts/openreward-service-cleanup-receipt.py",
+    "pbs-scripts/openreward-service-shutdown-request.py",
     "pbs-scripts/openreward-controller-runtime-receipt.py",
     "pbs-scripts/openreward_v8_ptc_e2e.py",
     "pbs-scripts/verify_openreward_v8_release.py",
@@ -219,6 +220,7 @@ done
 for host_only_asset in \
     pbs-scripts/openreward_v8_ptc_e2e.py \
     pbs-scripts/openreward-service-cleanup-receipt.py \
+    pbs-scripts/openreward-service-shutdown-request.py \
     pbs-scripts/openreward-controller-runtime-receipt.py; do
     if grep -Fxq "${host_only_asset}" "${GATE_ROOT}/source-members.txt"; then
         die "immutable source archive contains host-only launch asset ${host_only_asset}"

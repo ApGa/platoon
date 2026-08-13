@@ -10,8 +10,8 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r2-376d1b9-18e62c0"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 COMPONENTS = {
     "platoon_upstream": UPSTREAM_COMMIT,

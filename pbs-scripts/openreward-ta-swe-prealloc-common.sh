@@ -46,6 +46,7 @@ PREPARE_ENV=${SCRIPT_DIR}/prepare_openreward_env.sh
 PREPARE_CONTROLLER_ENV=${SCRIPT_DIR}/prepare_openreward_controller_env.sh
 NODE_SERVICES=${SCRIPT_DIR}/openreward-node-services.sh
 SERVICE_CLEANUP_RECEIPT=${SCRIPT_DIR}/openreward-service-cleanup-receipt.py
+SERVICE_SHUTDOWN_REQUEST=${SCRIPT_DIR}/openreward-service-shutdown-request.py
 CONTROLLER_RUNTIME_RECEIPT_HELPER=${SCRIPT_DIR}/openreward-controller-runtime-receipt.py
 SWE_CLEANUP=${SCRIPT_DIR}/cleanup_swe_singularity_sessions.py
 NODE_LOCAL_INIT=${SCRIPT_DIR}/openreward-node-local-init.py
@@ -101,7 +102,8 @@ RUNTIME=$(command -v "${RUNTIME}")
     die "node-local initializer Python must be an absolute executable: ${NODE_LOCAL_INIT_PYTHON}"
 for required_file in \
     "${PREPARE_ENV}" "${PREPARE_CONTROLLER_ENV}" "${NODE_SERVICES}" \
-    "${SERVICE_CLEANUP_RECEIPT}" "${CONTROLLER_RUNTIME_RECEIPT_HELPER}" "${SWE_CLEANUP}" \
+    "${SERVICE_CLEANUP_RECEIPT}" "${SERVICE_SHUTDOWN_REQUEST}" \
+    "${CONTROLLER_RUNTIME_RECEIPT_HELPER}" "${SWE_CLEANUP}" \
     "${NODE_LOCAL_INIT}" "${UPDATE_GATE}"; do
     [[ -x "${required_file}" ]] || die "required helper is not executable: ${required_file}"
 done
@@ -274,13 +276,17 @@ unset service_index allocation_index
 service_node_csv=$(IFS=,; printf '%s' "${SERVICE_NODES[*]}")
 echo "[pbs-openreward] environment service nodes count=${SERVICE_NODE_COUNT} ordered_tail=${service_node_csv}"
 SERVICE_CLEANUP_RECEIPT_DIR=${JOB_STATE_DIR}/node-services-cleanup
+SERVICE_SHUTDOWN_REQUEST_DIR=${JOB_STATE_DIR}/node-services-shutdown-request
 CONTROLLER_RUNTIME_RECEIPT=${JOB_STATE_DIR}/controller-runtime.json
 [[ ! -e "${CONTROLLER_RUNTIME_RECEIPT}" && ! -L "${CONTROLLER_RUNTIME_RECEIPT}" ]] || \
     die "refusing stale controller runtime receipt"
 [[ ! -e "${SERVICE_CLEANUP_RECEIPT_DIR}" && ! -L "${SERVICE_CLEANUP_RECEIPT_DIR}" ]] || \
     die "refusing stale node-service cleanup receipt directory"
+[[ ! -e "${SERVICE_SHUTDOWN_REQUEST_DIR}" && ! -L "${SERVICE_SHUTDOWN_REQUEST_DIR}" ]] || \
+    die "refusing stale node-service shutdown request directory"
 mkdir "${SERVICE_CLEANUP_RECEIPT_DIR}"
-chmod 0700 "${SERVICE_CLEANUP_RECEIPT_DIR}"
+mkdir "${SERVICE_SHUTDOWN_REQUEST_DIR}"
+chmod 0700 "${SERVICE_CLEANUP_RECEIPT_DIR}" "${SERVICE_SHUTDOWN_REQUEST_DIR}"
 
 # `${PLATOON_NODE_LOCAL_ROOT}` is the same allocation-specific spelling on
 # every ABCI host, but /local is a different filesystem on each host.  Create
@@ -629,6 +635,7 @@ service_pids=()
 service_hosts=()
 service_vnode_indices=()
 service_receipts=()
+service_shutdown_requests=()
 health_pid=
 gate_pid=
 controller_pid=
@@ -652,11 +659,56 @@ terminate_pid() {
 }
 
 service_cleanup_failed=0
+service_shutdown_mode=error
+publish_all_service_shutdown_requests() {
+    local index pid host request receipt request_pid
+    local -a request_pids=()
+    local -a request_logs=()
+    for index in "${!service_pids[@]}"; do
+        pid=${service_pids[index]}
+        host=${service_hosts[index]}
+        request=${service_shutdown_requests[index]}
+        receipt=${service_receipts[index]}
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            echo "[pbs-openreward] ERROR: node-service task died before natural shutdown request on ${host}" >&2
+            return 1
+        fi
+        if [[ -e "${request}" || -L "${request}" ]]; then
+            echo "[pbs-openreward] ERROR: stale node-service shutdown request for ${host}" >&2
+            return 1
+        fi
+        if [[ -e "${receipt}" || -L "${receipt}" ]]; then
+            echo "[pbs-openreward] ERROR: node-service receipt preceded natural shutdown request on ${host}" >&2
+            return 1
+        fi
+    done
+    for index in "${!service_pids[@]}"; do
+        host=${service_hosts[index]}
+        request=${service_shutdown_requests[index]}
+        request_logs[index]=${LOG_DIR}/services-shutdown-request-${host//[^A-Za-z0-9_.-]/_}.log
+        /usr/bin/timeout --signal=TERM --kill-after=5 30 \
+            "${CONTROLLER_PYTHON_BASE}" -I "${SERVICE_SHUTDOWN_REQUEST}" publish \
+            --request "${request}" --pbs-job-id "${PBS_JOBID}" --host "${host}" \
+            >"${request_logs[index]}" 2>&1 &
+        request_pids[index]=$!
+    done
+    for index in "${!request_pids[@]}"; do
+        request_pid=${request_pids[index]}
+        if ! wait "${request_pid}"; then
+            echo "[pbs-openreward] ERROR: create-only shutdown request publication failed on ${service_hosts[index]}" >&2
+            tail -n 40 "${request_logs[index]}" >&2 || true
+            service_cleanup_failed=1
+        fi
+    done
+    ((service_cleanup_failed == 0)) || return 1
+    service_shutdown_mode=natural
+    echo "[pbs-openreward] published exact natural shutdown requests for all ${#service_pids[@]} node-service supervisors"
+}
+
 request_all_service_shutdowns() {
     local index pid host receipt
-    # Validate the whole generation before sending the first signal. PBS pbsdsh
-    # exits locally as soon as it forwards TERM, so only the remote receipts
-    # below can attest completion of the compute-node traps.
+    # Error/signal fallback only. Natural success uses the request handshake so
+    # each original pbsdsh remains connected until it reaps the remote obit.
     for index in "${!service_pids[@]}"; do
         pid=${service_pids[index]}
         host=${service_hosts[index]}
@@ -723,6 +775,7 @@ audit_service_shutdown() {
 
 cleanup() {
     local status=$? index pid wait_status service_shutdown_deadline receipts_ready audit_pid
+    local expected_pbsdsh_status expected_primary_status kill_deadline
     local -a service_audit_pids=()
     trap - EXIT INT TERM
     terminate_pid "${gate_pid}" 5
@@ -744,7 +797,21 @@ cleanup() {
         echo "[pbs-openreward] ERROR: PBS role cleanup was not durably confirmed" >&2
         status=1
     fi
-    request_all_service_shutdowns
+    if [[ "${status}" -eq 0 ]]; then
+        if ! publish_all_service_shutdown_requests; then
+            status=1
+            request_all_service_shutdowns
+        fi
+    else
+        request_all_service_shutdowns
+    fi
+    if [[ "${service_shutdown_mode}" == natural ]]; then
+        expected_pbsdsh_status=0
+        expected_primary_status=0
+    else
+        expected_pbsdsh_status=1
+        expected_primary_status=143
+    fi
     service_shutdown_deadline=$((SECONDS + 180))
     for index in "${!service_pids[@]}"; do
         pid=${service_pids[index]}
@@ -755,11 +822,18 @@ cleanup() {
             echo "[pbs-openreward] ERROR: local pbsdsh required forced KILL for ${service_hosts[index]}" >&2
             kill -KILL "${pid}" 2>/dev/null || true
             service_cleanup_failed=1
+            kill_deadline=$((SECONDS + 10))
+            while kill -0 "${pid}" 2>/dev/null && ((SECONDS < kill_deadline)); do
+                sleep 0.2
+            done
         fi
-        wait_status=0
-        wait "${pid}" 2>/dev/null || wait_status=$?
-        if [[ "${wait_status}" -ne 1 ]]; then
-            echo "[pbs-openreward] ERROR: pbsdsh cleanup status was ${wait_status}, expected 1 on ${service_hosts[index]}" >&2
+        wait_status=unreaped
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            wait_status=0
+            wait "${pid}" 2>/dev/null || wait_status=$?
+        fi
+        if [[ "${wait_status}" != "${expected_pbsdsh_status}" ]]; then
+            echo "[pbs-openreward] ERROR: pbsdsh cleanup status was ${wait_status}, expected ${expected_pbsdsh_status} on ${service_hosts[index]}" >&2
             service_cleanup_failed=1
         fi
     done
@@ -775,7 +849,7 @@ cleanup() {
     for index in "${!service_receipts[@]}"; do
         if ! "${CONTROLLER_PYTHON_BASE}" -I "${SERVICE_CLEANUP_RECEIPT}" verify \
             --receipt "${service_receipts[index]}" --pbs-job-id "${PBS_JOBID}" \
-            --host "${service_hosts[index]}" --primary-status 143; then
+            --host "${service_hosts[index]}" --primary-status "${expected_primary_status}"; then
             echo "[pbs-openreward] ERROR: node-service cleanup receipt failed on ${service_hosts[index]}" >&2
             service_cleanup_failed=1
         fi
@@ -822,8 +896,11 @@ echo "[pbs-openreward] starting one Toolathlon and one SWE service on ${SERVICE_
 while IFS=$'\t' read -r host vnode_index; do
     safe_host=${host//[^A-Za-z0-9_.-]/_}
     service_receipt=${SERVICE_CLEANUP_RECEIPT_DIR}/${host}.json
+    service_shutdown_request=${SERVICE_SHUTDOWN_REQUEST_DIR}/${host}.json
     [[ ! -e "${service_receipt}" && ! -L "${service_receipt}" ]] || \
         die "refusing stale node-service cleanup receipt for ${host}"
+    [[ ! -e "${service_shutdown_request}" && ! -L "${service_shutdown_request}" ]] || \
+        die "refusing stale node-service shutdown request for ${host}"
     env \
         -u WANDB_API_KEY \
         -u OPENAI_API_KEY \
@@ -838,6 +915,7 @@ while IFS=$'\t' read -r host vnode_index; do
         "${PBSDSH}" -n "${vnode_index}" -- /usr/bin/env \
         "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
         "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${service_receipt}" \
+        "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${service_shutdown_request}" \
         "PLATOON_NODE_SERVICES_EXPECTED_HOST=${host}" \
         "PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}" \
         "${NODE_SERVICES}" \
@@ -846,11 +924,13 @@ while IFS=$'\t' read -r host vnode_index; do
     service_hosts+=("${host}")
     service_vnode_indices+=("${vnode_index}")
     service_receipts+=("${service_receipt}")
+    service_shutdown_requests+=("${service_shutdown_request}")
 done <"${SERVICE_NODE_MAP}"
 [[ "${#service_pids[@]}" -eq "${SERVICE_NODE_COUNT}" &&
     "${#service_hosts[@]}" -eq "${SERVICE_NODE_COUNT}" &&
     "${#service_vnode_indices[@]}" -eq "${SERVICE_NODE_COUNT}" &&
-    "${#service_receipts[@]}" -eq "${SERVICE_NODE_COUNT}" ]] || \
+    "${#service_receipts[@]}" -eq "${SERVICE_NODE_COUNT}" &&
+    "${#service_shutdown_requests[@]}" -eq "${SERVICE_NODE_COUNT}" ]] || \
     die "launched ${#service_pids[@]} service tasks for ${SERVICE_NODE_COUNT} service nodes"
 
 endpoint_healthy() {

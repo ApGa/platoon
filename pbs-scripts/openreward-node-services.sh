@@ -34,6 +34,7 @@ TOOLATHLON_STAGER=${PLATOON_REPO_ROOT}/plugins/openreward/scripts/openreward-too
 SWE_HELPER=${SCRIPT_DIR}/openreward-swe-singularity-server.sh
 SWE_CLEANUP=${SCRIPT_DIR}/cleanup_swe_singularity_sessions.py
 CLEANUP_RECEIPT_HELPER=${SCRIPT_DIR}/openreward-service-cleanup-receipt.py
+SHUTDOWN_REQUEST_HELPER=${SCRIPT_DIR}/openreward-service-shutdown-request.py
 RUNTIME=${PLATOON_CONTAINER_RUNTIME:-singularity}
 MKFS_EXT3=${PLATOON_MKFS_EXT3_BIN:-/usr/sbin/mkfs.ext3}
 TOOLATHLON_PORT=${OPENREWARD_PORT:-8082}
@@ -54,6 +55,7 @@ STAGE_TOOLATHLON_SIF=${PLATOON_STAGE_TOOLATHLON_SIF:-1}
 STAGE_TRAINING_SIF=${PLATOON_STAGE_TRAINING_SIF:-0}
 TRAINING_SIF_SHA256=${PLATOON_TRAINING_SIF_SHA256:-}
 CLEANUP_RECEIPT=${PLATOON_NODE_SERVICES_CLEANUP_RECEIPT:-}
+SHUTDOWN_REQUEST=${PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST:-}
 EXPECTED_HOST=${PLATOON_NODE_SERVICES_EXPECTED_HOST:-}
 EXPECTED_JOB_ID=${PLATOON_NODE_SERVICES_EXPECTED_JOB_ID:-}
 
@@ -83,13 +85,18 @@ if [[ "${STAGE_TRAINING_SIF}" == 1 ]]; then
 fi
 [[ "${TOOLATHLON_OVERLAY_SIZE_GB}" =~ ^[1-9][0-9]*$ ]] || \
     die "OPENREWARD_TOOLATHLON_OVERLAY_SIZE_GB must be a positive integer"
-if [[ -n "${CLEANUP_RECEIPT}" ]]; then
+if [[ -n "${CLEANUP_RECEIPT}" || -n "${SHUTDOWN_REQUEST}" ]]; then
+    [[ -n "${CLEANUP_RECEIPT}" && -n "${SHUTDOWN_REQUEST}" ]] || \
+        die "cleanup receipt and shutdown request must be configured together"
     [[ -x "${CLEANUP_RECEIPT_HELPER}" ]] || die "service cleanup receipt helper is missing"
+    [[ -x "${SHUTDOWN_REQUEST_HELPER}" ]] || die "service shutdown request helper is missing"
     [[ "${EXPECTED_JOB_ID}" == "${PBS_JOBID}" ]] || die "service cleanup receipt job mismatch"
     [[ -n "${EXPECTED_HOST}" && "${EXPECTED_HOST%%.*}" == "$(hostname -s)" ]] || \
         die "service cleanup receipt host mismatch"
     [[ "${CLEANUP_RECEIPT}" == /* && ! -e "${CLEANUP_RECEIPT}" && ! -L "${CLEANUP_RECEIPT}" ]] || \
         die "service cleanup receipt path is stale or indirect"
+    [[ "${SHUTDOWN_REQUEST}" == /* && ! -e "${SHUTDOWN_REQUEST}" && ! -L "${SHUTDOWN_REQUEST}" ]] || \
+        die "service shutdown request path is stale or indirect"
 fi
 
 actual_toolathlon_sha=$(sha256sum "${OPENREWARD_TOOLATHLON_SIF}" | awk '{print $1}')
@@ -171,39 +178,76 @@ rmdir "${overlay_layout}/upper" "${overlay_layout}/work" "${overlay_layout}"
 toolathlon_pid=
 swe_pid=
 cleanup_started=0
+natural_shutdown_requested=0
 
 cleanup() {
     local primary_status=${1:-$?}
     local status=${primary_status}
-    local pid deadline forced_kill=0 cleanup_ok=1 janitor_log
+    local index name pid deadline kill_deadline wait_status elapsed child_forced_kill
+    local forced_kill=0 cleanup_ok=1 janitor_log cleanup_begin
+    local -a child_names=(toolathlon swe-rebench)
+    local -a child_pids=("${toolathlon_pid}" "${swe_pid}")
     if ((cleanup_started)); then
         return
     fi
     cleanup_started=1
     trap - EXIT INT TERM
-    for pid in "${toolathlon_pid}" "${swe_pid}"; do
-        if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
-            echo "[node-services] ERROR: a service child was already dead before requested cleanup" >&2
-            cleanup_ok=0
-            status=1
-        elif ! kill -TERM "${pid}" 2>/dev/null; then
-            echo "[node-services] ERROR: could not request service-child cleanup" >&2
+    cleanup_begin=${SECONDS}
+    if [[ "${primary_status}" -eq 0 ]]; then
+        if ((natural_shutdown_requested != 1)) || \
+            ! /usr/bin/python3 -I "${SHUTDOWN_REQUEST_HELPER}" verify \
+                --request "${SHUTDOWN_REQUEST}" \
+                --pbs-job-id "${EXPECTED_JOB_ID}" --host "${EXPECTED_HOST}"; then
+            echo "[node-services] ERROR: natural cleanup lacks an exact verified shutdown request" >&2
             cleanup_ok=0
             status=1
         fi
+    fi
+    for index in "${!child_pids[@]}"; do
+        name=${child_names[index]}
+        pid=${child_pids[index]}
+        if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+            echo "[node-services] ERROR: service child ${name} pid=${pid:-absent} was already dead before requested cleanup" >&2
+            cleanup_ok=0
+            status=1
+        elif ! kill -TERM "${pid}" 2>/dev/null; then
+            echo "[node-services] ERROR: could not send TERM to service child ${name} pid=${pid}" >&2
+            cleanup_ok=0
+            status=1
+        else
+            echo "[node-services] cleanup-child name=${name} pid=${pid} TERM=sent elapsed_seconds=$((SECONDS - cleanup_begin))"
+        fi
     done
     deadline=$((SECONDS + 90))
-    for pid in "${toolathlon_pid}" "${swe_pid}"; do
+    for index in "${!child_pids[@]}"; do
+        name=${child_names[index]}
+        pid=${child_pids[index]}
+        child_forced_kill=0
         while [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null && ((SECONDS < deadline)); do
             sleep 0.2
         done
         if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
             kill -KILL "${pid}" 2>/dev/null || true
             forced_kill=1
+            child_forced_kill=1
+            cleanup_ok=0
+            status=1
+            kill_deadline=$((SECONDS + 10))
+            while kill -0 "${pid}" 2>/dev/null && ((SECONDS < kill_deadline)); do
+                sleep 0.2
+            done
+        fi
+        wait_status=unreaped
+        if [[ -n "${pid}" ]] && ! kill -0 "${pid}" 2>/dev/null; then
+            wait_status=0
+            wait "${pid}" 2>/dev/null || wait_status=$?
+        elif [[ -n "${pid}" ]]; then
+            echo "[node-services] ERROR: service child ${name} pid=${pid} remained live after bounded cleanup" >&2
             cleanup_ok=0
             status=1
         fi
-        [[ -z "${pid}" ]] || wait "${pid}" 2>/dev/null || true
+        elapsed=$((SECONDS - cleanup_begin))
+        echo "[node-services] cleanup-child name=${name} pid=${pid:-absent} TERM=requested elapsed_seconds=${elapsed} exit_status=${wait_status} forced_KILL=${child_forced_kill}"
     done
     if ! /usr/bin/python3 -I "${CLEANUP_RECEIPT_HELPER}" assert-tcp-closed \
         --host 127.0.0.1 --port "${TOOLATHLON_PORT}" --port "${SWE_PORT}" --timeout-seconds 2; then
@@ -280,6 +324,17 @@ swe_pid=$!
 # A long-lived pbsdsh connection owns this supervisor.  If either pool dies,
 # tear down its sibling and let the controller health monitor fail the job.
 while kill -0 "${toolathlon_pid}" 2>/dev/null && kill -0 "${swe_pid}" 2>/dev/null; do
+    if [[ -e "${SHUTDOWN_REQUEST}" || -L "${SHUTDOWN_REQUEST}" ]]; then
+        if ! /usr/bin/python3 -I "${SHUTDOWN_REQUEST_HELPER}" verify \
+            --request "${SHUTDOWN_REQUEST}" \
+            --pbs-job-id "${EXPECTED_JOB_ID}" --host "${EXPECTED_HOST}"; then
+            echo "[node-services] ERROR: shutdown request failed exact job/host verification" >&2
+            exit 2
+        fi
+        natural_shutdown_requested=1
+        echo "[node-services] verified natural shutdown request job=${EXPECTED_JOB_ID} host=${EXPECTED_HOST}"
+        exit 0
+    fi
     sleep 2
 done
 

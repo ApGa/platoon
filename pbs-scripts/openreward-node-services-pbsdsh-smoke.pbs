@@ -47,6 +47,7 @@ readonly RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
 readonly PREPARE_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_env.sh
 readonly NODE_SERVICES=${REPO_ROOT}/pbs-scripts/openreward-node-services.sh
 readonly SERVICE_RECEIPT_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-cleanup-receipt.py
+readonly SHUTDOWN_REQUEST_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-shutdown-request.py
 readonly PBSDSH=${PLATOON_PBSDSH_BIN:-/opt/pbs/bin/pbsdsh}
 readonly JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
 readonly SMOKE_ROOT=${PBS_LOCALDIR}/openreward-node-services-smoke
@@ -56,6 +57,7 @@ readonly DISCOVERY_LOG=${LOG_ROOT}/controller-pool-discovery.log
 readonly SESSION_AUDIT_LOG=${LOG_ROOT}/swe-session-audit.log
 readonly RESULT=${LOG_ROOT}/RESULT
 readonly SERVICE_RECEIPT=${LOG_ROOT}/node-services-cleanup.json
+readonly SERVICE_REQUEST=${LOG_ROOT}/node-services-shutdown-request.json
 readonly HOST=$(awk 'NF {print $1; exit}' "${PBS_NODEFILE}")
 readonly SWE_CLEANUP=${REPO_ROOT}/pbs-scripts/cleanup_swe_singularity_sessions.py
 readonly UV_BIN=/home/aci18912it/.local/bin/uv
@@ -67,7 +69,8 @@ die() {
 
 [[ -n "${PBS_JOBID:-}" && -d "${PBS_LOCALDIR:-}" ]] || die "PBS allocation is unavailable"
 [[ -x "${PBSDSH}" ]] || die "pbsdsh is unavailable: ${PBSDSH}"
-[[ -x "${NODE_SERVICES}" && -x "${SERVICE_RECEIPT_HELPER}" ]] || \
+[[ -x "${NODE_SERVICES}" && -x "${SERVICE_RECEIPT_HELPER}" && \
+    -x "${SHUTDOWN_REQUEST_HELPER}" ]] || \
     die "node-service cleanup helpers are unavailable"
 [[ -n "${HOST}" ]] || die "PBS_NODEFILE has no host"
 [[ -x "${SWE_CLEANUP}" ]] || die "SWE session cleanup helper is unavailable"
@@ -150,23 +153,45 @@ export OPENREWARD_SWE_REBENCH_PORT=8084
 
 service_pid=
 service_teardown_done=0
+service_shutdown_requested=0
+request_service_shutdown() {
+    [[ -n "${service_pid}" ]] || return 1
+    kill -0 "${service_pid}" 2>/dev/null || return 1
+    [[ ! -e "${SERVICE_REQUEST}" && ! -L "${SERVICE_REQUEST}" && \
+        ! -e "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] || return 1
+    "${CONTROLLER_PYTHON}" -I "${SHUTDOWN_REQUEST_HELPER}" publish \
+        --request "${SERVICE_REQUEST}" --pbs-job-id "${PBS_JOBID}" --host "${HOST}" || return 1
+    service_shutdown_requested=1
+}
 teardown_service() {
-    local deadline wait_status=0
+    local deadline kill_deadline wait_status=0 expected_pbsdsh_status expected_primary_status
     ((service_teardown_done)) && return 0
     service_teardown_done=1
     [[ -n "${service_pid}" ]] || return 0
-    kill -0 "${service_pid}" 2>/dev/null || return 1
-    kill -TERM "${service_pid}" 2>/dev/null || return 1
+    if ((service_shutdown_requested)); then
+        expected_pbsdsh_status=0
+        expected_primary_status=0
+    else
+        expected_pbsdsh_status=1
+        expected_primary_status=143
+        kill -0 "${service_pid}" 2>/dev/null || return 1
+        kill -TERM "${service_pid}" 2>/dev/null || return 1
+    fi
     deadline=$((SECONDS + 180))
     while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.2; done
-    kill -0 "${service_pid}" 2>/dev/null && return 1
+    if kill -0 "${service_pid}" 2>/dev/null; then
+        kill -KILL "${service_pid}" 2>/dev/null || true
+        kill_deadline=$((SECONDS + 10))
+        while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < kill_deadline)); do sleep 0.2; done
+        return 1
+    fi
     wait "${service_pid}" 2>/dev/null || wait_status=$?
-    [[ "${wait_status}" -eq 1 ]] || return 1
+    [[ "${wait_status}" -eq "${expected_pbsdsh_status}" ]] || return 1
     service_pid=
     while [[ ! -f "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] && ((SECONDS < deadline)); do sleep 0.2; done
     "${CONTROLLER_PYTHON}" -I "${SERVICE_RECEIPT_HELPER}" verify \
         --receipt "${SERVICE_RECEIPT}" --pbs-job-id "${PBS_JOBID}" \
-        --host "${HOST}" --primary-status 143 || return 1
+        --host "${HOST}" --primary-status "${expected_primary_status}" || return 1
     "${CONTROLLER_PYTHON}" -I "${SERVICE_RECEIPT_HELPER}" assert-tcp-closed \
         --host "${HOST}" --port "${OPENREWARD_PORT}" --port "${OPENREWARD_SWE_REBENCH_PORT}" \
         --timeout-seconds 2 --deadline-seconds 20 || return 1
@@ -200,6 +225,7 @@ env \
     "${PBSDSH}" -n 0 -- /usr/bin/env \
     "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
     "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${SERVICE_RECEIPT}" \
+    "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${SERVICE_REQUEST}" \
     "PLATOON_NODE_SERVICES_EXPECTED_HOST=${HOST}" \
     "PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}" "${NODE_SERVICES}" \
     >"${SERVICE_LOG}" 2>&1 &
@@ -302,7 +328,8 @@ swe_rebench_task_count=$(sed -n 's/^swe_rebench_task_count=//p' "${DISCOVERY_LOG
 [[ "${swe_rebench_task_count}" =~ ^[1-9][0-9]*$ ]] || die "invalid SWE-rebench task count"
 echo "[node-service-smoke] controller named-pool catalog discovery passed"
 
-teardown_service || die "node-service cleanup attestation failed"
+request_service_shutdown || die "natural node-service shutdown request publication failed"
+teardown_service || die "node-service cleanup handshake attestation failed"
 
 # A stopped helper must leave neither endpoint reachable.  PBS allocation
 # teardown remains the final process-isolation backstop.

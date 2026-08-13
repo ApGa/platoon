@@ -39,6 +39,7 @@ def test_gate2_validates_release_only_assets_before_source_resolution():
     assert python_probe in source
     assert "ast.parse(path.read_text(), filename=str(path))" in source
     assert "openreward-service-cleanup-receipt.py" in source
+    assert "openreward-service-shutdown-request.py" in source
     assert "openreward-controller-runtime-receipt.py" in source
     assert "openreward_v8_ptc_e2e.py" in source
     assert source.index(release) < source.index(bash_loop) < source.index(python_probe) < source.index(resolve)
@@ -56,6 +57,7 @@ def test_gate2_archive_requires_v8_provenance_and_both_fresh_leaf_configs():
     assert "for host_only_asset in \\\n" in source
     assert "pbs-scripts/openreward_v8_ptc_e2e.py \\\n" in source
     assert "pbs-scripts/openreward-service-cleanup-receipt.py" in source
+    assert "pbs-scripts/openreward-service-shutdown-request.py" in source
     assert "pbs-scripts/openreward-controller-runtime-receipt.py" in source
     assert "    containers/swe-rebench-538b5c5-py311.lock.txt \\\n" in source
     assert "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v8.yaml" in source

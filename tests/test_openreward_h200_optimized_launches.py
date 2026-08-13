@@ -838,13 +838,13 @@ def test_h200_v8_wrapper_pins_isolated_release_image_and_fresh_long_run(case: di
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r2-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py" in wrapper
     assert "ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v8-abci.env" in wrapper
     assert "export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" in wrapper
-    assert 'status --porcelain=v1 --untracked-files=all' in wrapper
+    assert "status --porcelain=v1 --untracked-files=all" in wrapper
     assert '"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"' in wrapper
     assert f"#PBS -l select={case['nodes']}:mpiprocs=8" in wrapper
     assert "#PBS -l walltime=168:00:00" in wrapper

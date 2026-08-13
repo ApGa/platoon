@@ -37,7 +37,7 @@ def _expected(job_id: str, host: str, primary_status: int) -> dict[str, Any]:
     if not job_id or not host or not 0 <= primary_status <= 255:
         raise RuntimeError("cleanup receipt identity or primary status is invalid")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "passed",
         "pbs_job_id": job_id,
         "host": host,
@@ -46,6 +46,7 @@ def _expected(job_id: str, host: str, primary_status: int) -> dict[str, Any]:
         "forced_kill": False,
         "endpoints_stopped": True,
         "swe_sessions_clean": True,
+        "shutdown_request_verified": primary_status == 0,
     }
 
 

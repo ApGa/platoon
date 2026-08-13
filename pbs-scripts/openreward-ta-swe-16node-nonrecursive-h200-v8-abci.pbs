@@ -18,8 +18,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r2-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
 CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v8.yaml
 COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh

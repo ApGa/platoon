@@ -236,7 +236,7 @@ def test_bench28_wrapper_waits_for_cleanup_then_verifies_strong_step27_receipt(c
 
     assert "#PBS -l select=16:mpiprocs=8" in source
     assert "#PBS -l walltime=168:00:00" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0" in source
     assert f"CONFIG=${{REPO_ROOT}}/plugins/openreward/platoon/openreward/configs/areal/{case['config']}.yaml" in source
     assert f"EXPERIMENT={case['experiment']}" in source
     assert f"TRIAL={case['trial']}" in source

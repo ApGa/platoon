@@ -67,7 +67,7 @@ def _git(path: Path, *args: str) -> str:
 def _require_release_gate() -> None:
     if os.environ.get("PLATOON_V8_RELEASE_GATE") != "1":
         pytest.skip("materialized external checkout validation is release-gate only")
-    if REPO_ROOT != Path("/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0"):
+    if REPO_ROOT != Path("/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0"):
         pytest.fail("PLATOON_V8_RELEASE_GATE requires the canonical release root")
 
 
@@ -218,7 +218,7 @@ def test_v8_env_and_launchers_pin_exact_image_labels_fail_closed() -> None:
     services = (PBS_ROOT / "openreward-node-services.sh").read_text()
 
     assert "set +x" in env
-    assert "PLATOON_REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0" in env
+    assert "PLATOON_REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0" in env
     assert "openreward-toolathlon-18e62c0d-c1e60b36.sif" in env
     for expected in (
         "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267",
@@ -240,8 +240,8 @@ def test_v8_env_and_launchers_pin_exact_image_labels_fail_closed() -> None:
 def test_v8_release_verifier_is_fail_closed_and_manifest_driven() -> None:
     verifier = (PBS_ROOT / "verify_openreward_v8_release.py").read_text()
 
-    assert 'RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0")' in verifier
-    assert 'RELEASE_REF = "refs/tags/abci-v8-376d1b9-18e62c0"' in verifier
+    assert 'RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0")' in verifier
+    assert 'RELEASE_REF = "refs/tags/abci-v8r2-376d1b9-18e62c0"' in verifier
     assert '"status", "--porcelain=v1", "--untracked-files=all"' in verifier
     assert "release HEAD does not match its pinned tag" in verifier
     assert "release component revisions mismatch" in verifier

@@ -127,16 +127,19 @@ def test_gate5_wrapper_waits_for_common_cleanup_before_verifying_receipt() -> No
     assert "unset OPENREWARD_GATE_MARKER_TO_PUBLISH" in wrapper
     assert "OPENREWARD_GATE5_ONE_UPDATE_OK" in wrapper
 
-    # The common lifecycle's EXIT trap stops controller/monitor, fans TERM out
-    # to every node service, then requires exact remote cleanup receipts before
-    # it can return to Gate 5.
+    # The common lifecycle's EXIT trap stops controller/monitor, publishes
+    # exact requests on natural success, and requires the original pbsdsh tasks
+    # plus exact remote cleanup receipts before it can return to Gate 5.
     assert "trap cleanup EXIT" in common
     assert 'terminate_pid "${controller_pid}" 75' in common
     assert 'terminate_pid "${health_pid}" 5' in common
     assert "request_all_service_shutdowns" in common
+    assert "publish_all_service_shutdown_requests" in common
     assert 'for index in "${!service_pids[@]}"' in common
     assert "service_shutdown_deadline=$((SECONDS + 180))" in common
-    assert "--primary-status 143" in common
+    assert "expected_pbsdsh_status=0" in common
+    assert "expected_primary_status=0" in common
+    assert "expected_primary_status=143" in common
     assert "service_cleanup_failed" in common
 
 

@@ -23,12 +23,13 @@ die() {
     exit 2
 }
 
-readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r2-376d1b9-18e62c0
 readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v8-abci.env
 readonly RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
 readonly PREPARE_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_env.sh
 readonly NODE_SERVICES=${REPO_ROOT}/pbs-scripts/openreward-node-services.sh
 readonly SERVICE_RECEIPT_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-cleanup-receipt.py
+readonly SHUTDOWN_REQUEST_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-shutdown-request.py
 readonly DRIVER=${REPO_ROOT}/pbs-scripts/openreward_v8_ptc_e2e.py
 readonly PBSDSH=/opt/pbs/bin/pbsdsh
 readonly UV_BIN=/home/aci18912it/.local/bin/uv
@@ -38,12 +39,14 @@ readonly DRIVER_STATE=${RESULT_ROOT}/driver-state
 readonly SERVICE_LOG=${RESULT_ROOT}/node-services.log
 readonly RESULT=${RESULT_ROOT}/RESULT
 readonly SERVICE_RECEIPT=${RESULT_ROOT}/node-services-cleanup.json
+readonly SERVICE_REQUEST=${RESULT_ROOT}/node-services-shutdown-request.json
 readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/${PBS_JOBID}
 
 [[ -n "${PBS_JOBID:-}" && -r "${PBS_NODEFILE:-}" ]] || die "PBS allocation metadata is absent"
 [[ -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${PREPARE_ENV}" ]] || \
     die "v8 release gate assets are incomplete"
-[[ -x "${NODE_SERVICES}" && -x "${SERVICE_RECEIPT_HELPER}" && -r "${DRIVER}" && \
+[[ -x "${NODE_SERVICES}" && -x "${SERVICE_RECEIPT_HELPER}" && \
+    -x "${SHUTDOWN_REQUEST_HELPER}" && -r "${DRIVER}" && \
     -x "${PBSDSH}" && -x "${UV_BIN}" ]] || \
     die "v8 smoke assets or PBS launcher are unavailable"
 [[ ! -e "${RESULT_ROOT}" && ! -L "${RESULT_ROOT}" ]] || \
@@ -154,23 +157,45 @@ export OPENREWARD_SWE_REBENCH_PORT=8084
 
 service_pid=
 service_teardown_done=0
+service_shutdown_requested=0
+request_service_shutdown() {
+    [[ -n "${service_pid}" ]] || return 1
+    kill -0 "${service_pid}" 2>/dev/null || return 1
+    [[ ! -e "${SERVICE_REQUEST}" && ! -L "${SERVICE_REQUEST}" && \
+        ! -e "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] || return 1
+    "${controller_python}" -I "${SHUTDOWN_REQUEST_HELPER}" publish \
+        --request "${SERVICE_REQUEST}" --pbs-job-id "${PBS_JOBID}" --host "${HOST}" || return 1
+    service_shutdown_requested=1
+}
 teardown_service() {
-    local deadline wait_status=0
+    local deadline kill_deadline wait_status=0 expected_pbsdsh_status expected_primary_status
     ((service_teardown_done)) && return 0
     service_teardown_done=1
     [[ -n "${service_pid}" ]] || return 0
-    kill -0 "${service_pid}" 2>/dev/null || return 1
-    kill -TERM "${service_pid}" 2>/dev/null || return 1
+    if ((service_shutdown_requested)); then
+        expected_pbsdsh_status=0
+        expected_primary_status=0
+    else
+        expected_pbsdsh_status=1
+        expected_primary_status=143
+        kill -0 "${service_pid}" 2>/dev/null || return 1
+        kill -TERM "${service_pid}" 2>/dev/null || return 1
+    fi
     deadline=$((SECONDS + 180))
     while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.2; done
-    kill -0 "${service_pid}" 2>/dev/null && return 1
+    if kill -0 "${service_pid}" 2>/dev/null; then
+        kill -KILL "${service_pid}" 2>/dev/null || true
+        kill_deadline=$((SECONDS + 10))
+        while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < kill_deadline)); do sleep 0.2; done
+        return 1
+    fi
     wait "${service_pid}" 2>/dev/null || wait_status=$?
-    [[ "${wait_status}" -eq 1 ]] || return 1
+    [[ "${wait_status}" -eq "${expected_pbsdsh_status}" ]] || return 1
     service_pid=
     while [[ ! -f "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] && ((SECONDS < deadline)); do sleep 0.2; done
     "${controller_python}" -I "${SERVICE_RECEIPT_HELPER}" verify \
         --receipt "${SERVICE_RECEIPT}" --pbs-job-id "${PBS_JOBID}" \
-        --host "${HOST}" --primary-status 143 || return 1
+        --host "${HOST}" --primary-status "${expected_primary_status}" || return 1
     "${controller_python}" -I "${SERVICE_RECEIPT_HELPER}" assert-tcp-closed \
         --host "${HOST}" --port 8082 --port 8084 --timeout-seconds 2 --deadline-seconds 20 || return 1
     "${controller_python}" -I "${SERVICE_RECEIPT_HELPER}" assert-empty-swe \
@@ -195,6 +220,7 @@ env \
     "${PBSDSH}" -n 0 -- /usr/bin/env \
     "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
     "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${SERVICE_RECEIPT}" \
+    "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${SERVICE_REQUEST}" \
     "PLATOON_NODE_SERVICES_EXPECTED_HOST=${HOST}" \
     "PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}" "${NODE_SERVICES}" \
     >"${SERVICE_LOG}" 2>&1 &
@@ -275,7 +301,8 @@ kill -0 "${service_pid}" 2>/dev/null || die "node-service helper died after the 
 endpoint_healthy 8082 && endpoint_healthy 8084 || \
     die "an environment endpoint became unhealthy after the PTC driver"
 
-teardown_service || die "production node-service cleanup attestation failed"
+request_service_shutdown || die "natural production service shutdown request failed"
+teardown_service || die "production node-service cleanup handshake attestation failed"
 
 temporary=${RESULT}.partial.$$
 printf 'openreward_v8_ptc_e2e=PASS\npbs_job_id=%s\nsource_sha256=%s\ncontroller_environment_key=%s\ndriver_sha256=%s\nopenhands_revision=%s\ntoolathlon_revision=%s\nptc_mode=orchestration_only\nptc_max_tool_calls=1024\nenvironment_max_tool_calls=8\nconcurrent_telemetry=2,2,2,0\nfollowup_telemetry=1,1,1,0\ntyped_error_kind=nonzero_exit\nservices_stopped=true\n' \
