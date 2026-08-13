@@ -382,6 +382,11 @@ def _tool_call_display(event: Dict[str, Any]) -> tuple[str | None, Any]:
 
 
 def _observation_payload(event: Dict[str, Any]) -> Any:
+    if event.get("kind") == "AgentErrorEvent":
+        error = event.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+
     observation = event.get("observation")
     if not isinstance(observation, dict):
         return None
@@ -507,6 +512,8 @@ def _find_nested_value(value: Any, key: str) -> Any:
 
 
 def _event_has_error(event: Dict[str, Any]) -> bool:
+    if event.get("kind") == "AgentErrorEvent":
+        return True
     payload = _observation_payload(event)
     preview = _observation_preview(event) or ""
     lowered = preview.lower()
@@ -631,6 +638,14 @@ def _openhands_event_summary(event: Dict[str, Any]) -> str:
     condensation_summary = _condensation_summary_text(event)
     if condensation_summary:
         return f"condensation: {_shorten_text(condensation_summary)}"
+
+    if kind == "AgentErrorEvent":
+        error = _observation_preview(event)
+        tool_name = event.get("tool_name")
+        if error and isinstance(tool_name, str) and tool_name:
+            return f"{tool_name} error: {error}"
+        if error:
+            return f"agent error: {error}"
 
     if kind == "ObservationEvent":
         observation = _observation_preview(event)

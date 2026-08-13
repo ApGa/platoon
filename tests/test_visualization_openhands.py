@@ -18,6 +18,7 @@ from platoon.visualization.tui import (  # noqa: E402
     TrajectoryTree,
     _collection_display_label,
     _observation_error_summary,
+    _observation_text,
     _openhands_event_summary,
     _openhands_search_text,
     _openhands_step_summary,
@@ -638,6 +639,31 @@ def test_observation_errors_are_surfaced():
 
     assert "Traceback" in (_observation_error_summary([observation]) or "")
     assert "->" in (_openhands_step_summary(step) or "")
+
+
+def test_agent_error_event_is_rendered_and_surfaced():
+    observation = {
+        "kind": "AgentErrorEvent",
+        "tool_name": "call_tool",
+        "tool_call_id": "call-invalid",
+        "error": "Error validating tool 'call_tool': missing required argument 'name'",
+    }
+    step = {
+        "action_events": {
+            "action_events": [
+                {
+                    "kind": "ActionEvent",
+                    "tool_name": "call_tool",
+                    "tool_call_id": "call-invalid",
+                }
+            ]
+        },
+        "observation_events": [observation],
+    }
+
+    assert "missing required argument" in (_observation_text(observation) or "")
+    assert "missing required argument" in (_observation_error_summary([observation]) or "")
+    assert "missing required argument" in (_openhands_step_summary(step) or "")
 
 
 def test_claim_done_summary_uses_final_reward_payload():

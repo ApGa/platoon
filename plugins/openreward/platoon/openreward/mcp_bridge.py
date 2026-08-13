@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 
 DECLARED_RESOURCES_META_KEY = "openhands.dev/declared_resources"
 TOOL_ROUTING_META_KEY = "openhands.dev/tool-routing"
+TOOL_ERROR_META_KEY = "openhands.dev/tool-error"
 OPENREWARD_TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
 _PR_SET_PDEATHSIG = 1
 _BRIDGE_CLOSE_TIMEOUT_SECONDS = 30
@@ -146,6 +147,35 @@ def _tool_result_to_payload(result: Any) -> dict[str, Any]:
     return payload
 
 
+def _tool_error_message(payload: dict[str, Any]) -> str | None:
+    """Return an environment-declared tool error without parsing prose.
+
+    OpenReward's ``ToolOutput`` currently has no top-level error discriminator.
+    Environments can therefore place a boolean or structured marker in output
+    metadata.  The bridge translates that marker into an MCP error, which makes
+    both ordinary OpenHands calls and calls nested inside PTC expose
+    ``Observation.is_error`` while leaving the underlying OpenReward session
+    alive for a corrective call.
+    """
+
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    marker = metadata.get(TOOL_ERROR_META_KEY)
+    if marker is not True and not isinstance(marker, dict):
+        return None
+
+    if isinstance(marker, dict):
+        message = marker.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return "The environment tool reported an error."
+
+
 def _completion_policy(tools: list[dict[str, Any]]) -> str:
     tool_names = {
         str(tool.get("name"))
@@ -258,6 +288,12 @@ def _make_environment_tool(runtime: "OpenRewardMCPBridge", tool: dict[str, Any])
 
     def _environment_tool(**kwargs) -> str:
         payload = runtime.call_openreward_tool(tool_name, kwargs)
+        error_message = _tool_error_message(payload)
+        if error_message is not None:
+            # FastMCP converts exceptions raised by a tool implementation into
+            # CallToolResult(isError=True).  Do not infer errors from output
+            # prose: only the environment-owned metadata marker reaches here.
+            raise RuntimeError(error_message)
         return json.dumps(payload, default=_json_default)
 
     _environment_tool.__name__ = _slug(tool_name).replace("-", "_")

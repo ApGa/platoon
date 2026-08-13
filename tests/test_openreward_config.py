@@ -549,6 +549,64 @@ def test_openreward_mcp_bridge_preserves_tool_metadata(monkeypatch):
     assert payload["metadata"] == result.metadata
 
 
+def test_openreward_mcp_bridge_translates_declared_tool_error(monkeypatch):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+
+    class Runtime:
+        def call_openreward_tool(self, name, arguments):
+            assert name == "python_execute"
+            assert arguments == {"code": "raise RuntimeError('boom')"}
+            return {
+                "finished": False,
+                "reward": None,
+                "text": "Python exited with status 1.",
+                "metadata": {
+                    bridge_mod.TOOL_ERROR_META_KEY: {
+                        "kind": "nonzero_exit",
+                        "message": "Python exited with status 1.",
+                    }
+                },
+            }
+
+    environment_tool = bridge_mod._make_environment_tool(
+        Runtime(),
+        {
+            "name": "python_execute",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"],
+            },
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="Python exited with status 1"):
+        environment_tool(code="raise RuntimeError('boom')")
+
+
+def test_openreward_mcp_bridge_does_not_infer_error_from_tool_text(monkeypatch):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+
+    class Runtime:
+        def call_openreward_tool(self, _name, _arguments):
+            return {
+                "finished": False,
+                "reward": None,
+                "text": "Error rates decreased by 20%.",
+            }
+
+    environment_tool = bridge_mod._make_environment_tool(
+        Runtime(),
+        {"name": "read_report", "parameters": {"type": "object"}},
+    )
+
+    assert json.loads(environment_tool()) == {
+        "finished": False,
+        "reward": None,
+        "text": "Error rates decreased by 20%.",
+    }
+
+
 def test_openreward_mcp_bridge_completion_policy_uses_available_terminal_tool(
     monkeypatch,
 ):
