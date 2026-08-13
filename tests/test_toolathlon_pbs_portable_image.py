@@ -230,13 +230,16 @@ def test_patch_repair_chain_seals_complete_manifest(tmp_path: Path, monkeypatch:
         asyncio.run(namespace["HealthHarness"].live_health(fake_bridge))
 
 
-def test_atomic_image_publication_is_create_only(tmp_path: Path) -> None:
+def test_cross_directory_image_publication_is_create_only(tmp_path: Path) -> None:
+    local_dir = tmp_path / "node-local"
     output_dir = tmp_path / "images"
+    local_dir.mkdir(mode=0o700)
     output_dir.mkdir(mode=0o700)
-    pending = output_dir / "image.sif.pending"
+    pending = local_dir / "image.sif.pending"
     output = output_dir / "image.sif"
     pending.write_bytes(b"verified-sif")
     pending.chmod(0o550)
+    expected_sha256 = digest(pending)
 
     subprocess.run(
         [
@@ -246,6 +249,8 @@ def test_atomic_image_publication_is_create_only(tmp_path: Path) -> None:
             str(pending),
             "--output",
             str(output),
+            "--expected-sha256",
+            expected_sha256,
         ],
         check=True,
     )
@@ -253,8 +258,9 @@ def test_atomic_image_publication_is_create_only(tmp_path: Path) -> None:
     assert output.read_bytes() == b"verified-sif"
     assert output.stat().st_mode & 0o777 == 0o550
     assert output.stat().st_nlink == 1
-    assert not pending.exists()
-    second = output_dir / "second.pending"
+    assert pending.read_bytes() == b"verified-sif"
+    assert not list(output_dir.glob(".*.publish.*"))
+    second = local_dir / "second.pending"
     second.write_bytes(b"other")
     second.chmod(0o550)
     failed = subprocess.run(
@@ -265,6 +271,8 @@ def test_atomic_image_publication_is_create_only(tmp_path: Path) -> None:
             str(second),
             "--output",
             str(output),
+            "--expected-sha256",
+            digest(second),
         ],
         check=False,
         capture_output=True,
@@ -272,6 +280,40 @@ def test_atomic_image_publication_is_create_only(tmp_path: Path) -> None:
     )
     assert failed.returncode != 0
     assert output.read_bytes() == b"verified-sif"
+    assert second.read_bytes() == b"other"
+
+
+def test_image_publication_rejects_digest_mismatch_and_cleans_staging(tmp_path: Path) -> None:
+    local_dir = tmp_path / "node-local"
+    output_dir = tmp_path / "images"
+    local_dir.mkdir(mode=0o700)
+    output_dir.mkdir(mode=0o700)
+    pending = local_dir / "image.pending"
+    output = output_dir / "image.sif"
+    pending.write_bytes(b"verified")
+    pending.chmod(0o550)
+
+    failed = subprocess.run(
+        [
+            sys.executable,
+            str(IMAGE_PUBLISHER),
+            "--pending",
+            str(pending),
+            "--output",
+            str(output),
+            "--expected-sha256",
+            "0" * 64,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert failed.returncode != 0
+    assert "digest differs" in failed.stderr
+    assert pending.read_bytes() == b"verified"
+    assert not output.exists()
+    assert not list(output_dir.glob(".*.publish.*"))
 
 
 def test_image_publisher_rejects_private_setgid_output_directory(tmp_path: Path) -> None:
@@ -292,9 +334,11 @@ def test_image_publisher_rejects_unsafe_directory_modes(tmp_path: Path, director
 
 
 def test_image_publication_loses_create_race_without_overwrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    local_dir = tmp_path / "node-local"
     output_dir = tmp_path / "images"
+    local_dir.mkdir(mode=0o700)
     output_dir.mkdir(mode=0o700)
-    pending = output_dir / "image.pending"
+    pending = local_dir / "image.pending"
     output = output_dir / "image.sif"
     pending.write_bytes(b"verified")
     pending.chmod(0o550)
@@ -310,12 +354,58 @@ def test_image_publication_loses_create_race_without_overwrite(tmp_path: Path, m
     monkeypatch.setattr(
         sys,
         "argv",
-        ["publisher", "--pending", str(pending), "--output", str(output)],
+        [
+            "publisher",
+            "--pending",
+            str(pending),
+            "--output",
+            str(output),
+            "--expected-sha256",
+            digest(pending),
+        ],
     )
     with pytest.raises(RuntimeError, match="appeared"):
         IMAGE_PUBLISHER_MODULE.main()
     assert output.read_bytes() == b"foreign"
     assert pending.read_bytes() == b"verified"
+    assert not list(output_dir.glob(".*.publish.*"))
+
+
+def test_image_publication_rejects_tampered_shared_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    local_dir = tmp_path / "node-local"
+    output_dir = tmp_path / "images"
+    local_dir.mkdir(mode=0o700)
+    output_dir.mkdir(mode=0o700)
+    pending = local_dir / "image.pending"
+    output = output_dir / "image.sif"
+    pending.write_bytes(b"verified")
+    pending.chmod(0o550)
+    real_copy = IMAGE_PUBLISHER_MODULE.copy_descriptor
+
+    def tampering_copy(source: int, destination: int) -> None:
+        real_copy(source, destination)
+        os.lseek(destination, 0, os.SEEK_SET)
+        os.write(destination, b"X")
+
+    monkeypatch.setattr(IMAGE_PUBLISHER_MODULE, "copy_descriptor", tampering_copy)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "publisher",
+            "--pending",
+            str(pending),
+            "--output",
+            str(output),
+            "--expected-sha256",
+            digest(pending),
+        ],
+    )
+    with pytest.raises(RuntimeError, match="staging SIF digest"):
+        IMAGE_PUBLISHER_MODULE.main()
+    assert pending.read_bytes() == b"verified"
+    assert not output.exists()
+    assert not list(output_dir.glob(".*.publish.*"))
 
 
 def test_image_publisher_rejects_multilink_pending(tmp_path: Path) -> None:
@@ -335,6 +425,8 @@ def test_image_publisher_rejects_multilink_pending(tmp_path: Path) -> None:
             str(pending),
             "--output",
             str(output),
+            "--expected-sha256",
+            digest(pending),
         ],
         check=False,
         capture_output=True,
@@ -342,6 +434,44 @@ def test_image_publisher_rejects_multilink_pending(tmp_path: Path) -> None:
     )
     assert failed.returncode != 0
     assert not output.exists()
+
+
+@pytest.mark.parametrize("source_kind", ["symlink", "wrong-mode"])
+def test_image_publisher_rejects_indirect_or_malformed_source(tmp_path: Path, source_kind: str) -> None:
+    local_dir = tmp_path / "node-local"
+    output_dir = tmp_path / "images"
+    local_dir.mkdir(mode=0o700)
+    output_dir.mkdir(mode=0o700)
+    real_source = local_dir / "real.sif"
+    real_source.write_bytes(b"verified")
+    real_source.chmod(0o550)
+    pending = real_source
+    if source_kind == "symlink":
+        pending = local_dir / "indirect.sif"
+        pending.symlink_to(real_source)
+    else:
+        pending.chmod(0o500)
+    output = output_dir / "image.sif"
+
+    failed = subprocess.run(
+        [
+            sys.executable,
+            str(IMAGE_PUBLISHER),
+            "--pending",
+            str(pending),
+            "--output",
+            str(output),
+            "--expected-sha256",
+            digest(real_source),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert failed.returncode != 0
+    assert not output.exists()
+    assert not list(output_dir.glob(".*.publish.*"))
 
 
 def test_site_singularity_is_accepted_as_trusted_executable() -> None:
@@ -464,6 +594,14 @@ def test_build_scripts_reference_exact_existing_asset_names() -> None:
     assert definition.count("verify_toolathlon_pbs_portability.sh --structural-only") == 2
     assert "exec --cleanenv --no-home" in builder
     assert "verify_toolathlon_pbs_portability.sh\n" in builder
+    assert "LOCAL_BASE_SIF=${WORK_ROOT}/openreward-toolathlon-base.sif" in builder
+    assert "LOCAL_OUTPUT_SIF=${WORK_ROOT}/${OUTPUT_NAME}" in builder
+    assert 'cp -- "${BASE_SIF}" "${LOCAL_BASE_SIF}"' in builder
+    assert "s|BASE_SIF_PATH|${LOCAL_BASE_SIF}|" in builder
+    assert 'build --fakeroot "${LOCAL_OUTPUT_SIF}"' in builder
+    assert '--pending "${LOCAL_OUTPUT_SIF}"' in builder
+    assert '--expected-sha256 "${OUTPUT_SHA256}"' in builder
+    assert '--base-sif "${BASE_SIF}"' in builder
 
 
 def test_embedded_verifier_covers_every_portable_runtime_tree() -> None:

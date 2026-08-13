@@ -59,15 +59,14 @@ OUTPUT_NAME=openreward-toolathlon-18e62c0d-pbs-${SHORT_ID}.sif
 OUTPUT_SIF=${OUTPUT_DIR}/${OUTPUT_NAME}
 RECEIPT_DIR=${OUTPUT_DIR}/build-receipts
 BUILD_RECEIPT=${RECEIPT_DIR}/${OUTPUT_NAME}.json
-JOB_TOKEN=${PBS_JOBID:-local}
-JOB_TOKEN=${JOB_TOKEN//[^A-Za-z0-9_.-]/_}
-PENDING_SIF=${OUTPUT_SIF}.pending.${JOB_TOKEN}.$$
 WORK_ROOT=${TMPDIR:-/tmp}/toolathlon-pbs-portable-build.$$
+LOCAL_BASE_SIF=${WORK_ROOT}/openreward-toolathlon-base.sif
+LOCAL_OUTPUT_SIF=${WORK_ROOT}/${OUTPUT_NAME}
 DEFINITION=${WORK_ROOT}/toolathlon-pbs-portable.def
 
 cleanup() {
-    rm -f "${PENDING_SIF}" 2>/dev/null || true
-    rm -f "${WORK_ROOT}/patch_toolathlon_pbs_portable.py" \
+    rm -f "${LOCAL_BASE_SIF}" "${LOCAL_OUTPUT_SIF}" \
+        "${WORK_ROOT}/patch_toolathlon_pbs_portable.py" \
         "${WORK_ROOT}/repair_toolathlon_snowflake_catalog.py" \
         "${WORK_ROOT}/verify_toolathlon_pbs_portability.sh" \
         "${DEFINITION}" 2>/dev/null || true
@@ -124,15 +123,6 @@ if not (
         f"receipt directory must be user-owned and private (0700/2700): {path}"
     )
 PY
-cp "${SCRIPT_DIR}/patch_toolathlon_pbs_portable.py" \
-    "${SCRIPT_DIR}/repair_toolathlon_snowflake_catalog.py" \
-    "${SCRIPT_DIR}/verify_toolathlon_pbs_portability.sh" \
-    "${WORK_ROOT}/"
-sed \
-    -e "s|BASE_SIF_PATH|${BASE_SIF}|" \
-    -e "s|PATCH_IDENTITY|${PATCH_IDENTITY}|g" \
-    "${SCRIPT_DIR}/toolathlon-pbs-portable.def" >"${DEFINITION}"
-
 if [[ -e "${OUTPUT_SIF}" ]]; then
     python3 "${SCRIPT_DIR}/publish_toolathlon_pbs_build_receipt.py" \
         --image "${OUTPUT_SIF}" \
@@ -153,27 +143,52 @@ if [[ -e "${OUTPUT_SIF}" ]]; then
     printf 'build_receipt_sha256=%s\n' "$(sha256sum "${BUILD_RECEIPT}" | cut -d ' ' -f 1)"
     exit 0
 fi
-if [[ -e "${PENDING_SIF}" ]]; then
-    echo "refusing unexpected pending output: ${PENDING_SIF}" >&2
+
+cp -- "${BASE_SIF}" "${LOCAL_BASE_SIF}"
+chmod 0400 "${LOCAL_BASE_SIF}"
+test -f "${LOCAL_BASE_SIF}"
+test ! -L "${LOCAL_BASE_SIF}"
+test "$(stat -c %u "${LOCAL_BASE_SIF}")" = "$(id -u)"
+test "$(stat -c %a "${LOCAL_BASE_SIF}")" = 400
+test "$(stat -c %h "${LOCAL_BASE_SIF}")" = 1
+test "$(sha256sum "${LOCAL_BASE_SIF}" | cut -d ' ' -f 1)" = "${EXPECTED_BASE_SHA256}"
+cp "${SCRIPT_DIR}/patch_toolathlon_pbs_portable.py" \
+    "${SCRIPT_DIR}/repair_toolathlon_snowflake_catalog.py" \
+    "${SCRIPT_DIR}/verify_toolathlon_pbs_portability.sh" \
+    "${WORK_ROOT}/"
+sed \
+    -e "s|BASE_SIF_PATH|${LOCAL_BASE_SIF}|" \
+    -e "s|PATCH_IDENTITY|${PATCH_IDENTITY}|g" \
+    "${SCRIPT_DIR}/toolathlon-pbs-portable.def" >"${DEFINITION}"
+
+if [[ -e "${LOCAL_OUTPUT_SIF}" || -L "${LOCAL_OUTPUT_SIF}" ]]; then
+    echo "refusing unexpected node-local output: ${LOCAL_OUTPUT_SIF}" >&2
     exit 2
 fi
 
 (
     cd "${WORK_ROOT}"
-    "${SINGULARITY}" build --fakeroot "${PENDING_SIF}" "${DEFINITION}"
+    "${SINGULARITY}" build --fakeroot "${LOCAL_OUTPUT_SIF}" "${DEFINITION}"
 )
-test -f "${PENDING_SIF}"
-test ! -L "${PENDING_SIF}"
-chmod 0550 "${PENDING_SIF}"
-"${SINGULARITY}" sif list "${PENDING_SIF}" >/dev/null
-"${SINGULARITY}" inspect --labels "${PENDING_SIF}" >/dev/null
-"${SINGULARITY}" exec --cleanenv --no-home "${PENDING_SIF}" \
+test -f "${LOCAL_OUTPUT_SIF}"
+test ! -L "${LOCAL_OUTPUT_SIF}"
+chmod 0550 "${LOCAL_OUTPUT_SIF}"
+test "$(stat -c %u "${LOCAL_OUTPUT_SIF}")" = "$(id -u)"
+test "$(stat -c %a "${LOCAL_OUTPUT_SIF}")" = 550
+test "$(stat -c %h "${LOCAL_OUTPUT_SIF}")" = 1
+"${SINGULARITY}" sif list "${LOCAL_OUTPUT_SIF}" >/dev/null
+"${SINGULARITY}" inspect --labels "${LOCAL_OUTPUT_SIF}" >/dev/null
+"${SINGULARITY}" exec --cleanenv --no-home "${LOCAL_OUTPUT_SIF}" \
     /usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh
-OUTPUT_SHA256=$(sha256sum "${PENDING_SIF}" | cut -d ' ' -f 1)
+OUTPUT_SHA256=$(sha256sum "${LOCAL_OUTPUT_SIF}" | cut -d ' ' -f 1)
+test "${OUTPUT_SHA256}" != "${EXPECTED_BASE_SHA256}"
 
-# Atomic, no-overwrite publication plus parent-directory fsync.
+# Cross-filesystem copy into a private shared staging file, followed by an
+# atomic, create-only same-directory link and parent-directory fsync.
 python3 "${SCRIPT_DIR}/publish_toolathlon_pbs_image.py" \
-    --pending "${PENDING_SIF}" --output "${OUTPUT_SIF}"
+    --pending "${LOCAL_OUTPUT_SIF}" \
+    --output "${OUTPUT_SIF}" \
+    --expected-sha256 "${OUTPUT_SHA256}"
 test "$(sha256sum "${OUTPUT_SIF}" | cut -d ' ' -f 1)" = "${OUTPUT_SHA256}"
 python3 "${SCRIPT_DIR}/publish_toolathlon_pbs_build_receipt.py" \
     --image "${OUTPUT_SIF}" \
