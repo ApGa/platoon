@@ -112,6 +112,7 @@ fi
 OPENREWARD_TRIAL_NAME=${OPENREWARD_TRIAL_NAME:-}
 OPENREWARD_ACTOR_PATH=${OPENREWARD_ACTOR_PATH:-}
 OPENREWARD_LOCAL_MODEL_SNAPSHOT=${OPENREWARD_LOCAL_MODEL_SNAPSHOT:-}
+OPENREWARD_RESOLVED_ACTOR_PATH=
 OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT=${OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT:-}
 OPENREWARD_WANDB_MODE=${OPENREWARD_WANDB_MODE:-${WANDB_MODE:-}}
 if [[ -n "${OPENREWARD_ACTOR_PATH}" && -z "${OPENREWARD_TRIAL_NAME}" ]]; then
@@ -137,6 +138,41 @@ if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]] && \
     OPENREWARD_LOCAL_MODEL_SNAPSHOT=${qwen_cache}/snapshots/${qwen_revision}
   fi
 fi
+
+# The preserve-thinking tokenizer overlay is published under a portable HF ID,
+# while this cluster intentionally starts workers in offline mode. Resolve that
+# ID to a complete local snapshot before trainer construction. Prefer a normal
+# HF cache entry when one exists (portable to other clusters), then fall back to
+# this cluster's content-identical overlay over the cached base-model weights.
+# Unlike the base-Qwen tokenizer-only workaround above, this resolved directory
+# must replace actor.path as well: SGLang and a fresh actor initialization also
+# consume that path. Recovery checkpoints created before the portable-ID change
+# used this same local overlay.
+if [[ -z "${OPENREWARD_ACTOR_PATH}" ]] && \
+   grep -qE '^[[:space:]]*path:[[:space:]]*apurvaga/Qwen3\.6-35B-A3B-preserve-thinking' "${CONFIG}"; then
+  if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
+    preserve_hf_cache=${HF_HOME:-${USER_ROOT}/.cache/huggingface}/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking
+    if [[ -f "${preserve_hf_cache}/refs/main" ]]; then
+      preserve_revision=$(tr -d '\r\n' <"${preserve_hf_cache}/refs/main")
+      preserve_snapshot=${preserve_hf_cache}/snapshots/${preserve_revision}
+      if [[ -d "${preserve_snapshot}" ]]; then
+        OPENREWARD_LOCAL_MODEL_SNAPSHOT=${preserve_snapshot}
+      fi
+    fi
+    if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
+      preserve_overlay=${REPO_ROOT}/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking
+      if [[ -d "${preserve_overlay}" ]]; then
+        OPENREWARD_LOCAL_MODEL_SNAPSHOT=${preserve_overlay}
+      fi
+    fi
+  fi
+  if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
+    echo "ERROR: config selects apurvaga/Qwen3.6-35B-A3B-preserve-thinking, but no local snapshot is available for offline startup." >&2
+    echo "       Populate its Hugging Face cache or set OPENREWARD_LOCAL_MODEL_SNAPSHOT to a complete local copy." >&2
+    exit 2
+  fi
+  OPENREWARD_RESOLVED_ACTOR_PATH=${OPENREWARD_LOCAL_MODEL_SNAPSHOT}
+fi
 if [[ -n "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
   for required_model_file in config.json tokenizer.json tokenizer_config.json model.safetensors.index.json; do
     [[ -e "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}/${required_model_file}" ]] || {
@@ -151,7 +187,11 @@ if [[ -n "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
     echo "       ${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" >&2
     exit 2
   }
-  echo "Using local Qwen snapshot for AReaL tokenizer startup: ${OPENREWARD_LOCAL_MODEL_SNAPSHOT}"
+  if [[ -n "${OPENREWARD_RESOLVED_ACTOR_PATH}" ]]; then
+    echo "Using local preserve-thinking actor/tokenizer snapshot: ${OPENREWARD_LOCAL_MODEL_SNAPSHOT}"
+  else
+    echo "Using local Qwen snapshot for AReaL tokenizer startup: ${OPENREWARD_LOCAL_MODEL_SNAPSHOT}"
+  fi
 fi
 
 # The checked-in training config requests online W&B logging, but credentials
@@ -185,11 +225,14 @@ TRAIN_OVERRIDE_ARGS=()
 if [[ -n "${OPENREWARD_TRIAL_NAME}" ]]; then
   TRAIN_OVERRIDE_ARGS+=("trial_name=${OPENREWARD_TRIAL_NAME}")
 fi
-if [[ -n "${OPENREWARD_ACTOR_PATH}" ]]; then
-  TRAIN_OVERRIDE_ARGS+=("actor.path=${OPENREWARD_ACTOR_PATH}")
-fi
 if [[ -n "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
   TRAIN_OVERRIDE_ARGS+=("tokenizer_path=${OPENREWARD_LOCAL_MODEL_SNAPSHOT}")
+fi
+if [[ -n "${OPENREWARD_RESOLVED_ACTOR_PATH}" ]]; then
+  TRAIN_OVERRIDE_ARGS+=("actor.path=${OPENREWARD_RESOLVED_ACTOR_PATH}")
+fi
+if [[ -n "${OPENREWARD_ACTOR_PATH}" ]]; then
+  TRAIN_OVERRIDE_ARGS+=("actor.path=${OPENREWARD_ACTOR_PATH}")
 fi
 if [[ -n "${OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT}" ]]; then
   TRAIN_OVERRIDE_ARGS+=(
