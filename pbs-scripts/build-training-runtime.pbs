@@ -1,0 +1,32 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=04:00:00
+#PBS -N rasp-build-training-sif
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+PLATOON_TRAINING_SIF=${PLATOON_TRAINING_SIF:-/groups/gai51740/aci18912it/rasp/images/platoon-training.sif}
+export PLATOON_TRAINING_SIF
+
+echo "training_sif_build_started=$(date --iso-8601=seconds)"
+echo "host=$(hostname -f)"
+echo "PBS_JOBID=${PBS_JOBID:?}"
+echo "PBS_LOCALDIR=${PBS_LOCALDIR:?}"
+echo "output=${PLATOON_TRAINING_SIF}"
+module list 2>&1
+
+"${REPO_ROOT}/pbs-scripts/build_training_sif.sh" --output "${PLATOON_TRAINING_SIF}"
+
+echo "training_sif_build_finished=$(date --iso-8601=seconds)"

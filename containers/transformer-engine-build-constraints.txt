@@ -1,0 +1,8 @@
+# Direct build/runtime dependencies of transformer-engine-torch that are not
+# present in Platoon's uv.lock because Transformer Engine is intentionally
+# excluded from normal resolution. Transitive dependencies remain governed by
+# the already-locked OpenReward environment.
+onnx==1.22.0
+onnxscript==0.7.1
+onnx-ir==0.2.1
+nvdlfw-inspect==0.2.2

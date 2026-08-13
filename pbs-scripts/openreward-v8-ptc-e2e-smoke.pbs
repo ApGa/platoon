@@ -1,0 +1,287 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:30:00
+#PBS -N rasp-v8-ptc-e2e
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Latest-stack acceptance for the v8 32-node PTC-enabled lineage. It starts
+# the exact production node-service helper with the Toolathlon 18e62c0 SIF,
+# then runs the installed 376d1b9 Platoon bridge and OpenHands b1acf PTC executor
+# from a matching immutable Gate2 controller environment. No model is loaded.
+
+set -euo pipefail
+umask 077
+
+die() {
+    echo "[v8-ptc-e2e] ERROR: $*" >&2
+    exit 2
+}
+
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0
+readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v8-abci.env
+readonly RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
+readonly PREPARE_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_env.sh
+readonly NODE_SERVICES=${REPO_ROOT}/pbs-scripts/openreward-node-services.sh
+readonly SERVICE_RECEIPT_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-cleanup-receipt.py
+readonly DRIVER=${REPO_ROOT}/pbs-scripts/openreward_v8_ptc_e2e.py
+readonly PBSDSH=/opt/pbs/bin/pbsdsh
+readonly UV_BIN=/home/aci18912it/.local/bin/uv
+readonly JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
+readonly RESULT_ROOT=/groups/gai51740/aci18912it/rasp/validation/v8-ptc-e2e/${JOB_ID_SAFE}
+readonly DRIVER_STATE=${RESULT_ROOT}/driver-state
+readonly SERVICE_LOG=${RESULT_ROOT}/node-services.log
+readonly RESULT=${RESULT_ROOT}/RESULT
+readonly SERVICE_RECEIPT=${RESULT_ROOT}/node-services-cleanup.json
+readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/${PBS_JOBID}
+
+[[ -n "${PBS_JOBID:-}" && -r "${PBS_NODEFILE:-}" ]] || die "PBS allocation metadata is absent"
+[[ -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${PREPARE_ENV}" ]] || \
+    die "v8 release gate assets are incomplete"
+[[ -x "${NODE_SERVICES}" && -x "${SERVICE_RECEIPT_HELPER}" && -r "${DRIVER}" && \
+    -x "${PBSDSH}" && -x "${UV_BIN}" ]] || \
+    die "v8 smoke assets or PBS launcher are unavailable"
+[[ ! -e "${RESULT_ROOT}" && ! -L "${RESULT_ROOT}" ]] || \
+    die "refusing stale PTC result root: ${RESULT_ROOT}"
+
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || die "v8 overlay selected another repository"
+[[ "${OPENREWARD_VERIFY_PINNED_SWE_RUNTIME}" == 1 ]] || \
+    die "v8 overlay did not enable pinned SWE runtime verification"
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+readonly RUNTIME=$(command -v singularity)
+
+# Neither environment service nor this PTC path needs any training or judging
+# credential. Scrub before pbsdsh and before the host-controller driver.
+for secret_name in \
+    WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL \
+    LITELLM_API_KEY LITELLM_BASE_URL RUBRIC_DEFAULT_LLM HF_TOKEN \
+    HUGGING_FACE_HUB_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    unset "${secret_name}"
+done
+unset secret_name
+
+mapfile -t ALLOC_NODES < <(awk 'NF && !seen[$1]++ {print $1}' "${PBS_NODEFILE}")
+[[ "${#ALLOC_NODES[@]}" -eq 1 ]] || die "PTC gate requires exactly one physical node"
+slot_count=$(awk -v host="${ALLOC_NODES[0]}" '$1 == host {count++} END {print count + 0}' "${PBS_NODEFILE}")
+[[ "${slot_count}" -eq 8 ]] || die "PTC gate requires eight vnode slots"
+readonly HOST=${ALLOC_NODES[0]}
+[[ "$(hostname -s)" == "${HOST%%.*}" ]] || die "batch shell is not on its allocated node"
+
+result_value() {
+    local file=$1 key=$2
+    awk -F= -v key="${key}" '
+        $1 == key { count++; value=substr($0, length(key) + 2) }
+        END { if (count != 1 || value == "") exit 1; print value }
+    ' "${file}"
+}
+
+readonly GATE2_RESULT=${OPENREWARD_V8_PTC_GATE2_RESULT:-}
+[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || \
+    die "OPENREWARD_V8_PTC_GATE2_RESULT must name one exact regular RESULT"
+[[ "$(stat -c %u "${GATE2_RESULT}")" == "$(id -u)" ]] || die "Gate2 RESULT owner mismatch"
+gate2_mode=$(stat -c %a "${GATE2_RESULT}")
+(( (8#${gate2_mode} & 8#077) == 0 )) || die "Gate2 RESULT is not private"
+[[ "$(result_value "${GATE2_RESULT}" gate2)" == passed ]] || die "Gate2 did not pass"
+source_sha=$(result_value "${GATE2_RESULT}" source_sha256)
+worker_key=$(result_value "${GATE2_RESULT}" worker_environment_key)
+controller_key=$(result_value "${GATE2_RESULT}" controller_environment_key)
+controller_venv=$(result_value "${GATE2_RESULT}" controller_venv)
+gate2_sif_sha=$(result_value "${GATE2_RESULT}" training_sif_sha256)
+[[ "${source_sha}" =~ ^[0-9a-f]{64}$ && "${worker_key}" =~ ^[0-9a-f]{64}$ && \
+    "${controller_key}" =~ ^[0-9a-f]{64}$ && "${gate2_sif_sha}" =~ ^[0-9a-f]{64}$ ]] || \
+    die "Gate2 RESULT identities are malformed"
+controller_python=${controller_venv}/bin/python
+controller_manifest=${controller_venv}/.platoon-controller-manifest
+[[ -x "${controller_python}" && -f "${controller_venv}/.platoon-controller-ready" ]] || \
+    die "Gate2 controller environment is not ready"
+grep -Fxq "source_sha256=${source_sha}" "${controller_manifest}" || \
+    die "Gate2 controller manifest source mismatch"
+
+# Re-resolve without building so a stale Gate2 from another source cannot run.
+export OPENREWARD_PROJECT_DIR=${REPO_ROOT}/plugins/openreward
+export OPENREWARD_UV_CACHE_DIR=${UV_CACHE_DIR}
+export OPENREWARD_UV_LINK_MODE=hardlink
+export OPENREWARD_BUILD_TE=1
+export OPENREWARD_BUILD_APEX=1
+export TE_VERSION=2.12.0
+export APEX_GIT_REF=6424da3b4faa6c8f062da4a48c424fff3f02d42d
+export TORCH_CUDA_ARCH_LIST=9.0+PTX
+export TE_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/te-wheels
+export APEX_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/apex-wheels
+actual_training_sif_sha=$(sha256sum "${PLATOON_TRAINING_SIF}" | awk '{print $1}')
+[[ "${actual_training_sif_sha}" == "${gate2_sif_sha}" ]] || die "Gate2 training SIF mismatch"
+export OPENREWARD_CONTAINER_ENV_ID=sha256:${actual_training_sif_sha}
+resolution=$(OPENREWARD_CONTAINER_IMAGE="${PLATOON_TRAINING_SIF}" \
+    OPENREWARD_UV_BIN="${UV_BIN}" "${PREPARE_ENV}" resolve)
+IFS=$'\t' read -r current_worker_key current_source_sha source_archive _worker_venv <<<"${resolution}"
+[[ "${current_source_sha}" == "${source_sha}" && "${current_worker_key}" == "${worker_key}" ]] || \
+    die "Gate2 source/environment is not the exact current v8 release"
+[[ -r "${source_archive}" && "$(sha256sum "${source_archive}" | awk '{print $1}')" == "${source_sha}" ]] || \
+    die "current source archive is missing or corrupt"
+
+mkdir -p "${RESULT_ROOT}"
+chmod 0700 "${RESULT_ROOT}"
+readonly DRIVER_SNAPSHOT=${RESULT_ROOT}/openreward_v8_ptc_e2e.snapshot.py
+driver_sha=$(sha256sum "${DRIVER}" | awk '{print $1}')
+cp -- "${DRIVER}" "${DRIVER_SNAPSHOT}.partial"
+chmod 0500 "${DRIVER_SNAPSHOT}.partial"
+[[ "$(sha256sum "${DRIVER_SNAPSHOT}.partial" | awk '{print $1}')" == "${driver_sha}" ]] || \
+    die "driver snapshot changed while copying"
+mv -T -- "${DRIVER_SNAPSHOT}.partial" "${DRIVER_SNAPSHOT}"
+
+export PLATOON_NODE_LOCAL_ROOT=${LOCAL_ROOT}
+export SINGULARITY_CACHEDIR=${LOCAL_ROOT}/singularity-cache
+export SINGULARITY_TMPDIR=${LOCAL_ROOT}/singularity-tmp
+export APPTAINER_CACHEDIR=${SINGULARITY_CACHEDIR}
+export APPTAINER_TMPDIR=${SINGULARITY_TMPDIR}
+export SWE_APPTAINER_SESSION_ROOT=${LOCAL_ROOT}/swe-sessions
+export SWE_SINGULARITY_SESSION_ROOT=${SWE_APPTAINER_SESSION_ROOT}
+export PLATOON_STAGE_TOOLATHLON_SIF=1
+export PLATOON_STAGE_TRAINING_SIF=0
+export OPENREWARD_PORT=8082
+export OPENREWARD_SWE_REBENCH_PORT=8084
+
+service_pid=
+service_teardown_done=0
+teardown_service() {
+    local deadline wait_status=0
+    ((service_teardown_done)) && return 0
+    service_teardown_done=1
+    [[ -n "${service_pid}" ]] || return 0
+    kill -0 "${service_pid}" 2>/dev/null || return 1
+    kill -TERM "${service_pid}" 2>/dev/null || return 1
+    deadline=$((SECONDS + 180))
+    while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.2; done
+    kill -0 "${service_pid}" 2>/dev/null && return 1
+    wait "${service_pid}" 2>/dev/null || wait_status=$?
+    [[ "${wait_status}" -eq 1 ]] || return 1
+    service_pid=
+    while [[ ! -f "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] && ((SECONDS < deadline)); do sleep 0.2; done
+    "${controller_python}" -I "${SERVICE_RECEIPT_HELPER}" verify \
+        --receipt "${SERVICE_RECEIPT}" --pbs-job-id "${PBS_JOBID}" \
+        --host "${HOST}" --primary-status 143 || return 1
+    "${controller_python}" -I "${SERVICE_RECEIPT_HELPER}" assert-tcp-closed \
+        --host "${HOST}" --port 8082 --port 8084 --timeout-seconds 2 --deadline-seconds 20 || return 1
+    "${controller_python}" -I "${SERVICE_RECEIPT_HELPER}" assert-empty-swe \
+        --session-root "${SWE_APPTAINER_SESSION_ROOT}" || return 1
+}
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    if ! teardown_service; then
+        status=1
+    fi
+    exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+env \
+    -u WANDB_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+    -u LITELLM_API_KEY -u LITELLM_BASE_URL -u RUBRIC_DEFAULT_LLM -u HF_TOKEN \
+    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+    "${PBSDSH}" -n 0 -- /usr/bin/env \
+    "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
+    "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${SERVICE_RECEIPT}" \
+    "PLATOON_NODE_SERVICES_EXPECTED_HOST=${HOST}" \
+    "PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}" "${NODE_SERVICES}" \
+    >"${SERVICE_LOG}" 2>&1 &
+service_pid=$!
+
+endpoint_healthy() {
+    local port=$1 status
+    status=$(curl --silent --show-error --output /dev/null --noproxy '*' \
+        --connect-timeout 2 --max-time 5 --write-out '%{http_code}' \
+        "http://${HOST}:${port}/" 2>/dev/null) || return 1
+    [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]
+}
+
+deadline=$((SECONDS + 600))
+until endpoint_healthy 8082 && endpoint_healthy 8084; do
+    if ! kill -0 "${service_pid}" 2>/dev/null; then
+        tail -n 160 "${SERVICE_LOG}" >&2 || true
+        die "production node-service helper exited during startup"
+    fi
+    if ((SECONDS >= deadline)); then
+        tail -n 160 "${SERVICE_LOG}" >&2 || true
+        die "production service endpoints did not become healthy"
+    fi
+    sleep 3
+done
+echo "[v8-ptc-e2e] exact production service endpoints are healthy"
+
+env \
+    -u WANDB_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+    -u LITELLM_API_KEY -u LITELLM_BASE_URL -u RUBRIC_DEFAULT_LLM -u HF_TOKEN \
+    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+    -u VIRTUAL_ENV -u UV_PROJECT_ENVIRONMENT -u PYTHONHOME -u PYTHONPATH \
+    HOME="${RESULT_ROOT}" PYTHONDONTWRITEBYTECODE=1 OPENHANDS_SUPPRESS_BANNER=1 \
+    "${controller_python}" -I "${DRIVER_SNAPSHOT}" \
+    --state-root "${DRIVER_STATE}" \
+    --session-url "http://${HOST}:8082" \
+    --controller-python "${controller_python}" \
+    --controller-environment-key "${controller_key}" \
+    --source-sha256 "${source_sha}" \
+    --driver-sha256 "${driver_sha}" \
+    --pbs-job-id "${PBS_JOBID}"
+
+driver_result=${DRIVER_STATE}/RESULT.json
+[[ -f "${driver_result}" && ! -L "${driver_result}" ]] || die "driver result is absent"
+"${controller_python}" -I - "${driver_result}" "${source_sha}" "${controller_key}" "${driver_sha}" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+expected = {
+    "status": "passed",
+    "source_sha256": sys.argv[2],
+    "controller_environment_key": sys.argv[3],
+    "driver_sha256": sys.argv[4],
+    "openhands_revision": "b1acf52ee362884f092b9eaf5e701a1bb5d1b335",
+    "toolathlon_revision": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
+    "ptc_mode": "orchestration_only",
+    "ptc_max_tool_calls": 1024,
+    "environment_max_tool_calls": 8,
+    "routing_metadata": "direct",
+    "bridge_turn": 3,
+    "bridge_finished": False,
+    "typed_error_kind": "nonzero_exit",
+}
+for key, expected_value in expected.items():
+    if value.get(key) != expected_value:
+        raise RuntimeError(f"driver result mismatch for {key}")
+if value.get("first_cell", {}).get("telemetry") != [2, 2, 2, 0]:
+    raise RuntimeError("first-cell telemetry mismatch")
+if value.get("followup_cell", {}).get("telemetry") != [1, 1, 1, 0]:
+    raise RuntimeError("follow-up telemetry mismatch")
+PY
+
+# A successful client result is insufficient if the production helper died
+# between the last MCP response and teardown. Require its process and both
+# exact endpoints immediately before requesting the intentional stop.
+kill -0 "${service_pid}" 2>/dev/null || die "node-service helper died after the PTC driver"
+endpoint_healthy 8082 && endpoint_healthy 8084 || \
+    die "an environment endpoint became unhealthy after the PTC driver"
+
+teardown_service || die "production node-service cleanup attestation failed"
+
+temporary=${RESULT}.partial.$$
+printf 'openreward_v8_ptc_e2e=PASS\npbs_job_id=%s\nsource_sha256=%s\ncontroller_environment_key=%s\ndriver_sha256=%s\nopenhands_revision=%s\ntoolathlon_revision=%s\nptc_mode=orchestration_only\nptc_max_tool_calls=1024\nenvironment_max_tool_calls=8\nconcurrent_telemetry=2,2,2,0\nfollowup_telemetry=1,1,1,0\ntyped_error_kind=nonzero_exit\nservices_stopped=true\n' \
+    "${PBS_JOBID}" "${source_sha}" "${controller_key}" "${driver_sha}" \
+    b1acf52ee362884f092b9eaf5e701a1bb5d1b335 \
+    18e62c0d0419da88209af911528f2f8a0b44a5ed >"${temporary}"
+chmod 0600 "${temporary}"
+mv -T -- "${temporary}" "${RESULT}"
+echo "openreward_v8_ptc_e2e=PASS result=${RESULT}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -24,7 +25,14 @@ from areal.infra.scheduler.slurm import SlurmScheduler, SlurmWorkerInfo
 from areal.infra.utils.proc import build_streaming_log_cmd
 from areal.utils import logging
 
+from platoon.train.areal.fork_lifecycle import (
+    cleanup_dependent_aliases_before_owner,
+    cleanup_forked_alias_workers,
+)
+
 logger = logging.getLogger("PreallocatedSlurmScheduler")
+
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class PreallocatedSlurmScheduler(SlurmScheduler):
@@ -54,9 +62,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         # costs tens of minutes on a multi-node job.  Configure different hosts
         # concurrently while retaining a single stream per host (which avoids
         # eight workers on one node competing for CPU, disk, and host memory).
-        configure_concurrency = os.environ.get(
-            "PLATOON_AREAL_PREALLOC_CONFIGURE_CONCURRENCY", "16"
-        )
+        configure_concurrency = os.environ.get("PLATOON_AREAL_PREALLOC_CONFIGURE_CONCURRENCY", "16")
         try:
             self._configure_concurrency = int(configure_concurrency)
         except ValueError as exc:
@@ -99,9 +105,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
                 **kwargs,
             )
         except EngineCreationError as exc:
-            duplicate_marker = (
-                f"Engine '{expected_engine_name}' already exists"
-            )
+            duplicate_marker = f"Engine '{expected_engine_name}' already exists"
             if exc.status_code == 400 and duplicate_marker in exc.reason:
                 logger.warning(
                     "Engine '%s' already exists on worker '%s'; treating the "
@@ -139,19 +143,14 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             if self._configured_worker_generations.get(worker_info.role) == generation:
                 return
 
-            workers_by_host: dict[
-                str, list[tuple[int, SlurmWorkerInfo]]
-            ] = defaultdict(list)
+            workers_by_host: dict[str, list[tuple[int, SlurmWorkerInfo]]] = defaultdict(list)
             for rank, role_worker in enumerate(role_workers):
-                workers_by_host[self._worker_host_key(role_worker)].append(
-                    (rank, role_worker)
-                )
+                workers_by_host[self._worker_host_key(role_worker)].append((rank, role_worker))
 
             host_count = len(workers_by_host)
             max_workers = min(self._configure_concurrency, host_count)
             logger.info(
-                "Configuring %s workers for role '%s' across %s hosts "
-                "(%s concurrent host streams)",
+                "Configuring %s workers for role '%s' across %s hosts (%s concurrent host streams)",
                 len(role_workers),
                 worker_info.role,
                 host_count,
@@ -268,9 +267,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             return self._alloc_nodes_cache
 
         nodes: list[str] = []
-        nodelist = os.environ.get("SLURM_JOB_NODELIST") or os.environ.get(
-            "SLURM_NODELIST"
-        )
+        nodelist = os.environ.get("SLURM_JOB_NODELIST") or os.environ.get("SLURM_NODELIST")
         if nodelist:
             try:
                 out = subprocess.check_output(
@@ -296,9 +293,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         default placement).
         """
 
-        if not self._truthy_env(
-            os.environ.get("PLATOON_AREAL_PREALLOC_SPREAD_NODES", "1")
-        ):
+        if not self._truthy_env(os.environ.get("PLATOON_AREAL_PREALLOC_SPREAD_NODES", "1")):
             return None
 
         alloc_nodes = self._allocation_nodes()
@@ -337,9 +332,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
                 f"Requesting {total_gpus} GPUs but each node has {self.n_gpus_per_node}."
             )
 
-        mem_per_cpu = (
-            mem_per_task // cpus_per_task if cpus_per_task > 0 else mem_per_task
-        )
+        mem_per_cpu = mem_per_task // cpus_per_task if cpus_per_task > 0 else mem_per_task
 
         rpc_cmd = spec.cmd or "python -m areal.infra.rpc.rpc_server"
         rpc_cmd_flags = [
@@ -359,21 +352,34 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         if self.fileroot:
             rpc_cmd_flags.extend(["--fileroot", str(self.fileroot)])
         rpc_cmd = " ".join([rpc_cmd] + [shlex.quote(str(flag)) for flag in rpc_cmd_flags])
+        # rpc_server otherwise falls back to SLURM_PROCID internally. Pass the
+        # rank explicitly so this command remains correct across AReaL versions
+        # and mirrors the PBS preallocated scheduler's rank contract.
+        rpc_cmd += ' --worker-index "${SLURM_PROCID:?SLURM_PROCID is unset}"'
 
         bash_cmds = (spec.additional_bash_cmds or []).copy()
+        worker_environment = spec.env_vars or {}
+        for name, value in worker_environment.items():
+            if not _ENVIRONMENT_NAME.fullmatch(name):
+                raise ValueError(f"Invalid worker environment variable name: {name!r}")
+            bash_cmds.insert(0, f"export {name}={shlex.quote(str(value))}")
         if total_gpus > 0:
             gpus_per_task = spec.gpu
             if gpus_per_task == 1:
-                cuda_setup_cmd = (
-                    f"export CUDA_VISIBLE_DEVICES=$((SLURM_LOCALID * {gpus_per_task}))"
-                )
+                cuda_setup_cmd = f"export CUDA_VISIBLE_DEVICES=$((SLURM_LOCALID * {gpus_per_task}))"
             else:
                 cuda_setup_cmd = (
                     f"export CUDA_VISIBLE_DEVICES=$(seq -s, $((SLURM_LOCALID * {gpus_per_task})) "
                     f"$((SLURM_LOCALID * {gpus_per_task} + {gpus_per_task} - 1)))"
                 )
-            bash_cmds.insert(0, cuda_setup_cmd)
-            bash_cmds.insert(1, "export ASCEND_RT_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES")
+            # Rank-derived device visibility must win over a generic spec
+            # environment while still preceding user bash preambles.
+            env_count = len(worker_environment)
+            bash_cmds.insert(env_count, cuda_setup_cmd)
+            bash_cmds.insert(
+                env_count + 1,
+                "export ASCEND_RT_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES",
+            )
 
         bash_cmds.extend(self._worker_preamble())
         bash_cmds.append(rpc_cmd)
@@ -383,9 +389,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         base_srun_args = self._srun_base_args()
         exclusive_env = os.environ.get("PLATOON_AREAL_PREALLOC_WORKER_EXCLUSIVE")
         use_exclusive = (
-            self._truthy_env(exclusive_env)
-            if exclusive_env is not None
-            else not self._has_overlap_arg(base_srun_args)
+            self._truthy_env(exclusive_env) if exclusive_env is not None else not self._has_overlap_arg(base_srun_args)
         )
 
         srun_args = [
@@ -480,9 +484,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
         if role in self._workers:
             raise WorkerCreationError(role, f"Role '{role}' already exists")
         if num_workers <= 0:
-            raise WorkerCreationError(
-                role, "Invalid configuration", "replicas must be greater than 0"
-            )
+            raise WorkerCreationError(role, "Invalid configuration", "replicas must be greater than 0")
 
         schedulings = self._prepare_worker_specs(role, num_workers, job.tasks)
         strategy = job.scheduling_strategy
@@ -505,17 +507,14 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
                     "Colocation strategy requires target role to be specified",
                 )
             if colocate_role not in self._workers:
-                raise WorkerNotFoundError(
-                    f"Cannot colocate with role '{colocate_role}' - role not found"
-                )
+                raise WorkerNotFoundError(f"Cannot colocate with role '{colocate_role}' - role not found")
 
             target_workers = self._workers[colocate_role]
             if num_workers != len(target_workers):
                 raise WorkerCreationError(
                     role,
                     "Replica count mismatch",
-                    f"Colocated role must have same replica count as target "
-                    f"({num_workers} != {len(target_workers)})",
+                    f"Colocated role must have same replica count as target ({num_workers} != {len(target_workers)})",
                 )
 
             if strategy.fork:
@@ -563,11 +562,7 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             for idx in range(num_workers):
                 worker_id = f"{role}/{idx}"
                 worker = Worker(id=worker_id, ip="", worker_ports=[], engine_ports=[])
-                worker_spec = (
-                    schedulings[idx]
-                    if len(schedulings) == num_workers
-                    else schedulings[0]
-                )
+                worker_spec = schedulings[idx] if len(schedulings) == num_workers else schedulings[0]
                 workers.append(
                     SlurmWorkerInfo(
                         worker=worker,
@@ -591,15 +586,35 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
 
         return worker_ids
 
-    def delete_workers(self, role: str | None = None):
+    def delete_workers(
+        self,
+        role: str | None = None,
+        reverse_order: bool = False,
+    ):
         if role is None:
-            for r in list(self._colocated_roles.keys()):
-                self.delete_workers(r)
-            for r in list(self._workers.keys()):
-                self.delete_workers(r)
+            colocated_roles = list(self._colocated_roles.keys())
+            worker_roles = [r for r in self._workers.keys() if r not in self._colocated_roles]
+            if reverse_order:
+                colocated_roles.reverse()
+                worker_roles.reverse()
+            # Aliases/forked workers must be detached before their owning role.
+            for r in colocated_roles:
+                self.delete_workers(r, reverse_order=reverse_order)
+            for r in worker_roles:
+                self.delete_workers(r, reverse_order=reverse_order)
             return
 
+        cleanup_dependent_aliases_before_owner(
+            self,
+            role,
+            reverse_order=reverse_order,
+        )
         if role in self._colocated_roles:
+            cleanup_forked_alias_workers(
+                self,
+                role,
+                reverse_order=reverse_order,
+            )
             if role in self._workers:
                 logger.info("Removing forked role '%s' (managed by parent worker)", role)
                 del self._workers[role]

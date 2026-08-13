@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import types
 from collections import Counter
@@ -345,6 +346,110 @@ def test_task_reference_round_trip_and_malformed_payload(monkeypatch):
     assert tasks.OpenRewardTaskReference.decode("legacy-task") is None
     with pytest.raises(ValueError, match="Malformed|empty"):
         tasks.OpenRewardTaskReference.decode(tasks.OPENREWARD_TASK_REFERENCE_PREFIX + "not-base64!")
+
+
+def test_mixed_task_discovery_uses_each_live_named_endpoint_pool(monkeypatch):
+    tasks = _load_tasks(monkeypatch)
+    config = tasks.OpenRewardConfig.from_mapping(
+        {
+            "environments": [
+                {
+                    "label": "toolathlon",
+                    "env_name": "toolathlongym",
+                    "session_url": "http://localhost:8082",
+                    "session_urls_env_var": "OPENREWARD_SESSION_URLS_TOOLATHLON",
+                },
+                {
+                    "label": "swe_rebench",
+                    "env_name": "nebius/SWE-rebench-V2",
+                    "session_url": "http://localhost:8084",
+                    "session_urls_env_var": "OPENREWARD_SESSION_URLS_SWE_REBENCH",
+                },
+            ]
+        }
+    )
+    # Launcher pools appear after Hydra has constructed the typed config. Task
+    # discovery must resolve them at call time instead of freezing localhost.
+    monkeypatch.setenv(
+        "OPENREWARD_SESSION_URLS_TOOLATHLON",
+        " http://tail-a:8082, http://tail-b:8082 ",
+    )
+    monkeypatch.setenv(
+        "OPENREWARD_SESSION_URLS_SWE_REBENCH",
+        "http://tail-c:8084,http://tail-d:8084",
+    )
+    monkeypatch.setenv("OPENREWARD_SESSION_URLS", "http://wrong-global:9999")
+
+    configured_urls = []
+
+    class Environment:
+        def num_tasks(self, split):
+            assert split == "train"
+            return 1
+
+    class Client:
+        def __init__(self, api_key):
+            assert api_key == "local"
+            configured_urls.append(
+                (
+                    os.environ["OPENREWARD_SESSION_URL"],
+                    os.environ["OPENREWARD_API_URL"],
+                )
+            )
+            self.environments = types.SimpleNamespace(get=lambda name: Environment())
+
+        def close(self):
+            pass
+
+    _module(monkeypatch, "openreward", OpenReward=Client)
+
+    records = tasks.get_task_records(config)
+
+    assert len(records) == 2
+    assert configured_urls == [
+        ("http://tail-a:8082", "http://tail-a:8082"),
+        ("http://tail-c:8084", "http://tail-c:8084"),
+    ]
+
+
+def test_task_discovery_endpoint_precedence_and_legacy_fallback(monkeypatch):
+    tasks = _load_tasks(monkeypatch)
+    monkeypatch.setenv("OPENREWARD_SESSION_URLS_STATIC", "http://named:8082")
+    monkeypatch.setenv("OPENREWARD_SESSION_URLS", "http://legacy-pool:8082")
+
+    static = tasks.OpenRewardEnvironmentConfig(
+        label="static",
+        session_url="http://literal:8082",
+        session_urls=["http://static-a:8082", "http://static-b:8082"],
+        session_urls_env_var="OPENREWARD_SESSION_URLS_STATIC",
+        api_url="http://catalog:9090",
+    )
+    assert static.resolve_session_urls(allow_legacy_global_pool=False) == [
+        "http://static-a:8082",
+        "http://static-b:8082",
+    ]
+    tasks._configure_openreward_urls(static, allow_legacy_global_pool=False)
+    assert os.environ["OPENREWARD_SESSION_URL"] == "http://static-a:8082"
+    assert os.environ["OPENREWARD_API_URL"] == "http://catalog:9090"
+
+    named = tasks.OpenRewardEnvironmentConfig(
+        label="static",
+        session_url="http://literal:8082",
+        session_urls_env_var="OPENREWARD_SESSION_URLS_STATIC",
+    )
+    assert named.resolve_session_urls(allow_legacy_global_pool=False) == ["http://named:8082"]
+
+    isolated = tasks.OpenRewardEnvironmentConfig(
+        label="isolated",
+        session_url="http://literal:8084",
+        session_urls_env_var="OPENREWARD_SESSION_URLS_ISOLATED",
+    )
+    assert isolated.resolve_session_urls(allow_legacy_global_pool=False) == [
+        "http://literal:8084"
+    ]
+    assert isolated.resolve_session_urls(allow_legacy_global_pool=True) == [
+        "http://legacy-pool:8082"
+    ]
 
 
 def test_mixed_task_records_use_num_tasks_without_listing(monkeypatch):

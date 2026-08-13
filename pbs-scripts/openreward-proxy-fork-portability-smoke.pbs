@@ -1,0 +1,342 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -N rasp-proxy-fork-smoke
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# One-node boundary gate for the host-controller/container-worker interpreter
+# split used by AReaL's POST /fork path.  It consumes an already-passed Gate 2
+# environment with the exact current source identity. The smoke driver is a
+# host-side diagnostic asset, snapshotted separately and attested by its own
+# digest; it never rebuilds an environment, loads model weights, starts SGLang,
+# or reads a training secret.
+
+set -euo pipefail
+umask 077
+
+die() {
+    echo "[proxy-fork-smoke] ERROR: $*" >&2
+    exit 2
+}
+
+# This gate deliberately does not source abci.env or secrets.env.  It needs
+# only fixed cluster-owned paths and must never read a stored credential.
+export PLATOON_PROJECT_ROOT=/groups/gai51740/aci18912it/rasp
+export PLATOON_REPO_ROOT=/home/aci18912it/rasp/source/platoon
+export PLATOON_JOB_STATE_ROOT=${PLATOON_PROJECT_ROOT}/job-state
+export PLATOON_NAME_RESOLVE_ROOT=${PLATOON_PROJECT_ROOT}/name-resolve
+export PLATOON_TRAINING_SIF=${PLATOON_PROJECT_ROOT}/images/platoon-training.sif
+export PLATOON_MODEL_SNAPSHOT=${PLATOON_PROJECT_ROOT}/cache/huggingface/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/ce815485d640a33461c25e3d5c505b5346e8c857
+export OPENREWARD_ENV_CACHE_ROOT=${PLATOON_PROJECT_ROOT}/cache/openreward-venvs
+export UV_CACHE_DIR=${PLATOON_PROJECT_ROOT}/cache/uv
+export HF_HOME=${PLATOON_PROJECT_ROOT}/cache/huggingface
+for secret_name in \
+    WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL LITELLM_API_KEY LITELLM_BASE_URL \
+    RUBRIC_DEFAULT_LLM HF_TOKEN HUGGING_FACE_HUB_TOKEN \
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    unset "${secret_name}"
+done
+unset secret_name
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+module load cuda/12.9/12.9.1
+module load hpcx/2.20
+
+readonly RUNTIME=$(command -v singularity)
+readonly PBSDSH=/opt/pbs/bin/pbsdsh
+readonly UV_BIN=/home/aci18912it/.local/bin/uv
+readonly PREPARE_ENV=${PLATOON_REPO_ROOT}/pbs-scripts/prepare_openreward_env.sh
+readonly DRIVER=${PLATOON_REPO_ROOT}/pbs-scripts/openreward_proxy_fork_portability_smoke.py
+readonly SIF_SHA_FILE=${PLATOON_TRAINING_SIF}.sha256
+readonly JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
+readonly STATE_ROOT=${PLATOON_JOB_STATE_ROOT}/proxy-fork-portability/${JOB_ID_SAFE}
+readonly SCHEDULER_STATE_ROOT=${STATE_ROOT}/pbs-prealloc
+readonly FILEROOT=${STATE_ROOT}/artifacts
+readonly NAME_RESOLVE_ROOT=${PLATOON_NAME_RESOLVE_ROOT}/proxy-fork-portability
+readonly EXPERIMENT=proxy-fork-portability
+readonly TRIAL=job-${JOB_ID_SAFE}
+readonly REGISTRY_USER=aci18912it
+readonly NODE_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon-proxy-fork/${PBS_JOBID}
+readonly GATE2_ROOT=${PLATOON_PROJECT_ROOT}/cache/gate2-immutable-runtime
+readonly TRIAL_RESOLVE_PATH=${NAME_RESOLVE_ROOT}/${REGISTRY_USER}/${EXPERIMENT}/${TRIAL}
+
+[[ -n "${PBS_JOBID:-}" && -r "${PBS_NODEFILE:-}" ]] || die "PBS allocation metadata is absent"
+[[ -x "${RUNTIME}" && -x "${PBSDSH}" && -x "${UV_BIN}" ]] || die "runtime tools are absent"
+[[ -x "${PREPARE_ENV}" && -r "${DRIVER}" ]] || die "smoke source assets are absent"
+[[ -r "${PLATOON_TRAINING_SIF}" && -r "${SIF_SHA_FILE}" ]] || die "training SIF is absent"
+[[ -d "${PLATOON_MODEL_SNAPSHOT}" ]] || die "local tokenizer/model snapshot is absent"
+[[ ! -e "${STATE_ROOT}" && ! -L "${STATE_ROOT}" ]] || die "refusing stale smoke state: ${STATE_ROOT}"
+[[ ! -e "${TRIAL_RESOLVE_PATH}" && ! -L "${TRIAL_RESOLVE_PATH}" ]] || \
+    die "refusing stale name-resolution trial: ${TRIAL_RESOLVE_PATH}"
+
+mapfile -t ALLOC_NODES < <(awk 'NF && !seen[$0]++ {print $0}' "${PBS_NODEFILE}")
+[[ "${#ALLOC_NODES[@]}" -eq 1 ]] || die "gate requires exactly one physical node"
+slot_count=$(awk -v host="${ALLOC_NODES[0]}" '$0 == host {count++} END {print count + 0}' "${PBS_NODEFILE}")
+[[ "${slot_count}" -eq 8 ]] || die "gate requires exactly eight PBS vnode slots"
+[[ "$(hostname -s)" == "${ALLOC_NODES[0]%%.*}" ]] || die "batch shell is not on the allocated node"
+
+expected_sif_sha=$(awk 'NF {print $1; exit}' "${SIF_SHA_FILE}")
+actual_sif_sha=$(sha256sum "${PLATOON_TRAINING_SIF}" | awk '{print $1}')
+[[ "${expected_sif_sha}" =~ ^[0-9a-f]{64}$ && "${actual_sif_sha}" == "${expected_sif_sha}" ]] || \
+    die "training SIF digest mismatch"
+"${RUNTIME}" sif list "${PLATOON_TRAINING_SIF}" >/dev/null
+
+mkdir -p \
+    "${STATE_ROOT}" "${SCHEDULER_STATE_ROOT}" "${FILEROOT}" "${NAME_RESOLVE_ROOT}" \
+    "${NODE_ROOT}/worker-home" "${NODE_ROOT}/worker-tmp" "${NODE_ROOT}/controller-home" \
+    "${NODE_ROOT}/cache/xdg" "${NODE_ROOT}/cache/flashinfer" \
+    "${NODE_ROOT}/cache/torch-extensions" "${NODE_ROOT}/cache/areal"
+chmod 0700 "${STATE_ROOT}" "${SCHEDULER_STATE_ROOT}" "${FILEROOT}" \
+    "${NODE_ROOT}" "${NODE_ROOT}/worker-home" "${NODE_ROOT}/controller-home"
+chmod 1777 "${NODE_ROOT}/worker-tmp"
+
+# Snapshot the driver so the running job cannot observe a working-tree edit.
+readonly DRIVER_SNAPSHOT=${STATE_ROOT}/openreward_proxy_fork_portability_smoke.snapshot.py
+driver_sha=$(sha256sum "${DRIVER}" | awk '{print $1}')
+[[ "${driver_sha}" =~ ^[0-9a-f]{64}$ ]] || die "driver digest is malformed"
+cp -- "${DRIVER}" "${DRIVER_SNAPSHOT}.partial"
+chmod 0500 "${DRIVER_SNAPSHOT}.partial"
+[[ "$(sha256sum "${DRIVER_SNAPSHOT}.partial" | awk '{print $1}')" == "${driver_sha}" ]] || \
+    die "driver snapshot digest mismatch"
+mv -T -- "${DRIVER_SNAPSHOT}.partial" "${DRIVER_SNAPSHOT}"
+
+# Resolve the current source archive/key, but deliberately do not build it.
+export OPENREWARD_PROJECT_DIR=${PLATOON_REPO_ROOT}/plugins/openreward
+export OPENREWARD_UV_CACHE_DIR=${UV_CACHE_DIR}
+export OPENREWARD_UV_LINK_MODE=hardlink
+export OPENREWARD_BUILD_TE=1
+export OPENREWARD_BUILD_APEX=1
+export TE_VERSION=2.12.0
+export APEX_GIT_REF=6424da3b4faa6c8f062da4a48c424fff3f02d42d
+export TORCH_CUDA_ARCH_LIST=9.0+PTX
+export TE_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/te-wheels
+export APEX_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/apex-wheels
+export OPENREWARD_CONTAINER_ENV_ID=sha256:${actual_sif_sha}
+resolution=$(
+    OPENREWARD_CONTAINER_IMAGE="${PLATOON_TRAINING_SIF}" \
+    OPENREWARD_UV_BIN="${UV_BIN}" \
+    "${PREPARE_ENV}" resolve
+)
+IFS=$'\t' read -r current_worker_key source_sha source_archive _unused_global_venv <<<"${resolution}"
+[[ "${source_sha}" =~ ^[0-9a-f]{64}$ && -r "${source_archive}" ]] || \
+    die "current immutable source resolution is malformed"
+
+result_value() {
+    local file=$1 key=$2
+    awk -F= -v key="${key}" '
+        $1 == key { count++; value=substr($0, length(key) + 2) }
+        END { if (count != 1 || value == "") exit 1; print value }
+    ' "${file}"
+}
+
+gate2_result_matches() {
+    local result=$1 result_source result_sif result_mode
+    [[ -f "${result}" && ! -L "${result}" && "$(stat -c %u "${result}")" == "$(id -u)" ]] || return 1
+    result_mode=$(stat -c %a "${result}")
+    (( (8#${result_mode} & 8#077) == 0 )) || return 1
+    result_source=$(result_value "${result}" source_sha256) || return 1
+    result_sif=$(result_value "${result}" training_sif_sha256) || return 1
+    [[ "${result_source}" == "${source_sha}" && "${result_sif}" == "${actual_sif_sha}" ]]
+}
+
+gate2_result=${OPENREWARD_PROXY_SMOKE_GATE2_RESULT:-}
+if [[ -n "${gate2_result}" ]]; then
+    gate2_result=$(readlink -f "${gate2_result}")
+    gate2_result_matches "${gate2_result}" || die "requested Gate 2 result does not match current source/SIF"
+else
+    mapfile -t gate2_candidates < <(
+        find "${GATE2_ROOT}" -mindepth 2 -maxdepth 2 -type f -name RESULT -printf '%T@ %p\n' \
+            | sort -nr | cut -d' ' -f2-
+    )
+    gate2_result=
+    for candidate in "${gate2_candidates[@]}"; do
+        if gate2_result_matches "${candidate}"; then
+            gate2_result=${candidate}
+            break
+        fi
+    done
+    [[ -n "${gate2_result}" ]] || die "no passed Gate 2 environment matches the exact current source/SIF"
+fi
+
+worker_key=$(result_value "${gate2_result}" worker_environment_key)
+controller_key=$(result_value "${gate2_result}" controller_environment_key)
+worker_venv=$(result_value "${gate2_result}" worker_venv)
+controller_venv=$(result_value "${gate2_result}" controller_venv)
+[[ "${worker_key}" == "${current_worker_key}" ]] || die "Gate 2 worker key is not current"
+worker_python=${worker_venv}/bin/python
+controller_python=${controller_venv}/bin/python
+[[ -L "${worker_python}" && "$(readlink "${worker_python}")" == /usr/bin/python3.12 ]] || \
+    die "Gate 2 worker Python is not the SIF interpreter link"
+[[ -L "${controller_python}" && "$(readlink "${controller_python}")" == /home/* ]] || \
+    die "Gate 2 controller Python is not host-only"
+[[ -f "${worker_venv}/.platoon-ready" && -f "${controller_venv}/.platoon-controller-ready" ]] || \
+    die "Gate 2 cached environments are unhealthy"
+worker_cache_root=$(dirname "$(dirname "${worker_venv}")")
+controller_cache_root=$(dirname "$(dirname "${controller_venv}")")
+cmp -s "${worker_cache_root}/manifests/${worker_key}.txt" "${worker_venv}/.platoon-env-manifest" || \
+    die "worker environment manifest mismatch"
+cmp -s "${controller_cache_root}/manifests/${controller_key}.txt" \
+    "${controller_venv}/.platoon-controller-manifest" || die "controller environment manifest mismatch"
+
+container_base=(
+    "${RUNTIME}" exec --cleanenv --containall --no-home
+    --no-mount home,cwd,bind-paths
+    --bind /etc/resolv.conf:/etc/resolv.conf:ro
+    --bind /etc/hosts:/etc/hosts:ro
+    --bind "${PLATOON_PROJECT_ROOT}:${PLATOON_PROJECT_ROOT}:rw"
+    --bind "${NODE_ROOT}:${NODE_ROOT}:rw"
+    "${PLATOON_TRAINING_SIF}"
+)
+"${container_base[@]}" "${worker_python}" -I -c \
+    'import os,sys; assert os.path.realpath(sys.executable)=="/usr/bin/python3.12"' || \
+    die "worker Python cannot execute inside the exact SIF"
+if "${container_base[@]}" "${controller_python}" -I -c 'raise SystemExit(0)' \
+    >"${STATE_ROOT}/forbidden-controller-python.log" 2>&1; then
+    die "host-only controller Python unexpectedly executed inside the contained SIF"
+fi
+echo "[proxy-fork-smoke] controller-in-SIF negative probe failed closed as required"
+
+cuda_lib_dirs=$(find "${worker_venv}/lib/python3.12/site-packages/nvidia" \
+    -mindepth 2 -maxdepth 2 -type d -name lib 2>/dev/null | paste -sd: -)
+[[ -n "${cuda_lib_dirs}" ]] || die "worker venv has no NVIDIA library directories"
+
+export PYTHONDONTWRITEBYTECODE=1
+export CUDA_VISIBLE_DEVICES=
+export HF_HOME
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export PLATOON_AREAL_PBS_CONTAINER_RUNTIME=${RUNTIME}
+export PLATOON_AREAL_PBS_CONTAINER_IMAGE=${PLATOON_TRAINING_SIF}
+export PLATOON_AREAL_PBS_CONTAINER_BINDS="/etc/resolv.conf:/etc/resolv.conf:ro /etc/hosts:/etc/hosts:ro ${PLATOON_PROJECT_ROOT}:${PLATOON_PROJECT_ROOT}:rw ${NODE_ROOT}:${NODE_ROOT}:rw"
+export PLATOON_AREAL_PBS_CONTAINER_WORKDIR=${STATE_ROOT}
+export PLATOON_AREAL_PBS_CONTAINER_ARGS="--containall --no-home --no-mount home,cwd,bind-paths --bind ${NODE_ROOT}/worker-tmp:/tmp:rw"
+export PLATOON_AREAL_PBS_GPU_VISIBILITY_MODE=nvidia-container-cli
+export PLATOON_AREAL_PBS_NVIDIA_SMI_BIN=/usr/bin/nvidia-smi
+export PLATOON_AREAL_PBS_STATE_DIR=${SCHEDULER_STATE_ROOT}
+export PLATOON_AREAL_PBS_HOST_PYTHON=${controller_python}
+export PLATOON_AREAL_PBS_WORKER_PYTHON=${worker_python}
+export PLATOON_AREAL_PBS_PBSDSH_BIN=${PBSDSH}
+export PLATOON_AREAL_PBS_FORWARD_ENV="HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE"
+export PLATOON_AREAL_PBS_WORKER_PREAMBLE="
+set -euo pipefail
+export HOME=${NODE_ROOT}/worker-home
+export TMPDIR=/tmp
+export XDG_CACHE_HOME=/tmp/xdg-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
+export FLASHINFER_CACHEDIR=/tmp/flashinfer-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
+export TORCH_EXTENSIONS_DIR=/tmp/torch-extensions-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
+export AREAL_CACHE_DIR=/tmp/areal-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
+mkdir -p \${XDG_CACHE_HOME} \${FLASHINFER_CACHEDIR} \${TORCH_EXTENSIONS_DIR} \${AREAL_CACHE_DIR}
+export PATH=${worker_venv}/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT PYTHONHOME PYTHONPATH
+export LD_LIBRARY_PATH=${cuda_lib_dirs}:\${LD_LIBRARY_PATH:-}
+cd ${STATE_ROOT}
+"
+
+export HOME=${NODE_ROOT}/controller-home
+export XDG_CACHE_HOME=${NODE_ROOT}/cache/xdg
+export FLASHINFER_CACHEDIR=${NODE_ROOT}/cache/flashinfer
+export TORCH_EXTENSIONS_DIR=${NODE_ROOT}/cache/torch-extensions
+export AREAL_CACHE_DIR=${NODE_ROOT}/cache/areal
+export PATH=${controller_venv}/bin:${PATH}
+unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT PYTHONHOME PYTHONPATH
+# Synthetic controller-only credential canary.  It is deliberately omitted
+# from both PBS launcher and worker forward lists. AReaL installs literal
+# non-secret `none` OpenAI placeholders in the Guard before /fork; the driver
+# requires those exact values and rejects this canary's bytes anywhere in the
+# live child environment without printing environment values.
+export OPENAI_API_KEY=proxy-fork-smoke-controller-only-sentinel
+
+smoke_pid=
+cleanup() {
+    local status=$? deadline
+    trap - EXIT INT TERM
+    if [[ -n "${smoke_pid}" ]] && kill -0 "${smoke_pid}" 2>/dev/null; then
+        kill -TERM "${smoke_pid}" 2>/dev/null || true
+        deadline=$((SECONDS + 75))
+        while kill -0 "${smoke_pid}" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.2; done
+        if kill -0 "${smoke_pid}" 2>/dev/null; then kill -KILL "${smoke_pid}" 2>/dev/null || true; fi
+        wait "${smoke_pid}" 2>/dev/null || true
+    fi
+    if ! "${controller_python}" -I \
+        "${controller_venv}/lib/python3.12/site-packages/platoon/train/areal/pbs_cleanup_barrier.py" \
+        --state-dir "${SCHEDULER_STATE_ROOT}/${JOB_ID_SAFE}/${TRIAL}" \
+        --pbs-job-id "${PBS_JOBID}" --experiment "${EXPERIMENT}" --trial "${TRIAL}" \
+        --timeout-seconds 120; then
+        status=1
+    fi
+    exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+"${controller_python}" -I "${DRIVER_SNAPSHOT}" \
+    --state-root "${STATE_ROOT}" \
+    --scheduler-state-root "${SCHEDULER_STATE_ROOT}" \
+    --fileroot "${FILEROOT}" \
+    --name-resolve-root "${NAME_RESOLVE_ROOT}" \
+    --model-snapshot "${PLATOON_MODEL_SNAPSHOT}" \
+    --controller-python "${controller_python}" \
+    --worker-python "${worker_python}" \
+    --pbs-job-id "${PBS_JOBID}" \
+    --experiment "${EXPERIMENT}" \
+    --trial "${TRIAL}" \
+    --source-sha256 "${source_sha}" \
+    --training-sif-sha256 "${actual_sif_sha}" \
+    --worker-environment-key "${worker_key}" \
+    --controller-environment-key "${controller_key}" \
+    --driver-sha256 "${driver_sha}" &
+smoke_pid=$!
+set +e
+wait "${smoke_pid}"
+smoke_status=$?
+set -e
+smoke_pid=
+[[ "${smoke_status}" -eq 0 ]] || die "smoke driver exited ${smoke_status}"
+[[ -f "${STATE_ROOT}/RESULT.json" ]] || die "smoke driver produced no result"
+"${controller_python}" -I - \
+    "${STATE_ROOT}/RESULT.json" "${PBS_JOBID}" "${EXPERIMENT}" "${TRIAL}" \
+    "${source_sha}" "${actual_sif_sha}" "${worker_key}" "${controller_key}" \
+    "${worker_python}" "${controller_python}" "${driver_sha}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(result_path, pbs_job_id, experiment, trial, source_sha, sif_sha,
+ worker_key, controller_key, worker_python, controller_python, driver_sha) = sys.argv[1:]
+value = json.loads(Path(result_path).read_text())
+expected = {
+    "version": 1,
+    "status": "passed",
+    "pbs_job_id": pbs_job_id,
+    "experiment": experiment,
+    "trial": trial,
+    "source_sha256": source_sha,
+    "training_sif_sha256": sif_sha,
+    "worker_environment_key": worker_key,
+    "controller_environment_key": controller_key,
+    "worker_python": worker_python,
+    "controller_python": controller_python,
+    "driver_sha256": driver_sha,
+    "requested_proxy_module": "areal.experimental.openai.proxy.proxy_rollout_server",
+    "effective_proxy_module": "platoon.areal_proxy_rollout",
+}
+for key, expected_value in expected.items():
+    assert value.get(key) == expected_value, (key, value.get(key), expected_value)
+assert value.get("proxy_health") == {"status": "ok", "initialized": True}
+assert value.get("proxy_process", {}).get("credential_names_present") == []
+assert value.get("proxy_process", {}).get("openai_placeholders") == {
+    "OPENAI_API_KEY": "none",
+    "OPENAI_BASE_URL": "none",
+}
+assert value.get("proxy_process", {}).get("controller_canary_absent") is True
+assert value.get("proxy_process", {}).get("cmdline", [None])[0] == worker_python
+PY
+echo "proxy_fork_portability_smoke=passed pbs_job_id=${PBS_JOBID} result=${STATE_ROOT}/RESULT.json"

@@ -1,0 +1,12 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20
+  - _self_
+
+# Fresh retry after the v1 actor-container launch exhausted a node's available
+# loop devices. Runtime service placement is owned by the matching PBS wrapper;
+# training semantics and topology remain inherited unchanged from v1.
+trial_name: abci-ta-swe16-nonrec-h200-cp1-c12-v2-trial0
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe16-nonrec-h200-cp1-c12-v2

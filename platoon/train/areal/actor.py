@@ -8,17 +8,17 @@ from areal.api import Scheduler
 from areal.api.cli_args import MicroBatchSpec
 from areal.engine import FSDPPPOActor
 from areal.infra import current_platform
-from areal.trainer.ppo.actor import PPOActor, PPOActorController
+from areal.trainer.ppo.actor import PPOActor
 from areal.trainer.ppo.stats import infer_token_denominator
 from areal.utils import logging, stats_tracker
 from areal.utils.data import batched_call, split_padded_tensor_dict_into_mb_list
 from areal.utils.perf_tracer import trace_perf
 
+from platoon.train.areal.actor_controller import PlatoonPPOActorController
 from platoon.train.areal.config_defs import PlatoonPPOActorConfig
 from platoon.train.areal.fp32_lm_head import install_fp32_lm_head_output_hooks
 from platoon.train.areal.loss_functions import build_loss_fn
 from platoon.train.areal.numerical_stability import (
-    aggregate_optimizer_update_results,
     install_nonfinite_gradient_guard,
     make_optimizer_update_result,
     optimizer_update_succeeded,
@@ -207,22 +207,6 @@ class PlatoonActorImpl(PPOActor):
             return make_optimizer_update_result(minibatch_update_successes)
 
 
-class PlatoonPPOActorController(PPOActorController):
-    """Actor controller exposing Platoon's worker-side memory hygiene RPC."""
-
-    def ppo_update(self, *args: Any, **kwargs: Any) -> bool:
-        results = self._custom_function_call(
-            "ppo_update",
-            *args,
-            rpc_meta={"broadcast": True},
-            **kwargs,
-        )
-        return aggregate_optimizer_update_results(results)
-
-    def clear_device_cache(self) -> None:
-        self._custom_function_call("clear_device_cache")
-
-
 class PlatoonPPOActor(FSDPPPOActor):
     """FSDP PPO actor with Platoon loss selection."""
 
@@ -269,6 +253,12 @@ def _get_platoon_megatron_actor_cls() -> type:
     if _platoon_megatron_actor_cls is not None:
         return _platoon_megatron_actor_cls
 
+    # This getter is invoked only after a worker resolves the remote engine
+    # path (or by a legacy multi-controller worker), so install
+    # Megatron-specific patches here before importing the real base class.
+    from platoon.train.areal.patches import apply_megatron_worker_patches
+
+    apply_megatron_worker_patches()
     from areal.engine import MegatronPPOActor
 
     class PlatoonMegatronPPOActor(MegatronPPOActor):

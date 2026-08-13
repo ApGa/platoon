@@ -1,0 +1,233 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=16:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-b28-cp1c18
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Bounded latest-stack H200 benchmark arm cp1-c18. The controller naturally
+# completes all 28 configured optimizer steps. This wrapper accepts success
+# only after the common lifecycle has also confirmed PBS role/service cleanup,
+# then verifies optimizer/weight-sync, checkpoint, and finished-W&B evidence
+# produced by the final step.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8-376d1b9-18e62c0
+RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c18_bench28_v8.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+CONTROLLER_RUNTIME_HELPER=${REPO_ROOT}/pbs-scripts/openreward-controller-runtime-receipt.py
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v8-abci.env
+HOST_PYTHON=/home/aci18912it/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
+EXPERIMENT=abci-openreward-ta-swe-h200-16-bench28-v8-cp1-c18
+TRIAL=abci-ta-swe16-bench28-v8-cp1-c18-trial0
+FINAL_STEP=27
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" &&
+    -x "${CONTROLLER_RUNTIME_HELPER}" && -r "${ABCI_ENV}" &&
+    -x "${RELEASE_VERIFY}" && -x "${HOST_PYTHON}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: immutable v8 release is incomplete: ${REPO_ROOT}" >&2
+    exit 2
+}
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: release root must be the exact non-symlink path: ${REPO_ROOT}" >&2
+    exit 2
+}
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: release HEAD is not the pinned ${RELEASE_REF}" >&2
+    exit 2
+}
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || {
+    echo "[bench28-cp1-c18] ERROR: release tracked content differs from ${release_commit}" >&2
+    exit 2
+}
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || {
+    echo "[bench28-cp1-c18] ERROR: release index differs from ${release_commit}" >&2
+    exit 2
+}
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || {
+    echo "[bench28-cp1-c18] ERROR: release has tracked or ordinary untracked changes" >&2
+    exit 2
+}
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+unset release_head release_commit
+
+# Resolve the canonical cluster paths from the same release overlay consumed by
+# the common lifecycle. Keep xtrace disabled: the overlay chains to protected
+# credentials even though this wrapper only uses its non-secret paths.
+set +x
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: v8 overlay selected a different release root" >&2
+    exit 2
+}
+RECEIPT=${PLATOON_JOB_STATE_ROOT}/benchmarks/${TRIAL}.step27.json
+CHECKPOINT_ROOT=${PLATOON_EXPERIMENT_ROOT}/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
+NAME_RESOLVE_TRIAL=${PLATOON_NAME_RESOLVE_ROOT}/$(id -un)/${EXPERIMENT}/${TRIAL}
+TRAINING_SIF=${PLATOON_TRAINING_SIF}
+SIF_SHA_FILE=${TRAINING_SIF}.sha256
+[[ -n "${PBS_JOBID:-}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: PBS_JOBID is unavailable" >&2
+    exit 2
+}
+JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
+CONTROLLER_RUNTIME_RECEIPT=${PLATOON_JOB_STATE_ROOT}/openreward/${JOB_ID_SAFE}/controller-runtime.json
+
+CANDIDATE=${RECEIPT%.json}.candidate.json
+ERROR_RECEIPT=${RECEIPT%.json}.error.json
+for fresh_path in \
+    "${RECEIPT}" "${CANDIDATE}" "${ERROR_RECEIPT}" \
+    "${CHECKPOINT_ROOT}" "${NAME_RESOLVE_TRIAL}" "${CONTROLLER_RUNTIME_RECEIPT}"; do
+    [[ ! -e "${fresh_path}" && ! -L "${fresh_path}" ]] || {
+        echo "[bench28-cp1-c18] ERROR: refusing stale benchmark state; use a fresh trial: ${fresh_path}" >&2
+        exit 2
+    }
+done
+unset fresh_path
+
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+export OPENREWARD_EXPECTED_NNODES=16
+export OPENREWARD_SERVICE_NODE_COUNT=6
+export OPENREWARD_EXPECTED_RECURSIVE=0
+export OPENREWARD_EXPECTED_PTC=0
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_MIN_GLOBAL_STEP=${FINAL_STEP}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+launch_epoch=$(date +%s)
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=${launch_epoch}
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+
+# Do not exec: COMMON returns only after its controller has exited and its EXIT
+# trap has synchronously accepted the PBS role cleanup barrier and stopped every
+# node-service process. A final-step marker created afterward therefore cannot
+# make an incomplete cleanup look successful.
+status=0
+"${COMMON}" "${CONFIG}" || status=$?
+if ((status != 0)); then
+    echo "[bench28-cp1-c18] ERROR: controller/common lifecycle failed with status ${status}" >&2
+    exit "${status}"
+fi
+# AReaL and the PBS role launchers remove every ENTRY record, but NFS can
+# legitimately retain empty worker/trial directories. Mirror the proven
+# portability-smoke cleanup: lstat the exact job-owned trial subtree, reject
+# any file, symlink, special node, or foreign-owned directory, and use rmdir
+# only in deepest-first order. Never unlink or recursively remove this tree.
+"${HOST_PYTHON}" -I -c '
+import os
+import stat
+import sys
+from pathlib import Path
+
+trial_root = Path(sys.argv[1])
+if not trial_root.is_absolute():
+    raise RuntimeError(f"name-resolution trial root is not absolute: {trial_root}")
+if trial_root.resolve() != trial_root:
+    raise RuntimeError(f"name-resolution trial root is indirect: {trial_root}")
+try:
+    root_stat = trial_root.lstat()
+except FileNotFoundError:
+    raise SystemExit(0)
+if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.getuid():
+    raise RuntimeError(f"unsafe name-resolution trial root survived: {trial_root}")
+
+def raise_walk_error(error):
+    raise error
+
+directories = []
+for raw_root, dirnames, filenames in os.walk(
+    trial_root,
+    topdown=True,
+    onerror=raise_walk_error,
+    followlinks=False,
+):
+    current = Path(raw_root)
+    current_stat = current.lstat()
+    if not stat.S_ISDIR(current_stat.st_mode) or current_stat.st_uid != os.getuid():
+        raise RuntimeError(f"unsafe name-resolution directory survived: {current}")
+    directories.append(current)
+    for filename in filenames:
+        child = current / filename
+        child.lstat()
+        raise RuntimeError(f"name-resolution record survived cleanup: {child}")
+    for dirname in dirnames:
+        child = current / dirname
+        child_stat = child.lstat()
+        if not stat.S_ISDIR(child_stat.st_mode) or child_stat.st_uid != os.getuid():
+            raise RuntimeError(f"unsafe name-resolution entry survived cleanup: {child}")
+
+for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+    directory_stat = directory.lstat()
+    if not stat.S_ISDIR(directory_stat.st_mode) or directory_stat.st_uid != os.getuid():
+        raise RuntimeError(f"unsafe name-resolution directory changed before rmdir: {directory}")
+    directory.rmdir()
+if os.path.lexists(trial_root):
+    raise RuntimeError(f"name-resolution trial subtree survived cleanup: {trial_root}")
+' "${NAME_RESOLVE_TRIAL}"
+
+# COMMON validated the same SIF before training. Re-hash it after the completed
+# run so the final receipt is also checked against the still-current image.
+[[ -r "${TRAINING_SIF}" && -r "${SIF_SHA_FILE}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: training SIF or digest sidecar disappeared" >&2
+    exit 2
+}
+expected_sif_sha=$(awk 'NF {print $1; exit}' "${SIF_SHA_FILE}")
+actual_sif_sha=$(sha256sum "${TRAINING_SIF}" | awk '{print $1}')
+[[ "${expected_sif_sha}" =~ ^[0-9a-f]{64}$ &&
+    "${actual_sif_sha}" == "${expected_sif_sha}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: final training SIF identity is invalid" >&2
+    exit 2
+}
+
+CONTROLLER_PYTHON=$(
+    "${HOST_PYTHON}" -I "${CONTROLLER_RUNTIME_HELPER}" read-controller-python \
+        --receipt "${CONTROLLER_RUNTIME_RECEIPT}" \
+        --pbs-job-id "${PBS_JOBID}" \
+        --experiment "${EXPERIMENT}" \
+        --trial "${TRIAL}" \
+        --controller-cache-root "${PLATOON_PROJECT_ROOT}/cache/openreward-controller-venvs"
+)
+[[ "${CONTROLLER_PYTHON}" == /* && "${CONTROLLER_PYTHON}" != *$'\n'* &&
+    -x "${CONTROLLER_PYTHON}" ]] || {
+    echo "[bench28-cp1-c18] ERROR: post-cleanup receipt returned an invalid controller Python" >&2
+    exit 2
+}
+"${CONTROLLER_PYTHON}" -I -m platoon.training_success_receipt finalize-candidate \
+    --candidate "${CANDIDATE}" \
+    --receipt "${RECEIPT}" \
+    --remote-timeout-seconds 300
+PYTHONPATH=${REPO_ROOT} "${HOST_PYTHON}" -m platoon.training_success_receipt verify \
+    --receipt "${RECEIPT}" \
+    --pbs-job-id "${PBS_JOBID}" \
+    --experiment "${EXPERIMENT}" \
+    --trial "${TRIAL}" \
+    --global-step "${FINAL_STEP}"
+"${HOST_PYTHON}" -I -c '
+import json
+import sys
+from pathlib import Path
+
+receipt = json.loads(Path(sys.argv[1]).read_text())
+expected_path = str(Path(sys.argv[2]).resolve())
+expected_sha = sys.argv[3]
+if receipt.get("training_sif_path") != expected_path:
+    raise RuntimeError("final receipt training SIF path mismatch")
+if receipt.get("training_sif_sha256") != expected_sha:
+    raise RuntimeError("final receipt training SIF digest mismatch")
+' "${RECEIPT}" "${TRAINING_SIF}" "${actual_sif_sha}"
+
+echo "OPENREWARD_BENCH28_CP1_C18_OK receipt=${RECEIPT}"

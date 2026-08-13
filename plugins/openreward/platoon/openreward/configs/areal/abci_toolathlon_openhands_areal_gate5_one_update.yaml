@@ -1,0 +1,98 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_ta20
+  - _self_
+
+# Gate 5 exercises the full 35B actor/rollout placement and immutable runtime,
+# but admits exactly one fixed Toolathlon task group and then exits.  Its model
+# topology remains inherited from the 16-node production leaf so later H200
+# topology tuning cannot accidentally leave the smoke on an easier layout.
+experiment_name: abci-openreward-gate5
+trial_name: abci-gate5-ta-one-update-v1-trial0
+total_train_steps: 1
+tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 16
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  # Replace the inherited curriculum with one legacy/single-environment row.
+  # list_tasks resolves this exact stable task name before the only batch starts.
+  environments: null
+  env_name: toolathlongym
+  split: train
+  eval_split: train
+  session_url: http://localhost:8082
+  api_url: null
+  api_key: local
+  train_task_limit: null
+  eval_task_limit: null
+  task_names:
+    - canvas-announcement-summary
+  task_indices: null
+  max_tool_calls: 0
+  balance_accepted_batches: false
+  enable_recursive_subagents: false
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  enable_task_tracker: true
+
+actor:
+  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+  megatron:
+    # Gate 5 inspects the DCP tree immediately after save_checkpoint returns.
+    async_save: false
+
+sglang:
+  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+train_dataset:
+  # One dataset row/batch is one task group; GroupRolloutWorkflow owns the
+  # eight trajectories within it.  Eight candidates are enough for actor DP5.
+  batch_size: 1
+
+rollout:
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_concurrent_rollouts: 1
+  request_timeout: 2700
+
+workflow_config:
+  group_size: 8
+  # Preserve the whole fixed group even when its task rewards are equal.  The
+  # Qwen MoE router auxiliary objective can still produce a real update.
+  filter_zero_variance_groups: false
+  filter_zero_advantage_datums: false
+  straggler_timeout_seconds: 600
+  straggler_quorum: 5
+  min_successful_group_size: 5
+  rollout_config:
+    # Twenty environment steps is short enough for a smoke while still giving
+    # the coding agent a meaningful multi-tool attempt at the fixed task.
+    max_steps: 20
+    timeout: 1800
+    step_timeout: 600
+
+recover:
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    mode: online
+    project: openreward-multienv-openhands
+    group: abci-gate5-ta-one-update-v1

@@ -1,0 +1,61 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=00:08:00
+#PBS -N rasp-oci-overlay
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+set -u -o pipefail
+umask 077
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+ROOT=${PBS_LOCALDIR:?}/oci-overlay-probe
+mkdir -p "${ROOT}"/{cache,tmp,layout/upper,layout/work}
+export SINGULARITY_CACHEDIR=${ROOT}/cache
+export SINGULARITY_TMPDIR=${ROOT}/tmp
+OCI_SIF=${ROOT}/alpine.oci.sif
+singularity pull --oci --keep-layers --disable-cache "${OCI_SIF}" \
+    docker://alpine:3.20 || exit 1
+
+attempt() {
+    local label=$1
+    shift
+    echo "attempt=${label} begin"
+    "$@"
+    echo "attempt=${label} status=$?"
+    return 0
+}
+
+EXTERNAL=${ROOT}/external.img
+truncate -s 256M "${EXTERNAL}"
+mkfs.ext3 -q -F -d "${ROOT}/layout" "${EXTERNAL}"
+attempt oci_external singularity exec --oci --fakeroot --cleanenv --no-home \
+    --overlay "${EXTERNAL}" "${OCI_SIF}" /bin/sh -c \
+    'id; touch /oci-external; test -f /oci-external'
+
+EMBEDDED=${ROOT}/embedded.oci.sif
+cp --reflink=auto "${OCI_SIF}" "${EMBEDDED}"
+singularity overlay create --size 256 "${EMBEDDED}"
+attempt oci_embedded_write singularity exec --oci --fakeroot --cleanenv \
+    --no-home --writable "${EMBEDDED}" /bin/sh -c \
+    'id; touch /oci-persistent; test -f /oci-persistent'
+attempt oci_embedded_read singularity exec --oci --fakeroot --cleanenv \
+    --no-home --writable "${EMBEDDED}" /bin/sh -c \
+    'id; test -f /oci-persistent'
+
+INSTANCE=oci-${PBS_JOBID%%.*}
+attempt oci_instance_start singularity instance start --oci --fakeroot \
+    --cleanenv --no-home --writable "${EMBEDDED}" "${INSTANCE}"
+attempt oci_instance_exec singularity exec --oci "instance://${INSTANCE}" \
+    /bin/sh -c 'id; touch /oci-instance; test -f /oci-instance'
+singularity instance stop --force "${INSTANCE}" >/dev/null 2>&1 || true
+attempt oci_instance_persist singularity exec --oci --fakeroot --cleanenv \
+    --no-home --writable "${EMBEDDED}" /bin/sh -c \
+    'id; test -f /oci-instance'
+
+echo "probe_complete=1"

@@ -1,0 +1,77 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=00:10:00
+#PBS -N rasp-overlay-probe
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+set -u -o pipefail
+umask 077
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+ROOT=${PBS_LOCALDIR:?}/overlay-probe
+mkdir -p "${ROOT}"/{cache,tmp}
+export SINGULARITY_CACHEDIR=${ROOT}/cache
+export SINGULARITY_TMPDIR=${ROOT}/tmp
+SIF=${ROOT}/alpine.sif
+singularity pull --disable-cache "${SIF}" docker://alpine:3.20 || exit 1
+
+make_overlay() {
+    local path=$1
+    local layout=${path}.layout
+    mkdir -p "${layout}/upper" "${layout}/work"
+    truncate -s 256M "${path}"
+    mkfs.ext3 -q -F -d "${layout}" "${path}"
+}
+
+attempt() {
+    local label=$1
+    shift
+    echo "attempt=${label} begin"
+    "$@"
+    local status=$?
+    echo "attempt=${label} status=${status}"
+    return 0
+}
+
+attempt fakeroot_identity singularity exec --fakeroot --cleanenv --no-home \
+    "${SIF}" /bin/sh -c 'id; cat /proc/self/uid_map; cat /proc/self/gid_map'
+
+MANUAL=${ROOT}/manual.img
+make_overlay "${MANUAL}"
+attempt manual_normal singularity exec --cleanenv --no-home \
+    --overlay "${MANUAL}" "${SIF}" /bin/sh -c \
+    'id; touch /normal-write; test -f /normal-write'
+attempt manual_fakeroot singularity exec --fakeroot --cleanenv --no-home \
+    --overlay "${MANUAL}" "${SIF}" /bin/sh -c \
+    'id; touch /fakeroot-write; test -f /fakeroot-write'
+
+BUILT=${ROOT}/built.img
+singularity overlay create --size 256 --sparse "${BUILT}"
+attempt built_normal singularity exec --cleanenv --no-home \
+    --overlay "${BUILT}" "${SIF}" /bin/sh -c \
+    'id; touch /built-normal-write; test -f /built-normal-write'
+attempt built_fakeroot singularity exec --fakeroot --cleanenv --no-home \
+    --overlay "${BUILT}" "${SIF}" /bin/sh -c \
+    'id; touch /built-fakeroot-write; test -f /built-fakeroot-write'
+
+EMBEDDED=${ROOT}/embedded.sif
+cp --reflink=auto "${SIF}" "${EMBEDDED}"
+singularity overlay create --size 256 "${EMBEDDED}"
+attempt embedded_fakeroot singularity exec --fakeroot --cleanenv --no-home \
+    --writable "${EMBEDDED}" /bin/sh -c \
+    'id; touch /embedded-write; test -f /embedded-write'
+
+INSTANCE=overlay-${PBS_JOBID%%.*}
+attempt instance_manual_start singularity instance start --fakeroot --cleanenv \
+    --no-home --overlay "${MANUAL}" "${SIF}" "${INSTANCE}"
+attempt instance_manual_exec singularity exec "instance://${INSTANCE}" \
+    /bin/sh -c 'id; touch /instance-write; test -f /instance-write'
+singularity instance stop --force "${INSTANCE}" >/dev/null 2>&1 || true
+
+echo "probe_complete=1"

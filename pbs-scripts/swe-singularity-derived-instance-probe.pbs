@@ -1,0 +1,127 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -N rasp-swe-derived-probe
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Prove that a localimage rebuild adding only %startscript gives an
+# OCI-derived SWE task SIF a persistent Singularity CE instance lifetime.
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+RAW_SIF=/groups/gai51740/aci18912it/rasp/cache/swe-rebench-sif/965b9f12410c2c9c195c1de164cd494c0e4f51181868bba2298daa99473fda87.sif
+ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/swe-derived-probe
+RAW_LOCAL=${ROOT}/raw-task.sif
+DEFINITION=${ROOT}/service-adapter.def
+DERIVED_SIF=${ROOT}/task-service-adapted.sif
+OVERLAY=${ROOT}/writable-overlay.img
+
+mkdir -p "${ROOT}" "${ROOT}/cache" "${ROOT}/runtime-tmp"
+export SINGULARITY_CACHEDIR=${ROOT}/cache
+export SINGULARITY_TMPDIR=${ROOT}/runtime-tmp
+
+PROBE_LABELS=()
+cleanup() {
+    local label name config
+    for label in "${PROBE_LABELS[@]}"; do
+        name=swe-derived-${PBS_JOBID%%.*}-${label}
+        config=${ROOT}/config-${label}
+        SINGULARITY_CONFIGDIR=${config} singularity instance stop --force "${name}" \
+            >/dev/null 2>&1 || true
+    done
+}
+trap cleanup EXIT INT TERM
+
+test -r "${RAW_SIF}"
+singularity sif list "${RAW_SIF}" >/dev/null
+cp "${RAW_SIF}" "${RAW_LOCAL}"
+test "$(sha256sum "${RAW_SIF}" | cut -d ' ' -f 1)" = \
+    "$(sha256sum "${RAW_LOCAL}" | cut -d ' ' -f 1)"
+printf '%s\n' \
+    'Bootstrap: localimage' \
+    "From: ${RAW_LOCAL}" \
+    '' \
+    '%labels' \
+    '    org.openreward.swe-service-adapter pbs-singularity-v1' \
+    '' \
+    '%startscript' \
+    '    exec /usr/bin/sleep 86400' \
+    >"${DEFINITION}"
+
+build_started=${SECONDS}
+singularity build --fakeroot "${DERIVED_SIF}" "${DEFINITION}"
+echo "derived_build_seconds=$((SECONDS - build_started))"
+singularity sif list "${DERIVED_SIF}" >/dev/null
+singularity inspect --labels "${DERIVED_SIF}"
+echo derived_startscript_begin
+singularity inspect --startscript "${DERIVED_SIF}"
+echo derived_startscript_end
+sha256sum "${RAW_SIF}" "${DERIVED_SIF}"
+stat -c 'image=%n size=%s mode=%a' "${RAW_SIF}" "${DERIVED_SIF}"
+
+layout=${ROOT}/overlay-layout
+mkdir -p "${layout}/upper" "${layout}/work"
+truncate -s 512M "${OVERLAY}"
+mkfs.ext3 -q -F -d "${layout}" "${OVERLAY}"
+mkdir -m 1777 "${ROOT}/tmp" "${ROOT}/var-tmp"
+
+probe_instance() {
+    local label=$1
+    shift
+    local name=swe-derived-${PBS_JOBID%%.*}-${label}
+    local config=${ROOT}/config-${label}
+    local exists=0
+    PROBE_LABELS+=("${label}")
+    mkdir -p "${config}"
+    export SINGULARITY_CONFIGDIR=${config}
+    echo "[derived:${label}] command=$(printf '%q ' singularity instance start "$@" "${DERIVED_SIF}" "${name}")"
+    singularity instance start "$@" "${DERIVED_SIF}" "${name}"
+    sleep 1
+    singularity instance list --json "${name}" | tee "${ROOT}/${label}-instance.json"
+    if grep -Fq "${name}" "${ROOT}/${label}-instance.json"; then
+        exists=1
+    fi
+    echo "[derived:${label}] process_snapshot"
+    ps -ef | grep -F "${name}" | grep -v grep || true
+    while IFS= read -r log; do
+        echo "[derived:${label}] runtime_log=${log}"
+        sed -n '1,200p' "${log}" || true
+    done < <(find "${config}" -type f \( -name '*.out' -o -name '*.err' -o -name '*.log' \) -print | sort)
+    if ((exists)); then
+        singularity exec "instance://${name}" /bin/sh -c \
+            'echo derived_instance_exec=ok; pwd; ps -ef'
+        singularity instance stop --timeout 2 "${name}"
+    fi
+    singularity instance list --json "${name}" | tee "${ROOT}/${label}-after-stop.json"
+    if grep -Fq "${name}" "${ROOT}/${label}-after-stop.json"; then
+        echo "[derived:${label}] instance survived stop" >&2
+        return 1
+    fi
+    echo "[derived:${label}] existed=${exists} stopped=1"
+    ((exists == 1))
+}
+
+minimal_ok=0
+production_ok=0
+if probe_instance minimal --cleanenv --no-home; then
+    minimal_ok=1
+fi
+if probe_instance production --cleanenv --containall --no-home \
+    --no-mount home,cwd,bind-paths --overlay "${OVERLAY}" \
+    --bind "${ROOT}/tmp:/tmp:rw" --bind "${ROOT}/var-tmp:/var/tmp:rw"; then
+    production_ok=1
+fi
+((minimal_ok == 1 && production_ok == 1))
+
+trap - EXIT INT TERM
+echo swe_singularity_derived_instance_probe=ok

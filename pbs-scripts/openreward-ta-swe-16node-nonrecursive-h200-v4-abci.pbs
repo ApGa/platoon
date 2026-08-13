@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=16:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-16nr-v4
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh v4 retry after v3 passed literal preflight, immutable runtime setup, and
+# all six remote service checks, then failed controller task discovery on the
+# inherited localhost URL before workers, checkpoints, receipts, or W&B began.
+# Preserve the six-node rollout-tail service placement and training semantics.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v4.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+EXPERIMENT=abci-openreward-ta-swe-h200-16
+TRIAL=abci-ta-swe16-nonrec-h200-cp1-c12-v4-trial0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
+
+prior_receipts=("${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json")
+for prior in "${prior_receipts[@]}"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || {
+        echo "[h200-16-v4] ERROR: refusing stale success artifact; use a fresh trial: ${prior}" >&2
+        exit 2
+    }
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || {
+    echo "[h200-16-v4] ERROR: refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}" >&2
+    exit 2
+}
+
+export OPENREWARD_EXPECTED_NNODES=16
+export OPENREWARD_SERVICE_NODE_COUNT=6
+export OPENREWARD_EXPECTED_RECURSIVE=0
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+
+exec "${COMMON}" "${CONFIG}"

@@ -1,0 +1,87 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=16:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-16nr-v8
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh v8 lineage for the isolated upstream stack. The proven v7 H200
+# topology, full 10-epoch horizon, live first-update candidate, and no-PTC
+# comparison remain unchanged; only the source/dependency/service-image wave
+# and trial identity advance.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8-376d1b9-18e62c0
+RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v8.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v8-abci.env
+EXPERIMENT=abci-openreward-ta-swe-h200-16
+TRIAL=abci-ta-swe16-nonrec-h200-cp1-c12-v8-trial0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" ]] || {
+    echo "[h200-16-v8] ERROR: immutable v8 release is incomplete: ${REPO_ROOT}" >&2
+    exit 2
+}
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || {
+    echo "[h200-16-v8] ERROR: release root must be the exact non-symlink path: ${REPO_ROOT}" >&2
+    exit 2
+}
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || {
+    echo "[h200-16-v8] ERROR: release HEAD is not the pinned ${RELEASE_REF}" >&2
+    exit 2
+}
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || {
+    echo "[h200-16-v8] ERROR: release tracked content differs from ${release_commit}" >&2
+    exit 2
+}
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || {
+    echo "[h200-16-v8] ERROR: release index differs from ${release_commit}" >&2
+    exit 2
+}
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || {
+    echo "[h200-16-v8] ERROR: release has tracked or ordinary untracked changes" >&2
+    exit 2
+}
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+unset release_head release_commit
+
+prior_receipts=("${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json")
+for prior in "${prior_receipts[@]}"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || {
+        echo "[h200-16-v8] ERROR: refusing stale success artifact; use a fresh trial: ${prior}" >&2
+        exit 2
+    }
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || {
+    echo "[h200-16-v8] ERROR: refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}" >&2
+    exit 2
+}
+
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+export OPENREWARD_EXPECTED_NNODES=16
+export OPENREWARD_SERVICE_NODE_COUNT=6
+export OPENREWARD_EXPECTED_RECURSIVE=0
+export OPENREWARD_EXPECTED_PTC=0
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+
+exec "${COMMON}" "${CONFIG}"

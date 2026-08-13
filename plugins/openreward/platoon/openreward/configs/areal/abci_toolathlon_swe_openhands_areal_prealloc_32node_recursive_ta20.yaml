@@ -1,0 +1,56 @@
+defaults:
+  - toolathlon_swe_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8-efficiency-ta20-curriculum
+  - _self_
+
+# This lineage is unreachable through the production wrapper until the
+# checkpoint-backed 16-node update gate validates.
+experiment_name: abci-openreward-ta-swe
+trial_name: abci-ta-swe32-rec-ta20-v1-trial0
+tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  enable_task_tracker: true
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+  balance_accepted_batches: false
+  subagent_environment_access: shared
+  enable_subagent_reward_judging: true
+  subagent_delegation_reward_coefficient: 0.0
+
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+sglang:
+  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+recover:
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    mode: online
+    project: openreward-multienv-openhands
+    group: abci-ta-swe32-rec-ta20-v1

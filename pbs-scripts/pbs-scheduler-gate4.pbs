@@ -1,0 +1,147 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=2:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -N rasp-pbs-scheduler-gate4
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load cuda/12.9/12.9.1
+module load singularity-ce/4.4.1
+export GATE4_SINGULARITY_BIN
+GATE4_SINGULARITY_BIN=$(command -v singularity)
+
+readonly REPO_ROOT=/home/aci18912it/rasp/source/platoon
+readonly SHARED_ROOT=/groups/gai51740/aci18912it/rasp
+readonly TRAINING_SIF=${SHARED_ROOT}/images/platoon-training.sif
+readonly EXPECTED_SIF_SHA256=53c770558ad86e4a8ec4d2532cd3ba1c60a10bd75fff6a51049dfb411b002b12
+readonly JOB_ID_SAFE=${PBS_JOBID%%.*}
+readonly STATE_ROOT=${SHARED_ROOT}/job-state/pbs-scheduler-gate4/${JOB_ID_SAFE}
+readonly GATE_HELPER=${REPO_ROOT}/pbs-scripts/pbs_scheduler_gate4.py
+readonly NODE_LOCAL_INIT=${REPO_ROOT}/pbs-scripts/openreward-node-local-init.py
+readonly NODE_LOCAL_INIT_PYTHON=/usr/bin/python3
+readonly GATE4_NODE_LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/${PBS_JOBID}
+
+mkdir -p "${STATE_ROOT}" "${SHARED_ROOT}/logs"
+chmod 700 "${STATE_ROOT}"
+
+mapfile -t NODES < <(awk '!seen[$0]++' "${PBS_NODEFILE:?PBS_NODEFILE is required}")
+if (( ${#NODES[@]} != 2 )); then
+    echo "Gate 4 requires exactly two ordered physical nodes, got: ${NODES[*]}" >&2
+    exit 1
+fi
+for node in "${NODES[@]}"; do
+    slots=$(awk -v target="${node}" '$0 == target {count++} END {print count + 0}' "${PBS_NODEFILE}")
+    if (( slots != 8 )); then
+        echo "Gate 4 requires eight PBS vnode slots for ${node}, got ${slots}" >&2
+        exit 1
+    fi
+done
+
+[[ -r "${TRAINING_SIF}" ]]
+actual_sha=$(sha256sum "${TRAINING_SIF}" | awk '{print $1}')
+if [[ "${actual_sha}" != "${EXPECTED_SIF_SHA256}" ]]; then
+    echo "Training SIF hash mismatch: ${actual_sha}" >&2
+    exit 1
+fi
+echo "gate4_image_identity=ok path=${TRAINING_SIF} sha256=${actual_sha}"
+echo "gate4_sif_list_begin"
+singularity sif list "${TRAINING_SIF}"
+echo "gate4_sif_list_end"
+echo "gate4_nodefile_begin"
+nl -ba "${PBS_NODEFILE}"
+echo "gate4_nodefile_end ordered_nodes=${NODES[*]}"
+
+# Exercise the exact production all-node initializer before any role launcher
+# can start. The source is snapshotted into this job's private shared state so
+# every pbsdsh task runs identical bytes even if the working tree changes.
+readonly NODE_MAP=${STATE_ROOT}/ordered-nodes.tsv
+awk '!seen[$1]++ { printf "%s\t%d\n", $1, NR - 1 }' "${PBS_NODEFILE}" >"${NODE_MAP}"
+readonly NODE_LOCAL_INIT_GENERATION=$(
+    "${NODE_LOCAL_INIT_PYTHON}" -I -c 'import secrets; print(secrets.token_hex(16))'
+)
+[[ "${NODE_LOCAL_INIT_GENERATION}" =~ ^[0-9a-f]{32}$ ]]
+readonly NODE_LOCAL_INIT_SNAPSHOT=${STATE_ROOT}/openreward-node-local-init.snapshot.py
+node_local_init_snapshot_tmp=${NODE_LOCAL_INIT_SNAPSHOT}.partial.$$
+node_local_init_source_sha=$(sha256sum "${NODE_LOCAL_INIT}" | awk '{print $1}')
+cp -- "${NODE_LOCAL_INIT}" "${node_local_init_snapshot_tmp}"
+chmod 0500 "${node_local_init_snapshot_tmp}"
+node_local_init_snapshot_sha=$(sha256sum "${node_local_init_snapshot_tmp}" | awk '{print $1}')
+node_local_init_current_sha=$(sha256sum "${NODE_LOCAL_INIT}" | awk '{print $1}')
+[[ "${node_local_init_source_sha}" == "${node_local_init_snapshot_sha}" &&
+    "${node_local_init_source_sha}" == "${node_local_init_current_sha}" ]]
+mv -T -- "${node_local_init_snapshot_tmp}" "${NODE_LOCAL_INIT_SNAPSHOT}"
+[[ ! -L "${NODE_LOCAL_INIT_SNAPSHOT}" && -f "${NODE_LOCAL_INIT_SNAPSHOT}" &&
+    "$(stat -c %a "${NODE_LOCAL_INIT_SNAPSHOT}")" == 500 ]]
+readonly NODE_LOCAL_RECEIPT_DIR=${STATE_ROOT}/node-local-ready/${NODE_LOCAL_INIT_GENERATION}
+mkdir -p "${NODE_LOCAL_RECEIPT_DIR}"
+chmod 0700 "${STATE_ROOT}/node-local-ready" "${NODE_LOCAL_RECEIPT_DIR}"
+
+node_local_init_count=0
+while IFS=$'\t' read -r host vnode_index; do
+    node_local_log=${STATE_ROOT}/node-local-init-${host}.log
+    env \
+        -u WANDB_API_KEY \
+        -u OPENAI_API_KEY \
+        -u OPENAI_BASE_URL \
+        -u LITELLM_API_KEY \
+        -u LITELLM_BASE_URL \
+        -u RUBRIC_DEFAULT_LLM \
+        -u HF_TOKEN \
+        -u AWS_ACCESS_KEY_ID \
+        -u AWS_SECRET_ACCESS_KEY \
+        -u AWS_SESSION_TOKEN \
+        /opt/pbs/bin/pbsdsh -n "${vnode_index}" -- \
+        "${NODE_LOCAL_INIT_PYTHON}" "${NODE_LOCAL_INIT_SNAPSHOT}" init \
+        --expected-host "${host}" \
+        --task-index "${vnode_index}" \
+        --expected-root "${GATE4_NODE_LOCAL_ROOT}" \
+        --pbs-job-id "${PBS_JOBID}" \
+        --generation "${NODE_LOCAL_INIT_GENERATION}" \
+        --receipt "${NODE_LOCAL_RECEIPT_DIR}/${host}.json" \
+        --stage-training-sif 0 \
+        --training-sif "${TRAINING_SIF}" \
+        --training-sif-sha256 "${actual_sha}" \
+        >"${node_local_log}" 2>&1
+    node_local_init_count=$((node_local_init_count + 1))
+done <"${NODE_MAP}"
+[[ "${node_local_init_count}" -eq 2 ]]
+
+"${NODE_LOCAL_INIT_PYTHON}" -I "${NODE_LOCAL_INIT_SNAPSHOT}" verify \
+    --node-map "${NODE_MAP}" \
+    --receipt-dir "${NODE_LOCAL_RECEIPT_DIR}" \
+    --expected-nodes 2 \
+    --expected-root "${GATE4_NODE_LOCAL_ROOT}" \
+    --pbs-job-id "${PBS_JOBID}" \
+    --generation "${NODE_LOCAL_INIT_GENERATION}" \
+    --stage-training-sif 0 \
+    --training-sif-sha256 "${actual_sha}"
+echo "gate4_node_local_initialization=ok nodes=2 generation=${NODE_LOCAL_INIT_GENERATION}"
+
+export GATE4_NODE_LOCAL_ROOT
+export GATE4_NODE_LOCAL_RECEIPT_DIR=${NODE_LOCAL_RECEIPT_DIR}
+export GATE4_NODE_LOCAL_INIT_GENERATION=${NODE_LOCAL_INIT_GENERATION}
+unset \
+    host vnode_index node_local_log node_local_init_count \
+    node_local_init_snapshot_tmp node_local_init_source_sha \
+    node_local_init_snapshot_sha node_local_init_current_sha
+
+# Never source config/abci.env or config/secrets.env in this no-training gate.
+# The helper adds only safe synthetic canaries to verify credential isolation.
+export GATE4_REGISTRY_USER=aci18912it
+
+/usr/bin/python3 -u "${GATE_HELPER}" \
+    --repo-root "${REPO_ROOT}" \
+    --state-root "${STATE_ROOT}" \
+    --image "${TRAINING_SIF}" \
+    --expected-sha "${EXPECTED_SIF_SHA256}"
+
+echo "gate4_completed=$(date --iso-8601=seconds)"

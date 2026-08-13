@@ -45,12 +45,8 @@ def _patch_areal_local_scalar_stats_export(stats_tracker_module=None) -> bool:
             return original(self, key, reduce_group)
 
         values = self.stats[key]
-        value = stats_tracker_module.torch.tensor(
-            sum(values), dtype=stats_tracker_module.torch.float32, device="cpu"
-        )
-        count = stats_tracker_module.torch.tensor(
-            len(values), dtype=stats_tracker_module.torch.float32, device="cpu"
-        )
+        value = stats_tracker_module.torch.tensor(sum(values), dtype=stats_tracker_module.torch.float32, device="cpu")
+        count = stats_tracker_module.torch.tensor(len(values), dtype=stats_tracker_module.torch.float32, device="cpu")
         return {key: float(value / count), f"{key}__count": int(count)}
 
     _aggregate_local_scalars_without_device_allocation.__platoon_local_scalar_stats_export_patch__ = True
@@ -287,8 +283,7 @@ def _patch_areal_sglang_routed_experts_launcher(sglang_config_cls=None) -> bool:
             return command
         if not isinstance(command, list) or command.count(upstream_module) != 1:
             raise RuntimeError(
-                "Unexpected AReaL SGLang launch command while enabling routed-expert capture: "
-                f"{command!r}"
+                f"Unexpected AReaL SGLang launch command while enabling routed-expert capture: {command!r}"
             )
         patched_command = list(command)
         patched_command[patched_command.index(upstream_module)] = platoon_module
@@ -2349,6 +2344,224 @@ def _patch_remote_inf_engine_routed_expert_stitching(remote_inf_engine_module=No
     return True
 
 
+def _patch_remote_inf_engine_server_child_exit(remote_inf_engine_module=None) -> bool:
+    """Stop inference-server readiness polling when its child already exited.
+
+    The pinned AReaL implementation accepts a ``subprocess.Popen`` object but
+    never observes it while polling the server health endpoint.  A failed
+    SGLang child can consequently consume the complete setup timeout before
+    the controller sees only the generic ``server launch failed`` error.  Keep
+    AReaL's original behavior when no child is supplied and preserve its exact
+    timeout exception for a live child that simply never becomes healthy.
+
+    This patch is installed only by the lightweight rollout RPC-server
+    entrypoint.  In particular, applying controller-safe patches on a bare
+    host must not import the worker inference stack (or its CUDA bindings).
+    """
+
+    if remote_inf_engine_module is None:
+        import areal.infra.remote_inf_engine as remote_inf_engine_module  # pyright: ignore[reportMissingImports]
+
+    engine_cls = remote_inf_engine_module.RemoteInfEngine
+    original_wait = engine_cls._wait_for_server
+    original_launch = engine_cls.launch_server
+    wait_is_patched = getattr(original_wait, "__platoon_server_child_exit_patch__", False)
+    launch_is_patched = getattr(original_launch, "__platoon_server_child_exit_cleanup_patch__", False)
+    if wait_is_patched and launch_is_patched:
+        return False
+    if wait_is_patched != launch_is_patched:
+        raise RuntimeError("Inconsistent AReaL inference-server child-exit patch state")
+
+    wait_signature = inspect.signature(original_wait)
+    parameters = tuple(wait_signature.parameters)
+    if parameters != ("self", "address", "process"):
+        raise RuntimeError(
+            "Unsupported AReaL RemoteInfEngine._wait_for_server API: "
+            f"expected (self, address, process), got {wait_signature}"
+        )
+    if wait_signature.parameters["process"].default is not None:
+        raise RuntimeError("Unsupported AReaL RemoteInfEngine._wait_for_server API: process must default to None")
+    launch_signature = inspect.signature(original_launch)
+    if tuple(launch_signature.parameters) != ("self", "server_args"):
+        raise RuntimeError(
+            f"Unsupported AReaL RemoteInfEngine.launch_server API: expected (self, server_args), got {launch_signature}"
+        )
+
+    try:
+        launch_source = textwrap.dedent(inspect.getsource(original_launch))
+    except (OSError, TypeError) as exc:
+        raise RuntimeError("Cannot inspect AReaL RemoteInfEngine.launch_server for child-exit cleanup") from exc
+    timeout_handler = "    except TimeoutError:\n"
+    if launch_source.count(timeout_handler) != 1:
+        raise RuntimeError("Unsupported AReaL RemoteInfEngine.launch_server cleanup layout")
+    rewritten_launch_source = launch_source.replace(
+        timeout_handler,
+        "    except ChildProcessError:\n"
+        "        self._shutdown_one_server(server_info)\n"
+        "        raise\n"
+        f"{timeout_handler}",
+        1,
+    )
+    launch_namespace: dict[str, Any] = {}
+    try:
+        exec(
+            compile(
+                rewritten_launch_source,
+                inspect.getsourcefile(original_launch) or "<areal-remote-inf-engine-launch-server-cleanup>",
+                "exec",
+            ),
+            remote_inf_engine_module.__dict__,
+            launch_namespace,
+        )
+    except Exception as exc:
+        raise RuntimeError("Failed to compile AReaL RemoteInfEngine.launch_server child-exit cleanup") from exc
+    launch_with_child_exit_cleanup = launch_namespace.get("launch_server")
+    if launch_with_child_exit_cleanup is None:
+        raise RuntimeError("AReaL RemoteInfEngine.launch_server child-exit cleanup produced no method")
+    launch_with_child_exit_cleanup = wraps(original_launch)(launch_with_child_exit_cleanup)
+    launch_with_child_exit_cleanup.__platoon_server_child_exit_cleanup_patch__ = True
+
+    def _raise_if_exited(process, address: str) -> None:
+        returncode = process.poll()
+        if returncode is None:
+            return
+        signal_detail = ""
+        if returncode < 0:
+            try:
+                import signal
+
+                signal_name = signal.Signals(-returncode).name
+            except (ValueError, OSError):
+                signal_name = "unknown"
+            signal_detail = f" (signal {-returncode}/{signal_name})"
+        raise ChildProcessError(
+            "Inference server child exited before becoming healthy at "
+            f"{address}: exit code {returncode}{signal_detail}. "
+            "Inspect this rollout worker's stdout/stderr above for the child traceback."
+        )
+
+    def _bounded_health_check(self, base_url: str, timeout: float) -> bool:
+        """Mirror pinned ``check_health`` with a readiness-safe timeout."""
+
+        try:
+            health_req = self.backend.get_health_check_request()
+            url = f"{base_url}{health_req.endpoint}"
+            response = remote_inf_engine_module.requests.request(
+                health_req.method,
+                url,
+                json=health_req.payload,
+                timeout=timeout,
+            )
+            return response.status_code == 200
+        except remote_inf_engine_module.requests.exceptions.RequestException:
+            return False
+
+    @wraps(original_wait)
+    def _wait_for_server_with_child_exit(self, address: str, process=None):
+        if process is None:
+            return original_wait(self, address, process=process)
+
+        try:
+            host, port = remote_inf_engine_module.split_hostport(address)
+            base_url = f"http://{remote_inf_engine_module.format_hostport(host, port)}"
+        except ValueError:
+            base_url = f"http://{address}"
+
+        deadline = time.monotonic() + self.config.setup_timeout
+        _raise_if_exited(process, address)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if _bounded_health_check(self, base_url, min(1.0, remaining)):
+                return None
+            # The process can die while the health request is in flight.  Check
+            # again before sleeping so an already-observed child failure costs
+            # no additional one-second polling interval.
+            _raise_if_exited(process, address)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(1.0, remaining))
+
+        # Prefer an exact child failure discovered on the timeout boundary;
+        # otherwise retain AReaL's exception type and message byte-for-byte.
+        _raise_if_exited(process, address)
+        raise TimeoutError("server launch failed")
+
+    _wait_for_server_with_child_exit.__platoon_server_child_exit_patch__ = True
+    engine_cls.launch_server = launch_with_child_exit_cleanup
+    engine_cls._wait_for_server = _wait_for_server_with_child_exit
+    return True
+
+
+def _patch_slurm_scheduler_engine_call_error_retry(scheduler_module=None) -> bool:
+    """Do not retry definitive engine RPC errors as transport failures.
+
+    AReaL intentionally retries request timeouts, HTTP 503 responses, and
+    connection failures.  Its pinned sync and async implementations also raise
+    ``EngineCallError`` for a non-retryable HTTP response *inside* a broad
+    ``except Exception`` block, which then turns that definitive response into
+    three identical calls.  Insert only the missing passthrough handler before
+    the existing transport handlers; all explicit retry branches stay intact.
+
+    The patch compiles against the installed AReaL function bodies and fails
+    closed if their relevant exception layout changes.  It imports only the
+    controller scheduler module and is therefore safe on a host without CUDA.
+    """
+
+    if scheduler_module is None:
+        import areal.infra.scheduler.slurm as scheduler_module  # pyright: ignore[reportMissingImports]
+
+    scheduler_cls = scheduler_module.SlurmScheduler
+    method_markers = {
+        "call_engine": "        except requests.exceptions.Timeout as e:\n",
+        "async_call_engine": "        except TimeoutError as e:\n",
+    }
+    changed = False
+    for method_name, transport_handler in method_markers.items():
+        original = getattr(scheduler_cls, method_name)
+        if getattr(original, "__platoon_engine_call_error_passthrough_patch__", False):
+            continue
+
+        try:
+            source = textwrap.dedent(inspect.getsource(original))
+        except (OSError, TypeError) as exc:
+            raise RuntimeError(f"Cannot inspect AReaL SlurmScheduler.{method_name} for retry patch") from exc
+
+        if source.count("        except EngineCallError:\n"):
+            # A newer AReaL owns the fix.  Do not replace its implementation.
+            continue
+        if source.count(transport_handler) != 1:
+            raise RuntimeError(f"Unsupported AReaL engine RPC retry layout in SlurmScheduler.{method_name}")
+        rewritten_source = source.replace(
+            transport_handler,
+            f"        except EngineCallError:\n            raise\n{transport_handler}",
+            1,
+        )
+        namespace: dict[str, Any] = {}
+        try:
+            exec(
+                compile(
+                    rewritten_source,
+                    inspect.getsourcefile(original) or f"<areal-slurm-{method_name}-retry>",
+                    "exec",
+                ),
+                scheduler_module.__dict__,
+                namespace,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to compile AReaL SlurmScheduler.{method_name} retry patch") from exc
+        rewritten = namespace.get(method_name)
+        if rewritten is None:
+            raise RuntimeError(f"AReaL SlurmScheduler.{method_name} retry patch produced no method")
+        rewritten = wraps(original)(rewritten)
+        rewritten.__platoon_engine_call_error_passthrough_patch__ = True
+        setattr(scheduler_cls, method_name, rewritten)
+        changed = True
+
+    return changed
+
+
 def _patch_remote_inf_engine_asyncio_teardown_race() -> None:
     """Run inference-server fan-out coroutines without asyncio's racy teardown.
 
@@ -2483,6 +2696,128 @@ def _patch_areal_proxy_rollout_fork_command() -> None:
     patch_scheduler(SlurmScheduler)
 
 
+def _patch_areal_fork_alias_cleanup(
+    local_scheduler_cls=None,
+    slurm_scheduler_cls=None,
+) -> bool:
+    """Make upstream Local/Slurm fork-alias deletion authoritative.
+
+    AReaL's schedulers currently discard a forked role's bookkeeping without
+    asking its owner Guard to terminate the child. Keep the upstream deletion
+    implementations intact, but gate their metadata removal on Platoon's
+    shared, fail-closed lifecycle helper. Plain aliases have no independent
+    ``_workers`` entry and continue through the original metadata-only path.
+    """
+
+    if local_scheduler_cls is None:
+        from areal.infra.scheduler.local import (  # pyright: ignore[reportMissingImports]
+            LocalScheduler as local_scheduler_cls,
+        )
+    if slurm_scheduler_cls is None:
+        from areal.infra.scheduler.slurm import (  # pyright: ignore[reportMissingImports]
+            SlurmScheduler as slurm_scheduler_cls,
+        )
+
+    from platoon.train.areal.fork_lifecycle import (
+        cleanup_dependent_aliases_before_owner,
+        cleanup_forked_alias_workers,
+    )
+
+    changed = False
+
+    def patch_scheduler(scheduler_cls) -> None:
+        nonlocal changed
+        original = scheduler_cls.delete_workers
+        if getattr(original, "__platoon_fork_alias_cleanup_patch__", False):
+            return
+
+        @wraps(original)
+        def _delete_workers_after_fork_cleanup(
+            self,
+            role: str | None = None,
+            reverse_order: bool = False,
+        ):
+            if role is None:
+                alias_roles = list(self._colocated_roles)
+                if reverse_order:
+                    alias_roles.reverse()
+                for alias_role in alias_roles:
+                    self.delete_workers(
+                        role=alias_role,
+                        reverse_order=reverse_order,
+                    )
+                return original(self, role=None, reverse_order=reverse_order)
+
+            cleanup_dependent_aliases_before_owner(
+                self,
+                role,
+                reverse_order=reverse_order,
+            )
+            cleanup_forked_alias_workers(
+                self,
+                role,
+                reverse_order=reverse_order,
+            )
+            return original(self, role=role, reverse_order=reverse_order)
+
+        _delete_workers_after_fork_cleanup.__platoon_fork_alias_cleanup_patch__ = True
+        scheduler_cls.delete_workers = _delete_workers_after_fork_cleanup
+        changed = True
+
+    patch_scheduler(local_scheduler_cls)
+    patch_scheduler(slurm_scheduler_cls)
+    return changed
+
+
+def _patch_rollout_controller_cleanup_error_propagation(controller_cls=None) -> bool:
+    """Prevent scheduler cleanup failures from becoming a successful shutdown.
+
+    The pinned RolloutController logs and suppresses both rollout-owner and
+    proxy-alias deletion failures. Scheduler teardown is now fail-closed, so a
+    controller must not erase that signal and let the training process report
+    success. Record only scheduler deletion failures while retaining all of
+    upstream's best-effort cleanup steps, then raise after they complete.
+    """
+
+    if controller_cls is None:
+        from areal.infra.controller.rollout_controller import (  # pyright: ignore[reportMissingImports]
+            RolloutController as controller_cls,
+        )
+
+    original = controller_cls.destroy
+    if getattr(original, "__platoon_cleanup_error_propagation_patch__", False):
+        return False
+
+    @wraps(original)
+    def _destroy_with_cleanup_error_propagation(self):
+        scheduler = self.scheduler
+        cleanup_errors: list[BaseException] = []
+
+        class _CleanupRecordingScheduler:
+            def delete_workers(_self, *args, **kwargs):
+                try:
+                    return scheduler.delete_workers(*args, **kwargs)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+                    raise
+
+            def __getattr__(_self, name):
+                return getattr(scheduler, name)
+
+        self.scheduler = _CleanupRecordingScheduler()
+        try:
+            result = original(self)
+        finally:
+            self.scheduler = scheduler
+        if cleanup_errors:
+            raise RuntimeError("Rollout scheduler cleanup could not be confirmed") from cleanup_errors[0]
+        return result
+
+    _destroy_with_cleanup_error_propagation.__platoon_cleanup_error_propagation_patch__ = True
+    controller_cls.destroy = _destroy_with_cleanup_error_propagation
+    return True
+
+
 def _flatten_message_list_content(messages: list[dict[str, Any]]) -> None:
     """Convert OpenAI list-shaped text content blocks to plain strings.
 
@@ -2581,11 +2916,7 @@ def _patch_areal_openai_reasoning_chat_template() -> None:
             extra_body = forwarded_request.get("extra_body")
             extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
             chat_template_kwargs = extra_body.get("chat_template_kwargs")
-            chat_template_kwargs = (
-                dict(chat_template_kwargs)
-                if isinstance(chat_template_kwargs, dict)
-                else {}
-            )
+            chat_template_kwargs = dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
             chat_template_kwargs.update(
                 enable_thinking=reasoning_effort != "none",
                 preserve_thinking=False,
@@ -2872,9 +3203,7 @@ def _patch_areal_recover_checkpoint_rotation() -> None:
         if os.path.exists(path_old):
             shutil.rmtree(path_old)
 
-        recover_module.logger.info(
-            f"Saved recover checkpoint to {path} (with_optim={with_optim})"
-        )
+        recover_module.logger.info(f"Saved recover checkpoint to {path} (with_optim={with_optim})")
 
     _save_checkpoint_with_rotation.__platoon_recover_rotation_patch__ = True
     handler_cls._save_checkpoint = _save_checkpoint_with_rotation
@@ -2903,10 +3232,7 @@ def _patch_areal_recover_checkpoint_rotation() -> None:
         if not os.path.exists(path):
             path_old = path + "_old"
             if os.path.exists(path_old):
-                recover_module.logger.warning(
-                    f"Canonical checkpoint {path} not found; "
-                    f"falling back to {path_old}"
-                )
+                recover_module.logger.warning(f"Canonical checkpoint {path} not found; falling back to {path_old}")
                 path = path_old
             else:
                 raise FileNotFoundError(f"Checkpoint path {path} does not exist.")
@@ -2927,8 +3253,50 @@ def _patch_areal_recover_checkpoint_rotation() -> None:
     handler_cls._load_checkpoint = _load_checkpoint_with_old_fallback
 
 
-def apply_all_patches() -> None:
-    """Apply Platoon compatibility patches for the current AReaL release.
+_CONTROLLER_SAFE_PATCHES_APPLIED = False
+_MEGATRON_WORKER_PATCHES_APPLIED = False
+_ROLLOUT_WORKER_PATCHES_APPLIED = False
+
+
+def apply_rollout_worker_patches() -> None:
+    """Apply patches that belong only inside rollout RPC worker containers."""
+
+    global _ROLLOUT_WORKER_PATCHES_APPLIED
+    if _ROLLOUT_WORKER_PATCHES_APPLIED:
+        return
+
+    _patch_remote_inf_engine_server_child_exit()
+    _ROLLOUT_WORKER_PATCHES_APPLIED = True
+
+
+def apply_megatron_worker_patches() -> None:
+    """Apply patches whose imports belong exclusively on Megatron workers.
+
+    The PBS single-controller process runs on the bare ABCI host, while the
+    compiled Megatron / Transformer Engine stack exists only in the worker
+    SIF. These patches must therefore be installed immediately before the real
+    Megatron actor class is resolved inside a worker, never while a controller
+    imports :mod:`platoon.train.areal`.
+    """
+
+    global _MEGATRON_WORKER_PATCHES_APPLIED
+    if _MEGATRON_WORKER_PATCHES_APPLIED:
+        return
+
+    _patch_megatron_bridge_attention_backend()
+    _patch_megatron_bridge_qwen35_tp_validation()
+    _patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
+    _patch_megatron_checkpoint_optimizer_bucket_shapes()
+    _patch_areal_megatron_memory_compatibility()
+    _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input()
+    _patch_megatron_core_qwen35_already_cp_local_thd_rope()
+    _patch_megatron_core_gdn_context_parallel_config_validation()
+    _patch_megatron_core_gated_delta_net_context_parallel()
+    _MEGATRON_WORKER_PATCHES_APPLIED = True
+
+
+def apply_controller_safe_patches() -> None:
+    """Apply Platoon compatibility patches safe in controllers and workers.
 
     Historical compatibility behavior is removed as AReaL adopts it upstream:
 
@@ -2945,6 +3313,10 @@ def apply_all_patches() -> None:
       chat templates; the remaining OpenAI patch only flattens text lists.
     """
 
+    global _CONTROLLER_SAFE_PATCHES_APPLIED
+    if _CONTROLLER_SAFE_PATCHES_APPLIED:
+        return
+
     _patch_areal_local_scalar_stats_export()
     _patch_hf_tokenizer_download_race()
     _patch_model_response_custom_stop_sequences()
@@ -2952,25 +3324,28 @@ def apply_all_patches() -> None:
     _patch_areal_sglang_routed_experts_launcher()
     _patch_areal_routed_experts_unpadding()
     _patch_triton_cache_for_qwen35_gdn_cp()
-    _patch_megatron_bridge_attention_backend()
-    _patch_megatron_bridge_qwen35_tp_validation()
-    _patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
-    _patch_megatron_checkpoint_optimizer_bucket_shapes()
     _patch_areal_qwen35_gdn_cp_guards()
-    _patch_areal_megatron_memory_compatibility()
-    _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input()
-    _patch_megatron_core_qwen35_already_cp_local_thd_rope()
-    _patch_megatron_core_gdn_context_parallel_config_validation()
-    _patch_megatron_core_gated_delta_net_context_parallel()
     _patch_batch_task_dispatcher_idle_submit()
     _patch_rollout_controller_least_loaded_workers()
     _patch_rollout_controller_pause_rpc_policy()
     _patch_local_scheduler_fork_ready_timeout()
+    _patch_slurm_scheduler_engine_call_error_retry()
     _patch_remote_inf_engine_routed_expert_stitching()
     _patch_remote_inf_engine_asyncio_teardown_race()
     _patch_remote_inf_engine_proxy_resolution()
     _patch_areal_proxy_rollout_fork_command()
+    _patch_areal_fork_alias_cleanup()
+    _patch_rollout_controller_cleanup_error_propagation()
     _patch_areal_openai_message_content_flatten()
     _patch_areal_openai_reasoning_chat_template()
     _patch_areal_recover_checkpoint_rotation()
     _install_process_stall_watchdog()
+    _CONTROLLER_SAFE_PATCHES_APPLIED = True
+
+
+def apply_all_patches() -> None:
+    """Apply every patch in an environment that supports Megatron imports."""
+
+    apply_controller_safe_patches()
+    apply_rollout_worker_patches()
+    apply_megatron_worker_patches()

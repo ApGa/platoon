@@ -1,0 +1,154 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=2:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -N rasp-training-gate1
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load cuda/12.9/12.9.1
+module load hpcx/2.20
+module load singularity-ce/4.4.1
+
+readonly REPO_ROOT=/home/aci18912it/rasp/source/platoon
+readonly SHARED_ROOT=/groups/gai51740/aci18912it/rasp
+readonly TRAINING_SIF=${PLATOON_TRAINING_SIF:-${SHARED_ROOT}/images/platoon-training.sif}
+readonly EXPECTED_SIF_SHA256=53c770558ad86e4a8ec4d2532cd3ba1c60a10bd75fff6a51049dfb411b002b12
+readonly EXPECTED_BASE_DIGEST=sha256:829404319e32cc15c1a1fa0e8a47b807f98154c6287079b0548d031f1af30882
+readonly EXPECTED_APEX_COMMIT=6424da3b4faa6c8f062da4a48c424fff3f02d42d
+readonly EXPECTED_TE_COMMIT=5671fd3675906cda1ade26c24a65d3dedd88eb89
+readonly SMOKE_HELPER=${REPO_ROOT}/pbs-scripts/training_runtime_nccl_smoke.py
+readonly JOB_MARKER=training-gate1-${PBS_JOBID%%.*}
+readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/${JOB_MARKER}
+readonly NCCL_LOG=${LOCAL_ROOT}/nccl.log
+
+mkdir -p "${LOCAL_ROOT}" "${SHARED_ROOT}/logs"
+export SINGULARITY_CACHEDIR=${LOCAL_ROOT}/singularity-cache
+export SINGULARITY_TMPDIR=${LOCAL_ROOT}/singularity-tmp
+mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+
+mapfile -t NODES < <(awk '!seen[$0]++' "${PBS_NODEFILE:?PBS_NODEFILE is required}")
+if (( ${#NODES[@]} != 2 )); then
+    echo "Expected two unique nodes, got ${#NODES[@]}: ${NODES[*]}" >&2
+    exit 1
+fi
+readonly MASTER_ADDR=${NODES[0]}
+# A deterministic job-specific port avoids collisions with concurrent gates.
+readonly MASTER_PORT=$((20000 + 10#${PBS_JOBID%%.*} % 20000))
+
+echo "gate_started=$(date --iso-8601=seconds)"
+echo "pbs_jobid=${PBS_JOBID}"
+echo "nodes=${NODES[*]}"
+echo "launcher=$(command -v mpirun)"
+mpirun --version | head -1
+
+[[ -r "${TRAINING_SIF}" ]]
+actual_sha256=$(sha256sum "${TRAINING_SIF}" | awk '{print $1}')
+[[ "${actual_sha256}" == "${EXPECTED_SIF_SHA256}" ]] || {
+    echo "Training SIF hash mismatch: ${actual_sha256}" >&2
+    exit 1
+}
+[[ $(awk '{print $1}' "${TRAINING_SIF}.sha256") == "${EXPECTED_SIF_SHA256}" ]]
+labels=$(singularity inspect --labels "${TRAINING_SIF}")
+grep -Fq "${EXPECTED_BASE_DIGEST}" <<<"${labels}"
+grep -Fq "${EXPECTED_APEX_COMMIT}" <<<"${labels}"
+grep -Fq "${EXPECTED_TE_COMMIT}" <<<"${labels}"
+grep -Fq 'org.platoon.cuda.version: 12.9.1' <<<"${labels}"
+grep -Fq 'org.platoon.pytorch.version: 2.9.1+cu129' <<<"${labels}"
+echo "image_identity=ok sha256=${actual_sha256}"
+
+"${REPO_ROOT}/pbs-scripts/verify_training_runtime.sh" \
+    --sif "${TRAINING_SIF}" --with-gpu
+
+# HPC-X is the site-supported process launcher. Each host local rank is first
+# resolved to an immutable physical UUID. NVIDIA setup exposes only that UUID,
+# which is consequently container-local CUDA ordinal zero.
+# PyTorch supplies NCCL inside the immutable SIF; NCCL debug output records the
+# selected inter-node transport for the validation ledger.
+mpirun -np 16 -map-by ppr:8:node -bind-to none -hostfile "${PBS_NODEFILE}" \
+    -x PATH -x LD_LIBRARY_PATH \
+    /bin/bash -lc '
+        set -euo pipefail
+        rank=${OMPI_COMM_WORLD_RANK:?}
+        local_rank=${OMPI_COMM_WORLD_LOCAL_RANK:?}
+        export SINGULARITY_CACHEDIR="${PBS_LOCALDIR:?}/'${JOB_MARKER}'-singularity-cache"
+        export SINGULARITY_TMPDIR="${PBS_LOCALDIR:?}/'${JOB_MARKER}'-singularity-tmp"
+        mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+        gpu_uuid=$(nvidia-smi --id="${local_rank}" --query-gpu=uuid --format=csv,noheader,nounits)
+        export NVIDIA_VISIBLE_DEVICES=${gpu_uuid}
+        export CUDA_VISIBLE_DEVICES=0
+        printf "rank_mapping host=%s rank=%s local_rank=%s visible=%s gpu_uuid=%s\n" \
+            "$(hostname -s)" "${rank}" "${local_rank}" "${CUDA_VISIBLE_DEVICES}" "${gpu_uuid}"
+        exec singularity exec --cleanenv --no-home --containall --nv --pwd /tmp \
+            --bind "'${SMOKE_HELPER}':/opt/platoon-runtime/training_runtime_nccl_smoke.py:ro" \
+            --bind "/dev/infiniband:/dev/infiniband" \
+            --env "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}" \
+            --env "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}" \
+            --env "PLATOON_GATE_RANK=${rank}" \
+            --env "XDG_CACHE_HOME=/tmp/platoon-rank-${rank}/cache" \
+            --env "FLASHINFER_WORKSPACE_DIR=/tmp/platoon-rank-${rank}/flashinfer" \
+            --env "TORCH_EXTENSIONS_DIR=/tmp/platoon-rank-${rank}/torch-extensions" \
+            --env "TRITON_CACHE_DIR=/tmp/platoon-rank-${rank}/triton" \
+            --env "NCCL_DEBUG=INFO" \
+            --env "NCCL_DEBUG_SUBSYS=INIT,NET" \
+            --env "NCCL_IB_DISABLE=0" \
+            --env "NCCL_NET=IB" \
+            --env "TORCH_NCCL_ASYNC_ERROR_HANDLING=1" \
+            "'${TRAINING_SIF}'" \
+            /bin/bash -c '\''export HOME=/tmp/platoon-rank-$PLATOON_GATE_RANK/home; exec "$@"'\'' \
+            gate-entry python3 /opt/platoon-runtime/training_runtime_nccl_smoke.py \
+                --rank "${rank}" --local-rank "${local_rank}" --world-size 16 \
+                --master-addr "'${MASTER_ADDR}'" --master-port "'${MASTER_PORT}'" \
+                --marker "'${JOB_MARKER}'" --expected-gpu-uuid "${gpu_uuid}"
+    ' 2>&1 | tee "${NCCL_LOG}"
+
+# NCCL_NET=IB makes socket fallback fatal. Keep a positive log assertion too so
+# a future NCCL release cannot silently ignore or reinterpret that setting.
+if ! grep -Eq 'NCCL INFO (NET/(IB|IBext)[^ ]*.*Using|Using network (IB|IBext|NCCL RDMA))' \
+    "${NCCL_LOG}"; then
+    echo "No evidence that NCCL selected its IB/RDMA transport" >&2
+    exit 1
+fi
+[[ $(grep -c 'rank_mapping host=' "${NCCL_LOG}") -eq 16 ]] || {
+    echo "Expected 16 host/GPU rank mappings" >&2
+    exit 1
+}
+[[ $(sed -n 's/.* gpu_uuid=\([^[:space:]]*\).*/\1/p' "${NCCL_LOG}" | sort -u | wc -l) -eq 16 ]] || {
+    echo "The 16 ranks did not map to 16 distinct physical GPU UUIDs" >&2
+    exit 1
+}
+[[ $(grep -c 'rank_passed .*device_count=1 ' "${NCCL_LOG}") -eq 16 ]] || {
+    echo "Not every rank proved that exactly one GPU was visible" >&2
+    exit 1
+}
+grep -Fq 'nccl_collective=ok backend=nccl world_size=16 all_reduce_sum=136.0' "${NCCL_LOG}"
+echo "rdma_transport=ok"
+echo "gpu_isolation=ok ranks=16 unique_gpu_uuids=16 visible_devices_per_rank=1"
+
+# mpirun returning zero is necessary but not sufficient evidence of teardown.
+# Check every allocated node for surviving marked workers and named instances.
+mpirun -np 2 -map-by ppr:1:node -bind-to none -hostfile "${PBS_NODEFILE}" \
+    /bin/bash -lc '
+        set -euo pipefail
+        marker="'${JOB_MARKER}'"
+        if pgrep -u "$(id -u)" -af "[t]raining_runtime_nccl_smoke.py.*${marker}"; then
+            echo "Marked training smoke process survived mpirun on $(hostname -s)" >&2
+            exit 1
+        fi
+        if singularity instance list 2>/dev/null | grep -Fq "${marker}"; then
+            echo "Singularity instance survived training smoke on $(hostname -s)" >&2
+            exit 1
+        fi
+        echo "cleanup=ok host=$(hostname -s)"
+    '
+
+echo "gate_result=PASS"
+echo "gate_finished=$(date --iso-8601=seconds)"

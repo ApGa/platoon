@@ -1,0 +1,194 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:45:00
+#PBS -N rasp-toolathlon-smoke
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# One-node ABCI gate for Toolathlon's unprivileged service. The database seed
+# is copied with a short-lived fakeroot process; the actual PostgreSQL, nginx,
+# and Python service run without fakeroot against a normal persistent overlay.
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+TOOLATHLON_SIF=${PLATOON_TOOLATHLON_SIF:-/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon.sif}
+ENTRYPOINT=${REPO_ROOT}/plugins/openreward/scripts/openreward-toolathlon-resilient-entrypoint.sh
+STAGER=${REPO_ROOT}/plugins/openreward/scripts/openreward-toolathlon-stage-pgdata.sh
+SESSION_SMOKE=${REPO_ROOT}/pbs-scripts/toolathlon_session_smoke.py
+RECOVERY_SMOKE=${REPO_ROOT}/pbs-scripts/toolathlon_worker_recovery_smoke.py
+LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/openreward-toolathlon-smoke
+STATE_HOST=${LOCAL_ROOT}/state
+PGDATA_CONTAINER=/mnt/state/postgresql/14/main
+OVERLAY=${LOCAL_ROOT}/toolathlon-overlay.img
+PORT=${OPENREWARD_SMOKE_PORT:-18080}
+BASE_PORT=${OPENREWARD_SMOKE_WORKER_BASE_PORT:-18100}
+SERVICE_LOG=${LOCAL_ROOT}/service.log
+HEALTH_SECONDS=${OPENREWARD_SMOKE_HEALTH_SECONDS:-1800}
+service_pid=
+
+if [[ -z "${HEALTH_SECONDS}" || "${HEALTH_SECONDS}" == *[!0-9]* ]]; then
+    echo "[smoke] OPENREWARD_SMOKE_HEALTH_SECONDS must be a nonnegative integer" >&2
+    exit 2
+fi
+
+mkdir -p "${LOCAL_ROOT}" "${STATE_HOST}"
+export SINGULARITY_CACHEDIR=${LOCAL_ROOT}/singularity-cache
+export SINGULARITY_TMPDIR=${LOCAL_ROOT}/singularity-tmp
+mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+
+cleanup() {
+    if [[ -n "${service_pid}" ]] && kill -0 "${service_pid}" 2>/dev/null; then
+        kill -TERM "${service_pid}" 2>/dev/null || true
+        for _ in $(seq 1 300); do
+            kill -0 "${service_pid}" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL "${service_pid}" 2>/dev/null || true
+        wait "${service_pid}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+test -r "${TOOLATHLON_SIF}"
+test -x "${ENTRYPOINT}"
+test -x "${STAGER}"
+test -r "${SESSION_SMOKE}"
+test -r "${RECOVERY_SMOKE}"
+
+echo "[smoke] staging image-baked PGDATA with transient fakeroot"
+singularity exec --fakeroot --cleanenv --no-home \
+    --bind "${LOCAL_ROOT}:/mnt,${STAGER}:/app/openreward-toolathlon-stage-pgdata.sh:ro" \
+    "${TOOLATHLON_SIF}" \
+    /app/openreward-toolathlon-stage-pgdata.sh "${PGDATA_CONTAINER}"
+test "$(stat -c %u "${STATE_HOST}/postgresql/14/main")" = "$(id -u)"
+
+OVERLAY_LAYOUT=${LOCAL_ROOT}/overlay-layout
+mkdir -p "${OVERLAY_LAYOUT}/upper" "${OVERLAY_LAYOUT}/work"
+truncate -s 2G "${OVERLAY}"
+mkfs.ext3 -q -F -d "${OVERLAY_LAYOUT}" "${OVERLAY}"
+
+echo "[smoke] starting non-fakeroot Toolathlon service"
+singularity exec --cleanenv --no-home --overlay "${OVERLAY}" \
+    --bind "${LOCAL_ROOT}:/mnt,${ENTRYPOINT}:/app/openreward-toolathlon-resilient-entrypoint.sh:ro" \
+    "${TOOLATHLON_SIF}" \
+    env \
+        OPENREWARD_RUNTIME_MODE=user \
+        OPENREWARD_STATE_DIR=/mnt/state \
+        OPENREWARD_PGDATA="${PGDATA_CONTAINER}" \
+        OPENREWARD_PORT="${PORT}" \
+        OPENREWARD_WORKER_BASE_PORT="${BASE_PORT}" \
+        OPENREWARD_WORKERS=2 \
+        OPENREWARD_WORKER_PID_DIR=/mnt/state/worker-pids \
+        OPENREWARD_WORKER_PID_ISOLATION=0 \
+        OPENREWARD_PG_MAX_CONNECTIONS=128 \
+        /app/openreward-toolathlon-resilient-entrypoint.sh \
+    >"${SERVICE_LOG}" 2>&1 &
+service_pid=$!
+
+status=
+for _ in $(seq 1 180); do
+    if ! kill -0 "${service_pid}" 2>/dev/null; then
+        echo "[smoke] service exited before readiness" >&2
+        cat "${SERVICE_LOG}" >&2
+        wait "${service_pid}"
+    fi
+    status=$(curl --silent --show-error --output /dev/null \
+        --connect-timeout 2 --max-time 5 --write-out '%{http_code}' \
+        --noproxy '*' "http://127.0.0.1:${PORT}/" 2>/dev/null || true)
+    if [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]; then
+        break
+    fi
+    sleep 1
+done
+if ! [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]; then
+    echo "[smoke] service did not become healthy; last HTTP status=${status@Q}" >&2
+    cat "${SERVICE_LOG}" >&2
+    exit 1
+fi
+echo "[smoke] nginx/python readiness HTTP status=${status}"
+
+psql_identity=$(singularity exec --cleanenv --no-home "${TOOLATHLON_SIF}" \
+    /usr/lib/postgresql/14/bin/psql \
+    -h 127.0.0.1 -p 5432 -U eigent -d postgres -v ON_ERROR_STOP=1 \
+    -tAc "SELECT current_user || ':' || current_database();")
+test "${psql_identity}" = eigent:postgres
+echo "[smoke] PostgreSQL identity=${psql_identity}"
+
+echo "[smoke] killing worker 0 while a live session remains on worker 1"
+singularity exec --cleanenv --no-home \
+    --bind "${STATE_HOST}:/mnt/state,${RECOVERY_SMOKE}:/app/toolathlon_worker_recovery_smoke.py:ro" \
+    "${TOOLATHLON_SIF}" \
+    env \
+        OPENREWARD_DISABLE_UPDATE_CHECK=1 \
+        OPENREWARD_SESSION_URL="http://127.0.0.1:$((BASE_PORT + 1))" \
+        OPENREWARD_API_URL="http://127.0.0.1:$((BASE_PORT + 1))" \
+        OPENREWARD_KILL_WORKER_PID_FILE=/mnt/state/worker-pids/worker-0.pid \
+        OPENREWARD_KILLED_WORKER_URL="http://127.0.0.1:${BASE_PORT}/" \
+        python3 /app/toolathlon_worker_recovery_smoke.py
+grep -Fq '[entrypoint] worker 0 exited unexpectedly' "${SERVICE_LOG}"
+test "$(grep -Fc '[entrypoint] starting worker 0 ' "${SERVICE_LOG}")" -ge 2
+
+echo "[smoke] exercising two concurrent isolated sessions and terminal rewards"
+singularity exec --cleanenv --no-home \
+    --bind "${SESSION_SMOKE}:/app/toolathlon_session_smoke.py:ro" \
+    "${TOOLATHLON_SIF}" \
+    env \
+        OPENREWARD_DISABLE_UPDATE_CHECK=1 \
+        OPENREWARD_SESSION_URL="http://127.0.0.1:${PORT}" \
+        OPENREWARD_API_URL="http://127.0.0.1:${PORT}" \
+        python3 /app/toolathlon_session_smoke.py
+
+endpoint_healthy() {
+    local url=$1 status
+    status=$(curl --silent --show-error --output /dev/null \
+        --connect-timeout 2 --max-time 5 --write-out '%{http_code}' \
+        --noproxy '*' "${url}" 2>/dev/null) || return 1
+    [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]
+}
+
+echo "[smoke] beginning ${HEALTH_SECONDS}s continuous public/backend health window"
+health_started=${SECONDS}
+health_deadline=$((SECONDS + HEALTH_SECONDS))
+health_checks=0
+while ((SECONDS < health_deadline)); do
+    if ! kill -0 "${service_pid}" 2>/dev/null; then
+        echo "[smoke] service exited during the health window" >&2
+        cat "${SERVICE_LOG}" >&2
+        wait "${service_pid}"
+    fi
+    endpoint_healthy "http://127.0.0.1:${PORT}/" || {
+        echo "[smoke] public endpoint became unhealthy" >&2
+        exit 1
+    }
+    endpoint_healthy "http://127.0.0.1:${BASE_PORT}/" || {
+        echo "[smoke] worker 0 endpoint became unhealthy" >&2
+        exit 1
+    }
+    endpoint_healthy "http://127.0.0.1:$((BASE_PORT + 1))/" || {
+        echo "[smoke] worker 1 endpoint became unhealthy" >&2
+        exit 1
+    }
+    health_checks=$((health_checks + 1))
+    sleep 5
+done
+health_elapsed=$((SECONDS - health_started))
+((health_elapsed >= HEALTH_SECONDS))
+echo "[smoke] health window passed elapsed=${health_elapsed}s checks=${health_checks}"
+
+kill -TERM "${service_pid}"
+wait "${service_pid}"
+service_pid=
+test ! -e "${STATE_HOST}/postgresql/14/main/postmaster.pid"
+grep -Fq '[entrypoint] received TERM; stopping' "${SERVICE_LOG}"
+grep -Fq '[entrypoint] shutting down' "${SERVICE_LOG}"
+echo "toolathlon_singularity_user_mode_smoke=ok"

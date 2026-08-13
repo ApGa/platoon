@@ -1,0 +1,155 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:15:00
+#PBS -N rasp-swe-inst-probe
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Controlled compatibility matrix for OCI-derived SIF instance lifetime.
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+SIF=/groups/gai51740/aci18912it/rasp/cache/swe-rebench-sif/965b9f12410c2c9c195c1de164cd494c0e4f51181868bba2298daa99473fda87.sif
+ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/swe-instance-probe
+mkdir -p "${ROOT}"
+export SINGULARITY_CACHEDIR=${ROOT}/cache
+export SINGULARITY_TMPDIR=${ROOT}/runtime-tmp
+mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+
+test -r "${SIF}"
+singularity sif list "${SIF}" >/dev/null
+
+PROBE_LABELS=()
+cleanup() {
+    local label name config
+    for label in "${PROBE_LABELS[@]}"; do
+        name="swe-probe-${PBS_JOBID%%.*}-${label}"
+        config=${ROOT}/${label}-config
+        [[ -d "${config}" ]] || continue
+        SINGULARITY_CONFIGDIR=${config} singularity instance stop --force "${name}" \
+            >/dev/null 2>&1 || true
+    done
+}
+trap cleanup EXIT INT TERM
+
+make_overlay() {
+    local label=$1
+    local seed_startscript=${2:-0}
+    local layout=${ROOT}/layout-${label}
+    local overlay=${ROOT}/${label}.img
+    mkdir -p "${layout}/upper" "${layout}/work"
+    if [[ "${seed_startscript}" == 1 ]]; then
+        mkdir -p "${layout}/upper/.singularity.d"
+        printf '%s\n' '#!/bin/sh' 'trap '\''exit 0'\'' HUP INT TERM' \
+            'while :; do sleep 86400 & wait "$!"; done' \
+            >"${layout}/upper/.singularity.d/startscript"
+        chmod 0500 "${layout}/upper/.singularity.d/startscript"
+    fi
+    truncate -s 512M "${overlay}"
+    mkfs.ext3 -q -F -d "${layout}" "${overlay}"
+    printf '%s\n' "${overlay}"
+}
+
+attempt() {
+    local label=$1 name="swe-probe-${PBS_JOBID%%.*}-${1}" rc list_rc exists=0
+    shift
+    PROBE_LABELS+=("${label}")
+    local config=${ROOT}/${label}-config output=${ROOT}/${label}-command.out
+    mkdir -p "${config}"
+    export SINGULARITY_CONFIGDIR=${config}
+    echo "[probe:${label}] command=$(printf '%q ' singularity "$@")"
+    set +e
+    singularity "$@" >"${output}" 2>&1
+    rc=$?
+    set -e
+    echo "[probe:${label}] launch_rc=${rc} output=$(tr '\n' ' ' < "${output}")"
+    sleep 1
+    set +e
+    singularity instance list --json "${name}" >"${ROOT}/${label}-list.json" 2>&1
+    list_rc=$?
+    set -e
+    if ((list_rc == 0)) && grep -Fq "${name}" "${ROOT}/${label}-list.json"; then
+        exists=1
+    fi
+    echo "[probe:${label}] list_rc=${list_rc} exists=${exists} json=$(tr '\n' ' ' < "${ROOT}/${label}-list.json")"
+    if ((exists)); then
+        singularity exec "instance://${name}" /bin/sh -c 'echo exec_ok; ps -ef'
+        singularity instance stop --timeout 2 "${name}"
+    fi
+    while IFS= read -r log; do
+        echo "[probe:${label}] runtime_log=${log}"
+        sed -n '1,160p' "${log}" || true
+    done < <(find "${config}" -type f \( -name '*.out' -o -name '*.err' -o -name '*.log' \) -print | sort)
+    singularity instance list --json "${name}" >"${ROOT}/${label}-after-stop.json"
+    if grep -Fq "${name}" "${ROOT}/${label}-after-stop.json"; then
+        echo "[probe:${label}] ERROR: instance survived stop" >&2
+        return 1
+    fi
+    echo "[probe:${label}] stopped=1"
+}
+
+inline_service='trap "exit 0" HUP INT TERM; while :; do sleep 86400 & wait "$!"; done'
+
+name="swe-probe-${PBS_JOBID%%.*}-minimal_inline"
+attempt minimal_inline instance run --cleanenv --no-home --no-eval \
+    "${SIF}" "${name}" /bin/sh -c "${inline_service}"
+
+name="swe-probe-${PBS_JOBID%%.*}-contained_inline"
+attempt contained_inline instance run --cleanenv --containall --no-home --no-eval \
+    "${SIF}" "${name}" /bin/sh -c "${inline_service}"
+
+name="swe-probe-${PBS_JOBID%%.*}-no_mount_inline"
+attempt no_mount_inline instance run --cleanenv --containall --no-home --no-eval \
+    --no-mount home,cwd,bind-paths \
+    "${SIF}" "${name}" /bin/sh -c "${inline_service}"
+
+overlay=$(make_overlay full_inline)
+tmp=${ROOT}/full-inline-tmp
+var_tmp=${ROOT}/full-inline-var-tmp
+mkdir -m 1777 "${tmp}" "${var_tmp}"
+name="swe-probe-${PBS_JOBID%%.*}-full_inline"
+attempt full_inline instance run --cleanenv --containall --no-home --no-eval \
+    --no-mount home,cwd,bind-paths --overlay "${overlay}" \
+    --bind "${tmp}:/tmp:rw" --bind "${var_tmp}:/var/tmp:rw" \
+    "${SIF}" "${name}" /bin/sh -c "${inline_service}"
+
+overlay=$(make_overlay full_private_file)
+tmp=${ROOT}/full-private-tmp
+var_tmp=${ROOT}/full-private-var-tmp
+mkdir -m 1777 "${tmp}" "${var_tmp}"
+printf '%s\n' '#!/bin/sh' "${inline_service}" >"${tmp}/service"
+chmod 0500 "${tmp}/service"
+name="swe-probe-${PBS_JOBID%%.*}-full_private_file"
+attempt full_private_file instance run --cleanenv --containall --no-home --no-eval \
+    --no-mount home,cwd,bind-paths --overlay "${overlay}" \
+    --bind "${tmp}:/tmp:rw" --bind "${var_tmp}:/var/tmp:rw" \
+    "${SIF}" "${name}" /bin/sh /tmp/service
+
+overlay=$(make_overlay overlay_startscript 1)
+tmp=${ROOT}/overlay-startscript-tmp
+var_tmp=${ROOT}/overlay-startscript-var-tmp
+mkdir -m 1777 "${tmp}" "${var_tmp}"
+name="swe-probe-${PBS_JOBID%%.*}-overlay_startscript"
+attempt overlay_startscript instance start --cleanenv --containall --no-home \
+    --no-mount home,cwd,bind-paths --overlay "${overlay}" \
+    --bind "${tmp}:/tmp:rw" --bind "${var_tmp}:/var/tmp:rw" \
+    "${SIF}" "${name}"
+
+overlay=$(make_overlay start_args)
+name="swe-probe-${PBS_JOBID%%.*}-start_args"
+attempt start_args instance start --cleanenv --containall --no-home --no-eval \
+    --no-mount home,cwd,bind-paths --overlay "${overlay}" \
+    "${SIF}" "${name}" /bin/sh -c "${inline_service}"
+
+echo "swe_singularity_instance_probe=complete"
+cleanup
+trap - EXIT INT TERM

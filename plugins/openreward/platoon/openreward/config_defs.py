@@ -122,6 +122,17 @@ class OpenRewardEnvironmentConfig:
         suffix = "".join(char.upper() if char.isalnum() else "_" for char in self.resolved_label)
         return f"OPENREWARD_SESSION_URLS_{suffix}"
 
+    def resolve_session_urls(self, *, allow_legacy_global_pool: bool) -> list[str]:
+        """Resolve the live endpoint pool without freezing launcher env at config load."""
+        candidates = list(self.session_urls or [])
+        if not candidates:
+            urls = os.environ.get(self.resolved_session_urls_env_var, "").strip()
+            candidates = [url.strip() for url in urls.split(",") if url.strip()]
+        if not candidates and allow_legacy_global_pool:
+            urls = os.environ.get("OPENREWARD_SESSION_URLS", "").strip()
+            candidates = [url.strip() for url in urls.split(",") if url.strip()]
+        return candidates or [self.session_url]
+
     @classmethod
     def from_mapping(
         cls,

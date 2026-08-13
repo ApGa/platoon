@@ -1,0 +1,90 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -N rasp-swe-gate3
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# One-node live gate for the exact SWE-rebench Singularity backend. No model,
+# W&B, or judge credentials are loaded or forwarded by this validation job.
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+ENV_ROOT=${REPO_ROOT}/external/swe-rebench-v2-openrewardenv
+PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
+SMOKE=${REPO_ROOT}/pbs-scripts/swe-singularity-live-smoke.py
+CLEANUP=${REPO_ROOT}/pbs-scripts/cleanup_swe_singularity_sessions.py
+DATA_DIR=/groups/gai51740/aci18912it/rasp/datasets/swe-rebench-v2-filtered-verified
+IMAGE_CACHE=/groups/gai51740/aci18912it/rasp/cache/swe-rebench-sif
+RESULT_ROOT=/groups/gai51740/aci18912it/rasp/validation/gate3
+LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/rasp-swe-gate3
+SESSION_ROOT=${LOCAL_ROOT}/sessions
+RESULT=${RESULT_ROOT}/${PBS_JOBID}.json
+
+test -x "${PYTHON}"
+test -r "${SMOKE}"
+test -x "${CLEANUP}"
+test -f "${DATA_DIR}/task_index.json"
+mkdir -p \
+    "${IMAGE_CACHE}" \
+    "${RESULT_ROOT}" \
+    "${SESSION_ROOT}" \
+    "${LOCAL_ROOT}/singularity-cache" \
+    "${LOCAL_ROOT}/singularity-tmp"
+chmod 0700 \
+    "${SESSION_ROOT}" \
+    "${LOCAL_ROOT}/singularity-cache" \
+    "${LOCAL_ROOT}/singularity-tmp"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH=${ENV_ROOT}
+export SWE_SANDBOX_RUNTIME=singularity
+export SWE_CONTAINER_RUNTIME_BIN
+SWE_CONTAINER_RUNTIME_BIN=$(command -v singularity)
+export SWE_APPTAINER_IMAGE_CACHE=${IMAGE_CACHE}
+export SWE_SINGULARITY_IMAGE_CACHE=${IMAGE_CACHE}
+export SWE_APPTAINER_SESSION_ROOT=${SESSION_ROOT}
+export SWE_SINGULARITY_SESSION_ROOT=${SESSION_ROOT}
+export SWE_APPTAINER_FAKEROOT=0
+export SWE_APPTAINER_NETWORK=host
+export SWE_APPTAINER_OVERLAY_SIZE_MB=4096
+export SWE_APPTAINER_OVERLAY_SPARSE=1
+export SWE_APPTAINER_PULL_TIMEOUT_SECONDS=1800
+export SWE_SANDBOX_CREATE_TIMEOUT_SECONDS=1800
+export SWE_SANDBOX_COMMAND_TIMEOUT_SECONDS=900
+export SWE_TEST_TIMEOUT_SECONDS=900
+export SINGULARITY_CACHEDIR=${LOCAL_ROOT}/singularity-cache
+export SINGULARITY_TMPDIR=${LOCAL_ROOT}/singularity-tmp
+export APPTAINER_CACHEDIR=${SINGULARITY_CACHEDIR}
+export APPTAINER_TMPDIR=${SINGULARITY_TMPDIR}
+
+cleanup() {
+    /usr/bin/python3 "${CLEANUP}" \
+        --session-root "${SESSION_ROOT}" \
+        --runtime "${SWE_CONTAINER_RUNTIME_BIN}" \
+        --stop-grace-seconds 10
+}
+trap cleanup EXIT INT TERM
+
+cd "${ENV_ROOT}"
+"${PYTHON}" "${SMOKE}" \
+    --data-dir "${DATA_DIR}" \
+    --session-root "${SESSION_ROOT}" \
+    --result "${RESULT}" \
+    --test-timeout 900
+
+cleanup
+trap - EXIT INT TERM
+test -s "${RESULT}"
+test -z "$(find "${SESSION_ROOT}" -mindepth 1 -maxdepth 1 -type d -name 'swe-rebench-*' -print -quit)"
+echo "swe_singularity_gate3_result=${RESULT}"

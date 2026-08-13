@@ -22,7 +22,7 @@ from areal.utils.environ import is_single_controller
 from areal.utils.perf_tracer import Category
 from datasets import Dataset
 
-from platoon.train.areal.actor import PlatoonPPOActor
+from platoon.train.areal.actor_controller import PlatoonPPOActorController
 from platoon.train.areal.batch_transforms import (
     BatchTransform,
     BatchTransformContext,
@@ -35,8 +35,13 @@ from platoon.train.areal.batch_transforms import (
 )
 from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig, PlatoonPPOActorConfig
 from platoon.train.areal.deadline import StepDeadlineGuard
+from platoon.train.areal.preallocated_pbs import PreallocatedPBSScheduler
 from platoon.train.areal.preallocated_slurm import PreallocatedSlurmScheduler
 from platoon.train.areal.workflow_serialization import normalize_remote_workflow
+from platoon.training_success_receipt import (
+    candidate_publication_enabled,
+    maybe_publish_training_success_candidate,
+)
 from platoon.utils.areal_data_processing import OPTIONAL_REWARD_METRIC_MASK_PREFIX
 from platoon.utils.rollout_workload import RolloutWorkload, sum_rollout_workloads
 
@@ -44,9 +49,29 @@ if TYPE_CHECKING:
     # Imported only for typing; the runtime import is deferred to the Megatron
     # branch of _create_train_engine so FSDP-only runs never import Megatron /
     # Transformer Engine.
-    from platoon.train.areal.actor import PlatoonMegatronPPOActor
+    from platoon.train.areal.actor import (
+        PlatoonMegatronPPOActor,
+        PlatoonPPOActor,
+    )
 
 logger = logging.getLogger("PlatoonArealRLTrainer")
+
+# In single-controller mode AReaL needs only an import path for the remote
+# Megatron engine class.  Importing that class on the host would also import
+# Megatron Bridge and Transformer Engine, whose compiled bindings intentionally
+# exist only in the training SIF.  The worker RPC server resolves this exact
+# path inside the SIF when it creates the real engine.  Keep this reference in
+# this controller module so it can never shadow actor.py's lazy worker export.
+_REMOTE_PLATOON_MEGATRON_PPO_ACTOR = type(
+    "PlatoonMegatronPPOActor",
+    (),
+    {"__module__": "platoon.train.areal.actor"},
+)
+_REMOTE_PLATOON_FSDP_PPO_ACTOR = type(
+    "PlatoonPPOActor",
+    (),
+    {"__module__": "platoon.train.areal.actor"},
+)
 
 # AReaL's publicly documented default proxy admin key. AReaL refuses to bind
 # the proxy rollout server to a routable (non-loopback) host while the key is
@@ -146,13 +171,9 @@ def _extract_accepted_batch_workload(
         missing = required.difference(item)
         if missing:
             raise ValueError(f"Incomplete workload sidecar; missing {sorted(missing)}")
-        fields = {
-            field: _sidecar_nonnegative_int(item, key)
-            for field, key in _WORKLOAD_SIDECAR_FIELDS.items()
-        }
+        fields = {field: _sidecar_nonnegative_int(item, key) for field, key in _WORKLOAD_SIDECAR_FIELDS.items()}
         datum_fields = {
-            field: _sidecar_nonnegative_int(item, key)
-            for field, key in _WORKLOAD_DATUM_SIDECAR_FIELDS.items()
+            field: _sidecar_nonnegative_int(item, key) for field, key in _WORKLOAD_DATUM_SIDECAR_FIELDS.items()
         }
         workloads.append(RolloutWorkload(**fields, **datum_fields))
         requested_rollouts += _sidecar_nonnegative_int(item, _WORKLOAD_REQUESTED_ROLLOUTS_KEY)
@@ -216,9 +237,7 @@ def _training_batch_workload_metrics(
                 "Submitted training datums cannot exceed accepted post-merge datums: "
                 f"submitted={submitted_datums}, postmerge={total_postmerge_datums}"
             )
-        result["workload/training_batch/total_non_submitted_datums"] = float(
-            total_postmerge_datums - submitted_datums
-        )
+        result["workload/training_batch/total_non_submitted_datums"] = float(total_postmerge_datums - submitted_datums)
     return result
 
 
@@ -365,9 +384,7 @@ def _filter_zero_centered_reward_batch(
     per_datum_attention_tokens = attention_mask.bool().reshape(batch_size, -1).sum(dim=1)
 
     full_divisor = math.lcm(dispatch_dp_size, ensure_batch_divisible_by)
-    input_divisibility_fallback = int(
-        batch_size < full_divisor or batch_size % full_divisor != 0
-    )
+    input_divisibility_fallback = int(batch_size < full_divisor or batch_size % full_divisor != 0)
     divisor = dispatch_dp_size if input_divisibility_fallback else full_divisor
     padding_count = (-int(nonzero_indices.numel())) % divisor if nonzero_indices.numel() else 0
     can_zero_pad = (
@@ -403,18 +420,16 @@ def _filter_zero_centered_reward_batch(
         as_tuple=False,
     ).reshape(-1)
 
-    retained_loss_tokens = int(
-        per_datum_loss_tokens.index_select(0, retained_indices).sum().item()
-    ) if retained_indices.numel() else 0
-    filtered_zero_loss_tokens = int(
-        per_datum_loss_tokens.index_select(0, filtered_zero_indices).sum().item()
-    ) if filtered_zero_indices.numel() else 0
-    denominator_tokens = retained_loss_tokens + filtered_zero_loss_tokens
-    denominator_scale = (
-        float(retained_loss_tokens) / float(denominator_tokens)
-        if denominator_tokens > 0
-        else 1.0
+    retained_loss_tokens = (
+        int(per_datum_loss_tokens.index_select(0, retained_indices).sum().item()) if retained_indices.numel() else 0
     )
+    filtered_zero_loss_tokens = (
+        int(per_datum_loss_tokens.index_select(0, filtered_zero_indices).sum().item())
+        if filtered_zero_indices.numel()
+        else 0
+    )
+    denominator_tokens = retained_loss_tokens + filtered_zero_loss_tokens
+    denominator_scale = float(retained_loss_tokens) / float(denominator_tokens) if denominator_tokens > 0 else 1.0
 
     metrics = {
         "input_datums": float(batch_size),
@@ -487,19 +502,13 @@ def _zero_reward_filter_incompatibilities(
         reasons.append("teacher/distillation objective is present")
     model_path = str(getattr(actor, "path", "")).lower()
     megatron = getattr(actor, "megatron", None)
-    bridge_type = (
-        megatron.get("bridge_type")
-        if isinstance(megatron, dict)
-        else getattr(megatron, "bridge_type", None)
-    )
+    bridge_type = megatron.get("bridge_type") if isinstance(megatron, dict) else getattr(megatron, "bridge_type", None)
     if (
         bridge_type == "megatron-bridge"
         and ("qwen3.5" in model_path or "qwen3.6" in model_path)
         and ("a3b" in model_path or "moe" in model_path)
     ):
-        reasons.append(
-            "Qwen3.5/3.6 MoE Megatron-Bridge has an independent global router auxiliary loss"
-        )
+        reasons.append("Qwen3.5/3.6 MoE Megatron-Bridge has an independent global router auxiliary loss")
     if custom_batch_transforms:
         reasons.append("custom batch transforms are present (additive transforms are incompatible)")
     return reasons
@@ -541,8 +550,7 @@ def _evaluation_enabled(config: Any) -> bool:
         # shape is unknown rather than silently suppressing evaluation.
         return True
     return bool(getattr(evaluator, "eval_before_train", False)) or any(
-        getattr(evaluator, field, None) is not None
-        for field in ("freq_epochs", "freq_steps", "freq_secs")
+        getattr(evaluator, field, None) is not None for field in ("freq_epochs", "freq_steps", "freq_secs")
     )
 
 
@@ -596,7 +604,29 @@ class PlatoonArealRLTrainer(PPOTrainer):
             custom_batch_transforms=batch_transforms,
         )
         _normalize_proxy_admin_api_key(config)
-        super().__init__(config=config, train_dataset=train_dataset, valid_dataset=val_dataset)
+        try:
+            super().__init__(
+                config=config,
+                train_dataset=train_dataset,
+                valid_dataset=val_dataset,
+            )
+        except BaseException:
+            # Upstream creates the scheduler and its actor workers before
+            # engine initialization completes.  If initialization raises, the
+            # ``with Trainer(...)`` statement has not entered its context yet,
+            # so __exit__/close can never reap those workers.  Tear down via
+            # the scheduler's public API here; PBS blocks in delete_workers
+            # until every launcher has confirmed identity-checked remote and
+            # discovery cleanup.
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None:
+                try:
+                    scheduler.delete_workers(role=None, reverse_order=True)
+                except BaseException as cleanup_error:
+                    raise RuntimeError(
+                        "Trainer construction failed and scheduler cleanup could not be confirmed"
+                    ) from cleanup_error
+            raise
         self.proxy_admin_api_key = self.config.rollout.admin_api_key
         self.proxy_base_url: str | None = None
         self.eval_proxy_base_url: str | None = None
@@ -604,6 +634,8 @@ class PlatoonArealRLTrainer(PPOTrainer):
         self._start_platoon_proxies()
 
     def _init_scheduler(self):
+        if self.config.scheduler.type == "pbs_prealloc":
+            return PreallocatedPBSScheduler(exp_config=self.config)
         if self.config.scheduler.type == "slurm_prealloc":
             return PreallocatedSlurmScheduler(exp_config=self.config)
         return super()._init_scheduler()
@@ -628,10 +660,35 @@ class PlatoonArealRLTrainer(PPOTrainer):
         actor_cls: type[PlatoonPPOActor | PlatoonMegatronPPOActor] | None = None
         if isinstance(actor_config, PlatoonPPOActorConfig):
             if alloc.backend == "fsdp":
+                if is_single_controller():
+                    # Match the Megatron controller path: importing AReaL's
+                    # concrete FSDP engine also imports its tree-attention
+                    # Megatron adapter. The worker resolves the real FSDP
+                    # subclass from this exact path inside the training SIF.
+                    actor = PlatoonPPOActorController(
+                        train_engine=_REMOTE_PLATOON_FSDP_PPO_ACTOR,
+                        config=actor_config,
+                        scheduler=self.scheduler,
+                    )
+                    actor.create_process_group(parallel_strategy=alloc.parallel)
+                    return actor
+                from platoon.train.areal.actor import PlatoonPPOActor
+
                 actor_cls = PlatoonPPOActor
             elif alloc.backend == "megatron":
-                # Deferred import: pulls in Megatron / Transformer Engine only
-                # when the Megatron backend is actually selected.
+                if is_single_controller():
+                    # TrainController uses this class only to emit its
+                    # module/name for worker-side dynamic import.  Avoid
+                    # importing container-only TE/APEX bindings on the host.
+                    actor = PlatoonPPOActorController(
+                        train_engine=_REMOTE_PLATOON_MEGATRON_PPO_ACTOR,
+                        config=actor_config,
+                        scheduler=self.scheduler,
+                    )
+                    actor.create_process_group(parallel_strategy=alloc.parallel)
+                    return actor
+                # Multi-controller workers execute inside the training SIF and
+                # therefore resolve the real lazy class locally.
                 from platoon.train.areal.actor import PlatoonMegatronPPOActor
 
                 actor_cls = PlatoonMegatronPPOActor
@@ -746,15 +803,11 @@ class PlatoonArealRLTrainer(PPOTrainer):
 
         recover_handler = self.recover_handler
         last_step_info = getattr(recover_handler, "last_step_info", None)
-        if (
-            last_step_info is not None
-            and int(getattr(last_step_info, "global_step", -1)) >= global_step
-        ):
+        if last_step_info is not None and int(getattr(last_step_info, "global_step", -1)) >= global_step:
             return False
         if recover_handler.config.mode in ("disabled", "off"):
             raise RuntimeError(
-                "Cannot drain before the allocation deadline because recovery "
-                "checkpointing is disabled."
+                "Cannot drain before the allocation deadline because recovery checkpointing is disabled."
             )
 
         # These imports are kept local so FSDP/test-only imports of this module
@@ -922,11 +975,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
         # keeps the *first* dict's value for anything else, which would drop every
         # rollout group but the first. Localize before concatenating.
         rollout_batch = [
-            {
-                key: value
-                for key, value in localize_rtensors(item).items()
-                if not _is_workflow_stat_key(key)
-            }
+            {key: value for key, value in localize_rtensors(item).items() if not _is_workflow_stat_key(key)}
             for item in rollout_batch
         ]
         batch = concat_padded_tensors(rollout_batch)
@@ -1014,10 +1063,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 ),
             )
             stats_tracker.scalar(
-                **{
-                    f"zero_advantage_filter/{key}": value
-                    for key, value in zero_filter_metrics.items()
-                },
+                **{f"zero_advantage_filter/{key}": value for key, value in zero_filter_metrics.items()},
                 **{"zero_advantage_filter/enabled": 1.0},
             )
             if batch is None:
@@ -1108,6 +1154,10 @@ class PlatoonArealRLTrainer(PPOTrainer):
             step_started_monotonic = time.monotonic()
             epoch = global_step // steps_per_epoch
             step = global_step % steps_per_epoch
+            actor_update_successful = False
+            weight_sync_succeeded = False
+            optimizer_batch_datums = 0
+            optimizer_action_tokens = 0
 
             if self._should_offload_rollout:
                 self._onload_rollout()
@@ -1140,24 +1190,15 @@ class PlatoonArealRLTrainer(PPOTrainer):
                         **accepted_workload.workload.to_metrics("workload/batch"),
                         **{
                             "workload/batch/total_tasks": float(accepted_workload.tasks),
-                            "workload/batch/total_requested_rollouts": float(
-                                accepted_workload.requested_rollouts
-                            ),
-                            "workload/batch/total_observed_rollouts": float(
-                                accepted_workload.observed_rollouts
-                            ),
-                            "workload/batch/total_trainable_rollouts": float(
-                                accepted_workload.trainable_rollouts
-                            ),
-                            "workload/batch/total_task_retained_datums": float(
-                                accepted_workload.task_retained_datums
-                            ),
+                            "workload/batch/total_requested_rollouts": float(accepted_workload.requested_rollouts),
+                            "workload/batch/total_observed_rollouts": float(accepted_workload.observed_rollouts),
+                            "workload/batch/total_trainable_rollouts": float(accepted_workload.trainable_rollouts),
+                            "workload/batch/total_task_retained_datums": float(accepted_workload.task_retained_datums),
                             "workload/batch/total_task_workflow_trainable_datums": float(
                                 accepted_workload.task_retained_datums
                             ),
                             "workload/batch/total_task_workflow_non_trainable_datums": float(
-                                accepted_workload.workload.postmerge_datums
-                                - accepted_workload.task_retained_datums
+                                accepted_workload.workload.postmerge_datums - accepted_workload.task_retained_datums
                             ),
                         },
                     )
@@ -1280,9 +1321,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     training_workload_metrics = _training_batch_workload_metrics(
                         optimizer_batch,
                         total_postmerge_datums=(
-                            accepted_workload.workload.postmerge_datums
-                            if accepted_workload is not None
-                            else None
+                            accepted_workload.workload.postmerge_datums if accepted_workload is not None else None
                         ),
                     )
                 except Exception:
@@ -1291,6 +1330,12 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     # masks; custom actor paths may not.
                     logger.warning("Unable to compute submitted training-batch telemetry", exc_info=True)
                 else:
+                    optimizer_batch_datums = int(
+                        training_workload_metrics["workload/training_batch/total_submitted_datums"]
+                    )
+                    optimizer_action_tokens = int(
+                        training_workload_metrics["workload/training_batch/total_action_tokens"]
+                    )
                     stats_tracker.scalar(**training_workload_metrics)
 
                 if optimizer_batch:
@@ -1308,13 +1353,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                         if actor_update_successful:
                             self.actor.step_lr_scheduler()
                         self.actor.get_device_stats().log("ppo update")
-                    stats_tracker.scalar(
-                        **{
-                            "ppo_actor/optimizer_update_skipped": float(
-                                not actor_update_successful
-                            )
-                        }
-                    )
+                    stats_tracker.scalar(**{"ppo_actor/optimizer_update_skipped": float(not actor_update_successful)})
                     # Free the training-peak allocator cache before the NCCL-heavy
                     # weight-update broadcast and checkpoint phases below.
                     self._maybe_clear_device_cache(self.actor)
@@ -1354,6 +1393,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                             versioned_meta = self.weight_update_meta.with_version(new_version)
                             self.actor.update_weights(versioned_meta)
                             self._advance_logical_versions(new_version)
+                            weight_sync_succeeded = True
                         # The bucketed broadcast leaves gathered full-parameter buckets
                         # in the cache; drop them before DCP save's NCCL collectives.
                         self._maybe_clear_device_cache(self.actor)
@@ -1382,9 +1422,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     empty_training_workload_metrics = _training_batch_workload_metrics(
                         [],
                         total_postmerge_datums=(
-                            accepted_workload.workload.postmerge_datums
-                            if accepted_workload is not None
-                            else None
+                            accepted_workload.workload.postmerge_datums if accepted_workload is not None else None
                         ),
                     )
                 except Exception:
@@ -1461,6 +1499,31 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 args={"global_step": global_step},
             ):
                 self._export_and_commit_stats(epoch=epoch, epoch_step=step, global_step=global_step)
+
+            if candidate_publication_enabled(global_step):
+                maybe_publish_training_success_candidate(
+                    fileroot=config.cluster.fileroot,
+                    experiment=config.experiment_name,
+                    trial=config.trial_name,
+                    config_path=os.environ.get("PLATOON_TRAINING_CONFIG_PATH", ""),
+                    pbs_job_id=os.environ.get("PBS_JOBID", ""),
+                    global_step=global_step,
+                    optimizer_update_successful=actor_update_successful,
+                    optimizer_batch_datums=optimizer_batch_datums,
+                    optimizer_action_tokens=optimizer_action_tokens,
+                    weight_sync_succeeded=weight_sync_succeeded,
+                    expected_version=global_step + 1,
+                    actor_version=int(self.actor.get_version()),
+                    rollout_version=int(self.rollout.get_version()),
+                    stats_logger=self.stats_logger,
+                    wandb_mode=config.stats_logger.wandb.mode,
+                    training_sif_path=os.environ.get("PLATOON_TRAINING_SIF", ""),
+                    training_sif_sha256=os.environ.get("PLATOON_TRAINING_SIF_SHA256", ""),
+                    not_before_epoch=os.environ.get(
+                        "PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH",
+                        "",
+                    ),
+                )
 
             self.rollout.resume()
             current_platform.synchronize()

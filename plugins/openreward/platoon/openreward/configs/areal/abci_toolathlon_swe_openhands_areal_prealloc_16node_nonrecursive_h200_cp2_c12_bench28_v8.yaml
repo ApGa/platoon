@@ -1,0 +1,33 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_bench28_v8
+  - _self_
+
+# Actor-topology arm: only CP changes relative to the fresh CP1/C12 control.
+# Both hybrid branches still occupy the same 80 actor GPUs on ten nodes.
+experiment_name: abci-openreward-ta-swe-h200-16-bench28-v8-cp2-c12
+trial_name: abci-ta-swe16-bench28-v8-cp2-c12-trial0
+total_train_steps: 28
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 16
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: false
+  enable_programmatic_tool_calling: false
+
+actor:
+  # Attention: 5 * 2 * 4 * 2 = 80 GPUs.
+  # FFN:       5 * 2 * 1 * 8 = 80 GPUs on the same actor ranks.
+  backend: megatron:(attn:d5p2t4c2|ffn:d5p2t1e8)
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe16-bench28-v8-cp2-c12

@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=32:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-32r-v5
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh v5 retry after v4 reached the corrected remote catalog and created all
+# 160 actor workers, then failed before Python because 152 remote containers did
+# not have the controller-created /local bind source. Preserve the twelve-node
+# rollout-tail service placement and all training semantics.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v5.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+EXPERIMENT=abci-openreward-ta-swe-h200-32
+TRIAL=abci-ta-swe32-rec-h200-cp1-c24-v5-trial0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
+
+prior_receipts=("${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json")
+for prior in "${prior_receipts[@]}"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || {
+        echo "[h200-32-v5] ERROR: refusing stale success artifact; use a fresh trial: ${prior}" >&2
+        exit 2
+    }
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || {
+    echo "[h200-32-v5] ERROR: refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}" >&2
+    exit 2
+}
+
+export OPENREWARD_EXPECTED_NNODES=32
+export OPENREWARD_SERVICE_NODE_COUNT=12
+export OPENREWARD_EXPECTED_RECURSIVE=1
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+
+exec "${COMMON}" "${CONFIG}"

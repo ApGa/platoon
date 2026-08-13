@@ -176,10 +176,6 @@ def _openreward_config(config: RolloutConfig) -> OpenRewardConfig:
     return OpenRewardConfig.from_mapping(extra.get("openreward"))
 
 
-def _session_urls_env_var(environment: OpenRewardEnvironmentConfig) -> str:
-    return environment.resolved_session_urls_env_var
-
-
 def _select_session_url(
     environment: OpenRewardEnvironmentConfig,
     shard_key: str,
@@ -193,15 +189,9 @@ def _select_session_url(
     ``OPENREWARD_SESSION_URLS_<LABEL>`` therefore take precedence. The original
     process-global ``OPENREWARD_SESSION_URLS`` remains a legacy single-env path.
     """
-    candidates = list(environment.session_urls or [])
-    if not candidates:
-        urls = os.environ.get(_session_urls_env_var(environment), "").strip()
-        candidates = [url.strip() for url in urls.split(",") if url.strip()]
-    if not candidates and allow_legacy_global_pool:
-        urls = os.environ.get("OPENREWARD_SESSION_URLS", "").strip()
-        candidates = [url.strip() for url in urls.split(",") if url.strip()]
-    if not candidates:
-        return environment.session_url
+    candidates = environment.resolve_session_urls(
+        allow_legacy_global_pool=allow_legacy_global_pool
+    )
     digest = hashlib.sha1(shard_key.encode("utf-8")).hexdigest()
     return candidates[int(digest, 16) % len(candidates)]
 

@@ -1,0 +1,594 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=12:00:00
+#PBS -N rasp-runtime-gate2
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Gate 2 for the exact PBS/Singularity immutable-environment path used by the
+# production launchers.  A job-private shared environment cache guarantees the
+# first build is cold; the same helper is immediately called again and must
+# report a cache hit.  The published relocatable venv is then tested both inside
+# the training SIF with H200 CUDA and on the bare host as the controller uses it.
+
+set -euo pipefail
+umask 077
+
+ABCI_ENV=${PLATOON_ABCI_ENV_FILE:-/home/aci18912it/rasp/config/abci.env}
+[[ "${ABCI_ENV}" == /* && -r "${ABCI_ENV}" ]] || {
+    echo "[gate2] ERROR: cluster environment must be an absolute readable file: ${ABCI_ENV}" >&2
+    exit 1
+}
+[[ "$(readlink -f "${ABCI_ENV}")" == "${ABCI_ENV}" ]] || {
+    echo "[gate2] ERROR: cluster environment must be the canonical path: ${ABCI_ENV}" >&2
+    exit 1
+}
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+
+die() {
+    echo "[gate2] ERROR: $*" >&2
+    exit 1
+}
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+module load cuda/12.9/12.9.1
+module load hpcx/2.20
+
+REPO_ROOT=${PLATOON_REPO_ROOT}
+PREPARE_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_env.sh
+PREPARE_CONTROLLER_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_controller_env.sh
+RUNTIME=$(command -v singularity)
+UV_BIN=/home/aci18912it/.local/bin/uv
+CONTROLLER_PYTHON_BASE=/home/aci18912it/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
+RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
+APEX_PIN=6424da3b4faa6c8f062da4a48c424fff3f02d42d
+TE_PIN=2.12.0
+JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
+GATE_ROOT=${PLATOON_PROJECT_ROOT}/cache/gate2-immutable-runtime/${JOB_ID_SAFE}
+ENV_CACHE=${GATE_ROOT}/env-cache
+CONTROLLER_ENV_CACHE=${GATE_ROOT}/controller-env-cache
+CONTROLLER_UV_CACHE=${PLATOON_PROJECT_ROOT}/cache/uv-controller-rhel9-glibc234
+LOG_ROOT=${GATE_ROOT}/logs
+LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon-gate2
+SIF_SHA_FILE=${PLATOON_TRAINING_SIF}.sha256
+
+[[ -x "${PREPARE_ENV}" ]] || die "PBS environment adapter is missing: ${PREPARE_ENV}"
+[[ -x "${PREPARE_CONTROLLER_ENV}" ]] || \
+    die "controller environment helper is missing: ${PREPARE_CONTROLLER_ENV}"
+[[ -x "${UV_BIN}" ]] || die "uv is missing: ${UV_BIN}"
+[[ -x "${CONTROLLER_PYTHON_BASE}" ]] || \
+    die "pinned host-controller Python is missing: ${CONTROLLER_PYTHON_BASE}"
+[[ -x "${RELEASE_VERIFY}" ]] || die "v8 release verifier is missing: ${RELEASE_VERIFY}"
+[[ -r "${PLATOON_TRAINING_SIF}" && -r "${SIF_SHA_FILE}" ]] || \
+    die "training SIF or digest sidecar is missing"
+[[ ! -e "${GATE_ROOT}" ]] || die "job-private cold cache already exists: ${GATE_ROOT}"
+
+# Validate release-only launch assets before the immutable adapter snapshots
+# its deliberately narrow worker/controller source archive. These host scripts
+# are bound by the clean release tag rather than injected into worker wheels.
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+for shell_asset in \
+    pbs-scripts/openreward-ta-swe-prealloc-common.sh \
+    pbs-scripts/openreward-node-services.sh \
+    pbs-scripts/openreward-ta-swe-16node-nonrecursive-h200-v8-abci.pbs \
+    pbs-scripts/openreward-ta-swe-32node-recursive-h200-v8-abci.pbs \
+    pbs-scripts/openreward-ta-swe-16node-nonrecursive-h200-cp1-c12-bench28-v8-abci.pbs \
+    pbs-scripts/openreward-ta-swe-16node-nonrecursive-h200-cp2-c12-bench28-v8-abci.pbs \
+    pbs-scripts/openreward-ta-swe-16node-nonrecursive-h200-cp1-c18-bench28-v8-abci.pbs \
+    pbs-scripts/openreward-ta-swe-16node-nonrecursive-h200-cp1-c24-bench28-v8-abci.pbs \
+    pbs-scripts/openreward-node-services-pbsdsh-smoke.pbs \
+    pbs-scripts/openreward-v8-ptc-e2e-smoke.pbs; do
+    /bin/bash -n "${REPO_ROOT}/${shell_asset}" || \
+        die "v8 host shell asset failed syntax validation: ${shell_asset}"
+done
+"${CONTROLLER_PYTHON_BASE}" -I - "${REPO_ROOT}" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for relative in (
+    "pbs-scripts/openreward-service-cleanup-receipt.py",
+    "pbs-scripts/openreward-controller-runtime-receipt.py",
+    "pbs-scripts/openreward_v8_ptc_e2e.py",
+    "pbs-scripts/verify_openreward_v8_release.py",
+    "pbs-scripts/verify_openreward_v8_swe_env.py",
+    "pbs-scripts/materialize_openreward_v8_swe_env.py",
+):
+    path = root / relative
+    ast.parse(path.read_text(), filename=str(path))
+print("v8_host_python_assets=syntax-ok")
+PY
+echo "[gate2] exact v8 release and host-only launch assets passed pre-resolve validation"
+
+expected_sif_sha=$(awk 'NF {print $1; exit}' "${SIF_SHA_FILE}")
+actual_sif_sha=$(sha256sum "${PLATOON_TRAINING_SIF}" | awk '{print $1}')
+[[ "${expected_sif_sha}" == "${actual_sif_sha}" ]] || die "training SIF digest mismatch"
+"${RUNTIME}" sif list "${PLATOON_TRAINING_SIF}" >/dev/null
+
+# Probe controller endpoints without transmitting any stored credential.  Any
+# non-zero HTTP response proves DNS/TLS/application reachability; authenticated
+# account validation is a separately approval-gated operation.
+controller_api_base=${LITELLM_BASE_URL:-${OPENAI_BASE_URL:-}}
+[[ -n "${controller_api_base}" ]] || die "LiteLLM/OpenAI controller endpoint is unavailable"
+for endpoint_name in wandb litellm; do
+    if [[ "${endpoint_name}" == wandb ]]; then
+        endpoint=https://api.wandb.ai/
+    else
+        endpoint=${controller_api_base%/}/models
+    fi
+    endpoint_status=$(curl --silent --show-error --output /dev/null \
+        --write-out '%{http_code}' --connect-timeout 10 --max-time 30 \
+        "${endpoint}") || die "${endpoint_name} compute-node connectivity request failed"
+    [[ "${endpoint_status}" =~ ^[1-5][0-9][0-9]$ ]] || \
+        die "${endpoint_name} compute-node connectivity returned no HTTP response"
+    echo "[gate2] controller_endpoint=${endpoint_name} unauthenticated_status=${endpoint_status}"
+done
+unset controller_api_base endpoint_name endpoint endpoint_status
+
+# Gate 2 needs no APIs after the host-only probes.  Neither the SIF nor the
+# import/build probes inherit credentials from abci.env's protected include.
+for secret_name in \
+    WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL LITELLM_API_KEY LITELLM_BASE_URL \
+    RUBRIC_DEFAULT_LLM HF_TOKEN \
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    unset "${secret_name}"
+done
+unset secret_name
+
+mkdir -p \
+    "${ENV_CACHE}" \
+    "${CONTROLLER_ENV_CACHE}" \
+    "${CONTROLLER_UV_CACHE}" \
+    "${LOG_ROOT}" \
+    "${LOCAL_ROOT}/home" \
+    "${LOCAL_ROOT}/tmp" \
+    "${LOCAL_ROOT}/cache/xdg" \
+    "${LOCAL_ROOT}/cache/flashinfer" \
+    "${LOCAL_ROOT}/cache/torch-extensions" \
+    "${LOCAL_ROOT}/cache/areal"
+chmod 0700 \
+    "${GATE_ROOT}" "${ENV_CACHE}" "${CONTROLLER_ENV_CACHE}" \
+    "${LOG_ROOT}" "${LOCAL_ROOT}/home"
+chmod 1777 "${LOCAL_ROOT}/tmp"
+
+export OPENREWARD_ENV_CACHE_ROOT=${ENV_CACHE}
+export OPENREWARD_PROJECT_DIR=${REPO_ROOT}/plugins/openreward
+export OPENREWARD_UV_CACHE_DIR=${UV_CACHE_DIR}
+export OPENREWARD_UV_LINK_MODE=hardlink
+export OPENREWARD_BUILD_TE=1
+export OPENREWARD_BUILD_APEX=1
+export TE_VERSION=${TE_PIN}
+export APEX_GIT_REF=${APEX_PIN}
+export TORCH_CUDA_ARCH_LIST=9.0+PTX
+export TE_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/te-wheels
+export APEX_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/apex-wheels
+export OPENREWARD_CONTAINER_ENV_ID=sha256:${actual_sif_sha}
+
+echo "[gate2] resolving exact source/content identity"
+resolution=$(
+    OPENREWARD_CONTAINER_IMAGE="${PLATOON_TRAINING_SIF}" \
+    OPENREWARD_UV_BIN="${UV_BIN}" \
+    "${PREPARE_ENV}" resolve
+)
+IFS=$'\t' read -r OPENREWARD_ENV_KEY OPENREWARD_SOURCE_SHA OPENREWARD_SOURCE_ARCHIVE OPENREWARD_JOB_VENV <<<"${resolution}"
+[[ -n "${OPENREWARD_ENV_KEY}" && -r "${OPENREWARD_SOURCE_ARCHIVE}" && -n "${OPENREWARD_JOB_VENV}" ]] || \
+    die "environment resolution is malformed"
+export OPENREWARD_ENV_KEY OPENREWARD_SOURCE_SHA OPENREWARD_SOURCE_ARCHIVE OPENREWARD_JOB_VENV
+
+helper_snapshot=${GATE_ROOT}/prepare_openreward_env.snapshot.sh
+"${PREPARE_ENV}" materialize "${OPENREWARD_SOURCE_ARCHIVE}" "${helper_snapshot}"
+tar -tf "${OPENREWARD_SOURCE_ARCHIVE}" >"${GATE_ROOT}/source-members.txt"
+if grep -Eq '(^|/)[^/]+\.orig$|(^|/)cleanup_openreward_2132698_generation\.py$|(^|/)test_offline_cleanup_2132698\.py$' \
+    "${GATE_ROOT}/source-members.txt"; then
+    die "immutable source archive contains retired migration debris"
+fi
+for archive_member in \
+    platoon/areal_rpc_server.py \
+    platoon/train/areal/fork_lifecycle.py \
+    platoon/train/areal/preallocated_pbs.py \
+    slurm-scripts/prepare_openreward_env.sh \
+    pbs-scripts/prepare_openreward_controller_env.sh \
+    pbs-scripts/openreward-v8-abci.env \
+    pbs-scripts/openreward-v8-release.json \
+    pbs-scripts/verify_openreward_v8_release.py \
+    pbs-scripts/verify_openreward_v8_swe_env.py \
+    pbs-scripts/materialize_openreward_v8_swe_env.py \
+    pbs-scripts/install_te.sh \
+    pbs-scripts/install_apex.sh \
+    containers/abci-training-runtime.lock \
+    containers/swe-rebench-538b5c5-py311.lock.txt \
+    containers/transformer-engine-build-constraints.txt \
+    plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v8.yaml \
+    plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_bench28_v8.yaml \
+    plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp2_c12_bench28_v8.yaml \
+    plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c18_bench28_v8.yaml \
+    plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c24_bench28_v8.yaml \
+    plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v8.yaml; do
+    grep -Fxq "${archive_member}" "${GATE_ROOT}/source-members.txt" || \
+        die "immutable source archive omits ${archive_member}"
+done
+for host_only_asset in \
+    pbs-scripts/openreward_v8_ptc_e2e.py \
+    pbs-scripts/openreward-service-cleanup-receipt.py \
+    pbs-scripts/openreward-controller-runtime-receipt.py; do
+    if grep -Fxq "${host_only_asset}" "${GATE_ROOT}/source-members.txt"; then
+        die "immutable source archive contains host-only launch asset ${host_only_asset}"
+    fi
+done
+unset archive_member
+
+echo "[gate2] validating contained SIF DNS/TLS through explicit system-file binds"
+"${RUNTIME}" exec --cleanenv --containall --no-home \
+    --no-mount home,cwd,bind-paths \
+    --bind /etc/resolv.conf:/etc/resolv.conf:ro \
+    --bind /etc/hosts:/etc/hosts:ro \
+    "${PLATOON_TRAINING_SIF}" \
+    curl --silent --show-error --fail --head --connect-timeout 10 --max-time 30 \
+        https://github.com/ >/dev/null
+
+build_in_sif() {
+    "${RUNTIME}" exec --nv --cleanenv --containall --no-home \
+        --no-mount home,cwd,bind-paths \
+        --bind /etc/resolv.conf:/etc/resolv.conf:ro \
+        --bind /etc/hosts:/etc/hosts:ro \
+        --bind "${REPO_ROOT}:${REPO_ROOT}:ro" \
+        --bind "${PLATOON_PROJECT_ROOT}:${PLATOON_PROJECT_ROOT}:rw" \
+        --bind "${LOCAL_ROOT}:${LOCAL_ROOT}:rw" \
+        --pwd "${GATE_ROOT}" \
+        --env "PLATOON_REPO_ROOT=${REPO_ROOT}" \
+        --env "OPENREWARD_ENV_CACHE_ROOT=${OPENREWARD_ENV_CACHE_ROOT}" \
+        --env "OPENREWARD_ENV_KEY=${OPENREWARD_ENV_KEY}" \
+        --env "OPENREWARD_SOURCE_SHA=${OPENREWARD_SOURCE_SHA}" \
+        --env "OPENREWARD_SOURCE_ARCHIVE=${OPENREWARD_SOURCE_ARCHIVE}" \
+        --env "OPENREWARD_JOB_VENV=${OPENREWARD_JOB_VENV}" \
+        --env "OPENREWARD_UV_CACHE_DIR=${OPENREWARD_UV_CACHE_DIR}" \
+        --env "OPENREWARD_UV_LINK_MODE=${OPENREWARD_UV_LINK_MODE}" \
+        --env OPENREWARD_UV_BIN=uv \
+        --env OPENREWARD_BUILD_TE=1 \
+        --env OPENREWARD_BUILD_APEX=1 \
+        --env "TE_VERSION=${TE_VERSION}" \
+        --env "APEX_GIT_REF=${APEX_GIT_REF}" \
+        --env "TE_WHEEL_CACHE=${TE_WHEEL_CACHE}" \
+        --env "APEX_WHEEL_CACHE=${APEX_WHEEL_CACHE}" \
+        --env TORCH_CUDA_ARCH_LIST=9.0+PTX \
+        --env "TMPDIR=${LOCAL_ROOT}/tmp" \
+        --env "TE_BUILD_SCRATCH=${LOCAL_ROOT}/tmp" \
+        --env "APEX_BUILD_SCRATCH=${LOCAL_ROOT}/tmp" \
+        --env CUDA_VISIBLE_DEVICES= \
+        "${PLATOON_TRAINING_SIF}" \
+        /usr/bin/env \
+            "HOME=${LOCAL_ROOT}/home" \
+            "XDG_CACHE_HOME=${LOCAL_ROOT}/cache/xdg" \
+            "FLASHINFER_CACHEDIR=${LOCAL_ROOT}/cache/flashinfer" \
+            "TORCH_EXTENSIONS_DIR=${LOCAL_ROOT}/cache/torch-extensions" \
+            "AREAL_CACHE_DIR=${LOCAL_ROOT}/cache/areal" \
+            /bin/bash "${helper_snapshot}" build
+}
+
+echo "[gate2] cold immutable environment build key=${OPENREWARD_ENV_KEY}"
+build_in_sif 2>&1 | tee "${LOG_ROOT}/cold-build.log"
+grep -Fq '[openreward-env] cache miss; building relocatable staging environment' \
+    "${LOG_ROOT}/cold-build.log" || die "first call did not prove a cold environment build"
+
+echo "[gate2] immediate second invocation must be a cache hit"
+build_in_sif 2>&1 | tee "${LOG_ROOT}/warm-build.log"
+grep -Fq "[openreward-env] cache hit: ${OPENREWARD_JOB_VENV}" \
+    "${LOG_ROOT}/warm-build.log" || die "second call did not report the exact cache hit"
+
+# This worker venv is intentionally container-ABI-only: its relocatable Python
+# link resolves to /usr/bin/python3.12 inside the SIF, which is absent on ABCI's
+# host.  Check the exact link here and execute it only in the SIF below.
+[[ -L "${OPENREWARD_JOB_VENV}/bin/python" ]] || die "published worker venv Python link is absent"
+[[ "$(readlink "${OPENREWARD_JOB_VENV}/bin/python")" == /usr/bin/python3.12 ]] || \
+    die "published worker venv Python does not target the SIF interpreter"
+[[ -f "${OPENREWARD_JOB_VENV}/.platoon-ready" ]] || die "published venv readiness marker is absent"
+grep -Fxq 'relocatable = true' "${OPENREWARD_JOB_VENV}/pyvenv.cfg" || \
+    die "published venv is not relocatable"
+
+# The SIF-built worker venv points at the SIF's /usr/bin/python3.12 and must
+# never be executed by ABCI's host.  Resolve and build an independent host ABI
+# environment from the exact same immutable source archive.
+export OPENREWARD_CONTROLLER_ENV_CACHE_ROOT=${CONTROLLER_ENV_CACHE}
+export OPENREWARD_CONTROLLER_UV_CACHE_DIR=${CONTROLLER_UV_CACHE}
+export OPENREWARD_CONTROLLER_UV_BIN=${UV_BIN}
+export OPENREWARD_CONTROLLER_PYTHON=${CONTROLLER_PYTHON_BASE}
+controller_resolution=$(
+    env \
+        -u WANDB_API_KEY \
+        -u OPENAI_API_KEY \
+        -u OPENAI_BASE_URL \
+        -u LITELLM_API_KEY \
+        -u LITELLM_BASE_URL \
+        -u RUBRIC_DEFAULT_LLM \
+        -u HF_TOKEN \
+        -u AWS_ACCESS_KEY_ID \
+        -u AWS_SECRET_ACCESS_KEY \
+        -u AWS_SESSION_TOKEN \
+        "${PREPARE_CONTROLLER_ENV}" resolve
+)
+IFS=$'\t' read -r OPENREWARD_CONTROLLER_ENV_KEY OPENREWARD_CONTROLLER_JOB_VENV \
+    <<<"${controller_resolution}"
+[[ -n "${OPENREWARD_CONTROLLER_ENV_KEY}" && -n "${OPENREWARD_CONTROLLER_JOB_VENV}" ]] || \
+    die "controller environment resolution is malformed"
+export OPENREWARD_CONTROLLER_ENV_KEY OPENREWARD_CONTROLLER_JOB_VENV
+controller_helper_snapshot=${GATE_ROOT}/prepare_openreward_controller_env.snapshot.sh
+"${PREPARE_CONTROLLER_ENV}" materialize \
+    "${OPENREWARD_SOURCE_ARCHIVE}" "${controller_helper_snapshot}"
+
+build_controller_on_host() {
+    env \
+        -u WANDB_API_KEY \
+        -u OPENAI_API_KEY \
+        -u OPENAI_BASE_URL \
+        -u LITELLM_API_KEY \
+        -u LITELLM_BASE_URL \
+        -u RUBRIC_DEFAULT_LLM \
+        -u HF_TOKEN \
+        -u AWS_ACCESS_KEY_ID \
+        -u AWS_SECRET_ACCESS_KEY \
+        -u AWS_SESSION_TOKEN \
+        HOME="${LOCAL_ROOT}/home" \
+        XDG_CACHE_HOME="${LOCAL_ROOT}/cache/xdg" \
+        TMPDIR="${LOCAL_ROOT}/tmp" \
+        OPENREWARD_CONTROLLER_ENV_CACHE_ROOT="${OPENREWARD_CONTROLLER_ENV_CACHE_ROOT}" \
+        OPENREWARD_CONTROLLER_ENV_KEY="${OPENREWARD_CONTROLLER_ENV_KEY}" \
+        OPENREWARD_CONTROLLER_JOB_VENV="${OPENREWARD_CONTROLLER_JOB_VENV}" \
+        OPENREWARD_CONTROLLER_PYTHON="${OPENREWARD_CONTROLLER_PYTHON}" \
+        OPENREWARD_CONTROLLER_UV_BIN="${OPENREWARD_CONTROLLER_UV_BIN}" \
+        OPENREWARD_CONTROLLER_UV_CACHE_DIR="${OPENREWARD_CONTROLLER_UV_CACHE_DIR}" \
+        OPENREWARD_SOURCE_SHA="${OPENREWARD_SOURCE_SHA}" \
+        OPENREWARD_SOURCE_ARCHIVE="${OPENREWARD_SOURCE_ARCHIVE}" \
+        /bin/bash "${controller_helper_snapshot}" build
+}
+
+echo "[gate2] cold immutable host-controller build key=${OPENREWARD_CONTROLLER_ENV_KEY}"
+build_controller_on_host 2>&1 | tee "${LOG_ROOT}/controller-cold-build.log"
+grep -Fq '[openreward-controller-env] cache miss; building host-compatible staging environment' \
+    "${LOG_ROOT}/controller-cold-build.log" || \
+    die "first host-controller call did not prove a cold environment build"
+
+echo "[gate2] immediate host-controller replay must be a cache hit"
+build_controller_on_host 2>&1 | tee "${LOG_ROOT}/controller-warm-build.log"
+grep -Fq "[openreward-controller-env] cache hit: ${OPENREWARD_CONTROLLER_JOB_VENV}" \
+    "${LOG_ROOT}/controller-warm-build.log" || \
+    die "second host-controller call did not report the exact cache hit"
+[[ -x "${OPENREWARD_CONTROLLER_JOB_VENV}/bin/python" ]] || \
+    die "published host-controller Python is absent"
+[[ -f "${OPENREWARD_CONTROLLER_JOB_VENV}/.platoon-controller-ready" ]] || \
+    die "published host-controller readiness marker is absent"
+
+cuda_lib_dirs=$(find "${OPENREWARD_JOB_VENV}/lib/python3.12/site-packages/nvidia" \
+    -mindepth 2 -maxdepth 2 -type d -name lib 2>/dev/null | paste -sd: -)
+[[ -n "${cuda_lib_dirs}" ]] || die "published venv has no NVIDIA wheel libraries"
+mapfile -t gate_gpu_uuids < <(nvidia-smi --query-gpu=uuid --format=csv,noheader | sed 's/[[:space:]]//g')
+[[ "${#gate_gpu_uuids[@]}" -eq 8 ]] || \
+    die "expected eight H200 UUIDs on the gate node, found ${#gate_gpu_uuids[@]}"
+# ABCI's Singularity CE uses nvidia-container-cli with --containall. It needs
+# the physical UUID explicitly; CUDA_VISIBLE_DEVICES then remaps that one
+# mounted device to logical index zero inside the SIF.
+gate_gpu_uuid=${gate_gpu_uuids[0]}
+
+echo "[gate2] exercising CUDA and the complete training import chain inside the SIF"
+NVIDIA_VISIBLE_DEVICES="${gate_gpu_uuid}" \
+"${RUNTIME}" exec --nv --cleanenv --containall --no-home \
+    --no-mount home,cwd,bind-paths \
+    --bind /etc/resolv.conf:/etc/resolv.conf:ro \
+    --bind /etc/hosts:/etc/hosts:ro \
+    --bind "${PLATOON_PROJECT_ROOT}:${PLATOON_PROJECT_ROOT}:rw" \
+    --bind "${LOCAL_ROOT}:${LOCAL_ROOT}:rw" \
+    --pwd "${GATE_ROOT}" \
+    "${PLATOON_TRAINING_SIF}" \
+    /usr/bin/env \
+        "HOME=${LOCAL_ROOT}/home" \
+        "XDG_CACHE_HOME=${LOCAL_ROOT}/cache/xdg" \
+        "FLASHINFER_CACHEDIR=${LOCAL_ROOT}/cache/flashinfer" \
+        "TORCH_EXTENSIONS_DIR=${LOCAL_ROOT}/cache/torch-extensions" \
+        "AREAL_CACHE_DIR=${LOCAL_ROOT}/cache/areal" \
+        "PLATOON_CUDA_LIB_DIRS=${cuda_lib_dirs}" \
+        "PLATOON_EXPECTED_VENV=${OPENREWARD_JOB_VENV}" \
+        "PLATOON_VENV_PYTHON=${OPENREWARD_JOB_VENV}/bin/python" \
+        "CUDA_VISIBLE_DEVICES=0" \
+        /bin/bash -c \
+        'export LD_LIBRARY_PATH="${PLATOON_CUDA_LIB_DIRS}:${LD_LIBRARY_PATH:-}"; exec "${PLATOON_VENV_PYTHON}" -I -' <<'PY'
+import importlib.metadata as metadata
+import os
+import sys
+from pathlib import Path
+
+prefix = Path(os.environ["PLATOON_EXPECTED_VENV"]).resolve()
+assert Path(sys.prefix).resolve() == prefix, (sys.prefix, prefix)
+worker_python = Path(os.environ["PLATOON_VENV_PYTHON"])
+assert worker_python.is_symlink(), worker_python
+assert os.readlink(worker_python) == "/usr/bin/python3.12", os.readlink(worker_python)
+import torch
+assert torch.__version__ == "2.9.1+cu129"
+assert torch.version.cuda == "12.9"
+assert torch.cuda.is_available()
+assert torch.cuda.get_device_capability(0) == (9, 0)
+assert "H200" in torch.cuda.get_device_name(0), torch.cuda.get_device_name(0)
+
+from platoon.train.areal import PlatoonArealRLTrainer
+from platoon.train.areal.actor import PlatoonMegatronPPOActor, PlatoonPPOActor
+import platoon.areal_rpc_server as areal_rpc_server
+import platoon.areal_proxy_rollout as areal_proxy_rollout
+import platoon.openreward
+import openhands
+import apex
+import fused_weight_gradient_mlp_cuda
+import onnx
+import transformer_engine.pytorch
+from fla.modules.convolution import causal_conv1d
+from fla.ops.cp import build_cp_context
+from megatron.bridge.models.conversion.auto_bridge import AutoBridge
+
+assert hasattr(onnx, "TensorProto")
+assert callable(areal_proxy_rollout.main)
+assert getattr(
+    areal_proxy_rollout.main,
+    "__platoon_name_resolve_cleanup__",
+    False,
+)
+proxy_main_source = __import__("inspect").getsource(areal_proxy_rollout.main)
+assert "_reset_name_resolve" in proxy_main_source
+areal_rpc_server._apply_platoon_areal_rollout_worker_patches()
+from areal.infra import remote_inf_engine
+
+patched_wait = remote_inf_engine.RemoteInfEngine._wait_for_server
+patched_launch = remote_inf_engine.RemoteInfEngine.launch_server
+assert getattr(patched_wait, "__platoon_server_child_exit_patch__", False)
+assert getattr(patched_launch, "__platoon_server_child_exit_cleanup_patch__", False)
+assert tuple(__import__("inspect").signature(patched_wait).parameters) == (
+    "self", "address", "process",
+)
+assert tuple(__import__("inspect").signature(patched_launch).parameters) == (
+    "self", "server_args",
+)
+assert PlatoonMegatronPPOActor.__module__ == "platoon.train.areal.actor"
+assert any(base.__name__ == "MegatronPPOActor" for base in PlatoonMegatronPPOActor.__mro__)
+assert PlatoonPPOActor.__module__ == "platoon.train.areal.actor"
+assert any(base.__name__ == "FSDPPPOActor" for base in PlatoonPPOActor.__mro__)
+for distribution in (
+    "areal", "megatron-core", "openhands-sdk", "openhands-tools", "platoon",
+    "platoon-openhands", "platoon-openreward", "sglang", "torch", "transformers",
+):
+    value = metadata.distribution(distribution)
+    assert Path(value.locate_file("")).resolve().is_relative_to(prefix), distribution
+print("gate2_sif_cuda_imports=ok", torch.cuda.get_device_name(0))
+PY
+
+echo "[gate2] exercising the independently pinned venv from the bare host controller ABI"
+env \
+    -u VIRTUAL_ENV \
+    -u UV_PROJECT_ENVIRONMENT \
+    -u PYTHONHOME \
+    -u PYTHONPATH \
+    HOME="${LOCAL_ROOT}/home" \
+    XDG_CACHE_HOME="${LOCAL_ROOT}/cache/xdg" \
+    FLASHINFER_CACHEDIR="${LOCAL_ROOT}/cache/flashinfer" \
+    TORCH_EXTENSIONS_DIR="${LOCAL_ROOT}/cache/torch-extensions" \
+    AREAL_CACHE_DIR="${LOCAL_ROOT}/cache/areal" \
+    CUDA_VISIBLE_DEVICES= \
+    PLATOON_EXPECTED_VENV="${OPENREWARD_CONTROLLER_JOB_VENV}" \
+    "${OPENREWARD_CONTROLLER_JOB_VENV}/bin/python" -I - <<'PY'
+import importlib.metadata as metadata
+import os
+import sys
+from pathlib import Path
+
+prefix = Path(os.environ["PLATOON_EXPECTED_VENV"]).resolve()
+assert Path(sys.prefix).resolve() == prefix
+import platoon.openreward.train_scripts.areal.train_areal as train_entry
+import torch
+from platoon.train.areal import fork_lifecycle
+from platoon.train.areal import patches as platoon_areal_patches
+from platoon.train.areal import preallocated_pbs
+from platoon.train.areal import preallocated_slurm
+from platoon.train.areal.preallocated_pbs import PreallocatedPBSScheduler
+from platoon.train.areal.preallocated_slurm import PreallocatedSlurmScheduler
+from areal.infra.controller.rollout_controller import RolloutController
+from areal.infra.scheduler import local as areal_local
+from areal.infra.scheduler import slurm as areal_slurm
+from platoon.train.areal.rl import (
+    _REMOTE_PLATOON_FSDP_PPO_ACTOR,
+    _REMOTE_PLATOON_MEGATRON_PPO_ACTOR,
+)
+
+assert callable(train_entry.main)
+assert PreallocatedPBSScheduler.__name__ == "PreallocatedPBSScheduler"
+fork_override = PreallocatedPBSScheduler.__dict__["_fork_single_worker"]
+assert getattr(fork_override, "__platoon_worker_python_fork_patch__", False)
+assert tuple(__import__("inspect").signature(fork_override).parameters) == (
+    "self", "session", "role", "idx", "target_wi", "target_role", "command",
+)
+fork_source = __import__("inspect").getsource(fork_override)
+assert "_ForkWorkerPythonSession" in fork_source
+assert "super()._fork_single_worker" in fork_source
+assert preallocated_pbs._FORK_WORKER_PYTHON_ENV == "PLATOON_AREAL_PBS_WORKER_PYTHON"
+for scheduler_cls in (areal_local.LocalScheduler, areal_slurm.SlurmScheduler):
+    assert getattr(
+        scheduler_cls.delete_workers,
+        "__platoon_fork_alias_cleanup_patch__",
+        False,
+    )
+for scheduler_cls in (PreallocatedSlurmScheduler, PreallocatedPBSScheduler):
+    delete_source = __import__("inspect").getsource(scheduler_cls.delete_workers)
+    assert "cleanup_forked_alias_workers" in delete_source
+    assert "cleanup_dependent_aliases_before_owner" in delete_source
+assert preallocated_slurm.cleanup_forked_alias_workers is preallocated_pbs.cleanup_forked_alias_workers
+assert (
+    preallocated_slurm.cleanup_dependent_aliases_before_owner
+    is preallocated_pbs.cleanup_dependent_aliases_before_owner
+)
+assert preallocated_slurm.cleanup_forked_alias_workers is fork_lifecycle.cleanup_forked_alias_workers
+assert (
+    preallocated_slurm.cleanup_dependent_aliases_before_owner
+    is fork_lifecycle.cleanup_dependent_aliases_before_owner
+)
+assert callable(platoon_areal_patches._patch_rollout_controller_cleanup_error_propagation)
+assert getattr(
+    RolloutController.destroy,
+    "__platoon_cleanup_error_propagation_patch__",
+    False,
+)
+assert tuple(__import__("inspect").signature(RolloutController.destroy).parameters) == (
+    "self",
+)
+destroy_patch_source = __import__("inspect").getsource(
+    platoon_areal_patches._patch_rollout_controller_cleanup_error_propagation
+)
+assert "_CleanupRecordingScheduler" in destroy_patch_source
+assert "cleanup_errors" in destroy_patch_source
+assert "self.scheduler = scheduler" in destroy_patch_source
+patched_call_engine = areal_slurm.SlurmScheduler.call_engine
+patched_async_call_engine = areal_slurm.SlurmScheduler.async_call_engine
+assert getattr(
+    patched_call_engine,
+    "__platoon_engine_call_error_passthrough_patch__",
+    False,
+)
+assert getattr(
+    patched_async_call_engine,
+    "__platoon_engine_call_error_passthrough_patch__",
+    False,
+)
+import inspect
+
+assert inspect.signature(patched_call_engine) == inspect.signature(
+    patched_call_engine.__wrapped__
+)
+assert inspect.signature(patched_async_call_engine) == inspect.signature(
+    patched_async_call_engine.__wrapped__
+)
+assert _REMOTE_PLATOON_MEGATRON_PPO_ACTOR.__module__ == "platoon.train.areal.actor"
+assert _REMOTE_PLATOON_MEGATRON_PPO_ACTOR.__name__ == "PlatoonMegatronPPOActor"
+assert _REMOTE_PLATOON_FSDP_PPO_ACTOR.__module__ == "platoon.train.areal.actor"
+assert _REMOTE_PLATOON_FSDP_PPO_ACTOR.__name__ == "PlatoonPPOActor"
+for distribution in ("areal", "datasets", "openhands-sdk", "platoon", "platoon-openreward", "torch"):
+    value = metadata.distribution(distribution)
+    assert Path(value.locate_file("")).resolve().is_relative_to(prefix), distribution
+for forbidden in ("megatron", "transformer_engine", "apex", "fused_weight_gradient_mlp_cuda"):
+    assert not any(name == forbidden or name.startswith(forbidden + ".") for name in sys.modules), forbidden
+print("gate2_host_controller_imports=ok", sys.executable)
+PY
+
+cat >"${GATE_ROOT}/RESULT" <<EOF
+gate2=passed
+pbs_job_id=${PBS_JOBID}
+worker_environment_key=${OPENREWARD_ENV_KEY}
+controller_environment_key=${OPENREWARD_CONTROLLER_ENV_KEY}
+source_sha256=${OPENREWARD_SOURCE_SHA}
+training_sif_sha256=${actual_sif_sha}
+worker_venv=${OPENREWARD_JOB_VENV}
+controller_venv=${OPENREWARD_CONTROLLER_JOB_VENV}
+EOF
+chmod 0400 "${GATE_ROOT}/RESULT"
+echo "gate2_immutable_runtime=passed result=${GATE_ROOT}/RESULT"

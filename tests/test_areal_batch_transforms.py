@@ -40,17 +40,37 @@ def _load_trainer_module(batch_transforms_module):
     sys.modules["platoon.train.areal.batch_transforms"] = batch_transforms_module
 
     actor_mod = types.ModuleType("platoon.train.areal.actor")
-    actor_mod.PlatoonPPOActor = type(
-        "PlatoonPPOActor",
-        (),
-        {"as_controller": classmethod(lambda cls, config, scheduler: cls())},
-    )
-    actor_mod.PlatoonMegatronPPOActor = type(
-        "PlatoonMegatronPPOActor",
-        (),
-        {"as_controller": classmethod(lambda cls, config, scheduler: cls())},
-    )
+
+    class FakeActorController:
+        def __init__(self, train_engine, config, scheduler):
+            self.train_engine = train_engine
+            self.config = config
+            self.scheduler = scheduler
+            self.parallel_strategies = []
+
+        def create_process_group(self, parallel_strategy=None):
+            self.parallel_strategies.append(parallel_strategy)
+
+    class FakeFSDPActor:
+        @classmethod
+        def as_controller(cls, config, scheduler):
+            return FakeActorController(cls, config, scheduler)
+
+    actor_mod.PlatoonPPOActor = FakeFSDPActor
+    actor_mod.megatron_lazy_imports = []
+
+    def actor_getattr(name):
+        if name == "PlatoonMegatronPPOActor":
+            actor_mod.megatron_lazy_imports.append(name)
+            return type(name, (), {"__module__": actor_mod.__name__})
+        raise AttributeError(name)
+
+    actor_mod.__getattr__ = actor_getattr
     sys.modules["platoon.train.areal.actor"] = actor_mod
+
+    actor_controller_mod = types.ModuleType("platoon.train.areal.actor_controller")
+    actor_controller_mod.PlatoonPPOActorController = FakeActorController
+    sys.modules["platoon.train.areal.actor_controller"] = actor_controller_mod
 
     config_mod = types.ModuleType("platoon.train.areal.config_defs")
     config_mod.PlatoonArealRLTrainerConfig = object
@@ -66,6 +86,10 @@ def _load_trainer_module(batch_transforms_module):
     preallocated_mod = types.ModuleType("platoon.train.areal.preallocated_slurm")
     preallocated_mod.PreallocatedSlurmScheduler = type("PreallocatedSlurmScheduler", (), {})
     sys.modules["platoon.train.areal.preallocated_slurm"] = preallocated_mod
+
+    preallocated_pbs_mod = types.ModuleType("platoon.train.areal.preallocated_pbs")
+    preallocated_pbs_mod.PreallocatedPBSScheduler = type("PreallocatedPBSScheduler", (), {})
+    sys.modules["platoon.train.areal.preallocated_pbs"] = preallocated_pbs_mod
 
     workflow_serialization_mod = types.ModuleType("platoon.train.areal.workflow_serialization")
     workflow_serialization_mod.normalize_remote_workflow = lambda workflow: workflow
@@ -132,6 +156,46 @@ def _load_trainer_module(batch_transforms_module):
         "platoon_rl_test",
         REPO_ROOT / "platoon/train/areal/rl.py",
     )
+
+
+def test_single_controller_megatron_emits_worker_import_without_host_import():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    actor_module = sys.modules["platoon.train.areal.actor"]
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.scheduler = object()
+    actor_config = rl_module.PlatoonPPOActorConfig()
+    parallel = object()
+
+    controller = trainer._create_train_engine(
+        actor_config,
+        SimpleNamespace(backend="megatron", parallel=parallel),
+    )
+
+    assert actor_module.megatron_lazy_imports == []
+    assert controller.train_engine.__module__ == "platoon.train.areal.actor"
+    assert controller.train_engine.__name__ == "PlatoonMegatronPPOActor"
+    assert controller.parallel_strategies == [parallel]
+
+
+def test_single_controller_fsdp_behavior_is_unchanged():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    actor_module = sys.modules["platoon.train.areal.actor"]
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.scheduler = object()
+    actor_config = rl_module.PlatoonPPOActorConfig()
+    parallel = object()
+
+    controller = trainer._create_train_engine(
+        actor_config,
+        SimpleNamespace(backend="fsdp", parallel=parallel),
+    )
+
+    assert actor_module.megatron_lazy_imports == []
+    assert controller.train_engine.__module__ == "platoon.train.areal.actor"
+    assert controller.train_engine.__name__ == "PlatoonPPOActor"
+    assert controller.parallel_strategies == [parallel]
 
 
 def _evaluator_config(**overrides):

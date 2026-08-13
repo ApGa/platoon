@@ -1,0 +1,161 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=2:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -N rasp-cluster-probe
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load cuda/12.9/12.9.1
+module load hpcx/2.20
+module load singularity-ce/4.4.1
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+PROBE_HELPER=${REPO_ROOT}/pbs-scripts/cluster_probe_tcp.py
+SHARED_ROOT=/groups/gai51740/aci18912it/rasp
+LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon-probe
+mkdir -p "${LOCAL_ROOT}" "${SHARED_ROOT}/job-state/${PBS_JOBID}"
+export SINGULARITY_CACHEDIR=${LOCAL_ROOT}/singularity-cache
+export SINGULARITY_TMPDIR=${LOCAL_ROOT}/singularity-tmp
+mkdir -p "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+
+cleanup() {
+    singularity instance stop --force "probe-${PBS_JOBID%%.*}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+echo "probe_started=$(date --iso-8601=seconds)"
+echo "host=$(hostname -f)"
+echo "PBS_JOBID=${PBS_JOBID}"
+echo "PBS_LOCALDIR=${PBS_LOCALDIR}"
+echo "PBS_NODEFILE=${PBS_NODEFILE}"
+echo "module_list_begin"
+module list 2>&1 || true
+echo "module_list_end"
+echo "nodefile_begin"
+cat "${PBS_NODEFILE}"
+echo "nodefile_end"
+
+mapfile -t NODES < <(awk '!seen[$0]++' "${PBS_NODEFILE}")
+if (( ${#NODES[@]} != 2 )); then
+    echo "Expected exactly two unique hosts, got ${#NODES[@]}: ${NODES[*]}" >&2
+    exit 1
+fi
+SECOND_NODE_INDEX=$(awk -v target="${NODES[1]}" '$0 == target {print NR - 1; exit}' "${PBS_NODEFILE}")
+if [[ -z "${SECOND_NODE_INDEX}" ]]; then
+    echo "Could not find second host in PBS_NODEFILE" >&2
+    exit 1
+fi
+
+echo "host_inventory_begin"
+mpirun -np 2 -map-by ppr:1:node -bind-to none -hostfile "${PBS_NODEFILE}" \
+    /bin/bash -lc '
+        set -e
+        echo "host=$(hostname -f) rank=${OMPI_COMM_WORLD_RANK:-unset} local_rank=${OMPI_COMM_WORLD_LOCAL_RANK:-unset}"
+        echo "PBS_LOCALDIR=${PBS_LOCALDIR:-unset} TMPDIR=${TMPDIR:-unset}"
+        nvidia-smi -L
+        nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+        df -Th /home /groups "${PBS_LOCALDIR:-/local}" /tmp
+        singularity version
+    '
+echo "host_inventory_end"
+
+echo "gpu_rank_map_begin"
+mpirun -np 16 -map-by ppr:8:node -bind-to none -hostfile "${PBS_NODEFILE}" \
+    /bin/bash -lc '
+        set -e
+        export CUDA_VISIBLE_DEVICES=${OMPI_COMM_WORLD_LOCAL_RANK:?}
+        uuid=$(nvidia-smi --query-gpu=uuid --format=csv,noheader,nounits)
+        count=$(nvidia-smi -L | wc -l)
+        printf "host=%s rank=%s local_rank=%s visible_count=%s uuid=%s\n" \
+            "$(hostname -f)" "${OMPI_COMM_WORLD_RANK}" \
+            "${OMPI_COMM_WORLD_LOCAL_RANK}" "${count}" "${uuid}"
+    '
+echo "gpu_rank_map_end"
+
+for port in 8082 8084; do
+    pbsdsh -n "${SECOND_NODE_INDEX}" -- \
+        python3 "${PROBE_HELPER}" listen "${port}" &
+    listener_pid=$!
+    python3 "${PROBE_HELPER}" connect "${NODES[1]}" "${port}"
+    wait "${listener_pid}"
+    echo "cross_node_tcp_${port}=ok"
+done
+
+LOCK_DIR=${SHARED_ROOT}/job-state/${PBS_JOBID}/lock-probe
+mkdir -p "${LOCK_DIR}"
+LOCK_PATH=${LOCK_DIR}/publish.lock
+READY_PATH=${LOCK_DIR}/remote-ready
+pbsdsh -n "${SECOND_NODE_INDEX}" -- /bin/bash -lc \
+    "flock '${LOCK_PATH}' /bin/bash -c 'touch \"${READY_PATH}\"; sleep 3'" &
+lock_holder_pid=$!
+for _ in $(seq 1 100); do
+    [[ -e "${READY_PATH}" ]] && break
+    sleep 0.05
+done
+[[ -e "${READY_PATH}" ]]
+if flock -n "${LOCK_PATH}" true; then
+    echo "Lustre flock unexpectedly allowed concurrent ownership" >&2
+    exit 1
+fi
+wait "${lock_holder_pid}"
+flock -n "${LOCK_PATH}" true
+printf 'complete\n' > "${LOCK_DIR}/artifact.tmp"
+mv "${LOCK_DIR}/artifact.tmp" "${LOCK_DIR}/artifact"
+[[ $(<"${LOCK_DIR}/artifact") == complete ]]
+echo "lustre_flock_atomic_rename=ok"
+
+for endpoint in \
+    https://github.com/ \
+    https://huggingface.co/ \
+    https://pypi.org/simple/ \
+    https://download.pytorch.org/whl/cu129/ \
+    https://api.wandb.ai/ \
+    https://registry-1.docker.io/v2/; do
+    status=$(curl -L -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 \
+        --max-time 30 "${endpoint}" || true)
+    printf 'outbound endpoint=%s status=%s\n' "${endpoint}" "${status}"
+done
+
+ALPINE_SIF=${LOCAL_ROOT}/alpine-3.20.sif
+singularity pull --disable-cache "${ALPINE_SIF}" docker://alpine:3.20
+singularity inspect "${ALPINE_SIF}" >/dev/null
+echo "singularity_pull_and_inspect=ok"
+
+OVERLAY=${LOCAL_ROOT}/probe-overlay.img
+OVERLAY_LAYOUT=${LOCAL_ROOT}/overlay-layout
+SESSION_TMP=${LOCAL_ROOT}/session-tmp
+mkdir -p "${SESSION_TMP}" "${OVERLAY_LAYOUT}/upper" "${OVERLAY_LAYOUT}/work"
+# `singularity overlay create` formats upper/work as real uid 0. Under
+# fakeroot that uid is unmapped, so the resulting rootfs appeared read-only on
+# ABCI. Seed the ext3 image with upper/work owned by the submitting uid; that
+# uid maps to container uid 0 under fakeroot.
+truncate -s 256M "${OVERLAY}"
+mkfs.ext3 -q -F -d "${OVERLAY_LAYOUT}" "${OVERLAY}"
+INSTANCE=probe-${PBS_JOBID%%.*}
+singularity instance start --fakeroot --cleanenv --no-home \
+    --overlay "${OVERLAY}" --bind "${SESSION_TMP}:/tmp" \
+    "${ALPINE_SIF}" "${INSTANCE}"
+singularity exec "instance://${INSTANCE}" /bin/sh -lc \
+    'mkdir -p /probe-state && printf persistent > /probe-state/value && printf private > /tmp/value'
+[[ $(singularity exec "instance://${INSTANCE}" cat /probe-state/value) == persistent ]]
+[[ $(<"${SESSION_TMP}/value") == private ]]
+singularity instance stop "${INSTANCE}"
+echo "singularity_instance_overlay_persistence=ok"
+
+if singularity exec --cleanenv --no-home --net --network none \
+    "${ALPINE_SIF}" /bin/true; then
+    echo "singularity_network_none=supported"
+else
+    echo "singularity_network_none=unsupported"
+fi
+
+echo "probe_finished=$(date --iso-8601=seconds)"

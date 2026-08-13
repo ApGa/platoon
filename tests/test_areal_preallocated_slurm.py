@@ -188,8 +188,8 @@ def _install_fake_areal(monkeypatch):
     monkeypatch.setitem(sys.modules, "areal.infra.scheduler.slurm", slurm_mod)
 
     proc_mod = types.ModuleType("areal.infra.utils.proc")
-    proc_mod.build_streaming_log_cmd = (
-        lambda cmd, role_log, merged_log, role: " ".join(cmd) if isinstance(cmd, list) else cmd
+    proc_mod.build_streaming_log_cmd = lambda cmd, role_log, merged_log, role: (
+        " ".join(cmd) if isinstance(cmd, list) else cmd
     )
     monkeypatch.setitem(sys.modules, "areal.infra.utils.proc", proc_mod)
 
@@ -200,6 +200,17 @@ def _install_fake_areal(monkeypatch):
 
 def _load_scheduler_module(monkeypatch):
     _install_fake_areal(monkeypatch)
+    # Load this focused scheduler module without executing the training
+    # package's optional heavyweight imports.
+    platoon_package = types.ModuleType("platoon")
+    platoon_package.__path__ = [str(REPO_ROOT / "platoon")]
+    train_package = types.ModuleType("platoon.train")
+    train_package.__path__ = [str(REPO_ROOT / "platoon/train")]
+    areal_package = types.ModuleType("platoon.train.areal")
+    areal_package.__path__ = [str(REPO_ROOT / "platoon/train/areal")]
+    monkeypatch.setitem(sys.modules, "platoon", platoon_package)
+    monkeypatch.setitem(sys.modules, "platoon.train", train_package)
+    monkeypatch.setitem(sys.modules, "platoon.train.areal", areal_package)
     return _load_module(
         "platoon_preallocated_slurm_test",
         REPO_ROOT / "platoon/train/areal/preallocated_slurm.py",
@@ -467,10 +478,88 @@ def test_preallocated_command_uses_current_srun_allocation(monkeypatch):
     assert "--no-container-entrypoint" in command
     assert "CUDA_VISIBLE_DEVICES" in command
     assert "--experiment-name exp" in command
+    assert '--worker-index "${SLURM_PROCID:?SLURM_PROCID is unset}"' in command
     assert "export PATH=/venv/bin:$PATH" in command
     assert "/bin/bash -c" in command
     assert "/bin/bash -lc" not in command
     assert "\n;\n" not in command
+
+
+def test_preallocated_command_forwards_spec_environment_safely(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    command = scheduler._build_role_srun_command(
+        role="actor",
+        replicas=8,
+        nodes=1,
+        total_gpus=8,
+        cpus_per_task=2,
+        mem_per_task=4096,
+        schedulings=[
+            FakeSchedulingSpec(
+                cpu=2,
+                gpu=1,
+                mem=4,
+                env_vars={"SAFE_VALUE": "spaces and $shell; syntax"},
+            )
+        ],
+        nodelist=None,
+        exclude=None,
+    )
+
+    assert "export SAFE_VALUE='spaces and $shell; syntax'" in command
+
+
+def test_rank_gpu_mapping_overrides_generic_spec_environment(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    command = scheduler._build_role_srun_command(
+        role="actor",
+        replicas=8,
+        nodes=1,
+        total_gpus=8,
+        cpus_per_task=2,
+        mem_per_task=4096,
+        schedulings=[
+            FakeSchedulingSpec(
+                cpu=2,
+                gpu=1,
+                mem=4,
+                env_vars={"CUDA_VISIBLE_DEVICES": "stale"},
+            )
+        ],
+        nodelist=None,
+        exclude=None,
+    )
+
+    assert command.index("export CUDA_VISIBLE_DEVICES=stale") < command.index(
+        "export CUDA_VISIBLE_DEVICES=$((SLURM_LOCALID"
+    )
+
+
+def test_preallocated_command_rejects_invalid_environment_name(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    with pytest.raises(ValueError, match="Invalid worker environment"):
+        scheduler._build_role_srun_command(
+            role="actor",
+            replicas=8,
+            nodes=1,
+            total_gpus=8,
+            cpus_per_task=2,
+            mem_per_task=4096,
+            schedulings=[
+                FakeSchedulingSpec(
+                    cpu=2,
+                    gpu=1,
+                    mem=4,
+                    env_vars={"BAD-NAME": "value"},
+                )
+            ],
+            nodelist=None,
+            exclude=None,
+        )
 
 
 def test_preallocated_overlap_workers_do_not_use_exclusive(monkeypatch):
@@ -639,9 +728,7 @@ def test_worker_registration_failure_cleans_up_role_process(monkeypatch):
                 role="rollout",
                 replicas=1,
                 tasks=[FakeSchedulingSpec(cpu=4, gpu=8, mem=16)],
-                scheduling_strategy=types.SimpleNamespace(
-                    type="separation", target=None
-                ),
+                scheduling_strategy=types.SimpleNamespace(type="separation", target=None),
             )
         )
 
@@ -650,3 +737,203 @@ def test_worker_registration_failure_cleans_up_role_process(monkeypatch):
     assert "rollout" not in scheduler._role_commands
     assert "rollout" not in scheduler._workers
     assert "rollout" not in scheduler._jobs
+
+
+def test_delete_all_workers_honors_reverse_order(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler._workers = {"actor": [], "rollout": []}
+    terminated: list[str] = []
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_role_process",
+        lambda role: terminated.append(role),
+    )
+
+    scheduler.delete_workers(reverse_order=True)
+
+    assert terminated == ["rollout", "actor"]
+
+
+def test_delete_forked_alias_runs_lifecycle_before_metadata_drop(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler._workers = {
+        "rollout": [_worker_info("rollout", 0, "node0")],
+        "proxy": [_worker_info("proxy", 0, "node0")],
+    }
+    scheduler._colocated_roles = {"proxy": "rollout"}
+    observations = []
+
+    def cleanup(instance, role, *, reverse_order=False):
+        observations.append(
+            (
+                instance is scheduler,
+                role,
+                reverse_order,
+                set(instance._workers),
+                dict(instance._colocated_roles),
+            )
+        )
+        return True
+
+    monkeypatch.setattr(module, "cleanup_forked_alias_workers", cleanup)
+
+    scheduler.delete_workers("proxy", reverse_order=True)
+
+    assert observations == [(True, "proxy", True, {"rollout", "proxy"}, {"proxy": "rollout"})]
+    assert set(scheduler._workers) == {"rollout"}
+    assert scheduler._colocated_roles == {}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "Owner Guard refused kill response",
+        "fork endpoint did not attest process death",
+        "Refusing to delete replaced fork discovery entries",
+    ],
+)
+def test_delete_forked_alias_lifecycle_failure_preserves_metadata(monkeypatch, failure):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler._workers = {
+        "rollout": [_worker_info("rollout", 0, "node0")],
+        "proxy": [_worker_info("proxy", 0, "node0")],
+    }
+    scheduler._colocated_roles = {"proxy": "rollout"}
+    monkeypatch.setattr(
+        module,
+        "cleanup_forked_alias_workers",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(failure)),
+    )
+
+    with pytest.raises(RuntimeError, match=failure):
+        scheduler.delete_workers("proxy")
+
+    assert set(scheduler._workers) == {"rollout", "proxy"}
+    assert scheduler._colocated_roles == {"proxy": "rollout"}
+
+
+def test_delete_plain_alias_remains_metadata_only(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    owner = _worker_info("actor", 0, "node0")
+    scheduler._workers = {"actor": [owner]}
+    scheduler._colocated_roles = {"ref": "actor"}
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "cleanup_forked_alias_workers",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or False,
+    )
+
+    scheduler.delete_workers("ref")
+
+    assert len(calls) == 1
+    assert scheduler._workers == {"actor": [owner]}
+    assert scheduler._colocated_roles == {}
+
+
+def test_delete_all_cleans_forked_alias_before_owner(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler._workers = {
+        "rollout": [_worker_info("rollout", 0, "node0")],
+        "proxy": [_worker_info("proxy", 0, "node0")],
+    }
+    scheduler._colocated_roles = {"proxy": "rollout"}
+    events = []
+
+    def cleanup(instance, role, *, reverse_order=False):
+        assert "rollout" in instance._workers
+        events.append(f"cleanup:proxy:reverse={reverse_order}")
+        return True
+
+    monkeypatch.setattr(module, "cleanup_forked_alias_workers", cleanup)
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_role_process",
+        lambda role: events.append(f"terminate:{role}"),
+    )
+
+    scheduler.delete_workers(reverse_order=True)
+
+    assert events == ["cleanup:proxy:reverse=True", "terminate:rollout"]
+    assert scheduler._workers == {}
+    assert scheduler._colocated_roles == {}
+
+
+def test_direct_owner_delete_cleans_dependent_alias_first(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler._workers = {
+        "rollout": [_worker_info("rollout", 0, "node0")],
+        "proxy": [_worker_info("proxy", 0, "node0")],
+    }
+    scheduler._colocated_roles = {"proxy": "rollout"}
+    events = []
+
+    def cleanup_dependents(instance, role, *, reverse_order=False):
+        events.append(f"dependents:{role}:reverse={reverse_order}")
+        if role == "rollout":
+            instance.delete_workers("proxy", reverse_order=reverse_order)
+            return ("proxy",)
+        return ()
+
+    monkeypatch.setattr(module, "cleanup_dependent_aliases_before_owner", cleanup_dependents)
+    monkeypatch.setattr(
+        module,
+        "cleanup_forked_alias_workers",
+        lambda instance, role, *, reverse_order=False: events.append(f"kill:{role}:reverse={reverse_order}") or True,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_role_process",
+        lambda role: events.append(f"terminate:{role}"),
+    )
+
+    scheduler.delete_workers("rollout", reverse_order=True)
+
+    assert events == [
+        "dependents:rollout:reverse=True",
+        "dependents:proxy:reverse=True",
+        "kill:proxy:reverse=True",
+        "terminate:rollout",
+    ]
+    assert scheduler._workers == {}
+    assert scheduler._colocated_roles == {}
+
+
+def test_direct_owner_delete_preserves_owner_when_alias_cleanup_fails(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    owner = _worker_info("rollout", 0, "node0")
+    alias = _worker_info("proxy", 0, "node0")
+    scheduler._workers = {"rollout": [owner], "proxy": [alias]}
+    scheduler._colocated_roles = {"proxy": "rollout"}
+    terminated = []
+
+    def cleanup_dependents(instance, role, *, reverse_order=False):
+        if role == "rollout":
+            instance.delete_workers("proxy", reverse_order=reverse_order)
+        return ()
+
+    monkeypatch.setattr(module, "cleanup_dependent_aliases_before_owner", cleanup_dependents)
+    monkeypatch.setattr(
+        module,
+        "cleanup_forked_alias_workers",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("attestation failed")),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_terminate_role_process",
+        lambda role: terminated.append(role),
+    )
+
+    with pytest.raises(RuntimeError, match="attestation failed"):
+        scheduler.delete_workers("rollout")
+
+    assert terminated == []
+    assert scheduler._workers == {"rollout": [owner], "proxy": [alias]}
+    assert scheduler._colocated_roles == {"proxy": "rollout"}

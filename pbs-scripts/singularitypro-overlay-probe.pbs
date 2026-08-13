@@ -1,0 +1,36 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1
+#PBS -l walltime=00:05:00
+#PBS -N rasp-singpro-probe
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+set -u -o pipefail
+umask 077
+source /etc/profile.d/modules.sh
+module purge
+module load singularitypro/4.1.12
+command -v singularity
+singularity version
+
+ROOT=${PBS_LOCALDIR:?}/singularitypro-probe
+mkdir -p "${ROOT}"/{cache,tmp,layout/upper,layout/work}
+export SINGULARITY_CACHEDIR=${ROOT}/cache
+export SINGULARITY_TMPDIR=${ROOT}/tmp
+SIF=${ROOT}/alpine.sif
+singularity pull --disable-cache "${SIF}" docker://alpine:3.20 || exit 1
+OVERLAY=${ROOT}/overlay.img
+truncate -s 256M "${OVERLAY}"
+mkfs.ext3 -q -F -d "${ROOT}/layout" "${OVERLAY}"
+
+set +e
+singularity exec --fakeroot --cleanenv --no-home --overlay "${OVERLAY}" \
+    "${SIF}" /bin/sh -c 'id; touch /fakeroot-write; test -f /fakeroot-write'
+echo "singularitypro_fakeroot_overlay_status=$?"
+singularity exec --cleanenv --no-home --overlay "${OVERLAY}" \
+    "${SIF}" /bin/sh -c 'id; touch /normal-write; test -f /normal-write'
+echo "singularitypro_normal_overlay_status=$?"

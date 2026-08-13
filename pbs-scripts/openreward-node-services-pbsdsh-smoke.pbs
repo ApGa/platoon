@@ -1,0 +1,333 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:15:00
+#PBS -N rasp-node-svc-smoke
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+
+# Exercise the exact production node-service helper through PBS pbsdsh before
+# allocating dozens of nodes.  This catches remote-task PATH/fd/container
+# differences while using only one short-lived rt_HF node.
+
+set -euo pipefail
+umask 077
+
+ABCI_ENV=${PLATOON_ABCI_ENV_FILE:-}
+[[ "${ABCI_ENV}" == /* && -f "${ABCI_ENV}" && ! -L "${ABCI_ENV}" ]] || {
+    echo "[node-service-smoke] ERROR: PLATOON_ABCI_ENV_FILE must name one exact regular overlay" >&2
+    exit 2
+}
+[[ -r "${ABCI_ENV}" ]] || {
+    echo "[node-service-smoke] ERROR: unreadable cluster environment: ${ABCI_ENV}" >&2
+    exit 2
+}
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+
+# The service helper scrubs these too.  Remove them from this orchestration
+# process before launching pbsdsh so the smoke cannot forward API credentials.
+for secret_name in \
+    WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL \
+    LITELLM_API_KEY LITELLM_BASE_URL RUBRIC_DEFAULT_LLM HF_TOKEN \
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    unset "${secret_name}"
+done
+unset secret_name
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+readonly REPO_ROOT=${PLATOON_REPO_ROOT}
+readonly RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
+readonly PREPARE_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_env.sh
+readonly NODE_SERVICES=${REPO_ROOT}/pbs-scripts/openreward-node-services.sh
+readonly SERVICE_RECEIPT_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-cleanup-receipt.py
+readonly PBSDSH=${PLATOON_PBSDSH_BIN:-/opt/pbs/bin/pbsdsh}
+readonly JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
+readonly SMOKE_ROOT=${PBS_LOCALDIR}/openreward-node-services-smoke
+readonly LOG_ROOT=${PLATOON_PROJECT_ROOT}/validation/node-services-pbsdsh/${JOB_ID_SAFE}
+readonly SERVICE_LOG=${LOG_ROOT}/services.log
+readonly DISCOVERY_LOG=${LOG_ROOT}/controller-pool-discovery.log
+readonly SESSION_AUDIT_LOG=${LOG_ROOT}/swe-session-audit.log
+readonly RESULT=${LOG_ROOT}/RESULT
+readonly SERVICE_RECEIPT=${LOG_ROOT}/node-services-cleanup.json
+readonly HOST=$(awk 'NF {print $1; exit}' "${PBS_NODEFILE}")
+readonly SWE_CLEANUP=${REPO_ROOT}/pbs-scripts/cleanup_swe_singularity_sessions.py
+readonly UV_BIN=/home/aci18912it/.local/bin/uv
+
+die() {
+    echo "[node-service-smoke] ERROR: $*" >&2
+    exit 1
+}
+
+[[ -n "${PBS_JOBID:-}" && -d "${PBS_LOCALDIR:-}" ]] || die "PBS allocation is unavailable"
+[[ -x "${PBSDSH}" ]] || die "pbsdsh is unavailable: ${PBSDSH}"
+[[ -x "${NODE_SERVICES}" && -x "${SERVICE_RECEIPT_HELPER}" ]] || \
+    die "node-service cleanup helpers are unavailable"
+[[ -n "${HOST}" ]] || die "PBS_NODEFILE has no host"
+[[ -x "${SWE_CLEANUP}" ]] || die "SWE session cleanup helper is unavailable"
+[[ -x "${RELEASE_VERIFY}" && -x "${PREPARE_ENV}" && -x "${UV_BIN}" ]] || \
+    die "v8 release verification assets are unavailable"
+[[ "${OPENREWARD_VERIFY_PINNED_SWE_RUNTIME:-}" == 1 ]] || \
+    die "v8 overlay did not enable pinned SWE runtime verification"
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+
+result_value() {
+    local file=$1 key=$2
+    awk -F= -v key="${key}" '
+        $1 == key { count++; value=substr($0, length(key) + 2) }
+        END { if (count != 1 || value == "") exit 1; print value }
+    ' "${file}"
+}
+
+readonly GATE2_RESULT=${OPENREWARD_NODE_SERVICES_GATE2_RESULT:-}
+[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || \
+    die "OPENREWARD_NODE_SERVICES_GATE2_RESULT must name one exact regular RESULT"
+[[ "$(stat -c %u "${GATE2_RESULT}")" == "$(id -u)" ]] || die "Gate2 RESULT owner mismatch"
+gate2_mode=$(stat -c %a "${GATE2_RESULT}")
+(( (8#${gate2_mode} & 8#077) == 0 )) || die "Gate2 RESULT is not private"
+[[ "$(result_value "${GATE2_RESULT}" gate2)" == passed ]] || die "Gate2 did not pass"
+source_sha=$(result_value "${GATE2_RESULT}" source_sha256)
+worker_key=$(result_value "${GATE2_RESULT}" worker_environment_key)
+controller_key=$(result_value "${GATE2_RESULT}" controller_environment_key)
+controller_venv=$(result_value "${GATE2_RESULT}" controller_venv)
+gate2_sif_sha=$(result_value "${GATE2_RESULT}" training_sif_sha256)
+[[ "${source_sha}" =~ ^[0-9a-f]{64}$ && "${worker_key}" =~ ^[0-9a-f]{64}$ && \
+    "${controller_key}" =~ ^[0-9a-f]{64}$ && "${gate2_sif_sha}" =~ ^[0-9a-f]{64}$ ]] || \
+    die "Gate2 RESULT identities are malformed"
+readonly CONTROLLER_VENV=${controller_venv}
+readonly CONTROLLER_PYTHON=${CONTROLLER_VENV}/bin/python
+readonly CONTROLLER_MANIFEST=${CONTROLLER_VENV}/.platoon-controller-manifest
+readonly CONFIG=${CONTROLLER_VENV}/lib/python3.12/site-packages/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v8.yaml
+[[ -x "${CONTROLLER_PYTHON}" && -f "${CONTROLLER_VENV}/.platoon-controller-ready" ]] || \
+    die "verified controller environment is unavailable"
+[[ -r "${CONTROLLER_MANIFEST}" && -r "${CONFIG}" ]] || \
+    die "verified controller manifest or installed v8 config is unavailable"
+grep -Fxq "source_sha256=${source_sha}" "${CONTROLLER_MANIFEST}" || \
+    die "controller source identity does not match the passed immutable gate"
+
+export OPENREWARD_PROJECT_DIR=${REPO_ROOT}/plugins/openreward
+export OPENREWARD_UV_CACHE_DIR=${UV_CACHE_DIR}
+export OPENREWARD_UV_LINK_MODE=hardlink
+export OPENREWARD_BUILD_TE=1
+export OPENREWARD_BUILD_APEX=1
+export TE_VERSION=2.12.0
+export APEX_GIT_REF=6424da3b4faa6c8f062da4a48c424fff3f02d42d
+export TORCH_CUDA_ARCH_LIST=9.0+PTX
+export TE_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/te-wheels
+export APEX_WHEEL_CACHE=${PLATOON_PROJECT_ROOT}/cache/apex-wheels
+actual_training_sif_sha=$(sha256sum "${PLATOON_TRAINING_SIF}" | awk '{print $1}')
+[[ "${actual_training_sif_sha}" == "${gate2_sif_sha}" ]] || die "Gate2 training SIF mismatch"
+export OPENREWARD_CONTAINER_ENV_ID=sha256:${actual_training_sif_sha}
+resolution=$(OPENREWARD_CONTAINER_IMAGE="${PLATOON_TRAINING_SIF}" \
+    OPENREWARD_UV_BIN="${UV_BIN}" "${PREPARE_ENV}" resolve)
+IFS=$'\t' read -r current_worker_key current_source_sha source_archive _worker_venv <<<"${resolution}"
+[[ "${current_source_sha}" == "${source_sha}" && "${current_worker_key}" == "${worker_key}" ]] || \
+    die "Gate2 source/environment is not the exact current v8 release"
+[[ -r "${source_archive}" && "$(sha256sum "${source_archive}" | awk '{print $1}')" == "${source_sha}" ]] || \
+    die "current source archive is missing or corrupt"
+
+mkdir -p "${SMOKE_ROOT}" "${LOG_ROOT}"
+chmod 0700 "${SMOKE_ROOT}" "${LOG_ROOT}"
+[[ ! -e "${RESULT}" && ! -L "${RESULT}" ]] || die "refusing stale result: ${RESULT}"
+
+export PLATOON_NODE_LOCAL_ROOT=${SMOKE_ROOT}
+export SINGULARITY_CACHEDIR=${SMOKE_ROOT}/singularity-cache
+export SINGULARITY_TMPDIR=${SMOKE_ROOT}/singularity-tmp
+export APPTAINER_CACHEDIR=${SINGULARITY_CACHEDIR}
+export APPTAINER_TMPDIR=${SINGULARITY_TMPDIR}
+export SWE_APPTAINER_SESSION_ROOT=${SMOKE_ROOT}/swe-sessions
+export SWE_SINGULARITY_SESSION_ROOT=${SWE_APPTAINER_SESSION_ROOT}
+export PLATOON_STAGE_TOOLATHLON_SIF=1
+export PLATOON_STAGE_TRAINING_SIF=0
+export OPENREWARD_PORT=8082
+export OPENREWARD_SWE_REBENCH_PORT=8084
+
+service_pid=
+service_teardown_done=0
+teardown_service() {
+    local deadline wait_status=0
+    ((service_teardown_done)) && return 0
+    service_teardown_done=1
+    [[ -n "${service_pid}" ]] || return 0
+    kill -0 "${service_pid}" 2>/dev/null || return 1
+    kill -TERM "${service_pid}" 2>/dev/null || return 1
+    deadline=$((SECONDS + 180))
+    while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.2; done
+    kill -0 "${service_pid}" 2>/dev/null && return 1
+    wait "${service_pid}" 2>/dev/null || wait_status=$?
+    [[ "${wait_status}" -eq 1 ]] || return 1
+    service_pid=
+    while [[ ! -f "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] && ((SECONDS < deadline)); do sleep 0.2; done
+    "${CONTROLLER_PYTHON}" -I "${SERVICE_RECEIPT_HELPER}" verify \
+        --receipt "${SERVICE_RECEIPT}" --pbs-job-id "${PBS_JOBID}" \
+        --host "${HOST}" --primary-status 143 || return 1
+    "${CONTROLLER_PYTHON}" -I "${SERVICE_RECEIPT_HELPER}" assert-tcp-closed \
+        --host "${HOST}" --port "${OPENREWARD_PORT}" --port "${OPENREWARD_SWE_REBENCH_PORT}" \
+        --timeout-seconds 2 --deadline-seconds 20 || return 1
+    "${CONTROLLER_PYTHON}" -I "${SERVICE_RECEIPT_HELPER}" assert-empty-swe \
+        --session-root "${SWE_APPTAINER_SESSION_ROOT}" || return 1
+}
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    if ! teardown_service; then
+        status=1
+    fi
+    exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+echo "[node-service-smoke] starting exact production helper host=${HOST}"
+env \
+    -u WANDB_API_KEY \
+    -u OPENAI_API_KEY \
+    -u OPENAI_BASE_URL \
+    -u LITELLM_API_KEY \
+    -u LITELLM_BASE_URL \
+    -u RUBRIC_DEFAULT_LLM \
+    -u HF_TOKEN \
+    -u AWS_ACCESS_KEY_ID \
+    -u AWS_SECRET_ACCESS_KEY \
+    -u AWS_SESSION_TOKEN \
+    "${PBSDSH}" -n 0 -- /usr/bin/env \
+    "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
+    "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${SERVICE_RECEIPT}" \
+    "PLATOON_NODE_SERVICES_EXPECTED_HOST=${HOST}" \
+    "PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}" "${NODE_SERVICES}" \
+    >"${SERVICE_LOG}" 2>&1 &
+service_pid=$!
+
+endpoint_healthy() {
+    local port=$1 status
+    status=$(curl --silent --show-error --output /dev/null \
+        --connect-timeout 2 --max-time 5 --write-out '%{http_code}' \
+        --noproxy '*' "http://${HOST}:${port}/" 2>/dev/null) || return 1
+    [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]
+}
+
+deadline=$((SECONDS + 600))
+until endpoint_healthy "${OPENREWARD_PORT}" && endpoint_healthy "${OPENREWARD_SWE_REBENCH_PORT}"; do
+    if ! kill -0 "${service_pid}" 2>/dev/null; then
+        tail -n 160 "${SERVICE_LOG}" >&2 || true
+        die "node-service helper exited before both endpoints became healthy"
+    fi
+    if ((SECONDS >= deadline)); then
+        tail -n 160 "${SERVICE_LOG}" >&2 || true
+        die "both endpoints did not become healthy within 600 seconds"
+    fi
+    sleep 3
+done
+echo "[node-service-smoke] both production endpoints are healthy"
+
+# Reproduce the exact controller-side operation which failed in production
+# jobs 2132770/2132771.  A deliberately dead legacy pool proves a mixed config
+# cannot fall back to it or either inherited localhost literal.  Successful
+# task discovery requires both named remote pools to answer real catalog calls.
+export OPENREWARD_SESSION_URLS=http://127.0.0.1:1
+export OPENREWARD_SESSION_URLS_TOOLATHLON=http://${HOST}:${OPENREWARD_PORT}
+export OPENREWARD_SESSION_URLS_SWE_REBENCH=http://${HOST}:${OPENREWARD_SWE_REBENCH_PORT}
+unset OPENREWARD_SESSION_URL OPENREWARD_API_URL
+env \
+    -u WANDB_API_KEY \
+    -u OPENAI_API_KEY \
+    -u OPENAI_BASE_URL \
+    -u LITELLM_API_KEY \
+    -u LITELLM_BASE_URL \
+    -u RUBRIC_DEFAULT_LLM \
+    -u HF_TOKEN \
+    -u AWS_ACCESS_KEY_ID \
+    -u AWS_SECRET_ACCESS_KEY \
+    -u AWS_SESSION_TOKEN \
+    -u VIRTUAL_ENV \
+    -u UV_PROJECT_ENVIRONMENT \
+    -u PYTHONHOME \
+    -u PYTHONPATH \
+    "${CONTROLLER_PYTHON}" -P - "${CONFIG}" "${HOST}" >"${DISCOVERY_LOG}" <<'PY'
+from __future__ import annotations
+
+import sys
+from collections import Counter
+from pathlib import Path
+
+from areal.api.cli_args import load_expr_config
+from platoon.openreward.areal_config import OpenRewardArealTrainerConfig
+from platoon.openreward import tasks
+
+module_path = Path(tasks.__file__).resolve()
+site_root = Path(sys.prefix).resolve() / "lib" / "python3.12" / "site-packages"
+if not module_path.is_relative_to(site_root):
+    raise RuntimeError(f"task discovery did not import the verified controller venv: {module_path}")
+
+config_path, host = sys.argv[1:]
+config, _ = load_expr_config(["--config", config_path], OpenRewardArealTrainerConfig)
+environments = config.openreward.resolved_environments()
+if not config.openreward.is_mixture:
+    raise RuntimeError("v8 smoke config is not a mixed environment config")
+expected_urls = {
+    "toolathlon": f"http://{host}:8082",
+    "swe_rebench": f"http://{host}:8084",
+}
+resolved = {
+    environment.resolved_label: environment.resolve_session_urls(
+        allow_legacy_global_pool=False
+    )
+    for environment in environments
+}
+if resolved != {label: [url] for label, url in expected_urls.items()}:
+    raise RuntimeError(f"named pool resolution mismatch: {resolved!r}")
+if any("localhost" in url or "127.0.0.1" in url for urls in resolved.values() for url in urls):
+    raise RuntimeError(f"controller discovery selected a local URL: {resolved!r}")
+
+records = tasks.get_task_records(config.openreward)
+counts = Counter(record["_openreward_environment"] for record in records)
+if set(counts) != set(expected_urls) or any(counts[label] <= 0 for label in expected_urls):
+    raise RuntimeError(f"catalog discovery returned invalid environment counts: {dict(counts)!r}")
+print("controller_pool_discovery=PASS")
+print(f"toolathlon_task_count={counts['toolathlon']}")
+print(f"swe_rebench_task_count={counts['swe_rebench']}")
+PY
+grep -Fxq controller_pool_discovery=PASS "${DISCOVERY_LOG}" || \
+    die "controller named-pool catalog discovery did not pass"
+toolathlon_task_count=$(sed -n 's/^toolathlon_task_count=//p' "${DISCOVERY_LOG}")
+swe_rebench_task_count=$(sed -n 's/^swe_rebench_task_count=//p' "${DISCOVERY_LOG}")
+[[ "${toolathlon_task_count}" =~ ^[1-9][0-9]*$ ]] || die "invalid Toolathlon task count"
+[[ "${swe_rebench_task_count}" =~ ^[1-9][0-9]*$ ]] || die "invalid SWE-rebench task count"
+echo "[node-service-smoke] controller named-pool catalog discovery passed"
+
+teardown_service || die "node-service cleanup attestation failed"
+
+# A stopped helper must leave neither endpoint reachable.  PBS allocation
+# teardown remains the final process-isolation backstop.
+if endpoint_healthy "${OPENREWARD_PORT}" || endpoint_healthy "${OPENREWARD_SWE_REBENCH_PORT}"; then
+    tail -n 160 "${SERVICE_LOG}" >&2 || true
+    die "an environment endpoint remained reachable after helper teardown"
+fi
+
+# The service supervisor already performs exact session cleanup.  Re-run the
+# identity-checked janitor as a read-only/zero-removal audit and require the
+# allocation-local session directory to be empty before publishing evidence.
+/usr/bin/python3 "${SWE_CLEANUP}" \
+    --session-root "${SWE_APPTAINER_SESSION_ROOT}" \
+    --runtime "$(command -v singularity)" \
+    --stop-grace-seconds 10 >"${SESSION_AUDIT_LOG}" 2>&1
+grep -Fxq swe_singularity_sessions_cleaned=0 "${SESSION_AUDIT_LOG}" || \
+    die "post-service SWE session audit was not clean"
+"${CONTROLLER_PYTHON}" -I "${SERVICE_RECEIPT_HELPER}" assert-empty-swe \
+    --session-root "${SWE_APPTAINER_SESSION_ROOT}" || \
+    die "SWE session entries remain after helper teardown"
+
+temporary=${RESULT}.tmp.$$
+printf 'node_services_pbsdsh_smoke=PASS\npbs_job_id=%s\nhost=%s\nsource_sha256=%s\ncontroller_environment_key=%s\ncontroller_pool_discovery=PASS\ntoolathlon_task_count=%s\nswe_rebench_task_count=%s\nendpoints_became_healthy=true\nendpoints_stopped=true\nswe_sessions_clean=true\n' \
+    "${PBS_JOBID}" "${HOST}" "${source_sha}" "${controller_key}" \
+    "${toolathlon_task_count}" "${swe_rebench_task_count}" >"${temporary}"
+chmod 0600 "${temporary}"
+mv "${temporary}" "${RESULT}"
+echo "node_services_pbsdsh_smoke=PASS"

@@ -1,0 +1,863 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -N rasp-q35-routes-ar
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# One-node reproduction of the production rollout server.  Variant A keeps
+# SGLang custom all-reduce enabled while explicitly disabling PyTorch's
+# expandable-segments allocator. Only the exact production CUDA-IPC failure
+# signature permits variant B, which additionally disables custom all-reduce.
+# A real /generate request must return routed-expert bytes before either
+# variant can pass.
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+readonly PROJECT_ROOT=/groups/gai51740/aci18912it/rasp
+readonly SIF=${PROJECT_ROOT}/images/platoon-training.sif
+readonly SIF_SHA256=53c770558ad86e4a8ec4d2532cd3ba1c60a10bd75fff6a51049dfb411b002b12
+readonly MODEL=${PROJECT_ROOT}/cache/huggingface/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/ce815485d640a33461c25e3d5c505b5346e8c857
+readonly WORKER_ENV_KEY=18c5656107b2172786057c189f5c928859f3569abce0eaa30adb52b3e98f2445
+readonly SOURCE_SHA256=4038f0718a9f0f88142c1d688708b62dcd9abd7a97ebeae8fd196c506f4efaf4
+readonly WORKER_ENV=${PROJECT_ROOT}/cache/openreward-venvs/envs/${WORKER_ENV_KEY}
+readonly WORKER_MANIFEST=${WORKER_ENV}/.platoon-env-manifest
+readonly CONFIG_16=${WORKER_ENV}/lib/python3.12/site-packages/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v5.yaml
+readonly CONFIG_32=${WORKER_ENV}/lib/python3.12/site-packages/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v5.yaml
+readonly RUNTIME=$(command -v singularity)
+readonly NVIDIA_SMI=/usr/bin/nvidia-smi
+readonly ALLOCATOR_CONF=expandable_segments:False
+readonly EXPECTED_GPU_NAME='NVIDIA H200'
+readonly JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
+readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/qwen35-routed-experts-sglang
+readonly RESULT_ROOT=${PROJECT_ROOT}/validation/qwen35-routed-experts-sglang/${JOB_ID_SAFE}
+readonly RESULT=${RESULT_ROOT}/RESULT.json
+readonly SMOKE_HOOK_ROOT=${LOCAL_ROOT}/tmp/smoke-hook
+readonly HOST_IP=$(hostname -I | awk '{print $1}')
+readonly PORT_A_08=${QWEN35_ROUTED_EXPERTS_SMOKE_PORT_A_08:-19010}
+readonly PORT_A_07=${QWEN35_ROUTED_EXPERTS_SMOKE_PORT_A_07:-19011}
+readonly PORT_B_08=${QWEN35_ROUTED_EXPERTS_SMOKE_PORT_B_08:-19012}
+readonly PORT_B_07=${QWEN35_ROUTED_EXPERTS_SMOKE_PORT_B_07:-19013}
+
+server_pid=
+server_pgid=
+server_log=
+selected_mode=
+
+die() {
+    echo "[qwen35-routes-smoke] ERROR: $*" >&2
+    exit 1
+}
+
+publish_json() {
+    local path=$1 status=$2 mode=$3 disable_custom_ar=$4 mem_fraction=$5 exit_code=$6
+    local request_result=${7:-} command_record=${8:-}
+    /usr/bin/python3 - "${path}" "${status}" "${mode}" "${disable_custom_ar}" \
+        "${mem_fraction}" "${exit_code}" "${request_result}" "${command_record}" \
+        "${PBS_JOBID}" "${HOST_IP}" "${WORKER_ENV_KEY}" "${SOURCE_SHA256}" \
+        "${SIF_SHA256}" "${server_log}" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+(
+    output,
+    status,
+    mode,
+    disable_custom_ar,
+    mem_fraction,
+    exit_code,
+    request_result,
+    command_record,
+    pbs_job_id,
+    host_ip,
+    worker_environment_key,
+    source_sha256,
+    sif_sha256,
+    server_log,
+) = sys.argv[1:]
+record: dict[str, object] = {
+    "schema_version": 1,
+    "status": status,
+    "mode": mode,
+    "allocator": "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False",
+    "disable_custom_all_reduce": disable_custom_ar == "1",
+    "mem_fraction_static": mem_fraction,
+    "exit_code": int(exit_code),
+    "pbs_job_id": pbs_job_id,
+    "host_ip": host_ip,
+    "worker_environment_key": worker_environment_key,
+    "source_sha256": source_sha256,
+    "training_sif_sha256": sif_sha256,
+    "server_log": server_log,
+}
+log_text = Path(server_log).read_text(errors="replace") if server_log and Path(server_log).is_file() else ""
+registration_prefix = "PLATOON_SMOKE_CUSTOM_AR_REGISTERED "
+registration_lines = [
+    line for line in log_text.splitlines() if line.startswith(registration_prefix)
+]
+record["custom_ar_registration_count"] = len(registration_lines)
+record["custom_ar_registration_ranks"] = sorted(
+    {
+        int(field.removeprefix("rank="))
+        for line in registration_lines
+        for field in line.split()
+        if field.startswith("rank=")
+    }
+)
+record["known_ipc_markers"] = {
+    marker: marker in log_text
+    for marker in (
+        "get_graph_buffer_ipc_meta",
+        "RuntimeError: invalid argument",
+        "/sgl-kernel/csrc/allreduce/custom_all_reduce.cuh:350",
+    )
+}
+if command_record:
+    record["command_record"] = command_record
+if request_result:
+    with Path(request_result).open(encoding="utf-8") as stream:
+        record["request"] = json.load(stream)
+path = Path(output)
+if path.name == "RESULT.json":
+    record["variants"] = {}
+    for variant_path in sorted(path.parent.glob("*.result.json")):
+        with variant_path.open(encoding="utf-8") as stream:
+            record["variants"][variant_path.stem.removesuffix(".result")] = json.load(stream)
+path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+with temporary.open("x", encoding="utf-8") as stream:
+    json.dump(record, stream, sort_keys=True)
+    stream.write("\n")
+os.chmod(temporary, 0o600)
+temporary.replace(path)
+PY
+}
+
+process_group_alive() {
+    [[ -n "${server_pgid}" ]] && kill -0 -- "-${server_pgid}" 2>/dev/null && \
+        ps -eo pgid=,stat= | awk -v pgid="${server_pgid}" \
+            '$1 == pgid && $2 !~ /^Z/ { found = 1 } END { exit !found }'
+}
+
+stop_server() {
+    local deadline teardown_failed=0
+    if process_group_alive; then
+        kill -TERM -- "-${server_pgid}" 2>/dev/null || true
+        deadline=$((SECONDS + 60))
+        while process_group_alive && ((SECONDS < deadline)); do
+            sleep 0.2
+        done
+        if process_group_alive; then
+            kill -KILL -- "-${server_pgid}" 2>/dev/null || true
+            deadline=$((SECONDS + 15))
+            while process_group_alive && ((SECONDS < deadline)); do
+                sleep 0.2
+            done
+        fi
+    fi
+    [[ -z "${server_pid}" ]] || wait "${server_pid}" 2>/dev/null || true
+    process_group_alive && teardown_failed=1
+    server_pid=
+    server_pgid=
+    return "${teardown_failed}"
+}
+
+assert_no_gpu_processes() {
+    local gpu_processes
+    gpu_processes=$("${NVIDIA_SMI}" --query-compute-apps=pid \
+        --format=csv,noheader,nounits 2>/dev/null) || return 1
+    if grep -Eq '^[[:space:]]*[0-9]+' <<<"${gpu_processes}"; then
+        return 1
+    fi
+    return 0
+}
+
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    if ! stop_server; then
+        echo "[qwen35-routes-smoke] ERROR: server process group survived teardown" >&2
+        status=1
+    fi
+    if ! assert_no_gpu_processes; then
+        echo "[qwen35-routes-smoke] ERROR: GPU process survived server teardown" >&2
+        status=1
+    fi
+    exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+[[ -n "${PBS_JOBID:-}" && -d "${PBS_LOCALDIR:-}" ]] || die "PBS allocation is unavailable"
+[[ -x "${RUNTIME}" ]] || die "SingularityCE is unavailable"
+[[ -x "${NVIDIA_SMI}" ]] || die "nvidia-smi is unavailable"
+[[ "${HOST_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid host IPv4 address: ${HOST_IP}"
+ports=("${PORT_A_08}" "${PORT_A_07}" "${PORT_B_08}" "${PORT_B_07}")
+for port in "${ports[@]}"; do
+    [[ "${port}" =~ ^[1-9][0-9]*$ ]] || die "smoke ports must be positive integers"
+done
+[[ "$(printf '%s\n' "${ports[@]}" | sort -u | wc -l)" -eq 4 ]] || die "smoke ports must be distinct"
+unset ports port
+[[ -r "${SIF}" && "$(sha256sum "${SIF}" | awk '{print $1}')" == "${SIF_SHA256}" ]] || \
+    die "training SIF digest mismatch"
+[[ "$(basename "${WORKER_ENV}")" == "${WORKER_ENV_KEY}" ]] || die "worker environment key mismatch"
+[[ -r "${WORKER_MANIFEST}" && -f "${WORKER_ENV}/.platoon-ready" && -f "${WORKER_ENV}/.build-complete" ]] || \
+    die "exact production worker environment is not ready"
+grep -Fxq "source_sha256=${SOURCE_SHA256}" "${WORKER_MANIFEST}" || \
+    die "worker environment source identity mismatch"
+grep -Fxq "container=sha256:${SIF_SHA256}" "${WORKER_MANIFEST}" || \
+    die "worker environment container identity mismatch"
+[[ -L "${WORKER_ENV}/bin/python" && "$(readlink "${WORKER_ENV}/bin/python")" == /usr/bin/python3.12 ]] || \
+    die "worker Python is not relocatable into the production SIF"
+[[ -r "${CONFIG_16}" && -r "${CONFIG_32}" ]] || die "installed v5 production configs are unavailable"
+for file in config.json tokenizer.json tokenizer_config.json model.safetensors.index.json; do
+    [[ -r "${MODEL}/${file}" ]] || die "model snapshot lacks ${file}"
+done
+[[ "$(find "${MODEL}" -maxdepth 1 -name 'model-*-of-*.safetensors' | wc -l)" -eq 26 ]] || \
+    die "model snapshot does not contain all 26 shards"
+
+[[ ! -e "${RESULT_ROOT}" && ! -L "${RESULT_ROOT}" ]] || \
+    die "refusing pre-existing result root: ${RESULT_ROOT}"
+mkdir -p "${LOCAL_ROOT}/tmp/home" "${LOCAL_ROOT}/home" "${LOCAL_ROOT}/cache" "${RESULT_ROOT}"
+chmod 0700 "${LOCAL_ROOT}" "${LOCAL_ROOT}/home" "${LOCAL_ROOT}/cache" \
+    "${LOCAL_ROOT}/tmp/home" "${RESULT_ROOT}"
+chmod 1777 "${LOCAL_ROOT}/tmp"
+[[ ! -e "${RESULT}" && ! -L "${RESULT}" ]] || die "refusing stale aggregate result: ${RESULT}"
+
+mapfile -t GPU_UUIDS < <("${NVIDIA_SMI}" --query-gpu=uuid --format=csv,noheader | sed 's/[[:space:]]//g')
+mapfile -t GPU_NAMES < <("${NVIDIA_SMI}" --query-gpu=name --format=csv,noheader)
+[[ "${#GPU_UUIDS[@]}" -eq 8 ]] || die "expected 8 H200 UUIDs, found ${#GPU_UUIDS[@]}"
+[[ "${#GPU_NAMES[@]}" -eq 8 ]] || die "expected 8 GPU names, found ${#GPU_NAMES[@]}"
+printf '%s\n' "${GPU_UUIDS[@]}" | grep -Eqv '^GPU-[0-9a-fA-F-]+$' && die "malformed GPU UUID"
+[[ "$(printf '%s\n' "${GPU_UUIDS[@]}" | sort -u | wc -l)" -eq 8 ]] || die "GPU UUIDs are not unique"
+printf '%s\n' "${GPU_NAMES[@]}" | grep -Fxqv "${EXPECTED_GPU_NAME}" && die "allocation contains a non-H200 GPU"
+readonly NVIDIA_VISIBLE_DEVICES=$(IFS=,; printf '%s' "${GPU_UUIDS[*]}")
+readonly CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+gpu_process_inventory=$("${NVIDIA_SMI}" \
+    --query-compute-apps=pid,gpu_uuid --format=csv,noheader,nounits 2>/dev/null) || \
+    die "failed to query pre-existing GPU processes"
+preexisting_gpu_processes=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]*,' \
+    <<<"${gpu_process_inventory}" || true)
+[[ -z "${preexisting_gpu_processes//[[:space:]]/}" ]] || \
+    die "GPU processes existed before the first smoke variant"
+unset gpu_process_inventory
+cuda_lib_dirs=$(find "${WORKER_ENV}/lib/python3.12/site-packages/nvidia" \
+    -mindepth 2 -maxdepth 2 -type d -name lib 2>/dev/null | paste -sd: - || true)
+[[ -n "${cuda_lib_dirs}" ]] || die "worker environment has no pinned NVIDIA library directories"
+readonly CUDA_LIB_DIRS=${cuda_lib_dirs}
+unset cuda_lib_dirs
+
+inner_gpu_inventory=${RESULT_ROOT}/inner-gpus.csv
+env NVIDIA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES}" \
+    "${RUNTIME}" exec --nv --cleanenv --containall --no-home \
+        --no-mount home,cwd,bind-paths --pwd /tmp "${SIF}" \
+        /usr/bin/env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+        /usr/bin/nvidia-smi --query-gpu=name,uuid --format=csv,noheader \
+        >"${inner_gpu_inventory}" || die "inner-container GPU inventory probe failed"
+/usr/bin/python3 - "${inner_gpu_inventory}" "${NVIDIA_VISIBLE_DEVICES}" "${EXPECTED_GPU_NAME}" <<'PY'
+import sys
+from pathlib import Path
+
+path, expected_csv, expected_name = sys.argv[1:]
+rows = [line.strip() for line in Path(path).read_text().splitlines() if line.strip()]
+if len(rows) != 8:
+    raise RuntimeError(f"inner container exposed {len(rows)} GPUs, expected 8")
+parsed_rows = [row.rsplit(",", 1) for row in rows]
+if any(len(row) != 2 for row in parsed_rows):
+    raise RuntimeError(f"malformed inner GPU inventory rows: {rows!r}")
+names, uuids = zip(*parsed_rows)
+uuids = tuple(value.strip() for value in uuids)
+if any(name.strip() != expected_name for name in names):
+    raise RuntimeError(f"inner container exposed unexpected GPU models: {names!r}")
+expected = tuple(expected_csv.split(","))
+if len(set(uuids)) != 8 or set(uuids) != set(expected):
+    raise RuntimeError(f"inner GPU UUID set mismatch: actual={uuids!r} expected={expected!r}")
+PY
+chmod 0600 "${inner_gpu_inventory}"
+
+# Python multiprocessing ``spawn`` imports sitecustomize in every TP worker.
+# Install a smoke-only after-return attestation around the pinned SGLang method
+# that failed in production. A marker therefore proves that the real
+# get_graph_buffer_ipc_meta/register_graph_buffers path returned successfully;
+# it does not replace or bypass any communication operation.
+mkdir -m 0700 "${SMOKE_HOOK_ROOT}"
+/usr/bin/python3 - "${SMOKE_HOOK_ROOT}/sitecustomize.py" <<'PY'
+import os
+import sys
+
+output = sys.argv[1]
+source = r'''import functools
+import os
+
+if os.environ.get("PLATOON_SGLANG_SMOKE_ATTEST_CUSTOM_AR") == "1":
+    from sglang.srt.distributed.device_communicators.custom_all_reduce import CustomAllreduce
+
+    _original_register_graph_buffers = CustomAllreduce.register_graph_buffers
+
+    @functools.wraps(_original_register_graph_buffers)
+    def _attested_register_graph_buffers(self):
+        result = _original_register_graph_buffers(self)
+        os.write(
+            2,
+            (
+                "PLATOON_SMOKE_CUSTOM_AR_REGISTERED "
+                f"pid={os.getpid()} rank={self.rank} world_size={self.world_size}\n"
+            ).encode("ascii"),
+        )
+        return result
+
+    CustomAllreduce.register_graph_buffers = _attested_register_graph_buffers
+'''
+descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(source)
+        stream.flush()
+        os.fsync(stream.fileno())
+finally:
+    os.chmod(output, 0o400, follow_symlinks=False)
+PY
+
+# Do not allow host credentials or runtime-control variables into the clean
+# container. NVIDIA_VISIBLE_DEVICES is set explicitly per launch because it is
+# consumed by SingularityCE's nvidia-container-cli integration on the host.
+for secret_name in \
+    WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL LITELLM_API_KEY \
+    LITELLM_BASE_URL RUBRIC_DEFAULT_LLM HF_TOKEN AWS_ACCESS_KEY_ID \
+    AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    unset "${secret_name}" "SINGULARITYENV_${secret_name}" "APPTAINERENV_${secret_name}"
+done
+unset secret_name PYTORCH_CUDA_ALLOC_CONF \
+    SINGULARITYENV_PYTORCH_CUDA_ALLOC_CONF APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF
+
+/usr/bin/python3 - "${RESULT_ROOT}/preflight.json" "${PBS_JOBID}" "${HOST_IP}" \
+    "${WORKER_ENV_KEY}" "${SOURCE_SHA256}" "${SIF_SHA256}" "${NVIDIA_VISIBLE_DEVICES}" \
+    "${preexisting_gpu_processes}" "${ALLOCATOR_CONF}" "${EXPECTED_GPU_NAME}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+output, job_id, host_ip, env_key, source_sha, sif_sha, gpu_uuids, preexisting, allocator, gpu_name = sys.argv[1:]
+path = Path(output)
+record = {
+    "schema_version": 1,
+    "status": "PASS",
+    "pbs_job_id": job_id,
+    "host_ip": host_ip,
+    "worker_environment_key": env_key,
+    "source_sha256": source_sha,
+    "training_sif_sha256": sif_sha,
+    "gpu_uuids": gpu_uuids.split(","),
+    "gpu_name": gpu_name,
+    "inner_gpu_inventory": "inner-gpus.csv",
+    "preexisting_gpu_processes": preexisting.splitlines(),
+    "allocator_environment": {"PYTORCH_CUDA_ALLOC_CONF": allocator},
+    "nccl_environment": {
+        "TORCH_NCCL_TRACE_BUFFER_SIZE": "4096",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
+        "TORCH_NCCL_DESYNC_DEBUG": "1",
+    },
+    "cuda_device_max_connections": "1",
+}
+temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+with temporary.open("x", encoding="utf-8") as stream:
+    json.dump(record, stream, sort_keys=True)
+    stream.write("\n")
+os.chmod(temporary, 0o600)
+temporary.replace(path)
+PY
+unset preexisting_gpu_processes
+
+run_request() {
+    local port=$1 request_result=$2
+    /usr/bin/python3 - "${HOST_IP}" "${port}" "${request_result}" <<'PY'
+from __future__ import annotations
+
+import base64
+import json
+import os
+import struct
+import sys
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+host, port, output = sys.argv[1:]
+payload = {
+    "input_ids": [9707, 825, 2805],
+    "sampling_params": {
+        "temperature": 0.0,
+        "max_new_tokens": 16,
+    },
+    "return_logprob": True,
+    "return_routed_experts": True,
+    "stream": False,
+}
+request = Request(
+    f"http://{host}:{int(port)}/generate",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urlopen(request, timeout=600) as response:  # noqa: S310 - allocation-local endpoint
+    result = json.load(response)
+meta = result.get("meta_info") or {}
+encoded = meta.get("routed_experts")
+if not isinstance(encoded, str) or not encoded:
+    raise RuntimeError(f"SGLang returned no routed experts; meta keys={sorted(meta)}")
+raw = base64.b64decode(encoded, validate=True)
+if not raw or len(raw) % 4:
+    raise RuntimeError(f"invalid routed-expert byte length: {len(raw)}")
+route_ids = [value[0] for value in struct.iter_unpack("=i", raw)]
+if min(route_ids) < 0 or max(route_ids) >= 256:
+    raise RuntimeError(f"routed-expert IDs outside Qwen MoE range: {min(route_ids)}..{max(route_ids)}")
+prompt_tokens = int(meta.get("prompt_tokens", 0))
+completion_tokens = int(meta.get("completion_tokens", 0))
+route_rows = prompt_tokens + completion_tokens - 1
+route_width = 320
+expected_int32_count = route_rows * route_width
+if route_rows <= 0 or len(route_ids) != expected_int32_count:
+    raise RuntimeError(
+        "routed-expert shape mismatch: "
+        f"count={len(route_ids)} expected={expected_int32_count} rows={route_rows} width={route_width}"
+    )
+summary = {
+    "status": "PASS",
+    "endpoint": "/generate",
+    "routed_experts_bytes": len(raw),
+    "routed_experts_int32_count": len(route_ids),
+    "routed_experts_rows": route_rows,
+    "routed_experts_width": route_width,
+    "routed_experts_min": min(route_ids),
+    "routed_experts_max": max(route_ids),
+    "prompt_tokens": prompt_tokens,
+    "completion_tokens": completion_tokens,
+}
+if summary["prompt_tokens"] <= 0 or summary["completion_tokens"] <= 0:
+    raise RuntimeError(f"real generation had invalid token counts: {summary}")
+path = Path(output)
+temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+with temporary.open("x", encoding="utf-8") as stream:
+    json.dump(summary, stream, sort_keys=True)
+    stream.write("\n")
+os.chmod(temporary, 0o600)
+temporary.replace(path)
+print(json.dumps(summary, sort_keys=True))
+PY
+}
+
+generate_server_command() {
+    local config=$1 expected_mem_fraction=$2 disable_custom_ar=$3 port=$4 output=$5
+    env \
+        -u PYTORCH_CUDA_ALLOC_CONF \
+        -u SINGULARITYENV_PYTORCH_CUDA_ALLOC_CONF \
+        -u APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF \
+        "${RUNTIME}" exec --cleanenv --containall --no-home \
+            --no-mount home,cwd,bind-paths \
+            --bind "${PROJECT_ROOT}:${PROJECT_ROOT}:ro" \
+            --bind "${RESULT_ROOT}:${RESULT_ROOT}:rw" \
+            --bind "${LOCAL_ROOT}/tmp:/tmp:rw" \
+            --pwd /tmp \
+            "${SIF}" \
+            /usr/bin/env \
+                HOME=/tmp/home \
+                PATH=${WORKER_ENV}/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin \
+                LD_LIBRARY_PATH=${CUDA_LIB_DIRS} \
+                PLATOON_EXPERIMENT_ROOT=${PROJECT_ROOT}/experiments/areal \
+                PLATOON_NAME_RESOLVE_ROOT=${PROJECT_ROOT}/name-resolve \
+                PLATOON_MODEL_SNAPSHOT=${MODEL} \
+                PYTORCH_CUDA_ALLOC_CONF=${ALLOCATOR_CONF} \
+                CUDA_DEVICE_MAX_CONNECTIONS=1 \
+                PYTHONDONTWRITEBYTECODE=1 \
+                TORCH_NCCL_TRACE_BUFFER_SIZE=4096 \
+                TORCH_NCCL_DUMP_ON_TIMEOUT=1 \
+                TORCH_NCCL_DESYNC_DEBUG=1 \
+                python -P - "${config}" "${expected_mem_fraction}" \
+                    "${disable_custom_ar}" "${HOST_IP}" "${port}" "${output}" <<'PY'
+from __future__ import annotations
+
+import importlib.metadata as metadata
+import importlib.util
+import json
+import os
+import platform
+import sys
+from pathlib import Path
+
+from areal.api.cli_args import SGLangConfig, parse_cli_args, to_structured_cfg
+from omegaconf import OmegaConf
+import platoon
+
+config_path, expected_mem, disable_custom_ar, host, port, output = sys.argv[1:]
+raw_config, _ = parse_cli_args(["--config", config_path])
+# Reattach the structured subtree before conversion so interpolations such as
+# ``random_seed: ${seed}`` retain the fully composed Hydra config as parent.
+# This mirrors AReaL's full-config structuring without running controller-side
+# setup, logging, or name-resolution effects in this smoke.
+raw_config.sglang = to_structured_cfg(raw_config.sglang, SGLangConfig)
+sglang_config = OmegaConf.to_object(raw_config.sglang)
+if not isinstance(sglang_config, SGLangConfig):
+    raise TypeError(f"unexpected composed SGLang config type: {type(sglang_config)!r}")
+patches_path = Path(platoon.__file__).parent / "train" / "areal" / "patches.py"
+patches_spec = importlib.util.spec_from_file_location("_platoon_smoke_areal_patches", patches_path)
+if patches_spec is None or patches_spec.loader is None:
+    raise RuntimeError(f"cannot load exact Platoon patch module from {patches_path}")
+patches_module = importlib.util.module_from_spec(patches_spec)
+patches_spec.loader.exec_module(patches_module)
+patches_module._patch_areal_sglang_routed_experts_launcher(SGLangConfig)
+if float(sglang_config.mem_fraction_static) != float(expected_mem):
+    raise RuntimeError(
+        f"composed config mem fraction mismatch: {sglang_config.mem_fraction_static} != {expected_mem}"
+    )
+if not bool(raw_config.rollout.return_routed_experts):
+    raise RuntimeError("composed v5 rollout does not request routed experts")
+
+# Match RolloutController's production propagation, with INFO enabled solely
+# so this smoke can positively attest custom all-reduce registration.
+sglang_config.enable_return_routed_experts = True
+sglang_config.disable_custom_all_reduce = disable_custom_ar == "1"
+sglang_config.log_level = "info"
+command = SGLangConfig.build_cmd(
+    sglang_config=sglang_config,
+    tp_size=8,
+    base_gpu_id=0,
+    host=host,
+    port=int(port),
+    n_nodes=1,
+    node_rank=0,
+    pp_size=1,
+)
+if command[1:3] != ["-m", "platoon.sglang_server"]:
+    raise RuntimeError(f"Platoon routed-expert launcher patch was not applied: {command!r}")
+if ("--disable-custom-all-reduce" in command) != (disable_custom_ar == "1"):
+    raise RuntimeError(f"custom all-reduce command mismatch: {command!r}")
+if "--enable-return-routed-experts" not in command:
+    raise RuntimeError(f"routed-expert capture missing from command: {command!r}")
+
+packages = {}
+for distribution in ("areal", "platoon", "platoon-openreward", "sglang", "sglang-kernel", "torch"):
+    packages[distribution] = metadata.version(distribution)
+import torch
+
+expected_packages = {
+    "areal": "2.0.0",
+    "platoon": "0.1.0",
+    "platoon-openreward": "0.1.0",
+    "sglang": "0.5.10.post1",
+    "sglang-kernel": "0.4.1",
+    "torch": "2.9.1+cu129",
+}
+if packages != expected_packages or torch.version.cuda != "12.9":
+    raise RuntimeError(
+        f"pinned runtime version mismatch: packages={packages!r} torch_cuda={torch.version.cuda!r}"
+    )
+
+record = {
+    "schema_version": 1,
+    "command": command,
+    "config_path": config_path,
+    "experiment_name": str(raw_config.experiment_name),
+    "trial_name": str(raw_config.trial_name),
+    "rollout_return_routed_experts": True,
+    "diagnostic_overrides": {"log_level": "info"},
+    "mem_fraction_static": float(sglang_config.mem_fraction_static),
+    "disable_custom_all_reduce": sglang_config.disable_custom_all_reduce,
+    "allocator_environment": {"PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF")},
+    "nccl_environment": {
+        name: os.environ.get(name)
+        for name in (
+            "TORCH_NCCL_TRACE_BUFFER_SIZE",
+            "TORCH_NCCL_DUMP_ON_TIMEOUT",
+            "TORCH_NCCL_DESYNC_DEBUG",
+        )
+    },
+    "cuda_device_max_connections": os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS"),
+    "versions": {
+        "python": platform.python_version(),
+        "torch_cuda": torch.version.cuda,
+        **packages,
+    },
+}
+if record["allocator_environment"]["PYTORCH_CUDA_ALLOC_CONF"] != "expandable_segments:False":
+    raise RuntimeError("exact allocator override missing from command generator")
+path = Path(output)
+temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+with temporary.open("x", encoding="utf-8") as stream:
+    json.dump(record, stream, sort_keys=True)
+    stream.write("\n")
+os.chmod(temporary, 0o600)
+temporary.replace(path)
+PY
+}
+
+run_variant() {
+    local mode=$1 config=$2 mem_fraction=$3 port=$4 disable_custom_ar=$5
+    local variant_result=${RESULT_ROOT}/${mode}.result.json
+    local request_result=${RESULT_ROOT}/${mode}.request.json
+    local command_json=${RESULT_ROOT}/${mode}.command.json
+    local command_record=${RESULT_ROOT}/${mode}.command.txt
+    local ready=0 model_status health_status exit_code=0 deadline command_temporary command_count
+    local custom_ar_count=0
+    local -a server_command=() launch_command=()
+
+    server_log=${RESULT_ROOT}/${mode}.server.log
+    [[ ! -e "${variant_result}" && ! -L "${variant_result}" && \
+        ! -e "${request_result}" && ! -L "${request_result}" && \
+        ! -e "${command_json}" && ! -L "${command_json}" && \
+        ! -e "${command_record}" && ! -L "${command_record}" && \
+        ! -e "${server_log}" && ! -L "${server_log}" ]] || \
+        die "refusing stale variant artifacts for ${mode}"
+    mkdir -p "${LOCAL_ROOT}/tmp/xdg-${mode}" "${LOCAL_ROOT}/tmp/flashinfer-${mode}" \
+        "${LOCAL_ROOT}/tmp/torch-extensions-${mode}" "${LOCAL_ROOT}/tmp/areal-${mode}"
+    chmod 0700 "${LOCAL_ROOT}/tmp/xdg-${mode}" "${LOCAL_ROOT}/tmp/flashinfer-${mode}" \
+        "${LOCAL_ROOT}/tmp/torch-extensions-${mode}" "${LOCAL_ROOT}/tmp/areal-${mode}"
+
+    generate_server_command "${config}" "${mem_fraction}" "${disable_custom_ar}" \
+        "${port}" "${command_json}" || die "failed to generate exact SGLang command for ${mode}"
+    command_count=$(/usr/bin/python3 - "${command_json}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    command = json.load(stream)["command"]
+if not isinstance(command, list) or not command or not all(isinstance(value, str) for value in command):
+    raise RuntimeError("generated command is malformed")
+print(len(command))
+PY
+)
+    [[ "${command_count}" -gt 3 ]] || die "generated server command is empty"
+    mapfile -d '' -t server_command < <(/usr/bin/python3 - "${command_json}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    command = json.load(stream)["command"]
+for value in command:
+    sys.stdout.buffer.write(value.encode() + b"\0")
+PY
+)
+    [[ "${#server_command[@]}" -eq "${command_count}" ]] || die "generated command transfer was truncated"
+
+    launch_command=(
+        "${RUNTIME}" exec --nv --cleanenv --containall --no-home
+        --no-mount home,cwd,bind-paths
+        --bind /etc/resolv.conf:/etc/resolv.conf:ro
+        --bind /etc/hosts:/etc/hosts:ro
+        --bind "${PROJECT_ROOT}:${PROJECT_ROOT}:ro"
+        --bind "${LOCAL_ROOT}/tmp:/tmp:rw"
+        --pwd /tmp
+        "${SIF}"
+        /usr/bin/env
+        HOME=/tmp/home
+        TMPDIR=/tmp
+        XDG_CACHE_HOME=/tmp/xdg-${mode}
+        FLASHINFER_CACHEDIR=/tmp/flashinfer-${mode}
+        TORCH_EXTENSIONS_DIR=/tmp/torch-extensions-${mode}
+        AREAL_CACHE_DIR=/tmp/areal-${mode}
+        HF_HOME=${PROJECT_ROOT}/cache/huggingface
+        HF_HUB_OFFLINE=1
+        TRANSFORMERS_OFFLINE=1
+        PLATOON_MODEL_SNAPSHOT=${MODEL}
+        PLATOON_QWEN35_GDN_CP=1
+        PLATOON_QWEN35_GDN_CP_CONV_BACKEND=fla
+        PLATOON_SGLANG_SMOKE_ATTEST_CUSTOM_AR=1
+        PYTORCH_CUDA_ALLOC_CONF=${ALLOCATOR_CONF}
+        CUDA_DEVICE_MAX_CONNECTIONS=1
+        PYTHONDONTWRITEBYTECODE=1
+        PYTHONPATH=/tmp/smoke-hook
+        CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
+        PATH=${WORKER_ENV}/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+        LD_LIBRARY_PATH=${CUDA_LIB_DIRS}
+        TORCH_NCCL_TRACE_BUFFER_SIZE=4096
+        TORCH_NCCL_DUMP_ON_TIMEOUT=1
+        TORCH_NCCL_DESYNC_DEBUG=1
+        "${server_command[@]}"
+    )
+    command_temporary=${command_record}.tmp.$$
+    {
+        printf 'mode=%s\nallocator=PYTORCH_CUDA_ALLOC_CONF=%s\n' "${mode}" "${ALLOCATOR_CONF}"
+        printf 'mem_fraction_static=%s\ndisable_custom_all_reduce=%s\n' \
+            "${mem_fraction}" "${disable_custom_ar}"
+        printf 'nvidia_visible_devices=%s\ncommand=' "${NVIDIA_VISIBLE_DEVICES}"
+        printf '%q ' "${launch_command[@]}"
+        printf '\n'
+    } >"${command_temporary}"
+    chmod 0600 "${command_temporary}"
+    mv "${command_temporary}" "${command_record}"
+
+    echo "[qwen35-routes-smoke] starting mode=${mode} mem_fraction=${mem_fraction} allocator=${ALLOCATOR_CONF} disable_custom_all_reduce=${disable_custom_ar}"
+    env \
+        -u PYTORCH_CUDA_ALLOC_CONF \
+        -u SINGULARITYENV_PYTORCH_CUDA_ALLOC_CONF \
+        -u APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF \
+        NVIDIA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES}" \
+        setsid "${launch_command[@]}" \
+        >"${server_log}" 2>&1 &
+    server_pid=$!
+    server_pgid=${server_pid}
+
+    deadline=$((SECONDS + 900))
+    while ((SECONDS < deadline)); do
+        if ! kill -0 "${server_pid}" 2>/dev/null; then
+            wait "${server_pid}" || exit_code=$?
+            stop_server || die "server process group survived failed mode ${mode}"
+            publish_json "${variant_result}" FAIL "${mode}" "${disable_custom_ar}" \
+                "${mem_fraction}" "${exit_code}" "" "${command_json}"
+            tail -n 240 "${server_log}" >&2 || true
+            assert_no_gpu_processes || die "GPU process survived failed mode ${mode}"
+            return 1
+        fi
+        model_status=$(curl --silent --output /dev/null --connect-timeout 2 --max-time 5 \
+            --write-out '%{http_code}' --noproxy '*' "http://${HOST_IP}:${port}/v1/models" || true)
+        health_status=$(curl --silent --output /dev/null --connect-timeout 2 --max-time 5 \
+            --write-out '%{http_code}' --noproxy '*' "http://${HOST_IP}:${port}/health" || true)
+        if [[ "${model_status}" == 200 && "${health_status}" == 200 ]]; then
+            ready=1
+            break
+        fi
+        sleep 3
+    done
+    if ((ready == 0)); then
+        stop_server || die "server process group survived timed-out mode ${mode}"
+        publish_json "${variant_result}" FAIL "${mode}" "${disable_custom_ar}" \
+            "${mem_fraction}" 124 "" "${command_json}"
+        tail -n 240 "${server_log}" >&2 || true
+        assert_no_gpu_processes || die "GPU process survived timed-out mode ${mode}"
+        return 1
+    fi
+
+    if ! run_request "${port}" "${request_result}"; then
+        stop_server || die "server process group survived failed request in mode ${mode}"
+        publish_json "${variant_result}" FAIL "${mode}" "${disable_custom_ar}" \
+            "${mem_fraction}" 65 "" "${command_json}"
+        tail -n 240 "${server_log}" >&2 || true
+        assert_no_gpu_processes || die "GPU process survived failed request in mode ${mode}"
+        return 1
+    fi
+    if ! grep -Fq 'Expanded SGLang routed-expert capture capacity' "${server_log}"; then
+        stop_server || die "server process group survived missing routed-expert attestation in mode ${mode}"
+        publish_json "${variant_result}" FAIL "${mode}" "${disable_custom_ar}" \
+            "${mem_fraction}" 66 "${request_result}" "${command_json}"
+        return 1
+    fi
+    if [[ "${disable_custom_ar}" == 0 ]]; then
+        custom_ar_count=$(/usr/bin/python3 - "${server_log}" <<'PY'
+import re
+import sys
+
+pattern = re.compile(
+    r"^PLATOON_SMOKE_CUSTOM_AR_REGISTERED pid=[1-9][0-9]* "
+    r"rank=([0-7]) world_size=8$"
+)
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+matches = [pattern.fullmatch(line) for line in lines]
+ranks = {int(match.group(1)) for match in matches if match is not None}
+if ranks != set(range(8)):
+    raise SystemExit(f"custom-AR after-return ranks mismatch: {sorted(ranks)}")
+print(sum(match is not None for match in matches))
+PY
+) || custom_ar_count=0
+        if [[ "${custom_ar_count}" -lt 8 ]] || \
+            grep -Eiq '(CustomAllreduce|custom all.?reduce).*is disabled|is disabled.*(CustomAllreduce|custom all.?reduce)' \
+                "${server_log}"; then
+            stop_server || die "server process group survived custom-AR attestation failure in mode ${mode}"
+            publish_json "${variant_result}" FAIL "${mode}" "${disable_custom_ar}" \
+                "${mem_fraction}" 67 "${request_result}" "${command_json}"
+            return 1
+        fi
+        if has_known_ipc_marker "${server_log}"; then
+            stop_server || die "server process group survived IPC-marker rejection in mode ${mode}"
+            publish_json "${variant_result}" FAIL "${mode}" "${disable_custom_ar}" \
+                "${mem_fraction}" 69 "${request_result}" "${command_json}"
+            return 1
+        fi
+    elif grep -Eq '^PLATOON_SMOKE_CUSTOM_AR_REGISTERED ' "${server_log}"; then
+        stop_server || die "server process group survived disabled custom-AR attestation failure in mode ${mode}"
+        publish_json "${variant_result}" FAIL "${mode}" "${disable_custom_ar}" \
+            "${mem_fraction}" 68 "${request_result}" "${command_json}"
+        return 1
+    fi
+    stop_server || die "server process group survived successful mode ${mode}"
+    assert_no_gpu_processes || die "GPU process survived successful mode ${mode}"
+    publish_json "${variant_result}" PASS "${mode}" "${disable_custom_ar}" \
+        "${mem_fraction}" 0 "${request_result}" "${command_json}"
+    selected_mode=${mode}
+    return 0
+}
+
+exact_ipc_failure() {
+    local log=$1
+    [[ -r "${log}" ]] && \
+        grep -Fq 'get_graph_buffer_ipc_meta' "${log}" && \
+        grep -Fq 'RuntimeError: invalid argument' "${log}" && \
+        grep -Fq '/sgl-kernel/csrc/allreduce/custom_all_reduce.cuh:350' "${log}"
+}
+
+has_known_ipc_marker() {
+    local log=$1 marker
+    for marker in \
+        'get_graph_buffer_ipc_meta' \
+        'RuntimeError: invalid argument' \
+        '/sgl-kernel/csrc/allreduce/custom_all_reduce.cuh:350'; do
+        grep -Fq "${marker}" "${log}" && return 0
+    done
+    return 1
+}
+
+finalize_pass() {
+    local mode=$1 disable_custom_ar=$2
+    stop_server || die "server process group survived before aggregate PASS"
+    assert_no_gpu_processes || die "GPU process survived before aggregate PASS"
+    trap '' INT TERM
+    publish_json "${RESULT}" PASS "${mode}" "${disable_custom_ar}" 0.8,0.7 0 \
+        "${RESULT_ROOT}/${selected_mode}.request.json" \
+        "${RESULT_ROOT}/${selected_mode}.command.json"
+    echo "qwen35_routed_experts_sglang_smoke=PASS selected_mode=${mode}"
+    trap - EXIT
+    exit 0
+}
+
+a_failure_log=
+if run_variant allocator-false-custom-ar-mem08 "${CONFIG_16}" 0.8 "${PORT_A_08}" 0; then
+    if run_variant allocator-false-custom-ar-mem07 "${CONFIG_32}" 0.7 "${PORT_A_07}" 0; then
+        finalize_pass allocator-false-custom-ar 0
+    else
+        a_failure_log=${RESULT_ROOT}/allocator-false-custom-ar-mem07.server.log
+    fi
+else
+    a_failure_log=${RESULT_ROOT}/allocator-false-custom-ar-mem08.server.log
+fi
+
+if ! exact_ipc_failure "${a_failure_log}"; then
+    server_log=${a_failure_log}
+    publish_json "${RESULT}" FAIL allocator-false-custom-ar 0 0.8,0.7 1
+    die "allocator-false custom-AR mode failed without the exact CUDA-IPC signature; fallback forbidden"
+fi
+
+echo "[qwen35-routes-smoke] exact CUDA-IPC failure reproduced; trying custom all-reduce disabled" >&2
+b_failure_log=
+if run_variant allocator-false-no-custom-ar-mem08 "${CONFIG_16}" 0.8 "${PORT_B_08}" 1; then
+    if run_variant allocator-false-no-custom-ar-mem07 "${CONFIG_32}" 0.7 "${PORT_B_07}" 1; then
+        finalize_pass allocator-false-no-custom-ar 1
+    else
+        b_failure_log=${RESULT_ROOT}/allocator-false-no-custom-ar-mem07.server.log
+    fi
+else
+    b_failure_log=${RESULT_ROOT}/allocator-false-no-custom-ar-mem08.server.log
+fi
+
+server_log=${b_failure_log}
+publish_json "${RESULT}" FAIL both 1 0.8,0.7 1
+die "allocator-only and custom-all-reduce-disabled variants failed"

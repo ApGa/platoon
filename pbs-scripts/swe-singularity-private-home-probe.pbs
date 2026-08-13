@@ -1,0 +1,72 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=00:10:00
+#PBS -N rasp-swe-home-probe
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Verify that an invocation-scoped HOME, rather than SINGULARITY_CONFIGDIR,
+# isolates all Singularity CE instance metadata and control operations.
+
+set -euo pipefail
+umask 077
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+
+SIF=/groups/gai51740/aci18912it/rasp/cache/swe-rebench-sif/965b9f12410c2c9c195c1de164cd494c0e4f51181868bba2298daa99473fda87.sif
+ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/swe-private-home-probe
+RUNTIME_HOME=${ROOT}/runtime-home
+OVERLAY=${ROOT}/writable-overlay.img
+NAME=swe-private-home-${PBS_JOBID%%.*}
+
+mkdir -p "${ROOT}" "${RUNTIME_HOME}" "${ROOT}/cache" "${ROOT}/runtime-tmp"
+chmod 0700 "${RUNTIME_HOME}" "${ROOT}/cache" "${ROOT}/runtime-tmp"
+export HOME=${RUNTIME_HOME}
+unset SINGULARITY_CONFIGDIR APPTAINER_CONFIGDIR
+export SINGULARITY_CACHEDIR=${ROOT}/cache
+export SINGULARITY_TMPDIR=${ROOT}/runtime-tmp
+
+cleanup() {
+    singularity instance stop --force "${NAME}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+test -r "${SIF}"
+singularity sif list "${SIF}" >/dev/null
+layout=${ROOT}/overlay-layout
+mkdir -p "${layout}/upper" "${layout}/work"
+truncate -s 512M "${OVERLAY}"
+mkfs.ext3 -q -F -d "${layout}" "${OVERLAY}"
+mkdir -m 1777 "${ROOT}/tmp" "${ROOT}/var-tmp"
+
+singularity instance start --cleanenv --containall --no-home \
+    --no-mount home,cwd,bind-paths --overlay "${OVERLAY}" \
+    --bind "${ROOT}/tmp:/tmp:rw" --bind "${ROOT}/var-tmp:/var/tmp:rw" \
+    "${SIF}" "${NAME}"
+sleep 1
+singularity instance list --json "${NAME}" | tee "${ROOT}/instance.json"
+grep -Fq "${NAME}" "${ROOT}/instance.json"
+find "${RUNTIME_HOME}" -maxdepth 8 -type f -printf 'private_runtime_file=%p\n' | sort
+test -n "$(find "${RUNTIME_HOME}" -path "*/${NAME}/*.json" -print -quit)"
+
+singularity exec "instance://${NAME}" /bin/sh -c \
+    'echo private_home_instance_exec=ok; pwd; ps -ef'
+singularity instance stop --timeout 2 "${NAME}"
+singularity instance list --json "${NAME}" | tee "${ROOT}/after-stop.json"
+if grep -Fq "${NAME}" "${ROOT}/after-stop.json"; then
+    echo 'private-HOME instance survived stop' >&2
+    exit 1
+fi
+if find "${RUNTIME_HOME}" -path "*/${NAME}/*.json" -print -quit | grep -q .; then
+    echo 'private-HOME instance metadata survived stop' >&2
+    exit 1
+fi
+
+trap - EXIT INT TERM
+echo swe_singularity_private_home_probe=ok

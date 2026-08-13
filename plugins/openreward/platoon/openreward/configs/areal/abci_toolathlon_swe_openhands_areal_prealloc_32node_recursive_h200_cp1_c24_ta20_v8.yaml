@@ -1,0 +1,34 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v7
+  - _self_
+
+# Fresh lineage for the isolated 376d1b9 Platoon + b1acf52 OpenHands +
+# 18e62c0 Toolathlon stack. The successful v7 topology and full horizon remain
+# unchanged. This recursive comparison explicitly re-enables PTC so the latest
+# Toolathlon typed errors, Platoon bridge translation, and OpenHands parallel
+# call handling run together; task tracking and recursive subagents stay on.
+experiment_name: abci-openreward-ta-swe-h200-32
+trial_name: abci-ta-swe32-rec-h200-cp1-c24-v8-trial0
+
+# Literal invariants are repeated for the host shell's pre-Hydra fail-closed
+# checks. They also make the intentional PTC semantic visible in this leaf.
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe32-rec-h200-cp1-c24-v8

@@ -1,0 +1,74 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=16:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=08:00:00
+#PBS -N rasp-gate5-1up
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Gate 5: one fixed Toolathlon task group, one real optimizer update, live
+# weight sync, a durable recovery checkpoint, and a remotely visible W&B row.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_gate5_one_update.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/abci-gate5-ta-one-update-v1-trial0.success.json
+HOST_PYTHON=/home/aci18912it/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
+
+export OPENREWARD_EXPECTED_NNODES=16
+export OPENREWARD_EXPECTED_RECURSIVE=0
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=abci-openreward-gate5
+export OPENREWARD_EXPECTED_TRIAL_NAME=abci-gate5-ta-one-update-v1-trial0
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+[[ -x "${HOST_PYTHON}" ]] || {
+    echo "[gate5] ERROR: pinned host verifier Python is unavailable: ${HOST_PYTHON}" >&2
+    exit 2
+}
+
+# A fixed trial is useful only if every validation submission is provably
+# fresh.  Refuse to launch over any prior checkpoint or success artifact; the
+# operator must choose a new versioned Gate 5 trial instead of deleting or
+# reusing evidence in place.
+CHECKPOINT_ROOT=${PLATOON_EXPERIMENT_ROOT:-/groups/gai51740/aci18912it/rasp/experiments/areal}/checkpoints/$(id -un)/abci-openreward-gate5/abci-gate5-ta-one-update-v1-trial0
+shopt -s nullglob
+prior_receipts=("${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json")
+for prior in "${prior_receipts[@]}"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || {
+        echo "[gate5] ERROR: refusing stale Gate 5 success artifact; use a fresh trial: ${prior}" >&2
+        exit 2
+    }
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || {
+    echo "[gate5] ERROR: refusing stale Gate 5 checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}" >&2
+    exit 2
+}
+
+# Do not exec: returning from the common lifecycle proves its controller,
+# scheduler workers, health monitor, and per-node services completed cleanup
+# before this wrapper accepts the final receipt.
+status=0
+"${COMMON}" "${CONFIG}" || status=$?
+if ((status != 0)); then
+    echo "[gate5] ERROR: one-update controller/common lifecycle failed with status ${status}" >&2
+    exit "${status}"
+fi
+
+PYTHONPATH=${REPO_ROOT} "${HOST_PYTHON}" -m platoon.training_success_receipt verify \
+    --receipt "${RECEIPT}" \
+    --pbs-job-id "${PBS_JOBID}" \
+    --experiment abci-openreward-gate5 \
+    --trial abci-gate5-ta-one-update-v1-trial0 \
+    --global-step 0
+
+echo "OPENREWARD_GATE5_ONE_UPDATE_OK"

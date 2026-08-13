@@ -1,0 +1,12 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20
+  - _self_
+
+# Fresh retry with environment services restricted to the twelve GPU8 rollout
+# nodes by the matching PBS wrapper. All training semantics remain inherited
+# unchanged from the v1 H200 leaf.
+trial_name: abci-ta-swe32-rec-h200-cp1-c24-v2-trial0
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe32-rec-h200-cp1-c24-v2

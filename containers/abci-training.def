@@ -1,0 +1,97 @@
+Bootstrap: docker
+From: docker.io/lmsysorg/sglang@sha256:829404319e32cc15c1a1fa0e8a47b807f98154c6287079b0548d031f1af30882
+
+%labels
+    org.opencontainers.image.title Platoon ABCI H200 training build runtime
+    org.opencontainers.image.base.name docker.io/lmsysorg/sglang:v0.5.10.post1-runtime
+    org.opencontainers.image.base.digest sha256:829404319e32cc15c1a1fa0e8a47b807f98154c6287079b0548d031f1af30882
+    org.platoon.cuda.version 12.9.1
+    org.platoon.python.version 3.12
+    org.platoon.pytorch.version 2.9.1+cu129
+    org.platoon.apex.commit 6424da3b4faa6c8f062da4a48c424fff3f02d42d
+    org.platoon.transformer-engine.version 2.12.0
+    org.platoon.transformer-engine.commit 5671fd3675906cda1ade26c24a65d3dedd88eb89
+    org.platoon.transformer-engine.userbuffers disabled
+
+%files
+    containers/abci-training-runtime.lock /opt/platoon-runtime/containers/abci-training-runtime.lock
+    containers/transformer-engine-build-constraints.txt /opt/platoon-runtime/containers/transformer-engine-build-constraints.txt
+    pbs-scripts/install_apex.sh /opt/platoon-runtime/pbs-scripts/install_apex.sh
+    pbs-scripts/install_te.sh /opt/platoon-runtime/pbs-scripts/install_te.sh
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        ccache \
+        cmake \
+        curl \
+        git \
+        kmod \
+        libibverbs-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        ninja-build \
+        patchelf \
+        pkg-config \
+        rsync \
+        util-linux
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    python3 -m pip install --disable-pip-version-check --no-cache-dir uv==0.12.1
+
+    chmod 0755 \
+        /opt/platoon-runtime/pbs-scripts/install_apex.sh \
+        /opt/platoon-runtime/pbs-scripts/install_te.sh
+
+    python3 - <<'PY'
+import sys
+from importlib import metadata
+
+assert sys.version_info[:2] == (3, 12), sys.version
+assert metadata.version("torch") == "2.9.1+cu129"
+assert metadata.version("torchvision") == "0.24.1+cu129"
+assert metadata.version("torchaudio") == "2.9.1+cu129"
+assert metadata.version("sglang") == "0.5.10.post1"
+
+import torch
+
+assert torch.version.cuda == "12.9", torch.version.cuda
+PY
+
+    /usr/local/cuda/bin/nvcc --version | grep -F 'release 12.9'
+    uv --version | grep -F 'uv 0.12.1'
+
+%environment
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=/usr/local/cuda/bin:/opt/platoon-runtime/pbs-scripts:${PATH}
+    export TORCH_CUDA_ARCH_LIST=9.0+PTX
+    export NVTE_FRAMEWORK=pytorch
+    export NVTE_CUDA_ARCHS=90
+    export MAX_JOBS=8
+    export UV_NO_MANAGED_PYTHON=1
+    export UV_PYTHON_DOWNLOADS=never
+
+%test
+    set -eu
+    test "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = 3.12
+    test "$(python3 -c 'import torch; print(torch.__version__)')" = 2.9.1+cu129
+    test "$(python3 -c 'import torch; print(torch.version.cuda)')" = 12.9
+    test "$(python3 -c 'from importlib.metadata import version; print(version("sglang"))')" = 0.5.10.post1
+    /usr/local/cuda/bin/nvcc --version | grep -F 'release 12.9'
+    command -v c++ cmake curl flock git ninja nvcc uv
+    /opt/platoon-runtime/pbs-scripts/install_apex.sh --print-provenance
+    /opt/platoon-runtime/pbs-scripts/install_te.sh --print-provenance
+
+%help
+    Digest-pinned build/runtime base for Platoon training on ABCI H200 nodes.
+
+    This image intentionally supplies the CUDA 12.9 compiler toolchain and
+    pinned extension installers, while the content-addressed job environment
+    supplies Platoon's uv-locked Python packages. Transformer Engine userbuffers
+    are disabled until the site MPI ABI has been validated.

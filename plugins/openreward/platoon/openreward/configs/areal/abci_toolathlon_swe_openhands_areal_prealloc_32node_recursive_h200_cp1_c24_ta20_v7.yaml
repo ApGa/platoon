@@ -1,0 +1,33 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v6
+  - _self_
+
+# Fresh identity after the 16-node v6 run exposed an AReaL proxy-fork bug that
+# also affects this topology: the contained guard received the host-controller
+# interpreter. The PBS scheduler now supplies the immutable worker-container
+# interpreter. PTC is intentionally disabled for this ABCI comparison; native
+# environment tools, the task tracker, and recursive subagents remain enabled.
+experiment_name: abci-openreward-ta-swe-h200-32
+trial_name: abci-ta-swe32-rec-h200-cp1-c24-v7-trial0
+
+# Repeat the production invariants consumed by the shell's literal fail-closed
+# preflight. Placement and recursion match v6; PTC is deliberately overridden.
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: true
+  # Keep recursive subagents, but explicitly remove the independent PTC tool.
+  enable_programmatic_tool_calling: false
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe32-rec-h200-cp1-c24-v7

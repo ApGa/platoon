@@ -1,0 +1,41 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v5
+  - _self_
+
+# Fresh retry after v5 reached SGLang CUDA-graph capture, where PyTorch's
+# expandable-segments allocator made custom all-reduce graph buffers
+# ineligible for CUDA IPC. Keep custom all-reduce and CUDA graphs enabled;
+# only the rollout worker allocator is changed. Actor and colocated reference
+# workers retain the inherited expandable-segments setting.
+experiment_name: abci-openreward-ta-swe-h200-32
+trial_name: abci-ta-swe32-rec-h200-cp1-c24-v6-trial0
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: true
+
+rollout:
+  # Preserve the recursive lineage's 128-GiB worker request as well as the
+  # inherited command and device contract while changing only the allocator.
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      mem: 128
+      cmd: python -m areal.infra.rpc.rpc_server
+      env_vars:
+        PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe32-rec-h200-cp1-c24-v6

@@ -1,0 +1,46 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_ta20
+  - _self_
+
+# Fresh H200 optimization lineage.  Keep the 80-GPU actor and six independent
+# TP8 rollout replicas from the migration-parity job.  Removing CP2 doubles
+# attention DP instead of changing TP, PP, EP, batch, or 32k-context semantics.
+experiment_name: abci-openreward-ta-swe-h200-16
+trial_name: abci-ta-swe16-nonrec-h200-cp1-c12-v1-trial0
+tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+# These cluster-local literals are also validated before Hydra composes the
+# inherited production config.
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 16
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: false
+
+actor:
+  # Attention: 10 * 2 * 4 * 1 = 80 GPUs.
+  # FFN:       5 * 2 * 1 * 8 = 80 GPUs on the same actor ranks.
+  backend: megatron:(attn:d10p2t4c1|ffn:d5p2t1e8)
+  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+rollout:
+  # With six SGLang replicas, twelve admits two workflow groups per replica.
+  # The inherited backend remains sglang:d6p1t8 (48 GPUs).
+  max_concurrent_rollouts: 12
+
+sglang:
+  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+stats_logger:
+  wandb:
+    mode: online
+    project: openreward-multienv-openhands
+    group: abci-ta-swe16-nonrec-h200-cp1-c12-v1

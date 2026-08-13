@@ -1,0 +1,29 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=16:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-ta-swe16
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Production migration target: fresh, nonrecursive 16-node Toolathlon ->
+# Toolathlon/SWE curriculum.  No continuation or GPU keepalive is installed.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/source/platoon
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_ta20.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+
+export OPENREWARD_EXPECTED_NNODES=16
+export OPENREWARD_EXPECTED_RECURSIVE=0
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=abci-openreward-ta-swe
+export OPENREWARD_EXPECTED_TRIAL_NAME=abci-ta-swe16-nonrec-ta20-v1-trial0
+export OPENREWARD_GATE_MARKER_TO_PUBLISH=/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe16-nonrecursive-update.json
+
+exec "${COMMON}" "${CONFIG}"

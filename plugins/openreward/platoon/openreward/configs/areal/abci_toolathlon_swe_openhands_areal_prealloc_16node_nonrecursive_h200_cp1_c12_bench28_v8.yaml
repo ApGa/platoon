@@ -1,0 +1,31 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v8
+  - _self_
+
+# Fresh latest-stack benchmark control. Twenty-eight optimizer steps cover the
+# Toolathlon prefix, the staleness transition, and the first mixed-curriculum
+# window without turning this bounded comparison into a full production run.
+experiment_name: abci-openreward-ta-swe-h200-16-bench28-v8-cp1-c12
+trial_name: abci-ta-swe16-bench28-v8-cp1-c12-trial0
+total_train_steps: 28
+
+# Repeat the literals consumed by the host launcher's pre-Hydra fail-closed
+# checks. The control retains the v8 80-GPU CP1 actor and rollout concurrency 12.
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 16
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: false
+  enable_programmatic_tool_calling: false
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe16-bench28-v8-cp1-c12

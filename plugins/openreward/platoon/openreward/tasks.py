@@ -23,11 +23,18 @@ OPENREWARD_SAMPLING_WEIGHT_COLUMN = "_openreward_sampling_weight"
 OPENREWARD_MIXTURE_COLUMN = "_openreward_mixture"
 
 
-def _configure_openreward_urls(config: OpenRewardEnvironmentConfig) -> None:
+def _configure_openreward_urls(
+    config: OpenRewardEnvironmentConfig,
+    *,
+    allow_legacy_global_pool: bool,
+) -> None:
     os.environ.setdefault("OPENREWARD_DISABLE_UPDATE_CHECK", "1")
-    if config.session_url:
-        os.environ["OPENREWARD_SESSION_URL"] = config.session_url
-        os.environ["OPENREWARD_API_URL"] = config.api_url or config.session_url
+    session_url = config.resolve_session_urls(
+        allow_legacy_global_pool=allow_legacy_global_pool
+    )[0]
+    if session_url:
+        os.environ["OPENREWARD_SESSION_URL"] = session_url
+        os.environ["OPENREWARD_API_URL"] = config.api_url or session_url
     elif config.api_url:
         os.environ["OPENREWARD_API_URL"] = config.api_url
 
@@ -178,13 +185,17 @@ def _environment_task_ids(
     split: str,
     limit: int | None,
     namespace: bool,
+    allow_legacy_global_pool: bool,
 ) -> list[str]:
     if limit is not None and (
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
     ):
         raise ValueError("OpenReward task limit must be a positive integer when set")
 
-    _configure_openreward_urls(config)
+    _configure_openreward_urls(
+        config,
+        allow_legacy_global_pool=allow_legacy_global_pool,
+    )
 
     from openreward import OpenReward
 
@@ -247,6 +258,7 @@ def get_task_records(config: OpenRewardConfig, *, evaluation: bool = False) -> l
             split=split,
             limit=limit,
             namespace=config.is_mixture or split != environment.split,
+            allow_legacy_global_pool=not config.is_mixture,
         )
         if not task_ids:
             raise RuntimeError(
@@ -277,6 +289,7 @@ def get_task_ids(config: OpenRewardConfig, *, split: str | None = None, limit: i
         split=selected_split,
         limit=limit,
         namespace=selected_split != environment.split,
+        allow_legacy_global_pool=not config.is_mixture,
     )
 
 
