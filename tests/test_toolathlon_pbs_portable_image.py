@@ -622,6 +622,91 @@ def test_build_scripts_reference_exact_existing_asset_names() -> None:
     assert '--base-sif "${BASE_SIF}"' in builder
 
 
+def test_definition_normalizes_embedded_assets_for_submit_uid(tmp_path: Path) -> None:
+    definition = (CONTAINERS / "toolathlon-pbs-portable.def").read_text()
+    root = tmp_path / "rootfs"
+    embedded = root / "usr/local/libexec/openreward"
+    embedded.mkdir(parents=True)
+    manifest = root / "usr/local/share/openreward/toolathlon-pbs-portable.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}\n")
+    manifest.chmod(0o400)
+    assets = {
+        "patch_toolathlon_pbs_portable.py": 0o644,
+        "repair_toolathlon_snowflake_catalog.py": 0o644,
+        "verify_toolathlon_pbs_portability.sh": 0o755,
+    }
+    for name in assets:
+        path = embedded / name
+        shutil.copy2(CONTAINERS / name, path)
+        # Model the canonical clone observed by the PBS builder: %files
+        # preserves root-owned source assets with an umask-derived 0750 mode.
+        path.chmod(0o750)
+    normalized_directories = (
+        root / "usr",
+        root / "usr/local",
+        root / "usr/local/libexec",
+        embedded,
+        root / "usr/local/share",
+        manifest.parent,
+    )
+    for path in normalized_directories:
+        path.chmod(0o750)
+
+    verifier = embedded / "verify_toolathlon_pbs_portability.sh"
+
+    def accessible_as_submit_uid(path: Path, *, read: bool = False, execute: bool = False) -> bool:
+        requested = (0o004 if read else 0) | (0o001 if execute else 0)
+        if path.stat().st_mode & requested != requested:
+            return False
+        current = path.parent
+        while current != root:
+            if current.stat().st_mode & 0o001 == 0:
+                return False
+            current = current.parent
+        return True
+
+    assert not accessible_as_submit_uid(verifier, execute=True)
+    assert not accessible_as_submit_uid(manifest, read=True)
+
+    # Bind the behavioral model to the exact fail-closed normalization in the
+    # definition.  Root ownership is asserted textually because tests run as
+    # an unprivileged host uid; modes are applied and evaluated as uid 65534.
+    for logical in (
+        "/usr",
+        "/usr/local",
+        "/usr/local/libexec",
+        "/usr/local/libexec/openreward",
+        "/usr/local/share",
+        "/usr/local/share/openreward",
+    ):
+        assert logical in definition
+        assert 'chown 0:0 "${directory}"' in definition
+        (root / logical.lstrip("/")).chmod(0o755)
+    assert 'test "$(stat -c %u:%g "${directory}")" = 0:0' in definition
+    assert 'test "$(stat -c %a "${directory}")" = 755' in definition
+    assert 'chown 0:0 "${asset}"' in definition
+    assert 'test "$(stat -c %u:%g "${asset}")" = 0:0' in definition
+    assert 'test "$(stat -c %a "${asset}")" = 644' in definition
+    assert 'chown 0:0 "${verifier}"' in definition
+    assert 'test "$(stat -c %u:%g "${verifier}")" = 0:0' in definition
+    assert 'test "$(stat -c %a "${verifier}")" = 755' in definition
+    assert "manifest=/usr/local/share/openreward/toolathlon-pbs-portable.json" in definition
+    assert 'chown 0:0 "${manifest}"' in definition
+    assert 'test "$(stat -c %u:%g "${manifest}")" = 0:0' in definition
+    assert 'test "$(stat -c %a "${manifest}")" = 444' in definition
+    for name, mode in assets.items():
+        (embedded / name).chmod(mode)
+    manifest.chmod(0o444)
+
+    assert accessible_as_submit_uid(verifier, read=True, execute=True)
+    for name in ("patch_toolathlon_pbs_portable.py", "repair_toolathlon_snowflake_catalog.py"):
+        assert accessible_as_submit_uid(embedded / name, read=True)
+        assert not accessible_as_submit_uid(embedded / name, execute=True)
+    assert accessible_as_submit_uid(manifest, read=True)
+    assert not accessible_as_submit_uid(manifest, execute=True)
+
+
 def test_embedded_verifier_covers_every_portable_runtime_tree() -> None:
     verifier = (CONTAINERS / "verify_toolathlon_pbs_portability.sh").read_text()
     assert "EXPECTED_UV_VERSION='uv 0.12.3 (x86_64-unknown-linux-gnu)'" in verifier

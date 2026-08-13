@@ -25,6 +25,48 @@ From: BASE_SIF_PATH
     python3 /usr/local/libexec/openreward/patch_toolathlon_pbs_portable.py \
         --identity PATCH_IDENTITY
     python3 /usr/local/libexec/openreward/repair_toolathlon_snowflake_catalog.py
+    # Singularity preserves the canonical checkout's umask-derived 0750 file
+    # modes in %files.  Normalize every embedded provenance path after the
+    # patcher has also created its sealed manifest, and before either the image
+    # test or submitting uid executes/reads those paths.
+    for directory in \
+        /usr \
+        /usr/local \
+        /usr/local/libexec \
+        /usr/local/libexec/openreward \
+        /usr/local/share \
+        /usr/local/share/openreward; do
+        test -d "${directory}"
+        test ! -L "${directory}"
+        chown 0:0 "${directory}"
+        chmod 0755 "${directory}"
+        test "$(stat -c %u:%g "${directory}")" = 0:0
+        test "$(stat -c %a "${directory}")" = 755
+    done
+    for asset in \
+        /usr/local/libexec/openreward/patch_toolathlon_pbs_portable.py \
+        /usr/local/libexec/openreward/repair_toolathlon_snowflake_catalog.py; do
+        test -f "${asset}"
+        test ! -L "${asset}"
+        chown 0:0 "${asset}"
+        chmod 0644 "${asset}"
+        test "$(stat -c %u:%g "${asset}")" = 0:0
+        test "$(stat -c %a "${asset}")" = 644
+    done
+    verifier=/usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh
+    test -f "${verifier}"
+    test ! -L "${verifier}"
+    chown 0:0 "${verifier}"
+    chmod 0755 "${verifier}"
+    test "$(stat -c %u:%g "${verifier}")" = 0:0
+    test "$(stat -c %a "${verifier}")" = 755
+    manifest=/usr/local/share/openreward/toolathlon-pbs-portable.json
+    test -f "${manifest}"
+    test ! -L "${manifest}"
+    chown 0:0 "${manifest}"
+    chmod 0444 "${manifest}"
+    test "$(stat -c %u:%g "${manifest}")" = 0:0
+    test "$(stat -c %a "${manifest}")" = 444
     /usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh --structural-only
 
 %environment
