@@ -30,6 +30,7 @@ fi
 COMMON_WRAPPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-prealloc-16node-ptc-task-tracker-full.sh
 DEFAULT_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/toolathlon_swe_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8-efficiency-ta20-curriculum.yaml
 CONFIG=${1:-${DEFAULT_CONFIG}}
+USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd -P)}
 
 if [[ "${SLURM_NNODES:-32}" -ne 32 ]]; then
   echo "ERROR: this wrapper requires exactly 32 nodes; got ${SLURM_NNODES}." >&2
@@ -48,6 +49,9 @@ export OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS=${OPENREWARD_DEADLINE_INITIAL_ST
 export OPENREWARD_DEADLINE_SAFETY_SECONDS=${OPENREWARD_DEADLINE_SAFETY_SECONDS:-600}
 export OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT=0.0
 export OPENREWARD_ENABLE_TMAX=0
+# Override an image path inherited through `sbatch --export=ALL` so automatic
+# successors cannot silently keep serving the predecessor's Toolathlon image.
+export OPENREWARD_SERVER_IMAGE=${USER_ROOT}/images/openreward/apga+toolathlon-gym+18e62c0d041.sqsh
 export SWE_REBENCH_DATA_DIR=${REPO_ROOT}/.cache/swe-rebench-v2-filtered-verified
 export PLATOON_REPO_ROOT=${REPO_ROOT}
 

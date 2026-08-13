@@ -26,9 +26,13 @@ fi
 COMMON_WRAPPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-prealloc-16node-ptc-task-tracker-full.sh
 DEFAULT_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/toolathlon_swe_openhands_areal_prealloc_16node-cp-ptc-task-tracker-full-r3-fp32-lm-head-ta20-curriculum.yaml
 CONFIG=${1:-${DEFAULT_CONFIG}}
+USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd -P)}
 
 export OPENREWARD_ENABLE_TMAX=0
 export OPENREWARD_JOB_SCRIPT=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-swe-prealloc-16node-ptc-task-tracker-ta20-curriculum.sh
+# Override an image path inherited through `sbatch --export=ALL` so automatic
+# successors cannot silently keep serving the predecessor's Toolathlon image.
+export OPENREWARD_SERVER_IMAGE=${USER_ROOT}/images/openreward/apga+toolathlon-gym+18e62c0d041.sqsh
 export PLATOON_REPO_ROOT=${REPO_ROOT}
 
 exec "${COMMON_WRAPPER}" "${CONFIG}"
