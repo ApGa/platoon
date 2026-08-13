@@ -1,0 +1,40 @@
+Bootstrap: localimage
+From: BASE_SIF_PATH
+
+%labels
+    org.opencontainers.image.source https://github.com/ApGa/toolathlon-gym
+    org.opencontainers.image.revision 18e62c0d0419da88209af911528f2f8a0b44a5ed
+    org.openreward.toolathlon.base-sif-sha256 e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267
+    org.openreward.toolathlon.base-oci-digest sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd
+    org.openreward.toolathlon.pbs-portability PATCH_IDENTITY
+    org.openreward.toolathlon.playwright-browsers-sha256 84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5
+
+%files
+    patch_toolathlon_pbs_portable.py /usr/local/libexec/openreward/patch_toolathlon_pbs_portable.py
+    repair_toolathlon_snowflake_catalog.py /usr/local/libexec/openreward/repair_toolathlon_snowflake_catalog.py
+    verify_toolathlon_pbs_portability.sh /usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh
+
+%post
+    set -eu
+    export PATH="/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export UV_PYTHON_INSTALL_DIR="/opt/uv/python"
+    export UV_PYTHON_PREFERENCE="only-managed"
+    export UV_PYTHON_DOWNLOADS="never"
+    export UV_CACHE_DIR="/tmp/openreward-uv-cache"
+    export PLAYWRIGHT_BROWSERS_PATH="/opt/ms-playwright"
+    python3 /usr/local/libexec/openreward/patch_toolathlon_pbs_portable.py \
+        --identity PATCH_IDENTITY
+    python3 /usr/local/libexec/openreward/repair_toolathlon_snowflake_catalog.py
+    /usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh --structural-only
+
+%environment
+    export PATH="/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export UV_PYTHON_INSTALL_DIR="/opt/uv/python"
+    export UV_PYTHON_PREFERENCE="only-managed"
+    export UV_PYTHON_DOWNLOADS="never"
+    export UV_CACHE_DIR="/tmp/openreward-uv-cache"
+    export PLAYWRIGHT_BROWSERS_PATH="/opt/ms-playwright"
+
+%test
+    set -eu
+    /usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh --structural-only

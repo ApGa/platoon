@@ -1,0 +1,115 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=32:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-32r-v9
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh latest-stack 32-node recursive lineage.  The complete ten-epoch
+# horizon is retained and PTC is explicitly enabled in orchestration-only mode
+# with the 1024-call execution budget.  Launch remains gated on the immutable
+# v8r3 release and the PBS all-MCP health acceptance wave. Submitters must pass
+# OPENREWARD_V9_GATE2_RESULT=/absolute/path/to/RESULT and
+# OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT=/absolute/path/to/RESULT.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r3-376d1b9-18e62c0
+RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
+GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
+ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
+GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
+ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v9.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
+EXPERIMENT=abci-openreward-ta-swe-h200-32
+TRIAL=abci-ta-swe32-rec-h200-cp1-c24-v9-trial0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && -r "${ABCI_ENV}" && \
+    -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" ]] || {
+    echo "[h200-32-v9] ERROR: immutable v8r3 release is incomplete: ${REPO_ROOT}" >&2
+    exit 2
+}
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || {
+    echo "[h200-32-v9] ERROR: release root must be the exact non-symlink path: ${REPO_ROOT}" >&2
+    exit 2
+}
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || {
+    echo "[h200-32-v9] ERROR: release HEAD is not the pinned ${RELEASE_REF}" >&2
+    exit 2
+}
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || {
+    echo "[h200-32-v9] ERROR: release tracked content differs from ${release_commit}" >&2
+    exit 2
+}
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || {
+    echo "[h200-32-v9] ERROR: release index differs from ${release_commit}" >&2
+    exit 2
+}
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || {
+    echo "[h200-32-v9] ERROR: release has tracked or ordinary untracked changes" >&2
+    exit 2
+}
+# Load the exact release overlay before Gate2 verification because that gate
+# binds the currently selected training SIF, repaired Toolathlon SIF, build
+# receipt and portability identity.  The overlay does not print credentials.
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || {
+    echo "[h200-32-v9] ERROR: v9 overlay selected another repository" >&2
+    exit 2
+}
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || {
+    echo "[h200-32-v9] ERROR: submission must pass one absolute final v9 Gate2 RESULT" >&2
+    exit 2
+}
+"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"
+[[ "${ALL_MCP_RESULT}" == /* && -f "${ALL_MCP_RESULT}" && ! -L "${ALL_MCP_RESULT}" ]] || {
+    echo "[h200-32-v9] ERROR: submission must pass one absolute final all-MCP RESULT" >&2
+    exit 2
+}
+"${ALL_MCP_VERIFY}" --release-root "${REPO_ROOT}" --result "${ALL_MCP_RESULT}" \
+    --gate2-result "${GATE2_RESULT}"
+echo "[h200-32-v9] accepted gate2=${GATE2_RESULT} all-MCP=${ALL_MCP_RESULT}"
+unset release_head release_commit
+
+prior_receipts=("${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json")
+for prior in "${prior_receipts[@]}"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || {
+        echo "[h200-32-v9] ERROR: refusing stale success artifact; use a fresh trial: ${prior}" >&2
+        exit 2
+    }
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || {
+    echo "[h200-32-v9] ERROR: refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}" >&2
+    exit 2
+}
+
+export OPENREWARD_EXPECTED_NNODES=32
+export OPENREWARD_SERVICE_NODE_COUNT=12
+export OPENREWARD_EXPECTED_RECURSIVE=1
+export OPENREWARD_EXPECTED_PTC=1
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+
+exec "${COMMON}" "${CONFIG}"

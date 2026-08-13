@@ -1,0 +1,36 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=12:00:00
+#PBS -N rasp-runtime-gate2-v9
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Additive v9 entrypoint for the shared immutable-runtime Gate2 implementation.
+# The old v8r2 entrypoint and its completed evidence remain independent.  This
+# selects the canonical v8r3 overlay and requires the Gate2 implementation to
+# attest the repaired Toolathlon SIF/build receipt as well as cold/warm worker
+# and host-controller environments from the exact v9 source archive.
+# After PBS reaches terminal success, publish the only acceptable RESULT with:
+#   /usr/bin/python3 -I <release>/pbs-scripts/finalize_openreward_v9_acceptance.py \
+#       gate2 --job-id <PBS_JOBID>
+
+set -euo pipefail
+umask 077
+
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0
+readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
+readonly GATE2=${REPO_ROOT}/pbs-scripts/openreward-immutable-runtime-gate2.pbs
+
+[[ -r "${ABCI_ENV}" && -x "${GATE2}" ]] || {
+    echo "[gate2-v9] ERROR: immutable v8r3 Gate2 assets are incomplete" >&2
+    exit 2
+}
+
+export OPENREWARD_GATE2_RELEASE_FLAVOR=v9
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+exec "${GATE2}"

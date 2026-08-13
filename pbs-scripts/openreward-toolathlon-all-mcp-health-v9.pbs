@@ -1,0 +1,279 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=02:00:00
+#PBS -N rasp-ta-all-mcp-v9
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# One-node runtime acceptance for the exact v9 production Toolathlon path.
+# The patched server must initialize and live-enumerate all 25 MCP backends;
+# seven disposable sessions then exercise their exact set cover, including a
+# PostgreSQL-backed email send/readback.  This job writes RESULT.candidate only.
+# A post-job finalizer may publish immutable RESULT only after PBS records
+# F/substate 92/Exit_status 0/run_count 1 and normal service cleanup is proven.
+# Submission must pass the completed v9 immutable-runtime acceptance as
+# OPENREWARD_V9_GATE2_RESULT=/absolute/path/to/RESULT.
+# After this job reaches terminal success, finalize with:
+#   /usr/bin/python3 -I <release>/pbs-scripts/finalize_openreward_v9_acceptance.py \
+#       all-mcp --job-id <PBS_JOBID> --gate2-result <final-Gate2-RESULT>
+
+set -euo pipefail
+umask 077
+
+die() {
+    echo "[toolathlon-all-mcp-v9] ERROR: $*" >&2
+    exit 2
+}
+
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0
+readonly RELEASE_REF=refs/tags/abci-v8r3-376d1b9-18e62c0
+readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
+readonly RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
+readonly GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
+readonly GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
+readonly NODE_SERVICES=${REPO_ROOT}/pbs-scripts/openreward-node-services.sh
+readonly SERVICE_RECEIPT_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-cleanup-receipt.py
+readonly SHUTDOWN_REQUEST_HELPER=${REPO_ROOT}/pbs-scripts/openreward-service-shutdown-request.py
+readonly SWE_CLEANUP=${REPO_ROOT}/pbs-scripts/cleanup_swe_singularity_sessions.py
+readonly HEALTH_DRIVER=${REPO_ROOT}/pbs-scripts/toolathlon_all_mcp_health.py
+readonly RESULT_PUBLISHER=${REPO_ROOT}/pbs-scripts/publish_toolathlon_all_mcp_health_result.py
+readonly PBSDSH=/opt/pbs/bin/pbsdsh
+readonly RUNTIME=/usr/bin/singularity
+readonly RUNTIME_SHA256=085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6
+readonly RUNTIME_VERSION=4.4.1-1.el9
+readonly JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
+readonly RESULT_ROOT=/groups/gai51740/aci18912it/rasp/validation/toolathlon-all-mcp-v9/${JOB_ID_SAFE}
+readonly HEALTH_REPORT=${RESULT_ROOT}/health-report.json
+readonly CANDIDATE=${RESULT_ROOT}/RESULT.candidate
+readonly SERVICE_LOG=${RESULT_ROOT}/node-services.log
+readonly SERVICE_RECEIPT=${RESULT_ROOT}/node-services-cleanup.json
+readonly SERVICE_REQUEST=${RESULT_ROOT}/node-services-shutdown-request.json
+readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/toolathlon-all-mcp-v9/${PBS_JOBID}
+readonly HOST=$(awk 'NF {print $1; exit}' "${PBS_NODEFILE}")
+
+[[ -n "${PBS_JOBID:-}" && -r "${PBS_NODEFILE:-}" && -d "${PBS_LOCALDIR:-}" ]] || \
+    die "PBS allocation metadata is absent"
+[[ -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && \
+    -x "${NODE_SERVICES}" && \
+    -x "${SERVICE_RECEIPT_HELPER}" && -x "${SHUTDOWN_REQUEST_HELPER}" && \
+    -x "${SWE_CLEANUP}" && -x "${HEALTH_DRIVER}" && -x "${RESULT_PUBLISHER}" && \
+    -x "${PBSDSH}" ]] || die "v9 health assets or PBS launcher are unavailable"
+[[ ! -e "${RESULT_ROOT}" && ! -L "${RESULT_ROOT}" ]] || \
+    die "refusing stale all-MCP result root: ${RESULT_ROOT}"
+
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || \
+    die "v9 overlay selected another repository"
+[[ "${OPENREWARD_VERIFY_PINNED_SWE_RUNTIME}" == 1 ]] || \
+    die "v9 overlay did not enable pinned SWE runtime verification"
+[[ "${OPENREWARD_TOOLATHLON_BUILD_RECEIPT:-}" == /* ]] || \
+    die "v9 overlay lacks one exact Toolathlon build receipt"
+[[ "${OPENREWARD_TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH:-}" == /opt/ms-playwright ]] || \
+    die "v9 overlay lacks the relocated Playwright browser payload contract"
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || \
+    die "OPENREWARD_V9_GATE2_RESULT must name one exact final v9 Gate2 RESULT"
+"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"
+readonly RELEASE_COMMIT=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)" == "${RELEASE_COMMIT}" ]] || \
+    die "v9 release HEAD is not its pinned tag"
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+[[ -f "${RUNTIME}" && ! -L "${RUNTIME}" && \
+    ( "$(stat -c %u "${RUNTIME}")" == 0 || "$(stat -c %u "${RUNTIME}")" == 65534 ) && \
+    $((8#$(stat -c %a "${RUNTIME}") & 8#022)) -eq 0 && \
+    "$(sha256sum "${RUNTIME}" | awk '{print $1}')" == "${RUNTIME_SHA256}" && \
+    "$("${RUNTIME}" version)" == "${RUNTIME_VERSION}" ]] || \
+    die "canonical SingularityCE runtime identity mismatch"
+
+mapfile -t ALLOC_NODES < <(awk 'NF && !seen[$1]++ {print $1}' "${PBS_NODEFILE}")
+[[ "${#ALLOC_NODES[@]}" -eq 1 && "${ALLOC_NODES[0]}" == "${HOST}" ]] || \
+    die "all-MCP gate requires exactly one physical node"
+slot_count=$(awk -v host="${HOST}" '$1 == host {count++} END {print count + 0}' "${PBS_NODEFILE}")
+[[ "${slot_count}" -eq 8 ]] || die "all-MCP gate requires eight vnode slots"
+[[ "$(hostname -s)" == "${HOST%%.*}" ]] || die "batch shell is not on its allocated node"
+
+# Environment services and the health driver require no external credential.
+for secret_name in \
+    WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL \
+    LITELLM_API_KEY LITELLM_BASE_URL RUBRIC_DEFAULT_LLM HF_TOKEN \
+    HUGGING_FACE_HUB_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    unset "${secret_name}"
+done
+unset secret_name
+
+mkdir -p \
+    "${RESULT_ROOT}" "${LOCAL_ROOT}/driver-home" \
+    "${LOCAL_ROOT}/driver-home/uv-cache" "${LOCAL_ROOT}/driver-tmp"
+chmod 0700 \
+    "${RESULT_ROOT}" "${LOCAL_ROOT}" \
+    "${LOCAL_ROOT}/driver-home" "${LOCAL_ROOT}/driver-home/uv-cache" \
+    "${LOCAL_ROOT}/driver-tmp"
+export PLATOON_NODE_LOCAL_ROOT=${LOCAL_ROOT}/node-services
+export SINGULARITY_CACHEDIR=${LOCAL_ROOT}/singularity-cache
+export SINGULARITY_TMPDIR=${LOCAL_ROOT}/singularity-tmp
+export APPTAINER_CACHEDIR=${SINGULARITY_CACHEDIR}
+export APPTAINER_TMPDIR=${SINGULARITY_TMPDIR}
+export SWE_APPTAINER_SESSION_ROOT=${LOCAL_ROOT}/swe-sessions
+export SWE_SINGULARITY_SESSION_ROOT=${SWE_APPTAINER_SESSION_ROOT}
+export PLATOON_STAGE_TOOLATHLON_SIF=1
+export PLATOON_STAGE_TRAINING_SIF=0
+export OPENREWARD_PORT=8082
+export OPENREWARD_SWE_REBENCH_PORT=8084
+
+service_pid=
+service_teardown_done=0
+service_shutdown_requested=0
+
+request_service_shutdown() {
+    [[ -n "${service_pid}" ]] || return 1
+    kill -0 "${service_pid}" 2>/dev/null || return 1
+    [[ ! -e "${SERVICE_REQUEST}" && ! -L "${SERVICE_REQUEST}" && \
+        ! -e "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] || return 1
+    /usr/bin/python3 -I "${SHUTDOWN_REQUEST_HELPER}" publish \
+        --request "${SERVICE_REQUEST}" --pbs-job-id "${PBS_JOBID}" --host "${HOST}" || return 1
+    service_shutdown_requested=1
+}
+
+teardown_service() {
+    local deadline kill_deadline wait_status=0 expected_pbsdsh_status expected_primary_status
+    ((service_teardown_done)) && return 0
+    service_teardown_done=1
+    [[ -n "${service_pid}" ]] || return 0
+    if ((service_shutdown_requested)); then
+        expected_pbsdsh_status=0
+        expected_primary_status=0
+    else
+        expected_pbsdsh_status=1
+        expected_primary_status=143
+        kill -0 "${service_pid}" 2>/dev/null || return 1
+        kill -TERM "${service_pid}" 2>/dev/null || return 1
+    fi
+    deadline=$((SECONDS + 180))
+    while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.2; done
+    if kill -0 "${service_pid}" 2>/dev/null; then
+        kill -KILL "${service_pid}" 2>/dev/null || true
+        kill_deadline=$((SECONDS + 10))
+        while kill -0 "${service_pid}" 2>/dev/null && ((SECONDS < kill_deadline)); do sleep 0.2; done
+        return 1
+    fi
+    wait "${service_pid}" || wait_status=$?
+    [[ "${wait_status}" -eq "${expected_pbsdsh_status}" ]] || return 1
+    service_pid=
+    while [[ ! -f "${SERVICE_RECEIPT}" && ! -L "${SERVICE_RECEIPT}" ]] && \
+        ((SECONDS < deadline)); do sleep 0.2; done
+    /usr/bin/python3 -I "${SERVICE_RECEIPT_HELPER}" verify \
+        --receipt "${SERVICE_RECEIPT}" --pbs-job-id "${PBS_JOBID}" \
+        --host "${HOST}" --primary-status "${expected_primary_status}" || return 1
+    /usr/bin/python3 -I "${SERVICE_RECEIPT_HELPER}" assert-tcp-closed \
+        --host "${HOST}" --port "${OPENREWARD_PORT}" --port "${OPENREWARD_SWE_REBENCH_PORT}" \
+        --timeout-seconds 2 --deadline-seconds 20 || return 1
+    /usr/bin/python3 -I "${SERVICE_RECEIPT_HELPER}" assert-empty-swe \
+        --session-root "${SWE_APPTAINER_SESSION_ROOT}" || return 1
+}
+
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    if ! teardown_service; then
+        status=1
+    fi
+    exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+echo "[toolathlon-all-mcp-v9] starting exact production helper host=${HOST}"
+env \
+    -u WANDB_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+    -u LITELLM_API_KEY -u LITELLM_BASE_URL -u RUBRIC_DEFAULT_LLM \
+    -u HF_TOKEN -u HUGGING_FACE_HUB_TOKEN \
+    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+    "${PBSDSH}" -n 0 -- /usr/bin/env \
+    "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
+    "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${SERVICE_RECEIPT}" \
+    "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${SERVICE_REQUEST}" \
+    "PLATOON_NODE_SERVICES_EXPECTED_HOST=${HOST}" \
+    "PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}" \
+    "OPENREWARD_TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" \
+    "PLATOON_CONTAINER_RUNTIME=${RUNTIME}" "${NODE_SERVICES}" \
+    >"${SERVICE_LOG}" 2>&1 &
+service_pid=$!
+
+endpoint_healthy() {
+    local port=$1 status
+    status=$(curl --silent --show-error --output /dev/null \
+        --connect-timeout 2 --max-time 5 --write-out '%{http_code}' \
+        --noproxy '*' "http://${HOST}:${port}/" 2>/dev/null) || return 1
+    [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]
+}
+
+deadline=$((SECONDS + 900))
+until endpoint_healthy "${OPENREWARD_PORT}" && endpoint_healthy "${OPENREWARD_SWE_REBENCH_PORT}"; do
+    if ! kill -0 "${service_pid}" 2>/dev/null; then
+        tail -n 200 "${SERVICE_LOG}" >&2 || true
+        die "production helper exited before both endpoints became healthy"
+    fi
+    if ((SECONDS >= deadline)); then
+        tail -n 200 "${SERVICE_LOG}" >&2 || true
+        die "production endpoints did not become healthy within 900 seconds"
+    fi
+    sleep 3
+done
+
+echo "[toolathlon-all-mcp-v9] running seven-session exact 25-MCP cover"
+"${RUNTIME}" exec --cleanenv --no-home \
+    --bind "${HEALTH_DRIVER}:/opt/openreward-health/toolathlon_all_mcp_health.py:ro,${RESULT_ROOT}:/mnt/health-result,${LOCAL_ROOT}/driver-home:/mnt/driver-home,${LOCAL_ROOT}/driver-tmp:/mnt/driver-tmp" \
+    "${OPENREWARD_TOOLATHLON_SIF}" \
+    env \
+        HOME=/mnt/driver-home \
+        TMPDIR=/mnt/driver-tmp \
+        UV_CACHE_DIR=/mnt/driver-home/uv-cache \
+        UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+        UV_PYTHON_PREFERENCE=only-managed \
+        UV_PYTHON_DOWNLOADS=never \
+        PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+        PYTHONDONTWRITEBYTECODE=1 \
+        OPENREWARD_DISABLE_UPDATE_CHECK=1 \
+        OPENREWARD_SESSION_URL="http://${HOST}:${OPENREWARD_PORT}" \
+        OPENREWARD_API_URL="http://${HOST}:${OPENREWARD_PORT}" \
+        /opt/venv/bin/python /opt/openreward-health/toolathlon_all_mcp_health.py \
+        --output /mnt/health-result/health-report.json \
+        --catalog /app/tool_schemas.json \
+        --tasks-root /app/tasks
+
+[[ -f "${HEALTH_REPORT}" && ! -L "${HEALTH_REPORT}" && \
+    "$(stat -c %u "${HEALTH_REPORT}")" == "$(id -u)" && \
+    "$(stat -c %a "${HEALTH_REPORT}")" == 600 ]] || \
+    die "health driver did not publish one exact private report"
+kill -0 "${service_pid}" 2>/dev/null || die "production helper died during all-MCP health"
+endpoint_healthy "${OPENREWARD_PORT}" || die "Toolathlon endpoint died after all-MCP health"
+
+request_service_shutdown || die "natural node-service shutdown request publication failed"
+teardown_service || die "normal node-service cleanup attestation failed"
+
+/usr/bin/python3 -I "${RESULT_PUBLISHER}" candidate \
+    --candidate "${CANDIDATE}" \
+    --health-report "${HEALTH_REPORT}" \
+    --release-root "${REPO_ROOT}" \
+    --release-ref "${RELEASE_REF}" \
+    --release-commit "${RELEASE_COMMIT}" \
+    --gate2-result "${GATE2_RESULT}" \
+    --toolathlon-image "${OPENREWARD_TOOLATHLON_SIF}" \
+    --toolathlon-build-receipt "${OPENREWARD_TOOLATHLON_BUILD_RECEIPT}" \
+    --health-driver "${HEALTH_DRIVER}" \
+    --pbs-job-id "${PBS_JOBID}"
+[[ -f "${CANDIDATE}" && ! -L "${CANDIDATE}" ]] || \
+    die "all-MCP candidate publisher did not produce its receipt"
+
+trap - EXIT INT TERM
+echo "toolathlon_all_mcp_health_candidate=PASS candidate=${CANDIDATE} cleanup=${SERVICE_RECEIPT}"

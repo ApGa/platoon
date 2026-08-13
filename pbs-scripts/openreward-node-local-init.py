@@ -11,6 +11,7 @@ import re
 import shutil
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -21,6 +22,17 @@ HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 JOB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 GENERATION_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+EXPECTED_CONTAINER_RUNTIME_PATH = Path("/usr/bin/singularity")
+EXPECTED_CONTAINER_RUNTIME_SHA256 = "085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6"
+EXPECTED_CONTAINER_RUNTIME_VERSION = "4.4.1-1.el9"
+TRUSTED_CONTAINER_RUNTIME_UIDS = {0, 65534}
+RUNTIME_RECEIPT_KEYS = {
+    "container_runtime_path",
+    "container_runtime_sha256",
+    "container_runtime_version",
+    "container_runtime_uid",
+    "container_runtime_mode",
+}
 
 
 class InitError(RuntimeError):
@@ -72,6 +84,49 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _attest_container_runtime(args: argparse.Namespace) -> dict[str, object]:
+    runtime = Path(args.container_runtime)
+    if (
+        runtime != EXPECTED_CONTAINER_RUNTIME_PATH
+        or args.container_runtime_sha256 != EXPECTED_CONTAINER_RUNTIME_SHA256
+        or args.container_runtime_version != EXPECTED_CONTAINER_RUNTIME_VERSION
+    ):
+        raise InitError("container runtime request differs from the v9 pinned identity")
+    if not runtime.is_absolute() or runtime.resolve() != runtime:
+        raise InitError("container runtime is not one direct absolute path")
+    metadata = runtime.lstat()
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid not in TRUSTED_CONTAINER_RUNTIME_UIDS
+        or mode & 0o022
+        or not mode & 0o111
+    ):
+        raise InitError("container runtime ownership or mode is not trusted")
+    if _sha256(runtime) != EXPECTED_CONTAINER_RUNTIME_SHA256:
+        raise InitError("container runtime stream hash differs from the v9 pin")
+    try:
+        completed = subprocess.run(
+            [str(runtime), "version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        )
+    except subprocess.TimeoutExpired as error:
+        raise InitError("container runtime version check timed out") from error
+    if completed.returncode != 0 or completed.stdout.strip() != EXPECTED_CONTAINER_RUNTIME_VERSION:
+        raise InitError("container runtime version differs from the v9 pin")
+    return {
+        "container_runtime_path": str(runtime),
+        "container_runtime_sha256": EXPECTED_CONTAINER_RUNTIME_SHA256,
+        "container_runtime_version": EXPECTED_CONTAINER_RUNTIME_VERSION,
+        "container_runtime_uid": metadata.st_uid,
+        "container_runtime_mode": mode,
+    }
 
 
 def _stage_training_sif(source: Path, destination: Path, expected_sha256: str) -> None:
@@ -168,6 +223,7 @@ def initialize(args: argparse.Namespace) -> int:
     if observed_host != _short_host(expected_host):
         raise InitError(f"pbsdsh landed on host {observed_host!r}, expected {_short_host(expected_host)!r}")
     localdir, root = _validated_local_paths(args.expected_root, pbs_job_id)
+    runtime_evidence = _attest_container_runtime(args) if args.attest_container_runtime else {}
 
     platoon_parent = root.parent
     worker_home = root / "worker-home"
@@ -194,28 +250,27 @@ def initialize(args: argparse.Namespace) -> int:
     receipt = Path(args.receipt)
     if not receipt.is_absolute() or receipt.name != f"{expected_host}.json":
         raise InitError("receipt path is not the exact expected per-host JSON path")
-    _atomic_private_json(
-        receipt,
-        {
-            "schema_version": SCHEMA_VERSION,
-            "pbs_job_id": pbs_job_id,
-            "generation": generation,
-            "expected_host": expected_host,
-            "observed_host": observed_host,
-            "task_index": task_index,
-            "pbs_localdir": str(localdir),
-            "node_local_root": str(root),
-            "node_local_root_mode": 0o700,
-            "worker_home": str(worker_home),
-            "worker_home_mode": 0o700,
-            "worker_tmp": str(worker_tmp),
-            "worker_tmp_mode": 0o1777,
-            "training_sif_staged": stage_training_sif,
-            "training_sif_path": str(local_training_sif) if local_training_sif else "",
-            "training_sif_sha256": args.training_sif_sha256 if stage_training_sif else "",
-            "published_time_ns": time.time_ns(),
-        },
-    )
+    receipt_value: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
+        "pbs_job_id": pbs_job_id,
+        "generation": generation,
+        "expected_host": expected_host,
+        "observed_host": observed_host,
+        "task_index": task_index,
+        "pbs_localdir": str(localdir),
+        "node_local_root": str(root),
+        "node_local_root_mode": 0o700,
+        "worker_home": str(worker_home),
+        "worker_home_mode": 0o700,
+        "worker_tmp": str(worker_tmp),
+        "worker_tmp_mode": 0o1777,
+        "training_sif_staged": stage_training_sif,
+        "training_sif_path": str(local_training_sif) if local_training_sif else "",
+        "training_sif_sha256": args.training_sif_sha256 if stage_training_sif else "",
+        "published_time_ns": time.time_ns(),
+    }
+    receipt_value.update(runtime_evidence)
+    _atomic_private_json(receipt, receipt_value)
     print(f"node_local_ready host={expected_host} task_index={task_index}")
     return 0
 
@@ -303,6 +358,22 @@ def verify(args: argparse.Namespace) -> int:
         for key, expected_value in expected.items():
             if value.get(key) != expected_value:
                 raise InitError(f"receipt field mismatch host={host} field={key}")
+        runtime_keys = set(value) & RUNTIME_RECEIPT_KEYS
+        if args.attest_container_runtime:
+            if runtime_keys != RUNTIME_RECEIPT_KEYS:
+                raise InitError(f"receipt lacks exact runtime evidence for host={host}")
+            if (
+                value.get("container_runtime_path") != str(EXPECTED_CONTAINER_RUNTIME_PATH)
+                or value.get("container_runtime_sha256") != EXPECTED_CONTAINER_RUNTIME_SHA256
+                or value.get("container_runtime_version") != EXPECTED_CONTAINER_RUNTIME_VERSION
+                or value.get("container_runtime_uid") not in TRUSTED_CONTAINER_RUNTIME_UIDS
+                or not isinstance(value.get("container_runtime_mode"), int)
+                or int(value["container_runtime_mode"]) & 0o022
+                or not int(value["container_runtime_mode"]) & 0o111
+            ):
+                raise InitError(f"receipt runtime evidence mismatch for host={host}")
+        elif runtime_keys:
+            raise InitError(f"legacy receipt unexpectedly contains runtime evidence for host={host}")
         pbs_localdir = value.get("pbs_localdir")
         if not isinstance(pbs_localdir, str) or expected_root != str(Path(pbs_localdir) / "platoon" / pbs_job_id):
             raise InitError(f"receipt has inconsistent PBS_LOCALDIR for host={host}")
@@ -327,6 +398,10 @@ def _parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--stage-training-sif", type=int, choices=(0, 1), required=True)
     init_parser.add_argument("--training-sif", required=True)
     init_parser.add_argument("--training-sif-sha256", required=True)
+    init_parser.add_argument("--attest-container-runtime", type=int, choices=(0, 1), default=0)
+    init_parser.add_argument("--container-runtime", default="")
+    init_parser.add_argument("--container-runtime-sha256", default="")
+    init_parser.add_argument("--container-runtime-version", default="")
     init_parser.set_defaults(handler=initialize)
 
     verify_parser = commands.add_parser("verify")
@@ -338,6 +413,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--generation", required=True)
     verify_parser.add_argument("--stage-training-sif", type=int, choices=(0, 1), required=True)
     verify_parser.add_argument("--training-sif-sha256", required=True)
+    verify_parser.add_argument("--attest-container-runtime", type=int, choices=(0, 1), default=0)
+    verify_parser.add_argument("--container-runtime", default="")
+    verify_parser.add_argument("--container-runtime-sha256", default="")
+    verify_parser.add_argument("--container-runtime-version", default="")
     verify_parser.set_defaults(handler=verify)
     return parser
 

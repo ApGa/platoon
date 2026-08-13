@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import stat
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,82 @@ def test_initializer_rejects_symlink_worker_root(tmp_path: Path, monkeypatch: py
     assert not (receipts / f"{host}.json").exists()
 
 
+def test_runtime_attestation_requires_exact_executable_hash_version_owner_and_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = _load_helper()
+    job_id, host, _localdir, root, receipts, node_map = _fixture_paths(tmp_path, monkeypatch)
+    training_sif = tmp_path / "training.sif"
+    training_sif.write_bytes(b"unused")
+    training_digest = hashlib.sha256(training_sif.read_bytes()).hexdigest()
+    runtime = tmp_path / "singularity"
+    runtime.write_text("#!/bin/sh\nprintf '%s\\n' 4.4.1-test\n")
+    runtime.chmod(0o555)
+    digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    monkeypatch.setattr(helper, "EXPECTED_CONTAINER_RUNTIME_PATH", runtime)
+    monkeypatch.setattr(helper, "EXPECTED_CONTAINER_RUNTIME_SHA256", digest)
+    monkeypatch.setattr(helper, "EXPECTED_CONTAINER_RUNTIME_VERSION", "4.4.1-test")
+    monkeypatch.setattr(helper, "TRUSTED_CONTAINER_RUNTIME_UIDS", {os.getuid()})
+    arguments = Namespace(
+        container_runtime=str(runtime),
+        container_runtime_sha256=digest,
+        container_runtime_version="4.4.1-test",
+    )
+
+    assert helper._attest_container_runtime(arguments) == {
+        "container_runtime_path": str(runtime),
+        "container_runtime_sha256": digest,
+        "container_runtime_version": "4.4.1-test",
+        "container_runtime_uid": os.getuid(),
+        "container_runtime_mode": 0o555,
+    }
+    runtime_arguments = [
+        "--attest-container-runtime",
+        "1",
+        "--container-runtime",
+        str(runtime),
+        "--container-runtime-sha256",
+        digest,
+        "--container-runtime-version",
+        "4.4.1-test",
+    ]
+    init_arguments = _init_arguments(
+        job_id=job_id,
+        host=host,
+        root=root,
+        receipts=receipts,
+        training_sif=training_sif,
+        digest=training_digest,
+        stage=0,
+    )
+    assert helper.main([*init_arguments, *runtime_arguments]) == 0
+    receipt = receipts / f"{host}.json"
+    receipt_value = json.loads(receipt.read_text())
+    assert {key: receipt_value[key] for key in helper.RUNTIME_RECEIPT_KEYS} == {
+        "container_runtime_path": str(runtime),
+        "container_runtime_sha256": digest,
+        "container_runtime_version": "4.4.1-test",
+        "container_runtime_uid": os.getuid(),
+        "container_runtime_mode": 0o555,
+    }
+    verify_arguments = _verify_arguments(
+        job_id=job_id,
+        root=root,
+        receipts=receipts,
+        node_map=node_map,
+        digest=training_digest,
+        stage=0,
+    )
+    assert helper.main([*verify_arguments, *runtime_arguments]) == 0
+    receipt_value["container_runtime_sha256"] = "0" * 64
+    receipt.write_text(json.dumps(receipt_value))
+    assert helper.main([*verify_arguments, *runtime_arguments]) == 2
+
+    runtime.chmod(0o575)
+    with pytest.raises(helper.InitError, match="ownership or mode"):
+        helper._attest_container_runtime(arguments)
+
+
 def test_verifier_rejects_any_extra_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _load_helper()
     job_id, host, _localdir, root, receipts, node_map = _fixture_paths(tmp_path, monkeypatch)
@@ -294,6 +371,10 @@ def test_common_initializes_every_ordered_node_before_builds_services_and_worker
     assert '"${PBSDSH}" -n "${vnode_index}" --' in body
     assert '"${NODE_LOCAL_INIT_PYTHON}" "${NODE_LOCAL_INIT_SNAPSHOT}" init' in body
     assert '--stage-training-sif "${PLATOON_STAGE_TRAINING_SIF}"' in body
+    assert '--attest-container-runtime "${ATTEST_CONTAINER_RUNTIME}"' in body
+    assert '--container-runtime "${RUNTIME}"' in body
+    assert '--container-runtime-sha256 "${EXPECTED_CONTAINER_RUNTIME_SHA256}"' in body
+    assert '--container-runtime-version "${EXPECTED_CONTAINER_RUNTIME_VERSION}"' in body
     assert '"${CONTROLLER_PYTHON_BASE}" -I "${NODE_LOCAL_INIT_SNAPSHOT}" verify' in body
     assert '"${node_init_count}" -eq "${EXPECTED_NNODES}"' in body
     assert common.index("NODE_LOCAL_INIT_SNAPSHOT=") < init_start
@@ -311,3 +392,20 @@ def test_common_initializes_every_ordered_node_before_builds_services_and_worker
         "HF_TOKEN",
     ):
         assert f"-u {secret}" in body
+
+
+def test_common_and_service_helper_pin_v9_runtime_without_changing_v8_fallback() -> None:
+    common = COMMON_PATH.read_text()
+    services = (COMMON_PATH.parent / "openreward-node-services.sh").read_text()
+    runtime_sha = "085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6"
+
+    for source in (common, services):
+        assert "EXPECTED_CONTAINER_RUNTIME_PATH=/usr/bin/singularity" in source
+        assert f"EXPECTED_CONTAINER_RUNTIME_SHA256={runtime_sha}" in source
+        assert "EXPECTED_CONTAINER_RUNTIME_VERSION=4.4.1-1.el9" in source
+        assert 'if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then' in source
+        assert '( "${runtime_uid}" == 0 || "${runtime_uid}" == 65534 )' in source
+        assert "$((8#${runtime_mode} & 8#022)) -eq 0" in source
+        assert '"$(sha256sum "${RUNTIME}" | awk \'{print $1}\')"' in source
+        assert '"$("${RUNTIME}" version)" == "${EXPECTED_CONTAINER_RUNTIME_VERSION}"' in source
+    assert "ATTEST_CONTAINER_RUNTIME=0" in common

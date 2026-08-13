@@ -224,6 +224,33 @@ V8_CASES = (
     },
 )
 
+V9_CASES = (
+    {
+        "config": "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v9",
+        "parent": V8_CASES[0]["config"],
+        "wrapper": "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs",
+        "nodes": 16,
+        "recursive": False,
+        "ptc": False,
+        "experiment": CASES[0]["experiment"],
+        "trial": "abci-ta-swe16-nonrec-h200-cp1-c12-v9-trial0",
+        "wandb_group": "abci-ta-swe16-nonrec-h200-cp1-c12-v9",
+        "service_nodes": 6,
+    },
+    {
+        "config": "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v9",
+        "parent": V8_CASES[1]["config"],
+        "wrapper": "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs",
+        "nodes": 32,
+        "recursive": True,
+        "ptc": True,
+        "experiment": CASES[1]["experiment"],
+        "trial": "abci-ta-swe32-rec-h200-cp1-c24-v9-trial0",
+        "wandb_group": "abci-ta-swe32-rec-h200-cp1-c24-v9",
+        "service_nodes": 12,
+    },
+)
+
 
 def _merge(base, overlay):
     if isinstance(base, dict) and isinstance(overlay, dict):
@@ -849,6 +876,107 @@ def test_h200_v8_wrapper_pins_isolated_release_image_and_fresh_long_run(case: di
     assert f"#PBS -l select={case['nodes']}:mpiprocs=8" in wrapper
     assert "#PBS -l walltime=168:00:00" in wrapper
     assert f"TRIAL={case['trial']}" in wrapper
+    assert f"OPENREWARD_SERVICE_NODE_COUNT={case['service_nodes']}" in wrapper
+    assert f"OPENREWARD_EXPECTED_RECURSIVE={int(case['recursive'])}" in wrapper
+    assert f"OPENREWARD_EXPECTED_PTC={int(case['ptc'])}" in wrapper
+    assert "PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0" in wrapper
+    assert '[[ ! -e "${prior}" && ! -L "${prior}" ]]' in wrapper
+    assert '[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]]' in wrapper
+    assert 'exec "${COMMON}" "${CONFIG}"' in wrapper
+    assert "qsub" not in wrapper.lower()
+
+
+@pytest.mark.parametrize("case", V9_CASES, ids=("16node-v9", "32node-v9"))
+def test_h200_v9_leaf_is_fresh_full_horizon_and_has_exact_ptc_matrix(case: dict) -> None:
+    yaml = pytest.importorskip("yaml")
+    path = CONFIG_ROOT / f"{case['config']}.yaml"
+    leaf = yaml.safe_load(path.read_text())
+    config = _compose(case["config"])
+    parent = _compose(case["parent"])
+    openreward = {
+        "enable_recursive_subagents": case["recursive"],
+        "enable_programmatic_tool_calling": case["ptc"],
+    }
+    if case["ptc"]:
+        openreward |= {
+            "programmatic_tool_calling_mode": "orchestration_only",
+            "programmatic_tool_calling_max_tool_calls_per_execution": 1024,
+        }
+    expected = _merge(
+        parent,
+        {
+            "experiment_name": case["experiment"],
+            "trial_name": case["trial"],
+            "total_train_epochs": 10,
+            "total_train_steps": None,
+            "tokenizer_path": "${oc.env:PLATOON_MODEL_SNAPSHOT}",
+            "openreward": openreward,
+            "actor": {"path": "${oc.env:PLATOON_MODEL_SNAPSHOT}"},
+            "sglang": {"model_path": "${oc.env:PLATOON_MODEL_SNAPSHOT}"},
+            "stats_logger": {"wandb": {"group": case["wandb_group"]}},
+        },
+    )
+
+    assert config == expected
+    assert leaf["total_train_epochs"] == 10
+    assert leaf["total_train_steps"] is None
+    assert leaf["tokenizer_path"] == "${oc.env:PLATOON_MODEL_SNAPSHOT}"
+    assert leaf["actor"] == {"path": "${oc.env:PLATOON_MODEL_SNAPSHOT}"}
+    assert leaf["sglang"] == {"model_path": "${oc.env:PLATOON_MODEL_SNAPSHOT}"}
+    assert leaf["scheduler"] == {"type": "pbs_prealloc"}
+    assert leaf["cluster"] == {
+        "n_nodes": case["nodes"],
+        "n_gpus_per_node": 8,
+        "fileroot": "${oc.env:PLATOON_EXPERIMENT_ROOT}",
+        "name_resolve": {
+            "type": "nfs",
+            "nfs_record_root": "${oc.env:PLATOON_NAME_RESOLVE_ROOT}",
+        },
+    }
+    for invariant in ("actor", "rollout", "workflow_config", "recover"):
+        assert config[invariant] == parent[invariant]
+    assert config["openreward"]["enable_task_tracker"] is True
+    assert config["openreward"]["enable_recursive_subagents"] is case["recursive"]
+    assert config["openreward"]["enable_programmatic_tool_calling"] is case["ptc"]
+    if case["ptc"]:
+        assert config["openreward"]["programmatic_tool_calling_mode"] == "orchestration_only"
+        assert config["openreward"]["programmatic_tool_calling_max_tool_calls_per_execution"] == 1024
+
+
+@pytest.mark.parametrize("case", V9_CASES, ids=("16node-v9", "32node-v9"))
+def test_h200_v9_wrapper_pins_future_release_and_fresh_long_run(case: dict) -> None:
+    path = PBS_ROOT / case["wrapper"]
+    subprocess.run(["bash", "-n", str(path)], check=True)
+    wrapper = path.read_text()
+
+    assert path.stat().st_mode & 0o111 == 0o111
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r3-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
+    assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
+    assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
+    assert ("ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py") in wrapper
+    assert "ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}" in wrapper
+    assert '${ALL_MCP_RESULT}" == /* && -f "${ALL_MCP_RESULT}" && ! -L "${ALL_MCP_RESULT}' in wrapper
+    assert "submission must pass one absolute final all-MCP RESULT" in wrapper
+    assert "submission must pass one absolute final v9 Gate2 RESULT" in wrapper
+    assert "export OPENREWARD_V9_GATE2_RESULT" not in wrapper
+    assert "export OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT" not in wrapper
+    assert "ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env" in wrapper
+    assert "export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" in wrapper
+    assert "status --porcelain=v1 --untracked-files=all" in wrapper
+    assert '"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"' in wrapper
+    assert ('"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"') in wrapper
+    assert (
+        '"${ALL_MCP_VERIFY}" --release-root "${REPO_ROOT}" '
+        '--result "${ALL_MCP_RESULT}" \\\n'
+        '    --gate2-result "${GATE2_RESULT}"'
+    ) in wrapper
+    assert f"#PBS -l select={case['nodes']}:mpiprocs=8" in wrapper
+    assert "#PBS -l walltime=168:00:00" in wrapper
+    assert f"TRIAL={case['trial']}" in wrapper
+    assert "-v7-trial" not in wrapper
     assert f"OPENREWARD_SERVICE_NODE_COUNT={case['service_nodes']}" in wrapper
     assert f"OPENREWARD_EXPECTED_RECURSIVE={int(case['recursive'])}" in wrapper
     assert f"OPENREWARD_EXPECTED_PTC={int(case['ptc'])}" in wrapper

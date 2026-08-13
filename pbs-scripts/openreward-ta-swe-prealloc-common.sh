@@ -67,6 +67,12 @@ TOOLATHLON_SHA256=${OPENREWARD_TOOLATHLON_SIF_SHA256:-e730e11d1abc63f5cac9eb1788
 TOOLATHLON_SOURCE_REVISION=${OPENREWARD_TOOLATHLON_SOURCE_REVISION:-}
 TOOLATHLON_SOURCE_URL=${OPENREWARD_TOOLATHLON_SOURCE_URL:-}
 TOOLATHLON_OCI_AMD64_DIGEST=${OPENREWARD_TOOLATHLON_OCI_AMD64_DIGEST:-}
+TOOLATHLON_BASE_SIF_SHA256=${OPENREWARD_TOOLATHLON_BASE_SIF_SHA256:-}
+TOOLATHLON_PORTABILITY_PATCH_SHA256=${OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256:-}
+EXPECTED_CONTAINER_RUNTIME_PATH=/usr/bin/singularity
+EXPECTED_CONTAINER_RUNTIME_SHA256=085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6
+EXPECTED_CONTAINER_RUNTIME_VERSION=4.4.1-1.el9
+ATTEST_CONTAINER_RUNTIME=0
 APEX_PIN=6424da3b4faa6c8f062da4a48c424fff3f02d42d
 TE_PIN=2.12.0
 TE_COMMIT_PIN=5671fd3675906cda1ade26c24a65d3dedd88eb89
@@ -95,6 +101,20 @@ require_uint OPENREWARD_EXPECTED_NNODES "${EXPECTED_NNODES}" 1
 [[ -x "${RUNTIME}" ]] || command -v "${RUNTIME}" >/dev/null 2>&1 || \
     die "Singularity runtime is unavailable: ${RUNTIME}"
 RUNTIME=$(command -v "${RUNTIME}")
+if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
+    ATTEST_CONTAINER_RUNTIME=1
+    runtime_uid=$(stat -c %u "${RUNTIME}")
+    runtime_mode=$(stat -c %a "${RUNTIME}")
+    [[ "${RUNTIME}" == "${EXPECTED_CONTAINER_RUNTIME_PATH}" && \
+        "$(readlink -f "${RUNTIME}")" == "${EXPECTED_CONTAINER_RUNTIME_PATH}" && \
+        -f "${RUNTIME}" && ! -L "${RUNTIME}" && -x "${RUNTIME}" && \
+        ( "${runtime_uid}" == 0 || "${runtime_uid}" == 65534 ) && \
+        $((8#${runtime_mode} & 8#022)) -eq 0 && \
+        "$(sha256sum "${RUNTIME}" | awk '{print $1}')" == "${EXPECTED_CONTAINER_RUNTIME_SHA256}" && \
+        "$("${RUNTIME}" version)" == "${EXPECTED_CONTAINER_RUNTIME_VERSION}" ]] || \
+        die "derived v9 launch requires the exact trusted SingularityCE runtime"
+    unset runtime_uid runtime_mode
+fi
 [[ -x "${UV_BIN}" ]] || die "uv is unavailable: ${UV_BIN}"
 [[ -x "${CONTROLLER_PYTHON_BASE}" ]] || \
     die "pinned host-controller Python is unavailable: ${CONTROLLER_PYTHON_BASE}"
@@ -188,7 +208,19 @@ if [[ -n "${TOOLATHLON_SOURCE_REVISION}" ]]; then
     grep -Fq "org.opencontainers.image.revision: ${TOOLATHLON_SOURCE_REVISION}" \
         <<<"${toolathlon_labels}" || die "Toolathlon SIF source revision mismatch"
 fi
-if [[ -n "${TOOLATHLON_OCI_AMD64_DIGEST}" ]]; then
+if [[ -n "${TOOLATHLON_BASE_SIF_SHA256}" || -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
+    [[ "${TOOLATHLON_BASE_SIF_SHA256}" =~ ^[0-9a-f]{64}$ && \
+        "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" =~ ^[0-9a-f]{64}$ ]] || \
+        die "derived Toolathlon SIF requires exact base and portability SHA-256 identities"
+    [[ -n "${TOOLATHLON_OCI_AMD64_DIGEST}" ]] || \
+        die "derived Toolathlon SIF requires the exact base OCI digest"
+    grep -Fq "org.openreward.toolathlon.base-sif-sha256: ${TOOLATHLON_BASE_SIF_SHA256}" \
+        <<<"${toolathlon_labels}" || die "Toolathlon derived SIF base digest mismatch"
+    grep -Fq "org.openreward.toolathlon.base-oci-digest: ${TOOLATHLON_OCI_AMD64_DIGEST}" \
+        <<<"${toolathlon_labels}" || die "Toolathlon derived SIF base OCI digest mismatch"
+    grep -Fq "org.openreward.toolathlon.pbs-portability: ${TOOLATHLON_PORTABILITY_PATCH_SHA256}" \
+        <<<"${toolathlon_labels}" || die "Toolathlon derived SIF portability patch mismatch"
+elif [[ -n "${TOOLATHLON_OCI_AMD64_DIGEST}" ]]; then
     grep -Fq "org.label-schema.usage.singularity.deffile.from: ghcr.io/apga/toolathlon-gym@${TOOLATHLON_OCI_AMD64_DIGEST}" \
         <<<"${toolathlon_labels}" || die "Toolathlon SIF OCI digest mismatch"
 fi
@@ -347,6 +379,10 @@ while IFS=$'\t' read -r host vnode_index; do
         --stage-training-sif "${PLATOON_STAGE_TRAINING_SIF}" \
         --training-sif "${PLATOON_TRAINING_SIF}" \
         --training-sif-sha256 "${TRAINING_SIF_SHA256}" \
+        --attest-container-runtime "${ATTEST_CONTAINER_RUNTIME}" \
+        --container-runtime "${RUNTIME}" \
+        --container-runtime-sha256 "${EXPECTED_CONTAINER_RUNTIME_SHA256}" \
+        --container-runtime-version "${EXPECTED_CONTAINER_RUNTIME_VERSION}" \
         >"${node_init_log}" 2>&1; then
         echo "[pbs-openreward] ERROR: node-local initialization failed on ${host}" >&2
         tail -n 40 "${node_init_log}" >&2 || true
@@ -365,7 +401,11 @@ done <"${NODE_MAP}"
     --pbs-job-id "${PBS_JOBID}" \
     --generation "${NODE_LOCAL_INIT_GENERATION}" \
     --stage-training-sif "${PLATOON_STAGE_TRAINING_SIF}" \
-    --training-sif-sha256 "${TRAINING_SIF_SHA256}"
+    --training-sif-sha256 "${TRAINING_SIF_SHA256}" \
+    --attest-container-runtime "${ATTEST_CONTAINER_RUNTIME}" \
+    --container-runtime "${RUNTIME}" \
+    --container-runtime-sha256 "${EXPECTED_CONTAINER_RUNTIME_SHA256}" \
+    --container-runtime-version "${EXPECTED_CONTAINER_RUNTIME_VERSION}"
 unset \
     host vnode_index node_init_log node_init_receipt node_init_count \
     node_local_init_snapshot_tmp node_local_init_source_sha \

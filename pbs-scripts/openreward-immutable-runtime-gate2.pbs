@@ -32,6 +32,12 @@ ABCI_ENV=${PLATOON_ABCI_ENV_FILE:-/home/aci18912it/rasp/config/abci.env}
 source "${ABCI_ENV}"
 export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
 
+GATE2_RELEASE_FLAVOR=${OPENREWARD_GATE2_RELEASE_FLAVOR:-v8}
+[[ "${GATE2_RELEASE_FLAVOR}" == v8 || "${GATE2_RELEASE_FLAVOR}" == v9 ]] || {
+    echo "[gate2] ERROR: OPENREWARD_GATE2_RELEASE_FLAVOR must be v8 or v9" >&2
+    exit 1
+}
+
 die() {
     echo "[gate2] ERROR: $*" >&2
     exit 1
@@ -45,14 +51,24 @@ module load hpcx/2.20
 REPO_ROOT=${PLATOON_REPO_ROOT}
 PREPARE_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_env.sh
 PREPARE_CONTROLLER_ENV=${REPO_ROOT}/pbs-scripts/prepare_openreward_controller_env.sh
-RUNTIME=$(command -v singularity)
+RUNTIME=/usr/bin/singularity
+RUNTIME_SHA256=085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6
+RUNTIME_VERSION=4.4.1-1.el9
 UV_BIN=/home/aci18912it/.local/bin/uv
 CONTROLLER_PYTHON_BASE=/home/aci18912it/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
-RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
+if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
+    RELEASE_REF=refs/tags/abci-v8r3-376d1b9-18e62c0
+    RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
+    GATE_ROOT_BASENAME=gate2-immutable-runtime-v9
+else
+    RELEASE_REF=refs/tags/abci-v8r2-376d1b9-18e62c0
+    RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v8_release.py
+    GATE_ROOT_BASENAME=gate2-immutable-runtime
+fi
 APEX_PIN=6424da3b4faa6c8f062da4a48c424fff3f02d42d
 TE_PIN=2.12.0
 JOB_ID_SAFE=${PBS_JOBID//[^A-Za-z0-9_.-]/_}
-GATE_ROOT=${PLATOON_PROJECT_ROOT}/cache/gate2-immutable-runtime/${JOB_ID_SAFE}
+GATE_ROOT=${PLATOON_PROJECT_ROOT}/cache/${GATE_ROOT_BASENAME}/${JOB_ID_SAFE}
 ENV_CACHE=${GATE_ROOT}/env-cache
 CONTROLLER_ENV_CACHE=${GATE_ROOT}/controller-env-cache
 CONTROLLER_UV_CACHE=${PLATOON_PROJECT_ROOT}/cache/uv-controller-rhel9-glibc234
@@ -66,7 +82,14 @@ SIF_SHA_FILE=${PLATOON_TRAINING_SIF}.sha256
 [[ -x "${UV_BIN}" ]] || die "uv is missing: ${UV_BIN}"
 [[ -x "${CONTROLLER_PYTHON_BASE}" ]] || \
     die "pinned host-controller Python is missing: ${CONTROLLER_PYTHON_BASE}"
-[[ -x "${RELEASE_VERIFY}" ]] || die "v8 release verifier is missing: ${RELEASE_VERIFY}"
+[[ -f "${RUNTIME}" && ! -L "${RUNTIME}" && \
+    ( "$(stat -c %u "${RUNTIME}")" == 0 || "$(stat -c %u "${RUNTIME}")" == 65534 ) && \
+    $((8#$(stat -c %a "${RUNTIME}") & 8#022)) -eq 0 && \
+    "$(sha256sum "${RUNTIME}" | awk '{print $1}')" == "${RUNTIME_SHA256}" && \
+    "$("${RUNTIME}" version)" == "${RUNTIME_VERSION}" ]] || \
+    die "canonical SingularityCE runtime identity mismatch"
+[[ -x "${RELEASE_VERIFY}" ]] || \
+    die "${GATE2_RELEASE_FLAVOR} release verifier is missing: ${RELEASE_VERIFY}"
 [[ -r "${PLATOON_TRAINING_SIF}" && -r "${SIF_SHA_FILE}" ]] || \
     die "training SIF or digest sidecar is missing"
 [[ ! -e "${GATE_ROOT}" ]] || die "job-private cold cache already exists: ${GATE_ROOT}"
@@ -75,6 +98,9 @@ SIF_SHA_FILE=${PLATOON_TRAINING_SIF}.sha256
 # its deliberately narrow worker/controller source archive. These host scripts
 # are bound by the clean release tag rather than injected into worker wheels.
 "${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+RELEASE_COMMIT=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)" == "${RELEASE_COMMIT}" ]] || \
+    die "release HEAD is not ${RELEASE_REF}"
 for shell_asset in \
     pbs-scripts/openreward-ta-swe-prealloc-common.sh \
     pbs-scripts/openreward-node-services.sh \
@@ -89,6 +115,20 @@ for shell_asset in \
     /bin/bash -n "${REPO_ROOT}/${shell_asset}" || \
         die "v8 host shell asset failed syntax validation: ${shell_asset}"
 done
+if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
+    for shell_asset in \
+        pbs-scripts/openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs \
+        pbs-scripts/openreward-ta-swe-32node-recursive-h200-v9-abci.pbs \
+        pbs-scripts/openreward-toolathlon-pbs-portable-build.pbs \
+        pbs-scripts/openreward-toolathlon-all-mcp-health-v9.pbs \
+        pbs-scripts/openreward-immutable-runtime-gate2-v9.pbs \
+        pbs-scripts/openreward-v9-abci.env \
+        containers/build_toolathlon_pbs_portable_sif.sh \
+        containers/verify_toolathlon_pbs_portability.sh; do
+        /bin/bash -n "${REPO_ROOT}/${shell_asset}" || \
+            die "v9 host shell asset failed syntax validation: ${shell_asset}"
+    done
+fi
 "${CONTROLLER_PYTHON_BASE}" -I - "${REPO_ROOT}" <<'PY'
 import ast
 import sys
@@ -108,7 +148,59 @@ for relative in (
     ast.parse(path.read_text(), filename=str(path))
 print("v8_host_python_assets=syntax-ok")
 PY
-echo "[gate2] exact v8 release and host-only launch assets passed pre-resolve validation"
+if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
+    "${CONTROLLER_PYTHON_BASE}" -I - "${REPO_ROOT}" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for relative in (
+    "pbs-scripts/verify_openreward_v9_release.py",
+    "pbs-scripts/verify_toolathlon_all_mcp_health_result.py",
+    "pbs-scripts/verify_openreward_v9_gate2_result.py",
+    "pbs-scripts/publish_openreward_v9_gate2_result.py",
+    "pbs-scripts/finalize_openreward_v9_acceptance.py",
+    "pbs-scripts/openreward-node-local-init.py",
+    "pbs-scripts/toolathlon_all_mcp_health.py",
+    "pbs-scripts/publish_toolathlon_all_mcp_health_result.py",
+    "containers/patch_toolathlon_pbs_portable.py",
+    "containers/repair_toolathlon_snowflake_catalog.py",
+    "containers/publish_toolathlon_pbs_image.py",
+    "containers/publish_toolathlon_pbs_build_receipt.py",
+):
+    path = root / relative
+    ast.parse(path.read_text(), filename=str(path))
+print("v9_host_python_assets=syntax-ok")
+PY
+
+    # Re-run the immutable build-receipt publisher in verification-only mode.
+    # For an existing mode-0400 receipt it rehashes the current SIF, all build
+    # assets, embedded portability manifest/verifier, repaired server/catalog,
+    # and exact OCI/source/portability labels without modifying the artifact.
+    [[ "${OPENREWARD_TOOLATHLON_SIF}" == /* && \
+        "${OPENREWARD_TOOLATHLON_BUILD_RECEIPT}" == /* && \
+        "${OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256}" =~ ^[0-9a-f]{64}$ ]] || \
+        die "v9 overlay lacks final Toolathlon image/build identities"
+    /usr/bin/python3 -I "${REPO_ROOT}/containers/publish_toolathlon_pbs_build_receipt.py" \
+        --image "${OPENREWARD_TOOLATHLON_SIF}" \
+        --receipt "${OPENREWARD_TOOLATHLON_BUILD_RECEIPT}" \
+        --base-sif /groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-c1e60b36.sif \
+        --patch-identity "${OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256}" \
+        --asset-dir "${REPO_ROOT}/containers" \
+        --builder "${REPO_ROOT}/containers/build_toolathlon_pbs_portable_sif.sh" \
+        --singularity "${RUNTIME}" >/dev/null
+    TOOLATHLON_SIF_SHA256=$(sha256sum "${OPENREWARD_TOOLATHLON_SIF}" | awk '{print $1}')
+    TOOLATHLON_BUILD_RECEIPT_SHA256=$(
+        sha256sum "${OPENREWARD_TOOLATHLON_BUILD_RECEIPT}" | awk '{print $1}'
+    )
+    [[ "${TOOLATHLON_SIF_SHA256}" == "${OPENREWARD_TOOLATHLON_SIF_SHA256}" ]] || \
+        die "v9 Toolathlon SIF differs from the overlay after receipt verification"
+else
+    TOOLATHLON_SIF_SHA256=
+    TOOLATHLON_BUILD_RECEIPT_SHA256=
+fi
+echo "[gate2] exact ${GATE2_RELEASE_FLAVOR} release and host-only launch assets passed pre-resolve validation"
 
 expected_sif_sha=$(awk 'NF {print $1; exit}' "${SIF_SHA_FILE}")
 actual_sif_sha=$(sha256sum "${PLATOON_TRAINING_SIF}" | awk '{print $1}')
@@ -217,6 +309,19 @@ for archive_member in \
     grep -Fxq "${archive_member}" "${GATE_ROOT}/source-members.txt" || \
         die "immutable source archive omits ${archive_member}"
 done
+if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
+    for archive_member in \
+        pbs-scripts/openreward-v9-abci.env \
+        pbs-scripts/openreward-v9-release.json \
+        pbs-scripts/verify_openreward_v9_release.py \
+        pbs-scripts/verify_toolathlon_all_mcp_health_result.py \
+        pbs-scripts/verify_openreward_v9_gate2_result.py \
+        plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v9.yaml \
+        plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v9.yaml; do
+        grep -Fxq "${archive_member}" "${GATE_ROOT}/source-members.txt" || \
+            die "v9 immutable source archive omits ${archive_member}"
+    done
+fi
 for host_only_asset in \
     pbs-scripts/openreward_v8_ptc_e2e.py \
     pbs-scripts/openreward-service-cleanup-receipt.py \
@@ -226,6 +331,27 @@ for host_only_asset in \
         die "immutable source archive contains host-only launch asset ${host_only_asset}"
     fi
 done
+if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
+    for host_only_asset in \
+        pbs-scripts/openreward-ta-swe-prealloc-common.sh \
+        pbs-scripts/openreward-node-services.sh \
+        pbs-scripts/openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs \
+        pbs-scripts/openreward-ta-swe-32node-recursive-h200-v9-abci.pbs \
+        pbs-scripts/openreward-toolathlon-pbs-portable-build.pbs \
+        pbs-scripts/openreward-toolathlon-all-mcp-health-v9.pbs \
+        pbs-scripts/openreward-immutable-runtime-gate2-v9.pbs \
+        pbs-scripts/openreward-node-local-init.py \
+        pbs-scripts/toolathlon_all_mcp_health.py \
+        pbs-scripts/publish_toolathlon_all_mcp_health_result.py \
+        pbs-scripts/publish_openreward_v9_gate2_result.py \
+        pbs-scripts/finalize_openreward_v9_acceptance.py \
+        containers/build_toolathlon_pbs_portable_sif.sh \
+        containers/publish_toolathlon_pbs_build_receipt.py; do
+        if grep -Fxq "${host_only_asset}" "${GATE_ROOT}/source-members.txt"; then
+            die "v9 immutable source archive contains host-only asset ${host_only_asset}"
+        fi
+    done
+fi
 unset archive_member
 
 echo "[gate2] validating contained SIF DNS/TLS through explicit system-file binds"
@@ -582,7 +708,30 @@ for forbidden in ("megatron", "transformer_engine", "apex", "fused_weight_gradie
 print("gate2_host_controller_imports=ok", sys.executable)
 PY
 
-cat >"${GATE_ROOT}/RESULT" <<EOF
+if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
+    GATE2_CANDIDATE=${GATE_ROOT}/RESULT.candidate
+    /usr/bin/python3 -I \
+        "${REPO_ROOT}/pbs-scripts/publish_openreward_v9_gate2_result.py" candidate \
+        --candidate "${GATE2_CANDIDATE}" \
+        --release-commit "${RELEASE_COMMIT}" \
+        --pbs-job-id "${PBS_JOBID}" \
+        --worker-environment-key "${OPENREWARD_ENV_KEY}" \
+        --controller-environment-key "${OPENREWARD_CONTROLLER_ENV_KEY}" \
+        --source-sha256 "${OPENREWARD_SOURCE_SHA}" \
+        --training-sif "${PLATOON_TRAINING_SIF}" \
+        --training-sif-sha256 "${actual_sif_sha}" \
+        --worker-venv "${OPENREWARD_JOB_VENV}" \
+        --controller-venv "${OPENREWARD_CONTROLLER_JOB_VENV}" \
+        --toolathlon-sif "${OPENREWARD_TOOLATHLON_SIF}" \
+        --toolathlon-sif-sha256 "${TOOLATHLON_SIF_SHA256}" \
+        --toolathlon-build-receipt "${OPENREWARD_TOOLATHLON_BUILD_RECEIPT}" \
+        --toolathlon-build-receipt-sha256 "${TOOLATHLON_BUILD_RECEIPT_SHA256}" \
+        --toolathlon-portability-patch-sha256 \
+            "${OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256}"
+    echo "gate2_immutable_runtime_v9_candidate=passed candidate=${GATE2_CANDIDATE}"
+else
+    # Preserve the established v8 RESULT byte schema and behavior exactly.
+    cat >"${GATE_ROOT}/RESULT" <<EOF
 gate2=passed
 pbs_job_id=${PBS_JOBID}
 worker_environment_key=${OPENREWARD_ENV_KEY}
@@ -592,5 +741,6 @@ training_sif_sha256=${actual_sif_sha}
 worker_venv=${OPENREWARD_JOB_VENV}
 controller_venv=${OPENREWARD_CONTROLLER_JOB_VENV}
 EOF
-chmod 0400 "${GATE_ROOT}/RESULT"
-echo "gate2_immutable_runtime=passed result=${GATE_ROOT}/RESULT"
+    chmod 0400 "${GATE_ROOT}/RESULT"
+    echo "gate2_immutable_runtime=passed result=${GATE_ROOT}/RESULT"
+fi

@@ -43,6 +43,12 @@ TOOLATHLON_SHA256=${OPENREWARD_TOOLATHLON_SIF_SHA256:-e730e11d1abc63f5cac9eb1788
 TOOLATHLON_SOURCE_REVISION=${OPENREWARD_TOOLATHLON_SOURCE_REVISION:-}
 TOOLATHLON_SOURCE_URL=${OPENREWARD_TOOLATHLON_SOURCE_URL:-}
 TOOLATHLON_OCI_AMD64_DIGEST=${OPENREWARD_TOOLATHLON_OCI_AMD64_DIGEST:-}
+TOOLATHLON_BASE_SIF_SHA256=${OPENREWARD_TOOLATHLON_BASE_SIF_SHA256:-}
+TOOLATHLON_PORTABILITY_PATCH_SHA256=${OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256:-}
+TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH=${OPENREWARD_TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH:-}
+EXPECTED_CONTAINER_RUNTIME_PATH=/usr/bin/singularity
+EXPECTED_CONTAINER_RUNTIME_SHA256=085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6
+EXPECTED_CONTAINER_RUNTIME_VERSION=4.4.1-1.el9
 LOCAL_ROOT=${PLATOON_NODE_LOCAL_ROOT:?PLATOON_NODE_LOCAL_ROOT is required}
 TOOLATHLON_ROOT=${LOCAL_ROOT}/toolathlon
 TOOLATHLON_STATE=${TOOLATHLON_ROOT}/state
@@ -99,6 +105,20 @@ if [[ -n "${CLEANUP_RECEIPT}" || -n "${SHUTDOWN_REQUEST}" ]]; then
         die "service shutdown request path is stale or indirect"
 fi
 
+if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
+    runtime_uid=$(stat -c %u "${RUNTIME}")
+    runtime_mode=$(stat -c %a "${RUNTIME}")
+    [[ "${RUNTIME}" == "${EXPECTED_CONTAINER_RUNTIME_PATH}" && \
+        "$(readlink -f "${RUNTIME}")" == "${EXPECTED_CONTAINER_RUNTIME_PATH}" && \
+        -f "${RUNTIME}" && ! -L "${RUNTIME}" && -x "${RUNTIME}" && \
+        ( "${runtime_uid}" == 0 || "${runtime_uid}" == 65534 ) && \
+        $((8#${runtime_mode} & 8#022)) -eq 0 && \
+        "$(sha256sum "${RUNTIME}" | awk '{print $1}')" == "${EXPECTED_CONTAINER_RUNTIME_SHA256}" && \
+        "$("${RUNTIME}" version)" == "${EXPECTED_CONTAINER_RUNTIME_VERSION}" ]] || \
+        die "derived v9 service requires the exact trusted SingularityCE runtime"
+    unset runtime_uid runtime_mode
+fi
+
 actual_toolathlon_sha=$(sha256sum "${OPENREWARD_TOOLATHLON_SIF}" | awk '{print $1}')
 [[ "${actual_toolathlon_sha}" == "${TOOLATHLON_SHA256}" ]] || \
     die "Toolathlon SIF digest mismatch: ${actual_toolathlon_sha}"
@@ -111,11 +131,35 @@ if [[ -n "${TOOLATHLON_SOURCE_REVISION}" ]]; then
     grep -Fq "org.opencontainers.image.revision: ${TOOLATHLON_SOURCE_REVISION}" \
         <<<"${toolathlon_labels}" || die "Toolathlon SIF source revision mismatch"
 fi
-if [[ -n "${TOOLATHLON_OCI_AMD64_DIGEST}" ]]; then
+if [[ -n "${TOOLATHLON_BASE_SIF_SHA256}" || -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
+    [[ "${TOOLATHLON_BASE_SIF_SHA256}" =~ ^[0-9a-f]{64}$ && \
+        "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" =~ ^[0-9a-f]{64}$ ]] || \
+        die "derived Toolathlon SIF requires exact base and portability SHA-256 identities"
+    [[ -n "${TOOLATHLON_OCI_AMD64_DIGEST}" ]] || \
+        die "derived Toolathlon SIF requires the exact base OCI digest"
+    grep -Fq "org.openreward.toolathlon.base-sif-sha256: ${TOOLATHLON_BASE_SIF_SHA256}" \
+        <<<"${toolathlon_labels}" || die "Toolathlon derived SIF base digest mismatch"
+    grep -Fq "org.openreward.toolathlon.base-oci-digest: ${TOOLATHLON_OCI_AMD64_DIGEST}" \
+        <<<"${toolathlon_labels}" || die "Toolathlon derived SIF base OCI digest mismatch"
+    grep -Fq "org.openreward.toolathlon.pbs-portability: ${TOOLATHLON_PORTABILITY_PATCH_SHA256}" \
+        <<<"${toolathlon_labels}" || die "Toolathlon derived SIF portability patch mismatch"
+elif [[ -n "${TOOLATHLON_OCI_AMD64_DIGEST}" ]]; then
     grep -Fq "org.label-schema.usage.singularity.deffile.from: ghcr.io/apga/toolathlon-gym@${TOOLATHLON_OCI_AMD64_DIGEST}" \
         <<<"${toolathlon_labels}" || die "Toolathlon SIF OCI digest mismatch"
 fi
 unset toolathlon_labels
+
+toolathlon_portable_env=()
+if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
+    [[ "${TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH}" == /opt/ms-playwright ]] || \
+        die "derived Toolathlon SIF requires PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright"
+    toolathlon_portable_env=(
+        PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+        UV_PYTHON_INSTALL_DIR=/opt/uv/python
+        UV_PYTHON_PREFERENCE=only-managed
+        UV_PYTHON_DOWNLOADS=never
+    )
+fi
 
 mkdir -p \
     "${LOCAL_ROOT}/images" \
@@ -300,10 +344,11 @@ echo "[node-services] starting Toolathlon host=$(hostname) port=${TOOLATHLON_POR
     env \
         HOME=/mnt/state/home \
         UV_CACHE_DIR=/mnt/state/cache/uv \
+        "${toolathlon_portable_env[@]}" \
         XDG_CACHE_HOME=/mnt/state/cache/xdg \
         TMPDIR=/mnt/state/tmp \
         VIRTUAL_ENV=/opt/venv \
-        PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        PATH=/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
         OPENREWARD_RUNTIME_MODE=user \
         OPENREWARD_STATE_DIR=/mnt/state \
         OPENREWARD_PGDATA="${pgdata_container}" \

@@ -1,0 +1,126 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=1:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=04:00:00
+#PBS -N rasp-ta-pbs-build
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Build the PBS-portable child SIF from one exact clean pre-release commit.
+# The final v8r3 tag cannot exist until it records the derived raw SIF hash, so
+# this deliberately accepts only an explicit commit-pinned checkout rather
+# than pretending the image and final manifest can be created simultaneously.
+
+set -euo pipefail
+umask 077
+
+die() {
+    echo "[toolathlon-pbs-build] ERROR: $*" >&2
+    exit 2
+}
+
+readonly REPO_ROOT=${PLATOON_TOOLATHLON_BUILD_INPUT_ROOT:-}
+readonly EXPECTED_COMMIT=${PLATOON_TOOLATHLON_BUILD_INPUT_COMMIT:-}
+readonly BASE_SIF=/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-c1e60b36.sif
+readonly BASE_SIF_SHA256=e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267
+readonly OUTPUT_DIR=/groups/gai51740/aci18912it/rasp/images
+readonly RUNTIME=/usr/bin/singularity
+readonly RUNTIME_SHA256=085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6
+readonly RUNTIME_VERSION=4.4.1-1.el9
+
+[[ -n "${PBS_JOBID:-}" && -d "${PBS_LOCALDIR:-}" ]] || die "PBS allocation is unavailable"
+[[ "${REPO_ROOT}" == /* && -d "${REPO_ROOT}/.git" || \
+    "${REPO_ROOT}" == /* && -f "${REPO_ROOT}/.git" ]] || \
+    die "PLATOON_TOOLATHLON_BUILD_INPUT_ROOT must name one exact Git checkout"
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
+    die "build input root must be a canonical non-symlink path"
+[[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || \
+    die "PLATOON_TOOLATHLON_BUILD_INPUT_COMMIT must be one full commit SHA"
+[[ "$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)" == "${EXPECTED_COMMIT}" ]] || \
+    die "build input HEAD differs from the explicit commit"
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || die "build input has tracked changes"
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || die "build input index is dirty"
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
+    die "build input has tracked or ordinary untracked changes"
+
+readonly BUILD_SCRIPT=${REPO_ROOT}/containers/build_toolathlon_pbs_portable_sif.sh
+readonly DEFINITION=${REPO_ROOT}/containers/toolathlon-pbs-portable.def
+readonly PATCHER=${REPO_ROOT}/containers/patch_toolathlon_pbs_portable.py
+readonly CATALOG_REPAIR=${REPO_ROOT}/containers/repair_toolathlon_snowflake_catalog.py
+readonly EMBEDDED_VERIFY=${REPO_ROOT}/containers/verify_toolathlon_pbs_portability.sh
+readonly IMAGE_PUBLISHER=${REPO_ROOT}/containers/publish_toolathlon_pbs_image.py
+readonly RECEIPT_PUBLISHER=${REPO_ROOT}/containers/publish_toolathlon_pbs_build_receipt.py
+for asset in \
+    "${BUILD_SCRIPT}" "${DEFINITION}" "${PATCHER}" "${CATALOG_REPAIR}" \
+    "${EMBEDDED_VERIFY}" "${IMAGE_PUBLISHER}" "${RECEIPT_PUBLISHER}"; do
+    [[ -r "${asset}" ]] || die "build asset is unreadable: ${asset}"
+done
+[[ -x "${BUILD_SCRIPT}" && -x "${PATCHER}" && -x "${CATALOG_REPAIR}" && \
+    -x "${EMBEDDED_VERIFY}" && -x "${IMAGE_PUBLISHER}" && \
+    -x "${RECEIPT_PUBLISHER}" ]] || die "build helpers are not executable"
+[[ -f "${BASE_SIF}" && ! -L "${BASE_SIF}" && \
+    "$(sha256sum "${BASE_SIF}" | awk '{print $1}')" == "${BASE_SIF_SHA256}" ]] || \
+    die "base Toolathlon SIF identity mismatch"
+
+source /etc/profile.d/modules.sh
+module load singularity-ce/4.4.1
+[[ -f "${RUNTIME}" && ! -L "${RUNTIME}" && \
+    ( "$(stat -c %u "${RUNTIME}")" == 0 || "$(stat -c %u "${RUNTIME}")" == 65534 ) && \
+    $((8#$(stat -c %a "${RUNTIME}") & 8#022)) -eq 0 && \
+    "$(sha256sum "${RUNTIME}" | awk '{print $1}')" == "${RUNTIME_SHA256}" && \
+    "$("${RUNTIME}" version)" == "${RUNTIME_VERSION}" ]] || \
+    die "canonical SingularityCE runtime identity mismatch"
+export PATH=/usr/bin:/bin
+
+for secret_name in \
+    WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL \
+    LITELLM_API_KEY LITELLM_BASE_URL RUBRIC_DEFAULT_LLM HF_TOKEN \
+    HUGGING_FACE_HUB_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    unset "${secret_name}"
+done
+unset secret_name
+
+export TMPDIR=${PBS_LOCALDIR}/toolathlon-pbs-portable-build
+export SINGULARITY_CACHEDIR=${TMPDIR}/singularity-cache
+export SINGULARITY_TMPDIR=${TMPDIR}/singularity-tmp
+export APPTAINER_CACHEDIR=${SINGULARITY_CACHEDIR}
+export APPTAINER_TMPDIR=${SINGULARITY_TMPDIR}
+mkdir -p "${TMPDIR}" "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+chmod 0700 "${TMPDIR}" "${SINGULARITY_CACHEDIR}" "${SINGULARITY_TMPDIR}"
+
+patch_identity=$(
+    for asset in \
+        toolathlon-pbs-portable.def \
+        patch_toolathlon_pbs_portable.py \
+        repair_toolathlon_snowflake_catalog.py \
+        verify_toolathlon_pbs_portability.sh; do
+        printf '%s  %s\n' \
+            "$(sha256sum "${REPO_ROOT}/containers/${asset}" | awk '{print $1}')" "${asset}"
+    done | sha256sum | awk '{print $1}'
+)
+[[ "${patch_identity}" =~ ^[0-9a-f]{64}$ ]] || die "portability patch identity is malformed"
+readonly OUTPUT_SIF=${OUTPUT_DIR}/openreward-toolathlon-18e62c0d-pbs-${patch_identity:0:12}.sif
+readonly BUILD_RECEIPT=${OUTPUT_DIR}/build-receipts/$(basename "${OUTPUT_SIF}").json
+[[ ! -e "${OUTPUT_SIF}" && ! -L "${OUTPUT_SIF}" && \
+    ! -e "${BUILD_RECEIPT}" && ! -L "${BUILD_RECEIPT}" ]] || \
+    die "refusing stale derived image or build receipt"
+
+echo "[toolathlon-pbs-build] building input_commit=${EXPECTED_COMMIT} patch=${patch_identity}"
+"${BUILD_SCRIPT}" "${BASE_SIF}" "${OUTPUT_DIR}"
+
+[[ -f "${OUTPUT_SIF}" && ! -L "${OUTPUT_SIF}" && \
+    "$(stat -c %u "${OUTPUT_SIF}")" == "$(id -u)" && \
+    "$(stat -c %a "${OUTPUT_SIF}")" == 550 ]] || \
+    die "derived SIF was not published as exact owner mode 0550 regular content"
+[[ -f "${BUILD_RECEIPT}" && ! -L "${BUILD_RECEIPT}" && \
+    "$(stat -c %u "${BUILD_RECEIPT}")" == "$(id -u)" && \
+    "$(stat -c %a "${BUILD_RECEIPT}")" == 400 ]] || \
+    die "derived SIF build receipt was not published as exact owner mode 0400 content"
+actual_sha=$(sha256sum "${OUTPUT_SIF}" | awk '{print $1}')
+[[ "${actual_sha}" =~ ^[0-9a-f]{64}$ ]] || die "derived SIF digest is malformed"
+
+echo "toolathlon_pbs_portable_build=PASS image=${OUTPUT_SIF} sha256=${actual_sha} receipt=${BUILD_RECEIPT}"

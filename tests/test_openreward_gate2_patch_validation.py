@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE2 = REPO_ROOT / "pbs-scripts/openreward-immutable-runtime-gate2.pbs"
+GATE2_V9 = REPO_ROOT / "pbs-scripts/openreward-immutable-runtime-gate2-v9.pbs"
 
 
 def test_gate2_uses_the_canonical_explicit_cluster_environment():
@@ -65,6 +66,61 @@ def test_gate2_archive_requires_v8_provenance_and_both_fresh_leaf_configs():
     assert "immutable source archive contains retired migration debris" in source
     assert r"[^/]+\.orig$" in source
     assert "cleanup_openreward_2132698_generation" in source
+
+
+def test_additive_v9_gate2_selects_future_overlay_without_replacing_v8_entrypoint():
+    source = GATE2.read_text()
+    wrapper = GATE2_V9.read_text()
+
+    assert "GATE2_RELEASE_FLAVOR=${OPENREWARD_GATE2_RELEASE_FLAVOR:-v8}" in source
+    assert "openreward_v8_release.py" in source
+    assert "verify_openreward_v9_release.py" in source
+    assert "GATE_ROOT_BASENAME=gate2-immutable-runtime-v9" in source
+    assert "publish_toolathlon_pbs_build_receipt.py" in source
+    assert 'TOOLATHLON_SIF_SHA256=$(sha256sum "${OPENREWARD_TOOLATHLON_SIF}"' in source
+    assert "--toolathlon-build-receipt-sha256" in source
+    assert "--toolathlon-portability-patch-sha256" in source
+    assert "gate2_immutable_runtime_v9_candidate=passed" in source
+    assert "publish_openreward_v9_gate2_result.py" in source
+    assert 'publish_openreward_v9_gate2_result.py" finalize' not in source
+    assert 'cat >"${GATE_ROOT}/RESULT" <<EOF' in source
+    assert "OPENREWARD_GATE2_RELEASE_FLAVOR=v9" in wrapper
+    assert "openreward-v9-abci.env" in wrapper
+    assert "openreward-immutable-runtime-gate2.pbs" in wrapper
+    assert "qsub" not in wrapper.lower()
+
+
+def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
+    source = GATE2.read_text()
+    adapter = (REPO_ROOT / "pbs-scripts/prepare_openreward_env.sh").read_text()
+
+    for asset in (
+        "openreward-v9-abci.env",
+        "openreward-v9-release.json",
+        "verify_openreward_v9_release.py",
+        "verify_toolathlon_all_mcp_health_result.py",
+        "verify_openreward_v9_gate2_result.py",
+    ):
+        assert asset in source
+        assert f'print "    pbs-scripts/{asset}"' in adapter
+    for config in (
+        "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v9.yaml",
+        "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v9.yaml",
+    ):
+        assert config in source
+    for host_only in (
+        "openreward-toolathlon-pbs-portable-build.pbs",
+        "openreward-toolathlon-all-mcp-health-v9.pbs",
+        "openreward-node-local-init.py",
+        "toolathlon_all_mcp_health.py",
+        "publish_toolathlon_all_mcp_health_result.py",
+        "publish_openreward_v9_gate2_result.py",
+        "publish_toolathlon_pbs_build_receipt.py",
+    ):
+        assert host_only in source
+    assert '"pbs-scripts/openreward-node-local-init.py",' in source
+    assert 'print "    pbs-scripts/publish_openreward_v9_gate2_result.py"' not in adapter
+    assert 'print "    pbs-scripts/openreward-node-local-init.py"' not in adapter
 
 
 def test_gate2_archives_and_imports_rollout_rpc_patch_entrypoint():
