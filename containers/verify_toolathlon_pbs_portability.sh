@@ -9,7 +9,7 @@ case "${VERIFY_MODE}" in
 esac
 
 EXPECTED_UV_SHA256=729d27dbea534ee540a2d3ef43a62fa1a10af7fcbb6d57a70d5859509f624578
-EXPECTED_UV_VERSION='uv 0.12.3'
+EXPECTED_UV_VERSION='uv 0.12.3 (x86_64-unknown-linux-gnu)'
 EXPECTED_SERVER_SHA256=f38415553a88d16a9b7327ce241c20eea1ef172ca9ae4fb9da797b8e06c76485
 EXPECTED_CATALOG_SHA256=a6bdfea0a5524ec8d198a0b2eb9b107aba89e308b50659a106abaff0002fd64d
 EXPECTED_SERVERS=25
@@ -25,9 +25,10 @@ HEADLESS_SHELL_EXECUTABLE=${PLAYWRIGHT_ROOT}/chromium_headless_shell-1182/chrome
 MANIFEST=/usr/local/share/openreward/toolathlon-pbs-portable.json
 PRODUCTION_PATH=/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 COMMAND_LIST=$(mktemp /tmp/toolathlon-pbs-portable-commands.XXXXXX)
+MANAGED_INTERPRETER_LIST=$(mktemp /tmp/toolathlon-pbs-portable-interpreters.XXXXXX)
 BROWSER_TMP=$(mktemp -d /tmp/toolathlon-playwright-probe.XXXXXX)
 cleanup() {
-    rm -f -- "${COMMAND_LIST}"
+    rm -f -- "${COMMAND_LIST}" "${MANAGED_INTERPRETER_LIST}"
     case "${BROWSER_TMP}" in
         /tmp/toolathlon-playwright-probe.*) rm -r -- "${BROWSER_TMP}" ;;
         *) printf 'refusing unexpected browser temp path: %s\n' "${BROWSER_TMP}" >&2 ;;
@@ -56,10 +57,12 @@ test "$(sha256sum /app/tool_schemas.json | cut -d ' ' -f 1)" = "${EXPECTED_CATAL
 test "$(sha256sum "${CHROMIUM_EXECUTABLE}" | cut -d ' ' -f 1)" = "${EXPECTED_CHROMIUM_SHA256}"
 test "$(sha256sum "${HEADLESS_SHELL_EXECUTABLE}" | cut -d ' ' -f 1)" = "${EXPECTED_HEADLESS_SHELL_SHA256}"
 
-python3 - "${MANIFEST}" "${COMMAND_LIST}" "${PRODUCTION_PATH}" <<'PY'
+python3 - "${MANIFEST}" "${COMMAND_LIST}" "${PRODUCTION_PATH}" \
+    "${MANAGED_INTERPRETER_LIST}" <<'PY'
 import json
 import hashlib
 import os
+import re
 import shutil
 import stat
 import sys
@@ -70,6 +73,7 @@ import yaml
 manifest = json.loads(Path(sys.argv[1]).read_text())
 command_list = Path(sys.argv[2])
 production_path = sys.argv[3]
+managed_interpreter_list = Path(sys.argv[4])
 expected = {
     "base_sif_sha256": "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267",
     "toolathlon_revision": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
@@ -206,6 +210,25 @@ def contains_root_reference(value: str) -> bool:
 # even when the well-known python aliases were repaired.  Audit every symlink,
 # executable shebang, and pyvenv.cfg in both runtime trees.
 runtime_errors = []
+portable_python = Path("/opt/uv/python")
+for ancestor in (portable_python, *portable_python.parents):
+    try:
+        value = ancestor.lstat()
+    except OSError as exc:
+        runtime_errors.append(f"cannot stat managed Python ancestor {ancestor}: {exc}")
+        continue
+    mode = stat.S_IMODE(value.st_mode)
+    if not stat.S_ISDIR(value.st_mode) or mode & 0o022 or mode & 0o005 != 0o005:
+        runtime_errors.append(
+            f"unsafe managed Python ancestor {ancestor}: mode={mode:04o}"
+        )
+if portable_python.parent.is_dir():
+    uv_parent_mode = stat.S_IMODE(portable_python.parent.lstat().st_mode)
+    if uv_parent_mode != 0o755:
+        runtime_errors.append(
+            f"portable uv parent must be mode 0755: {portable_python.parent} "
+            f"mode={uv_parent_mode:04o}"
+        )
 for tree in (
     Path("/opt/local_servers"),
     Path("/opt/venv"),
@@ -251,6 +274,50 @@ for tree in (
                     runtime_errors.append(f"root-backed executable shebang in {path}")
 if runtime_errors:
     raise SystemExit("\n".join(runtime_errors))
+
+
+def select_managed_python_interpreters(portable_python: Path) -> list[Path]:
+    """Select each real, versioned uv-managed Python ELF exactly once."""
+
+    try:
+        portable_root = portable_python.resolve(strict=True)
+    except OSError as exc:
+        raise SystemExit(f"cannot resolve managed Python root {portable_python}: {exc}") from exc
+    selected = []
+    selected_paths = set()
+    selected_inodes = set()
+    for candidate in sorted(portable_python.glob("*/bin/python*")):
+        # The managed distributions also contain executable python*-config
+        # shell scripts.  They are not interpreters and reject the -c probe.
+        if re.fullmatch(r"python[0-9]+\.[0-9]+", candidate.name) is None:
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(portable_root)
+            value = resolved.stat()
+            with resolved.open("rb") as stream:
+                magic = stream.read(4)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"invalid managed Python interpreter {candidate}: {exc}") from exc
+        if not stat.S_ISREG(value.st_mode) or value.st_mode & 0o111 == 0:
+            raise SystemExit(f"managed Python interpreter is not executable: {resolved}")
+        if magic != b"\x7fELF":
+            raise SystemExit(f"managed Python interpreter is not an ELF binary: {resolved}")
+        inode = (value.st_dev, value.st_ino)
+        if resolved in selected_paths or inode in selected_inodes:
+            continue
+        selected.append(resolved)
+        selected_paths.add(resolved)
+        selected_inodes.add(inode)
+    if not selected:
+        raise SystemExit("no directly executable uv-managed Python ELF interpreters found")
+    return sorted(selected)
+
+
+managed_interpreters = select_managed_python_interpreters(portable_python)
+managed_interpreter_list.write_text(
+    "\n".join(str(interpreter) for interpreter in managed_interpreters) + "\n"
+)
 
 
 def executable_by_uid(path: Path, uid: int = 65534, gid: int = 65534) -> bool:
@@ -387,10 +454,19 @@ if command -v setpriv >/dev/null 2>&1 && [[ $(id -u) -eq 0 ]]; then
             "${interpreter}" -c 'import sys; assert sys.version_info >= (3, 10)' \
             >/dev/null
     done < <(find /opt/local_servers -path '*/.venv/bin/python' \( -type f -o -type l \) -print | sort)
+    while IFS= read -r interpreter; do
+        setpriv --reuid=65534 --regid=65534 --clear-groups \
+            "${interpreter}" -c 'import sys; assert sys.version_info >= (3, 10)' \
+            >/dev/null
+    done < "${MANAGED_INTERPRETER_LIST}"
 else
     while IFS= read -r executable; do
         test -x "${executable}"
     done < "${COMMAND_LIST}"
+    while IFS= read -r interpreter; do
+        "${interpreter}" -c 'import sys; assert sys.version_info >= (3, 10)' \
+            >/dev/null
+    done < "${MANAGED_INTERPRETER_LIST}"
 fi
 
 # Launch a real local page through the exact pinned Playwright runtime.  This

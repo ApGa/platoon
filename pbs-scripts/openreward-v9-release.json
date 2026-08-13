@@ -75,7 +75,7 @@
       "chromium_sandbox": "disabled_for_unprivileged_singularity",
       "rootless_launch": "passed"
     },
-    "pbs_portability_patch_sha256": "80d78d63036972eab73efcdca93cb89c9f1bb8674d1bf22992c7ec6b262ed927"
+    "pbs_portability_patch_sha256": "5c59374cceada9c3947f23a305323e73fe954a67b6763c8ee0fb7502d0975071"
   },
   "swe_runtime": {
     "swe_revision": "538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7",

@@ -9,7 +9,9 @@ import importlib.util
 import json
 import os
 import py_compile
+import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +31,18 @@ def load_module(name: str, path: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_verifier_python_function(name: str):
+    source = (CONTAINERS / "verify_toolathlon_pbs_portability.sh").read_text()
+    embedded = source.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    tree = ast.parse(embedded)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    module = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"Path": Path, "re": re, "stat": stat}
+    exec(compile(module, "<portable-verifier-function>", "exec"), namespace)
+    return namespace[name]
 
 
 PATCH = load_module(
@@ -78,6 +92,9 @@ def test_patch_repair_chain_seals_complete_manifest(tmp_path: Path, monkeypatch:
     managed.parent.mkdir(parents=True)
     managed.write_text("#!/bin/sh\nexit 0\n")
     managed.chmod(0o755)
+    portable_uv_parent = root / "opt/uv"
+    portable_uv_parent.mkdir(parents=True)
+    portable_uv_parent.chmod(0o750)
     venv = root / "opt/local_servers/fixture/.venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin/python").symlink_to("/root/.local/share/uv/python/cpython-3.11-linux-x86_64-gnu/bin/python3.11")
@@ -111,6 +128,7 @@ def test_patch_repair_chain_seals_complete_manifest(tmp_path: Path, monkeypatch:
     )
     monkeypatch.setattr(PATCH, "PLAYWRIGHT_HEADLESS_SHELL_SHA256", digest(browser_source))
     PATCH.install_portable_uv(root, digest(uv))
+    assert portable_uv_parent.stat().st_mode & 0o777 == 0o755
     playwright_stats = PATCH.install_portable_playwright(root, browser_identity["tree_sha256"])
     PATCH.patch_playwright_config(root, PATCH.BASE_PLAYWRIGHT_CONFIG_SHA256)
     stats = PATCH.rewrite_mcp_venvs(root)
@@ -606,6 +624,14 @@ def test_build_scripts_reference_exact_existing_asset_names() -> None:
 
 def test_embedded_verifier_covers_every_portable_runtime_tree() -> None:
     verifier = (CONTAINERS / "verify_toolathlon_pbs_portability.sh").read_text()
+    assert "EXPECTED_UV_VERSION='uv 0.12.3 (x86_64-unknown-linux-gnu)'" in verifier
+    assert 'test "$(uv --version)" = "${EXPECTED_UV_VERSION}"' in verifier
+    assert 'portable_python = Path("/opt/uv/python")' in verifier
+    assert "portable uv parent must be mode 0755" in verifier
+    assert 're.fullmatch(r"python[0-9]+\\.[0-9]+", candidate.name)' in verifier
+    assert 'magic != b"\\x7fELF"' in verifier
+    assert 'done < "${MANAGED_INTERPRETER_LIST}"' in verifier
+    assert "setpriv --reuid=65534 --regid=65534 --clear-groups" in verifier
     for runtime_tree in ("/opt/local_servers", "/opt/venv", "/opt/uv/python", "/opt/ms-playwright"):
         assert f'Path("{runtime_tree}")' in verifier
     assert "root-backed runtime symlink" in verifier
@@ -616,6 +642,45 @@ def test_embedded_verifier_covers_every_portable_runtime_tree() -> None:
     assert 'playwright_args.count("--no-sandbox") != 1' in verifier
     assert "toolathlon_playwright_rootless_launch=ok" in verifier
     assert "executablePath: selected" in verifier
+
+
+def test_managed_interpreter_selector_matches_exact_uv_root_shape(tmp_path: Path) -> None:
+    portable_python = tmp_path / "opt/uv/python"
+    expected = []
+    for version in ("3.11", "3.13"):
+        exact = portable_python / f"cpython-{version}.15-linux-x86_64-gnu"
+        binary = exact / f"bin/python{version}"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELFfixture")
+        binary.chmod(0o755)
+        config = binary.with_name(f"python{version}-config")
+        config.write_text("#!/bin/sh\nexit 1\n")
+        config.chmod(0o755)
+        (binary.parent / "python").symlink_to(binary.name)
+        (binary.parent / "python3").symlink_to(binary.name)
+        (binary.parent / "python3-config").symlink_to(config.name)
+        alias = portable_python / f"cpython-{version}-linux-x86_64-gnu"
+        alias.symlink_to(exact.name, target_is_directory=True)
+        expected.append(binary.resolve())
+
+    select = load_verifier_python_function("select_managed_python_interpreters")
+    selected = select(portable_python)
+
+    assert selected == expected
+    assert len({(path.stat().st_dev, path.stat().st_ino) for path in selected}) == 2
+    assert all(not path.name.endswith("-config") for path in selected)
+
+
+def test_managed_interpreter_selector_rejects_config_only_tree(tmp_path: Path) -> None:
+    portable_python = tmp_path / "opt/uv/python"
+    config = portable_python / "cpython-3.11.15-linux-x86_64-gnu/bin/python3.11-config"
+    config.parent.mkdir(parents=True)
+    config.write_text("#!/bin/sh\nexit 1\n")
+    config.chmod(0o755)
+
+    select = load_verifier_python_function("select_managed_python_interpreters")
+    with pytest.raises(SystemExit, match="no directly executable uv-managed Python ELF"):
+        select(portable_python)
 
 
 def test_playwright_tree_identity_detects_content_and_logical_path_drift(tmp_path: Path) -> None:

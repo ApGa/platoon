@@ -122,7 +122,7 @@ def test_v9_launch_path_uses_derived_labels_without_weakening_v8_validation() ->
     assert "OPENREWARD_TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" in overlay
     assert (
         "OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256="
-        "80d78d63036972eab73efcdca93cb89c9f1bb8674d1bf22992c7ec6b262ed927"
+        "5c59374cceada9c3947f23a305323e73fe954a67b6763c8ee0fb7502d0975071"
     ) in overlay
     for relative in (
         "openreward-ta-swe-prealloc-common.sh",

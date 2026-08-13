@@ -196,6 +196,10 @@ def install_portable_uv(root: Path, expected_uv_sha256: str) -> None:
     shutil.copy2(source_uv, target_uv)
     target_uv.chmod(0o755)
     target_python.parent.mkdir(parents=True, exist_ok=True)
+    # The base image's umask can create /opt/uv as 0750.  The managed Python
+    # payload may itself be world-traversable, but every rewritten MCP venv
+    # still fails for the unprivileged container uid if this parent is not.
+    target_python.parent.chmod(0o755)
     shutil.copytree(source_python, target_python, symlinks=True)
     make_world_readable(target_python)
 

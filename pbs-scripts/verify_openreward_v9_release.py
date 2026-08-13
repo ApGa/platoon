@@ -15,7 +15,7 @@ from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0")
 RELEASE_REF = "refs/tags/abci-v8r3-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "c0d6eb87c4127387b05948f6fcf10a28dd1a3fa9aa2f7f4a2b167236b2050874"
+MANIFEST_SHA256 = "d5361eabcf9a8cb0091d92b79f8c76703a39bcec45eb1bfbc6dca70bed9dea94"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 COMPONENTS = {
     "platoon_upstream": UPSTREAM_COMMIT,
