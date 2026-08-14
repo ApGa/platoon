@@ -116,9 +116,13 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
         "publish_toolathlon_all_mcp_health_result.py",
         "publish_openreward_v9_gate2_result.py",
         "publish_toolathlon_pbs_build_receipt.py",
+        "launch_toolathlon_python_mcp.py",
+        "probe_toolathlon_python_mcp_launchers.py",
     ):
         assert host_only in source
     assert '"pbs-scripts/openreward-node-local-init.py",' in source
+    assert '"containers/launch_toolathlon_python_mcp.py",' in source
+    assert '"containers/probe_toolathlon_python_mcp_launchers.py",' in source
     assert 'print "    pbs-scripts/publish_openreward_v9_gate2_result.py"' not in adapter
     assert 'print "    pbs-scripts/openreward-node-local-init.py"' not in adapter
 

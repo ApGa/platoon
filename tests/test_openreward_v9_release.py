@@ -18,20 +18,24 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
-EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif"
-EXPECTED_IMAGE_SHA256 = "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r4-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r4-376d1b9-18e62c0"
+EXPECTED_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
+EXPECTED_PATCH_IDENTITY = "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b"
+EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
+EXPECTED_IMAGE_SHA256 = "11d158f7c1a76486f1338f8cf90ce8a0280962792c0e5c95559f19cc391cda14"
 EXPECTED_RECEIPT_PATH = (
-    "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif.json"
+    "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif.json"
 )
-EXPECTED_RECEIPT_SHA256 = "e6de71ec50b59107e42e1ab6e40f8c387737941029d0b2373ae7dfe50924df78"
+EXPECTED_RECEIPT_SHA256 = "37286eeb005f83e3b9133ceb8204b12d93220ac02cc033118e98c5f314908598"
 
 
 def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text())
 
     assert manifest["schema_version"] == 1
-    assert manifest["release_root"] == ("/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0")
-    assert manifest["release_ref"] == "refs/tags/abci-v8r3-376d1b9-18e62c0"
+    assert manifest["release_root"] == EXPECTED_RELEASE_ROOT
+    assert manifest["release_ref"] == EXPECTED_RELEASE_REF
     assert manifest["components"]["toolathlon"] == ("18e62c0d0419da88209af911528f2f8a0b44a5ed")
     assert manifest["upstream_refresh"]["fetched_at_utc"] == "2026-08-13T16:38:39Z"
     assert {name: value["sha"] for name, value in manifest["upstream_refresh"].items() if name != "fetched_at_utc"} == {
@@ -83,6 +87,8 @@ def test_v9_release_binds_ready_repaired_image_and_build_receipt() -> None:
     assert derivation["status"] == "ready"
     assert derivation["build_receipt_path"] == EXPECTED_RECEIPT_PATH
     assert derivation["build_receipt_sha256"] == EXPECTED_RECEIPT_SHA256
+    assert derivation["build_commit"] == EXPECTED_BUILD_COMMIT
+    assert derivation["pbs_portability_patch_sha256"] == EXPECTED_PATCH_IDENTITY
     assert "PENDING" not in json.dumps(manifest)
     assert f"OPENREWARD_TOOLATHLON_SIF={image['path']}" in overlay
     assert f"OPENREWARD_TOOLATHLON_SIF_SHA256={image['sha256']}" in overlay
@@ -98,24 +104,24 @@ def test_v9_release_binds_ready_repaired_image_and_build_receipt() -> None:
     assert provenance["status"] == "passed"
     assert provenance["authorization_scope"] == "image_artifact_only"
     assert provenance["pbs_accounting_attested"] is False
-    assert provenance["completed_at_epoch"] == 1786652030
+    assert provenance["completed_at_epoch"] == 1786678639
     assert provenance["derived_image"] == {
         "path": EXPECTED_IMAGE_PATH,
         "sha256": EXPECTED_IMAGE_SHA256,
-        "size": 1645879296,
+        "size": 1645539328,
         "device": 1214686570,
-        "inode": 414331875713126724,
+        "inode": 414331859103761933,
         "mode": 0o550,
         "uid": 18912,
     }
     assert provenance["build_tooling"] == {
         "builder": {
             "name": "build_toolathlon_pbs_portable_sif.sh",
-            "sha256": "e258f96f68188956a71e021bb307fa72abe5f960bf6e934a5653e07b9bc0e3e4",
+            "sha256": "04839fcb4fcae72ad065de2b8863a0f494efc681cb71403e67b28e390780e70b",
         },
         "publisher": {
             "name": "publish_toolathlon_pbs_build_receipt.py",
-            "sha256": "d601f7ec34f87ffc9e4952314ca7b33a70d72c84d36af281d6a1c5d23d95680b",
+            "sha256": "07a60a958948ae672aa708e4eb291a3f82746035463573216df2736aec9e0870",
         },
         "image_publisher": {
             "name": "publish_toolathlon_pbs_image.py",
@@ -129,22 +135,37 @@ def test_v9_release_binds_ready_repaired_image_and_build_receipt() -> None:
     }
     assert provenance["embedded"] == {
         "manifest_path": "/usr/local/share/openreward/toolathlon-pbs-portable.json",
-        "manifest_sha256": "134889cef74d6d80a53ea156fde72d3c89605a9b4c2822742a31b805e6672f4c",
+        "manifest_sha256": "a1cfac5ea288af21c42c3c13de3ab6e21eae7a46b25c9070347e3ddad5e39c2d",
         "assets": {
-            "patch_toolathlon_pbs_portable.py": ("0fceb3bb968ed43d413cd648a4d23666f9e770ea3944ef659e1e1c275253b9da"),
+            "launch_toolathlon_python_mcp.py": ("409c978c81ad5f8e89c6454878a1075820f936ac4a9014b141b526fdeefbfd00"),
+            "patch_toolathlon_pbs_portable.py": ("7c7caa3f7fa59807c111476bc61f1d2e40281e015d0bc326dab7cc3b92bc5421"),
+            "probe_toolathlon_python_mcp_launchers.py": (
+                "cf23c165adfc5d19c1d6a40117e0c257ecf519102140b053854af97f87534d65"
+            ),
             "repair_toolathlon_snowflake_catalog.py": (
                 "97be7bb955c04967bb5a54f4ffdf42bd5c00d5216314dd7938ad9ac3a5c6ab6a"
             ),
             "verify_toolathlon_pbs_portability.sh": (
-                "481b5eb243cc6293b52e639008fa4b9ef036834e8d903c13939040cebaed7713"
+                "818c9cd4ecd965295b0370ffe4a60695da4ffea678ea51a49cbf1e2b5048e14e"
             ),
         },
         "verify": "passed",
     }
-    assert provenance["labels"]["org.label-schema.usage.singularity.deffile.from"].startswith("/local/2136556.pbs1/")
-    assert provenance["labels"]["org.openreward.toolathlon.pbs-portability"] == (
-        "2e651c3e2ee52d6e0e2d4d5981262157df0387647a9e3200792327540fff29a6"
+    assert provenance["labels"]["org.label-schema.usage.singularity.deffile.from"].startswith("/local/2137418.pbs1/")
+    assert provenance["labels"]["org.openreward.toolathlon.pbs-portability"] == EXPECTED_PATCH_IDENTITY
+    python_mcp = derivation["python_mcp"]
+    assert python_mcp["policy"] == "baked_venv_no_uv"
+    assert python_mcp["audited_python_server_count"] == 13
+    assert python_mcp["rewritten_uv_config_count"] == 12
+    assert python_mcp["wrapper_sha256"] == provenance["embedded"]["assets"]["launch_toolathlon_python_mcp.py"]
+    assert python_mcp["probe_sha256"] == provenance["embedded"]["assets"]["probe_toolathlon_python_mcp_launchers.py"]
+    assert (
+        python_mcp["unprivileged_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation"]
+        == "passed"
     )
+    snowflake = python_mcp["snowflake_mcp_runtime"]
+    assert snowflake["installed_mcp_version"] == "1.26.0"
+    assert snowflake["installed_closure_sha256"] == ("b618e4359067acb69893820bae6a970c4d8a3714d77550c972346f6120497bc5")
     assert "set(receipt) != RECEIPT_KEYS" in verifier
     assert "receipt_provenance != provenance" in verifier
     assert "v9 Toolathlon build tooling identity mismatch" in verifier
@@ -157,8 +178,9 @@ def test_v9_verifier_binds_exact_manifest_tag_externals_and_swe_contract() -> No
     match = re.search(r'^MANIFEST_SHA256 = "([0-9a-f]{64})"$', source, re.MULTILINE)
 
     assert match is not None and match.group(1) == digest
-    assert 'RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0")' in source
-    assert 'RELEASE_REF = "refs/tags/abci-v8r3-376d1b9-18e62c0"' in source
+    assert f'RELEASE_ROOT = Path("{EXPECTED_RELEASE_ROOT}")' in source
+    assert f'RELEASE_REF = "{EXPECTED_RELEASE_REF}"' in source
+    assert f'TOOLATHLON_BUILD_COMMIT = "{EXPECTED_BUILD_COMMIT}"' in source
     assert '"status", "--porcelain=v1", "--untracked-files=all"' in source
     assert "release HEAD does not match its pinned tag" in source
     assert "materialized external revision mismatch" in source
@@ -212,10 +234,7 @@ def test_v9_launch_path_uses_derived_labels_without_weakening_v8_validation() ->
     assert f"OPENREWARD_TOOLATHLON_BASE_SIF_SHA256={base_sha}" in overlay
     assert "PLATOON_CONTAINER_RUNTIME=/usr/bin/singularity" in overlay
     assert "OPENREWARD_TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" in overlay
-    assert (
-        "OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256="
-        "2e651c3e2ee52d6e0e2d4d5981262157df0387647a9e3200792327540fff29a6"
-    ) in overlay
+    assert f"OPENREWARD_TOOLATHLON_PORTABILITY_PATCH_SHA256={EXPECTED_PATCH_IDENTITY}" in overlay
     for relative in (
         "openreward-ta-swe-prealloc-common.sh",
         "openreward-node-services.sh",

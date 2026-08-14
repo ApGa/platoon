@@ -12,7 +12,7 @@
 
 # Additive v9 entrypoint for the shared immutable-runtime Gate2 implementation.
 # The old v8r2 entrypoint and its completed evidence remain independent.  This
-# selects the canonical v8r3 overlay and requires the Gate2 implementation to
+# selects the canonical v8r4 overlay and requires the Gate2 implementation to
 # attest the repaired Toolathlon SIF/build receipt as well as cold/warm worker
 # and host-controller environments from the exact v9 source archive.
 # After PBS reaches terminal success, publish the only acceptable RESULT with:
@@ -22,12 +22,12 @@
 set -euo pipefail
 umask 077
 
-readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r4-376d1b9-18e62c0
 readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 readonly GATE2=${REPO_ROOT}/pbs-scripts/openreward-immutable-runtime-gate2.pbs
 
 [[ -r "${ABCI_ENV}" && -x "${GATE2}" ]] || {
-    echo "[gate2-v9] ERROR: immutable v8r3 Gate2 assets are incomplete" >&2
+    echo "[gate2-v9] ERROR: immutable v8r4 Gate2 assets are incomplete" >&2
     exit 2
 }
 

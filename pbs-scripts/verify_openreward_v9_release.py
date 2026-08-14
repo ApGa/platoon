@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r3/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r4/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,26 +14,30 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r3-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r4-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r4-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "a1a8bf7ce11f66fbd5569a77982e357a8434f65515e00fa7557566d0242e4719"
+MANIFEST_SHA256 = "94c6c9bb8f28c3391c564708b4fb56158344a70f8f28b09a725d7e496b61b3e7"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
+TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
-    "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif"
+    "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
 )
-TOOLATHLON_IMAGE_SHA256 = "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9"
+TOOLATHLON_IMAGE_SHA256 = "11d158f7c1a76486f1338f8cf90ce8a0280962792c0e5c95559f19cc391cda14"
 TOOLATHLON_RECEIPT_PATH = Path(
-    "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif.json"
+    "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif.json"
 )
-TOOLATHLON_RECEIPT_SHA256 = "e6de71ec50b59107e42e1ab6e40f8c387737941029d0b2373ae7dfe50924df78"
+TOOLATHLON_RECEIPT_SHA256 = "37286eeb005f83e3b9133ceb8204b12d93220ac02cc033118e98c5f314908598"
 TOOLATHLON_BASE_PATH = Path("/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-c1e60b36.sif")
 TOOLATHLON_BASE_SHA256 = "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267"
 TOOLATHLON_BASE_OCI = "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd"
+TOOLATHLON_PATCHED_SERVER_SHA256 = "26f58c49d42975616c5bef19b654cc4483e665b2107533000861cecbcd74c8a5"
 PATCH_ASSETS = (
     "toolathlon-pbs-portable.def",
     "patch_toolathlon_pbs_portable.py",
     "repair_toolathlon_snowflake_catalog.py",
+    "launch_toolathlon_python_mcp.py",
+    "probe_toolathlon_python_mcp_launchers.py",
     "verify_toolathlon_pbs_portability.sh",
 )
 RECEIPT_KEYS = {
@@ -60,6 +64,7 @@ EMBEDDED_RECEIPT_KEYS = {
     "manifest_sha256",
     "patched_server_sha256",
     "playwright",
+    "python_mcp",
     "repaired_tool_schemas_sha256",
     "verify",
 }
@@ -163,6 +168,44 @@ def _require_ancestor(root: Path, older: str, newer: str) -> None:
         raise RuntimeError(f"release ancestry check failed: {older} is not an ancestor of {newer}")
 
 
+def _require_python_mcp_identity(value: object, assets: dict[str, object]) -> None:
+    if not isinstance(value, dict):
+        raise RuntimeError("v9 Toolathlon Python MCP provenance is missing")
+    expected = {
+        "audited_python_server_count": 13,
+        "rewritten_uv_config_count": 12,
+        "policy": "baked_venv_no_uv",
+        "base_config_set_sha256": "ed8f303ce1bebf763f45bc838e58e68477bb4cded54bcb455471782705dc9511",
+        "patched_config_set_sha256": "0be2dc5984be8280f5ba5e6d781dad56e765a62f72fb9ebd791f51dcc80b1d60",
+        "launcher_mapping_sha256": "23497715f4e3388420e1842558e4017cad3aec62fdf8662e294d4480b19412cc",
+        "wrapper_path": "/usr/local/libexec/openreward/launch_toolathlon_python_mcp.py",
+        "wrapper_sha256": assets.get("launch_toolathlon_python_mcp.py"),
+        "probe_path": "/usr/local/libexec/openreward/probe_toolathlon_python_mcp_launchers.py",
+        "probe_sha256": assets.get("probe_toolathlon_python_mcp_launchers.py"),
+        "rootless_probe_policy": (
+            "cleanenv_no_home_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation"
+        ),
+        "unprivileged_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation": "passed",
+    }
+    if any(value.get(key) != expected_value for key, expected_value in expected.items()):
+        raise RuntimeError("v9 Toolathlon Python MCP launch provenance mismatch")
+    snowflake = value.get("snowflake_mcp_runtime")
+    project = snowflake.get("project_metadata") if isinstance(snowflake, dict) else None
+    if (
+        not isinstance(snowflake, dict)
+        or snowflake.get("policy") != "exact_in_place_record_repaired_ten_tree_replacement"
+        or snowflake.get("installed_mcp_version") != "1.26.0"
+        or snowflake.get("donor_closure_sha256") != "e7b1bf8895eec6e95d738b68a53cd4f0eaad9672284c9cdbe5ec3613399c2eec"
+        or snowflake.get("installed_closure_sha256")
+        != "b618e4359067acb69893820bae6a970c4d8a3714d77550c972346f6120497bc5"
+        or not isinstance(project, dict)
+        or project.get("patched_pyproject_sha256") != "8d8ed2e26ffe2621403a640fff0d598a35a78dbb06da2867e0bcf6ae80df2743"
+        or project.get("patched_lock_sha256") != "2945a5f989fd610b8a31017cd29c41cd3a662e5267f1f17d4871afb7f1ace81c"
+        or project.get("offline_uv_lock_check") != "passed"
+    ):
+        raise RuntimeError("v9 Toolathlon Snowflake MCP runtime provenance mismatch")
+
+
 def _require_final_image_identity(root: Path, manifest: dict[str, object]) -> None:
     image = manifest.get("toolathlon_image")
     derivation = manifest.get("toolathlon_image_derivation")
@@ -189,6 +232,8 @@ def _require_final_image_identity(root: Path, manifest: dict[str, object]) -> No
         raise RuntimeError("v9 Toolathlon image manifest identity mismatch")
     if derivation.get("playwright") != PLAYWRIGHT_IDENTITY:
         raise RuntimeError("v9 Toolathlon Playwright provenance mismatch")
+    if derivation.get("build_commit") != TOOLATHLON_BUILD_COMMIT:
+        raise RuntimeError("v9 Toolathlon build commit provenance mismatch")
 
     receipt_path = derivation.get("build_receipt_path")
     receipt_sha256 = derivation.get("build_receipt_sha256")
@@ -258,10 +303,12 @@ def _require_final_image_identity(root: Path, manifest: dict[str, object]) -> No
         receipt.get("toolathlon_source_revision") != COMPONENTS["toolathlon"]
         or receipt.get("portability_patch_sha256") != derivation.get("pbs_portability_patch_sha256")
         or embedded.get("base_server_sha256") != derivation.get("base_server_sha256")
-        or embedded.get("patched_server_sha256") != derivation.get("patched_server_sha256")
+        or embedded.get("patched_server_sha256") != TOOLATHLON_PATCHED_SERVER_SHA256
+        or derivation.get("patched_server_sha256") != TOOLATHLON_PATCHED_SERVER_SHA256
         or embedded.get("base_tool_schemas_sha256") != derivation.get("base_tool_schemas_sha256")
         or embedded.get("repaired_tool_schemas_sha256") != derivation.get("repaired_tool_schemas_sha256")
         or embedded.get("playwright") != PLAYWRIGHT_IDENTITY
+        or embedded.get("python_mcp") != derivation.get("python_mcp")
     ):
         raise RuntimeError("v9 Toolathlon build receipt derivation mismatch")
 
@@ -276,6 +323,7 @@ def _require_final_image_identity(root: Path, manifest: dict[str, object]) -> No
         name: assets[name] for name in PATCH_ASSETS if name != "toolathlon-pbs-portable.def"
     }:
         raise RuntimeError("v9 Toolathlon embedded asset identities mismatch")
+    _require_python_mcp_identity(embedded.get("python_mcp"), assets)
 
     tooling = receipt.get("build_tooling")
     expected_tooling_paths = {
@@ -345,6 +393,7 @@ def verify(root: Path) -> None:
     if head != release_commit:
         raise RuntimeError("release HEAD does not match its pinned tag")
     _require_ancestor(root, UPSTREAM_COMMIT, head)
+    _require_ancestor(root, TOOLATHLON_BUILD_COMMIT, head)
     if _git(root, "status", "--porcelain=v1", "--untracked-files=all"):
         raise RuntimeError("release checkout has tracked or ordinary untracked changes")
     tracked = _git(root, "ls-files").splitlines()
@@ -365,7 +414,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r3.  The
+    # The SWE dependency closure did not change between v8r2 and v8r4.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

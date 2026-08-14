@@ -123,7 +123,7 @@ EXPECTED_BASE_OCI = "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead866
 EXPECTED_BASE_SIF_SHA256 = "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267"
 EXPECTED_BASE_SIF_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-c1e60b36.sif"
 EXPECTED_BASE_SERVER_SHA256 = "719ec82fb3efada36c01115df3f636f7311b40778ba7c52103d1e6950800152e"
-EXPECTED_PATCHED_SERVER_SHA256 = "f38415553a88d16a9b7327ce241c20eea1ef172ca9ae4fb9da797b8e06c76485"
+EXPECTED_PATCHED_SERVER_SHA256 = "26f58c49d42975616c5bef19b654cc4483e665b2107533000861cecbcd74c8a5"
 EXPECTED_BASE_CATALOG_SHA256 = "48c56aabcf85833c53a967b1927bdf8a3e96c600983e9aa4f830ed99ab48f057"
 EXPECTED_REPAIRED_CATALOG_SHA256 = "a6bdfea0a5524ec8d198a0b2eb9b107aba89e308b50659a106abaff0002fd64d"
 EXPECTED_PLAYWRIGHT_BROWSER_TREE_SHA256 = "84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5"
@@ -135,6 +135,8 @@ PATCH_ASSETS = (
     "toolathlon-pbs-portable.def",
     "patch_toolathlon_pbs_portable.py",
     "repair_toolathlon_snowflake_catalog.py",
+    "launch_toolathlon_python_mcp.py",
+    "probe_toolathlon_python_mcp_launchers.py",
     "verify_toolathlon_pbs_portability.sh",
 )
 GATE2_FIELDS = {

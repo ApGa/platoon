@@ -20,8 +20,8 @@ def test_all_mcp_wrapper_uses_one_node_exact_future_release_and_no_submission() 
     subprocess.run(["bash", "-n", str(WRAPPER)], check=True)
     assert "#PBS -l select=1:mpiprocs=8" in source
     assert "#PBS -l walltime=02:00:00" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0" in source
-    assert "RELEASE_REF=refs/tags/abci-v8r3-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r4-376d1b9-18e62c0" in source
+    assert "RELEASE_REF=refs/tags/abci-v8r4-376d1b9-18e62c0" in source
     assert "openreward-v9-abci.env" in source
     assert "verify_openreward_v9_release.py" in source
     assert '"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"' in source

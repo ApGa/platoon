@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r3-376d1b9-18e62c0",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0",
+  "release_ref": "refs/tags/abci-v8r4-376d1b9-18e62c0",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r4-376d1b9-18e62c0",
   "components": {
     "platoon_upstream": "376d1b9885ea40464766fb3fea74815c6a698fbf",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -41,49 +41,51 @@
     }
   },
   "toolathlon_image": {
-    "path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif",
-    "sha256": "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9",
+    "path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif",
+    "sha256": "11d158f7c1a76486f1338f8cf90ce8a0280962792c0e5c95559f19cc391cda14",
     "oci_index_digest": "sha256:494af57e8a0f158d668982bf985b5937e73ba58eb468715f884de03550bd677c",
     "oci_amd64_digest": "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd"
   },
   "toolathlon_image_derivation": {
     "status": "ready",
-    "build_receipt_path": "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif.json",
-    "build_receipt_sha256": "e6de71ec50b59107e42e1ab6e40f8c387737941029d0b2373ae7dfe50924df78",
+    "build_receipt_path": "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif.json",
+    "build_receipt_sha256": "37286eeb005f83e3b9133ceb8204b12d93220ac02cc033118e98c5f314908598",
     "build_receipt_provenance": {
       "schema_version": 1,
       "gate": "toolathlon_pbs_portable_build",
       "status": "passed",
       "authorization_scope": "image_artifact_only",
       "pbs_accounting_attested": false,
-      "completed_at_epoch": 1786652030,
+      "completed_at_epoch": 1786678639,
       "derived_image": {
-        "path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif",
-        "sha256": "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9",
-        "size": 1645879296,
         "device": 1214686570,
-        "inode": 414331875713126724,
+        "inode": 414331859103761933,
         "mode": 360,
+        "path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif",
+        "sha256": "11d158f7c1a76486f1338f8cf90ce8a0280962792c0e5c95559f19cc391cda14",
+        "size": 1645539328,
         "uid": 18912
       },
       "patch_assets": {
-        "patch_toolathlon_pbs_portable.py": "0fceb3bb968ed43d413cd648a4d23666f9e770ea3944ef659e1e1c275253b9da",
+        "launch_toolathlon_python_mcp.py": "409c978c81ad5f8e89c6454878a1075820f936ac4a9014b141b526fdeefbfd00",
+        "patch_toolathlon_pbs_portable.py": "7c7caa3f7fa59807c111476bc61f1d2e40281e015d0bc326dab7cc3b92bc5421",
+        "probe_toolathlon_python_mcp_launchers.py": "cf23c165adfc5d19c1d6a40117e0c257ecf519102140b053854af97f87534d65",
         "repair_toolathlon_snowflake_catalog.py": "97be7bb955c04967bb5a54f4ffdf42bd5c00d5216314dd7938ad9ac3a5c6ab6a",
-        "toolathlon-pbs-portable.def": "01abe86ba6286128b155c41e77e31af82e0cf813c346c54545418cd8f051d643",
-        "verify_toolathlon_pbs_portability.sh": "481b5eb243cc6293b52e639008fa4b9ef036834e8d903c13939040cebaed7713"
+        "toolathlon-pbs-portable.def": "185d269919fd8cb540ee55105958bf67b794417893ccd19352ff6274dd21483a",
+        "verify_toolathlon_pbs_portability.sh": "818c9cd4ecd965295b0370ffe4a60695da4ffea678ea51a49cbf1e2b5048e14e"
       },
       "build_tooling": {
         "builder": {
           "name": "build_toolathlon_pbs_portable_sif.sh",
-          "sha256": "e258f96f68188956a71e021bb307fa72abe5f960bf6e934a5653e07b9bc0e3e4"
-        },
-        "publisher": {
-          "name": "publish_toolathlon_pbs_build_receipt.py",
-          "sha256": "d601f7ec34f87ffc9e4952314ca7b33a70d72c84d36af281d6a1c5d23d95680b"
+          "sha256": "04839fcb4fcae72ad065de2b8863a0f494efc681cb71403e67b28e390780e70b"
         },
         "image_publisher": {
           "name": "publish_toolathlon_pbs_image.py",
           "sha256": "d5ae5d34b2192c3d7f232c0f535bb4833fc277ef9ae265b82070f0f3abaf457d"
+        },
+        "publisher": {
+          "name": "publish_toolathlon_pbs_build_receipt.py",
+          "sha256": "07a60a958948ae672aa708e4eb291a3f82746035463573216df2736aec9e0870"
         },
         "singularity": {
           "path": "/usr/bin/singularity",
@@ -91,59 +93,405 @@
           "version": "4.4.1-1.el9"
         }
       },
-      "embedded": {
-        "manifest_path": "/usr/local/share/openreward/toolathlon-pbs-portable.json",
-        "manifest_sha256": "134889cef74d6d80a53ea156fde72d3c89605a9b4c2822742a31b805e6672f4c",
-        "assets": {
-          "patch_toolathlon_pbs_portable.py": "0fceb3bb968ed43d413cd648a4d23666f9e770ea3944ef659e1e1c275253b9da",
-          "repair_toolathlon_snowflake_catalog.py": "97be7bb955c04967bb5a54f4ffdf42bd5c00d5216314dd7938ad9ac3a5c6ab6a",
-          "verify_toolathlon_pbs_portability.sh": "481b5eb243cc6293b52e639008fa4b9ef036834e8d903c13939040cebaed7713"
-        },
-        "verify": "passed"
-      },
       "labels": {
         "org.label-schema.build-arch": "amd64",
-        "org.label-schema.build-date": "Friday_14_August_2026_5:12:42_JST",
+        "org.label-schema.build-date": "Friday_14_August_2026_12:35:23_JST",
         "org.label-schema.schema-version": "1.0",
         "org.label-schema.usage.singularity.deffile.bootstrap": "localimage",
-        "org.label-schema.usage.singularity.deffile.from": "/local/2136556.pbs1/toolathlon-pbs-portable-build/toolathlon-pbs-portable-build.220765/openreward-toolathlon-base.sif",
+        "org.label-schema.usage.singularity.deffile.from": "/local/2137418.pbs1/toolathlon-pbs-portable-build/toolathlon-pbs-portable-build.1976449/openreward-toolathlon-base.sif",
         "org.label-schema.usage.singularity.version": "4.4.1-1.el9",
         "org.opencontainers.image.revision": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
         "org.opencontainers.image.source": "https://github.com/ApGa/toolathlon-gym",
         "org.opencontainers.image.version": "22.04",
         "org.openreward.toolathlon.base-oci-digest": "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd",
         "org.openreward.toolathlon.base-sif-sha256": "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267",
-        "org.openreward.toolathlon.pbs-portability": "2e651c3e2ee52d6e0e2d4d5981262157df0387647a9e3200792327540fff29a6",
+        "org.openreward.toolathlon.pbs-portability": "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b",
         "org.openreward.toolathlon.playwright-browsers-sha256": "84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5"
+      },
+      "embedded": {
+        "manifest_path": "/usr/local/share/openreward/toolathlon-pbs-portable.json",
+        "manifest_sha256": "a1cfac5ea288af21c42c3c13de3ab6e21eae7a46b25c9070347e3ddad5e39c2d",
+        "assets": {
+          "launch_toolathlon_python_mcp.py": "409c978c81ad5f8e89c6454878a1075820f936ac4a9014b141b526fdeefbfd00",
+          "patch_toolathlon_pbs_portable.py": "7c7caa3f7fa59807c111476bc61f1d2e40281e015d0bc326dab7cc3b92bc5421",
+          "probe_toolathlon_python_mcp_launchers.py": "cf23c165adfc5d19c1d6a40117e0c257ecf519102140b053854af97f87534d65",
+          "repair_toolathlon_snowflake_catalog.py": "97be7bb955c04967bb5a54f4ffdf42bd5c00d5216314dd7938ad9ac3a5c6ab6a",
+          "verify_toolathlon_pbs_portability.sh": "818c9cd4ecd965295b0370ffe4a60695da4ffea678ea51a49cbf1e2b5048e14e"
+        },
+        "verify": "passed"
       }
     },
     "base_path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-c1e60b36.sif",
     "base_sha256": "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267",
     "base_oci_amd64_digest": "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd",
     "base_server_sha256": "719ec82fb3efada36c01115df3f636f7311b40778ba7c52103d1e6950800152e",
-    "patched_server_sha256": "f38415553a88d16a9b7327ce241c20eea1ef172ca9ae4fb9da797b8e06c76485",
+    "patched_server_sha256": "26f58c49d42975616c5bef19b654cc4483e665b2107533000861cecbcd74c8a5",
     "base_tool_schemas_sha256": "48c56aabcf85833c53a967b1927bdf8a3e96c600983e9aa4f830ed99ab48f057",
     "repaired_tool_schemas_sha256": "a6bdfea0a5524ec8d198a0b2eb9b107aba89e308b50659a106abaff0002fd64d",
     "playwright": {
-      "browsers_path": "/opt/ms-playwright",
       "base_browser_tree_sha256": "84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5",
-      "portable_browser_tree_sha256": "84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5",
-      "browser_file_count": 156,
-      "browser_total_bytes": 959511402,
-      "browser_symlink_count": 0,
+      "base_config_sha256": "66f5bc92c182bf365e499d8237308452a016d8ca9c5e878d1628393647c82d1a",
       "browser_directory_count": 13,
-      "chromium_revision": "1182",
+      "browser_file_count": 156,
+      "browser_symlink_count": 0,
+      "browser_total_bytes": 959511402,
+      "browsers_path": "/opt/ms-playwright",
       "chromium_executable": "/opt/ms-playwright/chromium-1182/chrome-linux/chrome",
+      "chromium_revision": "1182",
+      "chromium_sandbox": "disabled_for_unprivileged_singularity",
       "chromium_sha256": "b93030bc068a3850d4d668e69816fe4a5f04ec93db9b2f63f32f58a39f207db8",
+      "headless_shell_bytes": 305228784,
       "headless_shell_executable": "/opt/ms-playwright/chromium_headless_shell-1182/chrome-linux/headless_shell",
       "headless_shell_sha256": "71ebe8760eb72a99b265470d4030fef296f119e25b9aab5d3efbb6ac821483a5",
-      "headless_shell_bytes": 305228784,
-      "base_config_sha256": "66f5bc92c182bf365e499d8237308452a016d8ca9c5e878d1628393647c82d1a",
       "patched_config_sha256": "47841318775a9afc122097e769a3fcc02d3af7089d372b60fc11da1ea44f0de9",
-      "chromium_sandbox": "disabled_for_unprivileged_singularity",
+      "portable_browser_tree_sha256": "84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5",
       "rootless_launch": "passed"
     },
-    "pbs_portability_patch_sha256": "2e651c3e2ee52d6e0e2d4d5981262157df0387647a9e3200792327540fff29a6"
+    "pbs_portability_patch_sha256": "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b",
+    "build_commit": "69d04f210097870a984d26024016a705a278c1d2",
+    "python_mcp": {
+      "audited_python_server_count": 13,
+      "base_config_set_sha256": "ed8f303ce1bebf763f45bc838e58e68477bb4cded54bcb455471782705dc9511",
+      "base_excel_main_sha256": "c4b37f9fac83215030f8ed0178590e6d154f1a8249523f56f7483fb3dc710625",
+      "base_excel_server_sha256": "bc862fc7b268446f7bec47ece78548f4c1d29f5499a2cd9290856f2d7ba9effc",
+      "base_word_main_sha256": "967026a662e86b67d62994cbf020864995b66d48570ab0018dbe875a8002445d",
+      "base_yahoo_mcp_session_sha256": "e37de044b79f6a048f5580e425c2a69628f6bd41dc940ce7dbbb0e3d4e3239f2",
+      "launcher_mapping_sha256": "23497715f4e3388420e1842558e4017cad3aec62fdf8662e294d4480b19412cc",
+      "patched_config_set_sha256": "0be2dc5984be8280f5ba5e6d781dad56e765a62f72fb9ebd791f51dcc80b1d60",
+      "patched_excel_main_sha256": "f959bbb73eea5c18a74a7e59491e9f2305283443d6470cf10f34443dddb2401e",
+      "patched_excel_server_sha256": "ff9f1931ca5d0db8e4c8a63e07a5ea67a16024fb2fa337db55b0d596057cf26c",
+      "patched_word_main_sha256": "f8e0fbd953d549890645b8a4435d99af32adb735c50177aa2308d8e652ced1f2",
+      "patched_yahoo_mcp_session_sha256": "d8412e3a9a75d1c2a36407ecd560169b0a049f9ef29feb6bb508753dd433e67b",
+      "policy": "baked_venv_no_uv",
+      "probe_path": "/usr/local/libexec/openreward/probe_toolathlon_python_mcp_launchers.py",
+      "probe_sha256": "cf23c165adfc5d19c1d6a40117e0c257ecf519102140b053854af97f87534d65",
+      "rewritten_uv_config_count": 12,
+      "rootless_probe_policy": "cleanenv_no_home_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation",
+      "snowflake_mcp_runtime": {
+        "base_mcp_record_sha256": "60c02ca68bf53784cd57a6db77587fb747594b05f1f52874919dc8cf4ecc12c6",
+        "base_mcp_version": "2.0.0",
+        "base_trees": {
+          "mcp": {
+            "directory_count": 36,
+            "file_count": 230,
+            "symlink_count": 0,
+            "total_bytes": 1945318,
+            "tree_sha256": "c402262b0535d45286ad181cfd36304edc0e20435420b66c3c0d216f61d0276c"
+          },
+          "mcp-2.0.0.dist-info": {
+            "directory_count": 1,
+            "file_count": 7,
+            "symlink_count": 0,
+            "total_bytes": 19990,
+            "tree_sha256": "972a8cd55b10cd9ad0a0ede619599f9c23cb54890fc49b24d76d8363d7c11813"
+          }
+        },
+        "distribution_records": {
+          "editable_distribution": {
+            "base_metadata_sha256": "3557166e394b25d750fe183cce403f761d34c871638c0ee06b9ce9ae9772bf15",
+            "base_record_sha256": "0f4c2fc4320c7ae83ee3da5320c5f92ae6e016315b2a1f9d7fc148244dfe8247",
+            "base_tree": {
+              "bytes": 46391,
+              "dirs": 2,
+              "files": 10,
+              "sha256": "ed08e8fe37a61e766b6e4500fde8bfc38699a8b3b5eaa5484c48d87109cafcca",
+              "symlinks": 0
+            },
+            "patched_metadata_sha256": "e24695b398213d544f479fc814154ad217c34835f07cfaf7ae88297ca7b3cf97",
+            "patched_record_sha256": "0860da95e18081bc17601ab4682638f2ce31eef4eab26b11e7ef11bc0c742f8a",
+            "patched_tree": {
+              "bytes": 46392,
+              "dirs": 2,
+              "files": 10,
+              "sha256": "1f7bc1de08185154cdd82df8fd7e4688ec75261e1d8f17ed5ba233df160f3879",
+              "symlinks": 0
+            },
+            "path": "/opt/local_servers/mcp-snowflake-server/.venv/lib/python3.10/site-packages/mcp_snowflake_server-0.4.0.dist-info"
+          },
+          "full_record_audit": {
+            "record_files": 61,
+            "rows": 12245,
+            "unhashed_self_rows": 61,
+            "unique_owned_paths": 12184,
+            "verified_hashed_rows": 12184
+          },
+          "installed_entrypoints": {
+            "httpx": {
+              "mode": "0755",
+              "path": "/opt/local_servers/mcp-snowflake-server/.venv/bin/httpx",
+              "sha256": "962c10bb001b246ec1e8102231eab5463e9a7a097e1a85d26b84612b7a12cd17",
+              "size": 327
+            },
+            "mcp": {
+              "mode": "0755",
+              "path": "/opt/local_servers/mcp-snowflake-server/.venv/bin/mcp",
+              "sha256": "24a32fc6c81d80fbadf99f687dc09be2738c8d0a2ad5e1a6f6c1ff0f482a6b96",
+              "size": 327
+            }
+          },
+          "removed_entrypoints": {
+            "httpx2": {
+              "base_sha256": "889148a2acab37fd38379a49fe79d9e2ab19b00449377c7915e732f4733b2bbe",
+              "path": "/opt/local_servers/mcp-snowflake-server/.venv/bin/httpx2",
+              "status": "absent"
+            }
+          },
+          "verified_records": {
+            "httpx-0.28.1.dist-info/RECORD": {
+              "rows": 32,
+              "unhashed_self_rows": 1,
+              "verified_hashed_rows": 31
+            },
+            "mcp-1.26.0.dist-info/RECORD": {
+              "rows": 118,
+              "unhashed_self_rows": 1,
+              "verified_hashed_rows": 117
+            },
+            "mcp_snowflake_server-0.4.0.dist-info/RECORD": {
+              "rows": 12,
+              "unhashed_self_rows": 1,
+              "verified_hashed_rows": 11
+            }
+          }
+        },
+        "donor_closure_sha256": "e7b1bf8895eec6e95d738b68a53cd4f0eaad9672284c9cdbe5ec3613399c2eec",
+        "donor_mcp_record_sha256": "9fb533e1b39001b3dbb42cd1923045e4311c0f6e4ae304caa96dcafa60c91a64",
+        "donor_path": "/opt/local_servers/arxiv-latex-mcp/.venv/lib/python3.10/site-packages",
+        "donor_trees": {
+          "httpcore": {
+            "bytes": 261935,
+            "dirs": 4,
+            "files": 32,
+            "sha256": "4979575d1d1387da735e5ca878f295b56a0f6613dae7787c318d23c2b726f763",
+            "symlinks": 0
+          },
+          "httpcore-1.0.9.dist-info": {
+            "bytes": 26259,
+            "dirs": 2,
+            "files": 6,
+            "sha256": "a440271dc5541f1c93025ebf150d843b19fba319cfae589816331d438d21d105",
+            "symlinks": 0
+          },
+          "httpx": {
+            "bytes": 517126,
+            "dirs": 4,
+            "files": 47,
+            "sha256": "dcab6e2a667adb72691431d65abb39d1b4f45f896bdca248c14bb1d7a4b1e13e",
+            "symlinks": 0
+          },
+          "httpx-0.28.1.dist-info": {
+            "bytes": 11155,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "ba4344ded20f1905831db1c8dc3159a6ca4e45b0bcbe43856a256f257963d1fd",
+            "symlinks": 0
+          },
+          "httpx_sse": {
+            "bytes": 17379,
+            "dirs": 2,
+            "files": 11,
+            "sha256": "1b570184ac2bc1746bde2f53dc4c292156ac15fa220fc314ad1a7f627d9cd917",
+            "symlinks": 0
+          },
+          "httpx_sse-0.4.3.dist-info": {
+            "bytes": 11887,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "8581def6ee925f4b5f7f189da8ca1cafc0d885b27aaace1411ebb205a5433a9a",
+            "symlinks": 0
+          },
+          "mcp": {
+            "bytes": 1272614,
+            "dirs": 44,
+            "files": 192,
+            "sha256": "f8a26827d5a9fa1aa752ce689cfe94bac67db6730d0ca82f5ac4bf083d43c9c7",
+            "symlinks": 0
+          },
+          "mcp-1.26.0.dist-info": {
+            "bytes": 100954,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "7cd7b0a4500824b148345921c27b8a4a0135c55214e1531075a076b5d7b2e168",
+            "symlinks": 0
+          },
+          "pydantic_settings": {
+            "bytes": 378393,
+            "dirs": 6,
+            "files": 45,
+            "sha256": "b5fc4afa1a4fac6637e7a7b47341d3888a6cd80e90dab103026d2b17f27e118e",
+            "symlinks": 0
+          },
+          "pydantic_settings-2.13.1.dist-info": {
+            "bytes": 7322,
+            "dirs": 2,
+            "files": 6,
+            "sha256": "9e9610dd15656b0843bff454e6e112da96a00d0cff6fef5e143152c9e9440733",
+            "symlinks": 0
+          }
+        },
+        "installed_closure_sha256": "b618e4359067acb69893820bae6a970c4d8a3714d77550c972346f6120497bc5",
+        "installed_mcp_version": "1.26.0",
+        "installed_trees": {
+          "httpcore": {
+            "bytes": 261935,
+            "dirs": 4,
+            "files": 32,
+            "sha256": "4979575d1d1387da735e5ca878f295b56a0f6613dae7787c318d23c2b726f763",
+            "symlinks": 0
+          },
+          "httpcore-1.0.9.dist-info": {
+            "bytes": 26259,
+            "dirs": 2,
+            "files": 6,
+            "sha256": "a440271dc5541f1c93025ebf150d843b19fba319cfae589816331d438d21d105",
+            "symlinks": 0
+          },
+          "httpx": {
+            "bytes": 517126,
+            "dirs": 4,
+            "files": 47,
+            "sha256": "dcab6e2a667adb72691431d65abb39d1b4f45f896bdca248c14bb1d7a4b1e13e",
+            "symlinks": 0
+          },
+          "httpx-0.28.1.dist-info": {
+            "bytes": 11155,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "e3d5c1a896da31543eacaf2feabd3d71e678f41b3e4ad8aeee466d730fc06f97",
+            "symlinks": 0
+          },
+          "httpx_sse": {
+            "bytes": 17379,
+            "dirs": 2,
+            "files": 11,
+            "sha256": "1b570184ac2bc1746bde2f53dc4c292156ac15fa220fc314ad1a7f627d9cd917",
+            "symlinks": 0
+          },
+          "httpx_sse-0.4.3.dist-info": {
+            "bytes": 11887,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "8581def6ee925f4b5f7f189da8ca1cafc0d885b27aaace1411ebb205a5433a9a",
+            "symlinks": 0
+          },
+          "mcp": {
+            "bytes": 1272614,
+            "dirs": 44,
+            "files": 192,
+            "sha256": "f8a26827d5a9fa1aa752ce689cfe94bac67db6730d0ca82f5ac4bf083d43c9c7",
+            "symlinks": 0
+          },
+          "mcp-1.26.0.dist-info": {
+            "bytes": 100954,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "b2513aa50f095f094bbb22353385cf627e6e68b73c4e31a2472b73cbfe21b464",
+            "symlinks": 0
+          },
+          "pydantic_settings": {
+            "bytes": 378393,
+            "dirs": 6,
+            "files": 45,
+            "sha256": "b5fc4afa1a4fac6637e7a7b47341d3888a6cd80e90dab103026d2b17f27e118e",
+            "symlinks": 0
+          },
+          "pydantic_settings-2.13.1.dist-info": {
+            "bytes": 7322,
+            "dirs": 2,
+            "files": 6,
+            "sha256": "9e9610dd15656b0843bff454e6e112da96a00d0cff6fef5e143152c9e9440733",
+            "symlinks": 0
+          }
+        },
+        "policy": "exact_in_place_record_repaired_ten_tree_replacement",
+        "project_metadata": {
+          "base_lock_sha256": "83a120808c4458ed40505c395b6cbdd812a1534485169c86ce0ef39abbce0fe3",
+          "base_pyproject_sha256": "cf9e6b2e2b966d48c9b3b6615d66e00fdd8395dd39df9de49c2da9bc2c9cb3b7",
+          "donor_lock_sha256": "9e721de6dc27f29169af6af6e883ab40dc08f034fcd64e5f5a56219fbfcb6119",
+          "offline_uv_lock_check": "passed",
+          "patched_lock_sha256": "2945a5f989fd610b8a31017cd29c41cd3a662e5267f1f17d4871afb7f1ace81c",
+          "patched_pyproject_sha256": "8d8ed2e26ffe2621403a640fff0d598a35a78dbb06da2867e0bcf6ae80df2743",
+          "resolved_package_count": 66
+        },
+        "removed_mcp2_closure_sha256": "ca2c7c3ba32778fb8de51822f75f8bef3cfcd83696e50229cdec9a72c029ddd0",
+        "removed_mcp2_trees": {
+          "httpcore2": {
+            "bytes": 269014,
+            "dirs": 4,
+            "files": 32,
+            "sha256": "a3a7a88e450d1fabd33315da01dcda159c01bd58b3af698516b7862ec483dc44",
+            "symlinks": 0
+          },
+          "httpcore2-2.10.0.dist-info": {
+            "bytes": 30374,
+            "dirs": 2,
+            "files": 6,
+            "sha256": "9eec80a3c918162966b7b5f15a1929c7ba0c1985ff089161473c5205b03c800b",
+            "symlinks": 0
+          },
+          "httpx2": {
+            "bytes": 630518,
+            "dirs": 5,
+            "files": 55,
+            "sha256": "9f99700a783ff92f1ce37a723543ce6b7fe50e4892841b360172acefbf8b6e05",
+            "symlinks": 0
+          },
+          "httpx2-2.10.0.dist-info": {
+            "bytes": 15056,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "6bfbb647eeebbbbf470d5833f8e966a3b3daf61ede51d0ffb68258c631f56a71",
+            "symlinks": 0
+          },
+          "mcp_types": {
+            "bytes": 584978,
+            "dirs": 6,
+            "files": 17,
+            "sha256": "d277fadd8e06b95fa0f4b6370d2508207bf72ad90bd6db0fc67c5598bc57c77e",
+            "symlinks": 0
+          },
+          "mcp_types-2.0.0.dist-info": {
+            "bytes": 4288,
+            "dirs": 2,
+            "files": 6,
+            "sha256": "c467c6ee64f0e3cc0e05fe1035a9a02cf4d887bed49d221c8e50a4e2e77ab0cd",
+            "symlinks": 0
+          },
+          "opentelemetry": {
+            "bytes": 280206,
+            "dirs": 27,
+            "files": 62,
+            "sha256": "904385c3c61d97c58c7b7fdcc39c700b647cbef5a871e7f826cc40f06927697f",
+            "symlinks": 0
+          },
+          "opentelemetry_api-1.44.0.dist-info": {
+            "bytes": 17902,
+            "dirs": 2,
+            "files": 7,
+            "sha256": "ba54e3dc03672344621cd1b79a93c00717d2828ae103d72802d9d7c061be1f28",
+            "symlinks": 0
+          },
+          "truststore": {
+            "bytes": 54709,
+            "dirs": 1,
+            "files": 7,
+            "sha256": "967cfda76dc2cc91317d6e30251a5e504b86b9b28acc3b7773fc704ba2d0c451",
+            "symlinks": 0
+          },
+          "truststore-0.10.4.dist-info": {
+            "bytes": 6634,
+            "dirs": 2,
+            "files": 6,
+            "sha256": "a992e608b22932d34fc2d140eba7be46895676c5ffecef13730e10c8babddb17",
+            "symlinks": 0
+          }
+        },
+        "site_packages": "/opt/local_servers/mcp-snowflake-server/.venv/lib/python3.10/site-packages"
+      },
+      "unprivileged_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation": "passed",
+      "wrapper_path": "/usr/local/libexec/openreward/launch_toolathlon_python_mcp.py",
+      "wrapper_sha256": "409c978c81ad5f8e89c6454878a1075820f936ac4a9014b141b526fdeefbfd00"
+    }
   },
   "swe_runtime": {
     "swe_revision": "538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7",
