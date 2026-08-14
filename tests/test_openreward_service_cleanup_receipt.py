@@ -475,6 +475,12 @@ def test_swe_scan_rejects_every_matching_entry(tmp_path: Path, kind: str) -> Non
         helper.assert_empty_swe(root)
 
 
+def test_swe_scan_strictly_rejects_missing_root(tmp_path: Path) -> None:
+    helper = _load()
+    with pytest.raises(FileNotFoundError):
+        helper.assert_empty_swe(tmp_path / "missing-sessions")
+
+
 def test_common_service_cleanup_is_fanout_fail_closed_and_receipt_bound() -> None:
     common = COMMON.read_text()
     request = common.index("request_all_service_shutdowns()")
@@ -508,6 +514,25 @@ def test_common_service_cleanup_is_fanout_fail_closed_and_receipt_bound() -> Non
     assert '"${SHUTDOWN_REQUEST_HELPER}" verify' in node
     assert "cleanup-child name=${name}" in node
     assert "forced_KILL=${child_forced_kill}" in node
+    canonical = "expected_node_local_root=${PBS_LOCALDIR}/platoon/${PBS_JOBID}"
+    assert canonical in node
+    assert node.index('source "${ABCI_ENV}"') < node.index(canonical)
+    derived_guard = 'if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then'
+    guard_start = node.index(derived_guard)
+    assert guard_start < node.index(canonical) < node.index("\nfi", guard_start)
+    for marker in (
+        '"${PLATOON_NODE_LOCAL_ROOT}" == "${expected_node_local_root}"',
+        '"${LOCAL_ROOT}" == "${expected_node_local_root}"',
+        '"${SINGULARITY_CACHEDIR:-}" == "${expected_node_local_root}/singularity-cache"',
+        '"${SINGULARITY_TMPDIR:-}" == "${expected_node_local_root}/singularity-tmp"',
+        '"${APPTAINER_CACHEDIR:-}" == "${SINGULARITY_CACHEDIR}"',
+        '"${APPTAINER_TMPDIR:-}" == "${SINGULARITY_TMPDIR}"',
+        '"${SWE_APPTAINER_SESSION_ROOT:-}" == "${expected_node_local_root}/swe-sessions"',
+        '"${SWE_SINGULARITY_SESSION_ROOT:-}" == "${SWE_APPTAINER_SESSION_ROOT}"',
+    ):
+        assert marker in node
+    assert "derived v9 service paths do not match the canonical PBS job-local root" in node
+    assert "\nexport PLATOON_NODE_LOCAL_ROOT=" not in common
 
 
 def test_host_only_cleanup_helpers_are_executable() -> None:

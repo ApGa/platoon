@@ -22,6 +22,8 @@ def test_all_mcp_wrapper_uses_one_node_exact_future_release_and_no_submission() 
     assert "#PBS -l walltime=02:00:00" in source
     assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r4-376d1b9-18e62c0" in source
     assert "RELEASE_REF=refs/tags/abci-v8r4-376d1b9-18e62c0" in source
+    assert "readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/${PBS_JOBID}" in source
+    assert "/platoon/toolathlon-all-mcp-v9/${PBS_JOBID}" not in source
     assert "openreward-v9-abci.env" in source
     assert "verify_openreward_v9_release.py" in source
     assert '"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"' in source
@@ -42,6 +44,16 @@ def test_all_mcp_wrapper_runs_exact_production_service_driver_and_normal_cleanup
     assert source.index(request) < source.index(teardown) < source.index(candidate)
     assert "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT" in source
     assert "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST" in source
+    assert "export PLATOON_NODE_LOCAL_ROOT=${LOCAL_ROOT}" in source
+    assert "export PLATOON_NODE_LOCAL_ROOT=${LOCAL_ROOT}/node-services" not in source
+    assert '"${PLATOON_NODE_LOCAL_ROOT:-}" == "${LOCAL_ROOT}"' in source
+    assert '"${SINGULARITY_CACHEDIR:-}" == "${LOCAL_ROOT}/singularity-cache"' in source
+    assert '"${SINGULARITY_TMPDIR:-}" == "${LOCAL_ROOT}/singularity-tmp"' in source
+    assert '"${APPTAINER_CACHEDIR:-}" == "${SINGULARITY_CACHEDIR}"' in source
+    assert '"${APPTAINER_TMPDIR:-}" == "${SINGULARITY_TMPDIR}"' in source
+    assert '"${SWE_APPTAINER_SESSION_ROOT:-}" == "${LOCAL_ROOT}/swe-sessions"' in source
+    assert '"${SWE_SINGULARITY_SESSION_ROOT:-}" == "${SWE_APPTAINER_SESSION_ROOT}"' in source
+    assert source.index("v9 overlay node-local paths") < source.index("export PLATOON_NODE_LOCAL_ROOT=${LOCAL_ROOT}")
     assert '--primary-status "${expected_primary_status}"' in source
     assert "assert-tcp-closed" in source
     assert "assert-empty-swe" in source

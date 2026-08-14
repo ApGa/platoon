@@ -53,7 +53,7 @@ readonly CANDIDATE=${RESULT_ROOT}/RESULT.candidate
 readonly SERVICE_LOG=${RESULT_ROOT}/node-services.log
 readonly SERVICE_RECEIPT=${RESULT_ROOT}/node-services-cleanup.json
 readonly SERVICE_REQUEST=${RESULT_ROOT}/node-services-shutdown-request.json
-readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/toolathlon-all-mcp-v9/${PBS_JOBID}
+readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/${PBS_JOBID}
 readonly HOST=$(awk 'NF {print $1; exit}' "${PBS_NODEFILE}")
 
 [[ -n "${PBS_JOBID:-}" && -r "${PBS_NODEFILE:-}" && -d "${PBS_LOCALDIR:-}" ]] || \
@@ -77,6 +77,14 @@ export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
     die "v9 overlay lacks one exact Toolathlon build receipt"
 [[ "${OPENREWARD_TOOLATHLON_PLAYWRIGHT_BROWSERS_PATH:-}" == /opt/ms-playwright ]] || \
     die "v9 overlay lacks the relocated Playwright browser payload contract"
+[[ "${PLATOON_NODE_LOCAL_ROOT:-}" == "${LOCAL_ROOT}" && \
+    "${SINGULARITY_CACHEDIR:-}" == "${LOCAL_ROOT}/singularity-cache" && \
+    "${SINGULARITY_TMPDIR:-}" == "${LOCAL_ROOT}/singularity-tmp" && \
+    "${APPTAINER_CACHEDIR:-}" == "${SINGULARITY_CACHEDIR}" && \
+    "${APPTAINER_TMPDIR:-}" == "${SINGULARITY_TMPDIR}" && \
+    "${SWE_APPTAINER_SESSION_ROOT:-}" == "${LOCAL_ROOT}/swe-sessions" && \
+    "${SWE_SINGULARITY_SESSION_ROOT:-}" == "${SWE_APPTAINER_SESSION_ROOT}" ]] || \
+    die "v9 overlay node-local paths do not match the canonical PBS job root"
 "${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
 [[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || \
     die "OPENREWARD_V9_GATE2_RESULT must name one exact final v9 Gate2 RESULT"
@@ -117,7 +125,7 @@ chmod 0700 \
     "${RESULT_ROOT}" "${LOCAL_ROOT}" \
     "${LOCAL_ROOT}/driver-home" "${LOCAL_ROOT}/driver-home/uv-cache" \
     "${LOCAL_ROOT}/driver-tmp"
-export PLATOON_NODE_LOCAL_ROOT=${LOCAL_ROOT}/node-services
+export PLATOON_NODE_LOCAL_ROOT=${LOCAL_ROOT}
 export SINGULARITY_CACHEDIR=${LOCAL_ROOT}/singularity-cache
 export SINGULARITY_TMPDIR=${LOCAL_ROOT}/singularity-tmp
 export APPTAINER_CACHEDIR=${SINGULARITY_CACHEDIR}

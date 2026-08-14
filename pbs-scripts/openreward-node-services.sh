@@ -106,6 +106,20 @@ if [[ -n "${CLEANUP_RECEIPT}" || -n "${SHUTDOWN_REQUEST}" ]]; then
 fi
 
 if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
+    expected_node_local_root=${PBS_LOCALDIR}/platoon/${PBS_JOBID}
+    [[ "${PLATOON_NODE_LOCAL_ROOT}" == "${expected_node_local_root}" && \
+        "${LOCAL_ROOT}" == "${expected_node_local_root}" && \
+        "${SINGULARITY_CACHEDIR:-}" == "${expected_node_local_root}/singularity-cache" && \
+        "${SINGULARITY_TMPDIR:-}" == "${expected_node_local_root}/singularity-tmp" && \
+        "${APPTAINER_CACHEDIR:-}" == "${SINGULARITY_CACHEDIR}" && \
+        "${APPTAINER_TMPDIR:-}" == "${SINGULARITY_TMPDIR}" && \
+        "${SWE_APPTAINER_SESSION_ROOT:-}" == "${expected_node_local_root}/swe-sessions" && \
+        "${SWE_SINGULARITY_SESSION_ROOT:-}" == "${SWE_APPTAINER_SESSION_ROOT}" ]] || \
+        die "derived v9 service paths do not match the canonical PBS job-local root"
+    unset expected_node_local_root
+fi
+
+if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
     runtime_uid=$(stat -c %u "${RUNTIME}")
     runtime_mode=$(stat -c %a "${RUNTIME}")
     [[ "${RUNTIME}" == "${EXPECTED_CONTAINER_RUNTIME_PATH}" && \
