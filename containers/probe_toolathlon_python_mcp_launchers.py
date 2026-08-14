@@ -92,6 +92,141 @@ class ProbeInterrupted(RuntimeError):
     """Raised by TERM/INT so normal finally blocks clean every child."""
 
 
+def require_private_direct_directory(path: Path) -> os.stat_result:
+    """Require an exact owned mode-0700 directory with no final symlink."""
+
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"private runtime directory is unavailable: {path}: {exc}") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or path.is_symlink()
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise RuntimeError(f"runtime directory is not direct, owned, and mode 0700: {path}")
+    return metadata
+
+
+def private_directory_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+    )
+
+
+def remove_pinned_private_workspace(
+    workspace: Path,
+    expected_identity: tuple[int, int, int, int],
+) -> None:
+    """Remove only the exact runtime root created by this probe invocation."""
+
+    current = require_private_direct_directory(workspace)
+    if private_directory_identity(current) != expected_identity:
+        raise RuntimeError(f"refusing to remove replaced private workspace: {workspace}")
+    shutil.rmtree(workspace)
+    if workspace.exists() or workspace.is_symlink():
+        raise RuntimeError(f"private workspace remains after cleanup: {workspace}")
+
+
+def create_private_child_directory(parent: Path, name: str) -> Path:
+    """Atomically create one direct private child without following symlinks."""
+
+    if (
+        not parent.is_absolute()
+        or not name
+        or name in {".", ".."}
+        or Path(name).name != name
+        or "/" in name
+        or "\\" in name
+        or "\x00" in name
+    ):
+        raise RuntimeError(f"invalid private runtime child: parent={parent}, name={name!r}")
+    parent_metadata = require_private_direct_directory(parent)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        parent_fd = os.open(parent, flags)
+    except OSError as exc:
+        raise RuntimeError(f"cannot open private runtime parent directly: {parent}: {exc}") from exc
+    child_fd: int | None = None
+    child_created = False
+    created_metadata: os.stat_result | None = None
+    try:
+        opened_parent = os.fstat(parent_fd)
+        if (
+            (opened_parent.st_dev, opened_parent.st_ino) != (parent_metadata.st_dev, parent_metadata.st_ino)
+            or opened_parent.st_uid != os.geteuid()
+            or stat.S_IMODE(opened_parent.st_mode) != 0o700
+            or not stat.S_ISDIR(opened_parent.st_mode)
+        ):
+            raise RuntimeError(f"private runtime parent changed while opening: {parent}")
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise RuntimeError(f"private runtime child already exists: {parent / name}") from exc
+        child_created = True
+        created_metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        child_fd = os.open(name, flags, dir_fd=parent_fd)
+        opened_child = os.fstat(child_fd)
+        if (
+            not stat.S_ISDIR(opened_child.st_mode)
+            or opened_child.st_uid != os.geteuid()
+            or stat.S_IMODE(opened_child.st_mode) != 0o700
+        ):
+            raise RuntimeError(f"new private runtime child has unsafe metadata: {parent / name}")
+        child = parent / name
+        child_metadata = require_private_direct_directory(child)
+        if (child_metadata.st_dev, child_metadata.st_ino) != (
+            opened_child.st_dev,
+            opened_child.st_ino,
+        ):
+            raise RuntimeError(f"private runtime child changed after creation: {child}")
+        return child
+    except BaseException as exc:
+        cleanup_error: BaseException | None = None
+        if child_created:
+            try:
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    created_metadata is None
+                    or (current.st_dev, current.st_ino) != (created_metadata.st_dev, created_metadata.st_ino)
+                    or not stat.S_ISDIR(current.st_mode)
+                    or current.st_uid != os.geteuid()
+                    or stat.S_IMODE(current.st_mode) != 0o700
+                ):
+                    raise RuntimeError(f"refusing to roll back changed private runtime child: {parent / name}")
+                os.rmdir(name, dir_fd=parent_fd)
+            except BaseException as rollback_exc:
+                cleanup_error = rollback_exc
+        if cleanup_error is not None:
+            raise RuntimeError(
+                f"private runtime child creation failed and rollback was incomplete: {parent / name}: {cleanup_error}"
+            ) from exc
+        raise
+    finally:
+        if child_fd is not None:
+            os.close(child_fd)
+        os.close(parent_fd)
+
+
+def prepare_server_runtime(workspace: Path) -> dict[str, Path]:
+    """Create one server's runtime root and fixed writable children exactly once."""
+
+    if not workspace.is_absolute() or workspace.parent / workspace.name != workspace:
+        raise RuntimeError(f"per-server runtime path is not direct and absolute: {workspace}")
+    runtime = create_private_child_directory(workspace.parent, workspace.name)
+    return {
+        "workspace": runtime,
+        "home": create_private_child_directory(runtime, ".home"),
+        "tmp": create_private_child_directory(runtime, ".tmp"),
+        "cache": create_private_child_directory(runtime, ".cache"),
+        "uv_cache": create_private_child_directory(runtime, ".uv-cache"),
+    }
+
+
 def require_cleanup_signals_unblocked() -> None:
     blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set())
     forbidden = blocked.intersection({signal.SIGTERM, signal.SIGINT})
@@ -435,10 +570,14 @@ async def probe_one(
             raise RuntimeError("YouTube transcript MCP must execute its baked Python directly")
     elif not arguments or arguments[0] != name:
         raise RuntimeError(f"{name}: whitelist launcher key is absent or reordered")
+    runtime = prepare_server_runtime(workspace)
+    workspace = runtime["workspace"]
     cwd = Path(resolve(params.get("cwd", str(workspace)), workspace))
-    if cwd == workspace or workspace in cwd.parents:
-        cwd.mkdir(parents=True, exist_ok=True)
-    elif not cwd.is_dir():
+    if cwd == workspace:
+        require_private_direct_directory(cwd)
+    elif workspace in cwd.parents:
+        raise RuntimeError(f"{name}: nested writable configured cwd is not pinned: {cwd}")
+    elif not cwd.is_dir() or cwd.is_symlink():
         raise RuntimeError(f"{name}: immutable configured cwd is absent: {cwd}")
 
     configured_env = params.get("env", {})
@@ -447,14 +586,10 @@ async def probe_one(
     reserved = RESERVED_ENVIRONMENT.intersection(str(key) for key in configured_env)
     if reserved:
         raise RuntimeError(f"{name}: YAML overrides a probe-controlled environment key: {sorted(reserved)}")
-    child_home = workspace / ".home"
-    child_tmp = workspace / ".tmp"
-    child_cache = workspace / ".cache"
-    child_uv_cache = workspace / ".uv-cache"
-    child_home.mkdir(mode=0o700)
-    child_tmp.mkdir(mode=0o700)
-    child_cache.mkdir(mode=0o700)
-    child_uv_cache.mkdir(mode=0o700)
+    child_home = runtime["home"]
+    child_tmp = runtime["tmp"]
+    child_cache = runtime["cache"]
+    child_uv_cache = runtime["uv_cache"]
     environment = {
         "PATH": PRODUCTION_PATH,
         "HOME": str(child_home),
@@ -473,7 +608,7 @@ async def probe_one(
     # YAML values.  Mirror that precedence with a private Unix-socket fixture.
     environment.update(postgres_env)
     stderr_path = workspace / f"{name}.stderr"
-    with stderr_path.open("wb") as stderr:
+    with stderr_path.open("xb") as stderr:
         process: asyncio.subprocess.Process | None = None
         try:
             process = await spawn_registered_process(
@@ -1088,15 +1223,28 @@ def main() -> None:
     signal.signal(signal.SIGINT, interrupt_probe)
     atexit.register(emergency_cleanup)
     workspace = args.workspace_root.absolute()
-    if workspace.exists() or workspace.is_symlink():
-        raise RuntimeError(f"probe workspace must not already exist: {workspace}")
-    workspace.mkdir(mode=0o700, parents=False)
+    workspace_created = False
+    workspace_identity: tuple[int, int, int, int] | None = None
     try:
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK,
+            {signal.SIGTERM, signal.SIGINT},
+        )
+        try:
+            if workspace.exists() or workspace.is_symlink():
+                raise RuntimeError(f"probe workspace must not already exist: {workspace}")
+            workspace = create_private_child_directory(workspace.parent, workspace.name)
+            workspace_created = True
+            workspace_identity = private_directory_identity(require_private_direct_directory(workspace))
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         with private_postgres(workspace) as postgres_env:
             results = asyncio.run(run(workspace, postgres_env))
     finally:
-        if ACTIVE_POSTGRES is None and not ACTIVE_PROCESS_GROUPS and workspace.is_dir() and not workspace.is_symlink():
-            shutil.rmtree(workspace)
+        if workspace_created and ACTIVE_POSTGRES is None and not ACTIVE_PROCESS_GROUPS:
+            if workspace_identity is None:
+                raise RuntimeError("created probe workspace has no pinned identity")
+            remove_pinned_private_workspace(workspace, workspace_identity)
     if ACTIVE_POSTGRES is not None or ACTIVE_PROCESS_GROUPS:
         raise RuntimeError(
             "Python MCP probe cleanup is incomplete: "

@@ -16,7 +16,9 @@ import stat
 import subprocess
 import sys
 import textwrap
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -903,9 +905,11 @@ def test_all_python_mcp_configs_use_exact_baked_launchers_without_uv(tmp_path: P
         assert Path(value["params"]["command"]).name != "uv"
         if name == "youtube-transcript":
             assert value["params"]["command"].endswith("/.venv/bin/python3")
+            assert value["params"]["cwd"] == ("${local_servers_paths}/mcp-youtube-transcript")
         else:
             assert value["params"]["command"] == PATCH.PYTHON_MCP_WRAPPER
             assert value["params"]["args"][0] == name
+            assert value["params"].get("cwd", "${agent_workspace}") == ("${agent_workspace}")
             assert LAUNCHER.LAUNCHERS[name] == (
                 mapping["project_cwd"],
                 mapping["exec_command"],
@@ -925,6 +929,232 @@ def test_all_python_mcp_configs_use_exact_baked_launchers_without_uv(tmp_path: P
     ):
         with pytest.raises(SystemExit):
             resolve_command(invalid, youtube_config)
+
+
+def test_probe_creates_every_absent_server_runtime_privately_and_atomically(
+    tmp_path: Path,
+) -> None:
+    probe_root = tmp_path / "run"
+    probe_root.mkdir(mode=0o700)
+    names = tuple(PROBE.PYTHON_CONFIGS)
+    assert len(names) == 13
+    workspaces = [probe_root / name for name in names]
+    assert all(not path.exists() and not path.is_symlink() for path in workspaces)
+
+    with ThreadPoolExecutor(max_workers=len(names)) as executor:
+        prepared = list(executor.map(PROBE.prepare_server_runtime, workspaces))
+
+    for workspace, runtime in zip(workspaces, prepared, strict=True):
+        assert runtime == {
+            "workspace": workspace,
+            "home": workspace / ".home",
+            "tmp": workspace / ".tmp",
+            "cache": workspace / ".cache",
+            "uv_cache": workspace / ".uv-cache",
+        }
+        for path in runtime.values():
+            metadata = path.lstat()
+            assert stat.S_ISDIR(metadata.st_mode)
+            assert not path.is_symlink()
+            assert metadata.st_uid == os.geteuid()
+            assert stat.S_IMODE(metadata.st_mode) == 0o700
+
+    race_root = tmp_path / "race"
+    race_root.mkdir(mode=0o700)
+    barrier = threading.Barrier(2)
+
+    def race_create():
+        barrier.wait(timeout=5)
+        return PROBE.prepare_server_runtime(race_root / "same-server")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(race_create) for _ in range(2)]
+    outcomes = []
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except RuntimeError as exc:
+            outcomes.append(exc)
+    assert sum(isinstance(item, dict) for item in outcomes) == 1
+    assert sum("already exists" in str(item) for item in outcomes if isinstance(item, RuntimeError)) == 1
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir(mode=0o700)
+    indirect_parent = tmp_path / "indirect-parent"
+    indirect_parent.symlink_to(real_parent, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="not direct"):
+        PROBE.create_private_child_directory(indirect_parent, "child")
+
+    attack_parent = tmp_path / "attack-parent"
+    attack_parent.mkdir(mode=0o700)
+    attack_target = tmp_path / "attack-target"
+    attack_target.mkdir(mode=0o700)
+    (attack_parent / "child").symlink_to(attack_target, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="already exists"):
+        PROBE.create_private_child_directory(attack_parent, "child")
+    assert list(attack_target.iterdir()) == []
+
+
+def test_probe_one_prepares_absent_immutable_cwd_runtime_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configs = tmp_path / "configs"
+    configs.mkdir(mode=0o700)
+    immutable_project = tmp_path / "immutable-youtube-project"
+    immutable_project.mkdir(mode=0o700)
+    config_path = configs / "youtube_transcript.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "youtube-transcript",
+                "params": {
+                    "command": sys.executable,
+                    "args": ["-c", "raise SystemExit"],
+                    "cwd": str(immutable_project),
+                },
+            },
+            sort_keys=False,
+        )
+    )
+    run_root = tmp_path / "run"
+    run_root.mkdir(mode=0o700)
+    workspace = run_root / "youtube-transcript"
+    assert not workspace.exists() and not workspace.is_symlink()
+
+    class SpawnSentinel(RuntimeError):
+        pass
+
+    async def fail_after_runtime_setup(
+        command,
+        arguments,
+        *,
+        stderr,
+        cwd,
+        environment,
+    ):
+        assert command == sys.executable
+        assert arguments == ["-c", "raise SystemExit"]
+        assert cwd == immutable_project
+        assert stderr is not None
+        assert environment["HOME"] == str(workspace / ".home")
+        assert environment["TMPDIR"] == str(workspace / ".tmp")
+        assert environment["XDG_CACHE_HOME"] == str(workspace / ".cache")
+        assert environment["UV_CACHE_DIR"] == str(workspace / ".uv-cache")
+        raise SpawnSentinel("spawn reached after runtime setup")
+
+    monkeypatch.setattr(PROBE, "CONFIGS", configs)
+    monkeypatch.setattr(PROBE, "project_from_command", lambda _command: immutable_project)
+    monkeypatch.setattr(PROBE, "spawn_registered_process", fail_after_runtime_setup)
+    expected_launcher = {
+        "config_sha256": digest(config_path),
+        "config_command": sys.executable,
+        "exec_command": sys.executable,
+        "project_cwd": str(immutable_project),
+    }
+    with pytest.raises(RuntimeError, match="spawn reached after runtime setup") as caught:
+        asyncio.run(
+            PROBE.probe_one(
+                "youtube-transcript",
+                config_path.name,
+                workspace,
+                expected_launcher,
+                [],
+                {},
+            )
+        )
+    assert "FileNotFoundError" not in str(caught.value)
+    for path in (
+        workspace,
+        workspace / ".home",
+        workspace / ".tmp",
+        workspace / ".cache",
+        workspace / ".uv-cache",
+    ):
+        metadata = path.lstat()
+        assert stat.S_ISDIR(metadata.st_mode)
+        assert not path.is_symlink()
+        assert stat.S_IMODE(metadata.st_mode) == 0o700
+
+
+def test_probe_workspace_creation_rolls_back_and_main_cleans_pending_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rollback_parent = tmp_path / "rollback-parent"
+    rollback_parent.mkdir(mode=0o700)
+    real_open = PROBE.os.open
+
+    def fail_child_open(path, flags, mode=0o777, *, dir_fd=None):
+        if path == "child" and dir_fd is not None:
+            raise OSError("injected post-mkdir open failure")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(PROBE.os, "open", fail_child_open)
+        with pytest.raises(OSError, match="injected post-mkdir"):
+            PROBE.create_private_child_directory(rollback_parent, "child")
+    assert not (rollback_parent / "child").exists()
+    assert not PROBE.ACTIVE_PROCESS_GROUPS and PROBE.ACTIVE_POSTGRES is None
+
+    cleanup_parent = tmp_path / "cleanup-parent"
+    cleanup_parent.mkdir(mode=0o700)
+    exact = PROBE.create_private_child_directory(cleanup_parent, "exact")
+    exact_identity = PROBE.private_directory_identity(exact.lstat())
+    saved = cleanup_parent / "saved-exact"
+    exact.rename(saved)
+    exact.mkdir(mode=0o700)
+    replacement_marker = exact / "replacement"
+    replacement_marker.write_text("do not delete")
+    with pytest.raises(RuntimeError, match="refusing to remove replaced"):
+        PROBE.remove_pinned_private_workspace(exact, exact_identity)
+    assert replacement_marker.read_text() == "do not delete"
+
+    disappeared = PROBE.create_private_child_directory(cleanup_parent, "disappeared")
+    disappeared_identity = PROBE.private_directory_identity(disappeared.lstat())
+    disappeared.rmdir()
+    with pytest.raises(RuntimeError, match="unavailable"):
+        PROBE.remove_pinned_private_workspace(disappeared, disappeared_identity)
+
+    outer = tmp_path / "signal-parent"
+    outer.mkdir(mode=0o700)
+    workspace = outer / "run"
+    original_create = PROBE.create_private_child_directory
+    original_term_handler = signal.getsignal(signal.SIGTERM)
+    original_int_handler = signal.getsignal(signal.SIGINT)
+
+    def create_then_interrupt(parent: Path, name: str) -> Path:
+        created = original_create(parent, name)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return created
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(PROBE, "create_private_child_directory", create_then_interrupt)
+            scoped.setattr(sys, "argv", ["probe", "--workspace-root", str(workspace)])
+            with pytest.raises(PROBE.ProbeInterrupted):
+                PROBE.main()
+    finally:
+        signal.signal(signal.SIGTERM, original_term_handler)
+        signal.signal(signal.SIGINT, original_int_handler)
+    assert not workspace.exists() and not workspace.is_symlink()
+    assert not PROBE.ACTIVE_PROCESS_GROUPS and PROBE.ACTIVE_POSTGRES is None
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    assert signal.SIGTERM not in blocked and signal.SIGINT not in blocked
+
+    preexisting = outer / "preexisting"
+    preexisting.mkdir(mode=0o700)
+    marker = preexisting / "keep"
+    marker.write_text("owned by caller")
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(sys, "argv", ["probe", "--workspace-root", str(preexisting)])
+            with pytest.raises(RuntimeError, match="must not already exist"):
+                PROBE.main()
+    finally:
+        signal.signal(signal.SIGTERM, original_term_handler)
+        signal.signal(signal.SIGINT, original_int_handler)
+    assert marker.read_text() == "owned by caller"
 
 
 def test_exact_excel_word_and_yahoo_source_fixes_are_hash_pinned(

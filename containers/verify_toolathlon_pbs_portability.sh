@@ -24,7 +24,7 @@ EXPECTED_EXCEL_MAIN_SHA256=f959bbb73eea5c18a74a7e59491e9f2305283443d6470cf10f344
 EXPECTED_WORD_MAIN_SHA256=f8e0fbd953d549890645b8a4435d99af32adb735c50177aa2308d8e652ced1f2
 EXPECTED_YAHOO_MCP_SESSION_SHA256=d8412e3a9a75d1c2a36407ecd560169b0a049f9ef29feb6bb508753dd433e67b
 EXPECTED_PYTHON_MCP_WRAPPER_SHA256=409c978c81ad5f8e89c6454878a1075820f936ac4a9014b141b526fdeefbfd00
-EXPECTED_PYTHON_MCP_PROBE_SHA256=7b5ed76929ec76b62f5a7c8ccc6d1c9826cdcb70a36affc47637c4775eb911de
+EXPECTED_PYTHON_MCP_PROBE_SHA256=cf23c165adfc5d19c1d6a40117e0c257ecf519102140b053854af97f87534d65
 PLAYWRIGHT_ROOT=/opt/ms-playwright
 CHROMIUM_EXECUTABLE=${PLAYWRIGHT_ROOT}/chromium-1182/chrome-linux/chrome
 HEADLESS_SHELL_EXECUTABLE=${PLAYWRIGHT_ROOT}/chromium_headless_shell-1182/chrome-linux/headless_shell
@@ -246,7 +246,7 @@ launch_expected = {
     "wrapper_path": python_mcp_wrapper,
     "wrapper_sha256": "409c978c81ad5f8e89c6454878a1075820f936ac4a9014b141b526fdeefbfd00",
     "probe_path": "/usr/local/libexec/openreward/probe_toolathlon_python_mcp_launchers.py",
-    "probe_sha256": "7b5ed76929ec76b62f5a7c8ccc6d1c9826cdcb70a36affc47637c4775eb911de",
+    "probe_sha256": "cf23c165adfc5d19c1d6a40117e0c257ecf519102140b053854af97f87534d65",
     "rootless_probe_policy": (
         "cleanenv_no_home_exact_launch_initialize_live_name_set_"
         "persistence_clean_teardown_no_mutation"
