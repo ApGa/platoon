@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 
@@ -15,8 +17,52 @@ from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r3-376d1b9-18e62c0")
 RELEASE_REF = "refs/tags/abci-v8r3-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "9b4946e83045b320c7d5323c3169f8f9ca55c9d96cc374e9133875791fdea2cf"
+MANIFEST_SHA256 = "a1a8bf7ce11f66fbd5569a77982e357a8434f65515e00fa7557566d0242e4719"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
+TOOLATHLON_IMAGE_PATH = Path(
+    "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif"
+)
+TOOLATHLON_IMAGE_SHA256 = "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9"
+TOOLATHLON_RECEIPT_PATH = Path(
+    "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif.json"
+)
+TOOLATHLON_RECEIPT_SHA256 = "e6de71ec50b59107e42e1ab6e40f8c387737941029d0b2373ae7dfe50924df78"
+TOOLATHLON_BASE_PATH = Path("/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-c1e60b36.sif")
+TOOLATHLON_BASE_SHA256 = "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267"
+TOOLATHLON_BASE_OCI = "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd"
+PATCH_ASSETS = (
+    "toolathlon-pbs-portable.def",
+    "patch_toolathlon_pbs_portable.py",
+    "repair_toolathlon_snowflake_catalog.py",
+    "verify_toolathlon_pbs_portability.sh",
+)
+RECEIPT_KEYS = {
+    "authorization_scope",
+    "base_image",
+    "build_tooling",
+    "completed_at_epoch",
+    "derived_image",
+    "embedded",
+    "gate",
+    "labels",
+    "patch_assets",
+    "pbs_accounting_attested",
+    "portability_patch_sha256",
+    "schema_version",
+    "status",
+    "toolathlon_source_revision",
+}
+EMBEDDED_RECEIPT_KEYS = {
+    "assets",
+    "base_server_sha256",
+    "base_tool_schemas_sha256",
+    "manifest_path",
+    "manifest_sha256",
+    "patched_server_sha256",
+    "playwright",
+    "repaired_tool_schemas_sha256",
+    "verify",
+}
 COMPONENTS = {
     "platoon_upstream": UPSTREAM_COMMIT,
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -91,6 +137,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _require_owned_regular(path: Path, *, mode: int) -> os.stat_result:
+    if not path.is_absolute() or path.resolve() != path:
+        raise RuntimeError(f"release artifact is not direct and canonical: {path}")
+    value = path.lstat()
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or value.st_uid != os.getuid()
+        or stat.S_IMODE(value.st_mode) != mode
+        or value.st_nlink != 1
+    ):
+        raise RuntimeError(f"release artifact identity/mode mismatch: {path}")
+    return value
+
+
 def _require_ancestor(root: Path, older: str, newer: str) -> None:
     completed = subprocess.run(
         ["git", "-C", str(root), "merge-base", "--is-ancestor", older, newer],
@@ -103,7 +163,7 @@ def _require_ancestor(root: Path, older: str, newer: str) -> None:
         raise RuntimeError(f"release ancestry check failed: {older} is not an ancestor of {newer}")
 
 
-def _require_final_image_identity(manifest: dict[str, object]) -> None:
+def _require_final_image_identity(root: Path, manifest: dict[str, object]) -> None:
     image = manifest.get("toolathlon_image")
     derivation = manifest.get("toolathlon_image_derivation")
     if not isinstance(image, dict) or not isinstance(derivation, dict):
@@ -119,9 +179,138 @@ def _require_final_image_identity(manifest: dict[str, object]) -> None:
         or derivation.get("status") != "ready"
         or any("PENDING" in str(value) for value in derivation.values())
     ):
-        raise RuntimeError("v9 Toolathlon image identity is pending and cannot launch")
+        raise RuntimeError("v9 Toolathlon image identity is not final and cannot launch")
+    if image != {
+        "path": str(TOOLATHLON_IMAGE_PATH),
+        "sha256": TOOLATHLON_IMAGE_SHA256,
+        "oci_index_digest": "sha256:494af57e8a0f158d668982bf985b5937e73ba58eb468715f884de03550bd677c",
+        "oci_amd64_digest": TOOLATHLON_BASE_OCI,
+    }:
+        raise RuntimeError("v9 Toolathlon image manifest identity mismatch")
     if derivation.get("playwright") != PLAYWRIGHT_IDENTITY:
         raise RuntimeError("v9 Toolathlon Playwright provenance mismatch")
+
+    receipt_path = derivation.get("build_receipt_path")
+    receipt_sha256 = derivation.get("build_receipt_sha256")
+    provenance = derivation.get("build_receipt_provenance")
+    if (
+        receipt_path != str(TOOLATHLON_RECEIPT_PATH)
+        or receipt_sha256 != TOOLATHLON_RECEIPT_SHA256
+        or not isinstance(provenance, dict)
+    ):
+        raise RuntimeError("v9 Toolathlon build receipt reference mismatch")
+
+    image_stat = _require_owned_regular(TOOLATHLON_IMAGE_PATH, mode=0o550)
+    _require_owned_regular(TOOLATHLON_RECEIPT_PATH, mode=0o400)
+    if _sha256(TOOLATHLON_IMAGE_PATH) != TOOLATHLON_IMAGE_SHA256:
+        raise RuntimeError("v9 Toolathlon SIF stream digest mismatch")
+    if _sha256(TOOLATHLON_RECEIPT_PATH) != TOOLATHLON_RECEIPT_SHA256:
+        raise RuntimeError("v9 Toolathlon build receipt stream digest mismatch")
+    try:
+        receipt = json.loads(TOOLATHLON_RECEIPT_PATH.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("v9 Toolathlon build receipt is unreadable") from exc
+    if not isinstance(receipt, dict) or set(receipt) != RECEIPT_KEYS:
+        raise RuntimeError("v9 Toolathlon build receipt schema mismatch")
+    embedded = receipt.get("embedded")
+    if not isinstance(embedded, dict) or set(embedded) != EMBEDDED_RECEIPT_KEYS:
+        raise RuntimeError("v9 Toolathlon embedded receipt schema mismatch")
+
+    receipt_provenance = {
+        "schema_version": receipt.get("schema_version"),
+        "gate": receipt.get("gate"),
+        "status": receipt.get("status"),
+        "authorization_scope": receipt.get("authorization_scope"),
+        "pbs_accounting_attested": receipt.get("pbs_accounting_attested"),
+        "completed_at_epoch": receipt.get("completed_at_epoch"),
+        "derived_image": receipt.get("derived_image"),
+        "patch_assets": receipt.get("patch_assets"),
+        "build_tooling": receipt.get("build_tooling"),
+        "embedded": {
+            "manifest_path": embedded.get("manifest_path"),
+            "manifest_sha256": embedded.get("manifest_sha256"),
+            "assets": embedded.get("assets"),
+            "verify": embedded.get("verify"),
+        },
+        "labels": receipt.get("labels"),
+    }
+    if receipt_provenance != provenance:
+        raise RuntimeError("v9 Toolathlon build receipt provenance mismatch")
+
+    expected_derived = {
+        "path": str(TOOLATHLON_IMAGE_PATH),
+        "sha256": TOOLATHLON_IMAGE_SHA256,
+        "size": image_stat.st_size,
+        "device": image_stat.st_dev,
+        "inode": image_stat.st_ino,
+        "mode": 0o550,
+        "uid": os.getuid(),
+    }
+    if receipt.get("derived_image") != expected_derived:
+        raise RuntimeError("v9 Toolathlon build receipt SIF identity mismatch")
+    if receipt.get("base_image") != {
+        "path": str(TOOLATHLON_BASE_PATH),
+        "sha256": TOOLATHLON_BASE_SHA256,
+        "oci_digest": TOOLATHLON_BASE_OCI,
+    }:
+        raise RuntimeError("v9 Toolathlon build receipt base identity mismatch")
+    if (
+        receipt.get("toolathlon_source_revision") != COMPONENTS["toolathlon"]
+        or receipt.get("portability_patch_sha256") != derivation.get("pbs_portability_patch_sha256")
+        or embedded.get("base_server_sha256") != derivation.get("base_server_sha256")
+        or embedded.get("patched_server_sha256") != derivation.get("patched_server_sha256")
+        or embedded.get("base_tool_schemas_sha256") != derivation.get("base_tool_schemas_sha256")
+        or embedded.get("repaired_tool_schemas_sha256") != derivation.get("repaired_tool_schemas_sha256")
+        or embedded.get("playwright") != PLAYWRIGHT_IDENTITY
+    ):
+        raise RuntimeError("v9 Toolathlon build receipt derivation mismatch")
+
+    assets = receipt.get("patch_assets")
+    if not isinstance(assets, dict) or set(assets) != set(PATCH_ASSETS):
+        raise RuntimeError("v9 Toolathlon patch asset set mismatch")
+    patch_input = "".join(f"{assets[name]}  {name}\n" for name in PATCH_ASSETS).encode()
+    if hashlib.sha256(patch_input).hexdigest() != derivation.get("pbs_portability_patch_sha256"):
+        raise RuntimeError("v9 Toolathlon portability identity does not match its assets")
+    embedded_assets = embedded.get("assets")
+    if not isinstance(embedded_assets, dict) or embedded_assets != {
+        name: assets[name] for name in PATCH_ASSETS if name != "toolathlon-pbs-portable.def"
+    }:
+        raise RuntimeError("v9 Toolathlon embedded asset identities mismatch")
+
+    tooling = receipt.get("build_tooling")
+    expected_tooling_paths = {
+        "builder": root / "containers/build_toolathlon_pbs_portable_sif.sh",
+        "publisher": root / "containers/publish_toolathlon_pbs_build_receipt.py",
+        "image_publisher": root / "containers/publish_toolathlon_pbs_image.py",
+    }
+    if not isinstance(tooling, dict):
+        raise RuntimeError("v9 Toolathlon build tooling contract is missing")
+    for name, tooling_path in expected_tooling_paths.items():
+        reference = tooling.get(name)
+        if (
+            not isinstance(reference, dict)
+            or reference.get("name") != tooling_path.name
+            or reference.get("sha256") != _sha256(tooling_path)
+        ):
+            raise RuntimeError(f"v9 Toolathlon build tooling identity mismatch: {name}")
+    if tooling.get("singularity") != {
+        "path": "/usr/bin/singularity",
+        "sha256": "085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6",
+        "version": "4.4.1-1.el9",
+    }:
+        raise RuntimeError("v9 Toolathlon build Singularity identity mismatch")
+
+    labels = receipt.get("labels")
+    required_labels = {
+        "org.opencontainers.image.source": "https://github.com/ApGa/toolathlon-gym",
+        "org.opencontainers.image.revision": COMPONENTS["toolathlon"],
+        "org.openreward.toolathlon.base-sif-sha256": TOOLATHLON_BASE_SHA256,
+        "org.openreward.toolathlon.base-oci-digest": TOOLATHLON_BASE_OCI,
+        "org.openreward.toolathlon.pbs-portability": derivation.get("pbs_portability_patch_sha256"),
+        "org.openreward.toolathlon.playwright-browsers-sha256": PLAYWRIGHT_IDENTITY["portable_browser_tree_sha256"],
+    }
+    if not isinstance(labels, dict) or any(labels.get(key) != value for key, value in required_labels.items()):
+        raise RuntimeError("v9 Toolathlon derived SIF labels mismatch")
 
 
 def verify(root: Path) -> None:
@@ -149,7 +338,7 @@ def verify(root: Path) -> None:
         asset = root / relative
         if not asset.is_file() or asset.is_symlink() or not asset.stat().st_mode & 0o111:
             raise RuntimeError(f"release host acceptance asset is unavailable: {relative}")
-    _require_final_image_identity(manifest)
+    _require_final_image_identity(root, manifest)
 
     head = _git(root, "rev-parse", "--verify", "HEAD")
     release_commit = _git(root, "rev-parse", "--verify", f"{RELEASE_REF}^{{commit}}")

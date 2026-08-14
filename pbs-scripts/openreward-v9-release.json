@@ -41,14 +41,82 @@
     }
   },
   "toolathlon_image": {
-    "path": "/groups/gai51740/aci18912it/rasp/images/PENDING-openreward-toolathlon-18e62c0d-pbs-portable.sif",
-    "sha256": "PENDING_TOOLATHLON_SIF_SHA256",
+    "path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif",
+    "sha256": "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9",
     "oci_index_digest": "sha256:494af57e8a0f158d668982bf985b5937e73ba58eb468715f884de03550bd677c",
     "oci_amd64_digest": "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd"
   },
   "toolathlon_image_derivation": {
-    "status": "pending",
-    "build_receipt_path": "/groups/gai51740/aci18912it/rasp/images/PENDING-openreward-toolathlon-18e62c0d-pbs-portable.sif.build-receipt.json",
+    "status": "ready",
+    "build_receipt_path": "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif.json",
+    "build_receipt_sha256": "e6de71ec50b59107e42e1ab6e40f8c387737941029d0b2373ae7dfe50924df78",
+    "build_receipt_provenance": {
+      "schema_version": 1,
+      "gate": "toolathlon_pbs_portable_build",
+      "status": "passed",
+      "authorization_scope": "image_artifact_only",
+      "pbs_accounting_attested": false,
+      "completed_at_epoch": 1786652030,
+      "derived_image": {
+        "path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif",
+        "sha256": "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9",
+        "size": 1645879296,
+        "device": 1214686570,
+        "inode": 414331875713126724,
+        "mode": 360,
+        "uid": 18912
+      },
+      "patch_assets": {
+        "patch_toolathlon_pbs_portable.py": "0fceb3bb968ed43d413cd648a4d23666f9e770ea3944ef659e1e1c275253b9da",
+        "repair_toolathlon_snowflake_catalog.py": "97be7bb955c04967bb5a54f4ffdf42bd5c00d5216314dd7938ad9ac3a5c6ab6a",
+        "toolathlon-pbs-portable.def": "01abe86ba6286128b155c41e77e31af82e0cf813c346c54545418cd8f051d643",
+        "verify_toolathlon_pbs_portability.sh": "481b5eb243cc6293b52e639008fa4b9ef036834e8d903c13939040cebaed7713"
+      },
+      "build_tooling": {
+        "builder": {
+          "name": "build_toolathlon_pbs_portable_sif.sh",
+          "sha256": "e258f96f68188956a71e021bb307fa72abe5f960bf6e934a5653e07b9bc0e3e4"
+        },
+        "publisher": {
+          "name": "publish_toolathlon_pbs_build_receipt.py",
+          "sha256": "d601f7ec34f87ffc9e4952314ca7b33a70d72c84d36af281d6a1c5d23d95680b"
+        },
+        "image_publisher": {
+          "name": "publish_toolathlon_pbs_image.py",
+          "sha256": "d5ae5d34b2192c3d7f232c0f535bb4833fc277ef9ae265b82070f0f3abaf457d"
+        },
+        "singularity": {
+          "path": "/usr/bin/singularity",
+          "sha256": "085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6",
+          "version": "4.4.1-1.el9"
+        }
+      },
+      "embedded": {
+        "manifest_path": "/usr/local/share/openreward/toolathlon-pbs-portable.json",
+        "manifest_sha256": "134889cef74d6d80a53ea156fde72d3c89605a9b4c2822742a31b805e6672f4c",
+        "assets": {
+          "patch_toolathlon_pbs_portable.py": "0fceb3bb968ed43d413cd648a4d23666f9e770ea3944ef659e1e1c275253b9da",
+          "repair_toolathlon_snowflake_catalog.py": "97be7bb955c04967bb5a54f4ffdf42bd5c00d5216314dd7938ad9ac3a5c6ab6a",
+          "verify_toolathlon_pbs_portability.sh": "481b5eb243cc6293b52e639008fa4b9ef036834e8d903c13939040cebaed7713"
+        },
+        "verify": "passed"
+      },
+      "labels": {
+        "org.label-schema.build-arch": "amd64",
+        "org.label-schema.build-date": "Friday_14_August_2026_5:12:42_JST",
+        "org.label-schema.schema-version": "1.0",
+        "org.label-schema.usage.singularity.deffile.bootstrap": "localimage",
+        "org.label-schema.usage.singularity.deffile.from": "/local/2136556.pbs1/toolathlon-pbs-portable-build/toolathlon-pbs-portable-build.220765/openreward-toolathlon-base.sif",
+        "org.label-schema.usage.singularity.version": "4.4.1-1.el9",
+        "org.opencontainers.image.revision": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
+        "org.opencontainers.image.source": "https://github.com/ApGa/toolathlon-gym",
+        "org.opencontainers.image.version": "22.04",
+        "org.openreward.toolathlon.base-oci-digest": "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd",
+        "org.openreward.toolathlon.base-sif-sha256": "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267",
+        "org.openreward.toolathlon.pbs-portability": "2e651c3e2ee52d6e0e2d4d5981262157df0387647a9e3200792327540fff29a6",
+        "org.openreward.toolathlon.playwright-browsers-sha256": "84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5"
+      }
+    },
     "base_path": "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-c1e60b36.sif",
     "base_sha256": "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e267",
     "base_oci_amd64_digest": "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd",

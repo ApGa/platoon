@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
+EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif"
+EXPECTED_IMAGE_SHA256 = "e869cf4c9783ff803136414779067666a27b24b38669240d1c18b6f6add389b9"
+EXPECTED_RECEIPT_PATH = (
+    "/groups/gai51740/aci18912it/rasp/images/build-receipts/openreward-toolathlon-18e62c0d-pbs-2e651c3e2ee5.sif.json"
+)
+EXPECTED_RECEIPT_SHA256 = "e6de71ec50b59107e42e1ab6e40f8c387737941029d0b2373ae7dfe50924df78"
 
 
 def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
@@ -61,22 +71,84 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     }
 
 
-def test_v9_scaffold_cannot_launch_before_repaired_image_identity_lands() -> None:
+def test_v9_release_binds_ready_repaired_image_and_build_receipt() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text())
     overlay = OVERLAY_PATH.read_text()
     verifier = VERIFIER_PATH.read_text()
 
     image = manifest["toolathlon_image"]
     derivation = manifest["toolathlon_image_derivation"]
-    assert "PENDING" in image["path"]
-    assert image["sha256"] == "PENDING_TOOLATHLON_SIF_SHA256"
-    assert derivation["status"] == "pending"
-    assert any("PENDING" in str(value) for value in derivation.values())
+    assert image["path"] == EXPECTED_IMAGE_PATH
+    assert image["sha256"] == EXPECTED_IMAGE_SHA256
+    assert derivation["status"] == "ready"
+    assert derivation["build_receipt_path"] == EXPECTED_RECEIPT_PATH
+    assert derivation["build_receipt_sha256"] == EXPECTED_RECEIPT_SHA256
+    assert "PENDING" not in json.dumps(manifest)
     assert f"OPENREWARD_TOOLATHLON_SIF={image['path']}" in overlay
     assert f"OPENREWARD_TOOLATHLON_SIF_SHA256={image['sha256']}" in overlay
-    assert "v9 Toolathlon image identity is pending and cannot launch" in verifier
+    assert f"OPENREWARD_TOOLATHLON_BUILD_RECEIPT={EXPECTED_RECEIPT_PATH}" in overlay
+    assert f"OPENREWARD_TOOLATHLON_BUILD_RECEIPT_SHA256={EXPECTED_RECEIPT_SHA256}" in overlay
+    assert "v9 Toolathlon image identity is not final and cannot launch" in verifier
     assert 'derivation.get("status") != "ready"' in verifier
     assert 'derivation.get("playwright") != PLAYWRIGHT_IDENTITY' in verifier
+
+    provenance = derivation["build_receipt_provenance"]
+    assert provenance["schema_version"] == 1
+    assert provenance["gate"] == "toolathlon_pbs_portable_build"
+    assert provenance["status"] == "passed"
+    assert provenance["authorization_scope"] == "image_artifact_only"
+    assert provenance["pbs_accounting_attested"] is False
+    assert provenance["completed_at_epoch"] == 1786652030
+    assert provenance["derived_image"] == {
+        "path": EXPECTED_IMAGE_PATH,
+        "sha256": EXPECTED_IMAGE_SHA256,
+        "size": 1645879296,
+        "device": 1214686570,
+        "inode": 414331875713126724,
+        "mode": 0o550,
+        "uid": 18912,
+    }
+    assert provenance["build_tooling"] == {
+        "builder": {
+            "name": "build_toolathlon_pbs_portable_sif.sh",
+            "sha256": "e258f96f68188956a71e021bb307fa72abe5f960bf6e934a5653e07b9bc0e3e4",
+        },
+        "publisher": {
+            "name": "publish_toolathlon_pbs_build_receipt.py",
+            "sha256": "d601f7ec34f87ffc9e4952314ca7b33a70d72c84d36af281d6a1c5d23d95680b",
+        },
+        "image_publisher": {
+            "name": "publish_toolathlon_pbs_image.py",
+            "sha256": "d5ae5d34b2192c3d7f232c0f535bb4833fc277ef9ae265b82070f0f3abaf457d",
+        },
+        "singularity": {
+            "path": "/usr/bin/singularity",
+            "sha256": "085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6",
+            "version": "4.4.1-1.el9",
+        },
+    }
+    assert provenance["embedded"] == {
+        "manifest_path": "/usr/local/share/openreward/toolathlon-pbs-portable.json",
+        "manifest_sha256": "134889cef74d6d80a53ea156fde72d3c89605a9b4c2822742a31b805e6672f4c",
+        "assets": {
+            "patch_toolathlon_pbs_portable.py": ("0fceb3bb968ed43d413cd648a4d23666f9e770ea3944ef659e1e1c275253b9da"),
+            "repair_toolathlon_snowflake_catalog.py": (
+                "97be7bb955c04967bb5a54f4ffdf42bd5c00d5216314dd7938ad9ac3a5c6ab6a"
+            ),
+            "verify_toolathlon_pbs_portability.sh": (
+                "481b5eb243cc6293b52e639008fa4b9ef036834e8d903c13939040cebaed7713"
+            ),
+        },
+        "verify": "passed",
+    }
+    assert provenance["labels"]["org.label-schema.usage.singularity.deffile.from"].startswith("/local/2136556.pbs1/")
+    assert provenance["labels"]["org.openreward.toolathlon.pbs-portability"] == (
+        "2e651c3e2ee52d6e0e2d4d5981262157df0387647a9e3200792327540fff29a6"
+    )
+    assert "set(receipt) != RECEIPT_KEYS" in verifier
+    assert "receipt_provenance != provenance" in verifier
+    assert "v9 Toolathlon build tooling identity mismatch" in verifier
+    assert "v9 Toolathlon derived SIF labels mismatch" in verifier
 
 
 def test_v9_verifier_binds_exact_manifest_tag_externals_and_swe_contract() -> None:
@@ -111,6 +183,26 @@ def test_v9_overlay_and_verifier_have_valid_syntax_and_safe_current_tree_failure
     )
     assert completed.returncode != 0
     assert "release root is not the exact canonical path" in completed.stderr
+
+
+def test_v9_verifier_rejects_hardlinked_release_artifacts(tmp_path: Path) -> None:
+    module_name = "verify_openreward_v9_release_hardlink_test"
+    spec = importlib.util.spec_from_file_location(module_name, VERIFIER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(PBS_ROOT))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(PBS_ROOT))
+
+    artifact = tmp_path / "artifact.sif"
+    alias = tmp_path / "artifact.alias.sif"
+    artifact.write_bytes(b"immutable-image\n")
+    artifact.chmod(0o550)
+    os.link(artifact, alias)
+    with pytest.raises(RuntimeError, match="release artifact identity/mode mismatch"):
+        module._require_owned_regular(artifact, mode=0o550)
 
 
 def test_v9_launch_path_uses_derived_labels_without_weakening_v8_validation() -> None:
