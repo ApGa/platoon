@@ -11,7 +11,7 @@
 #PBS -m a
 
 # Build the PBS-portable child SIF from one exact clean pre-release commit.
-# The final v8r3 tag cannot exist until it records the derived raw SIF hash, so
+# The final v8r4 tag cannot exist until it records the derived raw SIF hash, so
 # this deliberately accepts only an explicit commit-pinned checkout rather
 # than pretending the image and final manifest can be created simultaneously.
 
@@ -51,15 +51,19 @@ readonly BUILD_SCRIPT=${REPO_ROOT}/containers/build_toolathlon_pbs_portable_sif.
 readonly DEFINITION=${REPO_ROOT}/containers/toolathlon-pbs-portable.def
 readonly PATCHER=${REPO_ROOT}/containers/patch_toolathlon_pbs_portable.py
 readonly CATALOG_REPAIR=${REPO_ROOT}/containers/repair_toolathlon_snowflake_catalog.py
+readonly PYTHON_MCP_LAUNCHER=${REPO_ROOT}/containers/launch_toolathlon_python_mcp.py
+readonly PYTHON_MCP_PROBE=${REPO_ROOT}/containers/probe_toolathlon_python_mcp_launchers.py
 readonly EMBEDDED_VERIFY=${REPO_ROOT}/containers/verify_toolathlon_pbs_portability.sh
 readonly IMAGE_PUBLISHER=${REPO_ROOT}/containers/publish_toolathlon_pbs_image.py
 readonly RECEIPT_PUBLISHER=${REPO_ROOT}/containers/publish_toolathlon_pbs_build_receipt.py
 for asset in \
     "${BUILD_SCRIPT}" "${DEFINITION}" "${PATCHER}" "${CATALOG_REPAIR}" \
-    "${EMBEDDED_VERIFY}" "${IMAGE_PUBLISHER}" "${RECEIPT_PUBLISHER}"; do
+    "${PYTHON_MCP_LAUNCHER}" "${PYTHON_MCP_PROBE}" "${EMBEDDED_VERIFY}" \
+    "${IMAGE_PUBLISHER}" "${RECEIPT_PUBLISHER}"; do
     [[ -r "${asset}" ]] || die "build asset is unreadable: ${asset}"
 done
 [[ -x "${BUILD_SCRIPT}" && -x "${PATCHER}" && -x "${CATALOG_REPAIR}" && \
+    -x "${PYTHON_MCP_LAUNCHER}" && -x "${PYTHON_MCP_PROBE}" && \
     -x "${EMBEDDED_VERIFY}" && -x "${IMAGE_PUBLISHER}" && \
     -x "${RECEIPT_PUBLISHER}" ]] || die "build helpers are not executable"
 [[ -f "${BASE_SIF}" && ! -L "${BASE_SIF}" && \
@@ -97,6 +101,8 @@ patch_identity=$(
         toolathlon-pbs-portable.def \
         patch_toolathlon_pbs_portable.py \
         repair_toolathlon_snowflake_catalog.py \
+        launch_toolathlon_python_mcp.py \
+        probe_toolathlon_python_mcp_launchers.py \
         verify_toolathlon_pbs_portability.sh; do
         printf '%s  %s\n' \
             "$(sha256sum "${REPO_ROOT}/containers/${asset}" | awk '{print $1}')" "${asset}"

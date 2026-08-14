@@ -18,6 +18,8 @@ for asset in \
     toolathlon-pbs-portable.def \
     patch_toolathlon_pbs_portable.py \
     repair_toolathlon_snowflake_catalog.py \
+    launch_toolathlon_python_mcp.py \
+    probe_toolathlon_python_mcp_launchers.py \
     verify_toolathlon_pbs_portability.sh \
     publish_toolathlon_pbs_image.py \
     publish_toolathlon_pbs_build_receipt.py; do
@@ -47,6 +49,8 @@ PATCH_ASSETS=(
     toolathlon-pbs-portable.def
     patch_toolathlon_pbs_portable.py
     repair_toolathlon_snowflake_catalog.py
+    launch_toolathlon_python_mcp.py
+    probe_toolathlon_python_mcp_launchers.py
     verify_toolathlon_pbs_portability.sh
 )
 PATCH_IDENTITY=$(
@@ -68,6 +72,8 @@ cleanup() {
     rm -f "${LOCAL_BASE_SIF}" "${LOCAL_OUTPUT_SIF}" \
         "${WORK_ROOT}/patch_toolathlon_pbs_portable.py" \
         "${WORK_ROOT}/repair_toolathlon_snowflake_catalog.py" \
+        "${WORK_ROOT}/launch_toolathlon_python_mcp.py" \
+        "${WORK_ROOT}/probe_toolathlon_python_mcp_launchers.py" \
         "${WORK_ROOT}/verify_toolathlon_pbs_portability.sh" \
         "${DEFINITION}" 2>/dev/null || true
     rmdir "${WORK_ROOT}" 2>/dev/null || true
@@ -154,6 +160,8 @@ test "$(stat -c %h "${LOCAL_BASE_SIF}")" = 1
 test "$(sha256sum "${LOCAL_BASE_SIF}" | cut -d ' ' -f 1)" = "${EXPECTED_BASE_SHA256}"
 cp "${SCRIPT_DIR}/patch_toolathlon_pbs_portable.py" \
     "${SCRIPT_DIR}/repair_toolathlon_snowflake_catalog.py" \
+    "${SCRIPT_DIR}/launch_toolathlon_python_mcp.py" \
+    "${SCRIPT_DIR}/probe_toolathlon_python_mcp_launchers.py" \
     "${SCRIPT_DIR}/verify_toolathlon_pbs_portability.sh" \
     "${WORK_ROOT}/"
 sed \

@@ -12,6 +12,8 @@ From: BASE_SIF_PATH
 %files
     patch_toolathlon_pbs_portable.py /usr/local/libexec/openreward/patch_toolathlon_pbs_portable.py
     repair_toolathlon_snowflake_catalog.py /usr/local/libexec/openreward/repair_toolathlon_snowflake_catalog.py
+    launch_toolathlon_python_mcp.py /usr/local/libexec/openreward/launch_toolathlon_python_mcp.py
+    probe_toolathlon_python_mcp_launchers.py /usr/local/libexec/openreward/probe_toolathlon_python_mcp_launchers.py
     verify_toolathlon_pbs_portability.sh /usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh
 
 %post
@@ -53,13 +55,17 @@ From: BASE_SIF_PATH
         test "$(stat -c %u:%g "${asset}")" = 0:0
         test "$(stat -c %a "${asset}")" = 644
     done
-    verifier=/usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh
-    test -f "${verifier}"
-    test ! -L "${verifier}"
-    chown 0:0 "${verifier}"
-    chmod 0755 "${verifier}"
-    test "$(stat -c %u:%g "${verifier}")" = 0:0
-    test "$(stat -c %a "${verifier}")" = 755
+    for executable in \
+        /usr/local/libexec/openreward/launch_toolathlon_python_mcp.py \
+        /usr/local/libexec/openreward/probe_toolathlon_python_mcp_launchers.py \
+        /usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh; do
+        test -f "${executable}"
+        test ! -L "${executable}"
+        chown 0:0 "${executable}"
+        chmod 0755 "${executable}"
+        test "$(stat -c %u:%g "${executable}")" = 0:0
+        test "$(stat -c %a "${executable}")" = 755
+    done
     manifest=/usr/local/share/openreward/toolathlon-pbs-portable.json
     test -f "${manifest}"
     test ! -L "${manifest}"

@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import time
@@ -17,7 +19,7 @@ BASE_SIF_SHA256 = "e730e11d1abc63f5cac9eb1788e36da79aa9c7027ed89d91ee42a5b1e311e
 BASE_OCI_DIGEST = "sha256:c1e60b3673c848b758bda1b32ec39898feb5d6ff4c7e55ead8661adb04b327bd"
 TOOLATHLON_REVISION = "18e62c0d0419da88209af911528f2f8a0b44a5ed"
 BASE_SERVER_SHA256 = "719ec82fb3efada36c01115df3f636f7311b40778ba7c52103d1e6950800152e"
-PATCHED_SERVER_SHA256 = "f38415553a88d16a9b7327ce241c20eea1ef172ca9ae4fb9da797b8e06c76485"
+PATCHED_SERVER_SHA256 = "26f58c49d42975616c5bef19b654cc4483e665b2107533000861cecbcd74c8a5"
 BASE_CATALOG_SHA256 = "48c56aabcf85833c53a967b1927bdf8a3e96c600983e9aa4f830ed99ab48f057"
 REPAIRED_CATALOG_SHA256 = "a6bdfea0a5524ec8d198a0b2eb9b107aba89e308b50659a106abaff0002fd64d"
 PLAYWRIGHT_BROWSERS_PATH = "/opt/ms-playwright"
@@ -34,6 +36,22 @@ PLAYWRIGHT_HEADLESS_SHELL_SHA256 = "71ebe8760eb72a99b265470d4030fef296f119e25b9a
 PLAYWRIGHT_HEADLESS_SHELL_BYTES = 305228784
 BASE_PLAYWRIGHT_CONFIG_SHA256 = "66f5bc92c182bf365e499d8237308452a016d8ca9c5e878d1628393647c82d1a"
 PATCHED_PLAYWRIGHT_CONFIG_SHA256 = "47841318775a9afc122097e769a3fcc02d3af7089d372b60fc11da1ea44f0de9"
+BASE_EXCEL_SERVER_SHA256 = "bc862fc7b268446f7bec47ece78548f4c1d29f5499a2cd9290856f2d7ba9effc"
+PATCHED_EXCEL_SERVER_SHA256 = "ff9f1931ca5d0db8e4c8a63e07a5ea67a16024fb2fa337db55b0d596057cf26c"
+BASE_EXCEL_MAIN_SHA256 = "c4b37f9fac83215030f8ed0178590e6d154f1a8249523f56f7483fb3dc710625"
+PATCHED_EXCEL_MAIN_SHA256 = "f959bbb73eea5c18a74a7e59491e9f2305283443d6470cf10f34443dddb2401e"
+BASE_WORD_MAIN_SHA256 = "967026a662e86b67d62994cbf020864995b66d48570ab0018dbe875a8002445d"
+PATCHED_WORD_MAIN_SHA256 = "f8e0fbd953d549890645b8a4435d99af32adb735c50177aa2308d8e652ced1f2"
+BASE_YAHOO_MCP_SESSION_SHA256 = "e37de044b79f6a048f5580e425c2a69628f6bd41dc940ce7dbbb0e3d4e3239f2"
+PATCHED_YAHOO_MCP_SESSION_SHA256 = "d8412e3a9a75d1c2a36407ecd560169b0a049f9ef29feb6bb508753dd433e67b"
+PYTHON_MCP_BASE_CONFIG_SET_SHA256 = "ed8f303ce1bebf763f45bc838e58e68477bb4cded54bcb455471782705dc9511"
+PYTHON_MCP_PATCHED_CONFIG_SET_SHA256 = "0be2dc5984be8280f5ba5e6d781dad56e765a62f72fb9ebd791f51dcc80b1d60"
+PYTHON_MCP_LAUNCHER_MAPPING_SHA256 = "23497715f4e3388420e1842558e4017cad3aec62fdf8662e294d4480b19412cc"
+PYTHON_MCP_WRAPPER_PATH = "/usr/local/libexec/openreward/launch_toolathlon_python_mcp.py"
+PYTHON_MCP_WRAPPER_SHA256 = "409c978c81ad5f8e89c6454878a1075820f936ac4a9014b141b526fdeefbfd00"
+PYTHON_MCP_PROBE_PATH = "/usr/local/libexec/openreward/probe_toolathlon_python_mcp_launchers.py"
+PYTHON_MCP_PROBE_SHA256 = "7b5ed76929ec76b62f5a7c8ccc6d1c9826cdcb70a36affc47637c4775eb911de"
+SNOWFLAKE_MCP_RUNTIME_SHA256 = "0ef800b520b62251834e8f474b3aefcf44466ada18773f39ce0d976385fd9a79"
 SINGULARITY_PATH = Path("/usr/bin/singularity")
 SINGULARITY_SHA256 = "085a757f172dcabda66b44d086913314d6aa574055a8fea90523be82b770cec6"
 SINGULARITY_VERSION = "4.4.1-1.el9"
@@ -42,15 +60,99 @@ PATCH_ASSETS = (
     "toolathlon-pbs-portable.def",
     "patch_toolathlon_pbs_portable.py",
     "repair_toolathlon_snowflake_catalog.py",
+    "launch_toolathlon_python_mcp.py",
+    "probe_toolathlon_python_mcp_launchers.py",
     "verify_toolathlon_pbs_portability.sh",
 )
 EMBEDDED_ASSETS = {
     "patch_toolathlon_pbs_portable.py": ("/usr/local/libexec/openreward/patch_toolathlon_pbs_portable.py"),
     "repair_toolathlon_snowflake_catalog.py": ("/usr/local/libexec/openreward/repair_toolathlon_snowflake_catalog.py"),
+    "launch_toolathlon_python_mcp.py": ("/usr/local/libexec/openreward/launch_toolathlon_python_mcp.py"),
+    "probe_toolathlon_python_mcp_launchers.py": (
+        "/usr/local/libexec/openreward/probe_toolathlon_python_mcp_launchers.py"
+    ),
     "verify_toolathlon_pbs_portability.sh": ("/usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh"),
 }
 MANIFEST_PATH = "/usr/local/share/openreward/toolathlon-pbs-portable.json"
 VERIFY_PATH = "/usr/local/libexec/openreward/verify_toolathlon_pbs_portability.sh"
+ACTIVE_COMMANDS: dict[int, subprocess.Popen[bytes]] = {}
+
+
+class PublisherInterrupted(RuntimeError):
+    """Raised so command cleanup runs when the publisher is cancelled."""
+
+
+def require_cleanup_signals_unblocked() -> None:
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    forbidden = blocked.intersection({signal.SIGTERM, signal.SIGINT})
+    if forbidden:
+        raise RuntimeError(f"build receipt publisher inherited blocked cleanup signals: {sorted(map(int, forbidden))}")
+
+
+def command_group_absent(process_group: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError as exc:
+            raise RuntimeError(f"cannot verify command process group {process_group}") from exc
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def terminate_command(
+    process: subprocess.Popen[bytes],
+    *,
+    terminate_timeout: float,
+    kill_timeout: float,
+) -> bool:
+    """Terminate, reap, and verify a complete isolated command group."""
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=terminate_timeout)
+    except subprocess.TimeoutExpired:
+        pass
+    if command_group_absent(process.pid, timeout=1):
+        ACTIVE_COMMANDS.pop(process.pid, None)
+        return False
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=kill_timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("command leader survived process-group SIGKILL") from exc
+    if not command_group_absent(process.pid, timeout=kill_timeout):
+        raise RuntimeError("command process group survived process-group SIGKILL")
+    ACTIVE_COMMANDS.pop(process.pid, None)
+    return True
+
+
+def interrupt_publisher(signum: int, _frame: Any) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise PublisherInterrupted(f"build receipt publisher interrupted by signal {signum}")
+
+
+def emergency_command_cleanup() -> None:
+    errors = []
+    for process in tuple(ACTIVE_COMMANDS.values()):
+        try:
+            terminate_command(process, terminate_timeout=5, kill_timeout=2)
+        except BaseException as exc:
+            errors.append(str(exc))
+    if ACTIVE_COMMANDS:
+        errors.append(f"command groups remain active: {sorted(ACTIVE_COMMANDS)}")
+    if errors:
+        os.write(2, ("; ".join(errors) + "\n").encode(errors="replace"))
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -115,19 +217,76 @@ def require_trusted_executable(path: Path) -> os.stat_result:
     return value
 
 
-def run_bytes(command: list[str], *, timeout: int = 120) -> bytes:
+def run_bytes(
+    command: list[str],
+    *,
+    timeout: int = 120,
+    terminate_timeout: int = 120,
+    kill_timeout: int = 10,
+) -> bytes:
+    process: subprocess.Popen[bytes] | None = None
+    previous_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK,
+        {signal.SIGTERM, signal.SIGINT},
+    )
+
+    def restore_child_signal_mask() -> None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
     try:
-        result = subprocess.run(command, check=False, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"command timed out after {timeout}s: {command!r}") from exc
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"command failed ({result.returncode}): {command!r}: {result.stderr.decode(errors='replace')[-1000:]}"
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            preexec_fn=restore_child_signal_mask,
         )
-    return result.stdout
+        ACTIVE_COMMANDS[process.pid] = process
+    finally:
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException:
+            if process is not None:
+                terminate_command(
+                    process,
+                    terminate_timeout=terminate_timeout,
+                    kill_timeout=kill_timeout,
+                )
+            raise
+    if process is None:
+        raise RuntimeError("command subprocess creation returned no process")
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException as exc:
+        forced_kill = terminate_command(
+            process,
+            terminate_timeout=terminate_timeout,
+            kill_timeout=kill_timeout,
+        )
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise RuntimeError(f"command timed out after {timeout}s (forced_kill={forced_kill}): {command!r}") from exc
+        raise
+    if not command_group_absent(process.pid, timeout=1):
+        forced_kill = terminate_command(
+            process,
+            terminate_timeout=terminate_timeout,
+            kill_timeout=kill_timeout,
+        )
+        raise RuntimeError(f"command left a process-group descendant (forced_kill={forced_kill}): {command!r}")
+    ACTIVE_COMMANDS.pop(process.pid, None)
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"command failed ({process.returncode}): {command!r}: {stderr.decode(errors='replace')[-1000:]}"
+        )
+    return stdout
 
 
-def singularity_exec_bytes(singularity: Path, image: Path, *command: str) -> bytes:
+def singularity_exec_bytes(
+    singularity: Path,
+    image: Path,
+    *command: str,
+    timeout: int = 120,
+) -> bytes:
     return run_bytes(
         [
             str(singularity),
@@ -136,7 +295,8 @@ def singularity_exec_bytes(singularity: Path, image: Path, *command: str) -> byt
             "--no-home",
             str(image),
             *command,
-        ]
+        ],
+        timeout=timeout,
     )
 
 
@@ -199,6 +359,14 @@ def validate_manifest(manifest: dict[str, Any], patch_identity: str) -> None:
         "patched_playwright_config_sha256": PATCHED_PLAYWRIGHT_CONFIG_SHA256,
         "playwright_chromium_sandbox": "disabled_for_unprivileged_singularity",
         "playwright_rootless_launch_policy": "required",
+        "base_excel_server_sha256": BASE_EXCEL_SERVER_SHA256,
+        "patched_excel_server_sha256": PATCHED_EXCEL_SERVER_SHA256,
+        "base_excel_main_sha256": BASE_EXCEL_MAIN_SHA256,
+        "patched_excel_main_sha256": PATCHED_EXCEL_MAIN_SHA256,
+        "base_word_main_sha256": BASE_WORD_MAIN_SHA256,
+        "patched_word_main_sha256": PATCHED_WORD_MAIN_SHA256,
+        "base_yahoo_mcp_session_sha256": BASE_YAHOO_MCP_SESSION_SHA256,
+        "patched_yahoo_mcp_session_sha256": PATCHED_YAHOO_MCP_SESSION_SHA256,
     }
     mismatches = {
         key: (manifest.get(key), expected_value)
@@ -207,6 +375,38 @@ def validate_manifest(manifest: dict[str, Any], patch_identity: str) -> None:
     }
     if mismatches:
         raise RuntimeError(f"embedded portability manifest mismatch: {mismatches}")
+    launchers = manifest.get("python_mcp_launchers")
+    expected_launchers = {
+        "policy": "baked_venv_no_uv",
+        "rewritten_uv_config_count": 12,
+        "audited_python_server_count": 13,
+        "base_config_set_sha256": PYTHON_MCP_BASE_CONFIG_SET_SHA256,
+        "patched_config_set_sha256": PYTHON_MCP_PATCHED_CONFIG_SET_SHA256,
+        "wrapper_path": PYTHON_MCP_WRAPPER_PATH,
+        "wrapper_sha256": PYTHON_MCP_WRAPPER_SHA256,
+        "probe_path": PYTHON_MCP_PROBE_PATH,
+        "probe_sha256": PYTHON_MCP_PROBE_SHA256,
+        "rootless_probe_policy": (
+            "cleanenv_no_home_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation"
+        ),
+        "launcher_mapping_sha256": PYTHON_MCP_LAUNCHER_MAPPING_SHA256,
+    }
+    if not isinstance(launchers, dict):
+        raise RuntimeError("embedded immutable Python MCP launcher manifest is missing")
+    launcher_mismatches = {
+        key: (launchers.get(key), expected_value)
+        for key, expected_value in expected_launchers.items()
+        if launchers.get(key) != expected_value
+    }
+    if launcher_mismatches:
+        raise RuntimeError(f"embedded immutable Python MCP launcher mismatch: {launcher_mismatches}")
+    snowflake_runtime = manifest.get("snowflake_mcp_runtime")
+    if (
+        not isinstance(snowflake_runtime, dict)
+        or sha256_bytes(json.dumps(snowflake_runtime, sort_keys=True, separators=(",", ":")).encode())
+        != SNOWFLAKE_MCP_RUNTIME_SHA256
+    ):
+        raise RuntimeError("embedded Snowflake MCP 1.26 runtime identity mismatch")
 
 
 def expected_receipt(
@@ -219,6 +419,7 @@ def expected_receipt(
     publisher: Path,
     image_publisher: Path,
     manifest_bytes: bytes,
+    snowflake_mcp_runtime: dict[str, Any],
     embedded_hashes: dict[str, str],
     labels: dict[str, str],
     singularity: Path,
@@ -287,6 +488,31 @@ def expected_receipt(
                 "chromium_sandbox": "disabled_for_unprivileged_singularity",
                 "rootless_launch": "passed",
             },
+            "python_mcp": {
+                "policy": "baked_venv_no_uv",
+                "rewritten_uv_config_count": 12,
+                "audited_python_server_count": 13,
+                "base_config_set_sha256": PYTHON_MCP_BASE_CONFIG_SET_SHA256,
+                "patched_config_set_sha256": PYTHON_MCP_PATCHED_CONFIG_SET_SHA256,
+                "launcher_mapping_sha256": PYTHON_MCP_LAUNCHER_MAPPING_SHA256,
+                "wrapper_path": PYTHON_MCP_WRAPPER_PATH,
+                "wrapper_sha256": PYTHON_MCP_WRAPPER_SHA256,
+                "probe_path": PYTHON_MCP_PROBE_PATH,
+                "probe_sha256": PYTHON_MCP_PROBE_SHA256,
+                "rootless_probe_policy": (
+                    "cleanenv_no_home_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation"
+                ),
+                "base_excel_server_sha256": BASE_EXCEL_SERVER_SHA256,
+                "patched_excel_server_sha256": PATCHED_EXCEL_SERVER_SHA256,
+                "base_excel_main_sha256": BASE_EXCEL_MAIN_SHA256,
+                "patched_excel_main_sha256": PATCHED_EXCEL_MAIN_SHA256,
+                "base_word_main_sha256": BASE_WORD_MAIN_SHA256,
+                "patched_word_main_sha256": PATCHED_WORD_MAIN_SHA256,
+                "base_yahoo_mcp_session_sha256": BASE_YAHOO_MCP_SESSION_SHA256,
+                "patched_yahoo_mcp_session_sha256": PATCHED_YAHOO_MCP_SESSION_SHA256,
+                "snowflake_mcp_runtime": snowflake_mcp_runtime,
+                "unprivileged_exact_launch_initialize_live_name_set_persistence_clean_teardown_no_mutation": "passed",
+            },
             "verify": "passed",
         },
         "labels": labels,
@@ -305,6 +531,19 @@ def validate_receipt(value: dict[str, Any], expected: dict[str, Any]) -> None:
         raise RuntimeError("existing build receipt completion time is invalid")
     if actual_without_time != expected_without_time:
         raise RuntimeError("existing build receipt does not match verified image")
+
+
+def validate_full_verifier_output(value: bytes) -> None:
+    if b"deferred_post_build" in value:
+        raise RuntimeError("embedded portability verifier returned deferred structural output")
+    required = (
+        b"toolathlon_pbs_portability_verify=ok",
+        b"toolathlon_playwright_rootless_launch=ok",
+        b'"toolathlon_python_mcp_rootless_probe": "ok"',
+    )
+    missing = [token.decode() for token in required if token not in value]
+    if missing:
+        raise RuntimeError(f"embedded full portability verifier did not pass: missing={missing}")
 
 
 def publish_create_only(path: Path, value: dict[str, Any]) -> None:
@@ -376,11 +615,8 @@ def verify_and_publish(args: argparse.Namespace) -> dict[str, Any]:
     if mismatches:
         raise RuntimeError(f"derived SIF label mismatch: {mismatches}")
 
-    verify_output = singularity_exec_bytes(singularity, image, VERIFY_PATH)
-    if b"toolathlon_pbs_portability_verify=ok" not in verify_output:
-        raise RuntimeError("embedded portability verifier did not pass")
-    if b"toolathlon_playwright_rootless_launch=ok" not in verify_output:
-        raise RuntimeError("embedded Playwright rootless launch did not pass")
+    verify_output = singularity_exec_bytes(singularity, image, VERIFY_PATH, timeout=1800)
+    validate_full_verifier_output(verify_output)
 
     manifest_bytes = singularity_exec_bytes(singularity, image, "/bin/cat", MANIFEST_PATH)
     try:
@@ -407,11 +643,14 @@ def verify_and_publish(args: argparse.Namespace) -> dict[str, Any]:
         publisher=publisher,
         image_publisher=image_publisher,
         manifest_bytes=manifest_bytes,
+        snowflake_mcp_runtime=manifest["snowflake_mcp_runtime"],
         embedded_hashes=embedded_hashes,
         labels=labels,
         singularity=singularity,
         completed_at_epoch=int(time.time()),
     )
+    if ACTIVE_COMMANDS:
+        raise RuntimeError(f"cannot publish while command groups remain active: {sorted(ACTIVE_COMMANDS)}")
     if receipt.exists() or receipt.is_symlink():
         require_regular(receipt, mode=0o400)
         try:
@@ -428,6 +667,10 @@ def verify_and_publish(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
+    require_cleanup_signals_unblocked()
+    signal.signal(signal.SIGTERM, interrupt_publisher)
+    signal.signal(signal.SIGINT, interrupt_publisher)
+    atexit.register(emergency_command_cleanup)
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
