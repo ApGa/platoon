@@ -20,8 +20,8 @@ def test_all_mcp_wrapper_uses_one_node_exact_future_release_and_no_submission() 
     subprocess.run(["bash", "-n", str(WRAPPER)], check=True)
     assert "#PBS -l select=1:mpiprocs=8" in source
     assert "#PBS -l walltime=02:00:00" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r5-376d1b9-18e62c0" in source
-    assert "RELEASE_REF=refs/tags/abci-v8r5-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r6-376d1b9-18e62c0" in source
+    assert "RELEASE_REF=refs/tags/abci-v8r6-376d1b9-18e62c0" in source
     assert "readonly LOCAL_ROOT=${PBS_LOCALDIR:?PBS_LOCALDIR is required}/platoon/${PBS_JOBID}" in source
     assert "/platoon/toolathlon-all-mcp-v9/${PBS_JOBID}" not in source
     assert "openreward-v9-abci.env" in source

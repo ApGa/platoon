@@ -5,13 +5,13 @@
 #PBS -l select=16:mpiprocs=8
 #PBS -l place=scatter
 #PBS -l walltime=168:00:00
-#PBS -N rasp-h200-16nr-v9
+#PBS -N rasp-h200-16nr-pad
 #PBS -j oe
 #PBS -o /groups/gai51740/aci18912it/rasp/logs/
 #PBS -m a
 
-# Fresh model-only replacement for the v7 16-node job.  This launcher is
-# intentionally unusable until the immutable v8r5 release, v9 overlay, release
+# Fresh model-only CP1 padded-GDN replacement for the v9 16-node job.  This launcher is
+# intentionally unusable until the immutable v8r6 release, v9 overlay, release
 # verifier, and PBS all-MCP health gate have been materialized and approved.
 # It retains the full ten-epoch/no-step-cap horizon and keeps PTC disabled.
 # Submitters must pass both immutable-runtime and post-F MCP acceptances as
@@ -21,24 +21,24 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r5-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r5-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r6-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r6-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
 GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
 ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
-CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v9.yaml
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v10_padded.yaml
 COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
 ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
-EXPERIMENT=abci-openreward-ta-swe-h200-16
-TRIAL=abci-ta-swe16-nonrec-h200-cp1-c12-v9-trial0
+EXPERIMENT=abci-openreward-ta-swe-h200-16-cp1-padded
+TRIAL=abci-ta-swe16-nonrec-h200-cp1-c12-v10-padded-trial0
 RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
 
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && -r "${ABCI_ENV}" && \
     -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" ]] || {
-    echo "[h200-16-v9] ERROR: immutable v8r5 release is incomplete: ${REPO_ROOT}" >&2
+    echo "[h200-16-v9] ERROR: immutable v8r6 release is incomplete: ${REPO_ROOT}" >&2
     exit 2
 }
 [[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || {
@@ -112,6 +112,8 @@ export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
 export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
 export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
 export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+export PLATOON_QWEN35_GDN_PACKED=0
+export OPENREWARD_EXPECTED_QWEN35_GDN_PACKED=0
 unset OPENREWARD_GATE_MARKER_TO_PUBLISH
 
 exec "${COMMON}" "${CONFIG}"

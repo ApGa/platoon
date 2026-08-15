@@ -576,6 +576,80 @@ def test_qwen_gdn_cp_guard_patch_is_opt_in(monkeypatch):
     assert model_mod.is_valid_vision_model("qwen3") is False
 
 
+def test_qwen_gdn_cp_padded_switch_preserves_upstream_layout_and_text_only_classification(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_padded_guard_test")
+    model_mod = types.ModuleType("areal.engine.core.model")
+    megatron_engine_mod = types.ModuleType("areal.engine.megatron_engine")
+
+    def original_requires_padded_seq(model_type):
+        return model_type == "qwen3_5_moe"
+
+    def original_is_valid_vision_model(model_type):
+        return model_type in {"qwen3_5_moe", "other_vision"}
+
+    model_mod.is_qwen3_5_model = lambda model_type: model_type in {"qwen3_5", "qwen3_5_moe"}
+    model_mod.requires_padded_seq = original_requires_padded_seq
+    model_mod.is_valid_vision_model = original_is_valid_vision_model
+
+    for name in ("areal", "areal.engine", "areal.engine.core"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "areal.engine.core.model", model_mod)
+    monkeypatch.setitem(sys.modules, "areal.engine.megatron_engine", megatron_engine_mod)
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "0")
+
+    patches._patch_areal_qwen35_gdn_cp_guards()
+
+    assert model_mod.requires_padded_seq is original_requires_padded_seq
+    assert model_mod.requires_padded_seq("qwen3_5_moe") is True
+    assert model_mod.is_valid_vision_model("qwen3_5_moe") is False
+    assert model_mod.is_valid_vision_model("other_vision") is True
+    assert megatron_engine_mod.requires_padded_seq is original_requires_padded_seq
+    assert megatron_engine_mod.is_valid_vision_model is model_mod.is_valid_vision_model
+
+
+def test_qwen_gdn_cp_packed_switch_skips_forward_override_and_defaults_on(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_padded_forward_test")
+    megatron_mod = types.ModuleType("megatron")
+    core_mod = types.ModuleType("megatron.core")
+    ssm_mod = types.ModuleType("megatron.core.ssm")
+    gdn_mod = types.ModuleType("megatron.core.ssm.gated_delta_net")
+    utils_mod = types.ModuleType("megatron.core.utils")
+
+    class FakeGatedDeltaNet:
+        def forward(self, *_args, **_kwargs):
+            return "upstream"
+
+    gdn_mod.GatedDeltaNet = FakeGatedDeltaNet
+    gdn_mod.chunk_gated_delta_rule = object()
+    ssm_mod.gated_delta_net = gdn_mod
+    utils_mod.deprecate_inference_params = lambda inference_context, _inference_params: inference_context
+    utils_mod.nvtx_range_pop = lambda **_kwargs: None
+    utils_mod.nvtx_range_push = lambda **_kwargs: None
+
+    for name, module in {
+        "megatron": megatron_mod,
+        "megatron.core": core_mod,
+        "megatron.core.ssm": ssm_mod,
+        "megatron.core.ssm.gated_delta_net": gdn_mod,
+        "megatron.core.utils": utils_mod,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    upstream_forward = FakeGatedDeltaNet.forward
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "0")
+    patches._patch_megatron_core_gated_delta_net_context_parallel()
+    assert FakeGatedDeltaNet.forward is upstream_forward
+
+    # Unset means enabled so existing PLATOON_QWEN35_GDN_CP=1 launches retain
+    # their current packed behavior unless they explicitly request the control.
+    monkeypatch.delenv("PLATOON_QWEN35_GDN_PACKED")
+    patches._patch_megatron_core_gated_delta_net_context_parallel()
+    assert FakeGatedDeltaNet.forward is not upstream_forward
+    assert getattr(FakeGatedDeltaNet.forward, "__platoon_qwen35_gdn_cp_patch__", False)
+
+
 def test_qwen_gdn_cp_config_validation_patch_preserves_cp(monkeypatch):
     patches = _load_patches_module("platoon_areal_patches_config_validation_test")
     megatron_mod = types.ModuleType("megatron")
@@ -897,9 +971,7 @@ def test_openai_content_patch_leaves_tool_argument_decoding_to_upstream(monkeypa
 def test_openai_non_thinking_hint_reaches_chat_template(monkeypatch):
     patches = _load_patches_module("platoon_areal_patches_non_thinking_test")
 
-    proxy_mod = types.ModuleType(
-        "areal.experimental.openai.proxy.proxy_rollout_server"
-    )
+    proxy_mod = types.ModuleType("areal.experimental.openai.proxy.proxy_rollout_server")
     captured = []
 
     async def call_client_create(
@@ -909,9 +981,7 @@ def test_openai_non_thinking_hint_reaches_chat_template(monkeypatch):
         extra_ignored_args=None,
         stream=False,
     ):
-        captured.append(
-            (create_fn, request, session_id, extra_ignored_args, stream)
-        )
+        captured.append((create_fn, request, session_id, extra_ignored_args, stream))
         return "response"
 
     proxy_mod._call_client_create = call_client_create
@@ -963,13 +1033,9 @@ def test_openai_non_thinking_hint_reaches_chat_template(monkeypatch):
 
 
 def test_openai_reasoning_hint_enables_chat_template(monkeypatch):
-    patches = _load_patches_module(
-        "platoon_areal_patches_reasoning_enabled_test"
-    )
+    patches = _load_patches_module("platoon_areal_patches_reasoning_enabled_test")
 
-    proxy_mod = types.ModuleType(
-        "areal.experimental.openai.proxy.proxy_rollout_server"
-    )
+    proxy_mod = types.ModuleType("areal.experimental.openai.proxy.proxy_rollout_server")
     captured = []
 
     async def call_client_create(**kwargs):

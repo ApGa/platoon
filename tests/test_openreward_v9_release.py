@@ -18,8 +18,8 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r5-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r5-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r6-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r6-376d1b9-18e62c0"
 EXPECTED_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 EXPECTED_PATCH_IDENTITY = "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b"
 EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
@@ -48,6 +48,8 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         "full_horizon": True,
         "total_train_epochs": 10,
         "total_train_steps": None,
+        "qwen35_gdn_cp_size": 1,
+        "qwen35_gdn_packed": False,
         "fresh_16node_model_only_lineage": True,
         "nonrecursive_16node_ptc": False,
         "recursive_32node_ptc": True,

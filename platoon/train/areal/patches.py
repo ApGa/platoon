@@ -654,6 +654,20 @@ def _qwen35_gdn_cp_enabled() -> bool:
     return os.environ.get("PLATOON_QWEN35_GDN_CP", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _qwen35_gdn_packed_enabled() -> bool:
+    """Return whether the opt-in Qwen3.5 bundle should replace the padded GDN path.
+
+    Packed execution remains enabled by default whenever the parent GDN CP
+    bundle is enabled, preserving the existing behavior.  CP1 jobs can set
+    ``PLATOON_QWEN35_GDN_PACKED=0`` to retain the other compatibility patches
+    while using AReaL's padded batches and Megatron-Core's upstream GDN forward.
+    """
+
+    if not _qwen35_gdn_cp_enabled():
+        return False
+    return os.environ.get("PLATOON_QWEN35_GDN_PACKED", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _qwen35_gdn_cp_conv_backend() -> str:
     backend = os.environ.get("PLATOON_QWEN35_GDN_CP_CONV_BACKEND", "fla").strip().lower()
     if backend not in {"fla", "reference"}:
@@ -1369,12 +1383,13 @@ def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
 
     This mirrors the MILES approach at the layout/recurrence boundary while
     keeping Megatron-Core's TP-sharded GDN weights. It is intentionally guarded
-    by ``PLATOON_QWEN35_GDN_CP=1`` because upstream MCore still marks this area
-    experimental. FLA handles the packed recurrence and CP-local convolution;
+    by ``PLATOON_QWEN35_GDN_CP=1`` and the default-on
+    ``PLATOON_QWEN35_GDN_PACKED`` switch because upstream MCore still marks this
+    area experimental. FLA handles the packed recurrence and CP-local convolution;
     the full-gather convolution remains available only as a rollback reference.
     """
 
-    if not _qwen35_gdn_cp_enabled():
+    if not _qwen35_gdn_packed_enabled():
         return
 
     try:
@@ -1553,7 +1568,7 @@ def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
 
 
 def _patch_areal_qwen35_gdn_cp_guards() -> None:
-    """Let text-only Qwen3.5 use AReaL's packed CP path under opt-in."""
+    """Classify Qwen3.5 as text-only and optionally enable its packed CP path."""
 
     if not _qwen35_gdn_cp_enabled():
         return
@@ -1564,7 +1579,9 @@ def _patch_areal_qwen35_gdn_cp_guards() -> None:
         raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import AReaL model guards.") from exc
 
     original_requires_padded_seq = core_model.requires_padded_seq
-    if not getattr(original_requires_padded_seq, "__platoon_qwen35_gdn_cp_guard_patch__", False):
+    if _qwen35_gdn_packed_enabled() and not getattr(
+        original_requires_padded_seq, "__platoon_qwen35_gdn_cp_guard_patch__", False
+    ):
 
         @wraps(original_requires_padded_seq)
         def _requires_padded_seq_with_qwen35_gdn_cp(model_type: str) -> bool:
