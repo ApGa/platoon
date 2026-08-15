@@ -3,27 +3,36 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-import torch
-from areal.api import Scheduler
-from areal.api.cli_args import MicroBatchSpec
-from areal.engine import FSDPPPOActor
-from areal.infra import current_platform
-from areal.trainer.ppo.actor import PPOActor
-from areal.trainer.ppo.stats import infer_token_denominator
-from areal.utils import logging, stats_tracker
-from areal.utils.data import batched_call, split_padded_tensor_dict_into_mb_list
-from areal.utils.perf_tracer import trace_perf
+# AReaL's FSDP engine opportunistically imports its Megatron tree-attention
+# adapter when Megatron is installed. That path reaches MBridge's Qwen3.5
+# registration and FLA before this module's lazy Megatron actor getter runs.
+# Establish the per-worker cache policy before importing torch or any AReaL
+# engine, then revalidate it at the lazy Megatron boundary below.
+from platoon.train.areal.patches import _prepare_megatron_worker_triton_fla_cache
 
-from platoon.train.areal.actor_controller import PlatoonPPOActorController
-from platoon.train.areal.config_defs import PlatoonPPOActorConfig
-from platoon.train.areal.fp32_lm_head import install_fp32_lm_head_output_hooks
-from platoon.train.areal.loss_functions import build_loss_fn
-from platoon.train.areal.numerical_stability import (
+_prepare_megatron_worker_triton_fla_cache()
+
+import torch  # noqa: E402
+from areal.api import Scheduler  # noqa: E402
+from areal.api.cli_args import MicroBatchSpec  # noqa: E402
+from areal.engine import FSDPPPOActor  # noqa: E402
+from areal.infra import current_platform  # noqa: E402
+from areal.trainer.ppo.actor import PPOActor  # noqa: E402
+from areal.trainer.ppo.stats import infer_token_denominator  # noqa: E402
+from areal.utils import logging, stats_tracker  # noqa: E402
+from areal.utils.data import batched_call, split_padded_tensor_dict_into_mb_list  # noqa: E402
+from areal.utils.perf_tracer import trace_perf  # noqa: E402
+
+from platoon.train.areal.actor_controller import PlatoonPPOActorController  # noqa: E402
+from platoon.train.areal.config_defs import PlatoonPPOActorConfig  # noqa: E402
+from platoon.train.areal.fp32_lm_head import install_fp32_lm_head_output_hooks  # noqa: E402
+from platoon.train.areal.loss_functions import build_loss_fn  # noqa: E402
+from platoon.train.areal.numerical_stability import (  # noqa: E402
     install_nonfinite_gradient_guard,
     make_optimizer_update_result,
     optimizer_update_succeeded,
 )
-from platoon.train.areal.router_replay import (
+from platoon.train.areal.router_replay import (  # noqa: E402
     ROUTED_EXPERTS_FIELD,
     ROUTED_EXPERTS_VALID_FIELD,
     assert_engine_router_replay_batch_consumed,

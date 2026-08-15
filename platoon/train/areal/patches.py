@@ -805,14 +805,17 @@ def _log_qwen35_gdn_cp_once(owner: object, key: str, message: str) -> None:
 
 
 def _prepare_megatron_worker_triton_fla_cache() -> None:
-    """Set cache policy before importing the Megatron actor or FLA kernels.
+    """Set cache policy before importing actor engines or FLA kernels.
 
-    Importing AReaL's ``MegatronPPOActor`` reaches Megatron Bridge's Qwen
-    providers and FLA's GDN kernels.  ``fla.utils`` snapshots
+    Importing either AReaL actor engine can reach Megatron Bridge's Qwen
+    providers and FLA's GDN kernels: its FSDP engine opportunistically imports
+    the Megatron tree-attention adapter when Megatron is installed.
+    ``fla.utils`` snapshots
     ``FLA_CACHE_RESULTS`` into ``autotune_cache_kwargs`` at import time, so a
     topology-time change during ``initialize`` is too late.  Prepare every
-    Megatron worker at the lazy base-class import boundary: CP1 Qwen3.5 also
-    uses upstream FLA GDN, while model architecture is not available yet.
+    actor worker before importing torch/AReaL engines, then revalidate at the
+    lazy Megatron base-class boundary. CP1 Qwen3.5 also uses upstream FLA GDN,
+    while model architecture is not available yet.
 
     With many actor processes starting together, a shared cache can expose a
     Triton metadata file before the matching ``.cubin`` is visible, surfacing

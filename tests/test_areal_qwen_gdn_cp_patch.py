@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib.util
 import json
@@ -16,6 +17,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PATCHES_PATH = REPO_ROOT / "platoon/train/areal/patches.py"
+ACTOR_PATH = REPO_ROOT / "platoon/train/areal/actor.py"
 
 
 def _load_patches_module(module_name: str = "platoon_areal_patches_test"):
@@ -609,6 +611,112 @@ def test_megatron_worker_prepares_triton_fla_cache_before_provider_import(monkey
         }
     ]
     assert checkpoint_patch_calls == [True]
+
+
+def test_actor_prepares_cache_before_eager_fsdp_engine_import(monkeypatch, tmp_path):
+    """Reproduce AReaL's FSDP -> Megatron adapter -> FLA import order."""
+
+    patches = _load_patches_module("platoon_areal_patches_actor_preimport_cache_test")
+    monkeypatch.setattr(patches.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setenv("RANK", "23")
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    monkeypatch.delenv("TRITON_CACHE_AUTOTUNING", raising=False)
+    monkeypatch.delenv("FLA_CACHE_RESULTS", raising=False)
+    monkeypatch.delitem(sys.modules, "fla.utils", raising=False)
+    monkeypatch.delitem(sys.modules, "triton", raising=False)
+
+    class FakeFSDPPPOActor:
+        pass
+
+    engine_import_state = []
+
+    class FakeEngineModule(types.ModuleType):
+        def __getattr__(self, name):
+            if name != "FSDPPPOActor":
+                raise AttributeError(name)
+            # AReaL's real FSDP engine imports tree_attn.module, whose optional
+            # Megatron adapter reaches this FLA import before actor.py's lazy
+            # MegatronPPOActor lookup. Mirror fla.utils' import-time snapshot.
+            fla_cache_results = os.environ.get("FLA_CACHE_RESULTS", "1") == "1"
+            monkeypatch.setitem(
+                sys.modules,
+                "fla.utils",
+                types.SimpleNamespace(
+                    SUPPORTS_AUTOTUNE_CACHE=True,
+                    FLA_CACHE_RESULTS=fla_cache_results,
+                    autotune_cache_kwargs={"cache_results": fla_cache_results},
+                ),
+            )
+            engine_import_state.append(
+                {
+                    "cache_dir": os.environ.get("TRITON_CACHE_DIR"),
+                    "triton_autotuning": os.environ.get("TRITON_CACHE_AUTOTUNING"),
+                    "fla_cache_results": fla_cache_results,
+                }
+            )
+            return FakeFSDPPPOActor
+
+    def _module(name, **attributes):
+        module = types.ModuleType(name)
+        module.__dict__.update(attributes)
+        monkeypatch.setitem(sys.modules, name, module)
+        return module
+
+    for package_name in ("platoon", "platoon.train", "platoon.train.areal", "areal"):
+        package = _module(package_name)
+        package.__path__ = []
+    monkeypatch.setitem(sys.modules, "platoon.train.areal.patches", patches)
+    _module("areal.api", Scheduler=type("Scheduler", (), {}))
+    _module("areal.api.cli_args", MicroBatchSpec=type("MicroBatchSpec", (), {}))
+    monkeypatch.setitem(sys.modules, "areal.engine", FakeEngineModule("areal.engine"))
+
+    # Execute actor.py's real module prefix through the eager FSDP import. The
+    # fake engine mimics the exact point where AReaL's optional Megatron tree
+    # adapter imports FLA, without requiring Megatron/FLA in the unit-test venv.
+    actor_tree = ast.parse(ACTOR_PATH.read_text(), filename=str(ACTOR_PATH))
+    prepare_call_index = next(
+        index
+        for index, statement in enumerate(actor_tree.body)
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+        and statement.value.func.id == "_prepare_megatron_worker_triton_fla_cache"
+    )
+    first_runtime_dependency_index = next(
+        index
+        for index, statement in enumerate(actor_tree.body)
+        if (
+            isinstance(statement, ast.Import)
+            and any(alias.name.split(".", 1)[0] in {"areal", "torch"} for alias in statement.names)
+        )
+        or (
+            isinstance(statement, ast.ImportFrom)
+            and statement.module is not None
+            and statement.module.split(".", 1)[0] in {"areal", "torch"}
+        )
+    )
+    assert prepare_call_index < first_runtime_dependency_index
+    fsdp_import_index = next(
+        index
+        for index, statement in enumerate(actor_tree.body)
+        if isinstance(statement, ast.ImportFrom)
+        and statement.module == "areal.engine"
+        and any(alias.name == "FSDPPPOActor" for alias in statement.names)
+    )
+    prefix = ast.Module(body=actor_tree.body[: fsdp_import_index + 1], type_ignores=[])
+    namespace = {"__name__": "platoon_areal_actor_preimport_cache_test"}
+    exec(compile(prefix, ACTOR_PATH, "exec"), namespace)
+
+    expected_cache_dir = str(tmp_path / "platoon-triton-cache" / f"rank-23-pid-{os.getpid()}")
+    assert engine_import_state == [
+        {
+            "cache_dir": expected_cache_dir,
+            "triton_autotuning": "0",
+            "fla_cache_results": False,
+        }
+    ]
+    assert namespace["FSDPPPOActor"] is FakeFSDPPPOActor
+    assert sys.modules["fla.utils"].autotune_cache_kwargs == {"cache_results": False}
 
 
 def test_megatron_worker_cache_preparation_rejects_unsafe_preimported_fla(monkeypatch):
