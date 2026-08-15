@@ -45,6 +45,9 @@ def test_smoke_uses_exact_immutable_runtime_and_production_server_args() -> None
     assert '[[ "${#GPU_UUIDS[@]}" -eq 8 ]]' in text
     assert "--cleanenv --containall --no-home" in text
     assert "--no-mount home,cwd,bind-paths" in text
+    assert "PLATOON_QWEN35_GDN_CP=" not in text
+    assert "PLATOON_QWEN35_GDN_PACKED=" not in text
+    assert "PLATOON_QWEN35_GDN_CP_CONV_BACKEND=fla" in text
 
 
 def test_smoke_prefers_allocator_fix_before_disabling_custom_all_reduce() -> None:

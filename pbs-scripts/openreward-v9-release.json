@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r6-376d1b9-18e62c0",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r6-376d1b9-18e62c0",
+  "release_ref": "refs/tags/abci-v8r7-376d1b9-18e62c0",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r7-376d1b9-18e62c0",
   "components": {
     "platoon_upstream": "376d1b9885ea40464766fb3fea74815c6a698fbf",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -531,10 +531,25 @@
     "total_train_steps": null,
     "qwen35_gdn_cp_size": 1,
     "qwen35_gdn_packed": false,
+    "qwen35_gdn_layout_selection": "model_architecture_and_context_parallel_topology",
+    "qwen35_gdn_cp1_layout": "padded_bshd_upstream_gdn",
+    "qwen35_gdn_cp_gt1_layout": "packed_thd_platoon_custom_gdn_cp",
+    "r3_padded_routes_layout": "sequence_major",
+    "dynamic_bs": true,
+    "filter_zero_advantage_datums": true,
+    "filter_zero_variance_groups": true,
+    "rollout_max_head_offpolicyness": 3,
+    "rollout_consumer_batch_size": 8,
+    "max_concurrent_rollouts_16node": 12,
+    "max_concurrent_rollouts_32node": 24,
+    "balance_accepted_batches": false,
     "fresh_16node_model_only_lineage": true,
+    "fresh_16node_lineage": "v11_signal_filter",
+    "fresh_32node_lineage": "v11_signal_filter",
     "nonrecursive_16node_ptc": false,
     "recursive_32node_ptc": true,
     "recursive_32node_ptc_mode": "orchestration_only",
-    "recursive_32node_ptc_max_tool_calls_per_execution": 1024
+    "recursive_32node_ptc_max_tool_calls_per_execution": 1024,
+    "recursive_32node_subagent_datum_keep_probability": 0.25
   }
 }

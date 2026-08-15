@@ -18,8 +18,6 @@ CONTROLLER_PATCHES = (
     "_patch_areal_openai_routed_experts_transport",
     "_patch_areal_sglang_routed_experts_launcher",
     "_patch_areal_routed_experts_unpadding",
-    "_patch_triton_cache_for_qwen35_gdn_cp",
-    "_patch_areal_qwen35_gdn_cp_guards",
     "_patch_batch_task_dispatcher_idle_submit",
     "_patch_rollout_controller_least_loaded_workers",
     "_patch_rollout_controller_pause_rpc_policy",
@@ -37,15 +35,9 @@ CONTROLLER_PATCHES = (
     "_install_process_stall_watchdog",
 )
 MEGATRON_PATCHES = (
+    "_prepare_megatron_worker_triton_fla_cache",
     "_patch_megatron_bridge_attention_backend",
-    "_patch_megatron_bridge_qwen35_tp_validation",
-    "_patch_megatron_bridge_qwen35_cp_constructor_loss_mode",
     "_patch_megatron_checkpoint_optimizer_bucket_shapes",
-    "_patch_areal_megatron_memory_compatibility",
-    "_patch_megatron_bridge_qwen3vl_already_cp_local_packed_input",
-    "_patch_megatron_core_qwen35_already_cp_local_thd_rope",
-    "_patch_megatron_core_gdn_context_parallel_config_validation",
-    "_patch_megatron_core_gated_delta_net_context_parallel",
 )
 ROLLOUT_PATCHES = ("_patch_remote_inf_engine_server_child_exit",)
 
@@ -109,8 +101,16 @@ class AReaLPatchRoutingTests(unittest.TestCase):
         self.assertNotIn("apply_megatron_worker_patches()", package_source)
 
         actor_source = ACTOR_PATH.read_text()
-        call_then_import = "    apply_megatron_worker_patches()\n    from areal.engine import MegatronPPOActor\n"
-        self.assertIn(call_then_import, actor_source)
+        apply_index = actor_source.index("    apply_megatron_worker_patches()")
+        self.assertLess(
+            apply_index,
+            actor_source.index("    from areal.engine import MegatronPPOActor", apply_index),
+        )
+        self.assertLess(
+            actor_source.index("            configure_qwen35_gdn_patches_for_actor("),
+            actor_source.index("            with router_replay_initialization(self):"),
+        )
+        self.assertIn("                self.parallel_strategy,", actor_source)
 
         controller_source = ACTOR_CONTROLLER_PATH.read_text()
         self.assertNotIn("areal.engine", controller_source)

@@ -504,7 +504,7 @@ def _patch_megatron_bridge_qwen35_cp_constructor_loss_mode() -> None:
             Qwen35VLMoEModelProvider,
         )
     except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron Bridge Qwen3.5 providers.") from exc
+        raise RuntimeError("Auto-selected Qwen3.5 actor could not import its Megatron Bridge providers.") from exc
 
     for provider_cls in (Qwen35VLModelProvider, Qwen35VLMoEModelProvider):
         original = provider_cls.provide
@@ -650,22 +650,136 @@ def _patch_megatron_checkpoint_optimizer_bucket_shapes() -> None:
     MegatronCheckpointManager.generate_state_dict = _generate_state_dict_with_padded_optimizer_bucket_shapes
 
 
+_QWEN35_GDN_ACTOR_TOPOLOGY: tuple[str, int, bool] | None = None
+
+
+def _register_qwen35_gdn_actor_topology(*, model_type: str, cp_size: int, is_qwen35: bool) -> None:
+    """Register the one model/topology owned by this Megatron worker.
+
+    AReaL creates the actor before it receives its parsed ``ParallelStrategy``.
+    Patch modules are imported even earlier, so environment variables cannot be
+    a trustworthy topology source.  Registration happens immediately before
+    actor initialization, after ``create_process_group`` has stored the actual
+    strategy delivered over RPC.  A worker process owns one Megatron actor; a
+    conflicting second registration therefore indicates a lifecycle bug and is
+    rejected rather than silently changing process-global monkey-patches.
+    """
+
+    global _QWEN35_GDN_ACTOR_TOPOLOGY
+    try:
+        normalized_cp_size = int(cp_size)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid actor context_parallel_size={cp_size!r}") from exc
+    if isinstance(cp_size, bool) or normalized_cp_size < 1:
+        raise RuntimeError(f"Invalid actor context_parallel_size={cp_size!r}")
+    requested = (str(model_type), normalized_cp_size, bool(is_qwen35))
+    if _QWEN35_GDN_ACTOR_TOPOLOGY is not None and _QWEN35_GDN_ACTOR_TOPOLOGY != requested:
+        raise RuntimeError(
+            "Megatron worker was reconfigured with a different model/topology: "
+            f"existing={_QWEN35_GDN_ACTOR_TOPOLOGY!r}, requested={requested!r}"
+        )
+    _QWEN35_GDN_ACTOR_TOPOLOGY = requested
+
+
 def _qwen35_gdn_cp_enabled() -> bool:
-    return os.environ.get("PLATOON_QWEN35_GDN_CP", "").strip().lower() in {"1", "true", "yes", "on"}
+    """Whether this worker's registered actor is a Qwen3.5 model.
+
+    The historical ``PLATOON_QWEN35_GDN_CP`` variable is deliberately ignored:
+    model architecture and parsed actor topology are correctness inputs, while
+    a launcher environment is not.
+    """
+
+    return _QWEN35_GDN_ACTOR_TOPOLOGY is not None and _QWEN35_GDN_ACTOR_TOPOLOGY[2]
 
 
 def _qwen35_gdn_packed_enabled() -> bool:
-    """Return whether the opt-in Qwen3.5 bundle should replace the padded GDN path.
+    """Whether the registered Qwen3.5 actor requires packed THD execution."""
 
-    Packed execution remains enabled by default whenever the parent GDN CP
-    bundle is enabled, preserving the existing behavior.  CP1 jobs can set
-    ``PLATOON_QWEN35_GDN_PACKED=0`` to retain the other compatibility patches
-    while using AReaL's padded batches and Megatron-Core's upstream GDN forward.
+    return _qwen35_gdn_cp_enabled() and _QWEN35_GDN_ACTOR_TOPOLOGY[1] > 1
+
+
+def configure_qwen35_gdn_patches_for_actor(
+    model_path: str,
+    parallel_strategy,
+    *,
+    auto_config_cls=None,
+) -> dict[str, object]:
+    """Derive and install Qwen3.5 GDN compatibility from the live actor.
+
+    This must run after ``create_process_group`` and immediately before the
+    Megatron engine's ``initialize``.  ``AutoConfig`` supplies the architecture;
+    the already-parsed ``ParallelStrategy`` supplies CP.  CP1 Qwen3.5 actors
+    keep AReaL's padded BSHD layout and Megatron-Core's upstream GDN forward.
+    CP>1 Qwen3.5 actors install the packed THD/CP implementation.  Other model
+    families do not import or install any Qwen-specific patch.
     """
 
-    if not _qwen35_gdn_cp_enabled():
-        return False
-    return os.environ.get("PLATOON_QWEN35_GDN_PACKED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    if parallel_strategy is None:
+        raise RuntimeError(
+            "Qwen3.5 GDN topology must be configured after create_process_group; actor.parallel_strategy is unset"
+        )
+    cp_size = getattr(parallel_strategy, "context_parallel_size", None)
+    try:
+        normalized_cp_size = int(cp_size)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid actor context_parallel_size={cp_size!r}") from exc
+    if isinstance(cp_size, bool) or normalized_cp_size < 1:
+        raise RuntimeError(f"Invalid actor context_parallel_size={cp_size!r}")
+
+    if auto_config_cls is None:
+        from transformers import AutoConfig as auto_config_cls  # pyright: ignore[reportMissingImports]
+
+    hf_config = auto_config_cls.from_pretrained(model_path, trust_remote_code=True)
+    model_type = getattr(hf_config, "model_type", None)
+    if not isinstance(model_type, str) or not model_type:
+        raise RuntimeError(f"Model config at {model_path!r} does not declare a model_type")
+
+    from areal.engine.core.model import is_qwen3_5_model  # pyright: ignore[reportMissingImports]
+
+    is_qwen35 = bool(is_qwen3_5_model(model_type))
+    _register_qwen35_gdn_actor_topology(
+        model_type=model_type,
+        cp_size=normalized_cp_size,
+        is_qwen35=is_qwen35,
+    )
+    mode = {
+        "model_type": model_type,
+        "context_parallel_size": normalized_cp_size,
+        "is_qwen35": is_qwen35,
+        "packed": is_qwen35 and normalized_cp_size > 1,
+    }
+    if not is_qwen35:
+        return mode
+
+    # Qwen3.5 text checkpoints use the VL bridge provider even at CP1.  These
+    # compatibility patches are architecture-specific but not CP-specific.
+    # The bounded vocab reductions in the memory patch remain important at
+    # CP1; its CP-local scalar branch is independently layout-gated.
+    _patch_megatron_bridge_qwen35_tp_validation()
+    _patch_areal_qwen35_gdn_cp_guards()
+    _patch_areal_megatron_memory_compatibility()
+
+    if normalized_cp_size == 1:
+        _log_qwen35_gdn_cp_once(
+            configure_qwen35_gdn_patches_for_actor,
+            "auto_padded_cp1",
+            f"Auto-configured Qwen3.5 model_type={model_type!r} with CP=1: "
+            "using padded BSHD batches and Megatron-Core's upstream GDN forward.",
+        )
+        return mode
+
+    _patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
+    _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input()
+    _patch_megatron_core_qwen35_already_cp_local_thd_rope()
+    _patch_megatron_core_gdn_context_parallel_config_validation()
+    _patch_megatron_core_gated_delta_net_context_parallel()
+    _log_qwen35_gdn_cp_once(
+        configure_qwen35_gdn_patches_for_actor,
+        "auto_packed_cp",
+        f"Auto-configured Qwen3.5 model_type={model_type!r} with CP={normalized_cp_size}: "
+        "using packed THD batches and Platoon's GDN context-parallel forward.",
+    )
+    return mode
 
 
 def _qwen35_gdn_cp_conv_backend() -> str:
@@ -690,19 +804,39 @@ def _log_qwen35_gdn_cp_once(owner: object, key: str, message: str) -> None:
     logging.getLogger("PlatoonQwen35GDNCP").warning(message)
 
 
-def _patch_triton_cache_for_qwen35_gdn_cp() -> None:
-    """Avoid shared Triton/FLA autotune cache races across many actor ranks.
+def _prepare_megatron_worker_triton_fla_cache() -> None:
+    """Set cache policy before importing the Megatron actor or FLA kernels.
 
-    FLA's GDN kernels autotune through Triton the first time they run. With 80
-    actor processes starting together, the default shared cache can expose a
-    metadata file before the matching ``.cubin`` is visible, which surfaces as
-    ``KeyError: "Unknown key: 'cubin'"`` during Triton ``CompiledKernel`` load.
-    Isolate caches per process and disable FLA's autotune result cache for this
-    opt-in experimental path.
+    Importing AReaL's ``MegatronPPOActor`` reaches Megatron Bridge's Qwen
+    providers and FLA's GDN kernels.  ``fla.utils`` snapshots
+    ``FLA_CACHE_RESULTS`` into ``autotune_cache_kwargs`` at import time, so a
+    topology-time change during ``initialize`` is too late.  Prepare every
+    Megatron worker at the lazy base-class import boundary: CP1 Qwen3.5 also
+    uses upstream FLA GDN, while model architecture is not available yet.
+
+    With many actor processes starting together, a shared cache can expose a
+    Triton metadata file before the matching ``.cubin`` is visible, surfacing
+    as ``KeyError: "Unknown key: 'cubin'"`` during ``CompiledKernel`` load.
+    Isolate caches per process and disable FLA's autotune result cache.  If FLA
+    has already frozen an unsafe policy, fail closed instead of pretending an
+    environment update can repair decorators that were already constructed.
     """
 
-    if not _qwen35_gdn_cp_enabled():
-        return
+    fla_utils_module = sys.modules.get("fla.utils")
+    if fla_utils_module is not None:
+        supports_autotune_cache = getattr(fla_utils_module, "SUPPORTS_AUTOTUNE_CACHE", None)
+        cache_results = getattr(fla_utils_module, "FLA_CACHE_RESULTS", None)
+        cache_kwargs = getattr(fla_utils_module, "autotune_cache_kwargs", None)
+        unsafe_fla_cache = supports_autotune_cache is not False and (
+            cache_results is not False
+            or not isinstance(cache_kwargs, dict)
+            or cache_kwargs.get("cache_results") is not False
+        )
+        if unsafe_fla_cache:
+            raise RuntimeError(
+                "fla.utils was imported before Megatron worker cache preparation and froze an unsafe "
+                "autotune cache policy"
+            )
 
     rank = (
         os.environ.get("SLURM_PROCID")
@@ -725,8 +859,11 @@ def _patch_triton_cache_for_qwen35_gdn_cp() -> None:
         try:
             triton_module.knobs.cache.dir = cache_dir
             triton_module.knobs.autotuning.cache = False
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(
+                "Triton was imported before Megatron worker cache preparation and its live cache state "
+                "could not be hardened"
+            ) from exc
 
 
 def _get_cp_sequence_lengths(cu_seqlens, cp_size: int, local_total_len: int | None = None):
@@ -779,7 +916,7 @@ def _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input() -> None:
             Qwen3VLModel,
         )
     except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron Bridge Qwen3-VL model.") from exc
+        raise RuntimeError("Auto-selected Qwen3.5 actor could not import the Megatron Bridge Qwen3-VL model.") from exc
 
     original_preprocess_packed_seqs = qwen3vl_model.preprocess_packed_seqs
     if not getattr(original_preprocess_packed_seqs, "__platoon_qwen35_already_cp_local_patch__", False):
@@ -923,7 +1060,7 @@ def _patch_megatron_core_qwen35_already_cp_local_thd_rope() -> None:
     try:
         from megatron.core.models.common.embeddings import rope_utils  # pyright: ignore[reportMissingImports]
     except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron-Core RoPE utilities.") from exc
+        raise RuntimeError("Auto-selected Qwen3.5 actor could not import Megatron-Core RoPE utilities.") from exc
 
     original_apply_thd = rope_utils._apply_rotary_pos_emb_thd
     if getattr(original_apply_thd, "__platoon_qwen35_already_cp_local_thd_rope_patch__", False):
@@ -1200,7 +1337,8 @@ def _build_gdn_cp_context(module, cu_seqlens, device, cp_group=None, cp_size: in
         from fla.ops.cp import build_cp_context  # pyright: ignore[reportMissingImports]
     except Exception as exc:
         raise RuntimeError(
-            "PLATOON_QWEN35_GDN_CP=1 requires flash-linear-attention with `fla.ops.cp.build_cp_context` available."
+            "Qwen3.5 GDN context parallelism requires flash-linear-attention with "
+            "`fla.ops.cp.build_cp_context` available."
         ) from exc
 
     return build_cp_context(
@@ -1338,7 +1476,7 @@ def _apply_packed_causal_conv1d_for_gdn(
 
 
 def _patch_megatron_core_gdn_context_parallel_config_validation() -> None:
-    """Bypass MCore's GDN CP construction guard under the opt-in CP patch.
+    """Bypass MCore's GDN CP guard for a topology-selected Qwen3.5 actor.
 
     Megatron-Core 0.17.0 rejects ``experimental_attention_variant="gated_delta_net"``
     with CP>1 during ``TransformerConfig.__post_init__``. The forward patch below
@@ -1354,7 +1492,7 @@ def _patch_megatron_core_gdn_context_parallel_config_validation() -> None:
             TransformerConfig,
         )
     except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron-Core TransformerConfig.") from exc
+        raise RuntimeError("Auto-selected Qwen3.5 actor could not import Megatron-Core TransformerConfig.") from exc
 
     original = TransformerConfig.__post_init__
     if getattr(original, "__platoon_qwen35_gdn_cp_config_patch__", False):
@@ -1379,14 +1517,14 @@ def _patch_megatron_core_gdn_context_parallel_config_validation() -> None:
 
 
 def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
-    """Opt-in packed THD + CP support for Megatron-Core GatedDeltaNet.
+    """Install packed THD + CP support for Megatron-Core GatedDeltaNet.
 
     This mirrors the MILES approach at the layout/recurrence boundary while
-    keeping Megatron-Core's TP-sharded GDN weights. It is intentionally guarded
-    by ``PLATOON_QWEN35_GDN_CP=1`` and the default-on
-    ``PLATOON_QWEN35_GDN_PACKED`` switch because upstream MCore still marks this
-    area experimental. FLA handles the packed recurrence and CP-local convolution;
-    the full-gather convolution remains available only as a rollback reference.
+    keeping Megatron-Core's TP-sharded GDN weights. It is installed only after
+    the live actor is identified as Qwen3.5 with CP>1 because upstream MCore
+    still marks this area experimental. FLA handles the packed recurrence and
+    CP-local convolution; the full-gather convolution remains available only as
+    a rollback reference.
     """
 
     if not _qwen35_gdn_packed_enabled():
@@ -1403,7 +1541,7 @@ def _patch_megatron_core_gated_delta_net_context_parallel() -> None:
             nvtx_range_push,
         )
     except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import Megatron-Core GDN dependencies.") from exc
+        raise RuntimeError("Auto-selected Qwen3.5 CP actor could not import Megatron-Core GDN dependencies.") from exc
 
     original = GatedDeltaNet.forward
     if getattr(original, "__platoon_qwen35_gdn_cp_patch__", False):
@@ -1576,7 +1714,7 @@ def _patch_areal_qwen35_gdn_cp_guards() -> None:
     try:
         import areal.engine.core.model as core_model  # pyright: ignore[reportMissingImports]
     except Exception as exc:
-        raise RuntimeError("PLATOON_QWEN35_GDN_CP=1 could not import AReaL model guards.") from exc
+        raise RuntimeError("Auto-selected Qwen3.5 actor could not import AReaL model guards.") from exc
 
     original_requires_padded_seq = core_model.requires_padded_seq
     if _qwen35_gdn_packed_enabled() and not getattr(
@@ -1883,8 +2021,8 @@ def _patch_areal_megatron_memory_compatibility(megatron_engine_module=None) -> d
     patched = {"vocab_reductions": False, "cp_forward_scalars": False}
     if megatron_engine_module is None:
         # Importing Megatron eagerly can initialize TE/CUDA and breaks FSDP-only
-        # installations. This compatibility patch belongs only to the opt-in
-        # packed GDN CP path; explicit modules remain injectable for unit tests.
+        # installations. Auto-configuration invokes this only for a Qwen3.5
+        # actor; explicit modules remain injectable for unit tests.
         if not _qwen35_gdn_cp_enabled():
             return patched
         import areal.engine.megatron_engine as megatron_engine_module  # pyright: ignore[reportMissingImports]
@@ -3300,15 +3438,11 @@ def apply_megatron_worker_patches() -> None:
     if _MEGATRON_WORKER_PATCHES_APPLIED:
         return
 
+    # Must precede every Megatron/Bridge import below. Importing the AReaL
+    # Megatron actor immediately after this function can eagerly reach FLA.
+    _prepare_megatron_worker_triton_fla_cache()
     _patch_megatron_bridge_attention_backend()
-    _patch_megatron_bridge_qwen35_tp_validation()
-    _patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
     _patch_megatron_checkpoint_optimizer_bucket_shapes()
-    _patch_areal_megatron_memory_compatibility()
-    _patch_megatron_bridge_qwen3vl_already_cp_local_packed_input()
-    _patch_megatron_core_qwen35_already_cp_local_thd_rope()
-    _patch_megatron_core_gdn_context_parallel_config_validation()
-    _patch_megatron_core_gated_delta_net_context_parallel()
     _MEGATRON_WORKER_PATCHES_APPLIED = True
 
 
@@ -3340,8 +3474,6 @@ def apply_controller_safe_patches() -> None:
     _patch_areal_openai_routed_experts_transport()
     _patch_areal_sglang_routed_experts_launcher()
     _patch_areal_routed_experts_unpadding()
-    _patch_triton_cache_for_qwen35_gdn_cp()
-    _patch_areal_qwen35_gdn_cp_guards()
     _patch_batch_task_dispatcher_idle_submit()
     _patch_rollout_controller_least_loaded_workers()
     _patch_rollout_controller_pause_rpc_policy()

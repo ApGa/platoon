@@ -30,8 +30,8 @@ die() {
     exit 2
 }
 
-readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r6-376d1b9-18e62c0
-readonly RELEASE_REF=refs/tags/abci-v8r6-376d1b9-18e62c0
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r7-376d1b9-18e62c0
+readonly RELEASE_REF=refs/tags/abci-v8r7-376d1b9-18e62c0
 readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 readonly RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 readonly GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py

@@ -18,8 +18,8 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r6-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r6-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r7-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r7-376d1b9-18e62c0"
 EXPECTED_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 EXPECTED_PATCH_IDENTITY = "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b"
 EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
@@ -50,11 +50,26 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         "total_train_steps": None,
         "qwen35_gdn_cp_size": 1,
         "qwen35_gdn_packed": False,
+        "qwen35_gdn_layout_selection": "model_architecture_and_context_parallel_topology",
+        "qwen35_gdn_cp1_layout": "padded_bshd_upstream_gdn",
+        "qwen35_gdn_cp_gt1_layout": "packed_thd_platoon_custom_gdn_cp",
+        "r3_padded_routes_layout": "sequence_major",
+        "dynamic_bs": True,
+        "filter_zero_advantage_datums": True,
+        "filter_zero_variance_groups": True,
+        "rollout_max_head_offpolicyness": 3,
+        "rollout_consumer_batch_size": 8,
+        "max_concurrent_rollouts_16node": 12,
+        "max_concurrent_rollouts_32node": 24,
+        "balance_accepted_batches": False,
         "fresh_16node_model_only_lineage": True,
+        "fresh_16node_lineage": "v11_signal_filter",
+        "fresh_32node_lineage": "v11_signal_filter",
         "nonrecursive_16node_ptc": False,
         "recursive_32node_ptc": True,
         "recursive_32node_ptc_mode": "orchestration_only",
         "recursive_32node_ptc_max_tool_calls_per_execution": 1024,
+        "recursive_32node_subagent_datum_keep_probability": 0.25,
     }
     assert manifest["toolathlon_image_derivation"]["playwright"] == {
         "browsers_path": "/opt/ms-playwright",

@@ -197,12 +197,8 @@ class PlatoonActorImpl(PPOActor):
             stats_tracker.scalar(
                 optimizer_minibatches_attempted=float(attempted_minibatches),
                 optimizer_minibatches_applied=float(applied_minibatches),
-                optimizer_minibatches_skipped=float(
-                    attempted_minibatches - applied_minibatches
-                ),
-                optimizer_partial_update=float(
-                    0 < applied_minibatches < attempted_minibatches
-                ),
+                optimizer_minibatches_skipped=float(attempted_minibatches - applied_minibatches),
+                optimizer_partial_update=float(0 < applied_minibatches < attempted_minibatches),
             )
             return make_optimizer_update_result(minibatch_update_successes)
 
@@ -254,9 +250,13 @@ def _get_platoon_megatron_actor_cls() -> type:
         return _platoon_megatron_actor_cls
 
     # This getter is invoked only after a worker resolves the remote engine
-    # path (or by a legacy multi-controller worker), so install
-    # Megatron-specific patches here before importing the real base class.
-    from platoon.train.areal.patches import apply_megatron_worker_patches
+    # path (or by a legacy multi-controller worker), so prepare the worker's
+    # Triton/FLA cache policy and install Megatron-specific patches here before
+    # importing the real base class.
+    from platoon.train.areal.patches import (
+        apply_megatron_worker_patches,
+        configure_qwen35_gdn_patches_for_actor,
+    )
 
     apply_megatron_worker_patches()
     from areal.engine import MegatronPPOActor
@@ -269,6 +269,14 @@ def _get_platoon_megatron_actor_cls() -> type:
             self.actor = PlatoonActorImpl(config, self)
 
         def initialize(self, *args: Any, **kwargs: Any) -> Any:
+            # ``create_process_group`` has already stored the parsed strategy on
+            # the engine.  Resolve the actual model architecture and install
+            # only the topology-compatible Qwen3.5 patches before upstream
+            # constructs its Bridge/MCore configs and model.
+            configure_qwen35_gdn_patches_for_actor(
+                self.config.path,
+                self.parallel_strategy,
+            )
             with router_replay_initialization(self):
                 result = super().initialize(*args, **kwargs)
             configure_router_replay_engine(self)

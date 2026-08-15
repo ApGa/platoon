@@ -358,6 +358,12 @@ def _pack_router_replay(
             length = int(length_tensor.item())
             packed_routes[i, :length] = routes[i, :length]
             packed_valid[i, :length] = valid[i, :length]
+        # Padded Megatron inputs enter the transformer as [S, B, H], so the
+        # router's flatten() walks sequence before batch. The actor payload and
+        # padding assembly above are [B, S, ...]; transpose both sidechannels
+        # before flattening so each route remains attached to its model token.
+        packed_routes = packed_routes.transpose(0, 1).contiguous()
+        packed_valid = packed_valid.transpose(0, 1).contiguous()
         return packed_routes.flatten(0, 1), packed_valid.flatten()
 
     total_padded = int(padded_cu_seqlens[-1].item())

@@ -106,6 +106,8 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
     for config in (
         "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v9.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v9.yaml",
+        "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v10_padded.yaml",
+        "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded.yaml",
     ):
         assert config in source
     for host_only in (

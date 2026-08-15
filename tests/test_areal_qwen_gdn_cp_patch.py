@@ -501,7 +501,11 @@ def test_qwen_gdn_cp_local_thd_rope_bypass_survives_recompute(monkeypatch):
     monkeypatch.setitem(sys.modules, "megatron.core.models.common", common_mod)
     monkeypatch.setitem(sys.modules, "megatron.core.models.common.embeddings", embeddings_mod)
     monkeypatch.setitem(sys.modules, "megatron.core.models.common.embeddings.rope_utils", rope_utils_mod)
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
+    patches._register_qwen35_gdn_actor_topology(
+        model_type="qwen3_5_moe",
+        cp_size=2,
+        is_qwen35=True,
+    )
 
     patches._patch_megatron_core_qwen35_already_cp_local_thd_rope()
 
@@ -547,7 +551,262 @@ def test_qwen_gdn_cp_local_thd_rope_bypass_survives_recompute(monkeypatch):
     assert calls == {"local": 2, "upstream": 1}
 
 
-def test_qwen_gdn_cp_guard_patch_is_opt_in(monkeypatch):
+def test_megatron_worker_prepares_triton_fla_cache_before_provider_import(monkeypatch, tmp_path):
+    patches = _load_patches_module("platoon_areal_patches_preimport_cache_test")
+    cache_knobs = types.SimpleNamespace(dir="shared")
+    autotuning_knobs = types.SimpleNamespace(cache=True)
+    triton_mod = types.SimpleNamespace(knobs=types.SimpleNamespace(cache=cache_knobs, autotuning=autotuning_knobs))
+    monkeypatch.setitem(sys.modules, "triton", triton_mod)
+    monkeypatch.delitem(sys.modules, "fla.utils", raising=False)
+    monkeypatch.setenv("SLURM_PROCID", "17")
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    monkeypatch.delenv("TRITON_CACHE_AUTOTUNING", raising=False)
+    monkeypatch.delenv("FLA_CACHE_RESULTS", raising=False)
+    monkeypatch.setattr(patches.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    provider_import_state = []
+
+    def _import_bridge_provider():
+        # Mirror fla.utils' import-time snapshot. This callback stands in for
+        # the first Megatron Bridge import made by the worker patch sequence.
+        fla_cache_results = os.environ.get("FLA_CACHE_RESULTS", "1") == "1"
+        fla_utils_mod = types.SimpleNamespace(
+            SUPPORTS_AUTOTUNE_CACHE=True,
+            FLA_CACHE_RESULTS=fla_cache_results,
+            autotune_cache_kwargs={"cache_results": fla_cache_results},
+        )
+        monkeypatch.setitem(sys.modules, "fla.utils", fla_utils_mod)
+        provider_import_state.append(
+            {
+                "cache_dir": os.environ.get("TRITON_CACHE_DIR"),
+                "triton_autotuning": os.environ.get("TRITON_CACHE_AUTOTUNING"),
+                "fla_cache_results": fla_utils_mod.FLA_CACHE_RESULTS,
+                "fla_cache_kwargs": dict(fla_utils_mod.autotune_cache_kwargs),
+                "live_triton_cache_dir": cache_knobs.dir,
+                "live_triton_autotuning": autotuning_knobs.cache,
+            }
+        )
+
+    checkpoint_patch_calls = []
+    monkeypatch.setattr(patches, "_patch_megatron_bridge_attention_backend", _import_bridge_provider)
+    monkeypatch.setattr(
+        patches,
+        "_patch_megatron_checkpoint_optimizer_bucket_shapes",
+        lambda: checkpoint_patch_calls.append(True),
+    )
+
+    patches.apply_megatron_worker_patches()
+
+    expected_cache_dir = str(tmp_path / "platoon-triton-cache" / f"rank-17-pid-{os.getpid()}")
+    assert provider_import_state == [
+        {
+            "cache_dir": expected_cache_dir,
+            "triton_autotuning": "0",
+            "fla_cache_results": False,
+            "fla_cache_kwargs": {"cache_results": False},
+            "live_triton_cache_dir": expected_cache_dir,
+            "live_triton_autotuning": False,
+        }
+    ]
+    assert checkpoint_patch_calls == [True]
+
+
+def test_megatron_worker_cache_preparation_rejects_unsafe_preimported_fla(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_unsafe_preimport_cache_test")
+    monkeypatch.setitem(
+        sys.modules,
+        "fla.utils",
+        types.SimpleNamespace(
+            SUPPORTS_AUTOTUNE_CACHE=True,
+            FLA_CACHE_RESULTS=True,
+            autotune_cache_kwargs={"cache_results": True},
+        ),
+    )
+    monkeypatch.delitem(sys.modules, "triton", raising=False)
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    monkeypatch.delenv("TRITON_CACHE_AUTOTUNING", raising=False)
+    monkeypatch.delenv("FLA_CACHE_RESULTS", raising=False)
+    provider_patch_calls = []
+    monkeypatch.setattr(
+        patches,
+        "_patch_megatron_bridge_attention_backend",
+        lambda: provider_patch_calls.append(True),
+    )
+
+    with pytest.raises(RuntimeError, match="imported before Megatron worker cache preparation"):
+        patches.apply_megatron_worker_patches()
+
+    assert provider_patch_calls == []
+    assert "FLA_CACHE_RESULTS" not in os.environ
+
+
+@pytest.mark.parametrize(
+    ("cp_size", "expected_packed", "expected_calls"),
+    (
+        (1, False, ["tp_validation", "areal_guards", "memory_compatibility"]),
+        (
+            2,
+            True,
+            [
+                "tp_validation",
+                "areal_guards",
+                "memory_compatibility",
+                "constructor_loss",
+                "packed_input",
+                "local_rope",
+                "config_validation",
+                "gdn_forward",
+            ],
+        ),
+    ),
+)
+def test_qwen_gdn_patches_are_auto_selected_from_model_and_live_cp(
+    monkeypatch,
+    cp_size,
+    expected_packed,
+    expected_calls,
+):
+    patches = _load_patches_module(f"platoon_areal_patches_auto_cp{cp_size}_test")
+    model_mod = types.ModuleType("areal.engine.core.model")
+    model_mod.is_qwen3_5_model = lambda model_type: model_type in {"qwen3_5", "qwen3_5_moe"}
+    for name in ("areal", "areal.engine", "areal.engine.core"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "areal.engine.core.model", model_mod)
+
+    auto_config_calls = []
+
+    class FakeAutoConfig:
+        @classmethod
+        def from_pretrained(cls, model_path, **kwargs):
+            auto_config_calls.append((model_path, kwargs))
+            return types.SimpleNamespace(model_type="qwen3_5_moe")
+
+    patch_names = {
+        "_patch_megatron_bridge_qwen35_tp_validation": "tp_validation",
+        "_patch_areal_qwen35_gdn_cp_guards": "areal_guards",
+        "_patch_areal_megatron_memory_compatibility": "memory_compatibility",
+        "_patch_megatron_bridge_qwen35_cp_constructor_loss_mode": "constructor_loss",
+        "_patch_megatron_bridge_qwen3vl_already_cp_local_packed_input": "packed_input",
+        "_patch_megatron_core_qwen35_already_cp_local_thd_rope": "local_rope",
+        "_patch_megatron_core_gdn_context_parallel_config_validation": "config_validation",
+        "_patch_megatron_core_gated_delta_net_context_parallel": "gdn_forward",
+    }
+    calls = []
+    for function_name, label in patch_names.items():
+        monkeypatch.setattr(patches, function_name, lambda label=label: calls.append(label))
+
+    # These legacy values intentionally request the opposite layout. They are
+    # neither consulted nor rewritten by topology configuration.
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "0")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "0" if expected_packed else "1")
+    mode = patches.configure_qwen35_gdn_patches_for_actor(
+        "/models/qwen35",
+        types.SimpleNamespace(context_parallel_size=cp_size),
+        auto_config_cls=FakeAutoConfig,
+    )
+
+    assert mode == {
+        "model_type": "qwen3_5_moe",
+        "context_parallel_size": cp_size,
+        "is_qwen35": True,
+        "packed": expected_packed,
+    }
+    assert calls == expected_calls
+    assert auto_config_calls == [("/models/qwen35", {"trust_remote_code": True})]
+    assert patches._qwen35_gdn_cp_enabled() is True
+    assert patches._qwen35_gdn_packed_enabled() is expected_packed
+    assert os.environ["PLATOON_QWEN35_GDN_PACKED"] == ("0" if expected_packed else "1")
+
+
+def test_non_qwen_actor_does_not_install_qwen_patches(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_auto_non_qwen_test")
+    model_mod = types.ModuleType("areal.engine.core.model")
+    model_mod.is_qwen3_5_model = lambda model_type: model_type.startswith("qwen3_5")
+    for name in ("areal", "areal.engine", "areal.engine.core"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "areal.engine.core.model", model_mod)
+
+    class FakeAutoConfig:
+        @classmethod
+        def from_pretrained(cls, _model_path, **_kwargs):
+            return types.SimpleNamespace(model_type="llama")
+
+    qwen_patch_names = (
+        "_patch_megatron_bridge_qwen35_tp_validation",
+        "_patch_areal_qwen35_gdn_cp_guards",
+        "_patch_areal_megatron_memory_compatibility",
+        "_patch_megatron_bridge_qwen35_cp_constructor_loss_mode",
+        "_patch_megatron_bridge_qwen3vl_already_cp_local_packed_input",
+        "_patch_megatron_core_qwen35_already_cp_local_thd_rope",
+        "_patch_megatron_core_gdn_context_parallel_config_validation",
+        "_patch_megatron_core_gated_delta_net_context_parallel",
+    )
+    calls = []
+    for function_name in qwen_patch_names:
+        monkeypatch.setattr(patches, function_name, lambda function_name=function_name: calls.append(function_name))
+
+    mode = patches.configure_qwen35_gdn_patches_for_actor(
+        "/models/llama",
+        types.SimpleNamespace(context_parallel_size=8),
+        auto_config_cls=FakeAutoConfig,
+    )
+
+    assert mode == {
+        "model_type": "llama",
+        "context_parallel_size": 8,
+        "is_qwen35": False,
+        "packed": False,
+    }
+    assert calls == []
+    assert patches._qwen35_gdn_cp_enabled() is False
+    assert patches._qwen35_gdn_packed_enabled() is False
+
+
+def test_qwen_gdn_auto_configuration_is_lifecycle_and_topology_fail_closed(monkeypatch):
+    patches = _load_patches_module("platoon_areal_patches_auto_lifecycle_test")
+
+    class FakeAutoConfig:
+        calls = 0
+
+        @classmethod
+        def from_pretrained(cls, _model_path, **_kwargs):
+            cls.calls += 1
+            return types.SimpleNamespace(model_type="qwen3_5_moe")
+
+    with pytest.raises(RuntimeError, match="after create_process_group"):
+        patches.configure_qwen35_gdn_patches_for_actor(
+            "/models/qwen35",
+            None,
+            auto_config_cls=FakeAutoConfig,
+        )
+    assert FakeAutoConfig.calls == 0
+
+    model_mod = types.ModuleType("areal.engine.core.model")
+    model_mod.is_qwen3_5_model = lambda model_type: model_type == "qwen3_5_moe"
+    for name in ("areal", "areal.engine", "areal.engine.core"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "areal.engine.core.model", model_mod)
+    for function_name in (
+        "_patch_megatron_bridge_qwen35_tp_validation",
+        "_patch_areal_qwen35_gdn_cp_guards",
+        "_patch_areal_megatron_memory_compatibility",
+    ):
+        monkeypatch.setattr(patches, function_name, lambda: None)
+
+    patches.configure_qwen35_gdn_patches_for_actor(
+        "/models/qwen35",
+        types.SimpleNamespace(context_parallel_size=1),
+        auto_config_cls=FakeAutoConfig,
+    )
+    with pytest.raises(RuntimeError, match="reconfigured with a different model/topology"):
+        patches.configure_qwen35_gdn_patches_for_actor(
+            "/models/qwen35",
+            types.SimpleNamespace(context_parallel_size=2),
+            auto_config_cls=FakeAutoConfig,
+        )
+
+
+def test_qwen_gdn_cp_guard_patch_is_derived_from_registered_topology(monkeypatch):
     patches = _load_patches_module("platoon_areal_patches_guard_test")
     areal_mod = types.ModuleType("areal")
     engine_mod = types.ModuleType("areal.engine")
@@ -563,12 +822,21 @@ def test_qwen_gdn_cp_guard_patch_is_opt_in(monkeypatch):
     monkeypatch.setitem(sys.modules, "areal.engine.core", core_mod)
     monkeypatch.setitem(sys.modules, "areal.engine.core.model", model_mod)
 
-    monkeypatch.delenv("PLATOON_QWEN35_GDN_CP", raising=False)
+    # Import-time patch routing happens before the worker receives its actor
+    # topology, so an unregistered module must remain inert.
     patches._patch_areal_qwen35_gdn_cp_guards()
     assert model_mod.requires_padded_seq("qwen3_5_moe") is True
     assert model_mod.is_valid_vision_model("qwen3_5_moe") is True
 
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
+    # Launcher variables are deliberately contradictory. The parsed CP size
+    # registered by the worker remains the sole correctness source.
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "0")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "0")
+    patches._register_qwen35_gdn_actor_topology(
+        model_type="qwen3_5_moe",
+        cp_size=2,
+        is_qwen35=True,
+    )
     patches._patch_areal_qwen35_gdn_cp_guards()
     assert model_mod.requires_padded_seq("qwen3_5_moe") is False
     assert model_mod.is_valid_vision_model("qwen3_5_moe") is False
@@ -595,8 +863,13 @@ def test_qwen_gdn_cp_padded_switch_preserves_upstream_layout_and_text_only_class
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     monkeypatch.setitem(sys.modules, "areal.engine.core.model", model_mod)
     monkeypatch.setitem(sys.modules, "areal.engine.megatron_engine", megatron_engine_mod)
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "0")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "0")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "1")
+    patches._register_qwen35_gdn_actor_topology(
+        model_type="qwen3_5_moe",
+        cp_size=1,
+        is_qwen35=True,
+    )
 
     patches._patch_areal_qwen35_gdn_cp_guards()
 
@@ -608,7 +881,7 @@ def test_qwen_gdn_cp_padded_switch_preserves_upstream_layout_and_text_only_class
     assert megatron_engine_mod.is_valid_vision_model is model_mod.is_valid_vision_model
 
 
-def test_qwen_gdn_cp_packed_switch_skips_forward_override_and_defaults_on(monkeypatch):
+def test_qwen_gdn_cp_topology_only_overrides_gdn_forward_for_cp_greater_than_one(monkeypatch):
     patches = _load_patches_module("platoon_areal_patches_padded_forward_test")
     megatron_mod = types.ModuleType("megatron")
     core_mod = types.ModuleType("megatron.core")
@@ -638,14 +911,24 @@ def test_qwen_gdn_cp_packed_switch_skips_forward_override_and_defaults_on(monkey
 
     upstream_forward = FakeGatedDeltaNet.forward
     monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "0")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "1")
+    patches._register_qwen35_gdn_actor_topology(
+        model_type="qwen3_5_moe",
+        cp_size=1,
+        is_qwen35=True,
+    )
     patches._patch_megatron_core_gated_delta_net_context_parallel()
     assert FakeGatedDeltaNet.forward is upstream_forward
 
-    # Unset means enabled so existing PLATOON_QWEN35_GDN_CP=1 launches retain
-    # their current packed behavior unless they explicitly request the control.
-    monkeypatch.delenv("PLATOON_QWEN35_GDN_PACKED")
-    patches._patch_megatron_core_gated_delta_net_context_parallel()
+    patches_cp2 = _load_patches_module("platoon_areal_patches_packed_forward_test")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "0")
+    monkeypatch.setenv("PLATOON_QWEN35_GDN_PACKED", "0")
+    patches_cp2._register_qwen35_gdn_actor_topology(
+        model_type="qwen3_5_moe",
+        cp_size=2,
+        is_qwen35=True,
+    )
+    patches_cp2._patch_megatron_core_gated_delta_net_context_parallel()
     assert FakeGatedDeltaNet.forward is not upstream_forward
     assert getattr(FakeGatedDeltaNet.forward, "__platoon_qwen35_gdn_cp_patch__", False)
 
@@ -677,12 +960,15 @@ def test_qwen_gdn_cp_config_validation_patch_preserves_cp(monkeypatch):
     monkeypatch.setitem(sys.modules, "megatron.core.transformer", transformer_mod)
     monkeypatch.setitem(sys.modules, "megatron.core.transformer.transformer_config", config_mod)
 
-    monkeypatch.delenv("PLATOON_QWEN35_GDN_CP", raising=False)
     patches._patch_megatron_core_gdn_context_parallel_config_validation()
     with pytest.raises(AssertionError, match="Gated delta net does not support context parallel"):
         FakeTransformerConfig("gated_delta_net", 2)
 
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
+    patches._register_qwen35_gdn_actor_topology(
+        model_type="qwen3_5_moe",
+        cp_size=2,
+        is_qwen35=True,
+    )
     patches._patch_megatron_core_gdn_context_parallel_config_validation()
     cfg = FakeTransformerConfig("gated_delta_net", 2)
     assert cfg.context_parallel_size == 2
@@ -745,7 +1031,6 @@ def test_qwen_gdn_cp_provider_uses_constructor_only_per_token_loss(monkeypatch):
     monkeypatch.setitem(sys.modules, "megatron.bridge.models.qwen_vl", qwen_vl_mod)
     monkeypatch.setitem(sys.modules, "megatron.bridge.models.qwen_vl.qwen35_vl_provider", provider_mod)
 
-    monkeypatch.delenv("PLATOON_QWEN35_GDN_CP", raising=False)
     patches._patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
     unpatched_provider = FakeProvider("gated_delta_net", 2)
     unpatched_model = unpatched_provider.provide()
@@ -754,7 +1039,11 @@ def test_qwen_gdn_cp_provider_uses_constructor_only_per_token_loss(monkeypatch):
     assert unpatched_model.config.calculate_per_token_loss is False
     assert unpatched_model.router.calculate_per_token_loss is False
 
-    monkeypatch.setenv("PLATOON_QWEN35_GDN_CP", "1")
+    patches._register_qwen35_gdn_actor_topology(
+        model_type="qwen3_5_moe",
+        cp_size=2,
+        is_qwen35=True,
+    )
     patches._patch_megatron_bridge_qwen35_cp_constructor_loss_mode()
 
     for provider_cls in (FakeProvider, FakeMoEProvider):

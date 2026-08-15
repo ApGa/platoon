@@ -173,6 +173,86 @@ def test_microbatch_alignment_applies_cp_before_tp_and_keeps_invalid_rows_live()
     torch.testing.assert_close(result.valid, torch.tensor([True, False, True]))
 
 
+def test_padded_microbatch_flattens_sequence_before_batch_with_dummy_padding():
+    routes = torch.zeros(2, 4, 2, 1, dtype=torch.int16)
+    routes[0, :, 0, 0] = torch.tensor([10, 11, 12, 13])
+    routes[1, :, 0, 0] = torch.tensor([20, 21, 22, 23])
+    routes[:, :, 1, 0] = routes[:, :, 0, 0] + 100
+    batch = RouterReplayBatch(
+        routes=routes,
+        valid=torch.tensor([[True, True, False, False], [True, False, False, False]]),
+    )
+
+    # Real lengths are three and two. Both rows are padded to four tokens and a
+    # third, all-padding row is appended to the Megatron microbatch. Megatron's
+    # padded router sees [S, B, H], so its flattened token order must be S-major.
+    result = build_local_router_replay_microbatch(
+        batch,
+        old_cu_seqlens=torch.tensor([0, 3, 5], dtype=torch.int32),
+        padded_cu_seqlens=torch.tensor([0, 4, 8, 12], dtype=torch.int32),
+        expected_layers=frozenset({0, 1}),
+        use_padded_seq=True,
+        cp_size=1,
+        cp_rank=0,
+        sequence_parallel=False,
+        tp_size=1,
+    )
+
+    assert result.routes.shape == (12, 2, 1)
+    torch.testing.assert_close(
+        result.routes[:, 0, 0],
+        torch.tensor([10, 20, 0, 11, 21, 0, 12, 0, 0, 0, 0, 0], dtype=torch.int16),
+    )
+    torch.testing.assert_close(
+        result.routes[:, 1, 0],
+        torch.tensor([110, 120, 0, 111, 121, 0, 112, 0, 0, 0, 0, 0], dtype=torch.int16),
+    )
+    torch.testing.assert_close(
+        result.valid,
+        torch.tensor([True, True, False, True, False, False, False, False, False, False, False, False]),
+    )
+
+
+def test_padded_microbatch_applies_sequence_parallel_scatter_after_transpose():
+    routes = torch.zeros(2, 4, 1, 1, dtype=torch.int16)
+    routes[0, :, 0, 0] = torch.tensor([10, 11, 12, 13])
+    routes[1, :, 0, 0] = torch.tensor([20, 21, 22, 23])
+    batch = RouterReplayBatch(
+        routes=routes,
+        valid=torch.tensor([[True, True, False, False], [True, False, False, False]]),
+    )
+    scatter_inputs = []
+
+    def scatter_first_tp_rank(value):
+        scatter_inputs.append(value.clone())
+        return value[: value.shape[0] // 2].contiguous()
+
+    result = build_local_router_replay_microbatch(
+        batch,
+        old_cu_seqlens=torch.tensor([0, 3, 5], dtype=torch.int32),
+        padded_cu_seqlens=torch.tensor([0, 4, 8, 12], dtype=torch.int32),
+        expected_layers=frozenset({0}),
+        use_padded_seq=True,
+        cp_size=1,
+        cp_rank=0,
+        sequence_parallel=True,
+        tp_size=2,
+        scatter_fn=scatter_first_tp_rank,
+    )
+
+    assert len(scatter_inputs) == 2
+    torch.testing.assert_close(
+        scatter_inputs[0][:, 0, 0],
+        torch.tensor([10, 20, 0, 11, 21, 0, 12, 0, 0, 0, 0, 0], dtype=torch.int16),
+    )
+    torch.testing.assert_close(
+        scatter_inputs[1].squeeze(-1).bool(),
+        torch.tensor([True, True, False, True, False, False, False, False, False, False, False, False]),
+    )
+    torch.testing.assert_close(result.routes[:, 0, 0], torch.tensor([10, 20, 0, 11, 21, 0], dtype=torch.int16))
+    torch.testing.assert_close(result.valid, torch.tensor([True, True, False, True, False, False]))
+
+
 class _FakeReplay:
     def __init__(self):
         self.target_topk_idx = None

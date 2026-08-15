@@ -259,10 +259,11 @@ CP1_PADDED_CASES = (
         "nodes": 16,
         "recursive": False,
         "ptc": False,
-        "experiment": "abci-openreward-ta-swe-h200-16-cp1-padded",
-        "trial": "abci-ta-swe16-nonrec-h200-cp1-c12-v10-padded-trial0",
-        "wandb_group": "abci-ta-swe16-nonrec-h200-cp1-c12-v10-padded",
+        "experiment": "abci-openreward-ta-swe-h200-16-cp1-padded-v11-signal-filter",
+        "trial": "abci-ta-swe16-nonrec-h200-cp1-c12-v11-padded-signal-filter-trial0",
+        "wandb_group": "abci-ta-swe16-nonrec-h200-cp1-c12-v11-padded-signal-filter",
         "service_nodes": 6,
+        "max_concurrent_rollouts": 12,
     },
     {
         "config": ("abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded"),
@@ -271,10 +272,12 @@ CP1_PADDED_CASES = (
         "nodes": 32,
         "recursive": True,
         "ptc": True,
-        "experiment": "abci-openreward-ta-swe-h200-32-cp1-padded",
-        "trial": "abci-ta-swe32-rec-h200-cp1-c24-v10-padded-trial0",
-        "wandb_group": "abci-ta-swe32-rec-h200-cp1-c24-v10-padded",
+        "experiment": "abci-openreward-ta-swe-h200-32-cp1-padded-v11-signal-filter",
+        "trial": "abci-ta-swe32-rec-h200-cp1-c24-v11-padded-signal-filter-trial0",
+        "wandb_group": "abci-ta-swe32-rec-h200-cp1-c24-v11-padded-signal-filter",
         "service_nodes": 12,
+        "max_concurrent_rollouts": 24,
+        "subagent_datum_keep_probability": 0.25,
     },
 )
 
@@ -971,7 +974,7 @@ def test_h200_v9_leaf_is_fresh_full_horizon_and_has_exact_ptc_matrix(case: dict)
 
 
 @pytest.mark.parametrize("case", CP1_PADDED_CASES, ids=("16node-cp1-padded", "32node-cp1-padded"))
-def test_h200_cp1_padded_leaf_changes_only_fresh_identity(case: dict) -> None:
+def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict) -> None:
     yaml = pytest.importorskip("yaml")
     leaf = yaml.safe_load((CONFIG_ROOT / f"{case['config']}.yaml").read_text())
     parent_leaf = yaml.safe_load((CONFIG_ROOT / f"{case['parent']}.yaml").read_text())
@@ -982,6 +985,11 @@ def test_h200_cp1_padded_leaf_changes_only_fresh_identity(case: dict) -> None:
         {
             "experiment_name": case["experiment"],
             "trial_name": case["trial"],
+            "dynamic_bs": True,
+            "workflow_config": {
+                "filter_zero_advantage_datums": True,
+                "filter_zero_variance_groups": True,
+            },
             "stats_logger": {"wandb": {"group": case["wandb_group"]}},
         },
     )
@@ -991,25 +999,40 @@ def test_h200_cp1_padded_leaf_changes_only_fresh_identity(case: dict) -> None:
     assert leaf["scheduler"] == parent_leaf["scheduler"]
     assert leaf["cluster"] == parent_leaf["cluster"]
     assert leaf["openreward"] == parent_leaf["openreward"]
+    assert leaf["dynamic_bs"] is True
+    assert leaf["workflow_config"] == {
+        "filter_zero_advantage_datums": True,
+        "filter_zero_variance_groups": True,
+    }
+    assert parent.get("dynamic_bs") is None
+    assert parent["workflow_config"]["filter_zero_advantage_datums"] is False
+    assert parent["workflow_config"]["filter_zero_variance_groups"] is False
     assert config["cluster"]["n_nodes"] == case["nodes"]
     assert config["openreward"]["enable_recursive_subagents"] is case["recursive"]
     assert config["openreward"]["enable_programmatic_tool_calling"] is case["ptc"]
+    assert config["openreward"]["balance_accepted_batches"] is False
+    assert config["rollout"]["max_head_offpolicyness"] == 3
+    assert config["rollout"]["consumer_batch_size"] == "${train_dataset.batch_size}"
+    assert config["train_dataset"]["batch_size"] == 8
+    assert config["rollout"]["max_concurrent_rollouts"] == case["max_concurrent_rollouts"]
+    if case["recursive"]:
+        assert config["workflow_config"]["subagent_datum_keep_probability"] == case["subagent_datum_keep_probability"]
     assert config["total_train_epochs"] == 10
     assert config["total_train_steps"] is None
-    for invariant in ("actor", "rollout", "workflow_config", "recover"):
+    for invariant in ("actor", "rollout", "recover"):
         assert config[invariant] == parent[invariant]
 
 
 @pytest.mark.parametrize("case", CP1_PADDED_CASES, ids=("16node-cp1-padded", "32node-cp1-padded"))
-def test_h200_v9_wrapper_pins_cp1_padded_fresh_long_run(case: dict) -> None:
+def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: dict) -> None:
     path = PBS_ROOT / case["wrapper"]
     subprocess.run(["bash", "-n", str(path)], check=True)
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r6-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r7-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r6-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r7-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
@@ -1040,29 +1063,30 @@ def test_h200_v9_wrapper_pins_cp1_padded_fresh_long_run(case: dict) -> None:
     assert f"OPENREWARD_EXPECTED_RECURSIVE={int(case['recursive'])}" in wrapper
     assert f"OPENREWARD_EXPECTED_PTC={int(case['ptc'])}" in wrapper
     assert "PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0" in wrapper
-    assert "export PLATOON_QWEN35_GDN_PACKED=0" in wrapper
-    assert "export OPENREWARD_EXPECTED_QWEN35_GDN_PACKED=0" in wrapper
-    assert "PLATOON_QWEN35_GDN_CP=0" not in wrapper
+    assert "PLATOON_QWEN35_GDN_PACKED" not in wrapper
+    assert "OPENREWARD_EXPECTED_QWEN35_GDN_PACKED" not in wrapper
+    assert "PLATOON_QWEN35_GDN_CP=" not in wrapper
     assert '[[ ! -e "${prior}" && ! -L "${prior}" ]]' in wrapper
     assert '[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]]' in wrapper
     assert 'exec "${COMMON}" "${CONFIG}"' in wrapper
     assert "qsub" not in wrapper.lower()
 
 
-def test_common_launcher_attests_and_forwards_cp1_padded_gdn_mode() -> None:
+def test_common_launcher_leaves_qwen35_layout_to_model_and_topology() -> None:
     common = (PBS_ROOT / "openreward-ta-swe-prealloc-common.sh").read_text()
 
-    assert "EXPECTED_QWEN35_GDN_PACKED=${OPENREWARD_EXPECTED_QWEN35_GDN_PACKED:-}" in common
-    assert '"${EXPECTED_QWEN35_GDN_PACKED}" == 0' in common
-    assert '"${EXPECTED_QWEN35_GDN_PACKED}" == 1' in common
-    assert "export PLATOON_QWEN35_GDN_PACKED=${PLATOON_QWEN35_GDN_PACKED:-1}" in common
-    assert '[[ "${PLATOON_QWEN35_GDN_PACKED}" == "${EXPECTED_QWEN35_GDN_PACKED}" ]]' in common
+    assert "OPENREWARD_EXPECTED_QWEN35_GDN_PACKED" not in common
+    assert "PLATOON_QWEN35_GDN_PACKED" not in common
+    assert "export PLATOON_QWEN35_GDN_CP=" not in common
+    assert "checkpoint model family and actual context-parallel topology" in common
+    assert "export PLATOON_QWEN35_GDN_CP_CONV_BACKEND=" in common
     forward_line = next(
         line for line in common.splitlines() if line.startswith("export PLATOON_AREAL_PBS_FORWARD_ENV=")
     )
     forwarded = forward_line.split('"', 2)[1].split()
-    assert forwarded.count("PLATOON_QWEN35_GDN_PACKED") == 1
-    assert forwarded.count("PLATOON_QWEN35_GDN_CP") == 1
+    assert "PLATOON_QWEN35_GDN_PACKED" not in forwarded
+    assert "PLATOON_QWEN35_GDN_CP" not in forwarded
+    assert forwarded.count("PLATOON_QWEN35_GDN_CP_CONV_BACKEND") == 1
 
 
 def test_common_launcher_routes_urls_and_service_lifecycle_only_to_validated_tail() -> None:
