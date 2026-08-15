@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r8/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r9/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r8-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r8-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r9-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r9-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "7faaf0004a5fceb401e4c12a12dbea22fd8df77de3e79448931372a98cd46744"
+MANIFEST_SHA256 = "0f68447140a4274b6d194a89b561972e6b5ac82160ac7e7fc3eab6a4287803d5"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -100,7 +100,7 @@ TRAINING_SEMANTICS = {
     "max_concurrent_rollouts_32node": 24,
     "balance_accepted_batches": False,
     "fresh_16node_model_only_lineage": True,
-    "fresh_16node_lineage": "v11_signal_filter",
+    "fresh_16node_lineage": "v12_wandb_safe",
     "fresh_32node_lineage": "v11_signal_filter",
     "nonrecursive_16node_ptc": False,
     "recursive_32node_ptc": True,
@@ -431,7 +431,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r8.  The
+    # The SWE dependency closure did not change between v8r2 and v8r9.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

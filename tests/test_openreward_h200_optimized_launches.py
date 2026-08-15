@@ -259,9 +259,9 @@ CP1_PADDED_CASES = (
         "nodes": 16,
         "recursive": False,
         "ptc": False,
-        "experiment": "abci-openreward-ta-swe-h200-16-cp1-padded-v11-signal-filter",
-        "trial": "abci-ta-swe16-nonrec-h200-cp1-c12-v11-padded-signal-filter-trial0",
-        "wandb_group": "abci-ta-swe16-nonrec-h200-cp1-c12-v11-padded-signal-filter",
+        "experiment": "abci-or-ta-swe16-cp1-v12",
+        "trial": "abci-ta-swe16-nr-cp1-c12-v12-t0",
+        "wandb_group": "abci-ta-swe16-nr-cp1-c12-v12",
         "service_nodes": 6,
         "max_concurrent_rollouts": 12,
     },
@@ -1023,6 +1023,31 @@ def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict
         assert config[invariant] == parent[invariant]
 
 
+def test_h200_16node_cp1_padded_identity_fits_areal_wandb_limit_with_margin() -> None:
+    case = CP1_PADDED_CASES[0]
+    assert case == {
+        "config": "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v10_padded",
+        "parent": V9_CASES[0]["config"],
+        "wrapper": "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs",
+        "nodes": 16,
+        "recursive": False,
+        "ptc": False,
+        "experiment": "abci-or-ta-swe16-cp1-v12",
+        "trial": "abci-ta-swe16-nr-cp1-c12-v12-t0",
+        "wandb_group": "abci-ta-swe16-nr-cp1-c12-v12",
+        "service_nodes": 6,
+        "max_concurrent_rollouts": 12,
+    }
+    wandb_id = f"{case['experiment']}_{case['trial']}_train"
+    assert wandb_id == "abci-or-ta-swe16-cp1-v12_abci-ta-swe16-nr-cp1-c12-v12-t0_train"
+    assert len(wandb_id) == 62
+    assert len(wandb_id) <= 128
+    assert 128 - len(wandb_id) >= 32
+
+    wrapper = (PBS_ROOT / case["wrapper"]).read_text()
+    assert "#PBS -N rasp-h200-16sf-v12" in wrapper
+
+
 @pytest.mark.parametrize("case", CP1_PADDED_CASES, ids=("16node-cp1-padded", "32node-cp1-padded"))
 def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: dict) -> None:
     path = PBS_ROOT / case["wrapper"]
@@ -1030,9 +1055,9 @@ def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: d
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r8-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r9-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r8-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r9-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
