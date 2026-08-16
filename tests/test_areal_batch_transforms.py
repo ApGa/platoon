@@ -115,7 +115,14 @@ def _load_trainer_module(batch_transforms_module):
         yield None
 
     utils_mod = types.ModuleType("areal.utils")
-    utils_mod.logging = SimpleNamespace(getLogger=lambda name: SimpleNamespace(info=lambda *a, **k: None))
+    utils_mod.logging = SimpleNamespace(
+        getLogger=lambda name: SimpleNamespace(
+            debug=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
+        )
+    )
     utils_mod.perf_tracer = SimpleNamespace(trace_scope=_null_context)
     utils_mod.stats_tracker = SimpleNamespace(
         record_timing=_null_context,
@@ -486,6 +493,129 @@ def test_trim_preserves_later_roots_when_nonroot_datums_are_available(monkeypatc
     assert int(processed["traj_start"].sum().item()) == 3
 
 
+def _actor_safe_batch_trainer(
+    rl_module,
+    *,
+    dp_size,
+    pp_size,
+    ppo_n_minibatches=1,
+    n_mbs=1,
+    n_mbs_divisor=1,
+    granularity=1,
+    ensure_batch_divisible_by=1,
+):
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    actor_config = SimpleNamespace(
+        ppo_n_minibatches=ppo_n_minibatches,
+        mb_spec=SimpleNamespace(
+            n_mbs=n_mbs,
+            n_mbs_divisor=n_mbs_divisor,
+            granularity=granularity,
+        ),
+    )
+    trainer.actor = SimpleNamespace(
+        config=actor_config,
+        parallel_strategy=SimpleNamespace(
+            dp_size=dp_size,
+            pipeline_parallel_size=pp_size,
+        ),
+    )
+    trainer.config = SimpleNamespace(
+        actor=actor_config,
+        rollout=SimpleNamespace(
+            shuffle_cross_task=False,
+            ensure_batch_divisible_by=ensure_batch_divisible_by,
+        ),
+    )
+    return trainer
+
+
+@pytest.mark.parametrize(
+    ("dp_size", "expected_minimum"),
+    [(20, 80), (10, 40)],
+)
+def test_actor_batch_requirements_include_pipeline_microbatch_floor(
+    dp_size,
+    expected_minimum,
+):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = _actor_safe_batch_trainer(
+        rl_module,
+        dp_size=dp_size,
+        pp_size=2,
+    )
+
+    requirements = trainer._actor_batch_requirements()
+
+    assert requirements.pipeline_parallel_size == 2
+    assert requirements.engine_min_microbatches == 4
+    assert requirements.engine_microbatch_divisor == 2
+    assert requirements.divisor == 2 * dp_size
+    assert requirements.minimum_datums == expected_minimum
+
+
+def test_actor_batch_requirements_compose_ppo_and_granularity():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = _actor_safe_batch_trainer(
+        rl_module,
+        dp_size=3,
+        pp_size=2,
+        ppo_n_minibatches=2,
+        n_mbs=5,
+        granularity=2,
+    )
+
+    requirements = trainer._actor_batch_requirements()
+
+    # Configured n_mbs=5 is rounded to the PP2 divisor, while DP*PPO*G
+    # determines the floor and the engine divisor determines safe increments.
+    assert requirements.engine_min_microbatches == 6
+    assert requirements.engine_microbatch_divisor == 2
+    assert requirements.divisor == 24
+    assert requirements.minimum_datums == 72
+
+
+def test_actor_floor_skips_undersized_batch_and_enforces_pp_divisor_above_floor():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = _actor_safe_batch_trainer(
+        rl_module,
+        dp_size=20,
+        pp_size=2,
+    )
+
+    assert trainer._maybe_shuffle_and_trim_batch({"datum_id": torch.arange(40)}) is None
+    minimum = trainer._maybe_shuffle_and_trim_batch({"datum_id": torch.arange(80)})
+    pp_unsafe_excess = trainer._maybe_shuffle_and_trim_batch({"datum_id": torch.arange(100)})
+
+    assert minimum is not None
+    assert minimum["datum_id"].numel() == 80
+    assert pp_unsafe_excess is not None
+    assert pp_unsafe_excess["datum_id"].numel() == 80
+
+
+def test_actor_batch_requirements_include_generic_engine_microbatch_divisor():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = _actor_safe_batch_trainer(
+        rl_module,
+        dp_size=2,
+        pp_size=1,
+        n_mbs=1,
+        n_mbs_divisor=4,
+        granularity=2,
+    )
+
+    requirements = trainer._actor_batch_requirements()
+
+    assert requirements.engine_microbatch_divisor == 4
+    assert requirements.engine_min_microbatches == 4
+    assert requirements.divisor == 16
+    assert requirements.minimum_datums == 16
+
+
 def test_segment_ids_are_created_before_trainable_filter_and_repair_lost_start():
     batch_transforms = _load_batch_transforms_module()
     rl_module = _load_trainer_module(batch_transforms)
@@ -769,6 +899,169 @@ def test_trainer_sums_and_strips_exact_accepted_task_workload_sidecars():
     assert reduced is not None
     assert torch.equal(reduced["rewards"], torch.tensor([[1.0], [0.0]]))
     assert not any(key.startswith(rl_module._WORKLOAD_SIDECAR_PREFIX) for key in reduced)
+
+
+def _dynamic_recollection_trainer(
+    rl_module,
+    *,
+    chunk_sizes,
+    max_rounds=2,
+    consumer_batch_size=16,
+):
+    calls = []
+    chunks = [
+        [
+            {
+                "datum_id": torch.arange(size),
+                "rewards": torch.ones(size, 1),
+                "attention_mask": torch.ones(size, 1, dtype=torch.bool),
+            }
+        ]
+        for size in chunk_sizes
+    ]
+
+    def prepare_batch(*args, **kwargs):
+        calls.append((args, kwargs))
+        return chunks[len(calls) - 1]
+
+    actor_config = SimpleNamespace(
+        ppo_n_minibatches=1,
+        mb_spec=SimpleNamespace(n_mbs=1, granularity=1),
+    )
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.actor = SimpleNamespace(
+        config=actor_config,
+        parallel_strategy=SimpleNamespace(
+            dp_size=20,
+            pipeline_parallel_size=2,
+        ),
+        prepare_batch=prepare_batch,
+    )
+    trainer.train_dataloader = SimpleNamespace(batch_size=8)
+    trainer.config = SimpleNamespace(
+        actor=actor_config,
+        dynamic_bs=True,
+        rollout=SimpleNamespace(
+            consumer_batch_size=consumer_batch_size,
+            ensure_batch_divisible_by=1,
+            shuffle_cross_task=False,
+        ),
+        workflow_config=SimpleNamespace(
+            dynamic_batch_recollection_max_rounds=max_rounds,
+            filter_zero_advantage_datums=False,
+            depth_level_weighting=False,
+            depth_level_discount_gamma=None,
+        ),
+    )
+    trainer.batch_transforms = []
+    return trainer, calls, chunks
+
+
+def test_dynamic_recollection_accumulates_two_chunks_and_transforms_once(monkeypatch):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer, calls, chunks = _dynamic_recollection_trainer(
+        rl_module,
+        chunk_sizes=[40, 40],
+    )
+    monkeypatch.setattr(
+        rl_module,
+        "_extract_accepted_batch_workload",
+        lambda batch: SimpleNamespace(task_retained_datums=sum(int(item["attention_mask"].shape[0]) for item in batch)),
+    )
+    transform_calls = []
+
+    def record_transform(batch, context):
+        transform_calls.append((batch["datum_id"].numel(), context.global_step))
+        return batch
+
+    trainer.batch_transforms = [record_transform]
+
+    collection = trainer._collect_rollout_batch(
+        workflow=object(),
+        workflow_kwargs={},
+        dynamic_filter_fn=None,
+        target_datums=80,
+    )
+    processed = trainer._postprocess_rollout_batch(
+        collection.raw_batch,
+        global_step=3,
+        epoch=0,
+        epoch_step=3,
+    )
+
+    assert len(calls) == 2
+    assert collection.raw_chunks[0] is chunks[0]
+    assert collection.raw_chunks[1] is chunks[1]
+    assert len(collection.raw_batch) == 2
+    assert collection.retained_datum_estimate == 80
+    assert processed is not None
+    assert len(processed) == 80
+    assert transform_calls == [(80, 3)]
+    metrics = collection.to_metrics(postprocess_batch_skipped=False)
+    assert metrics["dynamic_batch_recollection/rounds_attempted"] == 2.0
+    assert metrics["dynamic_batch_recollection/chunks_collected"] == 2.0
+    assert metrics["dynamic_batch_recollection/target_met_by_estimate"] == 1.0
+    assert metrics["dynamic_batch_recollection/max_rounds_exhausted"] == 0.0
+
+
+def test_dynamic_recollection_rejects_insufficient_consumer_capacity():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer, calls, _ = _dynamic_recollection_trainer(
+        rl_module,
+        chunk_sizes=[40, 40],
+        max_rounds=2,
+        consumer_batch_size=8,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"consumer_batch_size >= 2 \* train_dataloader.batch_size \(16\)",
+    ):
+        trainer._collect_rollout_batch(
+            workflow=object(),
+            workflow_kwargs={},
+            dynamic_filter_fn=None,
+            target_datums=80,
+        )
+
+    assert calls == []
+
+
+def test_dynamic_recollection_exhausts_then_final_floor_guard_skips(monkeypatch):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer, calls, _ = _dynamic_recollection_trainer(
+        rl_module,
+        chunk_sizes=[20, 20],
+    )
+    monkeypatch.setattr(
+        rl_module,
+        "_extract_accepted_batch_workload",
+        lambda batch: None,
+    )
+
+    collection = trainer._collect_rollout_batch(
+        workflow=object(),
+        workflow_kwargs={},
+        dynamic_filter_fn=None,
+        target_datums=80,
+    )
+    processed = trainer._postprocess_rollout_batch(
+        collection.raw_batch,
+        global_step=0,
+        epoch=0,
+        epoch_step=0,
+    )
+    metrics = collection.to_metrics(postprocess_batch_skipped=processed is None)
+
+    assert len(calls) == 2
+    assert collection.retained_datum_estimate is None
+    assert processed is None
+    assert metrics["dynamic_batch_recollection/retained_estimate_available"] == 0.0
+    assert metrics["dynamic_batch_recollection/max_rounds_exhausted"] == 1.0
+    assert metrics["dynamic_batch_recollection/postprocess_batch_skipped"] == 1.0
 
 
 def test_submitted_training_batch_metrics_count_post_filter_masks():
@@ -1089,6 +1382,32 @@ def test_early_global_zero_reward_filter_all_zero_returns_no_batch():
     assert metrics["filtered_zero_advantage_datums"] == 4.0
     assert metrics["filtered_zero_advantage_loss_tokens"] == 8.0
     assert metrics["retained_datums"] == 0.0
+
+
+def test_zero_reward_filter_pads_signal_to_actor_safe_pipeline_floor():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    batch = _zero_filter_batch(
+        [1.0] * 40 + [0.0] * 60,
+        [[True]] * 100,
+    )
+    batch["datum_id"] = torch.arange(100)
+    torch.manual_seed(17)
+
+    retained, metrics = rl_module._filter_zero_centered_reward_batch(
+        batch,
+        dispatch_dp_size=20,
+        minimum_batch_size=80,
+        batch_divisor=40,
+    )
+
+    assert retained is not None
+    assert retained["datum_id"].numel() == 80
+    assert set(range(40)).issubset(set(retained["datum_id"].tolist()))
+    assert metrics["zero_padding_datums"] == 40.0
+    assert metrics["filtered_zero_advantage_datums"] == 20.0
+    assert metrics["minimum_batch_datums"] == 80.0
+    assert metrics["dispatch_divisor"] == 40.0
 
 
 def test_postprocess_scales_denominator_after_dp_trim_and_before_dispatch(monkeypatch):

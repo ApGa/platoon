@@ -106,6 +106,16 @@ _WORKFLOW_STAT_KEYS = (
 )
 
 
+def _positive_int(value: Any, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return value
+
+
+def _round_up_to_multiple(value: int, divisor: int) -> int:
+    return ((value + divisor - 1) // divisor) * divisor
+
+
 def _is_workflow_stat_key(key: str) -> bool:
     return (
         key in _WORKFLOW_STAT_KEYS
@@ -124,6 +134,57 @@ class _AcceptedBatchWorkload:
     observed_rollouts: int
     trainable_rollouts: int
     task_retained_datums: int
+
+
+@dataclass(frozen=True)
+class _ActorBatchRequirements:
+    """Global cardinality constraints imposed by actor dispatch and packing."""
+
+    dispatch_dp_size: int
+    pipeline_parallel_size: int
+    ppo_n_minibatches: int
+    microbatch_granularity: int
+    engine_min_microbatches: int
+    engine_microbatch_divisor: int
+    divisor: int
+    minimum_datums: int
+
+
+@dataclass(frozen=True)
+class _RolloutBatchCollection:
+    """Raw dynamic-batch chunks retained through the RTensor cleanup phase."""
+
+    raw_batch: list[dict[str, Any]]
+    raw_chunks: tuple[list[dict[str, Any]], ...]
+    accepted_workload: _AcceptedBatchWorkload | None
+    retained_datum_estimate: int | None
+    target_datums: int
+    max_rounds: int
+    recollection_enabled: bool
+
+    def to_metrics(self, *, postprocess_batch_skipped: bool) -> dict[str, float]:
+        estimate_available = self.retained_datum_estimate is not None
+        estimate = self.retained_datum_estimate or 0
+        target_met = estimate_available and estimate >= self.target_datums
+        rounds = len(self.raw_chunks)
+        return {
+            "dynamic_batch_recollection/enabled": float(self.recollection_enabled),
+            "dynamic_batch_recollection/rounds_attempted": float(rounds),
+            "dynamic_batch_recollection/additional_rounds": float(max(rounds - 1, 0)),
+            "dynamic_batch_recollection/chunks_collected": float(rounds),
+            "dynamic_batch_recollection/nonempty_chunks": float(sum(bool(chunk) for chunk in self.raw_chunks)),
+            "dynamic_batch_recollection/accepted_task_items": float(len(self.raw_batch)),
+            "dynamic_batch_recollection/max_rounds": float(self.max_rounds),
+            "dynamic_batch_recollection/target_actor_safe_datums": float(self.target_datums),
+            "dynamic_batch_recollection/retained_estimate_available": float(estimate_available),
+            "dynamic_batch_recollection/estimated_task_retained_datums": float(estimate),
+            "dynamic_batch_recollection/estimated_floor_shortfall_datums": float(max(self.target_datums - estimate, 0)),
+            "dynamic_batch_recollection/target_met_by_estimate": float(target_met),
+            "dynamic_batch_recollection/max_rounds_exhausted": float(
+                self.recollection_enabled and rounds >= self.max_rounds and not target_met
+            ),
+            "dynamic_batch_recollection/postprocess_batch_skipped": float(postprocess_batch_skipped),
+        }
 
 
 def _sidecar_nonnegative_int(item: dict[str, Any], key: str) -> int:
@@ -352,6 +413,8 @@ def _filter_zero_centered_reward_batch(
     *,
     dispatch_dp_size: int,
     ensure_batch_divisible_by: int = 1,
+    minimum_batch_size: int | None = None,
+    batch_divisor: int | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, float]]:
     """Remove exact scalar-zero candidates after global multiplicative transforms.
 
@@ -361,8 +424,30 @@ def _filter_zero_centered_reward_batch(
     retained scalar rewards before advantage construction.
     """
 
-    if dispatch_dp_size < 1 or ensure_batch_divisible_by < 1:
-        raise ValueError("dispatch and configured divisors must be positive")
+    dispatch_dp_size = _positive_int(
+        dispatch_dp_size,
+        name="dispatch_dp_size",
+    )
+    ensure_batch_divisible_by = _positive_int(
+        ensure_batch_divisible_by,
+        name="ensure_batch_divisible_by",
+    )
+    if minimum_batch_size is None:
+        minimum_batch_size = dispatch_dp_size
+    minimum_batch_size = _positive_int(
+        minimum_batch_size,
+        name="minimum_batch_size",
+    )
+    if batch_divisor is None:
+        batch_divisor = dispatch_dp_size
+    batch_divisor = _positive_int(batch_divisor, name="batch_divisor")
+
+    divisor = math.lcm(
+        dispatch_dp_size,
+        ensure_batch_divisible_by,
+        batch_divisor,
+    )
+    minimum_batch_size = _round_up_to_multiple(minimum_batch_size, divisor)
     batch_size = get_batch_size(batch)
     rewards = localize_rtensors(batch.get("rewards"))
     loss_mask = localize_rtensors(batch.get("loss_mask"))
@@ -383,33 +468,53 @@ def _filter_zero_centered_reward_batch(
     per_datum_loss_tokens = loss_mask.bool().reshape(batch_size, -1).sum(dim=1)
     per_datum_attention_tokens = attention_mask.bool().reshape(batch_size, -1).sum(dim=1)
 
-    full_divisor = math.lcm(dispatch_dp_size, ensure_batch_divisible_by)
-    input_divisibility_fallback = int(batch_size < full_divisor or batch_size % full_divisor != 0)
-    divisor = dispatch_dp_size if input_divisibility_fallback else full_divisor
-    padding_count = (-int(nonzero_indices.numel())) % divisor if nonzero_indices.numel() else 0
-    can_zero_pad = (
-        nonzero_indices.numel() > 0
-        and padding_count <= zero_indices.numel()
-        and nonzero_indices.numel() + padding_count >= dispatch_dp_size
-    )
-    if can_zero_pad and padding_count:
-        order = torch.randperm(zero_indices.numel(), device=zero_indices.device)
-        padding_indices = zero_indices.index_select(0, order[:padding_count])
-    else:
-        padding_indices = zero_indices[:0]
-
-    retained_nonzero = nonzero_indices
+    input_divisibility_fallback = int(batch_size < minimum_batch_size or batch_size % divisor != 0)
+    safe_capacity = batch_size - batch_size % divisor
+    nonzero_count = int(nonzero_indices.numel())
+    retained_nonzero = nonzero_indices[:0]
     divisibility_trimmed = nonzero_indices[:0]
-    if not can_zero_pad:
-        trim_count = (
-            int(nonzero_indices.numel())
-            if nonzero_indices.numel() < dispatch_dp_size
-            else int(nonzero_indices.numel()) % dispatch_dp_size
+    padding_indices = zero_indices[:0]
+
+    if nonzero_count and safe_capacity >= minimum_batch_size:
+        target_size = _round_up_to_multiple(
+            max(nonzero_count, minimum_batch_size),
+            divisor,
         )
-        if trim_count:
-            order = torch.randperm(nonzero_indices.numel(), device=nonzero_indices.device)
-            divisibility_trimmed = nonzero_indices.index_select(0, order[:trim_count])
-            retained_nonzero = nonzero_indices.index_select(0, order[trim_count:])
+        if target_size <= safe_capacity:
+            # The already-collected zeros are structural padding only; retain
+            # every signal datum and choose exactly enough zeros to reach the
+            # actor-safe floor/divisor.
+            retained_nonzero = nonzero_indices
+            padding_count = target_size - nonzero_count
+            if padding_count:
+                order = torch.randperm(
+                    zero_indices.numel(),
+                    device=zero_indices.device,
+                )
+                padding_indices = zero_indices.index_select(
+                    0,
+                    order[:padding_count],
+                )
+        else:
+            # A standalone caller may supply a non-divisible batch. Preserve a
+            # safe prefix cardinality by randomly removing only the unavoidable
+            # excess signal; the trainer's preceding global trim never reaches
+            # this fallback.
+            trim_count = nonzero_count - safe_capacity
+            order = torch.randperm(
+                nonzero_indices.numel(),
+                device=nonzero_indices.device,
+            )
+            divisibility_trimmed = nonzero_indices.index_select(
+                0,
+                order[:trim_count],
+            )
+            retained_nonzero = nonzero_indices.index_select(
+                0,
+                order[trim_count:],
+            )
+    elif nonzero_count:
+        divisibility_trimmed = nonzero_indices
 
     retained_indices = torch.cat((retained_nonzero, padding_indices)).sort().values
     retained_zero_mask = torch.zeros(batch_size, dtype=torch.bool, device=zero_mask.device)
@@ -455,6 +560,7 @@ def _filter_zero_centered_reward_batch(
         ),
         "input_divisibility_fallback": float(input_divisibility_fallback),
         "dispatch_divisor": float(divisor),
+        "minimum_batch_datums": float(minimum_batch_size),
         "retained_datums": float(retained_indices.numel()),
         "retained_loss_tokens": float(retained_loss_tokens),
         "policy_gradient_denominator_tokens": float(denominator_tokens),
@@ -762,6 +868,199 @@ class PlatoonArealRLTrainer(PPOTrainer):
             return int(parallel_strategy.dp_size)
         return int(self.actor.data_parallel_world_size)
 
+    def _actor_batch_requirements(self) -> _ActorBatchRequirements:
+        """Derive the smallest safe global actor batch and its trim divisor.
+
+        Controller dispatch first gives every DP shard the same number of
+        trajectories. PPO then splits that local shard into minibatches, and
+        the engine groups adjacent sequences according to ``granularity``.
+        Megatron PP requires at least ``2 * PP`` engine microbatches and forces
+        their count to be divisible by PP. A token-capacity split can otherwise
+        turn five local sequences into five microbatches and fail while trying
+        to round that count to six. Generic engine ``n_mbs_divisor`` is included
+        as well, which covers FSDP while remaining conservative for Megatron's
+        PP override.
+        """
+
+        dispatch_dp_size = _positive_int(
+            self._actor_dispatch_dp_size(),
+            name="actor dispatch DP size",
+        )
+        parallel_strategy = getattr(self.actor, "parallel_strategy", None)
+        pipeline_parallel_size = _positive_int(
+            getattr(
+                parallel_strategy,
+                "pipeline_parallel_size",
+                getattr(parallel_strategy, "pp_size", 1),
+            ),
+            name="actor pipeline parallel size",
+        )
+
+        trainer_config = getattr(self, "config", None)
+        actor_config = getattr(self.actor, "config", None)
+        if actor_config is None:
+            actor_config = getattr(trainer_config, "actor", None)
+        ppo_n_minibatches = _positive_int(
+            getattr(actor_config, "ppo_n_minibatches", 1),
+            name="actor ppo_n_minibatches",
+        )
+        mb_spec = getattr(actor_config, "mb_spec", None)
+        configured_n_mbs = getattr(mb_spec, "n_mbs", 1)
+        if configured_n_mbs is None:
+            configured_n_mbs = 1
+        configured_n_mbs = _positive_int(
+            configured_n_mbs,
+            name="actor mb_spec.n_mbs",
+        )
+        microbatch_granularity = _positive_int(
+            getattr(mb_spec, "granularity", 1),
+            name="actor mb_spec.granularity",
+        )
+        configured_n_mbs_divisor = getattr(mb_spec, "n_mbs_divisor", 1)
+        if configured_n_mbs_divisor is None:
+            configured_n_mbs_divisor = 1
+        configured_n_mbs_divisor = _positive_int(
+            configured_n_mbs_divisor,
+            name="actor mb_spec.n_mbs_divisor",
+        )
+
+        pipeline_minimum = 2 * pipeline_parallel_size if pipeline_parallel_size > 1 else 1
+        engine_microbatch_divisor = math.lcm(
+            pipeline_parallel_size,
+            configured_n_mbs_divisor,
+        )
+        engine_min_microbatches = _round_up_to_multiple(
+            max(configured_n_mbs, pipeline_minimum),
+            engine_microbatch_divisor,
+        )
+        actor_base_quantum = dispatch_dp_size * ppo_n_minibatches * microbatch_granularity
+        actor_safe_divisor = actor_base_quantum * engine_microbatch_divisor
+        rollout_config = getattr(trainer_config, "rollout", None)
+        configured_divisor = _positive_int(
+            getattr(rollout_config, "ensure_batch_divisible_by", 1),
+            name="rollout.ensure_batch_divisible_by",
+        )
+        divisor = math.lcm(actor_safe_divisor, configured_divisor)
+        actor_minimum = actor_base_quantum * engine_min_microbatches
+        minimum_datums = _round_up_to_multiple(actor_minimum, divisor)
+        return _ActorBatchRequirements(
+            dispatch_dp_size=dispatch_dp_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            ppo_n_minibatches=ppo_n_minibatches,
+            microbatch_granularity=microbatch_granularity,
+            engine_min_microbatches=engine_min_microbatches,
+            engine_microbatch_divisor=engine_microbatch_divisor,
+            divisor=divisor,
+            minimum_datums=minimum_datums,
+        )
+
+    def _dynamic_batch_recollection_max_rounds(self) -> int:
+        configured_rounds = _positive_int(
+            getattr(
+                self.config.workflow_config,
+                "dynamic_batch_recollection_max_rounds",
+                1,
+            ),
+            name="workflow_config.dynamic_batch_recollection_max_rounds",
+        )
+        if not bool(getattr(self.config, "dynamic_bs", False)):
+            return 1
+        if configured_rounds == 1:
+            return 1
+
+        input_batch_size = _positive_int(
+            getattr(self.train_dataloader, "batch_size", None),
+            name="train dataloader batch_size",
+        )
+        consumer_batch_size = _positive_int(
+            getattr(self.config.rollout, "consumer_batch_size", None),
+            name="rollout.consumer_batch_size",
+        )
+        required_consumer_capacity = configured_rounds * input_batch_size
+        if consumer_batch_size < required_consumer_capacity:
+            raise ValueError(
+                "Dynamic batch recollection can block behind AReaL's cumulative "
+                "accepted-version capacity: "
+                f"{configured_rounds=} requires rollout.consumer_batch_size >= "
+                f"{configured_rounds} * train_dataloader.batch_size "
+                f"({required_consumer_capacity}), got {consumer_batch_size}."
+            )
+        return configured_rounds
+
+    def _collect_rollout_batch(
+        self,
+        *,
+        workflow: WorkflowLike,
+        workflow_kwargs: dict[str, Any] | None,
+        dynamic_filter_fn: Callable[[dict[str, Any]], bool] | str | None,
+        target_datums: int,
+    ) -> _RolloutBatchCollection:
+        """Collect bounded dynamic chunks before any batch transform runs."""
+
+        target_datums = _positive_int(target_datums, name="actor-safe target datums")
+        max_rounds = self._dynamic_batch_recollection_max_rounds()
+        recollection_enabled = bool(getattr(self.config, "dynamic_bs", False)) and max_rounds > 1
+        raw_chunks: list[list[dict[str, Any]]] = []
+        raw_batch: list[dict[str, Any]] = []
+        accepted_workload: _AcceptedBatchWorkload | None = None
+        retained_datum_estimate: int | None = None
+        workload_error_reported = False
+
+        for round_index in range(max_rounds):
+            raw_chunk = self.actor.prepare_batch(
+                self.train_dataloader,
+                workflow=workflow,
+                workflow_kwargs=workflow_kwargs,
+                should_accept_fn=dynamic_filter_fn,
+                group_size=self._controller_dispatch_group_size(),
+                dynamic_bs=self.config.dynamic_bs,
+            )
+            if not isinstance(raw_chunk, list):
+                raise TypeError(f"actor.prepare_batch must return a list, got {type(raw_chunk).__name__}")
+            # Keep the original chunk containers alive for RTensor shard cleanup;
+            # the flattened list is used only for one canonical postprocess pass.
+            raw_chunks.append(raw_chunk)
+            raw_batch.extend(raw_chunk)
+
+            try:
+                accepted_workload = _extract_accepted_batch_workload(raw_batch)
+            except Exception:
+                accepted_workload = None
+                retained_datum_estimate = None
+                if not workload_error_reported:
+                    logger.warning(
+                        "Unable to extract workload telemetry while recollecting "
+                        "a dynamic actor batch; continuing to the bounded limit",
+                        exc_info=True,
+                    )
+                    workload_error_reported = True
+            else:
+                retained_datum_estimate = (
+                    accepted_workload.task_retained_datums if accepted_workload is not None else None
+                )
+
+            logger.info(
+                "Actor batch collection round %d/%d: accepted_items=%d, "
+                "estimated_retained_datums=%s, target_datums=%d.",
+                round_index + 1,
+                max_rounds,
+                len(raw_batch),
+                retained_datum_estimate,
+                target_datums,
+            )
+            if retained_datum_estimate is not None and retained_datum_estimate >= target_datums:
+                break
+
+        return _RolloutBatchCollection(
+            raw_batch=raw_batch,
+            raw_chunks=tuple(raw_chunks),
+            accepted_workload=accepted_workload,
+            retained_datum_estimate=retained_datum_estimate,
+            target_datums=target_datums,
+            max_rounds=max_rounds,
+            recollection_enabled=recollection_enabled,
+        )
+
     def _advance_logical_versions(self, new_version: int) -> None:
         """Keep engine/rollout versions aligned with the trainer's global step.
 
@@ -884,7 +1183,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
         batch_size = get_batch_size(batch)
         if batch_size == 0:
             return None
-        dispatch_dp_size = self._actor_dispatch_dp_size()
+        requirements = self._actor_batch_requirements()
 
         index_device = None
         for value in batch.values():
@@ -898,20 +1197,17 @@ class PlatoonArealRLTrainer(PPOTrainer):
 
         indices = torch.arange(batch_size, device=index_device)
 
-        # Match the pre-migration trimming semantics: enforce divisibility by
-        # lcm(ensure_batch_divisible_by, dp_size) so a single trim preserves both
-        # guarantees, and skip trimming entirely when the batch is smaller than
-        # one full multiple (sequential %-trims could over-trim and break the
-        # ensure_batch_divisible_by contract).
-        ensure = math.lcm(
-            max(int(self.config.rollout.ensure_batch_divisible_by), 1),
-            dispatch_dp_size,
-        )
+        # One trim preserves controller dispatch, PPO-minibatch, engine
+        # granularity/microbatch divisibility, and the configured guarantee.
+        # Including PP is necessary even above the minimum: token-capacity
+        # packing can use every local sequence as a microbatch, whose count must
+        # still satisfy Megatron's PP divisor.
+        ensure = requirements.divisor
         total = int(indices.numel())
-        if total < dispatch_dp_size:
+        if total < requirements.minimum_datums:
             return None
         remainder = total % ensure
-        trim_count = remainder if remainder != 0 and total >= ensure else 0
+        trim_count = remainder
 
         # Divisibility trimming always draws a random subset so later/deeper
         # trajectories are not systematically discarded.  The shuffle flag
@@ -940,7 +1236,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
             indices = selection_order[keep.index_select(0, selection_order)]
         else:
             indices = indices[keep]
-        if int(indices.numel()) < dispatch_dp_size:
+        if int(indices.numel()) < requirements.minimum_datums:
             return None
 
         selected = index_batch(batch, indices)
@@ -1045,7 +1341,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
         if "trainable_datums" in batch:
             trainable_mask = batch.pop("trainable_datums").bool()
             global_trainable = int(trainable_mask.sum().item())
-            min_per_step = self._actor_dispatch_dp_size()
+            min_per_step = self._actor_batch_requirements().minimum_datums
             if global_trainable < min_per_step:
                 return None
             if not bool(trainable_mask.all()):
@@ -1089,13 +1385,13 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 False,
             )
         ):
+            requirements = self._actor_batch_requirements()
             batch, zero_filter_metrics = _filter_zero_centered_reward_batch(
                 batch,
-                dispatch_dp_size=self._actor_dispatch_dp_size(),
-                ensure_batch_divisible_by=max(
-                    int(self.config.rollout.ensure_batch_divisible_by),
-                    1,
-                ),
+                dispatch_dp_size=requirements.dispatch_dp_size,
+                ensure_batch_divisible_by=requirements.divisor,
+                minimum_batch_size=requirements.minimum_datums,
+                batch_divisor=requirements.divisor,
             )
             stats_tracker.scalar(
                 **{f"zero_advantage_filter/{key}": value for key, value in zero_filter_metrics.items()},
@@ -1196,6 +1492,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
 
             if self._should_offload_rollout:
                 self._onload_rollout()
+            actor_batch_requirements = self._actor_batch_requirements()
             with (
                 stats_tracker.record_timing("rollout"),
                 perf_tracer.trace_scope(
@@ -1204,39 +1501,31 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     args={"global_step": global_step, "epoch_step": step},
                 ),
             ):
-                raw_rollout_batch = self.actor.prepare_batch(
-                    self.train_dataloader,
+                rollout_collection = self._collect_rollout_batch(
                     workflow=workflow,
                     workflow_kwargs=workflow_kwargs,
-                    should_accept_fn=dynamic_filter_fn,
-                    group_size=self._controller_dispatch_group_size(),
-                    dynamic_bs=self.config.dynamic_bs,
+                    dynamic_filter_fn=dynamic_filter_fn,
+                    target_datums=actor_batch_requirements.minimum_datums,
                 )
-            accepted_workload = None
-            try:
-                accepted_workload = _extract_accepted_batch_workload(raw_rollout_batch)
-            except Exception:
-                # Workload reporting is observability-only. Never discard an
-                # otherwise valid policy batch because telemetry was malformed.
-                logger.warning("Unable to extract accepted-batch workload telemetry", exc_info=True)
-            else:
-                if accepted_workload is not None:
-                    stats_tracker.scalar(
-                        **accepted_workload.workload.to_metrics("workload/batch"),
-                        **{
-                            "workload/batch/total_tasks": float(accepted_workload.tasks),
-                            "workload/batch/total_requested_rollouts": float(accepted_workload.requested_rollouts),
-                            "workload/batch/total_observed_rollouts": float(accepted_workload.observed_rollouts),
-                            "workload/batch/total_trainable_rollouts": float(accepted_workload.trainable_rollouts),
-                            "workload/batch/total_task_retained_datums": float(accepted_workload.task_retained_datums),
-                            "workload/batch/total_task_workflow_trainable_datums": float(
-                                accepted_workload.task_retained_datums
-                            ),
-                            "workload/batch/total_task_workflow_non_trainable_datums": float(
-                                accepted_workload.workload.postmerge_datums - accepted_workload.task_retained_datums
-                            ),
-                        },
-                    )
+            raw_rollout_batch = rollout_collection.raw_batch
+            accepted_workload = rollout_collection.accepted_workload
+            if accepted_workload is not None:
+                stats_tracker.scalar(
+                    **accepted_workload.workload.to_metrics("workload/batch"),
+                    **{
+                        "workload/batch/total_tasks": float(accepted_workload.tasks),
+                        "workload/batch/total_requested_rollouts": float(accepted_workload.requested_rollouts),
+                        "workload/batch/total_observed_rollouts": float(accepted_workload.observed_rollouts),
+                        "workload/batch/total_trainable_rollouts": float(accepted_workload.trainable_rollouts),
+                        "workload/batch/total_task_retained_datums": float(accepted_workload.task_retained_datums),
+                        "workload/batch/total_task_workflow_trainable_datums": float(
+                            accepted_workload.task_retained_datums
+                        ),
+                        "workload/batch/total_task_workflow_non_trainable_datums": float(
+                            accepted_workload.workload.postmerge_datums - accepted_workload.task_retained_datums
+                        ),
+                    },
+                )
             if self._should_offload_rollout:
                 self._offload_rollout()
 
@@ -1245,6 +1534,11 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 global_step=global_step,
                 epoch=epoch,
                 epoch_step=step,
+            )
+            stats_tracker.scalar(
+                **rollout_collection.to_metrics(
+                    postprocess_batch_skipped=rollout_batch is None,
+                )
             )
             if rollout_batch is not None:
                 compute_batch, router_replay_sidechannels = _detach_router_replay_sidechannels(rollout_batch)
@@ -1518,7 +1812,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 ),
             ):
                 cleanup_targets = _batch_cleanup_targets(
-                    raw_rollout_batch,
+                    rollout_collection.raw_chunks,
                     rollout_batch,
                     adv_batch,
                     router_replay_marker_cleanup,

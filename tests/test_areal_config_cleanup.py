@@ -193,6 +193,27 @@ def test_token_efficiency_reward_config_parses_and_validates():
         )
 
 
+def test_dynamic_batch_recollection_rounds_default_and_validation():
+    config_mod = _load_config_module()
+
+    assert config_mod.WorkflowConfig().dynamic_batch_recollection_max_rounds == 1
+    assert (
+        config_mod.WorkflowConfig(
+            dynamic_batch_recollection_max_rounds=4,
+        ).dynamic_batch_recollection_max_rounds
+        == 4
+    )
+
+    for invalid in (True, False, 0, -1, 1.5):
+        with pytest.raises(
+            ValueError,
+            match="dynamic_batch_recollection_max_rounds must be a positive integer",
+        ):
+            config_mod.WorkflowConfig(
+                dynamic_batch_recollection_max_rounds=invalid,
+            )
+
+
 def test_removed_top_level_legacy_keys_are_rejected():
     config_mod = _load_config_module()
     schema = OmegaConf.structured(config_mod.PlatoonArealRLTrainerConfig)

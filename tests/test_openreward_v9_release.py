@@ -18,8 +18,8 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r10-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r10-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r11-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r11-376d1b9-18e62c0"
 EXPECTED_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 EXPECTED_PATCH_IDENTITY = "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b"
 EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
@@ -61,13 +61,43 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
             "missing_masks_treated_as_all_trainable_before_filter_and_concat"
         ),
         "rollout_max_head_offpolicyness": 3,
-        "rollout_consumer_batch_size": 8,
         "max_concurrent_rollouts_16node": 12,
         "max_concurrent_rollouts_32node": 24,
+        "actor_safe_dynamic_batch": {
+            "minimum_policy": "topology_derived",
+            "divisor_policy": (
+                "lcm(actor_dp_times_ppo_minibatches_times_microbatch_granularity_"
+                "times_engine_microbatch_divisor,"
+                "rollout_ensure_batch_divisible_by)"
+            ),
+            "engine_microbatch_divisor_policy": ("lcm(pipeline_parallel_size,configured_n_mbs_divisor)"),
+            "engine_min_microbatches_policy": ("engine_divisor_aligned_max_of_configured_n_mbs_and_2pp_when_pp_gt_1"),
+            "under_minimum_policy": "bounded_recollection_then_skip_optimizer_step",
+            "leaf_contracts": {
+                "16node_nonrecursive": {
+                    "actor_dp_size": 10,
+                    "actor_pipeline_parallel_size": 2,
+                    "actor_engine_min_microbatches": 4,
+                    "actor_batch_divisor": 20,
+                    "actor_safe_minimum_datums": 40,
+                    "dynamic_batch_recollection_max_rounds": 1,
+                    "rollout_consumer_batch_size": 8,
+                },
+                "32node_recursive": {
+                    "actor_dp_size": 20,
+                    "actor_pipeline_parallel_size": 2,
+                    "actor_engine_min_microbatches": 4,
+                    "actor_batch_divisor": 40,
+                    "actor_safe_minimum_datums": 80,
+                    "dynamic_batch_recollection_max_rounds": 2,
+                    "rollout_consumer_batch_size": 16,
+                },
+            },
+        },
         "balance_accepted_batches": False,
         "fresh_16node_model_only_lineage": True,
-        "fresh_16node_lineage": "v13_schema_safe",
-        "fresh_32node_lineage": "v13_schema_safe",
+        "fresh_16node_lineage": "v14_actor_batch_safe",
+        "fresh_32node_lineage": "v14_actor_batch_safe",
         "nonrecursive_16node_ptc": False,
         "recursive_32node_ptc": True,
         "recursive_32node_ptc_mode": "orchestration_only",

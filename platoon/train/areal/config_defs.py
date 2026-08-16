@@ -71,6 +71,12 @@ class WorkflowConfig:
     # Reject/replenish groups that return too few valid members for a meaningful
     # within-task baseline.  Recursive runs use 4 for an intended group size 8.
     min_successful_group_size: int = 1
+    # With dynamic batching, collect at most this many successive dispatcher
+    # chunks for one optimizer step when filtering leaves fewer datums than the
+    # actor topology can train safely.  One preserves AReaL's native behavior;
+    # larger values require rollout.consumer_batch_size to reserve at least
+    # this many input batches of accepted-version capacity.
+    dynamic_batch_recollection_max_rounds: int = 1
     leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
     depth_level_weighting: bool = False  # Trainer-side full-batch inverse-frequency weighting by depth level
     depth_level_discount_gamma: float | None = None  # Trainer-side full-batch reward discounting by gamma^d
@@ -120,6 +126,12 @@ class WorkflowConfig:
             raise ValueError("subprocess_shutdown_grace_seconds must be non-negative")
         if not 1 <= self.min_successful_group_size <= self.group_size:
             raise ValueError("min_successful_group_size must be in [1, group_size]")
+        if (
+            isinstance(self.dynamic_batch_recollection_max_rounds, bool)
+            or not isinstance(self.dynamic_batch_recollection_max_rounds, int)
+            or self.dynamic_batch_recollection_max_rounds < 1
+        ):
+            raise ValueError("dynamic_batch_recollection_max_rounds must be a positive integer")
         if not 0.0 <= self.subagent_datum_keep_probability <= 1.0:
             raise ValueError("subagent_datum_keep_probability must be in [0, 1]")
         if isinstance(self.subagent_datum_sampling_seed, bool) or not isinstance(

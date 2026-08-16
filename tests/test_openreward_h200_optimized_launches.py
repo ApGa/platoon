@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -259,12 +260,15 @@ CP1_PADDED_CASES = (
         "nodes": 16,
         "recursive": False,
         "ptc": False,
-        "experiment": "abci-or-ta-swe16-cp1-v13",
-        "trial": "abci-ta-swe16-nr-cp1-c12-v13-t0",
-        "wandb_group": "abci-ta-swe16-nr-cp1-c12-v13",
-        "job_name": "rasp-h200-16sf-v13",
+        "experiment": "abci-or-ta-swe16-cp1-v14",
+        "trial": "abci-ta-swe16-nr-cp1-c12-v14-t0",
+        "wandb_group": "abci-ta-swe16-nr-cp1-c12-v14",
+        "job_name": "rasp-h200-16sf-v14",
         "service_nodes": 6,
         "max_concurrent_rollouts": 12,
+        "consumer_batch_size": 8,
+        "recollection_max_rounds": 1,
+        "actor_safe_minimum_datums": 40,
     },
     {
         "config": ("abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded"),
@@ -273,12 +277,15 @@ CP1_PADDED_CASES = (
         "nodes": 32,
         "recursive": True,
         "ptc": True,
-        "experiment": "abci-or-ta-swe32-cp1-v13",
-        "trial": "abci-ta-swe32-rec-cp1-c24-v13-t0",
-        "wandb_group": "abci-ta-swe32-rec-cp1-c24-v13",
-        "job_name": "rasp-h200-32sf-v13",
+        "experiment": "abci-or-ta-swe32-cp1-v14",
+        "trial": "abci-ta-swe32-rec-cp1-c24-v14-t0",
+        "wandb_group": "abci-ta-swe32-rec-cp1-c24-v14",
+        "job_name": "rasp-h200-32sf-v14",
         "service_nodes": 12,
         "max_concurrent_rollouts": 24,
+        "consumer_batch_size": 16,
+        "recollection_max_rounds": 2,
+        "actor_safe_minimum_datums": 80,
         "subagent_datum_keep_probability": 0.25,
     },
 )
@@ -991,7 +998,9 @@ def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict
             "workflow_config": {
                 "filter_zero_advantage_datums": True,
                 "filter_zero_variance_groups": True,
+                "dynamic_batch_recollection_max_rounds": case["recollection_max_rounds"],
             },
+            "rollout": {"consumer_batch_size": case["consumer_batch_size"]},
             "stats_logger": {"wandb": {"group": case["wandb_group"]}},
         },
     )
@@ -1005,7 +1014,9 @@ def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict
     assert leaf["workflow_config"] == {
         "filter_zero_advantage_datums": True,
         "filter_zero_variance_groups": True,
+        "dynamic_batch_recollection_max_rounds": case["recollection_max_rounds"],
     }
+    assert leaf["rollout"] == {"consumer_batch_size": case["consumer_batch_size"]}
     assert parent.get("dynamic_bs") is None
     assert parent["workflow_config"]["filter_zero_advantage_datums"] is False
     assert parent["workflow_config"]["filter_zero_variance_groups"] is False
@@ -1014,15 +1025,34 @@ def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict
     assert config["openreward"]["enable_programmatic_tool_calling"] is case["ptc"]
     assert config["openreward"]["balance_accepted_batches"] is False
     assert config["rollout"]["max_head_offpolicyness"] == 3
-    assert config["rollout"]["consumer_batch_size"] == "${train_dataset.batch_size}"
+    assert config["rollout"]["consumer_batch_size"] == case["consumer_batch_size"]
     assert config["train_dataset"]["batch_size"] == 8
     assert config["rollout"]["max_concurrent_rollouts"] == case["max_concurrent_rollouts"]
+    assert config["workflow_config"]["dynamic_batch_recollection_max_rounds"] == case["recollection_max_rounds"]
+    assert config["rollout"]["consumer_batch_size"] >= (
+        config["train_dataset"]["batch_size"] * case["recollection_max_rounds"]
+    )
+
+    _, _, attn, _ = _actor_sizes(config["actor"]["backend"])
+    actor_dp_size, actor_pp_size = attn[:2]
+    actor_mb_spec = config["actor"].get("mb_spec", {})
+    configured_n_mbs = actor_mb_spec.get("n_mbs", 1) or 1
+    ppo_n_minibatches = config["actor"].get("ppo_n_minibatches", 1)
+    microbatch_granularity = actor_mb_spec.get("granularity", 1)
+    pipeline_minimum = 2 * actor_pp_size if actor_pp_size > 1 else 1
+    engine_min_microbatches = math.ceil(max(configured_n_mbs, pipeline_minimum) / actor_pp_size) * actor_pp_size
+    actor_safe_minimum = actor_dp_size * ppo_n_minibatches * microbatch_granularity * engine_min_microbatches
+    assert actor_safe_minimum == case["actor_safe_minimum_datums"]
     if case["recursive"]:
         assert config["workflow_config"]["subagent_datum_keep_probability"] == case["subagent_datum_keep_probability"]
     assert config["total_train_epochs"] == 10
     assert config["total_train_steps"] is None
-    for invariant in ("actor", "rollout", "recover"):
+    for invariant in ("actor", "recover"):
         assert config[invariant] == parent[invariant]
+    assert config["rollout"] == _merge(
+        parent["rollout"],
+        {"consumer_batch_size": case["consumer_batch_size"]},
+    )
 
 
 @pytest.mark.parametrize(
@@ -1030,16 +1060,16 @@ def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict
     (
         (
             CP1_PADDED_CASES[0],
-            "abci-or-ta-swe16-cp1-v13_abci-ta-swe16-nr-cp1-c12-v13-t0_train",
+            "abci-or-ta-swe16-cp1-v14_abci-ta-swe16-nr-cp1-c12-v14-t0_train",
             62,
         ),
         (
             CP1_PADDED_CASES[1],
-            "abci-or-ta-swe32-cp1-v13_abci-ta-swe32-rec-cp1-c24-v13-t0_train",
+            "abci-or-ta-swe32-cp1-v14_abci-ta-swe32-rec-cp1-c24-v14-t0_train",
             63,
         ),
     ),
-    ids=("16node-v13", "32node-v13"),
+    ids=("16node-v14", "32node-v14"),
 )
 def test_h200_cp1_padded_identity_fits_areal_wandb_limit_with_margin(
     case: dict,
@@ -1063,9 +1093,9 @@ def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: d
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r10-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r11-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r10-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r11-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
@@ -1092,6 +1122,11 @@ def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: d
     assert f"CONFIG=${{REPO_ROOT}}/plugins/openreward/platoon/openreward/configs/areal/{case['config']}.yaml" in wrapper
     assert f"EXPERIMENT={case['experiment']}" in wrapper
     assert f"TRIAL={case['trial']}" in wrapper
+    assert (
+        f"grep -Fxc '  dynamic_batch_recollection_max_rounds: {case['recollection_max_rounds']}' \"${{CONFIG}}\""
+    ) in wrapper
+    assert (f"grep -Fxc '  consumer_batch_size: {case['consumer_batch_size']}' \"${{CONFIG}}\"") in wrapper
+    assert "leaf must pin recollection rounds=" in wrapper
     assert "-v7-trial" not in wrapper
     assert f"OPENREWARD_SERVICE_NODE_COUNT={case['service_nodes']}" in wrapper
     assert f"OPENREWARD_EXPECTED_RECURSIVE={int(case['recursive'])}" in wrapper

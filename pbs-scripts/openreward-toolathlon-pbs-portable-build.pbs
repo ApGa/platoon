@@ -11,7 +11,7 @@
 #PBS -m a
 
 # Build the PBS-portable child SIF from one exact clean pre-release commit.
-# The final v8r10 tag cannot exist until it records the derived raw SIF hash, so
+# The final successor tag cannot exist until it records the derived raw SIF hash, so
 # this deliberately accepts only an explicit commit-pinned checkout rather
 # than pretending the image and final manifest can be created simultaneously.
 

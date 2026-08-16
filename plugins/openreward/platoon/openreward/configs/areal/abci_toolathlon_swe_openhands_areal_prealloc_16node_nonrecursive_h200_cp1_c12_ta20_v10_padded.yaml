@@ -4,16 +4,20 @@ defaults:
 
 # Fresh CP1 lineage for the padded-BSHD GDN control with signal-only training
 # batches.  The worker derives padded GDN from the model family and CP1
-# topology; this concise v13 identity avoids AReaL's 128-character W&B cap and
+# topology; this concise v14 identity avoids AReaL's 128-character W&B cap and
 # cannot discover any preceding run state.
-experiment_name: abci-or-ta-swe16-cp1-v13
-trial_name: abci-ta-swe16-nr-cp1-c12-v13-t0
+experiment_name: abci-or-ta-swe16-cp1-v14
+trial_name: abci-ta-swe16-nr-cp1-c12-v14-t0
 
 dynamic_bs: true
 
 workflow_config:
   filter_zero_advantage_datums: true
   filter_zero_variance_groups: true
+  dynamic_batch_recollection_max_rounds: 1
+
+rollout:
+  consumer_batch_size: 8
 
 # Repeat every literal consumed by the host launcher's pre-Hydra fail-closed
 # checks.  These values intentionally match the inherited production config.
@@ -34,4 +38,4 @@ openreward:
 
 stats_logger:
   wandb:
-    group: abci-ta-swe16-nr-cp1-c12-v13
+    group: abci-ta-swe16-nr-cp1-c12-v14
