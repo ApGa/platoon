@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r11-376d1b9-18e62c0",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r11-376d1b9-18e62c0",
+  "release_ref": "refs/tags/abci-v8r12-376d1b9-18e62c0",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r12-376d1b9-18e62c0",
   "components": {
     "platoon_upstream": "376d1b9885ea40464766fb3fea74815c6a698fbf",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -572,7 +572,7 @@
     "balance_accepted_batches": false,
     "fresh_16node_model_only_lineage": true,
     "fresh_16node_lineage": "v14_actor_batch_safe",
-    "fresh_32node_lineage": "v14_actor_batch_safe",
+    "fresh_32node_lineage": "v15_actor_batch_safe",
     "nonrecursive_16node_ptc": false,
     "recursive_32node_ptc": true,
     "recursive_32node_ptc_mode": "orchestration_only",

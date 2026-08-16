@@ -277,10 +277,10 @@ CP1_PADDED_CASES = (
         "nodes": 32,
         "recursive": True,
         "ptc": True,
-        "experiment": "abci-or-ta-swe32-cp1-v14",
-        "trial": "abci-ta-swe32-rec-cp1-c24-v14-t0",
-        "wandb_group": "abci-ta-swe32-rec-cp1-c24-v14",
-        "job_name": "rasp-h200-32sf-v14",
+        "experiment": "abci-or-ta-swe32-cp1-v15",
+        "trial": "abci-ta-swe32-rec-cp1-c24-v15-t0",
+        "wandb_group": "abci-ta-swe32-rec-cp1-c24-v15",
+        "job_name": "rasp-h200-32sf-v15",
         "service_nodes": 12,
         "max_concurrent_rollouts": 24,
         "consumer_batch_size": 16,
@@ -1065,11 +1065,11 @@ def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict
         ),
         (
             CP1_PADDED_CASES[1],
-            "abci-or-ta-swe32-cp1-v14_abci-ta-swe32-rec-cp1-c24-v14-t0_train",
+            "abci-or-ta-swe32-cp1-v15_abci-ta-swe32-rec-cp1-c24-v15-t0_train",
             63,
         ),
     ),
-    ids=("16node-v14", "32node-v14"),
+    ids=("16node-v14", "32node-v15"),
 )
 def test_h200_cp1_padded_identity_fits_areal_wandb_limit_with_margin(
     case: dict,
@@ -1093,9 +1093,9 @@ def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: d
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r11-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r12-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r11-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r12-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper

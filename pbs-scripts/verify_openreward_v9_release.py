@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r11/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r12/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r11-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r11-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r12-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r12-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "e0d6a0e1ff8f46183636fd0c425c4cc7a004b3b3acec22a51845ef799a5ba49d"
+MANIFEST_SHA256 = "a012e994f136f544bd4c54739ce287b7b396665e0f062dd01c5f379418b5e2c7"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -133,7 +133,7 @@ TRAINING_SEMANTICS = {
     "balance_accepted_batches": False,
     "fresh_16node_model_only_lineage": True,
     "fresh_16node_lineage": "v14_actor_batch_safe",
-    "fresh_32node_lineage": "v14_actor_batch_safe",
+    "fresh_32node_lineage": "v15_actor_batch_safe",
     "nonrecursive_16node_ptc": False,
     "recursive_32node_ptc": True,
     "recursive_32node_ptc_mode": "orchestration_only",
@@ -463,7 +463,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r11.  The
+    # The SWE dependency closure did not change between v8r2 and v8r12.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())
