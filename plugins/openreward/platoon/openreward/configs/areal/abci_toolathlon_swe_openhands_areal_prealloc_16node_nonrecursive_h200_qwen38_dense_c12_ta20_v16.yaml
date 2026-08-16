@@ -1,0 +1,70 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v10_padded
+  - _self_
+
+# Fresh nonrecursive dense-Qwen lineage. The release wrapper binds the exact
+# preserve-thinking snapshot; no MoE/R3 optimizer, rollout queue, or checkpoint
+# from the retired v14 lineage is discoverable.
+experiment_name: abci-or-ta-swe16-q38-v16
+trial_name: abci-ta-swe16-nr-q38d-c12-v16-t0
+tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+dynamic_bs: true
+
+workflow_config:
+  filter_zero_advantage_datums: true
+  filter_zero_variance_groups: true
+  dynamic_batch_recollection_max_rounds: 1
+  enable_router_replay: false
+  router_replay_num_layers: null
+  router_replay_topk: null
+
+rollout:
+  # Six TP8 replicas consume the six inference/service nodes. One-step
+  # staleness bounds prefetched policy lag without changing concurrency.
+  backend: sglang:d6p1t8
+  max_concurrent_rollouts: 12
+  consumer_batch_size: 8
+  max_head_offpolicyness: 1
+  return_routed_experts: false
+
+actor:
+  # 80 GPUs: dense DP10 x PP2 x TP4 x CP1. n_mbs=8 yields datum divisor
+  # 20 and a topology-safe/statistical minimum of 80 datums.
+  backend: megatron:d10p2t4c1
+  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+  enable_router_replay: false
+  router_replay_num_layers: null
+  router_replay_topk: null
+  router_replay_num_experts: null
+  mb_spec:
+    n_mbs: 8
+  megatron:
+    enable_mtp: false
+    use_deterministic_algorithms: false
+
+ref:
+  backend: ${actor.backend}
+
+sglang:
+  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+# Repeat literals consumed by the host launcher's pre-Hydra checks.
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 16
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: false
+  enable_programmatic_tool_calling: false
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe16-nr-q38d-c12-v16

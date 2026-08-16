@@ -55,6 +55,7 @@ TRAIN_MODULE=platoon.openreward.train_scripts.areal.train_areal
 EXPECTED_NNODES=${OPENREWARD_EXPECTED_NNODES:?OPENREWARD_EXPECTED_NNODES is required}
 EXPECTED_RECURSIVE=${OPENREWARD_EXPECTED_RECURSIVE:?OPENREWARD_EXPECTED_RECURSIVE is required}
 EXPECTED_PTC=${OPENREWARD_EXPECTED_PTC:-}
+EXPECTED_MODEL_SHARDS=${OPENREWARD_EXPECTED_MODEL_SHARDS:-26}
 EXPECTED_EXPERIMENT=${OPENREWARD_EXPECTED_EXPERIMENT_NAME:?OPENREWARD_EXPECTED_EXPERIMENT_NAME is required}
 EXPECTED_TRIAL=${OPENREWARD_EXPECTED_TRIAL_NAME:?OPENREWARD_EXPECTED_TRIAL_NAME is required}
 CONFIG=${1:?usage: $0 CONFIG}
@@ -91,6 +92,7 @@ require_uint() {
 }
 
 require_uint OPENREWARD_EXPECTED_NNODES "${EXPECTED_NNODES}" 1
+require_uint OPENREWARD_EXPECTED_MODEL_SHARDS "${EXPECTED_MODEL_SHARDS}" 1
 [[ "${EXPECTED_RECURSIVE}" == 0 || "${EXPECTED_RECURSIVE}" == 1 ]] || \
     die "OPENREWARD_EXPECTED_RECURSIVE must be 0 or 1"
 [[ -z "${EXPECTED_PTC}" || "${EXPECTED_PTC}" == 0 || "${EXPECTED_PTC}" == 1 ]] || \
@@ -167,8 +169,58 @@ for model_file in config.json tokenizer.json tokenizer_config.json model.safeten
     [[ -f "${PLATOON_MODEL_SNAPSHOT}/${model_file}" ]] || \
         die "model snapshot is incomplete; missing ${model_file}"
 done
-model_shards=$(find "${PLATOON_MODEL_SNAPSHOT}" -maxdepth 1 -name 'model-*-of-*.safetensors' | wc -l)
-[[ "${model_shards}" -eq 26 ]] || die "model snapshot has ${model_shards} shards; expected 26"
+if ! "${CONTROLLER_PYTHON_BASE}" -I -c '
+import json
+import re
+import sys
+from pathlib import Path
+
+snapshot = Path(sys.argv[1])
+expected_count = int(sys.argv[2])
+index_path = snapshot / "model.safetensors.index.json"
+try:
+    document = json.loads(index_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"could not read model shard index: {exc}") from exc
+weight_map = document.get("weight_map")
+if not isinstance(weight_map, dict) or not weight_map:
+    raise SystemExit("model shard index must contain a non-empty weight_map object")
+
+pattern = re.compile(r"model-([0-9]+)-of-([0-9]+)[.]safetensors")
+declared = set()
+for tensor_name, shard_name in weight_map.items():
+    if not isinstance(tensor_name, str) or not isinstance(shard_name, str):
+        raise SystemExit("model shard index weight_map entries must map strings to strings")
+    match = pattern.fullmatch(shard_name)
+    if match is None or Path(shard_name).name != shard_name:
+        raise SystemExit(f"model shard index names an invalid shard path: {shard_name!r}")
+    declared.add(shard_name)
+
+if len(declared) != expected_count:
+    raise SystemExit(
+        f"model shard index declares {len(declared)} shards; expected {expected_count}"
+    )
+totals = {int(pattern.fullmatch(name).group(2)) for name in declared}
+ordinals = {int(pattern.fullmatch(name).group(1)) for name in declared}
+if totals != {expected_count} or ordinals != set(range(1, expected_count + 1)):
+    raise SystemExit(
+        "model shard index ordinals do not form the exact expected 1..N shard set"
+    )
+
+on_disk = {
+    entry.name
+    for entry in snapshot.iterdir()
+    if pattern.fullmatch(entry.name) is not None and entry.is_file()
+}
+if on_disk != declared:
+    missing = sorted(declared - on_disk)
+    unexpected = sorted(on_disk - declared)
+    raise SystemExit(
+        f"model shard files differ from the index; missing={missing!r} unexpected={unexpected!r}"
+    )
+' "${PLATOON_MODEL_SNAPSHOT}" "${EXPECTED_MODEL_SHARDS}"; then
+    die "model snapshot shard-manifest validation failed"
+fi
 
 verify_sif_with_sidecar() {
     local image=$1 sidecar=${1}.sha256 expected actual

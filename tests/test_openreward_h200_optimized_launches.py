@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -289,6 +291,14 @@ CP1_PADDED_CASES = (
         "subagent_datum_keep_probability": 0.25,
     },
 )
+
+QWEN38_DENSE_CONFIG = "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v16"
+QWEN38_DENSE_WRAPPER = "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+QWEN38_DENSE_16_CONFIG = (
+    "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+    "qwen38_dense_c12_ta20_v16"
+)
+QWEN38_DENSE_16_WRAPPER = "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
 
 
 def _merge(base, overlay):
@@ -1055,6 +1065,199 @@ def test_h200_cp1_padded_leaf_enables_dynamic_signal_filtered_batches(case: dict
     )
 
 
+def test_qwen38_dense_recursive_leaf_has_exact_safe_training_contract() -> None:
+    yaml = pytest.importorskip("yaml")
+    path = CONFIG_ROOT / f"{QWEN38_DENSE_CONFIG}.yaml"
+    leaf = yaml.safe_load(path.read_text())
+    config = _compose(QWEN38_DENSE_CONFIG)
+    parent_name = CP1_PADDED_CASES[1]["config"]
+    parent = _compose(parent_name)
+
+    assert leaf["defaults"] == [parent_name, "_self_"]
+    assert config["experiment_name"] == "abci-or-ta-swe32-q38-v16"
+    assert config["trial_name"] == "abci-ta-swe32-rec-q38d-c24-v16-t0"
+    assert config["stats_logger"]["wandb"]["group"] == "abci-ta-swe32-rec-q38d-c24-v16"
+    snapshot = "${oc.env:PLATOON_MODEL_SNAPSHOT}"
+    assert config["tokenizer_path"] == snapshot
+    assert config["actor"]["path"] == snapshot
+    assert config["sglang"]["model_path"] == snapshot
+
+    actor_match = re.fullmatch(r"megatron:d(\d+)p(\d+)t(\d+)c(\d+)", config["actor"]["backend"])
+    assert actor_match is not None
+    actor_dp, actor_pp, actor_tp, actor_cp = (int(value) for value in actor_match.groups())
+    actor_gpus = actor_dp * actor_pp * actor_tp * actor_cp
+    rollout_gpus, rollout_replicas = _rollout_size(config["rollout"]["backend"])
+    assert (actor_dp, actor_pp, actor_tp, actor_cp) == (20, 2, 4, 1)
+    assert actor_gpus == 160
+    assert config["rollout"]["backend"] == "sglang:d12p1t8"
+    assert rollout_gpus == 96
+    assert rollout_replicas == 12
+    assert actor_gpus + rollout_gpus == config["cluster"]["n_nodes"] * 8 == 256
+    assert config["ref"]["backend"] == "${actor.backend}"
+    assert "attn:" not in config["actor"]["backend"]
+    assert "ffn:" not in config["actor"]["backend"]
+
+    mb_spec = config["actor"]["mb_spec"]
+    assert mb_spec["n_mbs"] == 8
+    assert mb_spec["max_tokens_per_mb"] == 32768
+    ppo_n_minibatches = config["actor"]["ppo_n_minibatches"]
+    granularity = mb_spec.get("granularity", 1)
+    engine_divisor = math.lcm(actor_pp, mb_spec.get("n_mbs_divisor", 1))
+    engine_min_microbatches = math.ceil(max(mb_spec["n_mbs"], 2 * actor_pp) / engine_divisor) * engine_divisor
+    datum_divisor = actor_dp * ppo_n_minibatches * granularity * engine_divisor
+    minimum_datums = actor_dp * ppo_n_minibatches * granularity * engine_min_microbatches
+    assert engine_divisor == 2
+    assert datum_divisor == 40
+    assert minimum_datums == 160
+
+    assert config["dynamic_bs"] is True
+    assert config["workflow_config"]["filter_zero_advantage_datums"] is True
+    assert config["workflow_config"]["filter_zero_variance_groups"] is True
+    assert config["workflow_config"]["dynamic_batch_recollection_max_rounds"] == 2
+    assert config["workflow_config"]["subagent_datum_keep_probability"] == 0.25
+    assert config["rollout"]["consumer_batch_size"] == 16
+    assert config["rollout"]["max_concurrent_rollouts"] == 24
+    assert config["rollout"]["max_concurrent_rollouts"] // rollout_replicas == 2
+    assert config["rollout"]["max_head_offpolicyness"] == 1
+
+    assert config["rollout"]["return_routed_experts"] is False
+    assert config["actor"]["enable_router_replay"] is False
+    assert config["actor"]["router_replay_num_layers"] is None
+    assert config["actor"]["router_replay_topk"] is None
+    assert config["actor"]["router_replay_num_experts"] is None
+    assert config["workflow_config"]["enable_router_replay"] is False
+    assert config["workflow_config"]["router_replay_num_layers"] is None
+    assert config["workflow_config"]["router_replay_topk"] is None
+    assert config["actor"]["megatron"]["enable_mtp"] is False
+    assert config["actor"]["megatron"]["use_deterministic_algorithms"] is False
+
+    assert config["openreward"]["enable_recursive_subagents"] is True
+    assert config["openreward"]["enable_programmatic_tool_calling"] is True
+    assert config["openreward"]["programmatic_tool_calling_mode"] == "orchestration_only"
+    assert config["openreward"]["programmatic_tool_calling_max_tool_calls_per_execution"] == 1024
+    assert config["openreward"]["environments"] == parent["openreward"]["environments"]
+    assert config["openreward"]["balance_accepted_batches"] is False
+    assert config["recover"] == parent["recover"]
+    assert config["total_train_epochs"] == parent["total_train_epochs"] == 10
+    assert config["total_train_steps"] is parent["total_train_steps"] is None
+
+
+def test_qwen38_dense_nonrecursive_leaf_has_exact_safe_training_contract() -> None:
+    yaml = pytest.importorskip("yaml")
+    path = CONFIG_ROOT / f"{QWEN38_DENSE_16_CONFIG}.yaml"
+    leaf = yaml.safe_load(path.read_text())
+    config = _compose(QWEN38_DENSE_16_CONFIG)
+    parent_name = CP1_PADDED_CASES[0]["config"]
+    parent = _compose(parent_name)
+
+    assert leaf["defaults"] == [parent_name, "_self_"]
+    assert config["experiment_name"] == "abci-or-ta-swe16-q38-v16"
+    assert config["trial_name"] == "abci-ta-swe16-nr-q38d-c12-v16-t0"
+    assert config["stats_logger"]["wandb"]["group"] == "abci-ta-swe16-nr-q38d-c12-v16"
+    snapshot = "${oc.env:PLATOON_MODEL_SNAPSHOT}"
+    assert config["tokenizer_path"] == snapshot
+    assert config["actor"]["path"] == snapshot
+    assert config["sglang"]["model_path"] == snapshot
+
+    actor_match = re.fullmatch(r"megatron:d(\d+)p(\d+)t(\d+)c(\d+)", config["actor"]["backend"])
+    assert actor_match is not None
+    actor_dp, actor_pp, actor_tp, actor_cp = (int(value) for value in actor_match.groups())
+    actor_gpus = actor_dp * actor_pp * actor_tp * actor_cp
+    rollout_gpus, rollout_replicas = _rollout_size(config["rollout"]["backend"])
+    assert (actor_dp, actor_pp, actor_tp, actor_cp) == (10, 2, 4, 1)
+    assert actor_gpus == 80
+    assert config["rollout"]["backend"] == "sglang:d6p1t8"
+    assert rollout_gpus == 48
+    assert rollout_replicas == 6
+    assert actor_gpus + rollout_gpus == config["cluster"]["n_nodes"] * 8 == 128
+    assert config["ref"]["backend"] == "${actor.backend}"
+    assert "attn:" not in config["actor"]["backend"]
+    assert "ffn:" not in config["actor"]["backend"]
+
+    mb_spec = config["actor"]["mb_spec"]
+    assert mb_spec["n_mbs"] == 8
+    assert mb_spec["max_tokens_per_mb"] == 32768
+    ppo_n_minibatches = config["actor"]["ppo_n_minibatches"]
+    granularity = mb_spec.get("granularity", 1)
+    engine_divisor = math.lcm(actor_pp, mb_spec.get("n_mbs_divisor", 1))
+    engine_min_microbatches = math.ceil(max(mb_spec["n_mbs"], 2 * actor_pp) / engine_divisor) * engine_divisor
+    datum_divisor = actor_dp * ppo_n_minibatches * granularity * engine_divisor
+    minimum_datums = actor_dp * ppo_n_minibatches * granularity * engine_min_microbatches
+    assert engine_divisor == 2
+    assert datum_divisor == 20
+    assert minimum_datums == 80
+
+    assert config["dynamic_bs"] is True
+    assert config["workflow_config"]["filter_zero_advantage_datums"] is True
+    assert config["workflow_config"]["filter_zero_variance_groups"] is True
+    assert config["workflow_config"]["dynamic_batch_recollection_max_rounds"] == 1
+    assert config["rollout"]["consumer_batch_size"] == 8
+    assert config["rollout"]["max_concurrent_rollouts"] == 12
+    assert config["rollout"]["max_concurrent_rollouts"] // rollout_replicas == 2
+    assert config["rollout"]["max_head_offpolicyness"] == 1
+
+    assert config["rollout"]["return_routed_experts"] is False
+    assert config["actor"]["enable_router_replay"] is False
+    assert config["actor"]["router_replay_num_layers"] is None
+    assert config["actor"]["router_replay_topk"] is None
+    assert config["actor"]["router_replay_num_experts"] is None
+    assert config["workflow_config"]["enable_router_replay"] is False
+    assert config["workflow_config"]["router_replay_num_layers"] is None
+    assert config["workflow_config"]["router_replay_topk"] is None
+    assert config["actor"]["megatron"]["enable_mtp"] is False
+    assert config["actor"]["megatron"]["use_deterministic_algorithms"] is False
+
+    assert config["openreward"]["enable_recursive_subagents"] is False
+    assert config["openreward"]["enable_programmatic_tool_calling"] is False
+    assert config["openreward"]["environments"] == parent["openreward"]["environments"]
+    assert config["openreward"]["balance_accepted_batches"] is False
+    assert config["recover"] == parent["recover"]
+    assert config["total_train_epochs"] == parent["total_train_epochs"] == 10
+    assert config["total_train_steps"] is parent["total_train_steps"] is None
+
+
+def test_common_launcher_validates_parameterized_index_declared_model_shards(tmp_path: Path) -> None:
+    common = (PBS_ROOT / "openreward-ta-swe-prealloc-common.sh").read_text()
+    overlay = (PBS_ROOT / "openreward-v9-abci.env").read_text()
+    assert 'source "${ABCI_ENV}"' in common
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in overlay
+    assert "EXPECTED_MODEL_SHARDS=${OPENREWARD_EXPECTED_MODEL_SHARDS:-26}" in common
+    assert 'require_uint OPENREWARD_EXPECTED_MODEL_SHARDS "${EXPECTED_MODEL_SHARDS}" 1' in common
+    assert '"${PLATOON_MODEL_SNAPSHOT}" "${EXPECTED_MODEL_SHARDS}"' in common
+    assert '[[ "${model_shards}" -eq 26 ]]' not in common
+
+    match = re.search(
+        r'^if ! "\$\{CONTROLLER_PYTHON_BASE\}" -I -c \'\n(?P<source>.*?)\n\' '
+        r'"\$\{PLATOON_MODEL_SNAPSHOT\}" "\$\{EXPECTED_MODEL_SHARDS\}"; then$',
+        common,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    validator = match.group("source")
+
+    shard_names = [f"model-{ordinal:05d}-of-00003.safetensors" for ordinal in range(1, 4)]
+    weight_map = {f"model.layers.{index}.weight": name for index, name in enumerate(shard_names)}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    for name in shard_names:
+        (tmp_path / name).touch()
+
+    command = [sys.executable, "-I", "-c", validator, str(tmp_path), "3"]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+
+    unexpected = tmp_path / "model-00004-of-00003.safetensors"
+    unexpected.touch()
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "unexpected=['model-00004-of-00003.safetensors']" in result.stderr
+    unexpected.unlink()
+
+    missing = tmp_path / shard_names[-1]
+    missing.unlink()
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert f"missing=['{shard_names[-1]}']" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("case", "expected_wandb_id", "expected_length"),
     (
@@ -1082,20 +1285,17 @@ def test_h200_cp1_padded_identity_fits_areal_wandb_limit_with_margin(
     assert len(wandb_id) <= 128
     assert 128 - len(wandb_id) >= 32
 
-    wrapper = (PBS_ROOT / case["wrapper"]).read_text()
-    assert f"#PBS -N {case['job_name']}" in wrapper
 
 
-@pytest.mark.parametrize("case", CP1_PADDED_CASES, ids=("16node-cp1-padded", "32node-cp1-padded"))
-def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: dict) -> None:
-    path = PBS_ROOT / case["wrapper"]
+def test_qwen38_dense_nonrecursive_wrapper_binds_fresh_model_release_and_leaf_contract() -> None:
+    path = PBS_ROOT / QWEN38_DENSE_16_WRAPPER
     subprocess.run(["bash", "-n", str(path)], check=True)
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r12-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r12-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r13-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
@@ -1116,21 +1316,39 @@ def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: d
         '--result "${ALL_MCP_RESULT}" \\\n'
         '    --gate2-result "${GATE2_RESULT}"'
     ) in wrapper
-    assert f"#PBS -l select={case['nodes']}:mpiprocs=8" in wrapper
-    assert f"#PBS -N {case['job_name']}" in wrapper
+    assert "#PBS -l select=16:mpiprocs=8" in wrapper
+    assert "#PBS -N rasp-h200-16q38-v16" in wrapper
     assert "#PBS -l walltime=168:00:00" in wrapper
-    assert f"CONFIG=${{REPO_ROOT}}/plugins/openreward/platoon/openreward/configs/areal/{case['config']}.yaml" in wrapper
-    assert f"EXPERIMENT={case['experiment']}" in wrapper
-    assert f"TRIAL={case['trial']}" in wrapper
     assert (
-        f"grep -Fxc '  dynamic_batch_recollection_max_rounds: {case['recollection_max_rounds']}' \"${{CONFIG}}\""
-    ) in wrapper
-    assert (f"grep -Fxc '  consumer_batch_size: {case['consumer_batch_size']}' \"${{CONFIG}}\"") in wrapper
-    assert "leaf must pin recollection rounds=" in wrapper
+        f"CONFIG=${{REPO_ROOT}}/plugins/openreward/platoon/openreward/configs/areal/{QWEN38_DENSE_16_CONFIG}.yaml"
+        in wrapper
+    )
+    assert "EXPERIMENT=abci-or-ta-swe16-q38-v16" in wrapper
+    assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v16-t0" in wrapper
+    for literal in (
+        "  dynamic_batch_recollection_max_rounds: 1",
+        "  consumer_batch_size: 8",
+        "  max_head_offpolicyness: 1",
+        "  backend: megatron:d10p2t4c1",
+        "  backend: sglang:d6p1t8",
+        "    n_mbs: 8",
+        "  return_routed_experts: false",
+        "    use_deterministic_algorithms: false",
+    ):
+        assert f"grep -Fxc '{literal}' \"${{CONFIG}}\"" in wrapper
+    assert "dense leaf must pin d10p2t4c1/d6p1t8" in wrapper
     assert "-v7-trial" not in wrapper
-    assert f"OPENREWARD_SERVICE_NODE_COUNT={case['service_nodes']}" in wrapper
-    assert f"OPENREWARD_EXPECTED_RECURSIVE={int(case['recursive'])}" in wrapper
-    assert f"OPENREWARD_EXPECTED_PTC={int(case['ptc'])}" in wrapper
+    assert "OPENREWARD_SERVICE_NODE_COUNT=6" in wrapper
+    assert "OPENREWARD_EXPECTED_RECURSIVE=0" in wrapper
+    assert "OPENREWARD_EXPECTED_PTC=0" in wrapper
+    assert "OPENREWARD_QWEN38_MODEL_REPOSITORY:-}" in wrapper
+    assert "apurvaga/Qwen3.8-27B-preserve-thinking" in wrapper
+    assert "OPENREWARD_QWEN38_MODEL_REVISION:-}" in wrapper
+    assert "97c725615b8aa025b800da4ceed38811358b30f1" in wrapper
+    assert "OPENREWARD_QWEN38_UPSTREAM_SOURCE:-}" in wrapper
+    assert "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0" in wrapper
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
+    assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
     assert "PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0" in wrapper
     assert "PLATOON_QWEN35_GDN_PACKED" not in wrapper
     assert "OPENREWARD_EXPECTED_QWEN35_GDN_PACKED" not in wrapper
@@ -1139,6 +1357,65 @@ def test_h200_v9_wrapper_uses_topology_derived_cp1_padded_fresh_long_run(case: d
     assert '[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]]' in wrapper
     assert 'exec "${COMMON}" "${CONFIG}"' in wrapper
     assert "qsub" not in wrapper.lower()
+
+    wandb_id = "abci-or-ta-swe16-q38-v16_abci-ta-swe16-nr-q38d-c12-v16-t0_train"
+    assert len(wandb_id) == 63
+    assert 128 - len(wandb_id) >= 32
+
+
+def test_qwen38_dense_wrapper_binds_fresh_model_release_and_leaf_contract() -> None:
+    path = PBS_ROOT / QWEN38_DENSE_WRAPPER
+    subprocess.run(["bash", "-n", str(path)], check=True)
+    wrapper = path.read_text()
+
+    assert path.stat().st_mode & 0o111 == 0o111
+    assert "#PBS -l select=32:mpiprocs=8" in wrapper
+    assert "#PBS -l walltime=168:00:00" in wrapper
+    assert "#PBS -N rasp-h200-32q38-v16" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r13-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
+    assert "GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py" in wrapper
+    assert "ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py" in wrapper
+    assert "ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env" in wrapper
+    assert (
+        f"CONFIG=${{REPO_ROOT}}/plugins/openreward/platoon/openreward/configs/areal/{QWEN38_DENSE_CONFIG}.yaml"
+        in wrapper
+    )
+    assert "EXPERIMENT=abci-or-ta-swe32-q38-v16" in wrapper
+    assert "TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0" in wrapper
+
+    assert "OPENREWARD_QWEN38_MODEL_REPOSITORY:-}" in wrapper
+    assert "apurvaga/Qwen3.8-27B-preserve-thinking" in wrapper
+    assert "OPENREWARD_QWEN38_MODEL_REVISION:-}" in wrapper
+    assert "97c725615b8aa025b800da4ceed38811358b30f1" in wrapper
+    assert "OPENREWARD_QWEN38_UPSTREAM_SOURCE:-}" in wrapper
+    assert "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0" in wrapper
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
+    assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
+
+    for literal in (
+        "  dynamic_batch_recollection_max_rounds: 2",
+        "  consumer_batch_size: 16",
+        "  max_head_offpolicyness: 1",
+        "  return_routed_experts: false",
+        "    use_deterministic_algorithms: false",
+    ):
+        assert f"grep -Fxc '{literal}' \"${{CONFIG}}\"" in wrapper
+
+    assert "export OPENREWARD_EXPECTED_NNODES=32" in wrapper
+    assert "export OPENREWARD_SERVICE_NODE_COUNT=12" in wrapper
+    assert "export OPENREWARD_EXPECTED_RECURSIVE=1" in wrapper
+    assert "export OPENREWARD_EXPECTED_PTC=1" in wrapper
+    assert "PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0" in wrapper
+    assert '[[ ! -e "${prior}" && ! -L "${prior}" ]]' in wrapper
+    assert '[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]]' in wrapper
+    assert 'exec "${COMMON}" "${CONFIG}"' in wrapper
+    assert "qsub" not in wrapper.lower()
+
+    wandb_id = "abci-or-ta-swe32-q38-v16_abci-ta-swe32-rec-q38d-c24-v16-t0_train"
+    assert len(wandb_id) == 64
+    assert 128 - len(wandb_id) >= 32
 
 
 def test_common_launcher_leaves_qwen35_layout_to_model_and_topology() -> None:

@@ -18,8 +18,18 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r12-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r12-376d1b9-18e62c0"
+RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r13-376d1b9-18e62c0"
+EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
+EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
+EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+EXPECTED_MODEL_SNAPSHOT = (
+    "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
+    "models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/"
+    "97c725615b8aa025b800da4ceed38811358b30f1"
+)
 EXPECTED_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 EXPECTED_PATCH_IDENTITY = "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b"
 EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
@@ -44,6 +54,20 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         "toolathlon": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
         "swe_rebench": "25b14c06b9236c075a4ede25bff6979e5783bb09",
     }
+    expected_model = {
+        "architecture": "dense_transformer",
+        "repository": EXPECTED_MODEL_REPOSITORY,
+        "revision": EXPECTED_MODEL_REVISION,
+        "release_tag": "preserve-thinking-v1",
+        "upstream_source": EXPECTED_MODEL_SOURCE,
+        "thinking_policy": "preserved",
+        "safetensors_shard_count": 18,
+        "snapshot_path": EXPECTED_MODEL_SNAPSHOT,
+    }
+    assert manifest["model_artifacts"] == {
+        "nonrecursive_16node": expected_model,
+        "recursive_32node": expected_model,
+    }
     assert manifest["training_semantics"] == {
         "full_horizon": True,
         "total_train_epochs": 10,
@@ -60,7 +84,8 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         "trainable_datums_missing_mask_normalization": (
             "missing_masks_treated_as_all_trainable_before_filter_and_concat"
         ),
-        "rollout_max_head_offpolicyness": 3,
+        "rollout_max_head_offpolicyness_16node": 1,
+        "rollout_max_head_offpolicyness_32node": 1,
         "max_concurrent_rollouts_16node": 12,
         "max_concurrent_rollouts_32node": 24,
         "actor_safe_dynamic_batch": {
@@ -77,18 +102,18 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
                 "16node_nonrecursive": {
                     "actor_dp_size": 10,
                     "actor_pipeline_parallel_size": 2,
-                    "actor_engine_min_microbatches": 4,
+                    "actor_engine_min_microbatches": 8,
                     "actor_batch_divisor": 20,
-                    "actor_safe_minimum_datums": 40,
+                    "actor_safe_minimum_datums": 80,
                     "dynamic_batch_recollection_max_rounds": 1,
                     "rollout_consumer_batch_size": 8,
                 },
                 "32node_recursive": {
                     "actor_dp_size": 20,
                     "actor_pipeline_parallel_size": 2,
-                    "actor_engine_min_microbatches": 4,
+                    "actor_engine_min_microbatches": 8,
                     "actor_batch_divisor": 40,
-                    "actor_safe_minimum_datums": 80,
+                    "actor_safe_minimum_datums": 160,
                     "dynamic_batch_recollection_max_rounds": 2,
                     "rollout_consumer_batch_size": 16,
                 },
@@ -96,8 +121,60 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         },
         "balance_accepted_batches": False,
         "fresh_16node_model_only_lineage": True,
-        "fresh_16node_lineage": "v14_actor_batch_safe",
-        "fresh_32node_lineage": "v15_actor_batch_safe",
+        "fresh_16node_lineage": "v16_qwen38_dense_actor_batch_safe",
+        "nonrecursive_16node_dense_contract": {
+            "actor_backend": "megatron:d10p2t4c1",
+            "actor_topology": {
+                "nodes": 10,
+                "gpus": 80,
+                "data_parallel_size": 10,
+                "pipeline_parallel_size": 2,
+                "tensor_parallel_size": 4,
+                "context_parallel_size": 1,
+                "expert_parallelism": False,
+            },
+            "rollout_backend": "sglang:d6p1t8",
+            "rollout_topology": {
+                "nodes": 6,
+                "gpus": 48,
+                "replicas": 6,
+                "pipeline_parallel_size": 1,
+                "tensor_parallel_size": 8,
+            },
+            "r3_enabled": False,
+            "return_routed_experts": False,
+            "actor_router_replay_enabled": False,
+            "actor_megatron_use_deterministic_algorithms": False,
+            "actor_mtp_enabled": False,
+            "expected_model_shards": 18,
+        },
+        "fresh_32node_lineage": "v16_qwen38_dense_actor_batch_safe",
+        "recursive_32node_dense_contract": {
+            "actor_backend": "megatron:d20p2t4c1",
+            "actor_topology": {
+                "nodes": 20,
+                "gpus": 160,
+                "data_parallel_size": 20,
+                "pipeline_parallel_size": 2,
+                "tensor_parallel_size": 4,
+                "context_parallel_size": 1,
+                "expert_parallelism": False,
+            },
+            "rollout_backend": "sglang:d12p1t8",
+            "rollout_topology": {
+                "nodes": 12,
+                "gpus": 96,
+                "replicas": 12,
+                "pipeline_parallel_size": 1,
+                "tensor_parallel_size": 8,
+            },
+            "r3_enabled": False,
+            "return_routed_experts": False,
+            "actor_router_replay_enabled": False,
+            "actor_megatron_use_deterministic_algorithms": False,
+            "actor_mtp_enabled": False,
+            "expected_model_shards": 18,
+        },
         "nonrecursive_16node_ptc": False,
         "recursive_32node_ptc": True,
         "recursive_32node_ptc_mode": "orchestration_only",
@@ -240,6 +317,66 @@ def test_v9_verifier_binds_exact_manifest_tag_externals_and_swe_contract() -> No
     assert "pbs-scripts/finalize_openreward_v9_acceptance.py" in manifest["host_acceptance_assets"]
     assert "HOST_ACCEPTANCE_ASSETS" in source
     assert "release host acceptance asset set mismatch" in source
+    assert "release model artifact identity mismatch" in source
+    assert "_require_model_artifacts()" in source
+    assert "release model shard set does not match its pinned 18-shard contract" in source
+
+
+def test_v9_release_binds_fresh_dense_qwen38_recursive_wrapper() -> None:
+    overlay = OVERLAY_PATH.read_text()
+    wrapper = RECURSIVE_WRAPPER_PATH.read_text()
+
+    subprocess.run(["bash", "-n", str(RECURSIVE_WRAPPER_PATH)], check=True)
+    assert "#PBS -N rasp-h200-32q38-v16" in wrapper
+    assert f"REPO_ROOT={EXPECTED_RELEASE_ROOT}" in wrapper
+    assert f"RELEASE_REF={EXPECTED_RELEASE_REF}" in wrapper
+    assert (
+        "CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/"
+        "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+        "qwen38_dense_c24_ta20_v16.yaml"
+    ) in wrapper
+    assert "EXPERIMENT=abci-or-ta-swe32-q38-v16" in wrapper
+    assert "TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0" in wrapper
+    assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
+    assert "max_head_offpolicyness: 1" in wrapper
+    assert "return_routed_experts: false" in wrapper
+    assert "use_deterministic_algorithms: false" in wrapper
+    assert f"OPENREWARD_QWEN38_MODEL_REPOSITORY={EXPECTED_MODEL_REPOSITORY}" in overlay
+    assert f"OPENREWARD_QWEN38_MODEL_REVISION={EXPECTED_MODEL_REVISION}" in overlay
+    assert f"OPENREWARD_QWEN38_UPSTREAM_SOURCE={EXPECTED_MODEL_SOURCE}" in overlay
+    assert f"OPENREWARD_QWEN38_MODEL_SNAPSHOT={EXPECTED_MODEL_SNAPSHOT}" in overlay
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in overlay
+    assert overlay.index("export OPENREWARD_QWEN38_MODEL_SNAPSHOT=") < overlay.index(
+        "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}"
+    )
+
+
+def test_v9_release_binds_fresh_dense_qwen38_nonrecursive_wrapper() -> None:
+    wrapper = NONRECURSIVE_WRAPPER_PATH.read_text()
+
+    subprocess.run(["bash", "-n", str(NONRECURSIVE_WRAPPER_PATH)], check=True)
+    assert "#PBS -N rasp-h200-16q38-v16" in wrapper
+    assert f"REPO_ROOT={EXPECTED_RELEASE_ROOT}" in wrapper
+    assert f"RELEASE_REF={EXPECTED_RELEASE_REF}" in wrapper
+    assert (
+        "CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/"
+        "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+        "qwen38_dense_c12_ta20_v16.yaml"
+    ) in wrapper
+    assert "EXPERIMENT=abci-or-ta-swe16-q38-v16" in wrapper
+    assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v16-t0" in wrapper
+    assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
+    for literal in (
+        "backend: megatron:d10p2t4c1",
+        "backend: sglang:d6p1t8",
+        "n_mbs: 8",
+        "max_head_offpolicyness: 1",
+        "return_routed_experts: false",
+        "use_deterministic_algorithms: false",
+    ):
+        assert literal in wrapper
 
 
 def test_v9_overlay_and_verifier_have_valid_syntax_and_safe_current_tree_failure() -> None:

@@ -1,0 +1,75 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded
+  - _self_
+
+# Fresh dense-Qwen lineage. The release wrapper binds PLATOON_MODEL_SNAPSHOT
+# fail-closed to apurvaga/Qwen3.8-27B-preserve-thinking at its pinned revision;
+# no preceding MoE/R3 optimizer, rollout queue, or checkpoint is discoverable.
+experiment_name: abci-or-ta-swe32-q38-v16
+trial_name: abci-ta-swe32-rec-q38d-c24-v16-t0
+tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+dynamic_bs: true
+
+workflow_config:
+  filter_zero_advantage_datums: true
+  filter_zero_variance_groups: true
+  dynamic_batch_recollection_max_rounds: 2
+  # Dense Qwen has no expert-router decisions to capture or replay.
+  enable_router_replay: false
+  router_replay_num_layers: null
+  router_replay_topk: null
+
+rollout:
+  # Keep the proven conservative 12-replica TP8 inference topology. Two groups
+  # per replica preserve recursive concurrency while one-step staleness bounds
+  # the prefetched policy lag seen in the prior MoE lineage.
+  backend: sglang:d12p1t8
+  max_concurrent_rollouts: 24
+  consumer_batch_size: 16
+  max_head_offpolicyness: 1
+  return_routed_experts: false
+
+actor:
+  # 160 GPUs: dense DP20 x PP2 x TP4 x CP1. With one PPO minibatch,
+  # granularity 1, and n_mbs=8, dynamic batches have divisor 40 and a
+  # topology-safe/statistical minimum of 160 datums.
+  backend: megatron:d20p2t4c1
+  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+  enable_router_replay: false
+  router_replay_num_layers: null
+  router_replay_topk: null
+  router_replay_num_experts: null
+  mb_spec:
+    n_mbs: 8
+  megatron:
+    enable_mtp: false
+    use_deterministic_algorithms: false
+
+ref:
+  backend: ${actor.backend}
+
+sglang:
+  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+# Repeat literals consumed by the host launcher's pre-Hydra checks.
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe32-rec-q38d-c24-v16

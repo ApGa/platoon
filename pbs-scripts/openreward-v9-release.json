@@ -1,13 +1,35 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r12-376d1b9-18e62c0",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r12-376d1b9-18e62c0",
+  "release_ref": "refs/tags/abci-v8r13-376d1b9-18e62c0",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0",
   "components": {
     "platoon_upstream": "376d1b9885ea40464766fb3fea74815c6a698fbf",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
     "openhands": "b1acf52ee362884f092b9eaf5e701a1bb5d1b335",
     "swe_rebench": "538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7",
     "toolathlon": "18e62c0d0419da88209af911528f2f8a0b44a5ed"
+  },
+  "model_artifacts": {
+    "nonrecursive_16node": {
+      "architecture": "dense_transformer",
+      "repository": "apurvaga/Qwen3.8-27B-preserve-thinking",
+      "revision": "97c725615b8aa025b800da4ceed38811358b30f1",
+      "release_tag": "preserve-thinking-v1",
+      "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "thinking_policy": "preserved",
+      "safetensors_shard_count": 18,
+      "snapshot_path": "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/97c725615b8aa025b800da4ceed38811358b30f1"
+    },
+    "recursive_32node": {
+      "architecture": "dense_transformer",
+      "repository": "apurvaga/Qwen3.8-27B-preserve-thinking",
+      "revision": "97c725615b8aa025b800da4ceed38811358b30f1",
+      "release_tag": "preserve-thinking-v1",
+      "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "thinking_policy": "preserved",
+      "safetensors_shard_count": 18,
+      "snapshot_path": "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/97c725615b8aa025b800da4ceed38811358b30f1"
+    }
   },
   "upstream_refresh": {
     "fetched_at_utc": "2026-08-13T16:38:39Z",
@@ -539,7 +561,8 @@
     "filter_zero_advantage_datums": true,
     "filter_zero_variance_groups": true,
     "trainable_datums_missing_mask_normalization": "missing_masks_treated_as_all_trainable_before_filter_and_concat",
-    "rollout_max_head_offpolicyness": 3,
+    "rollout_max_head_offpolicyness_16node": 1,
+    "rollout_max_head_offpolicyness_32node": 1,
     "max_concurrent_rollouts_16node": 12,
     "max_concurrent_rollouts_32node": 24,
     "actor_safe_dynamic_batch": {
@@ -552,18 +575,18 @@
         "16node_nonrecursive": {
           "actor_dp_size": 10,
           "actor_pipeline_parallel_size": 2,
-          "actor_engine_min_microbatches": 4,
+          "actor_engine_min_microbatches": 8,
           "actor_batch_divisor": 20,
-          "actor_safe_minimum_datums": 40,
+          "actor_safe_minimum_datums": 80,
           "dynamic_batch_recollection_max_rounds": 1,
           "rollout_consumer_batch_size": 8
         },
         "32node_recursive": {
           "actor_dp_size": 20,
           "actor_pipeline_parallel_size": 2,
-          "actor_engine_min_microbatches": 4,
+          "actor_engine_min_microbatches": 8,
           "actor_batch_divisor": 40,
-          "actor_safe_minimum_datums": 80,
+          "actor_safe_minimum_datums": 160,
           "dynamic_batch_recollection_max_rounds": 2,
           "rollout_consumer_batch_size": 16
         }
@@ -571,8 +594,60 @@
     },
     "balance_accepted_batches": false,
     "fresh_16node_model_only_lineage": true,
-    "fresh_16node_lineage": "v14_actor_batch_safe",
-    "fresh_32node_lineage": "v15_actor_batch_safe",
+    "fresh_16node_lineage": "v16_qwen38_dense_actor_batch_safe",
+    "nonrecursive_16node_dense_contract": {
+      "actor_backend": "megatron:d10p2t4c1",
+      "actor_topology": {
+        "nodes": 10,
+        "gpus": 80,
+        "data_parallel_size": 10,
+        "pipeline_parallel_size": 2,
+        "tensor_parallel_size": 4,
+        "context_parallel_size": 1,
+        "expert_parallelism": false
+      },
+      "rollout_backend": "sglang:d6p1t8",
+      "rollout_topology": {
+        "nodes": 6,
+        "gpus": 48,
+        "replicas": 6,
+        "pipeline_parallel_size": 1,
+        "tensor_parallel_size": 8
+      },
+      "r3_enabled": false,
+      "return_routed_experts": false,
+      "actor_router_replay_enabled": false,
+      "actor_megatron_use_deterministic_algorithms": false,
+      "actor_mtp_enabled": false,
+      "expected_model_shards": 18
+    },
+    "fresh_32node_lineage": "v16_qwen38_dense_actor_batch_safe",
+    "recursive_32node_dense_contract": {
+      "actor_backend": "megatron:d20p2t4c1",
+      "actor_topology": {
+        "nodes": 20,
+        "gpus": 160,
+        "data_parallel_size": 20,
+        "pipeline_parallel_size": 2,
+        "tensor_parallel_size": 4,
+        "context_parallel_size": 1,
+        "expert_parallelism": false
+      },
+      "rollout_backend": "sglang:d12p1t8",
+      "rollout_topology": {
+        "nodes": 12,
+        "gpus": 96,
+        "replicas": 12,
+        "pipeline_parallel_size": 1,
+        "tensor_parallel_size": 8
+      },
+      "r3_enabled": false,
+      "return_routed_experts": false,
+      "actor_router_replay_enabled": false,
+      "actor_megatron_use_deterministic_algorithms": false,
+      "actor_mtp_enabled": false,
+      "expected_model_shards": 18
+    },
     "nonrecursive_16node_ptc": false,
     "recursive_32node_ptc": true,
     "recursive_32node_ptc_mode": "orchestration_only",
