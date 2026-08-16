@@ -89,10 +89,7 @@ def _load_group_workflow_module():
     def concat_padded_tensors(items):
         if not items or not isinstance(items[0], dict):
             return items
-        return {
-            key: torch.cat([item[key] for item in items], dim=0)
-            for key in items[0]
-        }
+        return {key: torch.cat([item[key] for item in items], dim=0) for key in items[0]}
 
     data_mod.concat_padded_tensors = concat_padded_tensors
     sys.modules["areal.utils.data"] = data_mod
@@ -183,9 +180,7 @@ def test_areal_rollout_workload_counts_raw_recursive_tree_and_unique_exports():
     class Completion:
         def __init__(self, loss_mask, attention_mask=None):
             self.loss_mask = torch.tensor([loss_mask])
-            self.attention_mask = (
-                torch.tensor([attention_mask]) if attention_mask is not None else None
-            )
+            self.attention_mask = torch.tensor([attention_mask]) if attention_mask is not None else None
 
         def to_tensor_dict(self):
             result = {
@@ -275,10 +270,10 @@ def test_areal_error_filter_uses_centered_reward_sign_and_preserves_mixed_datums
         "rewards": torch.tensor([1.0, -1.0, 0.0, 2.0]),
         "loss_mask": torch.tensor(
             [
-                [False, True, True],   # positive, one error plus one clean
-                [False, True, True],   # negative: retain both error tokens
+                [False, True, True],  # positive, one error plus one clean
+                [False, True, True],  # negative: retain both error tokens
                 [False, True, False],  # zero: retain the error token
-                [False, True, True],   # positive and all-error: drop datum
+                [False, True, True],  # positive and all-error: drop datum
             ]
         ),
         sidechannel: torch.tensor(
@@ -413,9 +408,7 @@ async def test_areal_telemetry_failure_does_not_reject_data_and_attaches_datum_f
 
     train_data = {
         "rewards": torch.tensor([1.0, 0.5, 0.25]),
-        workflow_mod.POLICY_TRAINING_ELIGIBILITY_MASK_KEY: torch.tensor(
-            [True, False, True]
-        ),
+        workflow_mod.POLICY_TRAINING_ELIGIBILITY_MASK_KEY: torch.tensor([True, False, True]),
         workflow_mod.SUBAGENT_DATUM_KEEP_MASK_KEY: torch.tensor([True, True, False]),
     }
     monkeypatch.setattr(
@@ -498,15 +491,9 @@ def test_areal_task_workload_sidecar_preserves_no_train_data_work():
     assert train_data[workflow_mod._WORKLOAD_REQUESTED_ROLLOUTS_KEY].item() == 3
     assert train_data[workflow_mod._WORKLOAD_OBSERVED_ROLLOUTS_KEY].item() == 2
     assert train_data[workflow_mod._WORKLOAD_TRAINABLE_ROLLOUTS_KEY].item() == 0
-    assert train_data[
-        workflow_mod._WORKLOAD_DATUM_SIDECAR_FIELDS["postmerge_datums"]
-    ].item() == 1
-    assert train_data[
-        workflow_mod._WORKLOAD_DATUM_SIDECAR_FIELDS["policy_eligible_datums"]
-    ].item() == 1
-    assert train_data[
-        workflow_mod._WORKLOAD_DATUM_SIDECAR_FIELDS["post_sampling_datums"]
-    ].item() == 1
+    assert train_data[workflow_mod._WORKLOAD_DATUM_SIDECAR_FIELDS["postmerge_datums"]].item() == 1
+    assert train_data[workflow_mod._WORKLOAD_DATUM_SIDECAR_FIELDS["policy_eligible_datums"]].item() == 1
+    assert train_data[workflow_mod._WORKLOAD_DATUM_SIDECAR_FIELDS["post_sampling_datums"]].item() == 1
     assert train_data[workflow_mod._WORKLOAD_TASK_RETAINED_DATUMS_KEY].item() == 0
 
 
@@ -631,10 +618,7 @@ def test_policy_exclusion_activates_without_bernoulli_sampling():
     assert policy_key not in train_data
     assert "traj_depth" in train_data
     assert "traj_start" in train_data
-    assert not any(
-        key.startswith("subagent_sampling/")
-        for key in workflow_mod._test_recording_tracker.values
-    )
+    assert not any(key.startswith("subagent_sampling/") for key in workflow_mod._test_recording_tracker.values)
 
 
 def test_all_policy_eligible_without_sampling_is_an_exact_mask_noop():
@@ -770,9 +754,7 @@ async def test_partial_root_uses_only_valid_roots_for_group_baseline(
 
     stats_snapshot = {}
     workflow._arun_episode_single = types.MethodType(fake_episode, workflow)
-    workflow._record_stats = lambda train_data: stats_snapshot.setdefault(
-        "rewards", train_data["rewards"].clone()
-    )
+    workflow._record_stats = lambda train_data: stats_snapshot.setdefault("rewards", train_data["rewards"].clone())
 
     train_data = await workflow.arun_episode(object(), {"task_id": "task"})
 
@@ -860,9 +842,7 @@ async def test_group_with_no_valid_root_records_full_stats_then_rejects():
 
     stats_snapshot = {}
     workflow._arun_episode_single = types.MethodType(fake_episode, workflow)
-    workflow._record_stats = lambda train_data: stats_snapshot.setdefault(
-        "rewards", train_data["rewards"].clone()
-    )
+    workflow._record_stats = lambda train_data: stats_snapshot.setdefault("rewards", train_data["rewards"].clone())
 
     train_data = await workflow.arun_episode(object(), {"task_id": "task"})
 
@@ -941,9 +921,7 @@ async def test_zero_variance_filter_ignores_policy_excluded_verifier_rewards():
 
     stats_snapshot = {}
     workflow._arun_episode_single = types.MethodType(fake_episode, workflow)
-    workflow._record_stats = lambda train_data: stats_snapshot.setdefault(
-        "rewards", train_data["rewards"].clone()
-    )
+    workflow._record_stats = lambda train_data: stats_snapshot.setdefault("rewards", train_data["rewards"].clone())
 
     train_data = await workflow.arun_episode(object(), {"task_id": "task"})
 
@@ -952,6 +930,45 @@ async def test_zero_variance_filter_ignores_policy_excluded_verifier_rewards():
     assert torch.equal(stats_snapshot["rewards"], torch.tensor([0.0, 1.0, 0.0, 2.0]))
     assert train_data is None
     assert workflow_mod._test_recording_tracker.values["zero_variance_reward_group"] == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_accepted_zero_variance_filtered_group_backfills_all_trainable_mask():
+    workflow_mod = _load_group_workflow_module()
+    workflow = workflow_mod.GroupRolloutWorkflow.__new__(workflow_mod.GroupRolloutWorkflow)
+    workflow.config = types.SimpleNamespace(
+        group_size=2,
+        use_subprocesses=False,
+        min_successful_group_size=1,
+        leave_one_out_baseline=True,
+        filter_zero_variance_groups=True,
+    )
+    policy_key = workflow_mod.POLICY_TRAINING_ELIGIBILITY_MASK_KEY
+    results = [
+        {
+            "rewards": torch.tensor([1.0]),
+            "task_reward": torch.tensor([1.0]),
+            policy_key: torch.tensor([True]),
+        },
+        {
+            "rewards": torch.tensor([0.0]),
+            "task_reward": torch.tensor([0.0]),
+            policy_key: torch.tensor([True]),
+        },
+    ]
+
+    async def fake_episode(self, engine, data, rollout_number):
+        _ = self, engine, data
+        return results[rollout_number]
+
+    workflow._arun_episode_single = types.MethodType(fake_episode, workflow)
+    workflow._record_stats = lambda train_data: None
+
+    train_data = await workflow.arun_episode(object(), {"task_id": "task"})
+
+    assert train_data is not None
+    assert torch.equal(train_data["rewards"], torch.tensor([1.0, -1.0]))
+    assert torch.equal(train_data["trainable_datums"], torch.tensor([True, True]))
 
 
 @pytest.mark.asyncio
@@ -1048,10 +1065,7 @@ async def test_group_tail_counts_interrupted_members_before_killing_process_pool
     )
 
     assert [result[index]["rollout"] for index in range(4)] == list(range(4))
-    assert all(
-        result[index]["trajectories"]["root"]["misc"]["trajectory_timed_out"]
-        for index in range(4, 7)
-    )
+    assert all(result[index]["trajectories"]["root"]["misc"]["trajectory_timed_out"] for index in range(4, 7))
     assert result[7] is None
     assert events.index("terminate") < events.index("wrapper_released")
     assert "shutdown:False:True" in events

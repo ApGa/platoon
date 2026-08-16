@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r9/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r10/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r9-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r9-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r10-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r10-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "0f68447140a4274b6d194a89b561972e6b5ac82160ac7e7fc3eab6a4287803d5"
+MANIFEST_SHA256 = "a8d6c1e0d8f81bd6d83f8dd1f44084900bdcc2e1b417c806079a4e72eeba064e"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -81,6 +81,7 @@ EXTERNAL_PATHS = {
     "swe_rebench": "external/swe-rebench-v2-openrewardenv",
     "toolathlon": "external/toolathlon-gym",
 }
+TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION = "missing_masks_treated_as_all_trainable_before_filter_and_concat"
 TRAINING_SEMANTICS = {
     "full_horizon": True,
     "total_train_epochs": 10,
@@ -94,14 +95,15 @@ TRAINING_SEMANTICS = {
     "dynamic_bs": True,
     "filter_zero_advantage_datums": True,
     "filter_zero_variance_groups": True,
+    "trainable_datums_missing_mask_normalization": TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION,
     "rollout_max_head_offpolicyness": 3,
     "rollout_consumer_batch_size": 8,
     "max_concurrent_rollouts_16node": 12,
     "max_concurrent_rollouts_32node": 24,
     "balance_accepted_batches": False,
     "fresh_16node_model_only_lineage": True,
-    "fresh_16node_lineage": "v12_wandb_safe",
-    "fresh_32node_lineage": "v11_signal_filter",
+    "fresh_16node_lineage": "v13_schema_safe",
+    "fresh_32node_lineage": "v13_schema_safe",
     "nonrecursive_16node_ptc": False,
     "recursive_32node_ptc": True,
     "recursive_32node_ptc_mode": "orchestration_only",
@@ -431,7 +433,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r9.  The
+    # The SWE dependency closure did not change between v8r2 and v8r10.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

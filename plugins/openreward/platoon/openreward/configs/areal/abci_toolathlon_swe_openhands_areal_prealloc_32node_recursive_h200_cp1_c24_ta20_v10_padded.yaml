@@ -4,9 +4,9 @@ defaults:
 
 # Fresh CP1 lineage for the padded-BSHD GDN control with signal-only training
 # batches.  Recursive/PTC production behavior remains inherited from v9; this
-# v11 identity cannot discover the preceding v10 run state.
-experiment_name: abci-openreward-ta-swe-h200-32-cp1-padded-v11-signal-filter
-trial_name: abci-ta-swe32-rec-h200-cp1-c24-v11-padded-signal-filter-trial0
+# v13 identity cannot discover any preceding run state.
+experiment_name: abci-or-ta-swe32-cp1-v13
+trial_name: abci-ta-swe32-rec-cp1-c24-v13-t0
 
 dynamic_bs: true
 
@@ -35,4 +35,4 @@ openreward:
 
 stats_logger:
   wandb:
-    group: abci-ta-swe32-rec-h200-cp1-c24-v11-padded-signal-filter
+    group: abci-ta-swe32-rec-cp1-c24-v13

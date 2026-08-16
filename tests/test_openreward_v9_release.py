@@ -18,8 +18,8 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r9-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r9-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r10-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r10-376d1b9-18e62c0"
 EXPECTED_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 EXPECTED_PATCH_IDENTITY = "53541066e97beed06c4e0997969bf745a686e0542654dab763532a539317ba2b"
 EXPECTED_IMAGE_PATH = "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
@@ -57,14 +57,17 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         "dynamic_bs": True,
         "filter_zero_advantage_datums": True,
         "filter_zero_variance_groups": True,
+        "trainable_datums_missing_mask_normalization": (
+            "missing_masks_treated_as_all_trainable_before_filter_and_concat"
+        ),
         "rollout_max_head_offpolicyness": 3,
         "rollout_consumer_batch_size": 8,
         "max_concurrent_rollouts_16node": 12,
         "max_concurrent_rollouts_32node": 24,
         "balance_accepted_batches": False,
         "fresh_16node_model_only_lineage": True,
-        "fresh_16node_lineage": "v12_wandb_safe",
-        "fresh_32node_lineage": "v11_signal_filter",
+        "fresh_16node_lineage": "v13_schema_safe",
+        "fresh_32node_lineage": "v13_schema_safe",
         "nonrecursive_16node_ptc": False,
         "recursive_32node_ptc": True,
         "recursive_32node_ptc_mode": "orchestration_only",

@@ -978,6 +978,41 @@ class PlatoonArealRLTrainer(PPOTrainer):
             {key: value for key, value in localize_rtensors(item).items() if not _is_workflow_stat_key(key)}
             for item in rollout_batch
         ]
+
+        # Native workflows attach this mask to every accepted group, but
+        # custom and legacy workflows may omit it when every datum is eligible.
+        # Strict cross-task concatenation requires one shared schema, so an
+        # omitted mask means "all trainable" whenever any peer has a mask.
+        if any("trainable_datums" in item for item in rollout_batch):
+            for item_index, item in enumerate(rollout_batch):
+                item_batch_size = get_batch_size(item)
+                if "trainable_datums" in item:
+                    trainable_mask = item["trainable_datums"]
+                    if not torch.is_tensor(trainable_mask):
+                        raise TypeError(f"trainable_datums for rollout item {item_index} must be a tensor")
+                    trainable_mask = trainable_mask.detach().bool().reshape(-1)
+                    if trainable_mask.numel() != item_batch_size:
+                        raise ValueError(
+                            "trainable_datums does not match rollout item batch size: "
+                            f"item={item_index}, mask={trainable_mask.numel()}, "
+                            f"batch={item_batch_size}"
+                        )
+                    item["trainable_datums"] = trainable_mask
+                    continue
+
+                datum_device = next(
+                    (
+                        value.device
+                        for value in item.values()
+                        if torch.is_tensor(value) and value.ndim >= 1 and value.shape[0] == item_batch_size
+                    ),
+                    torch.device("cpu"),
+                )
+                item["trainable_datums"] = torch.ones(
+                    item_batch_size,
+                    dtype=torch.bool,
+                    device=datum_device,
+                )
         batch = concat_padded_tensors(rollout_batch)
 
         # Workflow-level stat tensors were already consumed by rollout-side stats

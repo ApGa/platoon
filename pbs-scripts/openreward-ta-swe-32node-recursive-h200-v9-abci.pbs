@@ -5,7 +5,7 @@
 #PBS -l select=32:mpiprocs=8
 #PBS -l place=scatter
 #PBS -l walltime=168:00:00
-#PBS -N rasp-h200-32sf-v11
+#PBS -N rasp-h200-32sf-v13
 #PBS -j oe
 #PBS -o /groups/gai51740/aci18912it/rasp/logs/
 #PBS -m a
@@ -13,15 +13,15 @@
 # Fresh CP1 signal-filtered 32-node recursive lineage.  The complete ten-epoch
 # horizon is retained and PTC is explicitly enabled in orchestration-only mode
 # with the 1024-call execution budget.  Launch remains gated on the immutable
-# v8r9 release and the PBS all-MCP health acceptance wave. Submitters must pass
+# v8r10 release and the PBS all-MCP health acceptance wave. Submitters must pass
 # OPENREWARD_V9_GATE2_RESULT=/absolute/path/to/RESULT and
 # OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT=/absolute/path/to/RESULT.
 
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r9-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r9-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r10-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r10-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
@@ -30,14 +30,14 @@ ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
 CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded.yaml
 COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
 ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
-EXPERIMENT=abci-openreward-ta-swe-h200-32-cp1-padded-v11-signal-filter
-TRIAL=abci-ta-swe32-rec-h200-cp1-c24-v11-padded-signal-filter-trial0
+EXPERIMENT=abci-or-ta-swe32-cp1-v13
+TRIAL=abci-ta-swe32-rec-cp1-c24-v13-t0
 RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
 
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && -r "${ABCI_ENV}" && \
     -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" ]] || {
-    echo "[h200-32-v9] ERROR: immutable v8r9 release is incomplete: ${REPO_ROOT}" >&2
+    echo "[h200-32-v9] ERROR: immutable v8r10 release is incomplete: ${REPO_ROOT}" >&2
     exit 2
 }
 [[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || {

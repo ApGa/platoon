@@ -78,9 +78,7 @@ def _load_trainer_module(batch_transforms_module):
     sys.modules["platoon.train.areal.config_defs"] = config_mod
 
     deadline_mod = types.ModuleType("platoon.train.areal.deadline")
-    deadline_mod.StepDeadlineGuard = SimpleNamespace(
-        from_environment=lambda: None
-    )
+    deadline_mod.StepDeadlineGuard = SimpleNamespace(from_environment=lambda: None)
     sys.modules["platoon.train.areal.deadline"] = deadline_mod
 
     preallocated_mod = types.ModuleType("platoon.train.areal.preallocated_slurm")
@@ -522,6 +520,128 @@ def test_segment_ids_are_created_before_trainable_filter_and_repair_lost_start()
     assert rl_module._TRAJECTORY_SEGMENT_ID_FIELD not in repaired
 
 
+@pytest.mark.parametrize("masked_first", [True, False])
+def test_reduce_rollout_batch_normalizes_mixed_trainable_mask_schema(masked_first):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.actor = SimpleNamespace(data_parallel_world_size=1)
+
+    recursive_group = {
+        "rewards": torch.tensor([[10.0], [11.0], [12.0]]),
+        "attention_mask": torch.ones(3, 1, dtype=torch.bool),
+        "traj_depth": torch.tensor([0, 1, 1]),
+        "trainable_datums": torch.tensor([True, False, True]),
+    }
+    nonrecursive_group = {
+        "rewards": torch.tensor([[20.0], [21.0]]),
+        "attention_mask": torch.ones(2, 1, dtype=torch.bool),
+        "traj_depth": torch.tensor([0, 0]),
+    }
+    rollout_batch = [recursive_group, nonrecursive_group] if masked_first else [nonrecursive_group, recursive_group]
+
+    reduced = trainer._reduce_rollout_batch(rollout_batch)
+
+    assert reduced is not None
+    expected_rewards = [10.0, 12.0, 20.0, 21.0]
+    expected_depths = [0, 1, 0, 0]
+    if not masked_first:
+        expected_rewards = [20.0, 21.0, 10.0, 12.0]
+        expected_depths = [0, 0, 0, 1]
+    assert reduced["rewards"].reshape(-1).tolist() == expected_rewards
+    assert reduced["traj_depth"].tolist() == expected_depths
+    assert "trainable_datums" not in reduced
+
+
+def test_reduce_rollout_batch_leaves_uniformly_mask_free_schema_unchanged(monkeypatch):
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    seen_input_keys = []
+    original_concat = rl_module.concat_padded_tensors
+
+    def recording_concat(items):
+        seen_input_keys.extend(set(item) for item in items)
+        return original_concat(items)
+
+    monkeypatch.setattr(rl_module, "concat_padded_tensors", recording_concat)
+    reduced = trainer._reduce_rollout_batch(
+        [
+            {
+                "rewards": torch.tensor([[1.0], [2.0]]),
+                "attention_mask": torch.ones(2, 1, dtype=torch.bool),
+            },
+            {
+                "rewards": torch.tensor([[3.0]]),
+                "attention_mask": torch.ones(1, 1, dtype=torch.bool),
+            },
+        ]
+    )
+
+    assert reduced is not None
+    assert reduced["rewards"].reshape(-1).tolist() == [1.0, 2.0, 3.0]
+    assert all("trainable_datums" not in keys for keys in seen_input_keys)
+    assert "trainable_datums" not in reduced
+
+
+def test_reduce_rollout_batch_normalizes_column_trainable_mask():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    trainer.actor = SimpleNamespace(data_parallel_world_size=1)
+
+    reduced = trainer._reduce_rollout_batch(
+        [
+            {
+                "rewards": torch.tensor([[1.0], [2.0], [3.0]]),
+                "attention_mask": torch.ones(3, 1, dtype=torch.bool),
+                "trainable_datums": torch.tensor([[1], [0], [1]]),
+            }
+        ]
+    )
+
+    assert reduced is not None
+    assert reduced["rewards"].reshape(-1).tolist() == [1.0, 3.0]
+    assert "trainable_datums" not in reduced
+
+
+def test_reduce_rollout_batch_rejects_nontensor_trainable_mask():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+
+    with pytest.raises(TypeError, match="rollout item 0 must be a tensor"):
+        trainer._reduce_rollout_batch(
+            [
+                {
+                    "rewards": torch.tensor([[1.0], [2.0]]),
+                    "attention_mask": torch.ones(2, 1, dtype=torch.bool),
+                    "trainable_datums": [True, False],
+                }
+            ]
+        )
+
+
+def test_reduce_rollout_batch_rejects_wrong_size_trainable_mask():
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+
+    with pytest.raises(
+        ValueError,
+        match=r"item=0, mask=1, batch=2",
+    ):
+        trainer._reduce_rollout_batch(
+            [
+                {
+                    "rewards": torch.tensor([[1.0], [2.0]]),
+                    "attention_mask": torch.ones(2, 1, dtype=torch.bool),
+                    "trainable_datums": torch.tensor([True]),
+                }
+            ]
+        )
+
+
 def test_trainer_strips_heterogeneous_workflow_stats_before_cross_task_concat():
     batch_transforms = _load_batch_transforms_module()
     rl_module = _load_trainer_module(batch_transforms)
@@ -587,15 +707,9 @@ def test_trainer_sums_and_strips_exact_accepted_task_workload_sidecars():
             rl_module._WORKLOAD_REQUESTED_ROLLOUTS_KEY: torch.tensor([requested]),
             rl_module._WORKLOAD_OBSERVED_ROLLOUTS_KEY: torch.tensor([observed]),
             rl_module._WORKLOAD_TRAINABLE_ROLLOUTS_KEY: torch.tensor([trainable]),
-            rl_module._WORKLOAD_DATUM_SIDECAR_FIELDS["postmerge_datums"]: torch.tensor(
-                [postmerge]
-            ),
-            rl_module._WORKLOAD_DATUM_SIDECAR_FIELDS["policy_eligible_datums"]: torch.tensor(
-                [policy_eligible]
-            ),
-            rl_module._WORKLOAD_DATUM_SIDECAR_FIELDS["post_sampling_datums"]: torch.tensor(
-                [post_sampling]
-            ),
+            rl_module._WORKLOAD_DATUM_SIDECAR_FIELDS["postmerge_datums"]: torch.tensor([postmerge]),
+            rl_module._WORKLOAD_DATUM_SIDECAR_FIELDS["policy_eligible_datums"]: torch.tensor([policy_eligible]),
+            rl_module._WORKLOAD_DATUM_SIDECAR_FIELDS["post_sampling_datums"]: torch.tensor([post_sampling]),
             rl_module._WORKLOAD_TASK_RETAINED_DATUMS_KEY: torch.tensor([task_retained]),
         }
         return item

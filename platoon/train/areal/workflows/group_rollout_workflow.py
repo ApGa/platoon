@@ -294,9 +294,7 @@ def _filter_positive_centered_error_tokens(train_data: dict) -> dict[str, float]
     return {
         "error_filter/detected_action_tokens": float(error_actions.sum().item()),
         "error_filter/suppressed_positive_action_tokens": float(suppressed.sum().item()),
-        "error_filter/retained_nonpositive_action_tokens": float(
-            (error_actions & ~suppressed).sum().item()
-        ),
+        "error_filter/retained_nonpositive_action_tokens": float((error_actions & ~suppressed).sum().item()),
         "error_filter/emptied_datums": float(emptied.sum().item()),
     }
 
@@ -604,9 +602,7 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         tracker.stat(
             denominator="workload/task/count",
             **{
-                "workload/task/requested_rollouts": torch.tensor(
-                    [float(len(processed_results))], dtype=torch.float32
-                ),
+                "workload/task/requested_rollouts": torch.tensor([float(len(processed_results))], dtype=torch.float32),
                 "workload/task/observed_rollouts": torch.tensor(
                     [float(sum(result.observed for result in processed_results))],
                     dtype=torch.float32,
@@ -615,9 +611,7 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
                     [float(trainable_rollouts)],
                     dtype=torch.float32,
                 ),
-                "workload/task/total_task_retained_datums": torch.tensor(
-                    [task_retained], dtype=torch.float32
-                ),
+                "workload/task/total_task_retained_datums": torch.tensor([task_retained], dtype=torch.float32),
                 "workload/task/total_task_workflow_trainable_datums": torch.tensor(
                     [task_retained], dtype=torch.float32
                 ),
@@ -640,9 +634,7 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         workload = sum_rollout_workloads(result.workload for result in processed_results)
         for field, key in _WORKLOAD_SIDECAR_FIELDS.items():
             train_data[key] = torch.tensor([getattr(workload, field)], dtype=torch.int64)
-        train_data[_WORKLOAD_REQUESTED_ROLLOUTS_KEY] = torch.tensor(
-            [len(processed_results)], dtype=torch.int64
-        )
+        train_data[_WORKLOAD_REQUESTED_ROLLOUTS_KEY] = torch.tensor([len(processed_results)], dtype=torch.int64)
         train_data[_WORKLOAD_OBSERVED_ROLLOUTS_KEY] = torch.tensor(
             [sum(result.observed for result in processed_results)], dtype=torch.int64
         )
@@ -709,9 +701,7 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         # Tests and external subclasses written before workload telemetry may
         # still return the historical dict/None shape. Preserve that API while
         # using the richer side channel for all native execution paths.
-        has_workload_sidechannel = any(
-            isinstance(result, _ProcessedRolloutResult) for result in raw_processed_results
-        )
+        has_workload_sidechannel = any(isinstance(result, _ProcessedRolloutResult) for result in raw_processed_results)
         processed_results = [
             result
             if isinstance(result, _ProcessedRolloutResult)
@@ -722,6 +712,7 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
             )
             for result in raw_processed_results
         ]
+
         def record_workload_stats(final_train_data: dict | None) -> list[int]:
             if final_train_data is None:
                 retained_datums_per_rollout = [0] * len(processed_results)
@@ -834,19 +825,24 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         if error_filter_metrics:
             tracker.scalar(**error_filter_metrics)
 
-        # Trainer-side full-batch transforms may still need batch metadata like
-        # traj_depth, so the workflow only signals which datums are trainable.
-        if not self.config.filter_zero_variance_groups and "trainable_datums" not in train_data:
-            train_data["trainable_datums"] = torch.ones_like(train_data["rewards"], dtype=torch.bool)
+        # Every accepted group exposes the same trainer-facing schema. Sampling
+        # and error filtering may already have supplied a restrictive mask;
+        # otherwise every datum is eligible. Zero-variance rejection is decided
+        # below and must not make this field structurally optional.
+        if "trainable_datums" not in train_data:
+            rewards = train_data["rewards"]
+            train_data["trainable_datums"] = torch.ones(
+                rewards.shape[0],
+                dtype=torch.bool,
+                device=rewards.device,
+            )
 
         final_trainable = train_data.get("trainable_datums")
         if final_trainable is None:
             final_trainable = torch.ones_like(train_data["rewards"], dtype=torch.bool)
         final_rewards = train_data["rewards"].reshape(-1)[final_trainable.bool().reshape(-1)]
         zero_signal = final_rewards.numel() == 0 or final_rewards.max() == final_rewards.min()
-        zero_filter_enabled = bool(
-            getattr(self.config, "filter_zero_advantage_datums", False)
-        )
+        zero_filter_enabled = bool(getattr(self.config, "filter_zero_advantage_datums", False))
         if zero_signal and len(results) > 1:
             stats_tracker.get(workflow_context.stat_scope()).scalar(zero_variance_reward_group=1.0)
             logger.info(
