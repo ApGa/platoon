@@ -108,7 +108,7 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v9.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_cp1_c12_ta20_v10_padded.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded.yaml",
-        "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v17.yaml",
+        "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v18.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v16.yaml",
     ):
         assert config in source
@@ -129,8 +129,8 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
     assert '"containers/probe_toolathlon_python_mcp_launchers.py",' in source
     assert 'print "    pbs-scripts/publish_openreward_v9_gate2_result.py"' not in adapter
     assert 'print "    pbs-scripts/openreward-node-local-init.py"' not in adapter
-    assert "RELEASE_REF=refs/tags/abci-v8r14-376d1b9-18e62c0" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r14-376d1b9-18e62c0" in GATE2_V9.read_text()
+    assert "RELEASE_REF=refs/tags/abci-v8r15-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0" in GATE2_V9.read_text()
 
 
 def test_gate2_archives_and_imports_rollout_rpc_patch_entrypoint():

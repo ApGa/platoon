@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r14/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r15/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r14-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r14-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r15-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "e09673164096b42267fdeb112e8a279dcc125c57ff0ad76729f8215e81fa7c82"
+MANIFEST_SHA256 = "7b5246f7e745fd5167b75c54440c582800c6b91c1bdd6817913975b1c181cdb6"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -163,7 +163,7 @@ TRAINING_SEMANTICS = {
     },
     "balance_accepted_batches": False,
     "fresh_16node_model_only_lineage": True,
-    "fresh_16node_lineage": "v17_qwen38_dense_actor_batch_safe_nccl_heartbeat3600",
+    "fresh_16node_lineage": "v18_qwen38_dense_actor_batch_safe_nccl_heartbeat3600_quote_safe",
     "nonrecursive_16node_dense_contract": {
         "actor_backend": "megatron:d10p2t4c1",
         "actor_topology": {
@@ -580,7 +580,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r14.  The
+    # The SWE dependency closure did not change between v8r2 and v8r15.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

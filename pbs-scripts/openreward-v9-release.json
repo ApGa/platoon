@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r14-376d1b9-18e62c0",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r14-376d1b9-18e62c0",
+  "release_ref": "refs/tags/abci-v8r15-376d1b9-18e62c0",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0",
   "components": {
     "platoon_upstream": "376d1b9885ea40464766fb3fea74815c6a698fbf",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -594,7 +594,7 @@
     },
     "balance_accepted_batches": false,
     "fresh_16node_model_only_lineage": true,
-    "fresh_16node_lineage": "v17_qwen38_dense_actor_batch_safe_nccl_heartbeat3600",
+    "fresh_16node_lineage": "v18_qwen38_dense_actor_batch_safe_nccl_heartbeat3600_quote_safe",
     "nonrecursive_16node_dense_contract": {
       "actor_backend": "megatron:d10p2t4c1",
       "actor_topology": {

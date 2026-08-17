@@ -1112,26 +1112,41 @@ export PLATOON_AREAL_PBS_FORWARD_ENV="HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLIN
 if [[ -n "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" ]]; then
     PLATOON_AREAL_PBS_FORWARD_ENV+=" TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"
 fi
-export PLATOON_AREAL_PBS_WORKER_PREAMBLE="
-set -euo pipefail
-if [[ -n "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" ]]; then
-    [[ "\${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}" == "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" ]] || {
-        echo "[pbs-openreward] ERROR: contained worker NCCL heartbeat retry contract is missing" >&2
-        exit 2
-    }
-fi
-export HOME=${PLATOON_NODE_LOCAL_ROOT}/worker-home
-export TMPDIR=/tmp
-export XDG_CACHE_HOME=/tmp/xdg-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
-export FLASHINFER_CACHEDIR=/tmp/flashinfer-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
-export TORCH_EXTENSIONS_DIR=/tmp/torch-extensions-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
-export AREAL_CACHE_DIR=/tmp/areal-\${PLATOON_ROLE}-\${PLATOON_WORKER_INDEX}
-mkdir -p \${XDG_CACHE_HOME} \${FLASHINFER_CACHEDIR} \${TORCH_EXTENSIONS_DIR} \${AREAL_CACHE_DIR}
-export PATH=${RUNTIME_GUARD_BIN}:${OPENREWARD_WORKER_JOB_VENV}/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
-unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT PYTHONHOME PYTHONPATH
-export LD_LIBRARY_PATH=${cuda_lib_dirs}:\${LD_LIBRARY_PATH:-}
-cd ${JOB_STATE_DIR}
-"
+# BEGIN OPENREWARD_WORKER_PREAMBLE_CONSTRUCTION
+# Build one shell command per array element so quotes intended for the contained
+# worker can never terminate a controller-side multiline assignment.
+printf -v openreward_worker_expected_heartbeat_q '%q' "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}"
+printf -v openreward_worker_home_q '%q' "${PLATOON_NODE_LOCAL_ROOT}/worker-home"
+printf -v openreward_worker_path_q '%q' \
+    "${RUNTIME_GUARD_BIN}:${OPENREWARD_WORKER_JOB_VENV}/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin"
+printf -v openreward_worker_cuda_lib_dirs_q '%q' "${cuda_lib_dirs}"
+printf -v openreward_worker_job_state_q '%q' "${JOB_STATE_DIR}"
+openreward_worker_preamble_lines=(
+    'set -euo pipefail'
+    "if [[ -n ${openreward_worker_expected_heartbeat_q} ]]; then"
+    "    [[ \"\${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}\" == ${openreward_worker_expected_heartbeat_q} ]] || {"
+    '        echo "[pbs-openreward] ERROR: contained worker NCCL heartbeat retry contract is missing" >&2'
+    '        exit 2'
+    '    }'
+    'fi'
+    "export HOME=${openreward_worker_home_q}"
+    'export TMPDIR=/tmp'
+    'export XDG_CACHE_HOME=/tmp/xdg-${PLATOON_ROLE}-${PLATOON_WORKER_INDEX}'
+    'export FLASHINFER_CACHEDIR=/tmp/flashinfer-${PLATOON_ROLE}-${PLATOON_WORKER_INDEX}'
+    'export TORCH_EXTENSIONS_DIR=/tmp/torch-extensions-${PLATOON_ROLE}-${PLATOON_WORKER_INDEX}'
+    'export AREAL_CACHE_DIR=/tmp/areal-${PLATOON_ROLE}-${PLATOON_WORKER_INDEX}'
+    'mkdir -p ${XDG_CACHE_HOME} ${FLASHINFER_CACHEDIR} ${TORCH_EXTENSIONS_DIR} ${AREAL_CACHE_DIR}'
+    "export PATH=${openreward_worker_path_q}"
+    'unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT PYTHONHOME PYTHONPATH'
+    "export LD_LIBRARY_PATH=${openreward_worker_cuda_lib_dirs_q}:\${LD_LIBRARY_PATH:-}"
+    "cd ${openreward_worker_job_state_q}"
+)
+printf -v PLATOON_AREAL_PBS_WORKER_PREAMBLE '%s\n' "${openreward_worker_preamble_lines[@]}"
+export PLATOON_AREAL_PBS_WORKER_PREAMBLE
+unset openreward_worker_expected_heartbeat_q openreward_worker_home_q \
+    openreward_worker_path_q openreward_worker_cuda_lib_dirs_q \
+    openreward_worker_job_state_q openreward_worker_preamble_lines
+# END OPENREWARD_WORKER_PREAMBLE_CONSTRUCTION
 
 monitor_services() {
     local failures=0 threshold=${OPENREWARD_HEALTH_FAILURE_THRESHOLD:-3}
