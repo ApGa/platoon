@@ -28,6 +28,15 @@ _READ_ONLY_SUBAGENT_GOAL_SUFFIX = (
     "or submit the environment result. The parent alone is responsible for "
     "applying changes and submitting."
 )
+_VERIFIER_AGENT_GOAL_SUFFIX = (
+    "## Verifier Tool Access\n\n"
+    "The environment tools needed for verification are directly available to "
+    "you. Use those tools yourself to inspect the environment and reproduce "
+    "the relevant checks. Do not launch a sub-agent merely to gain environment "
+    "tool access. Helper sub-agents are optional and should be used only for "
+    "genuinely independent, specialized checks; you remain responsible for "
+    "reviewing their evidence and returning the final verification verdict."
+)
 
 
 def _finished_reward_payload(event: Event) -> dict[str, Any] | None:
@@ -293,8 +302,16 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         return agent.model_copy(update={"mcp_config": {}})
 
     async def fork(self, task: Task) -> "OpenRewardOpenHandsEnv":
+        # A reward verifier must be able to reproduce the child agent's tool
+        # calls and inspect their externally visible effects.  The generic
+        # read-only allowlist cannot express that for environments such as
+        # Toolathlon (where every catalog call goes through ``call_tool``) or
+        # SWE-rebench (where running tests requires ``bash``).  Give the whole
+        # marked verifier branch shared access instead.  ``shared`` still
+        # removes environment-terminal tools such as claim_done/submit_answer,
+        # so a verifier cannot accidentally submit the root task.
         subagent_environment_access = (
-            "read_only"
+            "shared"
             if task.misc.get(_SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY) is True
             else self._subagent_environment_access
         )
@@ -328,6 +345,13 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             initial_user_message = _append_suffix(
                 initial_user_message,
                 _READ_ONLY_SUBAGENT_GOAL_SUFFIX,
+            )
+        if self._task.misc.get(_SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY) is True:
+            # This comes after the rollout-wide recursive/task suffix so it can
+            # refine generic delegation advice for the verifier's narrower role.
+            initial_user_message = _append_suffix(
+                initial_user_message,
+                _VERIFIER_AGENT_GOAL_SUFFIX,
             )
         current_task_goal = (
             (self._task.goal or "").strip()

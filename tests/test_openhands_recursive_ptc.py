@@ -487,7 +487,13 @@ def test_copy_agent_config_for_fork_drops_private_runtime_state(monkeypatch):
     from openhands.sdk.tool import Tool
 
     agent = AgentBase(
-        tools=[Tool(name="programmatic_tool_calling")],
+        tools=[
+            Tool(name="programmatic_tool_calling"),
+            Tool(
+                name="launch_subagent",
+                params={"runtime_id": "parent-runtime"},
+            ),
+        ],
         include_default_tools=["FinishTool"],
         mcp_config={"mcpServers": {"openreward": {"command": "python"}}},
     )
@@ -497,7 +503,7 @@ def test_copy_agent_config_for_fork_drops_private_runtime_state(monkeypatch):
     copied = recursive.copy_agent_config_for_fork(agent)
 
     assert copied is not agent
-    assert copied.tools == agent.tools
+    assert [tool.name for tool in copied.tools] == ["programmatic_tool_calling"]
     assert copied.include_default_tools == agent.include_default_tools
     assert copied.mcp_config == agent.mcp_config
     assert copied.mcp_config is not agent.mcp_config

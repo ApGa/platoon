@@ -37,9 +37,19 @@ class _RecordingStepBudgetTracker(StepBudgetTracker):
         super().__init__()
         self._state = state
 
-    def reserve_budget(self, requested_budget: float, raise_on_failure: bool = False) -> bool:
+    def reserve_budget(
+        self,
+        requested_budget: float,
+        raise_on_failure: bool = False,
+        *,
+        child_depth_scope="policy",
+    ) -> bool:
         self._state.events.append("budget.reserve")
-        return super().reserve_budget(requested_budget, raise_on_failure)
+        return super().reserve_budget(
+            requested_budget,
+            raise_on_failure,
+            child_depth_scope=child_depth_scope,
+        )
 
     def release_budget(self, amount_to_release: float) -> None:
         self._state.events.append("budget.release")

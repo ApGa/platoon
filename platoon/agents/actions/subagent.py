@@ -15,7 +15,11 @@ from platoon.episode.context import (
     subagent_reward_judge_config,
 )
 from platoon.episode.loop import _close_episode_resource, run_episode
-from platoon.episode.trajectory import BudgetExceededError, Trajectory
+from platoon.episode.trajectory import (
+    BudgetExceededError,
+    SubagentDepthScope,
+    Trajectory,
+)
 from platoon.utils.span_profile import profile_span
 
 SUBAGENT_REWARD_JUDGMENT_MISC_KEY = "subagent_reward_judgment"
@@ -74,6 +78,59 @@ def _trajectory_task_goal(traj: Trajectory) -> str:
 
 def _is_verifier_trajectory(traj: Trajectory) -> bool:
     return bool(_trajectory_task_misc(traj).get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY))
+
+
+def _propagate_verifier_task_misc(
+    parent_task_misc: dict[str, Any],
+    child_task_misc: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Keep every descendant of a reward verifier in the verifier tree.
+
+    ``Task.fork`` normally inherits all parent task metadata when callers do not
+    supply ``task_misc``.  A launch path that does supply metadata, however,
+    replaces it wholesale.  The verifier marker is an ancestry invariant, not
+    caller-controlled child metadata: losing it would make the child eligible
+    for policy training and would schedule another reward verifier for it.
+    The direct verifier's ``verifies_trajectory_id`` is intentionally not
+    copied: descendants are nested under the verifier through ``parent_info``
+    and must not masquerade as direct judges of the solver trajectory.
+    """
+
+    if not parent_task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
+        return child_task_misc
+
+    propagated = dict(
+        parent_task_misc if child_task_misc is None else child_task_misc
+    )
+    propagated[SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY] = True
+    propagated.pop(SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY, None)
+    return propagated
+
+
+def _subagent_depth_scope(
+    *,
+    parent_task_misc: dict[str, Any],
+    child_task_misc: dict[str, Any],
+    synthetic_verifier_parent: Trajectory | None,
+) -> SubagentDepthScope:
+    if not child_task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
+        return "policy"
+    if (
+        synthetic_verifier_parent is not None
+        and child_task_misc.get(
+            SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY
+        )
+        == synthetic_verifier_parent.id
+    ):
+        return "verifier_root"
+    if (
+        parent_task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY)
+        and parent_task_misc.get(
+            SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY
+        )
+    ):
+        return "verifier_helper"
+    return "verifier_descendant"
 
 
 def _format_verifier_goal(*, child_goal: str, child_traj: Trajectory) -> str:
@@ -219,8 +276,14 @@ async def _run_subagent_trajectory(
     agent = cast(ForkableAgent, current_agent.get())
     env = cast(ForkableEnv, current_env.get())
     task = parent_traj.task if parent_traj is not None and parent_traj.task is not None else env.task
+    task_misc = _propagate_verifier_task_misc(dict(task.misc), task_misc)
 
     subtask = task.fork(goal, max_steps, task_misc=task_misc)
+    child_depth_scope = _subagent_depth_scope(
+        parent_task_misc=dict(task.misc),
+        child_task_misc=dict(subtask.misc),
+        synthetic_verifier_parent=parent_traj,
+    )
     tracker = budget_tracker.get()
     reserved_budget = max_steps + 1
     forked_agent: ForkableAgent | None = None
@@ -228,7 +291,11 @@ async def _run_subagent_trajectory(
     episode_ownership_started = asyncio.Event()
 
     try:
-        tracker.reserve_budget(reserved_budget, raise_on_failure=True)
+        tracker.reserve_budget(
+            reserved_budget,
+            raise_on_failure=True,
+            child_depth_scope=child_depth_scope,
+        )
     except (BudgetExceededError, ValueError) as e:
         guidance = getattr(e, "guidance", "")
         msg = f"Not enough budget to launch subagent for goal {goal}. {e}"

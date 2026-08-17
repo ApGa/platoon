@@ -10,7 +10,11 @@ from typing import Any, Optional
 
 import pytest
 
-from platoon.agents.actions.subagent import launch_subagent
+from platoon.agents.actions.subagent import (
+    SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
+    SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY,
+    launch_subagent,
+)
 from platoon.agents.base import ForkableAgent
 from platoon.envs.base import ForkableEnv, Observation, Task
 from platoon.episode.context import (
@@ -22,6 +26,7 @@ from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import (
     BudgetExceededError,
     DepthAwareStepBudgetTracker,
+    TrajectoryCollection,
 )
 
 # -----------------------------
@@ -365,6 +370,77 @@ async def test_no_depth_limit_allows_deep_nesting():
     # All three levels should exist
     assert len(collection.trajectories) == 3
     assert len(traj.steps) == parent_max
+
+
+def test_verifier_root_and_one_helper_are_independent_of_policy_depth_limit():
+    collection = TrajectoryCollection()
+    root = collection.create_trajectory()
+    collection.set_trajectory_task(root.id, Task(id="root", goal="root"))
+    solver_child = collection.create_trajectory(parent_traj=root)
+    collection.set_trajectory_task(
+        solver_child.id,
+        Task(id="solver-child", goal="solve"),
+    )
+    tracker = DepthAwareStepBudgetTracker(max_depth=1)
+    collection_token = current_trajectory_collection.set(collection)
+    trajectory_token = current_trajectory.set(solver_child)
+
+    try:
+        # A policy child at the configured maximum remains blocked.
+        with pytest.raises(BudgetExceededError) as policy_error:
+            tracker.reserve_budget(
+                5,
+                raise_on_failure=True,
+                child_depth_scope="policy",
+            )
+        assert policy_error.value.reason == "depth"
+
+        # The out-of-policy verifier may still judge that deepest solver.
+        assert tracker.reserve_budget(
+            5,
+            raise_on_failure=True,
+            child_depth_scope="verifier_root",
+        )
+
+        verifier = collection.create_trajectory(parent_traj=solver_child)
+        collection.set_trajectory_task(
+            verifier.id,
+            Task(
+                id="verifier",
+                goal="verify",
+                misc={
+                    SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY: True,
+                    SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY: solver_child.id,
+                },
+            ),
+        )
+        current_trajectory.set(verifier)
+        assert tracker.reserve_budget(
+            5,
+            raise_on_failure=True,
+            child_depth_scope="verifier_helper",
+        )
+
+        helper = collection.create_trajectory(parent_traj=verifier)
+        collection.set_trajectory_task(
+            helper.id,
+            Task(
+                id="verifier-helper",
+                goal="inspect",
+                misc={SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY: True},
+            ),
+        )
+        current_trajectory.set(helper)
+        with pytest.raises(BudgetExceededError) as verifier_depth_error:
+            tracker.reserve_budget(
+                5,
+                raise_on_failure=True,
+                child_depth_scope="verifier_descendant",
+            )
+        assert verifier_depth_error.value.reason == "verifier_depth"
+    finally:
+        current_trajectory.reset(trajectory_token)
+        current_trajectory_collection.reset(collection_token)
 
 
 # -----------------------------

@@ -515,7 +515,10 @@ def append_user_message_suffix(agent: AgentBase, suffix: str | None) -> AgentBas
 def copy_agent_config_for_fork(agent: AgentBase) -> AgentBase:
     field_values = {field_name: getattr(agent, field_name) for field_name in type(agent).model_fields}
     if "tools" in field_values:
-        field_values["tools"] = list(agent.tools)
+        # A launcher executor is bound to its owning episode's event loop and
+        # context. Never copy that runtime handle into a child conversation;
+        # recursive children install a fresh launcher during environment reset.
+        field_values["tools"] = [tool for tool in agent.tools if tool.name != LAUNCH_SUBAGENT_TOOL_NAME]
     if "include_default_tools" in field_values:
         field_values["include_default_tools"] = list(agent.include_default_tools)
     if "mcp_config" in field_values:

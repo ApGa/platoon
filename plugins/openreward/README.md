@@ -205,13 +205,15 @@ openreward:
   subagent_environment_access: read_only
 ```
 
-`read_only` affects forked children only; the root keeps every environment
-tool. Children receive the strict inspection allowlist `get_task`, `get_status`,
-`get_tool_details`, and `view`. They do not receive `bash`, `str_replace`,
-`create_file`, `submit_answer`, `claim_done`, generic `call_tool`,
-`python_execute`, or unknown future environment tools. A child should return
-file/line evidence and a proposed replacement or patch through its local
-`finish` tool; only the parent edits and submits.
+`read_only` affects ordinary forked children only; the root keeps every
+environment tool. Children receive the strict inspection allowlist `get_task`,
+`get_status`, `get_tool_details`, and `view`. They do not receive `bash`,
+`str_replace`, `create_file`, `submit_answer`, `claim_done`, generic
+`call_tool`, `python_execute`, or unknown future environment tools. A child
+should return file/line evidence and a proposed replacement or patch through
+its local `finish` tool; only the parent edits and submits. Synthetic reward
+verifier branches are an intentional exception: they receive shared
+non-terminal tools so they can reproduce environment actions and run tests.
 
 This phase-1 mode does **not** fork the OpenReward environment or create a Git
 worktree. Child `view` calls inspect the same live workspace/session as the
@@ -219,12 +221,13 @@ parent, and concurrent parent activity can change what a child sees. In
 `shared` mode, concurrent edits can race. Children receive mutating tools but
 not the known terminal tools (`submit_answer` and `claim_done`); they report
 through their local `finish`, and the parent submits the shared result. Reward
-verifiers stay read-only. Every subagent receives the same environment-neutral
-system guidance explaining that its parent and siblings may share the live
-workspace. It can use the shared tree directly or, when conflict risk warrants
-it, create an isolated directory or Git worktree and then integrate the result
-or return its location, commit, or patch to the parent. Roots do not receive
-this child-only guidance.
+verifiers also omit these terminal tools and are prompted to inspect with their
+direct environment tools before considering delegation. Every subagent receives
+the same environment-neutral system guidance explaining that its parent and
+siblings may share the live workspace. It can use the shared tree directly or,
+when conflict risk warrants it, create an isolated directory or Git worktree
+and then integrate the result or return its location, commit, or patch to the
+parent. Roots do not receive this child-only guidance.
 
 Set `openreward.enable_subagent_reward_judging: true` to automatically launch a
 verifier agent after each normal subagent finishes. The verifier receives the
@@ -234,8 +237,13 @@ trajectory stores the normalized result in `misc.subagent_reward_judgment`; the
 verifier trajectory stores the judged child id in
 `misc.subagent_reward_verifies_trajectory_id`.
 `openreward.subagent_reward_judge_max_steps` controls the verifier step budget
-and defaults to 20. Verifier tasks do not receive `launch_subagent`, which
-avoids verifier-of-verifier recursion. Verifier trajectories are marked
+and defaults to 20. A verifier receives a fresh, verifier-bound
+`launch_subagent` runtime and may use one helper level for independent,
+specialized checks. Helper calls use `subagent_default_max_steps` (50 in the
+recursive training configs). Helpers inherit the verifier-tree marker, remain
+nested under the verifier, are excluded from policy training, and never receive
+a second reward verifier; deeper verifier delegation is rejected independently
+of the policy recursion-depth limit. Verifier trajectories are marked
 `misc.exclude_from_training: true`; judged worker trajectories expose
 `reward/subagent_judgment`, and OpenReward's reward processor uses that score as
 the worker subtrajectory reward.

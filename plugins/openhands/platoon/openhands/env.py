@@ -7,7 +7,6 @@ from dataclasses import replace
 from typing import Any, Callable, Sequence
 from uuid import UUID, uuid4
 
-from platoon.agents.actions.subagent import SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY
 from platoon.envs.base import SubTask, Task
 from platoon.episode.context import (
     current_trajectory,
@@ -125,10 +124,13 @@ class OpenHandsEnv:
             configured_agent = with_shared_workspace_subagent_prompt(configured_agent)
             configured_agent = with_finish_tool(configured_agent)
 
-        if not self._enable_recursive_subagents or self._task.misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
+        if not self._enable_recursive_subagents:
             self._agent = configured_agent
             return self._agent
 
+        # This includes synthetic reward verifiers. A launcher is bound to the
+        # current episode context; reusing a copied parent launcher would fork a
+        # verifier's helper from the solver trajectory instead of the verifier.
         from platoon.openhands.recursive import (
             LaunchSubagentRuntime,
             with_launch_subagent_tool,
