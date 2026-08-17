@@ -20,8 +20,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r20-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r21-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
@@ -55,7 +55,7 @@ die() {
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && \
     -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && \
     -x "${ALL_MCP_VERIFY}" && -x "${RESUME_VERIFY}" ]] ||
-    die "immutable v8r20 release is incomplete: ${REPO_ROOT}"
+    die "immutable v8r21 release is incomplete: ${REPO_ROOT}"
 [[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] ||
     die "release root must be the exact non-symlink path"
 

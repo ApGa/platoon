@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import math
 import subprocess
@@ -12,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_ROOT = REPO_ROOT / "plugins/openreward/platoon/openreward/configs/areal"
 CONFIG_NAME = (
     "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
-    "qwen36_moe_cp2_c24_ta20_v19"
+    "qwen36_moe_cp2_c24_ta20_v21"
 )
 WRAPPER = REPO_ROOT / "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"
 BACKEND = "megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)"
@@ -50,8 +51,8 @@ def test_qwen36_cp2_leaf_composes_exact_user_contract() -> None:
     openreward = config["openreward"]
     actor = config["actor"]
 
-    assert config["experiment_name"] == "abci-or-ta-swe32-q36-cp2-v19"
-    assert config["trial_name"] == "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0"
+    assert config["experiment_name"] == "abci-or-ta-swe32-q36-cp2-v21"
+    assert config["trial_name"] == "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0"
     assert config["dynamic_bs"] is False
     assert workflow["filter_zero_advantage_datums"] is False
     assert workflow["filter_zero_variance_groups"] is False
@@ -83,6 +84,7 @@ def test_qwen36_cp2_leaf_composes_exact_user_contract() -> None:
         }
     assert config["sglang"]["context_length"] == 65_537
     assert config["sglang"]["max_prefill_tokens"] == 65_536
+    assert config["rollout"]["agent"]["engine_max_tokens"] == 65_536
     assert openreward["condenser_max_tokens"] == (4 * 65_536) // 5 == 52_428
 
     engine_divisor = math.lcm(2, actor["mb_spec"]["n_mbs_divisor"])
@@ -94,6 +96,34 @@ def test_qwen36_cp2_leaf_composes_exact_user_contract() -> None:
     assert config["rollout"]["consumer_batch_size"] == config["train_dataset"]["batch_size"] == 8
     assert config["recover"]["mode"] == "auto"
     assert config["recover"]["freq_steps"] == 1
+
+
+def test_proxy_engine_cap_overrides_areal_32768_fallback() -> None:
+    candidates = (
+        REPO_ROOT / "external/AReaL",
+        Path("/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0/external/AReaL"),
+    )
+    areal_root = next((path for path in candidates if path.is_dir()), None)
+    if areal_root is None:
+        pytest.skip("materialized pinned AReaL checkout is unavailable")
+    client_path = areal_root / "areal/experimental/openai/client.py"
+    source = client_path.read_text(encoding="utf-8")
+    assert "_DEFAULT_MAX_TOTAL_TOKENS = 32768" in source
+    assert "cap = engine_max_tokens or _DEFAULT_MAX_TOTAL_TOKENS" in source
+
+    function = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "_resolve_max_total_tokens"
+    )
+    namespace = {"_DEFAULT_MAX_TOTAL_TOKENS": 32_768}
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    exec(compile(module, str(client_path), "exec"), namespace)
+    resolve = namespace["_resolve_max_total_tokens"]
+
+    assert resolve(50_000, 4_096, None) == 32_768
+    assert resolve(50_000, 4_096, 65_536) == 54_096
+    assert _compose(CONFIG_NAME)["rollout"]["agent"]["engine_max_tokens"] == 65_536
 
 
 def test_pinned_areal_transformer_proves_hybrid_cp2_ep8_mapping() -> None:
@@ -181,12 +211,13 @@ def test_fresh_wrapper_is_fail_closed_and_no_resume_path() -> None:
     source = WRAPPER.read_text()
 
     assert "#PBS -l select=32:mpiprocs=8" in source
-    assert "#PBS -N rasp-h200-32q36-v19" in source
-    assert "platoon-v8r20-376d1b9-18e62c0" in source
-    assert "refs/tags/abci-v8r20-376d1b9-18e62c0" in source
+    assert "#PBS -N rasp-h200-32q36-v21" in source
+    assert "platoon-v8r21-376d1b9-18e62c0" in source
+    assert "refs/tags/abci-v8r21-376d1b9-18e62c0" in source
     assert "refusing stale success artifact" in source
     assert "refusing stale checkpoint" in source
     assert "OPENREWARD_EXPECTED_MODEL_SHARDS=26" in source
+    assert "'    engine_max_tokens: 65536'" in source
     assert "export OPENREWARD_MODEL_FAMILY=qwen36" in source
     assert source.index("export OPENREWARD_MODEL_FAMILY=qwen36") < source.index(
         'source "${ABCI_ENV}"'

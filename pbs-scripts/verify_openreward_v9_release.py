@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r20/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r21/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r20-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r21-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "f2fedbed110ce0e44a60a6312e7861bdf81e166681aa61f41b6d1a383cfb87bd"
+MANIFEST_SHA256 = "6b4fc48885a23cada1c332ecd2e8b35d134c10c3479815993a7c061be7a427b6"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -243,7 +243,7 @@ TRAINING_SEMANTICS = {
             "pbs-scripts/openreward-ta-swe-16node-nonrecursive-qwen38-"
             "gs0-nooptim-h200-v10-abci.pbs"
         ),
-        "wrapper_sha256": "a471c2710c91d64be78756c71d7087f9ad78e50406b95999139579cce1d41946",
+        "wrapper_sha256": "a8e12848ca91da611cad155706570b74659917eb8620217a9de691aa5e857e7c",
         "recover_global_step": 0,
         "next_global_step": 1,
         "one_shot_after_checkpoint_advance": True,
@@ -395,7 +395,7 @@ TRAINING_SEMANTICS = {
         "wrapper_relative": (
             "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
         ),
-        "wrapper_sha256": "a06b0c0d5cca9e45924c4760681e9c29ab84ae2977ffba0b144b94cb2b81b377",
+        "wrapper_sha256": "f7ee2f1a8fee2144bc2c9d939b68816a2119e0a6b263e8797facafab10ad2bec",
         "experiment_name": "abci-or-ta-swe32-q38-v16",
         "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
         "pbs_job_name": "rasp-h200-32q38-rsp6-v20",
@@ -493,23 +493,23 @@ TRAINING_SEMANTICS = {
         "config_relative": (
             "plugins/openreward/platoon/openreward/configs/areal/"
             "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
-            "qwen36_moe_cp2_c24_ta20_v19.yaml"
+            "qwen36_moe_cp2_c24_ta20_v21.yaml"
         ),
-        "config_sha256": "b4f8594c5451bfed2d0539ddc266ca6546fd0eade2b9b5b7f5506f092853e201",
+        "config_sha256": "219c745573df56f01100698b19e01fa7450337c8158716ba48549a209a77e900",
         "wrapper_relative": (
             "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"
         ),
-        "wrapper_sha256": "96b45ec601d503161bcaa3ef677c7cdadf15b3c1fddadf91d362335c8fde7fab",
-        "experiment_name": "abci-or-ta-swe32-q36-cp2-v19",
-        "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0",
-        "pbs_job_name": "rasp-h200-32q36-v19",
+        "wrapper_sha256": "cefaee73152d28e31e54fde5a856a7b686da7cba61bae5c7db2e571f26de36b6",
+        "experiment_name": "abci-or-ta-swe32-q36-cp2-v21",
+        "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0",
+        "pbs_job_name": "rasp-h200-32q36-v21",
         "checkpoint_root": (
             "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
-            "abci-or-ta-swe32-q36-cp2-v19/abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0"
+            "abci-or-ta-swe32-q36-cp2-v21/abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0"
         ),
         "target_receipt": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0.success.json"
+            "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0.success.json"
         ),
         "stale_checkpoint_and_receipt_policy": "reject_before_controller",
         "recover_mode": "auto_with_preexisting_root_forbidden",
@@ -536,6 +536,7 @@ TRAINING_SEMANTICS = {
         "subagent_reward_judge_max_steps": 100,
         "subagent_max_depth": 1,
         "usable_context_window_tokens": 65536,
+        "rollout_engine_max_tokens": 65536,
         "sglang_exclusive_context_length": 65537,
         "sglang_max_prefill_tokens": 65536,
         "condenser_trigger_ratio": "4/5",
@@ -970,7 +971,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r20.  The
+    # The SWE dependency closure did not change between v8r2 and v8r21.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

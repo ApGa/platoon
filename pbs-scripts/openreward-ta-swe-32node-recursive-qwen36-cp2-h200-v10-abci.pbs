@@ -5,29 +5,29 @@
 #PBS -l select=32:mpiprocs=8
 #PBS -l place=scatter
 #PBS -l walltime=168:00:00
-#PBS -N rasp-h200-32q36-v19
+#PBS -N rasp-h200-32q36-v21
 #PBS -j oe
 #PBS -o /groups/gai51740/aci18912it/rasp/logs/
 #PBS -m a
 
-# Fresh Qwen3.6 MoE CP2 lineage. Submission must bind the v8r20 Gate2 and
+# Fresh Qwen3.6 MoE CP2 lineage. Submission must bind the v8r21 Gate2 and
 # all-MCP results; this launcher refuses all prior success and checkpoint paths.
 
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r20-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r21-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
 GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
 ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
-CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v19.yaml
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v21.yaml
 COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
 ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
-EXPERIMENT=abci-or-ta-swe32-q36-cp2-v19
-TRIAL=abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0
+EXPERIMENT=abci-or-ta-swe32-q36-cp2-v21
+TRIAL=abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0
 RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
 
@@ -38,7 +38,7 @@ die() {
 
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && \
     -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && \
-    -x "${ALL_MCP_VERIFY}" ]] || die "immutable v8r20 release is incomplete: ${REPO_ROOT}"
+    -x "${ALL_MCP_VERIFY}" ]] || die "immutable v8r21 release is incomplete: ${REPO_ROOT}"
 [[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
     die "release root must be the exact non-symlink path"
 
@@ -60,6 +60,7 @@ for literal in \
     '  ensure_batch_divisible_by: 20' \
     '  context_length: 65537' \
     '  max_prefill_tokens: 65536' \
+    '    engine_max_tokens: 65536' \
     '  return_routed_experts: true' \
     '  mode: auto'; do
     [[ "$(grep -Fxc "${literal}" "${CONFIG}")" == 1 ]] || \

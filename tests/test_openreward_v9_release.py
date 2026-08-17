@@ -25,8 +25,8 @@ NONRECURSIVE_WRAPPER_PATH = (
     PBS_ROOT
     / "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
 )
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r20-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r21-376d1b9-18e62c0"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
