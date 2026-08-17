@@ -17,8 +17,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r19-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
@@ -31,12 +31,12 @@ ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 EXPERIMENT=abci-or-ta-swe32-q38-v16
 TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
-RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-post-step6-v8r18.success.json
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-post-step6-v8r19.success.json
 SOURCE_CANDIDATE=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs5-v8r16.success.candidate.json
 ANCESTOR_CANDIDATE=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.candidate.json
 SOURCE_LOG=/groups/gai51740/aci18912it/rasp/logs/2156202.pbs1.OU
 SOURCE_CONFIG_RELATIVE=plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v16.yaml
-CURRENT_CONFIG_SHA256=f3ffb459d1ed6e9427124e8e7d6daafebb2709f965f86c5629a99e508449fe5c
+CURRENT_CONFIG_SHA256=24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237
 SOURCE_CONFIG_SHA256=a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa
 ANCESTOR_CANDIDATE_SHA256=b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22
 
@@ -71,7 +71,7 @@ die() {
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && \
     -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && \
     -x "${ALL_MCP_VERIFY}" && -x "${RESUME_VERIFY}" ]] ||
-    die "immutable v8r18 release is incomplete: ${REPO_ROOT}"
+    die "immutable v8r19 release is incomplete: ${REPO_ROOT}"
 [[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] ||
     die "release root must be the exact non-symlink path"
 
@@ -123,6 +123,7 @@ read -r observed_source_log_sha _ < <(sha256sum -- "${SOURCE_LOG}")
 unset observed_source_log_sha
 
 # shellcheck disable=SC1090
+export OPENREWARD_MODEL_FAMILY=qwen38
 source "${ABCI_ENV}"
 export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
 [[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || die "v9 overlay selected another repository"

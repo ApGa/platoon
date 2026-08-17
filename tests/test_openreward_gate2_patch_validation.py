@@ -85,6 +85,10 @@ def test_additive_v9_gate2_selects_future_overlay_without_replacing_v8_entrypoin
     assert 'publish_openreward_v9_gate2_result.py" finalize' not in source
     assert 'cat >"${GATE_ROOT}/RESULT" <<EOF' in source
     assert "OPENREWARD_GATE2_RELEASE_FLAVOR=v9" in wrapper
+    assert "OPENREWARD_MODEL_FAMILY=qwen38" in wrapper
+    assert wrapper.index("OPENREWARD_MODEL_FAMILY=qwen38") < wrapper.index(
+        'exec "${GATE2}"'
+    )
     assert "openreward-v9-abci.env" in wrapper
     assert "openreward-immutable-runtime-gate2.pbs" in wrapper
     assert "qsub" not in wrapper.lower()
@@ -134,8 +138,8 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
     assert '"containers/probe_toolathlon_python_mcp_launchers.py",' in source
     assert 'print "    pbs-scripts/publish_openreward_v9_gate2_result.py"' not in adapter
     assert 'print "    pbs-scripts/openreward-node-local-init.py"' not in adapter
-    assert "RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0" in GATE2_V9.read_text()
+    assert "RELEASE_REF=refs/tags/abci-v8r19-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0" in GATE2_V9.read_text()
 
 
 def test_gate2_archives_and_imports_rollout_rpc_patch_entrypoint():

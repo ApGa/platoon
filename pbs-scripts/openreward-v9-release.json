@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r18-376d1b9-18e62c0",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0",
+  "release_ref": "refs/tags/abci-v8r19-376d1b9-18e62c0",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0",
   "components": {
     "platoon_upstream": "376d1b9885ea40464766fb3fea74815c6a698fbf",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -18,6 +18,7 @@
       "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
       "thinking_policy": "preserved",
       "safetensors_shard_count": 18,
+      "safetensors_index_sha256": "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
       "snapshot_path": "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/97c725615b8aa025b800da4ceed38811358b30f1"
     },
     "recursive_32node": {
@@ -28,6 +29,7 @@
       "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
       "thinking_policy": "preserved",
       "safetensors_shard_count": 18,
+      "safetensors_index_sha256": "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
       "snapshot_path": "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/97c725615b8aa025b800da4ceed38811358b30f1"
     },
     "fresh_recursive_32node_qwen36_cp2": {
@@ -38,6 +40,7 @@
       "thinking_policy": "preserved",
       "weights_policy": "unchanged_from_upstream",
       "safetensors_shard_count": 26,
+      "safetensors_index_sha256": "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
       "snapshot_path": "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/ce815485d640a33461c25e3d5c505b5346e8c857"
     }
   },
@@ -671,7 +674,7 @@
       "source_log_sha256": "2497762da279fd93486521b9bf8dad78c02d0fc0bec8f39e7172d188cbcdd552",
       "source_candidate_absent": true,
       "source_success_receipt_absent": true,
-      "target_receipt": "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r18.success.json",
+      "target_receipt": "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r19.success.json",
       "success_receipt_isolated": true,
       "pbs_walltime_hours": 72,
       "checkpoint_artifact_policy": "preserve_in_place_no_rename_move_delete"
@@ -740,14 +743,14 @@
       "fail_closed_before_services": true,
       "successor_binding_id": "qwen38-32-v20-post-step6",
       "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v20.yaml",
-      "config_sha256": "f3ffb459d1ed6e9427124e8e7d6daafebb2709f965f86c5629a99e508449fe5c",
+      "config_sha256": "24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237",
       "wrapper_relative": "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs",
-      "wrapper_sha256": "9aa09ba8c1d97485b1f2730e1687158904c3461d4269e943b2dccc46f582a29e",
+      "wrapper_sha256": "91f0620f5bdc67242077d68dade9426c67fa0804ee471e33050aabe23336426f",
       "experiment_name": "abci-or-ta-swe32-q38-v16",
       "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
       "pbs_job_name": "rasp-h200-32q38-rsp6-v20",
       "checkpoint_root": "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/abci-or-ta-swe32-q38-v16/abci-ta-swe32-rec-q38d-c24-v16-t0",
-      "target_receipt": "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r18.success.json",
+      "target_receipt": "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r19.success.json",
       "source_config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v16.yaml",
       "source_config_sha256": "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa",
       "source_candidate": "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.candidate.json",
@@ -803,7 +806,7 @@
       "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v19.yaml",
       "config_sha256": "b4f8594c5451bfed2d0539ddc266ca6546fd0eade2b9b5b7f5506f092853e201",
       "wrapper_relative": "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs",
-      "wrapper_sha256": "31fb65adfd8f20acc138418abfb47f421a6449564c877db56c84bdb55b3e02a3",
+      "wrapper_sha256": "e099624f458a1a25e8f1626d544c40ca381b5c5c047f78080acd58ce61197669",
       "experiment_name": "abci-or-ta-swe32-q36-cp2-v19",
       "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0",
       "pbs_job_name": "rasp-h200-32q36-v19",

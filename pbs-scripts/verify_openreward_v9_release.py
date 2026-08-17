@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r18/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r19/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r18-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r19-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "22f20679acf73d8a9599a8fe2c9e34f1c33308cd4f24536b5c67b4ee452d7bf1"
+MANIFEST_SHA256 = "7d651498a0880c256fee5e81d431c4ad3103ef422207e10252c6f20a26c05383"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -84,6 +84,9 @@ MODEL_ARTIFACTS = {
         "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
         "thinking_policy": "preserved",
         "safetensors_shard_count": 18,
+        "safetensors_index_sha256": (
+            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"
+        ),
         "snapshot_path": (
             "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
             "models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/"
@@ -98,6 +101,9 @@ MODEL_ARTIFACTS = {
         "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
         "thinking_policy": "preserved",
         "safetensors_shard_count": 18,
+        "safetensors_index_sha256": (
+            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"
+        ),
         "snapshot_path": (
             "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
             "models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/"
@@ -112,6 +118,9 @@ MODEL_ARTIFACTS = {
         "thinking_policy": "preserved",
         "weights_policy": "unchanged_from_upstream",
         "safetensors_shard_count": 26,
+        "safetensors_index_sha256": (
+            "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83"
+        ),
         "snapshot_path": (
             "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
             "models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/"
@@ -262,7 +271,7 @@ TRAINING_SEMANTICS = {
         "source_success_receipt_absent": True,
         "target_receipt": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r18.success.json"
+            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r19.success.json"
         ),
         "success_receipt_isolated": True,
         "pbs_walltime_hours": 72,
@@ -355,11 +364,11 @@ TRAINING_SEMANTICS = {
             "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
             "qwen38_dense_c24_ta20_v20.yaml"
         ),
-        "config_sha256": "f3ffb459d1ed6e9427124e8e7d6daafebb2709f965f86c5629a99e508449fe5c",
+        "config_sha256": "24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237",
         "wrapper_relative": (
             "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
         ),
-        "wrapper_sha256": "9aa09ba8c1d97485b1f2730e1687158904c3461d4269e943b2dccc46f582a29e",
+        "wrapper_sha256": "91f0620f5bdc67242077d68dade9426c67fa0804ee471e33050aabe23336426f",
         "experiment_name": "abci-or-ta-swe32-q38-v16",
         "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
         "pbs_job_name": "rasp-h200-32q38-rsp6-v20",
@@ -369,7 +378,7 @@ TRAINING_SEMANTICS = {
         ),
         "target_receipt": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r18.success.json"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r19.success.json"
         ),
         "source_config_relative": (
             "plugins/openreward/platoon/openreward/configs/areal/"
@@ -463,7 +472,7 @@ TRAINING_SEMANTICS = {
         "wrapper_relative": (
             "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"
         ),
-        "wrapper_sha256": "31fb65adfd8f20acc138418abfb47f421a6449564c877db56c84bdb55b3e02a3",
+        "wrapper_sha256": "e099624f458a1a25e8f1626d544c40ca381b5c5c047f78080acd58ce61197669",
         "experiment_name": "abci-or-ta-swe32-q36-cp2-v19",
         "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0",
         "pbs_job_name": "rasp-h200-32q36-v19",
@@ -630,8 +639,11 @@ def _require_model_artifacts() -> None:
         for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors.index.json"):
             if not (snapshot / name).is_file():
                 raise RuntimeError(f"release model snapshot is incomplete ({contract}): {name}")
+        index_path = snapshot / "model.safetensors.index.json"
+        if _sha256(index_path) != artifact["safetensors_index_sha256"]:
+            raise RuntimeError(f"release model shard index digest mismatch: {contract}")
         try:
-            index = json.loads((snapshot / "model.safetensors.index.json").read_text())
+            index = json.loads(index_path.read_text())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"release model shard index is unreadable: {contract}") from exc
         weight_map = index.get("weight_map") if isinstance(index, dict) else None
@@ -930,7 +942,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r18.  The
+    # The SWE dependency closure did not change between v8r2 and v8r19.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

@@ -182,11 +182,15 @@ def test_fresh_wrapper_is_fail_closed_and_no_resume_path() -> None:
 
     assert "#PBS -l select=32:mpiprocs=8" in source
     assert "#PBS -N rasp-h200-32q36-v19" in source
-    assert "platoon-v8r18-376d1b9-18e62c0" in source
-    assert "refs/tags/abci-v8r18-376d1b9-18e62c0" in source
+    assert "platoon-v8r19-376d1b9-18e62c0" in source
+    assert "refs/tags/abci-v8r19-376d1b9-18e62c0" in source
     assert "refusing stale success artifact" in source
     assert "refusing stale checkpoint" in source
     assert "OPENREWARD_EXPECTED_MODEL_SHARDS=26" in source
+    assert "export OPENREWARD_MODEL_FAMILY=qwen36" in source
+    assert source.index("export OPENREWARD_MODEL_FAMILY=qwen36") < source.index(
+        'source "${ABCI_ENV}"'
+    )
     assert "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP" in source
     assert "unset OPENREWARD_REQUIRE_EXISTING_RECOVERY" in source
     assert "RESUME_VERIFY=" not in source

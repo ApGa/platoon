@@ -30,8 +30,8 @@ die() {
     exit 2
 }
 
-readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0
-readonly RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0
+readonly RELEASE_REF=refs/tags/abci-v8r19-376d1b9-18e62c0
 readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 readonly RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 readonly GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
@@ -67,6 +67,7 @@ readonly HOST=$(awk 'NF {print $1; exit}' "${PBS_NODEFILE}")
     die "refusing stale all-MCP result root: ${RESULT_ROOT}"
 
 # shellcheck disable=SC1090
+export OPENREWARD_MODEL_FAMILY=qwen38
 source "${ABCI_ENV}"
 export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
 [[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || \
@@ -208,6 +209,7 @@ env \
     -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
     "${PBSDSH}" -n 0 -- /usr/bin/env \
     "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
+    "OPENREWARD_MODEL_FAMILY=${OPENREWARD_MODEL_FAMILY}" \
     "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${SERVICE_RECEIPT}" \
     "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${SERVICE_REQUEST}" \
     "PLATOON_NODE_SERVICES_EXPECTED_HOST=${HOST}" \

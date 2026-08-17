@@ -46,7 +46,7 @@ QWEN38_SUCCESSOR_SOURCE_CONFIG_SHA256 = (
     "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"
 )
 QWEN38_SUCCESSOR_CURRENT_CONFIG_SHA256 = (
-    "f3ffb459d1ed6e9427124e8e7d6daafebb2709f965f86c5629a99e508449fe5c"
+    "24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237"
 )
 QWEN38_SUCCESSOR_GLOBAL_STEP = 6
 QWEN38_SUCCESSOR_RECOVER_STATS_COMMIT_STEP = 4
@@ -55,7 +55,7 @@ QWEN38_SUCCESSOR_ANCESTOR_SHA256 = (
 )
 QWEN38_SUCCESSOR_RECEIPT = (
     "abci-ta-swe32-rec-q38d-c24-v16-t0."
-    "resume-post-step6-v8r18.success.json"
+    "resume-post-step6-v8r19.success.json"
 )
 QWEN38_SUCCESSOR_ANCESTOR_RECEIPT = (
     "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
@@ -517,7 +517,7 @@ def _verify_failed_preupdate_source(
     if (
         not target_receipt.is_absolute()
         or target_receipt.name
-        != f"{expected_trial}.resume-gs0-v8r18.success.json"
+        != f"{expected_trial}.resume-gs0-v8r19.success.json"
     ):
         raise RuntimeError("target preupdate resume receipt identity mismatch")
     _require_canonical_directory(

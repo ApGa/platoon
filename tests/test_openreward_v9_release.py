@@ -20,8 +20,8 @@ OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
 RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
 NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r18-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r19-376d1b9-18e62c0"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -68,6 +68,15 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     }
     verifier_module = _load_release_verifier("verify_openreward_v9_release_semantics_test")
     assert manifest["model_artifacts"] == verifier_module.MODEL_ARTIFACTS
+    for artifact in manifest["model_artifacts"].values():
+        snapshot = Path(artifact["snapshot_path"])
+        assert snapshot.name == artifact["revision"]
+        index_path = snapshot / "model.safetensors.index.json"
+        assert hashlib.sha256(index_path.read_bytes()).hexdigest() == artifact[
+            "safetensors_index_sha256"
+        ]
+        index = json.loads(index_path.read_text())
+        assert len(set(index["weight_map"].values())) == artifact["safetensors_shard_count"]
     assert manifest["training_semantics"] == verifier_module.TRAINING_SEMANTICS
     for contract_name in (
         "fresh_recursive_32node_qwen36_cp2_contract",
@@ -271,10 +280,12 @@ def test_v9_release_binds_exact_resume_dense_qwen38_recursive_wrapper() -> None:
     assert f"OPENREWARD_QWEN38_MODEL_REVISION={EXPECTED_MODEL_REVISION}" in overlay
     assert f"OPENREWARD_QWEN38_UPSTREAM_SOURCE={EXPECTED_MODEL_SOURCE}" in overlay
     assert f"OPENREWARD_QWEN38_MODEL_SNAPSHOT={EXPECTED_MODEL_SNAPSHOT}" in overlay
-    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in overlay
-    assert overlay.index("export OPENREWARD_QWEN38_MODEL_SNAPSHOT=") < overlay.index(
-        "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}"
+    assert "export OPENREWARD_MODEL_FAMILY=qwen38" in wrapper
+    assert wrapper.index("export OPENREWARD_MODEL_FAMILY=qwen38") < wrapper.index(
+        'source "${ABCI_ENV}"'
     )
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" in overlay
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in overlay
 
 
 def test_v9_release_binds_step_zero_resume_dense_qwen38_nonrecursive_wrapper() -> None:
@@ -295,13 +306,17 @@ def test_v9_release_binds_step_zero_resume_dense_qwen38_nonrecursive_wrapper() -
     assert "export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
     assert "export OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
-    assert "resume-gs0-v8r18.success.json" in wrapper
+    assert "resume-gs0-v8r19.success.json" in wrapper
     assert "export OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
     assert (
         "export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="
         "${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}"
     ) in wrapper
     assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
+    assert "export OPENREWARD_MODEL_FAMILY=qwen38" in wrapper
+    assert wrapper.index("export OPENREWARD_MODEL_FAMILY=qwen38") < wrapper.index(
+        'source "${ABCI_ENV}"'
+    )
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
     for literal in (
         "backend: megatron:d10p2t4c1",
@@ -327,6 +342,64 @@ def test_v9_overlay_and_verifier_have_valid_syntax_and_safe_current_tree_failure
     )
     assert completed.returncode != 0
     assert "release root is not the exact canonical path" in completed.stderr
+
+
+def test_v9_model_selection_is_reentrant_and_unknown_fails_closed(tmp_path: Path) -> None:
+    source = OVERLAY_PATH.read_text()
+    begin_marker = "# BEGIN OPENREWARD_V9_MODEL_SELECTION\n"
+    end_marker = "# END OPENREWARD_V9_MODEL_SELECTION"
+    begin = source.index(begin_marker) + len(begin_marker)
+    end = source.index(end_marker, begin)
+    selection = tmp_path / "model-selection.env"
+    selection.write_text(source[begin:end], encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+set -euo pipefail
+export OPENREWARD_MODEL_FAMILY=qwen36
+source "$1"
+printf '%s\n' "${PLATOON_MODEL_SNAPSHOT}"
+source "$1"
+printf '%s\n' "${PLATOON_MODEL_SNAPSHOT}"
+export OPENREWARD_MODEL_FAMILY=qwen38
+source "$1"
+printf '%s\n' "${PLATOON_MODEL_SNAPSHOT}"
+""",
+            "model-selection-test",
+            str(selection),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    manifest = json.loads(MANIFEST_PATH.read_text())
+    q36 = manifest["model_artifacts"]["fresh_recursive_32node_qwen36_cp2"]
+    q38 = manifest["model_artifacts"]["recursive_32node"]
+    assert completed.stdout.splitlines() == [
+        q36["snapshot_path"],
+        q36["snapshot_path"],
+        q38["snapshot_path"],
+    ]
+
+    for family in ("", "unknown"):
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'set -uo pipefail; export OPENREWARD_MODEL_FAMILY="$2"; source "$1"',
+                "model-selection-test",
+                str(selection),
+                family,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 2
+        assert "OPENREWARD_MODEL_FAMILY must be qwen36 or qwen38" in completed.stderr
 
 
 def test_v9_verifier_rejects_hardlinked_release_artifacts(tmp_path: Path) -> None:

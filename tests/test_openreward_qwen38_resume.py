@@ -136,6 +136,51 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _run_common_static_config_inspection(path: Path) -> subprocess.CompletedProcess[str]:
+    source = COMMON.read_text(encoding="utf-8")
+    begin = source.index('CONFIG=$(readlink -f "${CONFIG}")')
+    end = source.index('[[ -f "${SWE_REBENCH_DATA_DIR}/task_index.json" ]]', begin)
+    harness = """#!/usr/bin/env bash
+set -euo pipefail
+CONFIG=$1
+EXPECTED_EXPERIMENT=abci-or-ta-swe32-q38-v16
+EXPECTED_TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0
+EXPECTED_RECURSIVE=1
+EXPECTED_PTC=1
+die() {
+    echo "[pbs-openreward] ERROR: $*" >&2
+    exit 2
+}
+""" + source[begin:end]
+    return subprocess.run(
+        ["bash", "-c", harness, "common-static-inspection", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_qwen38_v20_leaf_executes_common_static_launch_inspection(tmp_path: Path) -> None:
+    config = REPO_ROOT / SUCCESSOR_CONFIG_RELATIVE
+    result = _run_common_static_config_inspection(config)
+    assert result.returncode == 0, result.stderr
+
+    inherited_only = tmp_path / "inherited-only.yaml"
+    inherited_only.write_text(
+        "defaults:\n"
+        "  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_"
+        "h200_qwen38_dense_c24_ta20_v16\n"
+        "  - _self_\n"
+        "workflow_config:\n"
+        "  rollout_config:\n"
+        "    max_steps: 150\n",
+        encoding="utf-8",
+    )
+    result = _run_common_static_config_inspection(inherited_only)
+    assert result.returncode == 2
+    assert "config experiment '' does not match 'abci-or-ta-swe32-q38-v16'" in result.stderr
+
+
 def test_qwen38_v20_successor_composes_exact_timeout_and_step_contract() -> None:
     config = _compose_config(SUCCESSOR_CONFIG_RELATIVE)
     source = _compose_config(CONFIG_RELATIVE)
@@ -221,7 +266,7 @@ def test_qwen38_v20_successor_wrapper_binds_frozen_gs6_before_services() -> None
     assert "--successor-binding qwen38-32-v20-post-step6" in source
     assert "--expected-source-config-sha256" in source
     assert "--authorized-ancestor-receipt" in source
-    assert "resume-post-step6-v8r18.success.json" in source
+    assert "resume-post-step6-v8r19.success.json" in source
     assert "resume-gs5-v8r16.success.candidate.json" in source
     assert "SOURCE_PBS_JOB_ID=2156202.pbs1" in source
     assert "EXPECTED_GLOBAL_STEP=6" in source
@@ -238,6 +283,10 @@ def test_qwen38_v20_successor_wrapper_binds_frozen_gs6_before_services() -> None
     assert "57410a3d50b2a3bf45991568abc687f334f4d02179a7d207da9c32e1872735c4" in source
     assert "9417c54953c5651d5c9a73649657ca50da74995847d77258e0a256e193674251" in source
     assert "00c8d7ccdd27f49bd248369ffa45416d89b53dcb23a45ec9d5ea523aeeb7bddb" in source
+    assert "export OPENREWARD_MODEL_FAMILY=qwen38" in source
+    assert source.index("export OPENREWARD_MODEL_FAMILY=qwen38") < source.index(
+        'source "${ABCI_ENV}"'
+    )
     guard = source.index('[[ "${BINDING_STATE}" == FROZEN_POST_STEP6_CHECKPOINT ]]')
     assert guard < source.index('source "${ABCI_ENV}"')
     assert guard < source.index('"${RESUME_VERIFY}"')
@@ -502,8 +551,8 @@ def _build_authorized_fixture(
         if successor_config:
             _write_json(ancestor_candidate, {"authorized_ancestor": True})
     target_receipt = receipt_dir / (
-        f"{trial}.resume-gs0-v8r18.success.json" if preupdate else (
-            f"{trial}.resume-post-step6-v8r18.success.json"
+        f"{trial}.resume-gs0-v8r19.success.json" if preupdate else (
+            f"{trial}.resume-post-step6-v8r19.success.json"
             if successor_config
             else f"{trial}.resume-gs5-v8r16.success.json"
         )
@@ -994,6 +1043,9 @@ def test_resume_wrapper_and_common_bind_explicit_recovery_without_yaml_change() 
     assert "resume-gs5-v8r16.success.json" in wrapper
     assert "refusing stale checkpoint; use a fresh trial" not in wrapper
     assert "controller_args+=(recover.mode=on)" in common
+    assert 'case "${OPENREWARD_MODEL_FAMILY:-}" in' in common
+    assert '"OPENREWARD_MODEL_FAMILY=${OPENREWARD_MODEL_FAMILY}"' in common
+    assert "OPENREWARD_MODEL_FAMILY PLATOON_MODEL_SNAPSHOT" in common
     assert '"${RESUME_CHECKPOINT_VERIFY}" runtime' in common
     assert '"${PLATOON_TRAINING_SIF}"' in common
     assert "http://${host}:${OPENREWARD_PORT}/health" in common
@@ -1021,7 +1073,7 @@ def test_preupdate_resume_wrapper_binds_exact_step_zero_checkpoint_and_heartbeat
     assert "export OPENREWARD_PREUPDATE_RESUME_BINDING=qwen38-16-v18-job2155389" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=0" in wrapper
-    assert "resume-gs0-v8r18.success.json" in wrapper
+    assert "resume-gs0-v8r19.success.json" in wrapper
     assert "OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
     assert "preupdate resume requires exact recovered global step 0" in common
     assert "normal resume requires LR scheduler step equal recovered global step plus one" in common
