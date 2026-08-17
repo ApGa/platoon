@@ -296,9 +296,11 @@ QWEN38_DENSE_CONFIG = "abci_toolathlon_swe_openhands_areal_prealloc_32node_recur
 QWEN38_DENSE_WRAPPER = "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
 QWEN38_DENSE_16_CONFIG = (
     "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
-    "qwen38_dense_c12_ta20_v18"
+    "qwen38_dense_c12_ta20_v20_gs0_no_load_optim"
 )
-QWEN38_DENSE_16_WRAPPER = "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
+QWEN38_DENSE_16_WRAPPER = (
+    "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
+)
 
 
 def _merge(base, overlay):
@@ -1147,10 +1149,13 @@ def test_qwen38_dense_nonrecursive_leaf_has_exact_safe_training_contract() -> No
     path = CONFIG_ROOT / f"{QWEN38_DENSE_16_CONFIG}.yaml"
     leaf = yaml.safe_load(path.read_text())
     config = _compose(QWEN38_DENSE_16_CONFIG)
-    parent_name = CP1_PADDED_CASES[0]["config"]
-    parent = _compose(parent_name)
+    source_name = (
+        "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+        "qwen38_dense_c12_ta20_v18"
+    )
+    parent = _compose(source_name)
 
-    assert leaf["defaults"] == [parent_name, "_self_"]
+    assert leaf["defaults"] == [source_name, "_self_"]
     assert config["experiment_name"] == "abci-or-ta-swe16-q38-v18"
     assert config["trial_name"] == "abci-ta-swe16-nr-q38d-c12-v18-t0"
     assert config["stats_logger"]["wandb"]["group"] == "abci-ta-swe16-nr-q38d-c12-v18"
@@ -1211,7 +1216,9 @@ def test_qwen38_dense_nonrecursive_leaf_has_exact_safe_training_contract() -> No
     assert config["openreward"]["enable_programmatic_tool_calling"] is False
     assert config["openreward"]["environments"] == parent["openreward"]["environments"]
     assert config["openreward"]["balance_accepted_batches"] is False
-    assert config["recover"] == parent["recover"]
+    expected_recover = dict(parent["recover"])
+    expected_recover.update(no_load_optim=True, no_save_optim=False)
+    assert config["recover"] == expected_recover
     assert config["total_train_epochs"] == parent["total_train_epochs"] == 10
     assert config["total_train_steps"] is parent["total_train_steps"] is None
 
@@ -1295,9 +1302,9 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_step0_resume_release_and_leaf_c
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r19-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r20-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
@@ -1310,7 +1317,6 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_step0_resume_release_and_leaf_c
     assert "export OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT" not in wrapper
     assert "ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env" in wrapper
     assert "export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" in wrapper
-    assert "status --porcelain=v1 --untracked-files=all" in wrapper
     assert '"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"' in wrapper
     assert ('"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"') in wrapper
     assert (
@@ -1319,7 +1325,7 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_step0_resume_release_and_leaf_c
         '    --gate2-result "${GATE2_RESULT}"'
     ) in wrapper
     assert "#PBS -l select=16:mpiprocs=8" in wrapper
-    assert "#PBS -N rasp-h200-16q38-rs0-v18" in wrapper
+    assert "#PBS -N rasp-h200-16q38-rs0n-v20" in wrapper
     assert "#PBS -l walltime=72:00:00" in wrapper
     assert (
         f"CONFIG=${{REPO_ROOT}}/plugins/openreward/platoon/openreward/configs/areal/{QWEN38_DENSE_16_CONFIG}.yaml"
@@ -1328,26 +1334,31 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_step0_resume_release_and_leaf_c
     assert "EXPERIMENT=abci-or-ta-swe16-q38-v18" in wrapper
     assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v18-t0" in wrapper
     for literal in (
-        "  dynamic_batch_recollection_max_rounds: 1",
-        "  consumer_batch_size: 8",
-        "  max_head_offpolicyness: 1",
+        "  no_load_optim: true",
+        "  no_save_optim: false",
         "  backend: megatron:d10p2t4c1",
         "  backend: sglang:d6p1t8",
-        "    n_mbs: 8",
-        "  return_routed_experts: false",
-        "    use_deterministic_algorithms: false",
+        "  enable_recursive_subagents: false",
+        "  enable_programmatic_tool_calling: false",
     ):
-        assert f"grep -Fxc '{literal}' \"${{CONFIG}}\"" in wrapper
-    assert "dense leaf must pin d10p2t4c1/d6p1t8" in wrapper
+        assert f"    '{literal}'" in wrapper
+    assert "step-zero recovery leaf lacks exact literal" in wrapper
     assert "-v7-trial" not in wrapper
     assert "OPENREWARD_SERVICE_NODE_COUNT=6" in wrapper
     assert "OPENREWARD_EXPECTED_RECURSIVE=0" in wrapper
     assert "OPENREWARD_EXPECTED_PTC=0" in wrapper
     assert "OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
     assert "OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper
+    assert "OPENREWARD_PREUPDATE_RESUME_BINDING=${PREUPDATE_BINDING}" in wrapper
+    assert "OPENREWARD_PREUPDATE_LOAD_POLICY=${PREUPDATE_LOAD_POLICY}" in wrapper
+    assert "OPENREWARD_PREUPDATE_NO_LOAD_OPTIM=1" in wrapper
     assert "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
+    assert "OPENREWARD_EXPECTED_START_GLOBAL_STEP=1" in wrapper
+    assert "OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS=0" in wrapper
     assert "--allow-preupdate-global-step-zero" in wrapper
-    assert "resume-gs0-v8r19.success.json" in wrapper
+    assert "--expected-start-global-step 1" in wrapper
+    assert '--preupdate-load-policy "${PREUPDATE_LOAD_POLICY}"' in wrapper
+    assert "resume-gs0-nooptim-v8r20.success.json" in wrapper
     assert "OPENREWARD_QWEN38_MODEL_REPOSITORY:-}" in wrapper
     assert "apurvaga/Qwen3.8-27B-preserve-thinking" in wrapper
     assert "OPENREWARD_QWEN38_MODEL_REVISION:-}" in wrapper

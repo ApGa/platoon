@@ -57,6 +57,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger("PlatoonArealRLTrainer")
 
 _EXPECTED_RESUME_GLOBAL_STEP_ENV = "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP"
+_PREUPDATE_NO_LOAD_OPTIM_ENV = "OPENREWARD_PREUPDATE_NO_LOAD_OPTIM"
+_PREUPDATE_NO_LOAD_OPTIM_BINDING = {
+    "OPENREWARD_ALLOW_PREUPDATE_RESUME": "1",
+    "OPENREWARD_PREUPDATE_RESUME_BINDING": "qwen38-16-v18-job2155389",
+    "OPENREWARD_PREUPDATE_LOAD_POLICY": "qwen38-16-v20-gs0-no-load-optim",
+    "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP": "0",
+    "OPENREWARD_EXPECTED_START_GLOBAL_STEP": "1",
+    "OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS": "0",
+    "OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS": "0",
+    "OPENREWARD_EXPECTED_EXPERIMENT_NAME": "abci-or-ta-swe16-q38-v18",
+    "OPENREWARD_EXPECTED_TRIAL_NAME": "abci-ta-swe16-nr-q38d-c12-v18-t0",
+}
 
 # In single-controller mode AReaL needs only an import path for the remote
 # Megatron engine class.  Importing that class on the host would also import
@@ -142,6 +154,59 @@ def _training_start_step(recover_info: Any | None) -> int:
                 f"expected={expected_step}, recovered={recovered_step!r}, start={start_step!r}"
             )
     return start_step
+
+
+def _preupdate_no_load_optim_resume_active(
+    start_step: int,
+    *,
+    recover_no_load_optim: bool,
+    recover_no_save_optim: bool,
+) -> bool:
+    """Validate and identify the sole model-only preupdate recovery lineage."""
+
+    mode = os.environ.get(_PREUPDATE_NO_LOAD_OPTIM_ENV)
+    if mode is None or mode == "0":
+        return False
+    if mode != "1":
+        raise RuntimeError(f"{_PREUPDATE_NO_LOAD_OPTIM_ENV} must be 0 or 1")
+    observed = {name: os.environ.get(name) for name in _PREUPDATE_NO_LOAD_OPTIM_BINDING}
+    if (
+        observed != _PREUPDATE_NO_LOAD_OPTIM_BINDING
+        or isinstance(start_step, bool)
+        or start_step != 1
+        or recover_no_load_optim is not True
+        or recover_no_save_optim is not False
+    ):
+        raise RuntimeError(
+            "preupdate no-load-optimizer recovery does not match its exact "
+            "gs0/LR0/start1 binding"
+        )
+    return True
+
+
+def _require_preupdate_checkpoint_promotion(
+    *,
+    active: bool,
+    global_step: int,
+    optimizer_batch_datums: int,
+    actor_update_successful: bool,
+    weight_sync_succeeded: bool,
+) -> None:
+    """Protect the only valid gs0 checkpoint until its first real update."""
+
+    if not active or global_step != 1:
+        return
+    if (
+        isinstance(optimizer_batch_datums, bool)
+        or not isinstance(optimizer_batch_datums, int)
+        or optimizer_batch_datums < 1
+        or actor_update_successful is not True
+        or weight_sync_succeeded is not True
+    ):
+        raise RuntimeError(
+            "refusing to promote over the canonical preupdate gs0 checkpoint "
+            "without a nonempty successful optimizer update and weight sync"
+        )
 
 
 def _training_success_candidate_ready(
@@ -1469,6 +1534,11 @@ class PlatoonArealRLTrainer(PPOTrainer):
     ):
         config = self.config
         start_step = _training_start_step(self.recover_info)
+        preupdate_no_load_optim_resume = _preupdate_no_load_optim_resume_active(
+            start_step,
+            recover_no_load_optim=config.recover.no_load_optim,
+            recover_no_save_optim=config.recover.no_save_optim,
+        )
         deadline_guard = StepDeadlineGuard.from_environment()
         workflow, workflow_kwargs = normalize_remote_workflow(
             workflow,
@@ -1719,6 +1789,20 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 if optimizer_batch:
                     self.saver.maybe_wait_for_staging()
 
+                    if preupdate_no_load_optim_resume and global_step == 1:
+                        # Loading without optimizer state also skips the saved
+                        # LR scheduler. Advance its fresh step-0 state once,
+                        # after the actor is onloaded and immediately before the
+                        # first real update, so successful gs1 saves the normal
+                        # gs1/LR2 invariant. Any failure is rejected before
+                        # checkpoint promotion, making a retry reconstruct and
+                        # advance the fresh scheduler exactly once again.
+                        self.actor.step_lr_scheduler()
+                        logger.info(
+                            "Advanced the exact preupdate recovery LR scheduler "
+                            "from step 0 to step 1 before resumed global step 1"
+                        )
+
                     with (
                         stats_tracker.record_timing("train_step"),
                         perf_tracer.trace_scope(
@@ -1811,6 +1895,14 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 else:
                     stats_tracker.scalar(**empty_training_workload_metrics)
                 self._advance_logical_versions(global_step + 1)
+
+            _require_preupdate_checkpoint_promotion(
+                active=preupdate_no_load_optim_resume,
+                global_step=global_step,
+                optimizer_batch_datums=optimizer_batch_datums,
+                actor_update_successful=actor_update_successful,
+                weight_sync_succeeded=weight_sync_succeeded,
+            )
 
             with (
                 stats_tracker.record_timing("save"),

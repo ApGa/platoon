@@ -26,6 +26,18 @@ TRAIN_ENTRYPOINT = REPO_ROOT / "plugins/openreward/platoon/openreward/train_scri
 UPSTREAM_TRAINER = REPO_ROOT / "external/AReaL/areal/trainer/rl_trainer.py"
 UPSTREAM_STATS_LOGGER = REPO_ROOT / "external/AReaL/areal/utils/stats_logger.py"
 EXPECTED_RESUME_STEP_ENV = "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP"
+PREUPDATE_NO_LOAD_OPTIM_ENV = "OPENREWARD_PREUPDATE_NO_LOAD_OPTIM"
+PREUPDATE_NO_LOAD_OPTIM_BINDING = {
+    "OPENREWARD_ALLOW_PREUPDATE_RESUME": "1",
+    "OPENREWARD_PREUPDATE_RESUME_BINDING": "qwen38-16-v18-job2155389",
+    "OPENREWARD_PREUPDATE_LOAD_POLICY": "qwen38-16-v20-gs0-no-load-optim",
+    "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP": "0",
+    "OPENREWARD_EXPECTED_START_GLOBAL_STEP": "1",
+    "OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS": "0",
+    "OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS": "0",
+    "OPENREWARD_EXPECTED_EXPERIMENT_NAME": "abci-or-ta-swe16-q38-v18",
+    "OPENREWARD_EXPECTED_TRIAL_NAME": "abci-ta-swe16-nr-q38d-c12-v18-t0",
+}
 
 
 def _load_isolated_trainer_function(name: str, **injected_globals):
@@ -181,13 +193,27 @@ def test_trainer_hook_is_after_update_sync_recovery_and_stats_commit() -> None:
     sync = train.index("self.actor.update_weights(versioned_meta)")
     advance = train.index("self._advance_logical_versions(new_version)", sync)
     synced = train.index("weight_sync_succeeded = True", advance)
+    promotion_guard = train.index("_require_preupdate_checkpoint_promotion(", synced)
     recover = train.index("self._save_recover_checkpoint(")
     commit = train.index("self._export_and_commit_stats(")
     candidate_guard = train.index("_training_success_candidate_ready(")
     candidate = train.index("maybe_publish_training_success_candidate(", candidate_guard)
     resume = train.index("self.rollout.resume()", candidate)
 
-    assert reset < collect < update < sync < advance < synced < recover < commit < candidate_guard < candidate < resume
+    assert (
+        reset
+        < collect
+        < update
+        < sync
+        < advance
+        < synced
+        < promotion_guard
+        < recover
+        < commit
+        < candidate_guard
+        < candidate
+        < resume
+    )
     assert "optimizer_batch_datums = int(" in train[collect:update]
     assert "optimizer_action_tokens = int(" in train[collect:update]
     assert "PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH" in train[candidate:resume]
@@ -240,6 +266,142 @@ def test_no_update_defers_candidate_but_complete_update_reaches_publisher() -> N
     assert published == [6]
 
 
+def _preupdate_runtime_helpers():
+    active = _load_isolated_trainer_function(
+        "_preupdate_no_load_optim_resume_active",
+        _PREUPDATE_NO_LOAD_OPTIM_ENV=PREUPDATE_NO_LOAD_OPTIM_ENV,
+        _PREUPDATE_NO_LOAD_OPTIM_BINDING=PREUPDATE_NO_LOAD_OPTIM_BINDING,
+    )
+    guard = _load_isolated_trainer_function("_require_preupdate_checkpoint_promotion")
+    ready = _load_isolated_trainer_function(
+        "_training_success_candidate_ready",
+        candidate_publication_enabled=lambda _step: True,
+    )
+    return active, guard, ready
+
+
+def _enable_exact_preupdate_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PREUPDATE_NO_LOAD_OPTIM_ENV, "1")
+    for name, value in PREUPDATE_NO_LOAD_OPTIM_BINDING.items():
+        monkeypatch.setenv(name, value)
+
+
+@pytest.mark.parametrize(
+    ("optimizer_batch_datums", "actor_update_successful", "weight_sync_succeeded"),
+    (
+        (0, False, False),
+        (8, False, False),
+        (8, True, False),
+    ),
+    ids=("empty-batch", "nonfinite-update", "missing-weight-sync"),
+)
+def test_preupdate_nooptim_first_step_failure_preserves_gs0_without_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    optimizer_batch_datums: int,
+    actor_update_successful: bool,
+    weight_sync_succeeded: bool,
+) -> None:
+    active_fn, guard, ready = _preupdate_runtime_helpers()
+    _enable_exact_preupdate_binding(monkeypatch)
+    active = active_fn(
+        1,
+        recover_no_load_optim=True,
+        recover_no_save_optim=False,
+    )
+    saves: list[int] = []
+    candidates: list[int] = []
+
+    with pytest.raises(RuntimeError, match="refusing to promote"):
+        guard(
+            active=active,
+            global_step=1,
+            optimizer_batch_datums=optimizer_batch_datums,
+            actor_update_successful=actor_update_successful,
+            weight_sync_succeeded=weight_sync_succeeded,
+        )
+        saves.append(1)
+    if ready(
+        1,
+        actor_update_successful=actor_update_successful,
+        weight_sync_succeeded=weight_sync_succeeded,
+    ):
+        candidates.append(1)
+    assert saves == []
+    assert candidates == []
+
+
+def test_preupdate_nooptim_success_aligns_lr2_then_saves_and_publishes_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_fn, guard, ready = _preupdate_runtime_helpers()
+    _enable_exact_preupdate_binding(monkeypatch)
+    active = active_fn(
+        1,
+        recover_no_load_optim=True,
+        recover_no_save_optim=False,
+    )
+
+    # no_load_optim leaves the fresh scheduler at LR step 0. The exact-bound
+    # pre-update fast-forward moves it to 1, and the successful gs1 update moves
+    # it to 2 before the ordinary optimizer-bearing checkpoint is saved.
+    lr_num_steps = 0
+    if active:
+        lr_num_steps += 1
+    actor_update_successful = True
+    weight_sync_succeeded = True
+    optimizer_batch_datums = 8
+    if actor_update_successful:
+        lr_num_steps += 1
+    guard(
+        active=active,
+        global_step=1,
+        optimizer_batch_datums=optimizer_batch_datums,
+        actor_update_successful=actor_update_successful,
+        weight_sync_succeeded=weight_sync_succeeded,
+    )
+    saves = [(1, lr_num_steps)]
+    candidates = [1] if ready(
+        1,
+        actor_update_successful=actor_update_successful,
+        weight_sync_succeeded=weight_sync_succeeded,
+    ) else []
+
+    assert saves == [(1, 2)]
+    assert candidates == [1]
+
+
+def test_preupdate_nooptim_binding_is_exact_and_generic_empty_save_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_fn, guard, _ready = _preupdate_runtime_helpers()
+    monkeypatch.delenv(PREUPDATE_NO_LOAD_OPTIM_ENV, raising=False)
+    active = active_fn(
+        1,
+        recover_no_load_optim=False,
+        recover_no_save_optim=False,
+    )
+    assert active is False
+    generic_saves: list[int] = []
+    guard(
+        active=active,
+        global_step=1,
+        optimizer_batch_datums=0,
+        actor_update_successful=False,
+        weight_sync_succeeded=False,
+    )
+    generic_saves.append(1)
+    assert generic_saves == [1]
+
+    _enable_exact_preupdate_binding(monkeypatch)
+    monkeypatch.setenv("OPENREWARD_PREUPDATE_LOAD_POLICY", "wrong-policy")
+    with pytest.raises(RuntimeError, match="exact gs0/LR0/start1 binding"):
+        active_fn(
+            1,
+            recover_no_load_optim=True,
+            recover_no_save_optim=False,
+        )
+
+
 def test_resume_expectation_is_checked_before_training_side_effects() -> None:
     source = TRAINER_SOURCE.read_text()
     train_start = source.index("    def train(")
@@ -247,10 +409,17 @@ def test_resume_expectation_is_checked_before_training_side_effects() -> None:
     train = source[train_start:train_end]
 
     resolve = train.index("start_step = _training_start_step(self.recover_info)")
+    bind = train.index("_preupdate_no_load_optim_resume_active(", resolve)
     deadline = train.index("StepDeadlineGuard.from_environment()")
     normalize = train.index("normalize_remote_workflow(")
     loop = train.index("for global_step in range(")
-    assert resolve < deadline < normalize < loop
+    update = train.index("self.actor.ppo_update(optimizer_batch)", loop)
+    fast_forward = train.rindex("self.actor.step_lr_scheduler()", loop, update)
+    update_scheduler = train.index("self.actor.step_lr_scheduler()", update)
+    promotion_guard = train.index("_require_preupdate_checkpoint_promotion(", update_scheduler)
+    recover = train.index("self._save_recover_checkpoint(", promotion_guard)
+    assert resolve < bind < deadline < normalize < loop
+    assert loop < fast_forward < update < update_scheduler < promotion_guard < recover
 
 
 class _FakeStepInfo:

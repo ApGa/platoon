@@ -17,8 +17,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r19-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r20-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
@@ -31,7 +31,7 @@ ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 EXPERIMENT=abci-or-ta-swe32-q38-v16
 TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
-RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-post-step6-v8r19.success.json
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-post-step6-v8r20.success.json
 SOURCE_CANDIDATE=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs5-v8r16.success.candidate.json
 ANCESTOR_CANDIDATE=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.candidate.json
 SOURCE_LOG=/groups/gai51740/aci18912it/rasp/logs/2156202.pbs1.OU
@@ -71,7 +71,7 @@ die() {
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && \
     -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && \
     -x "${ALL_MCP_VERIFY}" && -x "${RESUME_VERIFY}" ]] ||
-    die "immutable v8r19 release is incomplete: ${REPO_ROOT}"
+    die "immutable v8r20 release is incomplete: ${REPO_ROOT}"
 [[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] ||
     die "release root must be the exact non-symlink path"
 
@@ -148,6 +148,7 @@ export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}
     --checkpoint-root "${CHECKPOINT_ROOT}" \
     --expected-checkpoint-root "${CHECKPOINT_ROOT}" \
     --expected-global-step "${EXPECTED_GLOBAL_STEP}" \
+    --expected-start-global-step 7 \
     --expected-steps-per-epoch 846 \
     --expected-shards 160 \
     --expected-total-bytes "${EXPECTED_TOTAL_BYTES}" \

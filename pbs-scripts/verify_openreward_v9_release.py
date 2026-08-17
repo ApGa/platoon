@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r19/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r20/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r19-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r20-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "7d651498a0880c256fee5e81d431c4ad3103ef422207e10252c6f20a26c05383"
+MANIFEST_SHA256 = "f2fedbed110ce0e44a60a6312e7861bdf81e166681aa61f41b6d1a383cfb87bd"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -135,7 +135,7 @@ EXTERNAL_PATHS = {
     "toolathlon": "external/toolathlon-gym",
 }
 TRAINING_RUNTIME_ASSETS = {
-    "platoon/train/areal/rl.py": "9ce579fa76b43d61223cd9a6c9f5bebec45b7801c5407e2258825a86f71c765b",
+    "platoon/train/areal/rl.py": "4eeea66565f513a6cc08aab76e80f55043db6199abafc9059435df1899cac84b",
     "plugins/openreward/platoon/openreward/config_defs.py": (
         "f8acd3bbbe9738211c8103f38c23b6fe9f65c4b11e00b505240e969b6588c51e"
     ),
@@ -232,8 +232,21 @@ TRAINING_SEMANTICS = {
         "recover_mode": "on",
         "allow_preupdate_global_step_zero": True,
         "preupdate_binding_id": "qwen38-16-v18-job2155389",
+        "preupdate_load_policy_id": "qwen38-16-v20-gs0-no-load-optim",
+        "config_relative": (
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+            "qwen38_dense_c12_ta20_v20_gs0_no_load_optim.yaml"
+        ),
+        "config_sha256": "efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97",
+        "wrapper_relative": (
+            "pbs-scripts/openreward-ta-swe-16node-nonrecursive-qwen38-"
+            "gs0-nooptim-h200-v10-abci.pbs"
+        ),
+        "wrapper_sha256": "a471c2710c91d64be78756c71d7087f9ad78e50406b95999139579cce1d41946",
         "recover_global_step": 0,
         "next_global_step": 1,
+        "one_shot_after_checkpoint_advance": True,
         "steps_per_epoch": 846,
         "checkpoint_root": (
             "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
@@ -257,12 +270,26 @@ TRAINING_SEMANTICS = {
         "dcp_state_keys": 1456,
         "dcp_storage_entries": 9169,
         "dcp_storage_coverage": "80_exact_paths_gap_free_and_in_bounds",
+        "optimizer_moment_keys": 0,
+        "optimizer_group_schema": "8_groups_each_param_plus_3_bookkeeping_no_exp_avg_or_exp_avg_sq",
         "lr_scheduler_num_steps": 0,
         "dataloader_samples_yielded": 72,
         "dataloader_iterator_yielded": 9,
         "source_release_root": "/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0",
         "source_release_ref": "refs/tags/abci-v8r15-376d1b9-18e62c0",
-        "config_sha256": "0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39",
+        "source_config_sha256": "0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39",
+        "recover_no_load_optim": True,
+        "recover_no_save_optim": False,
+        "runtime_composition_assertion": "no_load_optim_true_no_save_optim_false_before_services",
+        "first_step_lr_alignment": "fresh_lr0_fast_forward_once_then_successful_gs1_update_saves_lr2",
+        "first_step_checkpoint_promotion_guard": "requires_datums_update_and_weight_sync_before_overwriting_gs0",
+        "skipped_fp32_param_safety": (
+            "no_source_update_exact_model_topology_and_optimizer_implementation_only"
+        ),
+        "future_resume_policy": "gs1_lr2_with_moments_then_global_step_gte_1_requires_normal_optimizer_loading",
+        "future_resume_authorization": (
+            "fresh_exact_successor_release_from_observed_gs1_candidate_and_checkpoint_digests"
+        ),
         "source_log": "/groups/gai51740/aci18912it/rasp/logs/2155389.pbs1.OU",
         "source_log_sha256": (
             "2497762da279fd93486521b9bf8dad78c02d0fc0bec8f39e7172d188cbcdd552"
@@ -271,7 +298,7 @@ TRAINING_SEMANTICS = {
         "source_success_receipt_absent": True,
         "target_receipt": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r19.success.json"
+            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-nooptim-v8r20.success.json"
         ),
         "success_receipt_isolated": True,
         "pbs_walltime_hours": 72,
@@ -368,7 +395,7 @@ TRAINING_SEMANTICS = {
         "wrapper_relative": (
             "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
         ),
-        "wrapper_sha256": "91f0620f5bdc67242077d68dade9426c67fa0804ee471e33050aabe23336426f",
+        "wrapper_sha256": "a06b0c0d5cca9e45924c4760681e9c29ab84ae2977ffba0b144b94cb2b81b377",
         "experiment_name": "abci-or-ta-swe32-q38-v16",
         "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
         "pbs_job_name": "rasp-h200-32q38-rsp6-v20",
@@ -378,7 +405,7 @@ TRAINING_SEMANTICS = {
         ),
         "target_receipt": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r19.success.json"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r20.success.json"
         ),
         "source_config_relative": (
             "plugins/openreward/platoon/openreward/configs/areal/"
@@ -472,7 +499,7 @@ TRAINING_SEMANTICS = {
         "wrapper_relative": (
             "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"
         ),
-        "wrapper_sha256": "e099624f458a1a25e8f1626d544c40ca381b5c5c047f78080acd58ce61197669",
+        "wrapper_sha256": "96b45ec601d503161bcaa3ef677c7cdadf15b3c1fddadf91d362335c8fde7fab",
         "experiment_name": "abci-or-ta-swe32-q36-cp2-v19",
         "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0",
         "pbs_job_name": "rasp-h200-32q36-v19",
@@ -886,6 +913,7 @@ def verify(root: Path) -> None:
     if manifest.get("training_semantics") != TRAINING_SEMANTICS:
         raise RuntimeError("release training semantics mismatch")
     for contract_name in (
+        "nonrecursive_16node_resume_contract",
         "fresh_recursive_32node_qwen36_cp2_contract",
         "recursive_32node_qwen38_v20_successor_contract",
     ):
@@ -942,7 +970,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r19.  The
+    # The SWE dependency closure did not change between v8r2 and v8r20.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

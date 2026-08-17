@@ -5,8 +5,11 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import time
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +22,10 @@ SUCCESSOR_WRAPPER = (
     PBS_ROOT / "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
 )
 WRAPPER_16 = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
+NOOPTIM_WRAPPER_16 = (
+    PBS_ROOT
+    / "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
+)
 EXPERIMENT = "abci-or-ta-swe32-q38-v16"
 TRIAL = "abci-ta-swe32-rec-q38d-c24-v16-t0"
 EXPERIMENT_16 = "abci-or-ta-swe16-q38-v18"
@@ -34,6 +41,11 @@ CONFIG_RELATIVE_16 = Path(
     "plugins/openreward/platoon/openreward/configs/areal/"
     "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
     "qwen38_dense_c12_ta20_v18.yaml"
+)
+NOOPTIM_CONFIG_RELATIVE_16 = Path(
+    "plugins/openreward/platoon/openreward/configs/areal/"
+    "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+    "qwen38_dense_c12_ta20_v20_gs0_no_load_optim.yaml"
 )
 SUCCESSOR_CONFIG_RELATIVE = Path(
     "plugins/openreward/platoon/openreward/configs/areal/"
@@ -231,6 +243,31 @@ def test_qwen38_v20_successor_composes_exact_timeout_and_step_contract() -> None
     assert "+ 60  # cleanup grace" in child_source
 
 
+def test_qwen38_16_gs0_nooptim_leaf_changes_only_one_shot_recovery_load() -> None:
+    source = _compose_config(CONFIG_RELATIVE_16)
+    successor = _compose_config(NOOPTIM_CONFIG_RELATIVE_16)
+
+    assert successor["experiment_name"] == source["experiment_name"] == EXPERIMENT_16
+    assert successor["trial_name"] == source["trial_name"] == TRIAL_16
+    assert successor["recover"]["no_load_optim"] is True
+    assert successor["recover"]["no_save_optim"] is False
+    assert source["recover"].get("no_load_optim", False) is False
+    assert source["recover"].get("no_save_optim", False) is False
+
+    normalized = dict(successor)
+    normalized_recover = dict(successor["recover"])
+    normalized_recover.pop("no_load_optim")
+    normalized_recover.pop("no_save_optim")
+    normalized["recover"] = normalized_recover
+    assert normalized == source
+
+    assert successor["cluster"]["n_nodes"] == 16
+    assert successor["actor"]["backend"] == "megatron:d10p2t4c1"
+    assert successor["rollout"]["backend"] == "sglang:d6p1t8"
+    assert successor["openreward"]["enable_recursive_subagents"] is False
+    assert successor["openreward"]["enable_programmatic_tool_calling"] is False
+
+
 def test_successor_stats_cursor_matches_save_before_commit_resume_order() -> None:
     trainer_source = (REPO_ROOT / "platoon/train/areal/rl.py").read_text(encoding="utf-8")
     loop = trainer_source.index("for global_step in range(start_step, max_steps):")
@@ -256,6 +293,106 @@ def test_successor_stats_cursor_matches_save_before_commit_resume_order() -> Non
     assert max(7, 4 + 1) == 7
 
 
+def test_areal_no_load_optim_skips_only_load_and_normal_save_keeps_optimizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patches_path = REPO_ROOT / "platoon/train/areal/patches.py"
+    spec = importlib.util.spec_from_file_location("nooptim_patch_fixture", patches_path)
+    assert spec is not None and spec.loader is not None
+    patches = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(patches)
+
+    class SaveLoadMeta:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    checkpoint = tmp_path / "recover_checkpoint"
+
+    class Saver:
+        @staticmethod
+        def get_recover_checkpoint_path(*_args, **_kwargs):
+            return str(checkpoint)
+
+    class Handler:
+        def _save_checkpoint(self, *_args, **_kwargs):
+            raise AssertionError("unpatched save")
+
+        def _load_checkpoint(self, *_args, **_kwargs):
+            raise AssertionError("unpatched load")
+
+    class Logger:
+        @staticmethod
+        def info(_message):
+            pass
+
+        @staticmethod
+        def warning(_message):
+            pass
+
+    areal = types.ModuleType("areal")
+    api = types.ModuleType("areal.api")
+    api.SaveLoadMeta = SaveLoadMeta
+    utils = types.ModuleType("areal.utils")
+    recover = types.ModuleType("areal.utils.recover")
+    recover.RecoverHandler = Handler
+    recover.logger = Logger()
+    saver = types.ModuleType("areal.utils.saver")
+    saver.Saver = Saver
+    areal.api = api
+    areal.utils = utils
+    utils.recover = recover
+    utils.saver = saver
+    for name, module in {
+        "areal": areal,
+        "areal.api": api,
+        "areal.utils": utils,
+        "areal.utils.recover": recover,
+        "areal.utils.saver": saver,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    patches._patch_areal_recover_checkpoint_rotation()
+    handler = Handler()
+    handler.config = SimpleNamespace(
+        experiment_name="experiment",
+        trial_name="trial",
+        fileroot=str(tmp_path),
+        no_load_optim=False,
+        no_save_optim=False,
+    )
+    checkpoint.mkdir()
+
+    class Engine:
+        def __init__(self):
+            self.loaded = []
+            self.saved = []
+
+        def load(self, meta):
+            self.loaded.append(meta)
+            if meta.with_optim:
+                raise RuntimeError("optimizer moments are absent")
+
+        def save(self, meta):
+            self.saved.append(meta)
+            Path(meta.path, "saved").write_text("ok\n", encoding="utf-8")
+
+    engine = Engine()
+    with pytest.raises(RuntimeError, match="optimizer moments are absent"):
+        handler._load_checkpoint(engine)
+    assert engine.loaded[-1].with_optim is True
+
+    handler.config.no_load_optim = True
+    handler._load_checkpoint(engine)
+    assert engine.loaded[-1].with_optim is False
+
+    # no_load_optim never feeds the save plan. With the independent normal
+    # no_save_optim=False setting, the first gs>=1 checkpoint includes optimizer
+    # state and therefore becomes eligible for ordinary optimizer-loading resume.
+    handler._save_checkpoint(engine)
+    assert engine.saved[-1].with_optim is True
+    assert checkpoint.joinpath("saved").read_text(encoding="utf-8") == "ok\n"
+
+
 def test_qwen38_v20_successor_wrapper_binds_frozen_gs6_before_services() -> None:
     subprocess.run(["bash", "-n", str(SUCCESSOR_WRAPPER)], check=True)
     source = SUCCESSOR_WRAPPER.read_text(encoding="utf-8")
@@ -266,7 +403,7 @@ def test_qwen38_v20_successor_wrapper_binds_frozen_gs6_before_services() -> None
     assert "--successor-binding qwen38-32-v20-post-step6" in source
     assert "--expected-source-config-sha256" in source
     assert "--authorized-ancestor-receipt" in source
-    assert "resume-post-step6-v8r19.success.json" in source
+    assert "resume-post-step6-v8r20.success.json" in source
     assert "resume-gs5-v8r16.success.candidate.json" in source
     assert "SOURCE_PBS_JOB_ID=2156202.pbs1" in source
     assert "EXPECTED_GLOBAL_STEP=6" in source
@@ -373,8 +510,8 @@ def _build_authorized_fixture(
     source_config = source_release / config_relative
     source_config.parent.mkdir(parents=True)
     config_bytes = (
-        (REPO_ROOT / CONFIG_RELATIVE).read_bytes()
-        if successor_config
+        (REPO_ROOT / (CONFIG_RELATIVE_16 if preupdate else CONFIG_RELATIVE)).read_bytes()
+        if successor_config or preupdate
         else (
             f"experiment_name: {experiment}\n"
             f"trial_name: {trial}\n"
@@ -386,7 +523,11 @@ def _build_authorized_fixture(
     current_config.write_bytes(
         (REPO_ROOT / SUCCESSOR_CONFIG_RELATIVE).read_bytes()
         if successor_config
-        else config_bytes
+        else (
+            (REPO_ROOT / NOOPTIM_CONFIG_RELATIVE_16).read_bytes()
+            if preupdate
+            else config_bytes
+        )
     )
     source_ref = "refs/tags/source-release"
     _write_json(
@@ -551,8 +692,8 @@ def _build_authorized_fixture(
         if successor_config:
             _write_json(ancestor_candidate, {"authorized_ancestor": True})
     target_receipt = receipt_dir / (
-        f"{trial}.resume-gs0-v8r19.success.json" if preupdate else (
-            f"{trial}.resume-post-step6-v8r19.success.json"
+        f"{trial}.resume-gs0-nooptim-v8r20.success.json" if preupdate else (
+            f"{trial}.resume-post-step6-v8r20.success.json"
             if successor_config
             else f"{trial}.resume-gs5-v8r16.success.json"
         )
@@ -566,6 +707,8 @@ def _build_authorized_fixture(
         str(checkpoint_root),
         "--expected-global-step",
         str(global_step),
+        "--expected-start-global-step",
+        str(global_step + 1),
         "--expected-steps-per-epoch",
         "846",
         "--expected-shards",
@@ -630,6 +773,8 @@ def _build_authorized_fixture(
         command[0] = str(fixture_verify)
     if preupdate:
         command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
+            "--expected-source-config-sha256",
+            _sha256(source_config),
             "--source-log",
             str(source_log),
             "--expected-source-log-sha256",
@@ -637,6 +782,8 @@ def _build_authorized_fixture(
             "--allow-preupdate-global-step-zero",
             "--preupdate-binding",
             "qwen38-16-v18-job2155389",
+            "--preupdate-load-policy",
+            "qwen38-16-v20-gs0-no-load-optim",
         ]
     else:
         command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
@@ -771,6 +918,23 @@ def test_preupdate_resume_verifier_executes_candidate_free_step_zero_authorizati
 
     assert result.returncode == 0, result.stderr
     assert "openreward_resume_checkpoint=PASS global_step=0 shards=80 " in result.stdout
+
+
+def test_preupdate_binding_rejects_changed_current_config_and_any_advanced_step(
+    tmp_path: Path,
+) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, preupdate=True)
+    paths["current_config"].write_text("changed after binding\n", encoding="utf-8")
+    changed = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert changed.returncode != 0
+    assert "current resume config identity mismatch" in changed.stderr
+
+    command, _ = _build_authorized_fixture(tmp_path / "advanced", preupdate=True)
+    command[command.index("--expected-global-step") + 1] = "1"
+    command[command.index("--expected-start-global-step") + 1] = "2"
+    advanced = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert advanced.returncode != 0
+    assert "expected steps/counts/digests are invalid" in advanced.stderr
 
 
 @pytest.mark.parametrize(
@@ -924,6 +1088,48 @@ def test_runtime_semantic_verifier_executes_gap_free_dcp_and_progress_checks(
         module._verify_runtime_objects(**arguments)
 
 
+def test_preupdate_runtime_schema_requires_zero_moments_and_eight_groups() -> None:
+    spec = importlib.util.spec_from_file_location("resume_verifier_moments", VERIFY)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    pristine: dict[str, object] = {}
+    for group in range(8):
+        prefix = f"optimizer.distributed.dp_group_idx_{group}"
+        pristine[f"{prefix}.optimizer/shard_0_1"] = object()
+        pristine[f"{prefix}.per_bucket_numel/shard_0_1"] = object()
+        pristine[f"{prefix}.per_bucket_numel_unpadded/shard_0_1"] = object()
+        pristine[
+            f"{prefix}.gbuf_idx_0.dtype_(torch.bfloat16, torch.float32)."
+            "bucket_idx_0.param"
+        ] = object()
+
+    module._verify_optimizer_moment_metadata(pristine, 0)
+    with_moments = dict(pristine)
+    with_moments[
+        "optimizer.distributed.dp_group_idx_0.gbuf_idx_0."
+        "dtype_(torch.bfloat16, torch.float32).bucket_idx_0.exp_avg"
+    ] = object()
+    with pytest.raises(RuntimeError, match="optimizer-moment key count mismatch"):
+        module._verify_optimizer_moment_metadata(with_moments, 0)
+
+    missing_group = {
+        key: value
+        for key, value in pristine.items()
+        if "dp_group_idx_7" not in key
+    }
+    with pytest.raises(RuntimeError, match="eight-group skeleton"):
+        module._verify_optimizer_moment_metadata(missing_group, 0)
+
+    unexpected_bookkeeping = dict(pristine)
+    unexpected_bookkeeping[
+        "optimizer.distributed.dp_group_idx_0.extra_bookkeeping/shard_0_1"
+    ] = object()
+    with pytest.raises(RuntimeError, match="eight-group skeleton"):
+        module._verify_optimizer_moment_metadata(unexpected_bookkeeping, 0)
+
+
 def _health_functions() -> str:
     source = COMMON.read_text(encoding="utf-8")
     begin = source.index("# BEGIN OPENREWARD_HEALTH_MONITOR_FUNCTIONS")
@@ -1052,12 +1258,13 @@ def test_resume_wrapper_and_common_bind_explicit_recovery_without_yaml_change() 
     assert "http://${host}:${OPENREWARD_SWE_REBENCH_PORT}/health" in common
 
 
-def test_preupdate_resume_wrapper_binds_exact_step_zero_checkpoint_and_heartbeat() -> None:
-    wrapper = WRAPPER_16.read_text(encoding="utf-8")
+def test_preupdate_nooptim_wrapper_binds_exact_step_zero_checkpoint_and_heartbeat() -> None:
+    wrapper = NOOPTIM_WRAPPER_16.read_text(encoding="utf-8")
     common = COMMON.read_text(encoding="utf-8")
 
-    subprocess.run(["bash", "-n", str(WRAPPER_16)], check=True)
-    assert "#PBS -N rasp-h200-16q38-rs0-v18" in wrapper
+    subprocess.run(["bash", "-n", str(NOOPTIM_WRAPPER_16)], check=True)
+    assert NOOPTIM_WRAPPER_16.stat().st_mode & 0o111 == 0o111
+    assert "#PBS -N rasp-h200-16q38-rs0n-v20" in wrapper
     assert "#PBS -l walltime=72:00:00" in wrapper
     assert "EXPERIMENT=abci-or-ta-swe16-q38-v18" in wrapper
     assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v18-t0" in wrapper
@@ -1065,15 +1272,26 @@ def test_preupdate_resume_wrapper_binds_exact_step_zero_checkpoint_and_heartbeat
     assert "--expected-shards 80" in wrapper
     assert "--expected-total-bytes 164220069555" in wrapper
     assert "--allow-preupdate-global-step-zero" in wrapper
-    assert "--preupdate-binding qwen38-16-v18-job2155389" in wrapper
+    assert 'PREUPDATE_BINDING=qwen38-16-v18-job2155389' in wrapper
+    assert 'PREUPDATE_LOAD_POLICY=qwen38-16-v20-gs0-no-load-optim' in wrapper
+    assert '--preupdate-binding "${PREUPDATE_BINDING}"' in wrapper
+    assert '--preupdate-load-policy "${PREUPDATE_LOAD_POLICY}"' in wrapper
+    assert "--expected-source-config-sha256" in wrapper
+    assert "--expected-start-global-step 1" in wrapper
     assert "--source-log \"${SOURCE_LOG}\"" in wrapper
     assert "--source-candidate" not in wrapper
     assert "export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
     assert "export OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper
-    assert "export OPENREWARD_PREUPDATE_RESUME_BINDING=qwen38-16-v18-job2155389" in wrapper
+    assert "export OPENREWARD_PREUPDATE_RESUME_BINDING=${PREUPDATE_BINDING}" in wrapper
+    assert "export OPENREWARD_PREUPDATE_LOAD_POLICY=${PREUPDATE_LOAD_POLICY}" in wrapper
+    assert "export OPENREWARD_PREUPDATE_NO_LOAD_OPTIM=1" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=0" in wrapper
-    assert "resume-gs0-v8r19.success.json" in wrapper
+    assert "export OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS=0" in wrapper
+    assert "resume-gs0-nooptim-v8r20.success.json" in wrapper
     assert "OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
     assert "preupdate resume requires exact recovered global step 0" in common
-    assert "normal resume requires LR scheduler step equal recovered global step plus one" in common
+    assert "preupdate no-load-optimizer resume requires start step 1 and no optimizer moments" in common
+    assert "preupdate optimizer-load policy is forbidden for normal resume" in common
+    assert "controller_args+=(recover.no_load_optim=true recover.no_save_optim=false)" in common
+    assert '"${RESUME_CHECKPOINT_VERIFY}" composition' in common

@@ -70,7 +70,10 @@ EXPECTED_NCCL_HEARTBEAT_TIMEOUT=${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEO
 REQUIRE_EXISTING_RECOVERY=${OPENREWARD_REQUIRE_EXISTING_RECOVERY:-0}
 ALLOW_PREUPDATE_RESUME=${OPENREWARD_ALLOW_PREUPDATE_RESUME:-0}
 PREUPDATE_RESUME_BINDING=${OPENREWARD_PREUPDATE_RESUME_BINDING:-}
+PREUPDATE_LOAD_POLICY=${OPENREWARD_PREUPDATE_LOAD_POLICY:-}
+PREUPDATE_NO_LOAD_OPTIM=${OPENREWARD_PREUPDATE_NO_LOAD_OPTIM:-0}
 EXPECTED_RESUME_GLOBAL_STEP=${OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP:-}
+EXPECTED_START_GLOBAL_STEP=${OPENREWARD_EXPECTED_START_GLOBAL_STEP:-}
 EXPECTED_RESUME_CHECKPOINT_ROOT=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT:-}
 EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256:-}
 EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256:-}
@@ -79,6 +82,7 @@ EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256=${OPENREWARD_EXPECTED_RESUME_RECOVER
 EXPECTED_RESUME_DCP_STATE_KEYS=${OPENREWARD_EXPECTED_RESUME_DCP_STATE_KEYS:-}
 EXPECTED_RESUME_DCP_STORAGE_ENTRIES=${OPENREWARD_EXPECTED_RESUME_DCP_STORAGE_ENTRIES:-}
 EXPECTED_RESUME_DCP_SHARDS=${OPENREWARD_EXPECTED_RESUME_DCP_SHARDS:-}
+EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS=${OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS:-}
 EXPECTED_RESUME_LR_NUM_STEPS=${OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS:-}
 EXPECTED_RESUME_SAMPLES_YIELDED=${OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED:-}
 EXPECTED_RESUME_ITERATOR_YIELDED=${OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED:-}
@@ -125,6 +129,8 @@ require_uint OPENREWARD_EXPECTED_MODEL_SHARDS "${EXPECTED_MODEL_SHARDS}" 1
     die "OPENREWARD_REQUIRE_EXISTING_RECOVERY must be 0 or 1"
 [[ "${ALLOW_PREUPDATE_RESUME}" == 0 || "${ALLOW_PREUPDATE_RESUME}" == 1 ]] || \
     die "OPENREWARD_ALLOW_PREUPDATE_RESUME must be 0 or 1"
+[[ "${PREUPDATE_NO_LOAD_OPTIM}" == 0 || "${PREUPDATE_NO_LOAD_OPTIM}" == 1 ]] || \
+    die "OPENREWARD_PREUPDATE_NO_LOAD_OPTIM must be 0 or 1"
 if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
     require_uint OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP "${EXPECTED_RESUME_GLOBAL_STEP}" 0
     [[ "${EXPECTED_RESUME_CHECKPOINT_ROOT}" == /* && \
@@ -150,7 +156,12 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
     require_uint OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED \
         "${EXPECTED_RESUME_ITERATOR_YIELDED}" 1
     if [[ "${ALLOW_PREUPDATE_RESUME}" == 1 ]]; then
+        require_uint OPENREWARD_EXPECTED_START_GLOBAL_STEP "${EXPECTED_START_GLOBAL_STEP}" 1
+        require_uint OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS \
+            "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}" 0
         [[ "${PREUPDATE_RESUME_BINDING}" == qwen38-16-v18-job2155389 && \
+            "${PREUPDATE_LOAD_POLICY}" == qwen38-16-v20-gs0-no-load-optim && \
+            "${PREUPDATE_NO_LOAD_OPTIM}" == 1 && \
             "${EXPECTED_NNODES}" == 16 && "${EXPECTED_RECURSIVE}" == 0 && \
             "${EXPECTED_PTC}" == 0 && \
             "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe16-q38-v18 && \
@@ -164,20 +175,35 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
             die "preupdate resume is restricted to the exact Qwen3.8 16-node v18 job-2155389 binding"
         ((10#${EXPECTED_RESUME_GLOBAL_STEP} == 0 && 10#${EXPECTED_RESUME_LR_NUM_STEPS} == 0)) || \
             die "preupdate resume requires exact recovered global step 0 and LR scheduler step 0"
+        ((10#${EXPECTED_START_GLOBAL_STEP} == 1 && \
+          10#${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS} == 0)) || \
+            die "preupdate no-load-optimizer resume requires start step 1 and no optimizer moments"
     else
         [[ -z "${PREUPDATE_RESUME_BINDING}" ]] || \
             die "OPENREWARD_PREUPDATE_RESUME_BINDING requires preupdate resume mode"
+        [[ -z "${PREUPDATE_LOAD_POLICY}" && "${PREUPDATE_NO_LOAD_OPTIM}" == 0 ]] || \
+            die "preupdate optimizer-load policy is forbidden for normal resume"
+        [[ -z "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}" ]] || \
+            die "optimizer-moment absence is restricted to preupdate resume"
+        if [[ -z "${EXPECTED_START_GLOBAL_STEP}" ]]; then
+            EXPECTED_START_GLOBAL_STEP=$((10#${EXPECTED_RESUME_GLOBAL_STEP} + 1))
+        fi
+        require_uint OPENREWARD_EXPECTED_START_GLOBAL_STEP "${EXPECTED_START_GLOBAL_STEP}" 1
         ((10#${EXPECTED_RESUME_GLOBAL_STEP} >= 1 && \
+          10#${EXPECTED_START_GLOBAL_STEP} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1 && \
           10#${EXPECTED_RESUME_LR_NUM_STEPS} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1)) || \
-            die "normal resume requires LR scheduler step equal recovered global step plus one"
+            die "normal resume requires start/LR scheduler steps equal recovered global step plus one"
     fi
 else
     [[ "${ALLOW_PREUPDATE_RESUME}" == 0 ]] || \
         die "OPENREWARD_ALLOW_PREUPDATE_RESUME requires existing recovery"
     [[ -z "${PREUPDATE_RESUME_BINDING}" ]] || \
         die "OPENREWARD_PREUPDATE_RESUME_BINDING requires existing recovery"
+    [[ -z "${PREUPDATE_LOAD_POLICY}" && "${PREUPDATE_NO_LOAD_OPTIM}" == 0 ]] || \
+        die "preupdate optimizer-load policy requires existing recovery"
     for unexpected_resume_value in \
         "${EXPECTED_RESUME_GLOBAL_STEP}" \
+        "${EXPECTED_START_GLOBAL_STEP}" \
         "${EXPECTED_RESUME_CHECKPOINT_ROOT}" \
         "${EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256}" \
         "${EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256}" \
@@ -186,6 +212,7 @@ else
         "${EXPECTED_RESUME_DCP_STATE_KEYS}" \
         "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" \
         "${EXPECTED_RESUME_DCP_SHARDS}" \
+        "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}" \
         "${EXPECTED_RESUME_LR_NUM_STEPS}" \
         "${EXPECTED_RESUME_SAMPLES_YIELDED}" \
         "${EXPECTED_RESUME_ITERATOR_YIELDED}"; do
@@ -267,6 +294,14 @@ if [[ "${EXPECTED_PTC}" == 1 ]]; then
 elif [[ "${EXPECTED_PTC}" == 0 ]]; then
     grep -q 'enable_programmatic_tool_calling:[[:space:]]*false' "${CONFIG}" || \
         die "no-PTC wrapper requires a literal no-PTC leaf config"
+fi
+if [[ "${PREUPDATE_NO_LOAD_OPTIM:-0}" == 1 ]]; then
+    [[ "$(grep -Fxc '  no_load_optim: true' "${CONFIG}")" == 1 && \
+        "$(grep -Fxc '  no_save_optim: false' "${CONFIG}")" == 1 ]] || \
+        die "preupdate load policy requires literal no-load/normal-save optimizer semantics"
+else
+    ! grep -Fqx '  no_load_optim: true' "${CONFIG}" || \
+        die "no-load-optimizer config is forbidden outside the exact preupdate binding"
 fi
 
 [[ -f "${SWE_REBENCH_DATA_DIR}/task_index.json" ]] || \
@@ -728,6 +763,9 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
         resume_runtime_mode_args+=(
             --allow-preupdate-global-step-zero
             --preupdate-binding "${PREUPDATE_RESUME_BINDING}"
+            --preupdate-load-policy "${PREUPDATE_LOAD_POLICY}"
+            --expected-optimizer-moment-keys \
+                "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}"
         )
     fi
     "${RUNTIME}" exec --nv --cleanenv --containall --no-home \
@@ -756,6 +794,7 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
             --expected-recover-info-content-sha256 \
                 "${EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256}" \
             --expected-global-step "${EXPECTED_RESUME_GLOBAL_STEP}" \
+            --expected-start-global-step "${EXPECTED_START_GLOBAL_STEP}" \
             "${resume_runtime_mode_args[@]}" \
             --expected-state-keys "${EXPECTED_RESUME_DCP_STATE_KEYS}" \
             --expected-storage-entries "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" \
@@ -835,6 +874,24 @@ for forbidden in ("transformer_engine", "apex", "fused_weight_gradient_mlp_cuda"
     assert not any(name == forbidden or name.startswith(forbidden + ".") for name in sys.modules), forbidden
 print("host_controller_runtime=ok")
 PY
+
+if [[ "${PREUPDATE_NO_LOAD_OPTIM}" == 1 ]]; then
+    echo "[pbs-openreward] asserting composed one-shot no-load-optimizer recovery policy"
+    env \
+        -u WANDB_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+        -u LITELLM_API_KEY -u LITELLM_BASE_URL -u RUBRIC_DEFAULT_LLM -u HF_TOKEN \
+        -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+        -u VIRTUAL_ENV -u UV_PROJECT_ENVIRONMENT -u PYTHONHOME -u PYTHONPATH \
+        "${OPENREWARD_CONTROLLER_JOB_PYTHON}" -I \
+        "${RESUME_CHECKPOINT_VERIFY}" composition \
+        --config "${CONFIG}" \
+        --expected-experiment "${EXPECTED_EXPERIMENT}" \
+        --expected-trial "${EXPECTED_TRIAL}" \
+        --expected-nnodes "${EXPECTED_NNODES}" \
+        --expected-start-global-step "${EXPECTED_START_GLOBAL_STEP}" \
+        --preupdate-binding "${PREUPDATE_RESUME_BINDING}" \
+        --preupdate-load-policy "${PREUPDATE_LOAD_POLICY}"
+fi
 
 export PYTHONDONTWRITEBYTECODE=1
 export CUDA_VISIBLE_DEVICES=
@@ -1504,7 +1561,11 @@ controller_args=(
 )
 if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
     controller_args+=(recover.mode=on)
-    echo "[pbs-openreward] requiring existing recovery at global_step=${EXPECTED_RESUME_GLOBAL_STEP}"
+    if [[ "${PREUPDATE_NO_LOAD_OPTIM}" == 1 ]]; then
+        controller_args+=(recover.no_load_optim=true recover.no_save_optim=false)
+        echo "[pbs-openreward] requiring one-shot model-only load at global_step=0; expected training start=1 and subsequent optimizer saves enabled"
+    fi
+    echo "[pbs-openreward] requiring existing recovery at global_step=${EXPECTED_RESUME_GLOBAL_STEP} start_global_step=${EXPECTED_START_GLOBAL_STEP}"
 fi
 "${OPENREWARD_CONTROLLER_JOB_PYTHON}" "${controller_args[@]}" &
 controller_pid=$!

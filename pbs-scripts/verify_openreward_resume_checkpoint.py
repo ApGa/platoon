@@ -31,9 +31,20 @@ CHECKPOINT_METADATA = {
 }
 CHECKPOINT_SAMPLE_BYTES = 1024 * 1024
 PREUPDATE_BINDING_ID = "qwen38-16-v18-job2155389"
+PREUPDATE_LOAD_POLICY_ID = "qwen38-16-v20-gs0-no-load-optim"
 PREUPDATE_EXPERIMENT = "abci-or-ta-swe16-q38-v18"
 PREUPDATE_TRIAL = "abci-ta-swe16-nr-q38d-c12-v18-t0"
 PREUPDATE_SOURCE_JOB = "2155389.pbs1"
+PREUPDATE_SOURCE_CONFIG_SHA256 = (
+    "0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39"
+)
+PREUPDATE_CURRENT_CONFIG_SHA256 = (
+    "efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97"
+)
+PREUPDATE_RECEIPT = (
+    "abci-ta-swe16-nr-q38d-c12-v18-t0."
+    "resume-gs0-nooptim-v8r20.success.json"
+)
 QWEN38_SUCCESSOR_BINDING_ID = "qwen38-32-v20-post-step6"
 QWEN38_SUCCESSOR_EXPERIMENT = "abci-or-ta-swe32-q38-v16"
 QWEN38_SUCCESSOR_TRIAL = "abci-ta-swe32-rec-q38d-c24-v16-t0"
@@ -55,7 +66,7 @@ QWEN38_SUCCESSOR_ANCESTOR_SHA256 = (
 )
 QWEN38_SUCCESSOR_RECEIPT = (
     "abci-ta-swe32-rec-q38d-c24-v16-t0."
-    "resume-post-step6-v8r19.success.json"
+    "resume-post-step6-v8r20.success.json"
 )
 QWEN38_SUCCESSOR_ANCESTOR_RECEIPT = (
     "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
@@ -517,7 +528,7 @@ def _verify_failed_preupdate_source(
     if (
         not target_receipt.is_absolute()
         or target_receipt.name
-        != f"{expected_trial}.resume-gs0-v8r19.success.json"
+        != PREUPDATE_RECEIPT
     ):
         raise RuntimeError("target preupdate resume receipt identity mismatch")
     _require_canonical_directory(
@@ -545,10 +556,12 @@ def _verify_failed_preupdate_source(
 def verify(args: argparse.Namespace) -> None:
     if args.allow_preupdate_global_step_zero and (
         args.preupdate_binding != PREUPDATE_BINDING_ID
+        or args.preupdate_load_policy != PREUPDATE_LOAD_POLICY_ID
         or args.expected_experiment != PREUPDATE_EXPERIMENT
         or args.expected_trial != PREUPDATE_TRIAL
         or args.source_pbs_job_id != PREUPDATE_SOURCE_JOB
         or args.expected_global_step != 0
+        or args.expected_start_global_step != 1
         or args.expected_steps_per_epoch != 846
         or args.expected_shards != 80
     ):
@@ -716,8 +729,50 @@ def verify(args: argparse.Namespace) -> None:
     print(
         "openreward_resume_checkpoint=PASS "
         f"global_step={args.expected_global_step} shards={args.expected_shards} "
-        f"bytes={total_bytes} source_job={args.source_pbs_job_id}"
+        f"bytes={total_bytes} source_job={args.source_pbs_job_id} "
+        f"start_global_step={args.expected_start_global_step}"
     )
+
+
+def _verify_optimizer_moment_metadata(
+    state_metadata: dict[Any, Any], expected_optimizer_moment_keys: int | None
+) -> None:
+    optimizer_moment_keys = {
+        name
+        for name in state_metadata
+        if isinstance(name, str)
+        and (name.endswith(".exp_avg") or name.endswith(".exp_avg_sq"))
+    }
+    if (
+        expected_optimizer_moment_keys is not None
+        and len(optimizer_moment_keys) != expected_optimizer_moment_keys
+    ):
+        raise RuntimeError("DCP optimizer-moment key count mismatch")
+    if expected_optimizer_moment_keys == 0:
+        optimizer_keys = {
+            name
+            for name in state_metadata
+            if isinstance(name, str)
+            and name.startswith("optimizer.distributed.dp_group_idx_")
+        }
+        expected_optimizer_keys: set[str] = set()
+        for group in range(8):
+            prefix = f"optimizer.distributed.dp_group_idx_{group}"
+            expected_optimizer_keys.update(
+                {
+                    f"{prefix}.optimizer/shard_0_1",
+                    f"{prefix}.per_bucket_numel/shard_0_1",
+                    f"{prefix}.per_bucket_numel_unpadded/shard_0_1",
+                    (
+                        f"{prefix}.gbuf_idx_0."
+                        "dtype_(torch.bfloat16, torch.float32).bucket_idx_0.param"
+                    ),
+                }
+            )
+        if optimizer_keys != expected_optimizer_keys:
+            raise RuntimeError(
+                "pristine optimizer checkpoint lacks its exact eight-group skeleton"
+            )
 
 
 def _verify_runtime_objects(
@@ -732,6 +787,7 @@ def _verify_runtime_objects(
     expected_lr_num_steps: int,
     expected_samples_yielded: int,
     expected_iterator_yielded: int,
+    expected_optimizer_moment_keys: int | None = None,
 ) -> None:
     state_metadata = getattr(metadata, "state_dict_metadata", None)
     storage_data = getattr(metadata, "storage_data", None)
@@ -742,6 +798,9 @@ def _verify_runtime_objects(
         raise RuntimeError("DCP storage entry count mismatch")
     if getattr(metadata, "version", None) != "1.0.0":
         raise RuntimeError("DCP metadata version mismatch")
+    _verify_optimizer_moment_metadata(
+        state_metadata, expected_optimizer_moment_keys
+    )
     if (
         storage_meta is None
         or getattr(storage_meta, "checkpoint_id", None) != str(checkpoint) + "_new"
@@ -820,11 +879,14 @@ def runtime_main(argv: list[str]) -> None:
     parser.add_argument("--expected-fixed-content-sha256", required=True)
     parser.add_argument("--expected-recover-info-content-sha256", required=True)
     parser.add_argument("--expected-global-step", type=int, required=True)
+    parser.add_argument("--expected-start-global-step", type=int, required=True)
     parser.add_argument("--allow-preupdate-global-step-zero", action="store_true")
     parser.add_argument("--preupdate-binding")
+    parser.add_argument("--preupdate-load-policy")
     parser.add_argument("--expected-state-keys", type=int, required=True)
     parser.add_argument("--expected-storage-entries", type=int, required=True)
     parser.add_argument("--expected-shards", type=int, required=True)
+    parser.add_argument("--expected-optimizer-moment-keys", type=int)
     parser.add_argument("--expected-lr-num-steps", type=int, required=True)
     parser.add_argument("--expected-samples-yielded", type=int, required=True)
     parser.add_argument("--expected-iterator-yielded", type=int, required=True)
@@ -849,8 +911,11 @@ def runtime_main(argv: list[str]) -> None:
             args.allow_preupdate_global_step_zero
             and (
                 args.preupdate_binding != PREUPDATE_BINDING_ID
+                or args.preupdate_load_policy != PREUPDATE_LOAD_POLICY_ID
                 or args.expected_global_step != 0
+                or args.expected_start_global_step != 1
                 or args.expected_lr_num_steps != 0
+                or args.expected_optimizer_moment_keys != 0
                 or args.expected_state_keys != 1456
                 or args.expected_storage_entries != 9169
                 or args.expected_shards != 80
@@ -862,7 +927,10 @@ def runtime_main(argv: list[str]) -> None:
             not args.allow_preupdate_global_step_zero
             and (
                 args.preupdate_binding is not None
+                or args.preupdate_load_policy is not None
+                or args.expected_optimizer_moment_keys is not None
                 or args.expected_global_step < 1
+                or args.expected_start_global_step != args.expected_global_step + 1
                 or args.expected_lr_num_steps != args.expected_global_step + 1
             )
         )
@@ -910,13 +978,83 @@ def runtime_main(argv: list[str]) -> None:
             expected_lr_num_steps=args.expected_lr_num_steps,
             expected_samples_yielded=args.expected_samples_yielded,
             expected_iterator_yielded=args.expected_iterator_yielded,
+            expected_optimizer_moment_keys=args.expected_optimizer_moment_keys,
         )
     except (OSError, RuntimeError, pickle.PickleError) as exc:
         parser.error(str(exc))
     print(
         "openreward_resume_checkpoint_runtime=PASS "
         f"state_keys={args.expected_state_keys} storage_entries={args.expected_storage_entries} "
-        f"shards={args.expected_shards} lr_num_steps={args.expected_lr_num_steps}"
+        f"shards={args.expected_shards} lr_num_steps={args.expected_lr_num_steps} "
+        f"optimizer_moment_keys={args.expected_optimizer_moment_keys} "
+        f"start_global_step={args.expected_start_global_step}"
+    )
+
+
+def _verify_preupdate_composition(config: Any, args: argparse.Namespace) -> None:
+    """Assert the exact one-shot load policy after AReaL config composition."""
+
+    if (
+        args.preupdate_binding != PREUPDATE_BINDING_ID
+        or args.preupdate_load_policy != PREUPDATE_LOAD_POLICY_ID
+        or args.expected_experiment != PREUPDATE_EXPERIMENT
+        or args.expected_trial != PREUPDATE_TRIAL
+        or args.expected_nnodes != 16
+        or args.expected_start_global_step != 1
+    ):
+        raise RuntimeError("preupdate composition binding identity mismatch")
+    if (
+        config.experiment_name != args.expected_experiment
+        or config.trial_name != args.expected_trial
+        or config.cluster.n_nodes != args.expected_nnodes
+        or config.recover.no_load_optim is not True
+        or config.recover.no_save_optim is not False
+        or config.dynamic_bs is not True
+        or config.openreward.enable_recursive_subagents is not False
+        or config.openreward.enable_programmatic_tool_calling is not False
+        or config.workflow_config.filter_zero_advantage_datums is not True
+        or config.workflow_config.filter_zero_variance_groups is not True
+    ):
+        raise RuntimeError("composed preupdate config changed its exact load/topology semantics")
+
+
+def composition_main(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} composition")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--expected-experiment", required=True)
+    parser.add_argument("--expected-trial", required=True)
+    parser.add_argument("--expected-nnodes", type=int, required=True)
+    parser.add_argument("--expected-start-global-step", type=int, required=True)
+    parser.add_argument("--preupdate-binding", required=True)
+    parser.add_argument("--preupdate-load-policy", required=True)
+    args = parser.parse_args(argv)
+    try:
+        _require_owned_regular(args.config, label="preupdate current config")
+        if _sha256(args.config) != PREUPDATE_CURRENT_CONFIG_SHA256:
+            raise RuntimeError("preupdate current config content digest mismatch")
+        try:
+            from areal.api.cli_args import load_expr_config
+            from platoon.openreward.areal_config import OpenRewardArealTrainerConfig
+        except ImportError as exc:
+            raise RuntimeError(
+                "composition verifier requires the pinned host-controller environment"
+            ) from exc
+        config, _ = load_expr_config(
+            [
+                "--config",
+                str(args.config),
+                "recover.mode=on",
+                "recover.no_load_optim=true",
+                "recover.no_save_optim=false",
+            ],
+            OpenRewardArealTrainerConfig,
+        )
+        _verify_preupdate_composition(config, args)
+    except (AttributeError, OSError, RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
+    print(
+        "openreward_resume_composition=PASS "
+        "global_step=0 start_global_step=1 no_load_optim=true no_save_optim=false"
     )
 
 
@@ -924,10 +1062,14 @@ def main() -> None:
     if sys.argv[1:2] == ["runtime"]:
         runtime_main(sys.argv[2:])
         return
+    if sys.argv[1:2] == ["composition"]:
+        composition_main(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint-root", type=Path, required=True)
     parser.add_argument("--expected-checkpoint-root", type=Path, required=True)
     parser.add_argument("--expected-global-step", type=int, required=True)
+    parser.add_argument("--expected-start-global-step", type=int, required=True)
     parser.add_argument("--expected-steps-per-epoch", type=int, required=True)
     parser.add_argument("--expected-shards", type=int, required=True)
     parser.add_argument("--expected-total-bytes", type=int, required=True)
@@ -952,6 +1094,7 @@ def main() -> None:
     parser.add_argument("--expected-source-log-sha256")
     parser.add_argument("--allow-preupdate-global-step-zero", action="store_true")
     parser.add_argument("--preupdate-binding")
+    parser.add_argument("--preupdate-load-policy")
     parser.add_argument("--successor-binding")
     parser.add_argument("--source-pbs-job-id", required=True)
     parser.add_argument("--source-release-root", type=Path, required=True)
@@ -965,17 +1108,28 @@ def main() -> None:
     if args.expected_source_config_sha256 is None:
         args.expected_source_config_sha256 = args.expected_config_sha256
     successor_binding = args.successor_binding == QWEN38_SUCCESSOR_BINDING_ID
+    preupdate_nooptim_binding = (
+        args.allow_preupdate_global_step_zero
+        and args.preupdate_load_policy == PREUPDATE_LOAD_POLICY_ID
+    )
     if (
         (
             args.allow_preupdate_global_step_zero
             and (
                 args.expected_global_step != 0
+                or args.expected_start_global_step != 1
                 or args.preupdate_binding != PREUPDATE_BINDING_ID
+                or not preupdate_nooptim_binding
                 or args.expected_experiment != PREUPDATE_EXPERIMENT
                 or args.expected_trial != PREUPDATE_TRIAL
                 or args.source_pbs_job_id != PREUPDATE_SOURCE_JOB
                 or args.expected_steps_per_epoch != 846
                 or args.expected_shards != 80
+                or args.expected_source_config_sha256
+                != PREUPDATE_SOURCE_CONFIG_SHA256
+                or args.expected_config_sha256
+                != PREUPDATE_CURRENT_CONFIG_SHA256
+                or args.target_receipt.name != PREUPDATE_RECEIPT
                 or args.source_log is None
                 or re.fullmatch(r"[0-9a-f]{64}", args.expected_source_log_sha256 or "") is None
                 or args.source_candidate is not None
@@ -989,7 +1143,9 @@ def main() -> None:
             not args.allow_preupdate_global_step_zero
             and (
                 args.expected_global_step < 1
+                or args.expected_start_global_step != args.expected_global_step + 1
                 or args.preupdate_binding is not None
+                or args.preupdate_load_policy is not None
                 or args.source_candidate is None
                 or re.fullmatch(
                     r"[0-9a-f]{64}", args.expected_source_candidate_sha256 or ""
@@ -1031,6 +1187,7 @@ def main() -> None:
         )
         or (
             not successor_binding
+            and not preupdate_nooptim_binding
             and (
                 args.expected_source_config_sha256 != args.expected_config_sha256
                 or args.authorized_ancestor_receipt
