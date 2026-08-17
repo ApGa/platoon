@@ -44,7 +44,7 @@ def _evidence(tmp_path: Path, verifier) -> tuple[Path, Path, Path, Path]:
     scripts.mkdir(parents=True)
     driver = scripts / "toolathlon_all_mcp_health.py"
     driver.write_text("print('health driver')\n")
-    driver.chmod(0o640)
+    driver.chmod(0o755)
 
     image = tmp_path / "toolathlon.sif"
     image.write_bytes(b"synthetic-sif-content\n")
@@ -323,6 +323,7 @@ def test_final_result_rehashes_current_release_image_and_all_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     verifier = _load_verifier()
+    assert verifier.HEALTH_DRIVER_MODES == {0o440, 0o550, 0o640, 0o750, 0o755}
     release, result, _, gate2 = _evidence(tmp_path, verifier)
     monkeypatch.setattr(verifier, "RELEASE_ROOT", release)
     monkeypatch.setattr(verifier, "RELEASE_REF", "refs/tags/test-v9-release")

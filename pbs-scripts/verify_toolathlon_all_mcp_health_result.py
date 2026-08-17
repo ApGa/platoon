@@ -13,8 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r22-e11d720-057108f")
-RELEASE_REF = "refs/tags/abci-v8r22-e11d720-057108f"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r23-e11d720-057108f")
+RELEASE_REF = "refs/tags/abci-v8r23-e11d720-057108f"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
 HEALTH_DRIVER_RELATIVE = Path("pbs-scripts/toolathlon_all_mcp_health.py")
 EXPECTED_REVISION = "18e62c0d0419da88209af911528f2f8a0b44a5ed"
@@ -87,6 +87,7 @@ EXPECTED_EMAIL_TOOLS = {
     "emails.send_email",
     "emails.get_emails",
 }
+HEALTH_DRIVER_MODES = {0o440, 0o550, 0o640, 0o750, 0o755}
 EXPECTED_SESSION_COVER = {
     "financial-audit-cross-system-reconciliation": (
         "emails",
@@ -413,7 +414,7 @@ def validate_health_evidence(result: dict[str, Any], root: Path) -> None:
     if not isinstance(driver_ref, dict) or not isinstance(report_ref, dict):
         raise RuntimeError("all-MCP result lacks driver/report references")
     driver = root / HEALTH_DRIVER_RELATIVE
-    require_file(driver, modes={0o440, 0o550, 0o640, 0o750})
+    require_file(driver, modes=HEALTH_DRIVER_MODES)
     if driver_ref != {"path": str(driver), "sha256": sha256(driver)}:
         raise RuntimeError("all-MCP result health driver identity mismatch")
     report_path = Path(str(report_ref.get("path", "")))

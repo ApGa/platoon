@@ -52,6 +52,7 @@ EXPECTED_EMAIL_TOOLS = {
     "emails.send_email",
     "emails.get_emails",
 }
+HEALTH_DRIVER_MODES = {0o440, 0o550, 0o640, 0o750, 0o755}
 EXPECTED_SESSION_COVER = {
     "financial-audit-cross-system-reconciliation": (
         "emails",
@@ -623,7 +624,7 @@ def candidate(args: argparse.Namespace) -> dict[str, Any]:
         receipt=build_receipt_path,
     )
     driver = args.health_driver.absolute()
-    require_private_regular(driver, modes={0o440, 0o550, 0o640, 0o750}, direct=True)
+    require_private_regular(driver, modes=HEALTH_DRIVER_MODES, direct=True)
     release_root = args.release_root.absolute()
     validate_release(release_root, args.release_ref, args.release_commit)
     if driver != release_root / "pbs-scripts/toolathlon_all_mcp_health.py":
@@ -791,7 +792,7 @@ def finalize(args: argparse.Namespace) -> dict[str, Any]:
         receipt=build_path,
     )
 
-    for field, modes in (("health_driver", {0o440, 0o550, 0o640, 0o750}), ("health_report", {0o600})):
+    for field, modes in (("health_driver", HEALTH_DRIVER_MODES), ("health_report", {0o600})):
         info = candidate_value.get(field)
         if not isinstance(info, dict) or not isinstance(info.get("path"), str):
             raise RuntimeError(f"health candidate lacks {field} identity")

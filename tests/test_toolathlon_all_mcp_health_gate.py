@@ -135,6 +135,20 @@ def test_health_report_publication_is_private_and_create_only(tmp_path: Path) ->
         HEALTH.write_report(report, value)
 
 
+def test_candidate_and_finalizer_accept_git_executable_health_driver(tmp_path: Path) -> None:
+    driver = tmp_path / "toolathlon_all_mcp_health.py"
+    driver.write_text("#!/usr/bin/env python3\n")
+    driver.chmod(0o755)
+
+    assert RESULT.HEALTH_DRIVER_MODES == {0o440, 0o550, 0o640, 0o750, 0o755}
+    assert RESULT.require_private_regular(
+        driver,
+        modes=RESULT.HEALTH_DRIVER_MODES,
+    ).st_mode & 0o777 == 0o755
+    source = (REPO_ROOT / "pbs-scripts/publish_toolathlon_all_mcp_health_result.py").read_text()
+    assert source.count("HEALTH_DRIVER_MODES") == 3
+
+
 def test_health_driver_binds_portable_playwright_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     browsers = tmp_path / "ms-playwright"
     chromium = browsers / "chromium-1182/chrome-linux/chrome"
