@@ -51,6 +51,7 @@ CONTROLLER_RUNTIME_RECEIPT_HELPER=${SCRIPT_DIR}/openreward-controller-runtime-re
 SWE_CLEANUP=${SCRIPT_DIR}/cleanup_swe_singularity_sessions.py
 NODE_LOCAL_INIT=${SCRIPT_DIR}/openreward-node-local-init.py
 UPDATE_GATE=${SCRIPT_DIR}/openreward_update_gate.py
+RESUME_CHECKPOINT_VERIFY=${SCRIPT_DIR}/verify_openreward_resume_checkpoint.py
 TRAIN_MODULE=platoon.openreward.train_scripts.areal.train_areal
 EXPECTED_NNODES=${OPENREWARD_EXPECTED_NNODES:?OPENREWARD_EXPECTED_NNODES is required}
 EXPECTED_RECURSIVE=${OPENREWARD_EXPECTED_RECURSIVE:?OPENREWARD_EXPECTED_RECURSIVE is required}
@@ -59,6 +60,19 @@ EXPECTED_MODEL_SHARDS=${OPENREWARD_EXPECTED_MODEL_SHARDS:-26}
 EXPECTED_EXPERIMENT=${OPENREWARD_EXPECTED_EXPERIMENT_NAME:?OPENREWARD_EXPECTED_EXPERIMENT_NAME is required}
 EXPECTED_TRIAL=${OPENREWARD_EXPECTED_TRIAL_NAME:?OPENREWARD_EXPECTED_TRIAL_NAME is required}
 EXPECTED_NCCL_HEARTBEAT_TIMEOUT=${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}
+REQUIRE_EXISTING_RECOVERY=${OPENREWARD_REQUIRE_EXISTING_RECOVERY:-0}
+EXPECTED_RESUME_GLOBAL_STEP=${OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP:-}
+EXPECTED_RESUME_CHECKPOINT_ROOT=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT:-}
+EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256:-}
+EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256:-}
+EXPECTED_RESUME_FIXED_CONTENT_SHA256=${OPENREWARD_EXPECTED_RESUME_FIXED_CONTENT_SHA256:-}
+EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256=${OPENREWARD_EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256:-}
+EXPECTED_RESUME_DCP_STATE_KEYS=${OPENREWARD_EXPECTED_RESUME_DCP_STATE_KEYS:-}
+EXPECTED_RESUME_DCP_STORAGE_ENTRIES=${OPENREWARD_EXPECTED_RESUME_DCP_STORAGE_ENTRIES:-}
+EXPECTED_RESUME_DCP_SHARDS=${OPENREWARD_EXPECTED_RESUME_DCP_SHARDS:-}
+EXPECTED_RESUME_LR_NUM_STEPS=${OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS:-}
+EXPECTED_RESUME_SAMPLES_YIELDED=${OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED:-}
+EXPECTED_RESUME_ITERATOR_YIELDED=${OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED:-}
 CONFIG=${1:?usage: $0 CONFIG}
 RUNTIME=${PLATOON_CONTAINER_RUNTIME:-singularity}
 PBSDSH=${PLATOON_PBSDSH_BIN:-$(command -v pbsdsh || true)}
@@ -98,6 +112,53 @@ require_uint OPENREWARD_EXPECTED_MODEL_SHARDS "${EXPECTED_MODEL_SHARDS}" 1
     die "OPENREWARD_EXPECTED_RECURSIVE must be 0 or 1"
 [[ -z "${EXPECTED_PTC}" || "${EXPECTED_PTC}" == 0 || "${EXPECTED_PTC}" == 1 ]] || \
     die "OPENREWARD_EXPECTED_PTC must be 0 or 1 when set"
+[[ "${REQUIRE_EXISTING_RECOVERY}" == 0 || "${REQUIRE_EXISTING_RECOVERY}" == 1 ]] || \
+    die "OPENREWARD_REQUIRE_EXISTING_RECOVERY must be 0 or 1"
+if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
+    require_uint OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP "${EXPECTED_RESUME_GLOBAL_STEP}" 1
+    [[ "${EXPECTED_RESUME_CHECKPOINT_ROOT}" == /* && \
+        -d "${EXPECTED_RESUME_CHECKPOINT_ROOT}" && \
+        ! -L "${EXPECTED_RESUME_CHECKPOINT_ROOT}" && \
+        "$(readlink -f "${EXPECTED_RESUME_CHECKPOINT_ROOT}")" == "${EXPECTED_RESUME_CHECKPOINT_ROOT}" ]] || \
+        die "OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT must be an exact existing directory"
+    for resume_digest in \
+        "${EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256}" \
+        "${EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256}" \
+        "${EXPECTED_RESUME_FIXED_CONTENT_SHA256}" \
+        "${EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256}"; do
+        [[ "${resume_digest}" =~ ^[0-9a-f]{64}$ ]] || \
+            die "resume checkpoint digests must be exact lowercase SHA-256 values"
+    done
+    require_uint OPENREWARD_EXPECTED_RESUME_DCP_STATE_KEYS \
+        "${EXPECTED_RESUME_DCP_STATE_KEYS}" 1
+    require_uint OPENREWARD_EXPECTED_RESUME_DCP_STORAGE_ENTRIES \
+        "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" 1
+    require_uint OPENREWARD_EXPECTED_RESUME_DCP_SHARDS "${EXPECTED_RESUME_DCP_SHARDS}" 1
+    require_uint OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS "${EXPECTED_RESUME_LR_NUM_STEPS}" 1
+    require_uint OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED "${EXPECTED_RESUME_SAMPLES_YIELDED}" 1
+    require_uint OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED \
+        "${EXPECTED_RESUME_ITERATOR_YIELDED}" 1
+    ((10#${EXPECTED_RESUME_LR_NUM_STEPS} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1)) || \
+        die "resume LR scheduler step must equal recovered global step plus one"
+else
+    for unexpected_resume_value in \
+        "${EXPECTED_RESUME_GLOBAL_STEP}" \
+        "${EXPECTED_RESUME_CHECKPOINT_ROOT}" \
+        "${EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256}" \
+        "${EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256}" \
+        "${EXPECTED_RESUME_FIXED_CONTENT_SHA256}" \
+        "${EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256}" \
+        "${EXPECTED_RESUME_DCP_STATE_KEYS}" \
+        "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" \
+        "${EXPECTED_RESUME_DCP_SHARDS}" \
+        "${EXPECTED_RESUME_LR_NUM_STEPS}" \
+        "${EXPECTED_RESUME_SAMPLES_YIELDED}" \
+        "${EXPECTED_RESUME_ITERATOR_YIELDED}"; do
+        [[ -z "${unexpected_resume_value}" ]] || \
+            die "resume contract values require OPENREWARD_REQUIRE_EXISTING_RECOVERY=1"
+    done
+fi
+unset resume_digest unexpected_resume_value
 if [[ -n "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" ]]; then
     require_uint OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC \
         "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" 1
@@ -137,6 +198,9 @@ for required_file in \
     [[ -x "${required_file}" ]] || die "required helper is not executable: ${required_file}"
 done
 unset required_file
+if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 && ! -x "${RESUME_CHECKPOINT_VERIFY}" ]]; then
+    die "resume checkpoint runtime verifier is unavailable: ${RESUME_CHECKPOINT_VERIFY}"
+fi
 
 CONFIG=$(readlink -f "${CONFIG}")
 [[ -f "${CONFIG}" ]] || die "config does not exist: ${CONFIG}"
@@ -480,6 +544,10 @@ urls_for_port() {
 
 export OPENREWARD_PORT=${OPENREWARD_PORT:-8082}
 export OPENREWARD_SWE_REBENCH_PORT=${OPENREWARD_SWE_REBENCH_PORT:-8084}
+export OPENREWARD_WORKER_BASE_PORT=${OPENREWARD_WORKER_BASE_PORT:-28100}
+export OPENREWARD_WORKERS=${OPENREWARD_WORKERS:-8}
+[[ "${OPENREWARD_WORKER_BASE_PORT}" == 28100 && "${OPENREWARD_WORKERS}" == 8 ]] || \
+    die "Toolathlon node services must use the pinned 28100..28107 worker ports"
 export OPENREWARD_SESSION_URLS_TOOLATHLON
 OPENREWARD_SESSION_URLS_TOOLATHLON=$(urls_for_port "${OPENREWARD_PORT}")
 export OPENREWARD_SESSION_URLS_SWE_REBENCH
@@ -617,6 +685,41 @@ echo "[pbs-openreward] building/validating immutable worker venv key=${OPENREWAR
 cuda_lib_dirs=$(find "${OPENREWARD_WORKER_JOB_VENV}/lib/python3.12/site-packages/nvidia" \
     -mindepth 2 -maxdepth 2 -type d -name lib 2>/dev/null | paste -sd: - || true)
 [[ -n "${cuda_lib_dirs}" ]] || die "immutable worker venv has no pinned NVIDIA library directories"
+
+if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
+    echo "[pbs-openreward] validating exact recovery semantics inside the pinned training SIF"
+    "${RUNTIME}" exec --nv --cleanenv --containall --no-home \
+        --no-mount home,cwd,bind-paths \
+        --bind /etc/resolv.conf:/etc/resolv.conf:ro \
+        --bind /etc/hosts:/etc/hosts:ro \
+        --bind "${PLATOON_REPO_ROOT}:${PLATOON_REPO_ROOT}:ro" \
+        --bind "${PLATOON_PROJECT_ROOT}:${PLATOON_PROJECT_ROOT}:rw" \
+        --bind "${PLATOON_NODE_LOCAL_ROOT}:${PLATOON_NODE_LOCAL_ROOT}:rw" \
+        --pwd "${JOB_STATE_DIR}" \
+        --env PYTHONDONTWRITEBYTECODE=1 \
+        --env CUDA_VISIBLE_DEVICES= \
+        --env "LD_LIBRARY_PATH=${cuda_lib_dirs}" \
+        "${PLATOON_TRAINING_SIF}" \
+        /usr/bin/env \
+            "HOME=${PLATOON_NODE_LOCAL_ROOT}/worker-home" \
+            "PATH=${OPENREWARD_WORKER_JOB_VENV}/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin" \
+            "${OPENREWARD_WORKER_JOB_PYTHON}" -I \
+            "${RESUME_CHECKPOINT_VERIFY}" runtime \
+            --checkpoint-root "${EXPECTED_RESUME_CHECKPOINT_ROOT}" \
+            --expected-checkpoint-layout-sha256 \
+                "${EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256}" \
+            --expected-checkpoint-sample-manifest-sha256 \
+                "${EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256}" \
+            --expected-fixed-content-sha256 "${EXPECTED_RESUME_FIXED_CONTENT_SHA256}" \
+            --expected-recover-info-content-sha256 \
+                "${EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256}" \
+            --expected-state-keys "${EXPECTED_RESUME_DCP_STATE_KEYS}" \
+            --expected-storage-entries "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" \
+            --expected-shards "${EXPECTED_RESUME_DCP_SHARDS}" \
+            --expected-lr-num-steps "${EXPECTED_RESUME_LR_NUM_STEPS}" \
+            --expected-samples-yielded "${EXPECTED_RESUME_SAMPLES_YIELDED}" \
+            --expected-iterator-yielded "${EXPECTED_RESUME_ITERATOR_YIELDED}"
+fi
 
 echo "[pbs-openreward] building/validating separately pinned host-controller venv key=${OPENREWARD_CONTROLLER_ENV_KEY}"
 env \
@@ -1032,28 +1135,178 @@ done <"${SERVICE_NODE_MAP}"
     "${#service_shutdown_requests[@]}" -eq "${SERVICE_NODE_COUNT}" ]] || \
     die "launched ${#service_pids[@]} service tasks for ${SERVICE_NODE_COUNT} service nodes"
 
+HEALTH_CONNECT_TIMEOUT_SECONDS=${OPENREWARD_HEALTH_CONNECT_TIMEOUT_SECONDS:-3}
+HEALTH_MAX_TIME_SECONDS=${OPENREWARD_HEALTH_MAX_TIME_SECONDS:-15}
+TOOLATHLON_WORKER_BASE_PORT=${OPENREWARD_WORKER_BASE_PORT}
+TOOLATHLON_WORKERS=${OPENREWARD_WORKERS}
+TOOLATHLON_WORKER_QUORUM=${OPENREWARD_TOOLATHLON_WORKER_QUORUM:-5}
+TOOLATHLON_PUBLIC_PROBES=4
+TOOLATHLON_PUBLIC_QUORUM=1
+HEALTH_FAILURE_THRESHOLD=${OPENREWARD_HEALTH_FAILURE_THRESHOLD:-10}
+HEALTH_CHECK_SECONDS=${OPENREWARD_HEALTH_CHECK_SECS:-30}
+require_uint OPENREWARD_HEALTH_CONNECT_TIMEOUT_SECONDS "${HEALTH_CONNECT_TIMEOUT_SECONDS}" 1
+require_uint OPENREWARD_HEALTH_MAX_TIME_SECONDS "${HEALTH_MAX_TIME_SECONDS}" 1
+require_uint OPENREWARD_TOOLATHLON_WORKER_BASE_PORT "${TOOLATHLON_WORKER_BASE_PORT}" 1
+require_uint OPENREWARD_TOOLATHLON_WORKERS "${TOOLATHLON_WORKERS}" 1
+require_uint OPENREWARD_TOOLATHLON_WORKER_QUORUM "${TOOLATHLON_WORKER_QUORUM}" 1
+require_uint OPENREWARD_HEALTH_FAILURE_THRESHOLD "${HEALTH_FAILURE_THRESHOLD}" 1
+require_uint OPENREWARD_HEALTH_CHECK_SECS "${HEALTH_CHECK_SECONDS}" 1
+TOOLATHLON_WORKER_BASE_PORT=$((10#${TOOLATHLON_WORKER_BASE_PORT}))
+TOOLATHLON_WORKERS=$((10#${TOOLATHLON_WORKERS}))
+TOOLATHLON_WORKER_QUORUM=$((10#${TOOLATHLON_WORKER_QUORUM}))
+((TOOLATHLON_WORKER_QUORUM <= TOOLATHLON_WORKERS && \
+    TOOLATHLON_WORKER_BASE_PORT + TOOLATHLON_WORKERS - 1 <= 65535)) || \
+    die "Toolathlon direct-worker health topology is invalid"
+
+# Probe every exact Toolathlon worker port, its public nginx endpoint, and SWE
+# concurrently across all service hosts.  Each curl owns the full sweep timeout,
+# so one sweep is bounded by that timeout instead of endpoints * hosts * timeout.
+# BEGIN OPENREWARD_HEALTH_MONITOR_FUNCTIONS
 endpoint_healthy() {
-    local url=$1 status
-    status=$(curl --silent --show-error --output /dev/null \
-        --connect-timeout 2 --max-time 5 --write-out '%{http_code}' \
-        --noproxy '*' "${url}" 2>/dev/null) || return 1
-    [[ "${status}" =~ ^[1-4][0-9][0-9]$ ]]
+    local service=$1 host=$2 port=$3 url=$4 session_id=${5:-}
+    local result= rc=0 http=000 elapsed=unknown
+    local -a curl_args=(
+        --silent --output /dev/null
+        --connect-timeout "${HEALTH_CONNECT_TIMEOUT_SECONDS}"
+        --max-time "${HEALTH_MAX_TIME_SECONDS}"
+        --write-out $'%{http_code}\t%{time_total}'
+        --noproxy '*'
+    )
+    if [[ -n "${session_id}" ]]; then
+        curl_args+=(--header "X-Session-ID: ${session_id}")
+    fi
+    if result=$(curl "${curl_args[@]}" "${url}" 2>/dev/null); then
+        rc=0
+    else
+        rc=$?
+    fi
+    IFS=$'\t' read -r http elapsed <<<"${result}"
+    http=${http:-000}
+    elapsed=${elapsed:-unknown}
+    if [[ "${rc}" -eq 0 && "${http}" == 200 ]]; then
+        return 0
+    fi
+    printf '[pbs-openreward] WARNING: health probe failed service=%s host=%s port=%s url=%s rc=%s http=%s elapsed=%s\n' \
+        "${service}" "${host}" "${port}" "${url}" "${rc}" "${http}" "${elapsed}" >&2
+    return 1
 }
 
 service_pools_healthy() {
-    local index host
+    local round=${1:-0} index host url worker port probe_index status healthy=1
+    local sweep_started_seconds=${SECONDS} sweep_elapsed_seconds
+    local supervisors_alive=1
+    local -a probe_pids=() probe_kinds=() probe_hosts=()
+    local -A public_successes=() public_failures=() swe_ok=()
+    local -A direct_successes=() direct_failures=()
+
+    # Detect every dead node-service supervisor before launching network work.
     for index in "${!service_pids[@]}"; do
-        kill -0 "${service_pids[index]}" 2>/dev/null || return 1
         host=${service_hosts[index]}
-        endpoint_healthy "http://${host}:${OPENREWARD_PORT}/" || return 1
-        endpoint_healthy "http://${host}:${OPENREWARD_SWE_REBENCH_PORT}/" || return 1
+        if ! kill -0 "${service_pids[index]}" 2>/dev/null; then
+            url="http://${host}:${OPENREWARD_PORT}/health"
+            printf '[pbs-openreward] WARNING: health probe failed service=node-services host=%s port=%s url=%s rc=pid-dead http=none elapsed=0\n' \
+                "${host}" "${OPENREWARD_PORT}" "${url}" >&2
+            supervisors_alive=0
+        fi
     done
+    ((supervisors_alive)) || return 2
+
+    for host in "${service_hosts[@]}"; do
+        public_successes["${host}"]=0
+        public_failures["${host}"]=0
+        swe_ok["${host}"]=0
+        direct_successes["${host}"]=0
+        direct_failures["${host}"]=0
+
+        for ((worker = 0; worker < TOOLATHLON_PUBLIC_PROBES; worker++)); do
+            url="http://${host}:${OPENREWARD_PORT}/health"
+            endpoint_healthy toolathlon-nginx "${host}" "${OPENREWARD_PORT}" "${url}" \
+                "openreward-health-${JOB_ID_SAFE}-${host//[^A-Za-z0-9_.-]/_}-${round}-${worker}" &
+            probe_pids+=("$!")
+            probe_kinds+=(public)
+            probe_hosts+=("${host}")
+        done
+
+        for ((worker = 0; worker < TOOLATHLON_WORKERS; worker++)); do
+            port=$((TOOLATHLON_WORKER_BASE_PORT + worker))
+            url="http://${host}:${port}/health"
+            endpoint_healthy "toolathlon-worker-${worker}" "${host}" "${port}" "${url}" &
+            probe_pids+=("$!")
+            probe_kinds+=(direct)
+            probe_hosts+=("${host}")
+        done
+
+        url="http://${host}:${OPENREWARD_SWE_REBENCH_PORT}/health"
+        endpoint_healthy swe-rebench "${host}" "${OPENREWARD_SWE_REBENCH_PORT}" "${url}" &
+        probe_pids+=("$!")
+        probe_kinds+=(swe)
+        probe_hosts+=("${host}")
+    done
+
+    # Every curl is already in flight. Reap all of them before evaluating the
+    # per-host contract so no health process can leak into the next sweep.
+    for probe_index in "${!probe_pids[@]}"; do
+        status=0
+        wait "${probe_pids[probe_index]}" || status=$?
+        host=${probe_hosts[probe_index]}
+        case ${probe_kinds[probe_index]} in
+            public)
+                if ((status == 0)); then
+                    public_successes["${host}"]=$((public_successes["${host}"] + 1))
+                else
+                    public_failures["${host}"]=$((public_failures["${host}"] + 1))
+                fi
+                ;;
+            direct)
+                if ((status == 0)); then
+                    direct_successes["${host}"]=$((direct_successes["${host}"] + 1))
+                else
+                    direct_failures["${host}"]=$((direct_failures["${host}"] + 1))
+                fi
+                ;;
+            swe)
+                if ((status == 0)); then
+                    swe_ok["${host}"]=1
+                fi
+                ;;
+        esac
+    done
+
+    sweep_elapsed_seconds=$((SECONDS - sweep_started_seconds))
+    for host in "${service_hosts[@]}"; do
+        if ((public_successes["${host}"] < TOOLATHLON_PUBLIC_QUORUM)); then
+            printf '[pbs-openreward] WARNING: health quorum failed service=toolathlon-nginx host=%s port=%s url=http://%s:%s/health rc=quorum http=mixed elapsed=%ss successes=%s failures=%s required=%s probes=%s\n' \
+                "${host}" "${OPENREWARD_PORT}" "${host}" "${OPENREWARD_PORT}" \
+                "${sweep_elapsed_seconds}" "${public_successes["${host}"]}" \
+                "${public_failures["${host}"]}" "${TOOLATHLON_PUBLIC_QUORUM}" \
+                "${TOOLATHLON_PUBLIC_PROBES}" >&2
+            healthy=0
+        fi
+        if ((direct_successes["${host}"] < TOOLATHLON_WORKER_QUORUM)); then
+            printf '[pbs-openreward] WARNING: health quorum failed service=toolathlon-workers host=%s port=%s-%s url=http://%s:%s-%s/health rc=quorum http=mixed elapsed=%ss successes=%s failures=%s required=%s workers=%s\n' \
+                "${host}" "${TOOLATHLON_WORKER_BASE_PORT}" \
+                "$((TOOLATHLON_WORKER_BASE_PORT + TOOLATHLON_WORKERS - 1))" \
+                "${host}" "${TOOLATHLON_WORKER_BASE_PORT}" \
+                "$((TOOLATHLON_WORKER_BASE_PORT + TOOLATHLON_WORKERS - 1))" \
+                "${sweep_elapsed_seconds}" \
+                "${direct_successes["${host}"]}" "${direct_failures["${host}"]}" \
+                "${TOOLATHLON_WORKER_QUORUM}" "${TOOLATHLON_WORKERS}" >&2
+            healthy=0
+        fi
+        if ((swe_ok["${host}"] != 1)); then
+            healthy=0
+        fi
+    done
+    ((healthy))
 }
+# END OPENREWARD_HEALTH_MONITOR_FUNCTIONS
 
 server_wait_seconds=${OPENREWARD_SERVER_WAIT_SECS:-1200}
 require_uint OPENREWARD_SERVER_WAIT_SECS "${server_wait_seconds}" 1
 server_deadline=$((SECONDS + server_wait_seconds))
-until service_pools_healthy; do
+startup_health_round=0
+until service_pools_healthy "${startup_health_round}"; do
+    startup_health_round=$((startup_health_round + 1))
     for index in "${!service_pids[@]}"; do
         if ! kill -0 "${service_pids[index]}" 2>/dev/null; then
             host=${service_hosts[index]}
@@ -1069,6 +1322,7 @@ until service_pools_healthy; do
     fi
     sleep 5
 done
+unset startup_health_round
 echo "[pbs-openreward] all Toolathlon and SWE service endpoints are healthy"
 
 export OPENREWARD_DISABLE_UPDATE_CHECK=1
@@ -1149,22 +1403,36 @@ unset openreward_worker_expected_heartbeat_q openreward_worker_home_q \
 # END OPENREWARD_WORKER_PREAMBLE_CONSTRUCTION
 
 monitor_services() {
-    local failures=0 threshold=${OPENREWARD_HEALTH_FAILURE_THRESHOLD:-3}
-    require_uint OPENREWARD_HEALTH_FAILURE_THRESHOLD "${threshold}" 1
+    local failures=0 round=0 pool_status
     while [[ -n "${controller_pid}" ]] && kill -0 "${controller_pid}" 2>/dev/null; do
-        if service_pools_healthy && environment_runtime_healthy; then
-            failures=0
+        pool_status=0
+        service_pools_healthy "${round}" || pool_status=$?
+        if ((pool_status == 2)); then
+            : >"${health_failure_file}"
+            echo "[pbs-openreward] ERROR: node-service supervisor died; terminating controller immediately" >&2
+            kill -TERM "${controller_pid}" 2>/dev/null || true
+            return 1
+        elif ((pool_status == 0)); then
+            if environment_runtime_healthy; then
+                failures=0
+            else
+                failures=$((failures + 1))
+                echo "[pbs-openreward] WARNING: health probe failed service=runtime host=$(hostname -s) port=none url=local-runtime rc=1 http=none elapsed=unknown" >&2
+            fi
         else
             failures=$((failures + 1))
-            echo "[pbs-openreward] WARNING: environment pool unhealthy ${failures}/${threshold}" >&2
-            if ((failures >= threshold)); then
+        fi
+        if ((failures > 0)); then
+            echo "[pbs-openreward] WARNING: environment pool unhealthy ${failures}/${HEALTH_FAILURE_THRESHOLD}" >&2
+            if ((failures >= HEALTH_FAILURE_THRESHOLD)); then
                 : >"${health_failure_file}"
                 echo "[pbs-openreward] ERROR: environment pool remained unhealthy; terminating controller" >&2
                 kill -TERM "${controller_pid}" 2>/dev/null || true
                 return 1
             fi
         fi
-        sleep "${OPENREWARD_HEALTH_CHECK_SECS:-20}"
+        round=$((round + 1))
+        sleep "${HEALTH_CHECK_SECONDS}"
     done
 }
 
@@ -1179,12 +1447,20 @@ unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT PYTHONHOME PYTHONPATH
 cd "${JOB_STATE_DIR}"
 
 echo "[pbs-openreward] starting host controller experiment=${EXPECTED_EXPERIMENT} trial=${EXPECTED_TRIAL} nodes=${EXPECTED_NNODES} training_sif_sha256=${TRAINING_SIF_SHA256}"
-"${OPENREWARD_CONTROLLER_JOB_PYTHON}" -m "${TRAIN_MODULE}" --config "${CONFIG}" \
-    "cluster.n_nodes=${EXPECTED_NNODES}" \
-    "actor.path=${PLATOON_MODEL_SNAPSHOT}" \
-    "tokenizer_path=${PLATOON_MODEL_SNAPSHOT}" \
-    "sglang.model_path=${PLATOON_MODEL_SNAPSHOT}" \
-    stats_logger.wandb.mode=online &
+controller_args=(
+    -m "${TRAIN_MODULE}"
+    --config "${CONFIG}"
+    "cluster.n_nodes=${EXPECTED_NNODES}"
+    "actor.path=${PLATOON_MODEL_SNAPSHOT}"
+    "tokenizer_path=${PLATOON_MODEL_SNAPSHOT}"
+    "sglang.model_path=${PLATOON_MODEL_SNAPSHOT}"
+    stats_logger.wandb.mode=online
+)
+if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
+    controller_args+=(recover.mode=on)
+    echo "[pbs-openreward] requiring existing recovery at global_step=${EXPECTED_RESUME_GLOBAL_STEP}"
+fi
+"${OPENREWARD_CONTROLLER_JOB_PYTHON}" "${controller_args[@]}" &
 controller_pid=$!
 
 monitor_services &

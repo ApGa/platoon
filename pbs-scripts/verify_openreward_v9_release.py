@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r15/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r16/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r15-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r16-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r16-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "7b5246f7e745fd5167b75c54440c582800c6b91c1bdd6817913975b1c181cdb6"
+MANIFEST_SHA256 = "847f3fd11b1d6946818c758866beb9715c496db89c0dafea9cb2d6e985f2e16d"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -111,6 +111,9 @@ EXTERNAL_PATHS = {
     "swe_rebench": "external/swe-rebench-v2-openrewardenv",
     "toolathlon": "external/toolathlon-gym",
 }
+TRAINING_RUNTIME_ASSETS = {
+    "platoon/train/areal/rl.py": "9ce579fa76b43d61223cd9a6c9f5bebec45b7801c5407e2258825a86f71c765b",
+}
 TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION = "missing_masks_treated_as_all_trainable_before_filter_and_concat"
 TRAINING_SEMANTICS = {
     "full_horizon": True,
@@ -162,6 +165,8 @@ TRAINING_SEMANTICS = {
         },
     },
     "balance_accepted_batches": False,
+    "resume_training_start_guard": "require_loaded_recover_info_global_step_and_next_step_before_loop",
+    "success_candidate_requires_actor_update_and_weight_sync": True,
     "fresh_16node_model_only_lineage": True,
     "fresh_16node_lineage": "v18_qwen38_dense_actor_batch_safe_nccl_heartbeat3600_quote_safe",
     "nonrecursive_16node_dense_contract": {
@@ -191,7 +196,7 @@ TRAINING_SEMANTICS = {
         "expected_model_shards": 18,
         "torch_nccl_heartbeat_timeout_sec": 3600,
     },
-    "fresh_32node_lineage": "v16_qwen38_dense_actor_batch_safe",
+    "recursive_32node_lineage": "v16_qwen38_dense_resume_global_step5_source_job_2154492",
     "recursive_32node_dense_contract": {
         "actor_backend": "megatron:d20p2t4c1",
         "actor_topology": {
@@ -218,6 +223,77 @@ TRAINING_SEMANTICS = {
         "actor_mtp_enabled": False,
         "expected_model_shards": 18,
     },
+    "recursive_32node_resume_contract": {
+        "source_pbs_job_id": "2154492.pbs1",
+        "experiment_name": "abci-or-ta-swe32-q38-v16",
+        "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
+        "recover_mode": "on",
+        "recover_global_step": 5,
+        "next_global_step": 6,
+        "steps_per_epoch": 846,
+        "checkpoint_root": (
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
+            "abci-or-ta-swe32-q38-v16/abci-ta-swe32-rec-q38d-c24-v16-t0"
+        ),
+        "recover_checkpoint_shards": 160,
+        "recover_checkpoint_total_bytes": 383216730907,
+        "checkpoint_layout_sha256": (
+            "6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"
+        ),
+        "checkpoint_sample_manifest_sha256": (
+            "23aea8bf8cc932936d250dd1646d191efe664047169445da1ce2ef67d7168e11"
+        ),
+        "checkpoint_fixed_content_sha256": (
+            "ff7dccef8552800b23f1888cbf646c9b8f8c9019f5e83831264cd75ad6a15e6d"
+        ),
+        "recover_info_content_sha256": (
+            "86e7b2726bcbc86328deb65dae0544c30afec2664d548b349aa87224626cfd3c"
+        ),
+        "runtime_semantic_verification": "pinned_training_sif_before_controller",
+        "dcp_state_keys": 1472,
+        "dcp_storage_entries": 18297,
+        "dcp_storage_coverage": "160_exact_paths_gap_free_and_in_bounds",
+        "lr_scheduler_num_steps": 6,
+        "dataloader_samples_yielded": 208,
+        "dataloader_iterator_yielded": 26,
+        "source_release_root": "/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0",
+        "source_release_ref": "refs/tags/abci-v8r13-376d1b9-18e62c0",
+        "config_sha256": "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa",
+        "source_candidate": (
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
+        ),
+        "source_candidate_sha256": (
+            "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
+        ),
+        "target_receipt": (
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.json"
+        ),
+        "success_receipt_isolated": True,
+        "checkpoint_artifact_policy": "preserve_in_place_no_rename_move_delete",
+    },
+    "environment_health_monitor": {
+        "toolathlon_endpoint": "/health",
+        "swe_rebench_endpoint": "/health",
+        "toolathlon_worker_count": 8,
+        "toolathlon_worker_base_port": 28100,
+        "toolathlon_direct_worker_endpoint": "/health",
+        "toolathlon_direct_worker_quorum": 5,
+        "toolathlon_affinity_header": "X-Session-ID",
+        "toolathlon_affinity_policy": "nginx_consistent_hash",
+        "toolathlon_public_probe_count": 4,
+        "toolathlon_public_quorum": 1,
+        "all_hosts_and_endpoints_concurrent": True,
+        "per_probe_max_time_seconds": 15,
+        "expected_sweep_bound_seconds": 20,
+        "connect_timeout_seconds": 3,
+        "request_timeout_seconds": 15,
+        "failure_threshold": 10,
+        "check_interval_seconds": 30,
+        "minimum_consecutive_failure_window_seconds": 270,
+        "failure_diagnostic_fields": ["host", "port", "url", "rc", "http", "elapsed"],
+    },
     "nonrecursive_16node_ptc": False,
     "recursive_32node_ptc": True,
     "recursive_32node_ptc_mode": "orchestration_only",
@@ -233,6 +309,7 @@ HOST_ACCEPTANCE_ASSETS = [
     "pbs-scripts/toolathlon_all_mcp_health.py",
     "pbs-scripts/publish_toolathlon_all_mcp_health_result.py",
     "pbs-scripts/verify_toolathlon_all_mcp_health_result.py",
+    "pbs-scripts/verify_openreward_resume_checkpoint.py",
 ]
 PLAYWRIGHT_IDENTITY = {
     "browsers_path": "/opt/ms-playwright",
@@ -545,6 +622,12 @@ def verify(root: Path) -> None:
         raise RuntimeError("release model artifact identity mismatch")
     if manifest.get("training_semantics") != TRAINING_SEMANTICS:
         raise RuntimeError("release training semantics mismatch")
+    if manifest.get("training_runtime_assets") != TRAINING_RUNTIME_ASSETS:
+        raise RuntimeError("release training runtime asset identity mismatch")
+    for relative, expected_sha256 in TRAINING_RUNTIME_ASSETS.items():
+        asset = root / relative
+        if not asset.is_file() or asset.is_symlink() or _sha256(asset) != expected_sha256:
+            raise RuntimeError(f"release training runtime asset content mismatch: {relative}")
     if manifest.get("host_acceptance_assets") != HOST_ACCEPTANCE_ASSETS:
         raise RuntimeError("release host acceptance asset set mismatch")
     for relative in HOST_ACCEPTANCE_ASSETS:
@@ -580,7 +663,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r15.  The
+    # The SWE dependency closure did not change between v8r2 and v8r16.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

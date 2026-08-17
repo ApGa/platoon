@@ -129,8 +129,8 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
     assert '"containers/probe_toolathlon_python_mcp_launchers.py",' in source
     assert 'print "    pbs-scripts/publish_openreward_v9_gate2_result.py"' not in adapter
     assert 'print "    pbs-scripts/openreward-node-local-init.py"' not in adapter
-    assert "RELEASE_REF=refs/tags/abci-v8r15-376d1b9-18e62c0" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0" in GATE2_V9.read_text()
+    assert "RELEASE_REF=refs/tags/abci-v8r16-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r16-376d1b9-18e62c0" in GATE2_V9.read_text()
 
 
 def test_gate2_archives_and_imports_rollout_rpc_patch_entrypoint():

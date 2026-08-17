@@ -56,6 +56,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("PlatoonArealRLTrainer")
 
+_EXPECTED_RESUME_GLOBAL_STEP_ENV = "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP"
+
 # In single-controller mode AReaL needs only an import path for the remote
 # Megatron engine class.  Importing that class on the host would also import
 # Megatron Bridge and Transformer Engine, whose compiled bindings intentionally
@@ -104,6 +106,53 @@ _WORKFLOW_STAT_KEYS = (
     "num_input_tokens",
     "num_output_tokens",
 )
+
+
+def _training_start_step(recover_info: Any | None) -> int:
+    """Resolve and, when requested, fail-closed attest the recovery boundary."""
+
+    expected_raw = os.environ.get(_EXPECTED_RESUME_GLOBAL_STEP_ENV)
+    if expected_raw is not None and (
+        not expected_raw or any(character not in "0123456789" for character in expected_raw)
+    ):
+        raise RuntimeError(f"{_EXPECTED_RESUME_GLOBAL_STEP_ENV} must be a nonnegative integer")
+
+    if recover_info is None:
+        if expected_raw is not None:
+            raise RuntimeError(
+                f"{_EXPECTED_RESUME_GLOBAL_STEP_ENV}={expected_raw} requires an exact recovery checkpoint"
+            )
+        return 0
+
+    last_step_info = recover_info.last_step_info
+    recovered_step = last_step_info.global_step
+    start_step = last_step_info.next().global_step
+    if expected_raw is not None:
+        expected_step = int(expected_raw)
+        if (
+            isinstance(recovered_step, bool)
+            or not isinstance(recovered_step, int)
+            or recovered_step != expected_step
+            or isinstance(start_step, bool)
+            or not isinstance(start_step, int)
+            or start_step != expected_step + 1
+        ):
+            raise RuntimeError(
+                "recovery checkpoint global step mismatch: "
+                f"expected={expected_step}, recovered={recovered_step!r}, start={start_step!r}"
+            )
+    return start_step
+
+
+def _training_success_candidate_ready(
+    global_step: int,
+    *,
+    actor_update_successful: bool,
+    weight_sync_succeeded: bool,
+) -> bool:
+    """Require real update/sync evidence before evaluating receipt publication."""
+
+    return actor_update_successful and weight_sync_succeeded and candidate_publication_enabled(global_step)
 
 
 def _positive_int(value: Any, *, name: str) -> int:
@@ -1419,7 +1468,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
         total_epochs: int | None = None,
     ):
         config = self.config
-        start_step = self.recover_info.last_step_info.next().global_step if self.recover_info is not None else 0
+        start_step = _training_start_step(self.recover_info)
         deadline_guard = StepDeadlineGuard.from_environment()
         workflow, workflow_kwargs = normalize_remote_workflow(
             workflow,
@@ -1829,7 +1878,11 @@ class PlatoonArealRLTrainer(PPOTrainer):
             ):
                 self._export_and_commit_stats(epoch=epoch, epoch_step=step, global_step=global_step)
 
-            if candidate_publication_enabled(global_step):
+            if _training_success_candidate_ready(
+                global_step,
+                actor_update_successful=actor_update_successful,
+                weight_sync_succeeded=weight_sync_succeeded,
+            ):
                 maybe_publish_training_success_candidate(
                     fileroot=config.cluster.fileroot,
                     experiment=config.experiment_name,

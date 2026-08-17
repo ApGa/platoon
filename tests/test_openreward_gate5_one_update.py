@@ -25,6 +25,18 @@ TRAINER_SOURCE = REPO_ROOT / "platoon/train/areal/rl.py"
 TRAIN_ENTRYPOINT = REPO_ROOT / "plugins/openreward/platoon/openreward/train_scripts/areal/train_areal.py"
 UPSTREAM_TRAINER = REPO_ROOT / "external/AReaL/areal/trainer/rl_trainer.py"
 UPSTREAM_STATS_LOGGER = REPO_ROOT / "external/AReaL/areal/utils/stats_logger.py"
+EXPECTED_RESUME_STEP_ENV = "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP"
+
+
+def _load_isolated_trainer_function(name: str, **injected_globals):
+    """Execute one pure trainer helper without importing CUDA/AReaL."""
+
+    tree = ast.parse(TRAINER_SOURCE.read_text())
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    namespace = {"Any": object, "os": os, **injected_globals}
+    isolated = ast.Module(body=[function], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(isolated), str(TRAINER_SOURCE), "exec"), namespace)
+    return namespace[name]
 
 
 def _merge(base, overlay):
@@ -164,19 +176,20 @@ def test_trainer_hook_is_after_update_sync_recovery_and_stats_commit() -> None:
     train = source[train_start:train_end]
 
     reset = train.index("actor_update_successful = False")
-    prepare = train.index("self.actor.prepare_batch(")
+    collect = train.index("self._collect_rollout_batch(")
     update = train.index("self.actor.ppo_update(optimizer_batch)")
     sync = train.index("self.actor.update_weights(versioned_meta)")
     advance = train.index("self._advance_logical_versions(new_version)", sync)
     synced = train.index("weight_sync_succeeded = True", advance)
     recover = train.index("self._save_recover_checkpoint(")
     commit = train.index("self._export_and_commit_stats(")
-    candidate = train.index("maybe_publish_training_success_candidate(")
+    candidate_guard = train.index("_training_success_candidate_ready(")
+    candidate = train.index("maybe_publish_training_success_candidate(", candidate_guard)
     resume = train.index("self.rollout.resume()", candidate)
 
-    assert reset < prepare < update < sync < advance < synced < recover < commit < candidate < resume
-    assert "optimizer_batch_datums = int(" in train[prepare:update]
-    assert "optimizer_action_tokens = int(" in train[prepare:update]
+    assert reset < collect < update < sync < advance < synced < recover < commit < candidate_guard < candidate < resume
+    assert "optimizer_batch_datums = int(" in train[collect:update]
+    assert "optimizer_action_tokens = int(" in train[collect:update]
     assert "PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH" in train[candidate:resume]
 
     tree = ast.parse(source)
@@ -184,7 +197,11 @@ def test_trainer_hook_is_after_update_sync_recovery_and_stats_commit() -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
             continue
-        if ast.unparse(node.test) != "candidate_publication_enabled(global_step)":
+        if ast.unparse(node.test) != (
+            "_training_success_candidate_ready(global_step, "
+            "actor_update_successful=actor_update_successful, "
+            "weight_sync_succeeded=weight_sync_succeeded)"
+        ):
             continue
         guarded_calls.extend(
             child
@@ -192,6 +209,114 @@ def test_trainer_hook_is_after_update_sync_recovery_and_stats_commit() -> None:
             if isinstance(child, ast.Call) and ast.unparse(child.func) == "maybe_publish_training_success_candidate"
         )
     assert len(guarded_calls) == 1
+
+
+def test_no_update_defers_candidate_but_complete_update_reaches_publisher() -> None:
+    enabled_steps: list[int] = []
+    ready = _load_isolated_trainer_function(
+        "_training_success_candidate_ready",
+        candidate_publication_enabled=lambda step: enabled_steps.append(step) or True,
+    )
+    published: list[int] = []
+
+    def run_hook(*, actor_update_successful: bool, weight_sync_succeeded: bool) -> None:
+        if ready(
+            6,
+            actor_update_successful=actor_update_successful,
+            weight_sync_succeeded=weight_sync_succeeded,
+        ):
+            published.append(6)
+
+    run_hook(actor_update_successful=False, weight_sync_succeeded=False)
+    run_hook(actor_update_successful=True, weight_sync_succeeded=False)
+    run_hook(actor_update_successful=False, weight_sync_succeeded=True)
+    assert published == []
+    # The receipt predicate is not evaluated until direct update/sync evidence
+    # exists, so an empty or non-finite step cannot publish or raise there.
+    assert enabled_steps == []
+
+    run_hook(actor_update_successful=True, weight_sync_succeeded=True)
+    assert enabled_steps == [6]
+    assert published == [6]
+
+
+def test_resume_expectation_is_checked_before_training_side_effects() -> None:
+    source = TRAINER_SOURCE.read_text()
+    train_start = source.index("    def train(")
+    train_end = source.index("\n    def _evaluate_fn", train_start)
+    train = source[train_start:train_end]
+
+    resolve = train.index("start_step = _training_start_step(self.recover_info)")
+    deadline = train.index("StepDeadlineGuard.from_environment()")
+    normalize = train.index("normalize_remote_workflow(")
+    loop = train.index("for global_step in range(")
+    assert resolve < deadline < normalize < loop
+
+
+class _FakeStepInfo:
+    def __init__(self, global_step: int, next_global_step: int) -> None:
+        self.global_step = global_step
+        self._next_global_step = next_global_step
+
+    def next(self) -> SimpleNamespace:
+        return SimpleNamespace(global_step=self._next_global_step)
+
+
+def _fake_recover_info(global_step: int, next_global_step: int) -> SimpleNamespace:
+    return SimpleNamespace(last_step_info=_FakeStepInfo(global_step, next_global_step))
+
+
+def test_resume_expectation_rejects_missing_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_step = _load_isolated_trainer_function(
+        "_training_start_step",
+        _EXPECTED_RESUME_GLOBAL_STEP_ENV=EXPECTED_RESUME_STEP_ENV,
+    )
+    monkeypatch.setenv(EXPECTED_RESUME_STEP_ENV, "5")
+
+    with pytest.raises(RuntimeError, match="requires an exact recovery checkpoint"):
+        start_step(None)
+
+
+def test_resume_expectation_rejects_wrong_recovery_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_step = _load_isolated_trainer_function(
+        "_training_start_step",
+        _EXPECTED_RESUME_GLOBAL_STEP_ENV=EXPECTED_RESUME_STEP_ENV,
+    )
+    monkeypatch.setenv(EXPECTED_RESUME_STEP_ENV, "5")
+
+    with pytest.raises(RuntimeError, match=r"expected=5, recovered=4, start=5"):
+        start_step(_fake_recover_info(4, 5))
+
+
+def test_resume_expectation_accepts_exact_recovery_and_next_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_step = _load_isolated_trainer_function(
+        "_training_start_step",
+        _EXPECTED_RESUME_GLOBAL_STEP_ENV=EXPECTED_RESUME_STEP_ENV,
+    )
+    monkeypatch.setenv(EXPECTED_RESUME_STEP_ENV, "5")
+
+    assert start_step(_fake_recover_info(5, 6)) == 6
+
+
+@pytest.mark.parametrize("value", ("", "-1", "+5", "5.0", " 5"))
+def test_resume_expectation_rejects_noncanonical_integer(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    start_step = _load_isolated_trainer_function(
+        "_training_start_step",
+        _EXPECTED_RESUME_GLOBAL_STEP_ENV=EXPECTED_RESUME_STEP_ENV,
+    )
+    monkeypatch.setenv(EXPECTED_RESUME_STEP_ENV, value)
+
+    with pytest.raises(RuntimeError, match="must be a nonnegative integer"):
+        start_step(_fake_recover_info(5, 6))
 
 
 def test_context_closes_wandb_before_atexit_remote_finalization() -> None:

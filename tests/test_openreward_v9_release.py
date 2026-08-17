@@ -20,8 +20,8 @@ OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
 RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
 NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r15-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r16-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r16-376d1b9-18e62c0"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -120,6 +120,8 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
             },
         },
         "balance_accepted_batches": False,
+        "resume_training_start_guard": "require_loaded_recover_info_global_step_and_next_step_before_loop",
+        "success_candidate_requires_actor_update_and_weight_sync": True,
         "fresh_16node_model_only_lineage": True,
         "fresh_16node_lineage": "v18_qwen38_dense_actor_batch_safe_nccl_heartbeat3600_quote_safe",
         "nonrecursive_16node_dense_contract": {
@@ -149,7 +151,7 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
             "expected_model_shards": 18,
             "torch_nccl_heartbeat_timeout_sec": 3600,
         },
-        "fresh_32node_lineage": "v16_qwen38_dense_actor_batch_safe",
+        "recursive_32node_lineage": "v16_qwen38_dense_resume_global_step5_source_job_2154492",
         "recursive_32node_dense_contract": {
             "actor_backend": "megatron:d20p2t4c1",
             "actor_topology": {
@@ -175,6 +177,81 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
             "actor_megatron_use_deterministic_algorithms": False,
             "actor_mtp_enabled": False,
             "expected_model_shards": 18,
+        },
+        "recursive_32node_resume_contract": {
+            "source_pbs_job_id": "2154492.pbs1",
+            "experiment_name": "abci-or-ta-swe32-q38-v16",
+            "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
+            "recover_mode": "on",
+            "recover_global_step": 5,
+            "next_global_step": 6,
+            "steps_per_epoch": 846,
+            "checkpoint_root": (
+                "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
+                "abci-or-ta-swe32-q38-v16/abci-ta-swe32-rec-q38d-c24-v16-t0"
+            ),
+            "recover_checkpoint_shards": 160,
+            "recover_checkpoint_total_bytes": 383216730907,
+            "checkpoint_layout_sha256": (
+                "6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"
+            ),
+            "checkpoint_sample_manifest_sha256": (
+                "23aea8bf8cc932936d250dd1646d191efe664047169445da1ce2ef67d7168e11"
+            ),
+            "checkpoint_fixed_content_sha256": (
+                "ff7dccef8552800b23f1888cbf646c9b8f8c9019f5e83831264cd75ad6a15e6d"
+            ),
+            "recover_info_content_sha256": (
+                "86e7b2726bcbc86328deb65dae0544c30afec2664d548b349aa87224626cfd3c"
+            ),
+            "runtime_semantic_verification": "pinned_training_sif_before_controller",
+            "dcp_state_keys": 1472,
+            "dcp_storage_entries": 18297,
+            "dcp_storage_coverage": "160_exact_paths_gap_free_and_in_bounds",
+            "lr_scheduler_num_steps": 6,
+            "dataloader_samples_yielded": 208,
+            "dataloader_iterator_yielded": 26,
+            "source_release_root": (
+                "/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0"
+            ),
+            "source_release_ref": "refs/tags/abci-v8r13-376d1b9-18e62c0",
+            "config_sha256": (
+                "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"
+            ),
+            "source_candidate": (
+                "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+                "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
+            ),
+            "source_candidate_sha256": (
+                "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
+            ),
+            "target_receipt": (
+                "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+                "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.json"
+            ),
+            "success_receipt_isolated": True,
+            "checkpoint_artifact_policy": "preserve_in_place_no_rename_move_delete",
+        },
+        "environment_health_monitor": {
+            "toolathlon_endpoint": "/health",
+            "swe_rebench_endpoint": "/health",
+            "toolathlon_worker_count": 8,
+            "toolathlon_worker_base_port": 28100,
+            "toolathlon_direct_worker_endpoint": "/health",
+            "toolathlon_direct_worker_quorum": 5,
+            "toolathlon_affinity_header": "X-Session-ID",
+            "toolathlon_affinity_policy": "nginx_consistent_hash",
+            "toolathlon_public_probe_count": 4,
+            "toolathlon_public_quorum": 1,
+            "all_hosts_and_endpoints_concurrent": True,
+            "per_probe_max_time_seconds": 15,
+            "expected_sweep_bound_seconds": 20,
+            "connect_timeout_seconds": 3,
+            "request_timeout_seconds": 15,
+            "failure_threshold": 10,
+            "check_interval_seconds": 30,
+            "minimum_consecutive_failure_window_seconds": 270,
+            "failure_diagnostic_fields": ["host", "port", "url", "rc", "http", "elapsed"],
         },
         "nonrecursive_16node_ptc": False,
         "recursive_32node_ptc": True,
@@ -319,16 +396,22 @@ def test_v9_verifier_binds_exact_manifest_tag_externals_and_swe_contract() -> No
     assert "HOST_ACCEPTANCE_ASSETS" in source
     assert "release host acceptance asset set mismatch" in source
     assert "release model artifact identity mismatch" in source
+    assert manifest["training_runtime_assets"] == {
+        "platoon/train/areal/rl.py": hashlib.sha256(
+            (REPO_ROOT / "platoon/train/areal/rl.py").read_bytes()
+        ).hexdigest(),
+    }
+    assert "release training runtime asset content mismatch" in source
     assert "_require_model_artifacts()" in source
     assert "release model shard set does not match its pinned 18-shard contract" in source
 
 
-def test_v9_release_binds_fresh_dense_qwen38_recursive_wrapper() -> None:
+def test_v9_release_binds_exact_resume_dense_qwen38_recursive_wrapper() -> None:
     overlay = OVERLAY_PATH.read_text()
     wrapper = RECURSIVE_WRAPPER_PATH.read_text()
 
     subprocess.run(["bash", "-n", str(RECURSIVE_WRAPPER_PATH)], check=True)
-    assert "#PBS -N rasp-h200-32q38-v16" in wrapper
+    assert "#PBS -N rasp-h200-32q38-rs5-v16" in wrapper
     assert f"REPO_ROOT={EXPECTED_RELEASE_ROOT}" in wrapper
     assert f"RELEASE_REF={EXPECTED_RELEASE_REF}" in wrapper
     assert (
@@ -338,6 +421,9 @@ def test_v9_release_binds_fresh_dense_qwen38_recursive_wrapper() -> None:
     ) in wrapper
     assert "EXPERIMENT=abci-or-ta-swe32-q38-v16" in wrapper
     assert "TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0" in wrapper
+    assert "export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
+    assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=5" in wrapper
+    assert "resume-gs5-v8r16.success.json" in wrapper
     assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
     assert "max_head_offpolicyness: 1" in wrapper
