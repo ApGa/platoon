@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 RECOVER_INFO_FILES = {
     "checkpoint_info.json",
     "dataloader_info.pkl",
@@ -31,6 +30,10 @@ CHECKPOINT_METADATA = {
     "common_backend_version": 1,
 }
 CHECKPOINT_SAMPLE_BYTES = 1024 * 1024
+PREUPDATE_BINDING_ID = "qwen38-16-v18-job2155389"
+PREUPDATE_EXPERIMENT = "abci-or-ta-swe16-q38-v18"
+PREUPDATE_TRIAL = "abci-ta-swe16-nr-q38d-c12-v18-t0"
+PREUPDATE_SOURCE_JOB = "2155389.pbs1"
 
 
 def _sha256(path: Path) -> str:
@@ -206,7 +209,24 @@ def _verify_source_release(
         source_release_root / "pbs-scripts/openreward-v9-release.json",
         label="source release manifest",
     )
-    model = manifest.get("model_artifacts", {}).get("recursive_32node")
+    config_name = source_config_relative.name
+    if (
+        "swe32" in expected_experiment
+        and "32node_recursive" in config_name
+        and "swe32" in expected_trial
+    ):
+        model_artifact_key = "recursive_32node"
+        wrapper_name = "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+    elif (
+        "swe16" in expected_experiment
+        and "16node_nonrecursive" in config_name
+        and "swe16" in expected_trial
+    ):
+        model_artifact_key = "nonrecursive_16node"
+        wrapper_name = "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
+    else:
+        raise RuntimeError("source config/experiment/trial topology lineage mismatch")
+    model = manifest.get("model_artifacts", {}).get(model_artifact_key)
     if (
         manifest.get("release_root") != str(source_release_root)
         or manifest.get("release_ref") != source_release_ref
@@ -220,7 +240,7 @@ def _verify_source_release(
         raise RuntimeError("source release/model lineage mismatch")
 
     overlay = source_release_root / "pbs-scripts/openreward-v9-abci.env"
-    wrapper = source_release_root / "pbs-scripts/openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+    wrapper = source_release_root / "pbs-scripts" / wrapper_name
     _require_owned_regular(overlay, label="source release overlay")
     _require_owned_regular(wrapper, label="source release wrapper")
     overlay_text = overlay.read_text(encoding="utf-8")
@@ -314,7 +334,87 @@ def _verify_receipts(
         raise RuntimeError(f"receipt state is missing or ambiguous: {sorted(matching)!r}")
 
 
+def _verify_failed_preupdate_source(
+    *,
+    source_log: Path,
+    expected_source_log_sha256: str,
+    source_pbs_job_id: str,
+    source_release_root: Path,
+    expected_checkpoint_root: Path,
+    expected_experiment: str,
+    expected_trial: str,
+    target_receipt: Path,
+) -> None:
+    """Bind a step-zero recovery to one failed, candidate-free source job."""
+
+    if source_log.name != f"{source_pbs_job_id}.OU":
+        raise RuntimeError("failed source log name does not match its PBS job ID")
+    _require_owned_regular(source_log, label="failed source job log")
+    if _sha256(source_log) != expected_source_log_sha256:
+        raise RuntimeError("failed source job log content digest mismatch")
+    source_commit = _git(source_release_root, "rev-parse", "--verify", "HEAD")
+    log_text = source_log.read_text(encoding="utf-8", errors="strict")
+    required_fragments = {
+        f"openreward_v9_release=PASS release_commit={source_commit}",
+        "[h200-16-v9] accepted gate2=",
+        (
+            "[pbs-openreward] starting host controller "
+            f"experiment={expected_experiment} trial={expected_trial} nodes=16"
+        ),
+        (
+            "Recover INFO: Saved recover checkpoint to "
+            f"{expected_checkpoint_root}/default/recover_checkpoint"
+        ),
+        (
+            "RLTrainer ERROR: Training failed with exception: "
+            "optimizer_batch_datums must be an integer >= 1"
+        ),
+    }
+    missing = sorted(fragment for fragment in required_fragments if fragment not in log_text)
+    if missing:
+        raise RuntimeError(f"failed source job log lineage evidence is incomplete: {missing!r}")
+    if "training_success_candidate=published" in log_text:
+        raise RuntimeError("failed preupdate source log unexpectedly published a success candidate")
+
+    if (
+        not target_receipt.is_absolute()
+        or target_receipt.name
+        != f"{expected_trial}.resume-gs0-v8r17.success.json"
+    ):
+        raise RuntimeError("target preupdate resume receipt identity mismatch")
+    _require_canonical_directory(
+        target_receipt.parent, label="target resume receipt directory"
+    )
+    source_paths = {
+        target_receipt.parent / f"{expected_trial}.success.json",
+        target_receipt.parent / f"{expected_trial}.success.candidate.json",
+        target_receipt.parent / f"{expected_trial}.success.error.json",
+    }
+    if any(path.exists() or path.is_symlink() for path in source_paths):
+        raise RuntimeError("failed preupdate source receipt/candidate state is not absent")
+    target_paths = {
+        target_receipt,
+        target_receipt.with_name(target_receipt.name.removesuffix(".json") + ".candidate.json"),
+        target_receipt.with_name(target_receipt.name.removesuffix(".json") + ".error.json"),
+    }
+    if any(path.exists() or path.is_symlink() for path in target_paths):
+        raise RuntimeError("target resume receipt state is stale")
+    matching = {entry.name for entry in target_receipt.parent.glob(f"{expected_trial}*")}
+    if matching:
+        raise RuntimeError(f"candidate-free receipt state is ambiguous: {sorted(matching)!r}")
+
+
 def verify(args: argparse.Namespace) -> None:
+    if args.allow_preupdate_global_step_zero and (
+        args.preupdate_binding != PREUPDATE_BINDING_ID
+        or args.expected_experiment != PREUPDATE_EXPERIMENT
+        or args.expected_trial != PREUPDATE_TRIAL
+        or args.source_pbs_job_id != PREUPDATE_SOURCE_JOB
+        or args.expected_global_step != 0
+        or args.expected_steps_per_epoch != 846
+        or args.expected_shards != 80
+    ):
+        raise RuntimeError("preupdate resume binding identity/topology mismatch")
     checkpoint_root = args.checkpoint_root
     if checkpoint_root != args.expected_checkpoint_root:
         raise RuntimeError("checkpoint root does not equal the authorized absolute path")
@@ -424,18 +524,30 @@ def verify(args: argparse.Namespace) -> None:
         model_revision=args.model_revision,
         model_snapshot=model_snapshot,
     )
-    _verify_receipts(
-        source_candidate=args.source_candidate,
-        expected_source_candidate_sha256=args.expected_source_candidate_sha256,
-        source_pbs_job_id=args.source_pbs_job_id,
-        expected_checkpoint_root=checkpoint_root,
-        source_config=source_config,
-        expected_config_sha256=args.expected_config_sha256,
-        expected_experiment=args.expected_experiment,
-        expected_trial=args.expected_trial,
-        expected_global_step=args.expected_global_step,
-        target_receipt=args.target_receipt,
-    )
+    if args.allow_preupdate_global_step_zero:
+        _verify_failed_preupdate_source(
+            source_log=args.source_log,
+            expected_source_log_sha256=args.expected_source_log_sha256,
+            source_pbs_job_id=args.source_pbs_job_id,
+            source_release_root=args.source_release_root,
+            expected_checkpoint_root=checkpoint_root,
+            expected_experiment=args.expected_experiment,
+            expected_trial=args.expected_trial,
+            target_receipt=args.target_receipt,
+        )
+    else:
+        _verify_receipts(
+            source_candidate=args.source_candidate,
+            expected_source_candidate_sha256=args.expected_source_candidate_sha256,
+            source_pbs_job_id=args.source_pbs_job_id,
+            expected_checkpoint_root=checkpoint_root,
+            source_config=source_config,
+            expected_config_sha256=args.expected_config_sha256,
+            expected_experiment=args.expected_experiment,
+            expected_trial=args.expected_trial,
+            expected_global_step=args.expected_global_step,
+            target_receipt=args.target_receipt,
+        )
     if _checkpoint_snapshot(checkpoint) != before:
         raise RuntimeError("recover checkpoint changed during authorization")
     print(
@@ -544,6 +656,9 @@ def runtime_main(argv: list[str]) -> None:
     parser.add_argument("--expected-checkpoint-sample-manifest-sha256", required=True)
     parser.add_argument("--expected-fixed-content-sha256", required=True)
     parser.add_argument("--expected-recover-info-content-sha256", required=True)
+    parser.add_argument("--expected-global-step", type=int, required=True)
+    parser.add_argument("--allow-preupdate-global-step-zero", action="store_true")
+    parser.add_argument("--preupdate-binding")
     parser.add_argument("--expected-state-keys", type=int, required=True)
     parser.add_argument("--expected-storage-entries", type=int, required=True)
     parser.add_argument("--expected-shards", type=int, required=True)
@@ -563,11 +678,31 @@ def runtime_main(argv: list[str]) -> None:
             args.expected_state_keys,
             args.expected_storage_entries,
             args.expected_shards,
-            args.expected_lr_num_steps,
             args.expected_samples_yielded,
             args.expected_iterator_yielded,
         )
         < 1
+        or (
+            args.allow_preupdate_global_step_zero
+            and (
+                args.preupdate_binding != PREUPDATE_BINDING_ID
+                or args.expected_global_step != 0
+                or args.expected_lr_num_steps != 0
+                or args.expected_state_keys != 1456
+                or args.expected_storage_entries != 9169
+                or args.expected_shards != 80
+                or args.expected_samples_yielded != 72
+                or args.expected_iterator_yielded != 9
+            )
+        )
+        or (
+            not args.allow_preupdate_global_step_zero
+            and (
+                args.preupdate_binding is not None
+                or args.expected_global_step < 1
+                or args.expected_lr_num_steps != args.expected_global_step + 1
+            )
+        )
     ):
         parser.error("runtime counts/digests are invalid")
     try:
@@ -641,8 +776,12 @@ def main() -> None:
     parser.add_argument("--expected-trial", required=True)
     parser.add_argument("--current-config", type=Path, required=True)
     parser.add_argument("--expected-config-sha256", required=True)
-    parser.add_argument("--source-candidate", type=Path, required=True)
-    parser.add_argument("--expected-source-candidate-sha256", required=True)
+    parser.add_argument("--source-candidate", type=Path)
+    parser.add_argument("--expected-source-candidate-sha256")
+    parser.add_argument("--source-log", type=Path)
+    parser.add_argument("--expected-source-log-sha256")
+    parser.add_argument("--allow-preupdate-global-step-zero", action="store_true")
+    parser.add_argument("--preupdate-binding")
     parser.add_argument("--source-pbs-job-id", required=True)
     parser.add_argument("--source-release-root", type=Path, required=True)
     parser.add_argument("--source-release-ref", required=True)
@@ -653,12 +792,40 @@ def main() -> None:
     parser.add_argument("--target-receipt", type=Path, required=True)
     args = parser.parse_args()
     if (
-        args.expected_global_step < 1
+        (
+            args.allow_preupdate_global_step_zero
+            and (
+                args.expected_global_step != 0
+                or args.preupdate_binding != PREUPDATE_BINDING_ID
+                or args.expected_experiment != PREUPDATE_EXPERIMENT
+                or args.expected_trial != PREUPDATE_TRIAL
+                or args.source_pbs_job_id != PREUPDATE_SOURCE_JOB
+                or args.expected_steps_per_epoch != 846
+                or args.expected_shards != 80
+                or args.source_log is None
+                or re.fullmatch(r"[0-9a-f]{64}", args.expected_source_log_sha256 or "") is None
+                or args.source_candidate is not None
+                or args.expected_source_candidate_sha256 is not None
+            )
+        )
+        or (
+            not args.allow_preupdate_global_step_zero
+            and (
+                args.expected_global_step < 1
+                or args.preupdate_binding is not None
+                or args.source_candidate is None
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", args.expected_source_candidate_sha256 or ""
+                )
+                is None
+                or args.source_log is not None
+                or args.expected_source_log_sha256 is not None
+            )
+        )
         or args.expected_steps_per_epoch < 1
         or args.expected_shards < 1
         or args.expected_total_bytes < 1
         or re.fullmatch(r"[0-9a-f]{64}", args.expected_config_sha256) is None
-        or re.fullmatch(r"[0-9a-f]{64}", args.expected_source_candidate_sha256) is None
         or re.fullmatch(r"[0-9a-f]{64}", args.expected_checkpoint_layout_sha256) is None
         or re.fullmatch(r"[0-9a-f]{64}", args.expected_checkpoint_sample_manifest_sha256) is None
         or re.fullmatch(r"[0-9a-f]{64}", args.expected_fixed_content_sha256) is None

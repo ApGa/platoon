@@ -4,28 +4,30 @@
 #PBS -v RTYPE=rt_HF
 #PBS -l select=16:mpiprocs=8
 #PBS -l place=scatter
-#PBS -l walltime=168:00:00
-#PBS -N rasp-h200-16q38-v18
+#PBS -l walltime=72:00:00
+#PBS -N rasp-h200-16q38-rs0-v18
 #PBS -j oe
 #PBS -o /groups/gai51740/aci18912it/rasp/logs/
 #PBS -m a
 
-# Fresh dense-Qwen3.8 nonrecursive replacement for the v9 16-node job. This launcher is
-# intentionally unusable until the immutable v8r16 release, v9 overlay, release
-# verifier, and PBS all-MCP health gate have been materialized and approved.
-# It retains the full ten-epoch/no-step-cap horizon and keeps PTC disabled.
-# Submitters must pass both immutable-runtime and post-F MCP acceptances as
+# Exact step-0 recovery of the dense-Qwen3.8 16-node nonrecursive lineage
+# created by PBS job 2155389.pbs1. The experiment, trial, checkpoint and W&B
+# lineage remain unchanged; only this PBS job name and its isolated success
+# receipt are new. It retains the full ten-epoch/no-step-cap horizon, PTC stays
+# disabled, and the 3600-second NCCL heartbeat remains mandatory. Submitters
+# must pass both immutable-runtime and post-F MCP acceptances as
 # OPENREWARD_V9_GATE2_RESULT=/absolute/path/to/RESULT and
 # OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT=/absolute/path/to/RESULT.
 
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r16-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r16-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r17-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
+RESUME_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_resume_checkpoint.py
 GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
 ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
 CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v18.yaml
@@ -33,12 +35,17 @@ COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
 ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 EXPERIMENT=abci-or-ta-swe16-q38-v18
 TRIAL=abci-ta-swe16-nr-q38d-c12-v18-t0
-RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
-CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/$(id -un)/${EXPERIMENT}/${TRIAL}
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs0-v8r17.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/abci-or-ta-swe16-q38-v18/abci-ta-swe16-nr-q38d-c12-v18-t0
+SOURCE_LOG=/groups/gai51740/aci18912it/rasp/logs/2155389.pbs1.OU
+SOURCE_RELEASE_ROOT=/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0
+SOURCE_RELEASE_REF=refs/tags/abci-v8r15-376d1b9-18e62c0
+SOURCE_CONFIG_RELATIVE=plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v18.yaml
 
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && -r "${ABCI_ENV}" && \
-    -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" ]] || {
-    echo "[h200-16-v9] ERROR: immutable v8r16 release is incomplete: ${REPO_ROOT}" >&2
+    -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" && \
+    -x "${RESUME_VERIFY}" ]] || {
+    echo "[h200-16-v9] ERROR: immutable v8r17 release is incomplete: ${REPO_ROOT}" >&2
     exit 2
 }
 [[ "$(grep -Fxc '  dynamic_batch_recollection_max_rounds: 1' "${CONFIG}")" == 1 && \
@@ -113,17 +120,34 @@ export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBE
 echo "[h200-16-v9] accepted gate2=${GATE2_RESULT} all-MCP=${ALL_MCP_RESULT}"
 unset release_head release_commit
 
-prior_receipts=("${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json")
-for prior in "${prior_receipts[@]}"; do
-    [[ ! -e "${prior}" && ! -L "${prior}" ]] || {
-        echo "[h200-16-v9] ERROR: refusing stale success artifact; use a fresh trial: ${prior}" >&2
-        exit 2
-    }
-done
-[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || {
-    echo "[h200-16-v9] ERROR: refusing stale checkpoint; this must remain a model-only lineage: ${CHECKPOINT_ROOT}" >&2
-    exit 2
-}
+"${RESUME_VERIFY}" \
+    --checkpoint-root "${CHECKPOINT_ROOT}" \
+    --expected-checkpoint-root "${CHECKPOINT_ROOT}" \
+    --expected-global-step 0 \
+    --expected-steps-per-epoch 846 \
+    --expected-shards 80 \
+    --expected-total-bytes 164220069555 \
+    --expected-checkpoint-layout-sha256 25af0d65a233ee77165489dad0c4bbe43a0a56b6745aa9785eddb23f5b720d0c \
+    --expected-checkpoint-sample-manifest-sha256 3ab2c47cbe8b1d95f1c13ce09d026c57da8752db14749e0ce4011a762dd9505e \
+    --expected-fixed-content-sha256 bb5ec86330f5acfdae93b04e6101d88a7244e702fcda812ccc0a97adcc6bf6da \
+    --expected-recover-info-content-sha256 bfb4e310dc3f28946bd86b437cd8d0267875fd07a627346b151811ab83fd2bdb \
+    --expected-experiment "${EXPERIMENT}" \
+    --expected-trial "${TRIAL}" \
+    --current-config "${CONFIG}" \
+    --expected-config-sha256 0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39 \
+    --source-log "${SOURCE_LOG}" \
+    --expected-source-log-sha256 2497762da279fd93486521b9bf8dad78c02d0fc0bec8f39e7172d188cbcdd552 \
+    --allow-preupdate-global-step-zero \
+    --preupdate-binding qwen38-16-v18-job2155389 \
+    --source-pbs-job-id 2155389.pbs1 \
+    --source-release-root "${SOURCE_RELEASE_ROOT}" \
+    --source-release-ref "${SOURCE_RELEASE_REF}" \
+    --source-config-relative "${SOURCE_CONFIG_RELATIVE}" \
+    --model-repository "${OPENREWARD_QWEN38_MODEL_REPOSITORY}" \
+    --model-revision "${OPENREWARD_QWEN38_MODEL_REVISION}" \
+    --model-snapshot "${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" \
+    --target-receipt "${RECEIPT}"
+echo "[h200-16-v9] authorized exact recovery checkpoint=${CHECKPOINT_ROOT} global_step=0"
 
 export OPENREWARD_EXPECTED_NNODES=16
 export OPENREWARD_EXPECTED_MODEL_SHARDS=18
@@ -132,6 +156,21 @@ export OPENREWARD_EXPECTED_RECURSIVE=0
 export OPENREWARD_EXPECTED_PTC=0
 export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
 export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1
+export OPENREWARD_ALLOW_PREUPDATE_RESUME=1
+export OPENREWARD_PREUPDATE_RESUME_BINDING=qwen38-16-v18-job2155389
+export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT=${CHECKPOINT_ROOT}
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256=25af0d65a233ee77165489dad0c4bbe43a0a56b6745aa9785eddb23f5b720d0c
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256=3ab2c47cbe8b1d95f1c13ce09d026c57da8752db14749e0ce4011a762dd9505e
+export OPENREWARD_EXPECTED_RESUME_FIXED_CONTENT_SHA256=bb5ec86330f5acfdae93b04e6101d88a7244e702fcda812ccc0a97adcc6bf6da
+export OPENREWARD_EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256=bfb4e310dc3f28946bd86b437cd8d0267875fd07a627346b151811ab83fd2bdb
+export OPENREWARD_EXPECTED_RESUME_DCP_STATE_KEYS=1456
+export OPENREWARD_EXPECTED_RESUME_DCP_STORAGE_ENTRIES=9169
+export OPENREWARD_EXPECTED_RESUME_DCP_SHARDS=80
+export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=0
+export OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED=72
+export OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED=9
 export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
 export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
 export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0

@@ -10,20 +10,27 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PBS_ROOT = REPO_ROOT / "pbs-scripts"
 VERIFY = PBS_ROOT / "verify_openreward_resume_checkpoint.py"
 COMMON = PBS_ROOT / "openreward-ta-swe-prealloc-common.sh"
 WRAPPER = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+WRAPPER_16 = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
 EXPERIMENT = "abci-or-ta-swe32-q38-v16"
 TRIAL = "abci-ta-swe32-rec-q38d-c24-v16-t0"
+EXPERIMENT_16 = "abci-or-ta-swe16-q38-v18"
+TRIAL_16 = "abci-ta-swe16-nr-q38d-c12-v18-t0"
 MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 CONFIG_RELATIVE = Path(
     "plugins/openreward/platoon/openreward/configs/areal/"
     "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
     "qwen38_dense_c24_ta20_v16.yaml"
+)
+CONFIG_RELATIVE_16 = Path(
+    "plugins/openreward/platoon/openreward/configs/areal/"
+    "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+    "qwen38_dense_c12_ta20_v18.yaml"
 )
 
 
@@ -77,15 +84,23 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path]]:
-    checkpoint_root = tmp_path / "checkpoints" / EXPERIMENT / TRIAL
+def _build_authorized_fixture(
+    tmp_path: Path, *, preupdate: bool = False
+) -> tuple[list[str], dict[str, Path]]:
+    experiment = EXPERIMENT_16 if preupdate else EXPERIMENT
+    trial = TRIAL_16 if preupdate else TRIAL
+    config_relative = CONFIG_RELATIVE_16 if preupdate else CONFIG_RELATIVE
+    shard_count = 80 if preupdate else 160
+    global_step = 0 if preupdate else 5
+    source_job_id = "2155389.pbs1" if preupdate else "2154492.pbs1"
+    checkpoint_root = tmp_path / "checkpoints" / experiment / trial
     checkpoint = checkpoint_root / "default" / "recover_checkpoint"
     recover_info = checkpoint_root / "recover_info"
     checkpoint.mkdir(parents=True)
     recover_info.mkdir()
 
     checkpoint_files: list[Path] = []
-    for ordinal in range(160):
+    for ordinal in range(shard_count):
         shard = checkpoint / f"__{ordinal}_0.distcp"
         shard.write_bytes(f"shard-{ordinal}".encode())
         checkpoint_files.append(shard)
@@ -109,16 +124,23 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
 
     _write_json(
         recover_info / "step_info.json",
-        {"epoch": 0, "epoch_step": 5, "global_step": 5, "steps_per_epoch": 846},
+        {
+            "epoch": 0,
+            "epoch_step": global_step,
+            "global_step": global_step,
+            "steps_per_epoch": 846,
+        },
     )
-    _write_json(recover_info / "stats_logger_info.json", {"last_commit_step": 4})
+    _write_json(
+        recover_info / "stats_logger_info.json", {"last_commit_step": global_step - 1}
+    )
     _write_json(
         recover_info / "checkpoint_info.json",
         {
             "step": {
                 "frequency_steps": 1,
-                "steps": 6,
-                "last_steps": 6,
+                "steps": global_step + 1,
+                "last_steps": global_step + 1,
                 "interval_steps": 1,
             }
         },
@@ -132,11 +154,11 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
     model_snapshot = tmp_path / "model-snapshot"
     model_snapshot.mkdir()
     source_release = tmp_path / "source-release"
-    source_config = source_release / CONFIG_RELATIVE
+    source_config = source_release / config_relative
     source_config.parent.mkdir(parents=True)
     config_bytes = (
-        f"experiment_name: {EXPERIMENT}\n"
-        f"trial_name: {TRIAL}\n"
+        f"experiment_name: {experiment}\n"
+        f"trial_name: {trial}\n"
         "recover:\n  mode: auto\n"
     ).encode()
     source_config.write_bytes(config_bytes)
@@ -149,7 +171,7 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
             "release_root": str(source_release),
             "release_ref": source_ref,
             "model_artifacts": {
-                "recursive_32node": {
+                ("nonrecursive_16node" if preupdate else "recursive_32node"): {
                     "repository": MODEL_REPOSITORY,
                     "revision": MODEL_REVISION,
                     "snapshot_path": str(model_snapshot),
@@ -175,16 +197,20 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
     source_wrapper = (
         source_release
         / "pbs-scripts"
-        / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+        / (
+            "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
+            if preupdate
+            else "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+        )
     )
     source_wrapper.write_text(
         "\n".join(
             (
                 f"REPO_ROOT={source_release}",
                 f"RELEASE_REF={source_ref}",
-                f"EXPERIMENT={EXPERIMENT}",
-                f"TRIAL={TRIAL}",
-                f"CONFIG=${{REPO_ROOT}}/{CONFIG_RELATIVE}",
+                f"EXPERIMENT={experiment}",
+                f"TRIAL={trial}",
+                f"CONFIG=${{REPO_ROOT}}/{config_relative}",
             )
         )
         + "\n",
@@ -202,24 +228,59 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
 
     receipt_dir = tmp_path / "receipts"
     receipt_dir.mkdir()
-    source_candidate = receipt_dir / f"{TRIAL}.success.candidate.json"
-    _write_json(
-        source_candidate,
-        {
-            "schema_version": 2,
-            "gate": "abci-openreward-one-update-success",
-            "kind": "candidate",
-            "pbs_job_id": "2154492.pbs1",
-            "experiment_name": EXPERIMENT,
-            "trial_name": TRIAL,
-            "config_path": str(source_config),
-            "config_sha256": _sha256(source_config),
-            "global_step": 0,
-            "recover": {"checkpoint_root": str(checkpoint_root), "global_step": 0},
-            "wandb": {"run_id": f"{EXPERIMENT}_{TRIAL}_train"},
-        },
+    source_candidate = receipt_dir / f"{trial}.success.candidate.json"
+    source_log = tmp_path / f"{source_job_id}.OU"
+    if preupdate:
+        source_commit = subprocess.run(
+            ["git", "-C", str(source_release), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        source_log.write_text(
+            "\n".join(
+                (
+                    f"openreward_v9_release=PASS release_commit={source_commit}",
+                    "[h200-16-v9] accepted gate2=/gate2 all-MCP=/all-mcp",
+                    (
+                        "[pbs-openreward] starting host controller "
+                        f"experiment={experiment} trial={trial} nodes=16"
+                    ),
+                    (
+                        "Recover INFO: Saved recover checkpoint to "
+                        f"{checkpoint_root}/default/recover_checkpoint"
+                    ),
+                    (
+                        "RLTrainer ERROR: Training failed with exception: "
+                        "optimizer_batch_datums must be an integer >= 1"
+                    ),
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        _write_json(
+            source_candidate,
+            {
+                "schema_version": 2,
+                "gate": "abci-openreward-one-update-success",
+                "kind": "candidate",
+                "pbs_job_id": source_job_id,
+                "experiment_name": experiment,
+                "trial_name": trial,
+                "config_path": str(source_config),
+                "config_sha256": _sha256(source_config),
+                "global_step": 0,
+                "recover": {"checkpoint_root": str(checkpoint_root), "global_step": 0},
+                "wandb": {"run_id": f"{experiment}_{trial}_train"},
+            },
+        )
+    target_receipt = receipt_dir / (
+        f"{trial}.resume-gs0-v8r17.success.json"
+        if preupdate
+        else f"{trial}.resume-gs5-v8r16.success.json"
     )
-    target_receipt = receipt_dir / f"{TRIAL}.resume-gs5-v8r16.success.json"
     total_bytes = sum(path.stat().st_size for path in checkpoint.iterdir())
     command = [
         str(VERIFY),
@@ -228,11 +289,11 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
         "--expected-checkpoint-root",
         str(checkpoint_root),
         "--expected-global-step",
-        "5",
+        str(global_step),
         "--expected-steps-per-epoch",
         "846",
         "--expected-shards",
-        "160",
+        str(shard_count),
         "--expected-total-bytes",
         str(total_bytes),
         "--expected-checkpoint-layout-sha256",
@@ -244,25 +305,21 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
         "--expected-recover-info-content-sha256",
         _content_manifest_sha256(list(recover_info.iterdir())),
         "--expected-experiment",
-        EXPERIMENT,
+        experiment,
         "--expected-trial",
-        TRIAL,
+        trial,
         "--current-config",
         str(current_config),
         "--expected-config-sha256",
         _sha256(source_config),
-        "--source-candidate",
-        str(source_candidate),
-        "--expected-source-candidate-sha256",
-        _sha256(source_candidate),
         "--source-pbs-job-id",
-        "2154492.pbs1",
+        source_job_id,
         "--source-release-root",
         str(source_release),
         "--source-release-ref",
         source_ref,
         "--source-config-relative",
-        str(CONFIG_RELATIVE),
+        str(config_relative),
         "--model-repository",
         MODEL_REPOSITORY,
         "--model-revision",
@@ -272,11 +329,29 @@ def _build_authorized_fixture(tmp_path: Path) -> tuple[list[str], dict[str, Path
         "--target-receipt",
         str(target_receipt),
     ]
+    if preupdate:
+        command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
+            "--source-log",
+            str(source_log),
+            "--expected-source-log-sha256",
+            _sha256(source_log),
+            "--allow-preupdate-global-step-zero",
+            "--preupdate-binding",
+            "qwen38-16-v18-job2155389",
+        ]
+    else:
+        command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
+            "--source-candidate",
+            str(source_candidate),
+            "--expected-source-candidate-sha256",
+            _sha256(source_candidate),
+        ]
     return command, {
         "checkpoint": checkpoint,
         "recover_info": recover_info,
         "receipt_dir": receipt_dir,
         "target_receipt": target_receipt,
+        "source_log": source_log,
     }
 
 
@@ -289,6 +364,63 @@ def test_resume_verifier_executes_complete_authorization(tmp_path: Path) -> None
         "openreward_resume_checkpoint=PASS global_step=5 shards=160 "
         in result.stdout
     )
+
+
+def test_preupdate_resume_verifier_executes_candidate_free_step_zero_authorization(
+    tmp_path: Path,
+) -> None:
+    command, _ = _build_authorized_fixture(tmp_path, preupdate=True)
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "openreward_resume_checkpoint=PASS global_step=0 shards=80 " in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_error"),
+    (
+        ("missing_shard", "shard ordinals mismatch"),
+        ("same_size_shard", "bounded-sample manifest digest mismatch"),
+        ("wrong_step", "recover step info does not equal"),
+        ("unexpected_source_candidate", "source receipt/candidate state is not absent"),
+        ("unexpected_source_success", "source receipt/candidate state is not absent"),
+    ),
+)
+def test_preupdate_resume_rejects_missing_corrupt_wrong_step_and_source_candidate(
+    tmp_path: Path,
+    corruption: str,
+    expected_error: str,
+) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, preupdate=True)
+    if corruption == "missing_shard":
+        (paths["checkpoint"] / "__79_0.distcp").unlink()
+    elif corruption == "same_size_shard":
+        shard = paths["checkpoint"] / "__79_0.distcp"
+        shard.write_bytes(b"X" * shard.stat().st_size)
+    elif corruption == "wrong_step":
+        _write_json(
+            paths["recover_info"] / "step_info.json",
+            {"epoch": 0, "epoch_step": 1, "global_step": 1, "steps_per_epoch": 846},
+        )
+    elif corruption == "unexpected_source_candidate":
+        _write_json(paths["receipt_dir"] / f"{TRIAL_16}.success.candidate.json", {})
+    else:
+        _write_json(paths["receipt_dir"] / f"{TRIAL_16}.success.json", {})
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
+def test_step_zero_resume_requires_explicit_preupdate_mode(tmp_path: Path) -> None:
+    command, _ = _build_authorized_fixture(tmp_path, preupdate=True)
+    command.remove("--allow-preupdate-global-step-zero")
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "expected steps/counts/digests are invalid" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -517,3 +649,30 @@ def test_resume_wrapper_and_common_bind_explicit_recovery_without_yaml_change() 
     assert '"${PLATOON_TRAINING_SIF}"' in common
     assert "http://${host}:${OPENREWARD_PORT}/health" in common
     assert "http://${host}:${OPENREWARD_SWE_REBENCH_PORT}/health" in common
+
+
+def test_preupdate_resume_wrapper_binds_exact_step_zero_checkpoint_and_heartbeat() -> None:
+    wrapper = WRAPPER_16.read_text(encoding="utf-8")
+    common = COMMON.read_text(encoding="utf-8")
+
+    subprocess.run(["bash", "-n", str(WRAPPER_16)], check=True)
+    assert "#PBS -N rasp-h200-16q38-rs0-v18" in wrapper
+    assert "#PBS -l walltime=72:00:00" in wrapper
+    assert "EXPERIMENT=abci-or-ta-swe16-q38-v18" in wrapper
+    assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v18-t0" in wrapper
+    assert "--expected-global-step 0" in wrapper
+    assert "--expected-shards 80" in wrapper
+    assert "--expected-total-bytes 164220069555" in wrapper
+    assert "--allow-preupdate-global-step-zero" in wrapper
+    assert "--preupdate-binding qwen38-16-v18-job2155389" in wrapper
+    assert "--source-log \"${SOURCE_LOG}\"" in wrapper
+    assert "--source-candidate" not in wrapper
+    assert "export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
+    assert "export OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper
+    assert "export OPENREWARD_PREUPDATE_RESUME_BINDING=qwen38-16-v18-job2155389" in wrapper
+    assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
+    assert "export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=0" in wrapper
+    assert "resume-gs0-v8r17.success.json" in wrapper
+    assert "OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
+    assert "preupdate resume requires exact recovered global step 0" in common
+    assert "normal resume requires LR scheduler step equal recovered global step plus one" in common

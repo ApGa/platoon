@@ -20,8 +20,8 @@ OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
 RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
 NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r16-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r16-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r17-376d1b9-18e62c0"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -122,8 +122,8 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         "balance_accepted_batches": False,
         "resume_training_start_guard": "require_loaded_recover_info_global_step_and_next_step_before_loop",
         "success_candidate_requires_actor_update_and_weight_sync": True,
-        "fresh_16node_model_only_lineage": True,
-        "fresh_16node_lineage": "v18_qwen38_dense_actor_batch_safe_nccl_heartbeat3600_quote_safe",
+        "fresh_16node_model_only_lineage": False,
+        "fresh_16node_lineage": "v18_qwen38_dense_resume_global_step0_source_job_2155389",
         "nonrecursive_16node_dense_contract": {
             "actor_backend": "megatron:d10p2t4c1",
             "actor_topology": {
@@ -150,6 +150,62 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
             "actor_mtp_enabled": False,
             "expected_model_shards": 18,
             "torch_nccl_heartbeat_timeout_sec": 3600,
+        },
+        "nonrecursive_16node_resume_contract": {
+            "source_pbs_job_id": "2155389.pbs1",
+            "experiment_name": "abci-or-ta-swe16-q38-v18",
+            "trial_name": "abci-ta-swe16-nr-q38d-c12-v18-t0",
+            "recover_mode": "on",
+            "allow_preupdate_global_step_zero": True,
+            "preupdate_binding_id": "qwen38-16-v18-job2155389",
+            "recover_global_step": 0,
+            "next_global_step": 1,
+            "steps_per_epoch": 846,
+            "checkpoint_root": (
+                "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
+                "abci-or-ta-swe16-q38-v18/abci-ta-swe16-nr-q38d-c12-v18-t0"
+            ),
+            "recover_checkpoint_shards": 80,
+            "recover_checkpoint_total_bytes": 164220069555,
+            "checkpoint_layout_sha256": (
+                "25af0d65a233ee77165489dad0c4bbe43a0a56b6745aa9785eddb23f5b720d0c"
+            ),
+            "checkpoint_sample_manifest_sha256": (
+                "3ab2c47cbe8b1d95f1c13ce09d026c57da8752db14749e0ce4011a762dd9505e"
+            ),
+            "checkpoint_fixed_content_sha256": (
+                "bb5ec86330f5acfdae93b04e6101d88a7244e702fcda812ccc0a97adcc6bf6da"
+            ),
+            "recover_info_content_sha256": (
+                "bfb4e310dc3f28946bd86b437cd8d0267875fd07a627346b151811ab83fd2bdb"
+            ),
+            "runtime_semantic_verification": "pinned_training_sif_before_controller",
+            "dcp_state_keys": 1456,
+            "dcp_storage_entries": 9169,
+            "dcp_storage_coverage": "80_exact_paths_gap_free_and_in_bounds",
+            "lr_scheduler_num_steps": 0,
+            "dataloader_samples_yielded": 72,
+            "dataloader_iterator_yielded": 9,
+            "source_release_root": (
+                "/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0"
+            ),
+            "source_release_ref": "refs/tags/abci-v8r15-376d1b9-18e62c0",
+            "config_sha256": (
+                "0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39"
+            ),
+            "source_log": "/groups/gai51740/aci18912it/rasp/logs/2155389.pbs1.OU",
+            "source_log_sha256": (
+                "2497762da279fd93486521b9bf8dad78c02d0fc0bec8f39e7172d188cbcdd552"
+            ),
+            "source_candidate_absent": True,
+            "source_success_receipt_absent": True,
+            "target_receipt": (
+                "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+                "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r17.success.json"
+            ),
+            "success_receipt_isolated": True,
+            "pbs_walltime_hours": 72,
+            "checkpoint_artifact_policy": "preserve_in_place_no_rename_move_delete",
         },
         "recursive_32node_lineage": "v16_qwen38_dense_resume_global_step5_source_job_2154492",
         "recursive_32node_dense_contract": {
@@ -439,11 +495,12 @@ def test_v9_release_binds_exact_resume_dense_qwen38_recursive_wrapper() -> None:
     )
 
 
-def test_v9_release_binds_fresh_dense_qwen38_nonrecursive_wrapper() -> None:
+def test_v9_release_binds_step_zero_resume_dense_qwen38_nonrecursive_wrapper() -> None:
     wrapper = NONRECURSIVE_WRAPPER_PATH.read_text()
 
     subprocess.run(["bash", "-n", str(NONRECURSIVE_WRAPPER_PATH)], check=True)
-    assert "#PBS -N rasp-h200-16q38-v18" in wrapper
+    assert "#PBS -N rasp-h200-16q38-rs0-v18" in wrapper
+    assert "#PBS -l walltime=72:00:00" in wrapper
     assert f"REPO_ROOT={EXPECTED_RELEASE_ROOT}" in wrapper
     assert f"RELEASE_REF={EXPECTED_RELEASE_REF}" in wrapper
     assert (
@@ -453,6 +510,10 @@ def test_v9_release_binds_fresh_dense_qwen38_nonrecursive_wrapper() -> None:
     ) in wrapper
     assert "EXPERIMENT=abci-or-ta-swe16-q38-v18" in wrapper
     assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v18-t0" in wrapper
+    assert "export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
+    assert "export OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper
+    assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
+    assert "resume-gs0-v8r17.success.json" in wrapper
     assert "export OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
     assert (
         "export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="

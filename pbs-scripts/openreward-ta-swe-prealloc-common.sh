@@ -61,6 +61,8 @@ EXPECTED_EXPERIMENT=${OPENREWARD_EXPECTED_EXPERIMENT_NAME:?OPENREWARD_EXPECTED_E
 EXPECTED_TRIAL=${OPENREWARD_EXPECTED_TRIAL_NAME:?OPENREWARD_EXPECTED_TRIAL_NAME is required}
 EXPECTED_NCCL_HEARTBEAT_TIMEOUT=${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}
 REQUIRE_EXISTING_RECOVERY=${OPENREWARD_REQUIRE_EXISTING_RECOVERY:-0}
+ALLOW_PREUPDATE_RESUME=${OPENREWARD_ALLOW_PREUPDATE_RESUME:-0}
+PREUPDATE_RESUME_BINDING=${OPENREWARD_PREUPDATE_RESUME_BINDING:-}
 EXPECTED_RESUME_GLOBAL_STEP=${OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP:-}
 EXPECTED_RESUME_CHECKPOINT_ROOT=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT:-}
 EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256:-}
@@ -114,8 +116,10 @@ require_uint OPENREWARD_EXPECTED_MODEL_SHARDS "${EXPECTED_MODEL_SHARDS}" 1
     die "OPENREWARD_EXPECTED_PTC must be 0 or 1 when set"
 [[ "${REQUIRE_EXISTING_RECOVERY}" == 0 || "${REQUIRE_EXISTING_RECOVERY}" == 1 ]] || \
     die "OPENREWARD_REQUIRE_EXISTING_RECOVERY must be 0 or 1"
+[[ "${ALLOW_PREUPDATE_RESUME}" == 0 || "${ALLOW_PREUPDATE_RESUME}" == 1 ]] || \
+    die "OPENREWARD_ALLOW_PREUPDATE_RESUME must be 0 or 1"
 if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
-    require_uint OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP "${EXPECTED_RESUME_GLOBAL_STEP}" 1
+    require_uint OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP "${EXPECTED_RESUME_GLOBAL_STEP}" 0
     [[ "${EXPECTED_RESUME_CHECKPOINT_ROOT}" == /* && \
         -d "${EXPECTED_RESUME_CHECKPOINT_ROOT}" && \
         ! -L "${EXPECTED_RESUME_CHECKPOINT_ROOT}" && \
@@ -134,13 +138,37 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
     require_uint OPENREWARD_EXPECTED_RESUME_DCP_STORAGE_ENTRIES \
         "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" 1
     require_uint OPENREWARD_EXPECTED_RESUME_DCP_SHARDS "${EXPECTED_RESUME_DCP_SHARDS}" 1
-    require_uint OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS "${EXPECTED_RESUME_LR_NUM_STEPS}" 1
+    require_uint OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS "${EXPECTED_RESUME_LR_NUM_STEPS}" 0
     require_uint OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED "${EXPECTED_RESUME_SAMPLES_YIELDED}" 1
     require_uint OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED \
         "${EXPECTED_RESUME_ITERATOR_YIELDED}" 1
-    ((10#${EXPECTED_RESUME_LR_NUM_STEPS} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1)) || \
-        die "resume LR scheduler step must equal recovered global step plus one"
+    if [[ "${ALLOW_PREUPDATE_RESUME}" == 1 ]]; then
+        [[ "${PREUPDATE_RESUME_BINDING}" == qwen38-16-v18-job2155389 && \
+            "${EXPECTED_NNODES}" == 16 && "${EXPECTED_RECURSIVE}" == 0 && \
+            "${EXPECTED_PTC}" == 0 && \
+            "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe16-q38-v18 && \
+            "${EXPECTED_TRIAL}" == abci-ta-swe16-nr-q38d-c12-v18-t0 && \
+            "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" == 3600 && \
+            "${EXPECTED_RESUME_DCP_STATE_KEYS}" == 1456 && \
+            "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" == 9169 && \
+            "${EXPECTED_RESUME_DCP_SHARDS}" == 80 && \
+            "${EXPECTED_RESUME_SAMPLES_YIELDED}" == 72 && \
+            "${EXPECTED_RESUME_ITERATOR_YIELDED}" == 9 ]] || \
+            die "preupdate resume is restricted to the exact Qwen3.8 16-node v18 job-2155389 binding"
+        ((10#${EXPECTED_RESUME_GLOBAL_STEP} == 0 && 10#${EXPECTED_RESUME_LR_NUM_STEPS} == 0)) || \
+            die "preupdate resume requires exact recovered global step 0 and LR scheduler step 0"
+    else
+        [[ -z "${PREUPDATE_RESUME_BINDING}" ]] || \
+            die "OPENREWARD_PREUPDATE_RESUME_BINDING requires preupdate resume mode"
+        ((10#${EXPECTED_RESUME_GLOBAL_STEP} >= 1 && \
+          10#${EXPECTED_RESUME_LR_NUM_STEPS} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1)) || \
+            die "normal resume requires LR scheduler step equal recovered global step plus one"
+    fi
 else
+    [[ "${ALLOW_PREUPDATE_RESUME}" == 0 ]] || \
+        die "OPENREWARD_ALLOW_PREUPDATE_RESUME requires existing recovery"
+    [[ -z "${PREUPDATE_RESUME_BINDING}" ]] || \
+        die "OPENREWARD_PREUPDATE_RESUME_BINDING requires existing recovery"
     for unexpected_resume_value in \
         "${EXPECTED_RESUME_GLOBAL_STEP}" \
         "${EXPECTED_RESUME_CHECKPOINT_ROOT}" \
@@ -688,6 +716,13 @@ cuda_lib_dirs=$(find "${OPENREWARD_WORKER_JOB_VENV}/lib/python3.12/site-packages
 
 if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
     echo "[pbs-openreward] validating exact recovery semantics inside the pinned training SIF"
+    resume_runtime_mode_args=()
+    if [[ "${ALLOW_PREUPDATE_RESUME}" == 1 ]]; then
+        resume_runtime_mode_args+=(
+            --allow-preupdate-global-step-zero
+            --preupdate-binding "${PREUPDATE_RESUME_BINDING}"
+        )
+    fi
     "${RUNTIME}" exec --nv --cleanenv --containall --no-home \
         --no-mount home,cwd,bind-paths \
         --bind /etc/resolv.conf:/etc/resolv.conf:ro \
@@ -713,12 +748,15 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
             --expected-fixed-content-sha256 "${EXPECTED_RESUME_FIXED_CONTENT_SHA256}" \
             --expected-recover-info-content-sha256 \
                 "${EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256}" \
+            --expected-global-step "${EXPECTED_RESUME_GLOBAL_STEP}" \
+            "${resume_runtime_mode_args[@]}" \
             --expected-state-keys "${EXPECTED_RESUME_DCP_STATE_KEYS}" \
             --expected-storage-entries "${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}" \
             --expected-shards "${EXPECTED_RESUME_DCP_SHARDS}" \
             --expected-lr-num-steps "${EXPECTED_RESUME_LR_NUM_STEPS}" \
             --expected-samples-yielded "${EXPECTED_RESUME_SAMPLES_YIELDED}" \
             --expected-iterator-yielded "${EXPECTED_RESUME_ITERATOR_YIELDED}"
+    unset resume_runtime_mode_args
 fi
 
 echo "[pbs-openreward] building/validating separately pinned host-controller venv key=${OPENREWARD_CONTROLLER_ENV_KEY}"
