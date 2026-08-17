@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
-from typing import Any, Iterable, Protocol, runtime_checkable
+from typing import Any, Iterable, Literal, Protocol, TypeAlias, runtime_checkable
 
 from platoon.envs.base import Task
 from platoon.episode.context import (
@@ -205,9 +205,23 @@ class BudgetExceededError(ValueError):
         self.guidance = guidance
 
 
+SubagentDepthScope: TypeAlias = Literal[
+    "policy",
+    "verifier_root",
+    "verifier_helper",
+    "verifier_descendant",
+]
+
+
 @runtime_checkable
 class BudgetTracker(Protocol):
-    def reserve_budget(self, requested_budget: float, raise_on_failure: bool = False) -> bool: ...
+    def reserve_budget(
+        self,
+        requested_budget: float,
+        raise_on_failure: bool = False,
+        *,
+        child_depth_scope: SubagentDepthScope = "policy",
+    ) -> bool: ...
 
     def release_budget(self, amount_to_release: float) -> None: ...
 
@@ -267,7 +281,14 @@ class StepBudgetTracker(BudgetTracker):
         )
         return remaining
 
-    def reserve_budget(self, requested_budget: float, raise_on_failure: bool = False) -> bool:
+    def reserve_budget(
+        self,
+        requested_budget: float,
+        raise_on_failure: bool = False,
+        *,
+        child_depth_scope: SubagentDepthScope = "policy",
+    ) -> bool:
+        _ = child_depth_scope
         curr_traj_id = current_trajectory.get().id
         if self.remaining_budget() < requested_budget:
             if raise_on_failure:
@@ -329,8 +350,36 @@ class DepthAwareStepBudgetTracker(BudgetTracker):
     def remaining_budget_for(self, trajectory_id: str) -> float:
         return self._allocated_budget(trajectory_id) - self.used_budget_for(trajectory_id)
 
-    def reserve_budget(self, requested_budget: float, raise_on_failure: bool = False) -> bool:
-        """Check depth constraint only; subagent steps are not reserved from the parent."""
+    def reserve_budget(
+        self,
+        requested_budget: float,
+        raise_on_failure: bool = False,
+        *,
+        child_depth_scope: SubagentDepthScope = "policy",
+    ) -> bool:
+        """Check policy and synthetic-verifier depth constraints.
+
+        Synthetic reward verifiers are outside the policy recursion tree, so a
+        verifier root and one verifier helper level remain admissible even when
+        their physical trajectory depth exceeds ``max_depth``.  A helper may
+        not recursively delegate again; this keeps the exception narrow and
+        prevents an unbounded synthetic verifier tree.
+        """
+
+        _ = requested_budget
+        if child_depth_scope in {"verifier_root", "verifier_helper"}:
+            return True
+        if child_depth_scope == "verifier_descendant":
+            if raise_on_failure:
+                raise BudgetExceededError(
+                    "Verifier helper agents may not launch further subagents.",
+                    reason="verifier_depth",
+                    guidance=(
+                        "The synthetic verifier tree allows one helper level. "
+                        "Inspect the evidence directly and return it to the verifier."
+                    ),
+                )
+            return False
         if self.max_depth is not None:
             curr_traj_id = current_trajectory.get().id
             current_depth = self._trajectory_depth(curr_traj_id)

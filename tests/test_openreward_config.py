@@ -1268,7 +1268,7 @@ async def test_openreward_read_only_fork_has_no_child_submission_tool(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_openreward_shared_fork_keeps_reward_verifier_read_only(monkeypatch):
+async def test_openreward_reward_verifier_gets_shared_environment_tools(monkeypatch):
     env_mod = _load_openreward_env_module(monkeypatch)
     from platoon.envs.base import SubTask, Task
 
@@ -1295,8 +1295,12 @@ async def test_openreward_shared_fork_keeps_reward_verifier_read_only(monkeypatc
     parent_tools = {
         "get_task": object(),
         "view": object(),
+        "bash": object(),
         "str_replace": object(),
+        "call_tool": object(),
+        "python_execute": object(),
         "submit_answer": object(),
+        "claim_done": object(),
     }
     parent = env_mod.OpenRewardOpenHandsEnv(
         task=root,
@@ -1308,9 +1312,49 @@ async def test_openreward_shared_fork_keeps_reward_verifier_read_only(monkeypatc
 
     verifier = await parent.fork(verifier_task)
 
-    assert verifier._subagent_environment_access == "read_only"
-    assert set(verifier._shared_openreward_tools) == {"get_task", "view"}
+    assert verifier._subagent_environment_access == "shared"
+    assert set(verifier._shared_openreward_tools) == {
+        "get_task",
+        "view",
+        "bash",
+        "str_replace",
+        "call_tool",
+        "python_execute",
+    }
+    assert "submit_answer" not in verifier._shared_openreward_tools
+    assert "claim_done" not in verifier._shared_openreward_tools
     assert verifier._workspace == parent._workspace
+
+
+@pytest.mark.asyncio
+async def test_openreward_reward_verifier_prompt_prefers_direct_tools(monkeypatch):
+    env_mod = _load_openreward_env_module(monkeypatch)
+    from platoon.envs.base import SubTask, Task
+
+    root = Task(id="root", goal="Fix the bug")
+    verifier_task = SubTask(
+        id="verifier",
+        goal="Verify the child result",
+        parent_tasks=[root],
+        misc={"subagent_reward_verifier_task": True},
+    )
+    env = env_mod.OpenRewardOpenHandsEnv(
+        task=verifier_task,
+        agent=object(),
+        workspace="shared-live-workspace",
+        initial_goal_suffix="GENERIC RECURSIVE DELEGATION GUIDANCE",
+        subagent_environment_access="shared",
+    )
+    env._get_openreward_task_payload = lambda: {"prompt": "Fix the bug"}
+
+    goal = await env._initial_user_message()
+
+    generic_index = goal.index("GENERIC RECURSIVE DELEGATION GUIDANCE")
+    verifier_index = goal.index("## Verifier Tool Access")
+    assert verifier_index > generic_index
+    assert "environment tools needed for verification are directly available" in goal
+    assert "Do not launch a sub-agent merely to gain environment tool access" in goal
+    assert "you remain responsible" in goal
 
 
 @pytest.mark.asyncio

@@ -199,6 +199,66 @@ def test_deterministic_fallback_condensation_is_not_linked_as_model_completion(
 
 
 @pytest.mark.asyncio
+async def test_reward_verifier_gets_fresh_recursive_launcher_runtime(monkeypatch):
+    env_mod = _load_openhands_env_module(monkeypatch)
+    recursive = sys.modules["platoon.openhands.recursive"]
+    from platoon.agents.actions.subagent import (
+        SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
+    )
+    from platoon.envs.base import SubTask, Task
+
+    events: list[object] = []
+
+    class OldRuntime:
+        def close(self):
+            events.append("old-closed")
+
+    class Runtime:
+        def __init__(self):
+            events.append("new-created")
+
+        def bind(self, loop, context):
+            assert loop is asyncio.get_running_loop()
+            assert context is not None
+            events.append("new-bound")
+
+    recursive.with_shared_workspace_subagent_prompt = lambda agent: (
+        "workspace",
+        agent,
+    )
+    recursive.with_finish_tool = lambda agent: ("finish", agent)
+    recursive.LaunchSubagentRuntime = Runtime
+
+    def with_launch_subagent_tool(agent, *, runtime, default_max_steps):
+        events.append(("launcher-installed", runtime, default_max_steps))
+        return ("launcher", agent)
+
+    recursive.with_launch_subagent_tool = with_launch_subagent_tool
+
+    env = env_mod.OpenHandsEnv.__new__(env_mod.OpenHandsEnv)
+    env._task = SubTask(
+        id="verifier",
+        goal="verify child",
+        parent_tasks=[Task(id="child", goal="do work")],
+        misc={SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY: True},
+    )
+    env._agent = "copied-agent-with-inherited-launcher"
+    env._enable_recursive_subagents = True
+    # The recursive OpenReward jobs give verifier helpers the same 50-step
+    # default as policy subagents.
+    env._subagent_default_max_steps = 50
+    env._launch_subagent_runtime = OldRuntime()
+
+    configured = env._prepare_agent_for_conversation()
+
+    assert configured[0] == "launcher"
+    assert events[:3] == ["old-closed", "new-created", "new-bound"]
+    assert events[3][0] == "launcher-installed"
+    assert events[3][1] is env._launch_subagent_runtime
+    assert events[3][2] == 50
+
+
+@pytest.mark.asyncio
 async def test_close_interrupts_async_conversation_before_recursive_children(monkeypatch):
     env_mod = _load_openhands_env_module(monkeypatch)
     order: list[str] = []

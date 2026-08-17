@@ -132,6 +132,80 @@ class DeterministicJudgeEnv(ForkableEnv):
         )
 
 
+@dataclass
+class NestedVerifierEnv(ForkableEnv):
+    _task: Task
+    helper_messages: list[str]
+    blocked_grandhelper_messages: list[str]
+
+    async def reset(self) -> Observation:
+        current_trajectory_collection.get().set_trajectory_task(
+            current_trajectory.get().id,
+            self._task,
+        )
+        return Observation(task=self._task, finished=False)
+
+    async def step(self, action: Any) -> Observation:
+        _ = action
+        if self._task.goal == "root":
+            await launch_subagent(goal="solver child", max_steps=3)
+            finish_message.set("root done")
+            return Observation(task=self._task, finished=True)
+
+        if not self._task.misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
+            finish_message.set("solver completed")
+            return Observation(task=self._task, finished=True)
+
+        if self._task.misc.get("verifier_helper"):
+            blocked_message = await launch_subagent(
+                goal="nested verifier helper",
+                max_steps=1,
+            )
+            self.blocked_grandhelper_messages.append(blocked_message)
+            finish_message.set("inspected environment evidence")
+            return Observation(task=self._task, finished=True)
+
+        helper_message = await launch_subagent(
+            goal="inspect verifier evidence",
+            max_steps=2,
+            # Even explicit child metadata must not escape a verifier tree.
+            task_misc={
+                "verifier_helper": True,
+                SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY: False,
+                SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY: "incorrect",
+            },
+        )
+        self.helper_messages.append(helper_message)
+        finish_message.set(
+            json.dumps(
+                {
+                    "status": "verified",
+                    "score": 1.0,
+                    "summary": "helper inspected the environment",
+                    "evidence": [helper_message],
+                }
+            )
+        )
+        return Observation(task=self._task, finished=True)
+
+    async def close(self) -> None:
+        return None
+
+    async def observe(self) -> Observation:
+        return Observation(task=self._task, finished=False)
+
+    @property
+    def task(self) -> Task:
+        return self._task
+
+    async def fork(self, task: Task) -> "NestedVerifierEnv":
+        return NestedVerifierEnv(
+            task,
+            self.helper_messages,
+            self.blocked_grandhelper_messages,
+        )
+
+
 def _trajectory_by_goal(collection: TrajectoryCollection, goal: str) -> Trajectory:
     for trajectory in collection.trajectories.values():
         if trajectory.task is not None and trajectory.task.goal == goal:
@@ -213,6 +287,55 @@ async def test_subagent_judging_records_verifier_result():
     verifier_finish_events = [(reward, misc) for traj_id, reward, misc in recorder.finished if traj_id == verifier.id]
     assert verifier_finish_events[-1][1][SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY] == child.id
     assert verifier_finish_events[-1][1][EXCLUDE_FROM_TRAINING_MISC_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_verifier_descendant_stays_in_verifier_tree_and_is_not_reverified():
+    collection = TrajectoryCollection()
+    helper_messages: list[str] = []
+    blocked_grandhelper_messages: list[str] = []
+    tokens = [
+        current_trajectory_collection.set(collection),
+        # Policy recursion permits only root -> solver. The verifier root and
+        # its one helper are synthetic depth exceptions.
+        budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=1)),
+        subagent_reward_judge_config.set(SubagentRewardJudgeConfig(max_steps=4)),
+    ]
+
+    try:
+        await run_episode(
+            DeterministicJudgeAgent(),
+            NestedVerifierEnv(
+                _task=Task(goal="root", id="root", max_steps=20),
+                helper_messages=helper_messages,
+                blocked_grandhelper_messages=blocked_grandhelper_messages,
+            ),
+        )
+    finally:
+        for token in reversed(tokens):
+            token.var.reset(token)
+
+    assert helper_messages == ["inspected environment evidence"]
+    assert len(blocked_grandhelper_messages) == 1
+    assert "one helper level" in blocked_grandhelper_messages[0]
+    assert len(collection.trajectories) == 4
+
+    solver = _trajectory_by_goal(collection, "solver child")
+    verifier = next(
+        trajectory
+        for trajectory in collection.trajectories.values()
+        if trajectory.task is not None
+        and trajectory.task.misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY)
+        and not trajectory.task.misc.get("verifier_helper")
+    )
+    helper = _trajectory_by_goal(collection, "inspect verifier evidence")
+    assert helper.task is not None
+    assert helper.task.misc[SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY] is True
+    assert SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY not in helper.task.misc
+    assert helper.parent_info is not None
+    assert helper.parent_info.id == verifier.id
+    assert SUBAGENT_REWARD_JUDGMENT_MISC_KEY not in helper.misc
+    assert solver.misc[SUBAGENT_REWARD_JUDGMENT_MISC_KEY]["verifier_trajectory_id"] == verifier.id
 
 
 @pytest.mark.asyncio
