@@ -1,0 +1,181 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=16:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=72:00:00
+#PBS -N rasp-h200-16q38-rs11-v22
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Ordinary optimizer-loading successor for the durable global-step-11 Qwen3.8
+# checkpoint.  This permanently retires the step-zero no-load-optimizer policy.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r22-e11d720-057108f
+RELEASE_REF=refs/tags/abci-v8r22-e11d720-057108f
+RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
+GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
+ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
+RESUME_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_resume_checkpoint.py
+GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
+ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v22_resume_gs11.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
+EXPERIMENT=abci-or-ta-swe16-q38-v18
+TRIAL=abci-ta-swe16-nr-q38d-c12-v18-t0
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs11-v8r22.success.json
+SOURCE_CANDIDATE=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs0-nooptim-v8r20.success.candidate.json
+SOURCE_LOG=/groups/gai51740/aci18912it/rasp/logs/2159631.pbs1.OU
+SOURCE_RELEASE_ROOT=/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0
+SOURCE_RELEASE_REF=refs/tags/abci-v8r20-376d1b9-18e62c0
+SOURCE_CONFIG_RELATIVE=plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v20_gs0_no_load_optim.yaml
+SOURCE_PBS_JOB_ID=2159631.pbs1
+SUCCESSOR_BINDING=qwen38-16-v22-gs11-ordinary
+CURRENT_CONFIG_SHA256=a5886ed07ef6adcf0681e8f577edc9da205983b4ab94fcd96638b1ad52ef0400
+SOURCE_CONFIG_SHA256=efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97
+SOURCE_CANDIDATE_SHA256=2ddbea585030511632246700bc0adfcc20f79205b09a902f5a1823f98535f5a4
+SOURCE_LOG_SHA256=6c1c610f57941a5f0e021353e431bf9387934be6df5485c95d92562a824ee539
+EXPECTED_GLOBAL_STEP=11
+EXPECTED_START_GLOBAL_STEP=12
+EXPECTED_TOTAL_BYTES=383216293802
+EXPECTED_CHECKPOINT_LAYOUT_SHA256=b25138786744bb5afe7c683fd58bec87c59b28b398f0b5bc3d531ea1d1bde9af
+EXPECTED_CHECKPOINT_SAMPLE_MANIFEST_SHA256=70dbcd55159fd741ed6e754fa1d39cff94a9c06ec5cd1c935d696b1abc9ad93f
+EXPECTED_FIXED_CONTENT_SHA256=583a9c9810d1bcd56af359c20b9380b0788c6c28d0931c9f02238e921dcd1cd1
+EXPECTED_RECOVER_INFO_CONTENT_SHA256=3afc16096bb9315e9d452fe63e112f6b603195e27592911ce36821dff740d0f9
+EXPECTED_DCP_STATE_KEYS=1472
+EXPECTED_DCP_STORAGE_ENTRIES=18057
+EXPECTED_OPTIMIZER_MOMENT_KEYS=16
+EXPECTED_LR_NUM_STEPS=8
+EXPECTED_SAMPLES_YIELDED=304
+EXPECTED_ITERATOR_YIELDED=38
+
+die() {
+    echo "[h200-16-q38-v22] ERROR: $*" >&2
+    exit 2
+}
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && \
+    -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && \
+    -x "${ALL_MCP_VERIFY}" && -x "${RESUME_VERIFY}" ]] ||
+    die "immutable v8r22 release is incomplete: ${REPO_ROOT}"
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] ||
+    die "release root must be the exact non-symlink path"
+read -r observed_config_sha _ < <(sha256sum -- "${CONFIG}")
+[[ "${observed_config_sha}" == "${CURRENT_CONFIG_SHA256}" ]] ||
+    die "Qwen3.8 gs11 successor config digest mismatch"
+unset observed_config_sha
+for literal in \
+    '  no_load_optim: false' \
+    '  no_save_optim: false' \
+    'dynamic_bs: true' \
+    '  filter_zero_advantage_datums: true' \
+    '  filter_zero_variance_groups: true' \
+    '  max_concurrent_rollouts: 12' \
+    '  backend: sglang:d6p1t8' \
+    '  backend: megatron:d10p2t4c1' \
+    '  enable_recursive_subagents: false' \
+    '  enable_programmatic_tool_calling: false'; do
+    [[ "$(grep -Fxc "${literal}" "${CONFIG}")" == 1 ]] ||
+        die "Qwen3.8 gs11 successor lacks exact literal: ${literal}"
+done
+
+# shellcheck disable=SC1090
+export OPENREWARD_MODEL_FAMILY=qwen38
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] ||
+    die "v9 overlay selected another repository"
+[[ "${OPENREWARD_QWEN38_MODEL_REPOSITORY:-}" == apurvaga/Qwen3.8-27B-preserve-thinking && \
+    "${OPENREWARD_QWEN38_MODEL_REVISION:-}" == 97c725615b8aa025b800da4ceed38811358b30f1 && \
+    "${OPENREWARD_QWEN38_MODEL_SNAPSHOT:-}" == /groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/97c725615b8aa025b800da4ceed38811358b30f1 && \
+    -d "${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" && ! -L "${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" && \
+    "$(readlink -f "${OPENREWARD_QWEN38_MODEL_SNAPSHOT}")" == "${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" ]] ||
+    die "pinned Qwen3.8 model binding is incomplete"
+export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}
+
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] ||
+    die "submission must pass one absolute final v9 Gate2 RESULT"
+"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"
+[[ "${ALL_MCP_RESULT}" == /* && -f "${ALL_MCP_RESULT}" && ! -L "${ALL_MCP_RESULT}" ]] ||
+    die "submission must pass one absolute final all-MCP RESULT"
+"${ALL_MCP_VERIFY}" --release-root "${REPO_ROOT}" --result "${ALL_MCP_RESULT}" \
+    --gate2-result "${GATE2_RESULT}"
+
+"${RESUME_VERIFY}" \
+    --checkpoint-root "${CHECKPOINT_ROOT}" \
+    --expected-checkpoint-root "${CHECKPOINT_ROOT}" \
+    --expected-global-step "${EXPECTED_GLOBAL_STEP}" \
+    --expected-start-global-step "${EXPECTED_START_GLOBAL_STEP}" \
+    --expected-steps-per-epoch 846 \
+    --expected-shards 80 \
+    --expected-total-bytes "${EXPECTED_TOTAL_BYTES}" \
+    --expected-checkpoint-layout-sha256 "${EXPECTED_CHECKPOINT_LAYOUT_SHA256}" \
+    --expected-checkpoint-sample-manifest-sha256 "${EXPECTED_CHECKPOINT_SAMPLE_MANIFEST_SHA256}" \
+    --expected-fixed-content-sha256 "${EXPECTED_FIXED_CONTENT_SHA256}" \
+    --expected-recover-info-content-sha256 "${EXPECTED_RECOVER_INFO_CONTENT_SHA256}" \
+    --expected-experiment "${EXPERIMENT}" \
+    --expected-trial "${TRIAL}" \
+    --current-config "${CONFIG}" \
+    --expected-config-sha256 "${CURRENT_CONFIG_SHA256}" \
+    --expected-source-config-sha256 "${SOURCE_CONFIG_SHA256}" \
+    --source-candidate "${SOURCE_CANDIDATE}" \
+    --expected-source-candidate-sha256 "${SOURCE_CANDIDATE_SHA256}" \
+    --source-log "${SOURCE_LOG}" \
+    --expected-source-log-sha256 "${SOURCE_LOG_SHA256}" \
+    --successor-binding "${SUCCESSOR_BINDING}" \
+    --source-pbs-job-id "${SOURCE_PBS_JOB_ID}" \
+    --source-release-root "${SOURCE_RELEASE_ROOT}" \
+    --source-release-ref "${SOURCE_RELEASE_REF}" \
+    --source-config-relative "${SOURCE_CONFIG_RELATIVE}" \
+    --model-repository "${OPENREWARD_QWEN38_MODEL_REPOSITORY}" \
+    --model-revision "${OPENREWARD_QWEN38_MODEL_REVISION}" \
+    --model-snapshot "${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" \
+    --target-receipt "${RECEIPT}"
+
+export OPENREWARD_EXPECTED_NNODES=16
+export OPENREWARD_EXPECTED_MODEL_SHARDS=18
+export OPENREWARD_SERVICE_NODE_COUNT=6
+export OPENREWARD_EXPECTED_RECURSIVE=0
+export OPENREWARD_EXPECTED_PTC=0
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1
+export OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING=${SUCCESSOR_BINDING}
+export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=${EXPECTED_GLOBAL_STEP}
+export OPENREWARD_EXPECTED_START_GLOBAL_STEP=${EXPECTED_START_GLOBAL_STEP}
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT=${CHECKPOINT_ROOT}
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256=${EXPECTED_CHECKPOINT_LAYOUT_SHA256}
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256=${EXPECTED_CHECKPOINT_SAMPLE_MANIFEST_SHA256}
+export OPENREWARD_EXPECTED_RESUME_FIXED_CONTENT_SHA256=${EXPECTED_FIXED_CONTENT_SHA256}
+export OPENREWARD_EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256=${EXPECTED_RECOVER_INFO_CONTENT_SHA256}
+export OPENREWARD_EXPECTED_RESUME_DCP_STATE_KEYS=${EXPECTED_DCP_STATE_KEYS}
+export OPENREWARD_EXPECTED_RESUME_DCP_STORAGE_ENTRIES=${EXPECTED_DCP_STORAGE_ENTRIES}
+export OPENREWARD_EXPECTED_RESUME_DCP_SHARDS=80
+export OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS=${EXPECTED_OPTIMIZER_MOMENT_KEYS}
+export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=${EXPECTED_LR_NUM_STEPS}
+export OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED=${EXPECTED_SAMPLES_YIELDED}
+export OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED=${EXPECTED_ITERATOR_YIELDED}
+export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=1
+export OPENREWARD_NODE_MEMORY_LIMIT_BYTES=2061584302080
+export OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=85
+export OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=274877906944
+export OPENREWARD_NODE_MEMORY_POLL_SECONDS=2
+export OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS=60
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+unset OPENREWARD_ALLOW_PREUPDATE_RESUME OPENREWARD_PREUPDATE_RESUME_BINDING
+unset OPENREWARD_PREUPDATE_LOAD_POLICY OPENREWARD_PREUPDATE_NO_LOAD_OPTIM
+
+exec "${COMMON}" "${CONFIG}"

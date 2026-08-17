@@ -33,6 +33,7 @@ TOOLATHLON_ENTRYPOINT=${PLATOON_REPO_ROOT}/plugins/openreward/scripts/openreward
 TOOLATHLON_STAGER=${PLATOON_REPO_ROOT}/plugins/openreward/scripts/openreward-toolathlon-stage-pgdata.sh
 SWE_HELPER=${SCRIPT_DIR}/openreward-swe-singularity-server.sh
 SWE_CLEANUP=${SCRIPT_DIR}/cleanup_swe_singularity_sessions.py
+MEMORY_GUARD=${SCRIPT_DIR}/openreward-node-memory-guard.py
 CLEANUP_RECEIPT_HELPER=${SCRIPT_DIR}/openreward-service-cleanup-receipt.py
 SHUTDOWN_REQUEST_HELPER=${SCRIPT_DIR}/openreward-service-shutdown-request.py
 RUNTIME=${PLATOON_CONTAINER_RUNTIME:-singularity}
@@ -64,6 +65,12 @@ CLEANUP_RECEIPT=${PLATOON_NODE_SERVICES_CLEANUP_RECEIPT:-}
 SHUTDOWN_REQUEST=${PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST:-}
 EXPECTED_HOST=${PLATOON_NODE_SERVICES_EXPECTED_HOST:-}
 EXPECTED_JOB_ID=${PLATOON_NODE_SERVICES_EXPECTED_JOB_ID:-}
+NODE_MEMORY_GUARD_ENABLED=${OPENREWARD_NODE_MEMORY_GUARD_ENABLED:-1}
+NODE_MEMORY_LIMIT_BYTES=${OPENREWARD_NODE_MEMORY_LIMIT_BYTES:-2061584302080}
+NODE_MEMORY_TRIGGER_PERCENT=${OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT:-85}
+NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=${OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES:-274877906944}
+NODE_MEMORY_POLL_SECONDS=${OPENREWARD_NODE_MEMORY_POLL_SECONDS:-2}
+NODE_MEMORY_TELEMETRY_SECONDS=${OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS:-60}
 
 die() {
     echo "[node-services] ERROR: $*" >&2
@@ -76,7 +83,15 @@ die() {
 [[ -x "${TOOLATHLON_STAGER}" ]] || die "Toolathlon PGDATA stager is missing"
 [[ -x "${SWE_HELPER}" ]] || die "SWE helper is missing"
 [[ -x "${SWE_CLEANUP}" ]] || die "SWE cleanup helper is missing"
+[[ -x "${MEMORY_GUARD}" ]] || die "node memory guard is missing"
 [[ -r "${OPENREWARD_TOOLATHLON_SIF}" ]] || die "Toolathlon SIF is missing"
+[[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 && \
+    "${NODE_MEMORY_LIMIT_BYTES}" == 2061584302080 && \
+    "${NODE_MEMORY_TRIGGER_PERCENT}" == 85 && \
+    "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" == 274877906944 && \
+    "${NODE_MEMORY_POLL_SECONDS}" == 2 && \
+    "${NODE_MEMORY_TELEMETRY_SECONDS}" == 60 ]] || \
+    die "node memory guard must use the exact enabled PBS service-node contract"
 [[ "${MKFS_EXT3}" == /* ]] || \
     die "PLATOON_MKFS_EXT3_BIN must be an absolute path: ${MKFS_EXT3}"
 [[ -x "${MKFS_EXT3}" ]] || die "mkfs.ext3 is missing or not executable: ${MKFS_EXT3}"
@@ -235,6 +250,9 @@ rmdir "${overlay_layout}/upper" "${overlay_layout}/work" "${overlay_layout}"
 
 toolathlon_pid=
 swe_pid=
+memory_guard_pid=
+memory_guard_reaped=0
+memory_guard_status=
 cleanup_started=0
 natural_shutdown_requested=0
 
@@ -242,6 +260,7 @@ cleanup() {
     local primary_status=${1:-$?}
     local status=${primary_status}
     local index name pid deadline kill_deadline wait_status elapsed child_forced_kill
+    local guard_deadline guard_wait_status guard_forced_kill
     local forced_kill=0 cleanup_ok=1 janitor_log cleanup_begin
     local -a child_names=(toolathlon swe-rebench)
     local -a child_pids=("${toolathlon_pid}" "${swe_pid}")
@@ -257,6 +276,11 @@ cleanup() {
                 --request "${SHUTDOWN_REQUEST}" \
                 --pbs-job-id "${EXPECTED_JOB_ID}" --host "${EXPECTED_HOST}"; then
             echo "[node-services] ERROR: natural cleanup lacks an exact verified shutdown request" >&2
+            cleanup_ok=0
+            status=1
+        fi
+        if [[ -z "${memory_guard_pid}" ]] || ! kill -0 "${memory_guard_pid}" 2>/dev/null; then
+            echo "[node-services] ERROR: memory guard was already dead before natural cleanup" >&2
             cleanup_ok=0
             status=1
         fi
@@ -276,6 +300,51 @@ cleanup() {
             echo "[node-services] cleanup-child name=${name} pid=${pid} TERM=sent elapsed_seconds=$((SECONDS - cleanup_begin))"
         fi
     done
+    guard_wait_status=not-started
+    guard_forced_kill=0
+    if [[ -n "${memory_guard_pid}" ]]; then
+        if kill -0 "${memory_guard_pid}" 2>/dev/null; then
+            if kill -TERM "${memory_guard_pid}" 2>/dev/null; then
+                echo "[node-services] cleanup-guard pid=${memory_guard_pid} TERM=sent elapsed_seconds=$((SECONDS - cleanup_begin))"
+            else
+                echo "[node-services] ERROR: could not send TERM to memory guard pid=${memory_guard_pid}" >&2
+                cleanup_ok=0
+                status=1
+            fi
+        fi
+        guard_deadline=$((SECONDS + 10))
+        while kill -0 "${memory_guard_pid}" 2>/dev/null && ((SECONDS < guard_deadline)); do
+            sleep 0.2
+        done
+        if kill -0 "${memory_guard_pid}" 2>/dev/null; then
+            kill -KILL "${memory_guard_pid}" 2>/dev/null || true
+            guard_forced_kill=1
+            cleanup_ok=0
+            status=1
+            kill_deadline=$((SECONDS + 10))
+            while kill -0 "${memory_guard_pid}" 2>/dev/null && ((SECONDS < kill_deadline)); do
+                sleep 0.2
+            done
+        fi
+        if ((memory_guard_reaped)); then
+            guard_wait_status=${memory_guard_status}
+        elif ! kill -0 "${memory_guard_pid}" 2>/dev/null; then
+            guard_wait_status=0
+            wait "${memory_guard_pid}" 2>/dev/null || guard_wait_status=$?
+            memory_guard_status=${guard_wait_status}
+            memory_guard_reaped=1
+        else
+            echo "[node-services] ERROR: memory guard pid=${memory_guard_pid} remained live after bounded cleanup" >&2
+            cleanup_ok=0
+            status=1
+        fi
+        if [[ "${primary_status}" -eq 0 && "${guard_wait_status}" != 0 ]]; then
+            echo "[node-services] ERROR: memory guard cleanup status was ${guard_wait_status}, expected 0" >&2
+            cleanup_ok=0
+            status=1
+        fi
+        echo "[node-services] cleanup-guard pid=${memory_guard_pid} exit_status=${guard_wait_status} forced_KILL=${guard_forced_kill}"
+    fi
     deadline=$((SECONDS + 90))
     for index in "${!child_pids[@]}"; do
         name=${child_names[index]}
@@ -350,6 +419,18 @@ mkdir -p \
     "${TOOLATHLON_STATE}/tmp"
 
 echo "[node-services] starting Toolathlon host=$(hostname) port=${TOOLATHLON_PORT} image_sha256=${TOOLATHLON_SHA256}"
+# The guard watches the aggregate PBS allocation cgroup when it can identify
+# that cgroup by the exact node memory limit.  Its only fallback is explicit
+# host MemAvailable telemetry.
+echo "[node-services] starting memory guard host=$(hostname) limit_bytes=${NODE_MEMORY_LIMIT_BYTES} trigger_percent=${NODE_MEMORY_TRIGGER_PERCENT}"
+/usr/bin/python3 -I "${MEMORY_GUARD}" \
+    --node-limit-bytes "${NODE_MEMORY_LIMIT_BYTES}" \
+    --trigger-percent "${NODE_MEMORY_TRIGGER_PERCENT}" \
+    --fallback-available-bytes "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" \
+    --poll-seconds "${NODE_MEMORY_POLL_SECONDS}" \
+    --telemetry-seconds "${NODE_MEMORY_TELEMETRY_SECONDS}" &
+memory_guard_pid=$!
+
 # The Toolathlon application uses PostgreSQL's standard localhost port; there
 # is exactly one service per physical allocation node.
 "${RUNTIME}" exec --cleanenv --no-home --overlay "${TOOLATHLON_OVERLAY}" \
@@ -380,9 +461,12 @@ export SWE_APPTAINER_MKFS_BIN=${MKFS_EXT3}
 OPENREWARD_SWE_REBENCH_PORT=${SWE_PORT} "${SWE_HELPER}" &
 swe_pid=$!
 
-# A long-lived pbsdsh connection owns this supervisor.  If either pool dies,
-# tear down its sibling and let the controller health monitor fail the job.
-while kill -0 "${toolathlon_pid}" 2>/dev/null && kill -0 "${swe_pid}" 2>/dev/null; do
+# A long-lived pbsdsh connection owns this supervisor.  If either pool or the
+# memory guard dies, tear down the live children and fail the controller's
+# node-service health check.
+while kill -0 "${toolathlon_pid}" 2>/dev/null && \
+    kill -0 "${swe_pid}" 2>/dev/null && \
+    kill -0 "${memory_guard_pid}" 2>/dev/null; do
     if [[ -e "${SHUTDOWN_REQUEST}" || -L "${SHUTDOWN_REQUEST}" ]]; then
         if ! /usr/bin/python3 -I "${SHUTDOWN_REQUEST_HELPER}" verify \
             --request "${SHUTDOWN_REQUEST}" \
@@ -398,7 +482,13 @@ while kill -0 "${toolathlon_pid}" 2>/dev/null && kill -0 "${swe_pid}" 2>/dev/nul
 done
 
 status=1
-if ! kill -0 "${toolathlon_pid}" 2>/dev/null; then
+if ! kill -0 "${memory_guard_pid}" 2>/dev/null; then
+    memory_guard_status=0
+    wait "${memory_guard_pid}" || memory_guard_status=$?
+    memory_guard_reaped=1
+    status=${memory_guard_status}
+    echo "[node-services] ERROR: node memory guard exited status=${status}" >&2
+elif ! kill -0 "${toolathlon_pid}" 2>/dev/null; then
     wait "${toolathlon_pid}" || status=$?
     echo "[node-services] ERROR: Toolathlon exited status=${status}" >&2
 else

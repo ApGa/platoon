@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r21/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r22/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,17 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r21-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r22-e11d720-057108f")
+RELEASE_REF = "refs/tags/abci-v8r22-e11d720-057108f"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "4159bff92679f66cfb0934fe7c16c2955beee2688ccd900eae37e2b20ec6c959"
+MANIFEST_SHA256 = "811332a41b0c97eed7e166119f6310fdeec8db15c8bbe3625edf776137b1ff8b"
+V8R22_SUCCESSOR_CONTRACTS_SHA256 = "1ddb29706c1ea903f802b22e518200ba68f8aeaa819fc07b766b918fd338c4c0"
+SERVICE_NODE_MEMORY_GUARD_SHA256 = "049ef25bebacddd8e3d665de23afe37db258d3a16d5d45794ce1bbf734a95f60"
+V8R22_SUCCESSOR_CONTRACT_NAMES = {
+    "qwen38_32node_gs10",
+    "qwen38_16node_gs11",
+    "qwen36_32node_gs1_depth2",
+}
 UPSTREAM_COMMIT = "e11d7201ae8118a9350210615038ff2fe582945f"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -84,9 +91,7 @@ MODEL_ARTIFACTS = {
         "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
         "thinking_policy": "preserved",
         "safetensors_shard_count": 18,
-        "safetensors_index_sha256": (
-            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"
-        ),
+        "safetensors_index_sha256": ("77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"),
         "snapshot_path": (
             "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
             "models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/"
@@ -101,9 +106,7 @@ MODEL_ARTIFACTS = {
         "upstream_source": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
         "thinking_policy": "preserved",
         "safetensors_shard_count": 18,
-        "safetensors_index_sha256": (
-            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"
-        ),
+        "safetensors_index_sha256": ("77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"),
         "snapshot_path": (
             "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
             "models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/"
@@ -118,9 +121,7 @@ MODEL_ARTIFACTS = {
         "thinking_policy": "preserved",
         "weights_policy": "unchanged_from_upstream",
         "safetensors_shard_count": 26,
-        "safetensors_index_sha256": (
-            "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83"
-        ),
+        "safetensors_index_sha256": ("41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83"),
         "snapshot_path": (
             "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
             "models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/"
@@ -142,6 +143,11 @@ TRAINING_RUNTIME_ASSETS = {
     "plugins/openreward/platoon/openreward/rollout.py": (
         "653f501c985bd84b3bc5553849d224755fc5c119ae461c4ba5ea8e753b8dfd44"
     ),
+    "pbs-scripts/openreward-ta-swe-prealloc-common.sh": (
+        "6d3e5c47705dd470985261759457c1255d49a3ef62fa32c5d3b5735161e5ad9c"
+    ),
+    "pbs-scripts/openreward-node-services.sh": ("244a2c4d26962ad5269fe225f451feb07d43ff32e4cc55d809fc99259b9306a5"),
+    "pbs-scripts/openreward-node-memory-guard.py": ("234d25909ca7bef46885308e5ef039414aa838f15c30cc993830451eb784558a"),
 }
 TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION = "missing_masks_treated_as_all_trainable_before_filter_and_concat"
 TRAINING_SEMANTICS = {
@@ -239,10 +245,7 @@ TRAINING_SEMANTICS = {
             "qwen38_dense_c12_ta20_v20_gs0_no_load_optim.yaml"
         ),
         "config_sha256": "efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97",
-        "wrapper_relative": (
-            "pbs-scripts/openreward-ta-swe-16node-nonrecursive-qwen38-"
-            "gs0-nooptim-h200-v10-abci.pbs"
-        ),
+        "wrapper_relative": ("pbs-scripts/openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"),
         "wrapper_sha256": "a8e12848ca91da611cad155706570b74659917eb8620217a9de691aa5e857e7c",
         "recover_global_step": 0,
         "next_global_step": 1,
@@ -254,18 +257,10 @@ TRAINING_SEMANTICS = {
         ),
         "recover_checkpoint_shards": 80,
         "recover_checkpoint_total_bytes": 164220069555,
-        "checkpoint_layout_sha256": (
-            "25af0d65a233ee77165489dad0c4bbe43a0a56b6745aa9785eddb23f5b720d0c"
-        ),
-        "checkpoint_sample_manifest_sha256": (
-            "3ab2c47cbe8b1d95f1c13ce09d026c57da8752db14749e0ce4011a762dd9505e"
-        ),
-        "checkpoint_fixed_content_sha256": (
-            "bb5ec86330f5acfdae93b04e6101d88a7244e702fcda812ccc0a97adcc6bf6da"
-        ),
-        "recover_info_content_sha256": (
-            "bfb4e310dc3f28946bd86b437cd8d0267875fd07a627346b151811ab83fd2bdb"
-        ),
+        "checkpoint_layout_sha256": ("25af0d65a233ee77165489dad0c4bbe43a0a56b6745aa9785eddb23f5b720d0c"),
+        "checkpoint_sample_manifest_sha256": ("3ab2c47cbe8b1d95f1c13ce09d026c57da8752db14749e0ce4011a762dd9505e"),
+        "checkpoint_fixed_content_sha256": ("bb5ec86330f5acfdae93b04e6101d88a7244e702fcda812ccc0a97adcc6bf6da"),
+        "recover_info_content_sha256": ("bfb4e310dc3f28946bd86b437cd8d0267875fd07a627346b151811ab83fd2bdb"),
         "runtime_semantic_verification": "pinned_training_sif_before_controller",
         "dcp_state_keys": 1456,
         "dcp_storage_entries": 9169,
@@ -283,17 +278,13 @@ TRAINING_SEMANTICS = {
         "runtime_composition_assertion": "no_load_optim_true_no_save_optim_false_before_services",
         "first_step_lr_alignment": "fresh_lr0_fast_forward_once_then_successful_gs1_update_saves_lr2",
         "first_step_checkpoint_promotion_guard": "requires_datums_update_and_weight_sync_before_overwriting_gs0",
-        "skipped_fp32_param_safety": (
-            "no_source_update_exact_model_topology_and_optimizer_implementation_only"
-        ),
+        "skipped_fp32_param_safety": ("no_source_update_exact_model_topology_and_optimizer_implementation_only"),
         "future_resume_policy": "gs1_lr2_with_moments_then_global_step_gte_1_requires_normal_optimizer_loading",
         "future_resume_authorization": (
             "fresh_exact_successor_release_from_observed_gs1_candidate_and_checkpoint_digests"
         ),
         "source_log": "/groups/gai51740/aci18912it/rasp/logs/2155389.pbs1.OU",
-        "source_log_sha256": (
-            "2497762da279fd93486521b9bf8dad78c02d0fc0bec8f39e7172d188cbcdd552"
-        ),
+        "source_log_sha256": ("2497762da279fd93486521b9bf8dad78c02d0fc0bec8f39e7172d188cbcdd552"),
         "source_candidate_absent": True,
         "source_success_receipt_absent": True,
         "target_receipt": (
@@ -345,18 +336,10 @@ TRAINING_SEMANTICS = {
         ),
         "recover_checkpoint_shards": 160,
         "recover_checkpoint_total_bytes": 383216730907,
-        "checkpoint_layout_sha256": (
-            "6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"
-        ),
-        "checkpoint_sample_manifest_sha256": (
-            "23aea8bf8cc932936d250dd1646d191efe664047169445da1ce2ef67d7168e11"
-        ),
-        "checkpoint_fixed_content_sha256": (
-            "ff7dccef8552800b23f1888cbf646c9b8f8c9019f5e83831264cd75ad6a15e6d"
-        ),
-        "recover_info_content_sha256": (
-            "86e7b2726bcbc86328deb65dae0544c30afec2664d548b349aa87224626cfd3c"
-        ),
+        "checkpoint_layout_sha256": ("6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"),
+        "checkpoint_sample_manifest_sha256": ("23aea8bf8cc932936d250dd1646d191efe664047169445da1ce2ef67d7168e11"),
+        "checkpoint_fixed_content_sha256": ("ff7dccef8552800b23f1888cbf646c9b8f8c9019f5e83831264cd75ad6a15e6d"),
+        "recover_info_content_sha256": ("86e7b2726bcbc86328deb65dae0544c30afec2664d548b349aa87224626cfd3c"),
         "runtime_semantic_verification": "pinned_training_sif_before_controller",
         "dcp_state_keys": 1472,
         "dcp_storage_entries": 18297,
@@ -368,12 +351,9 @@ TRAINING_SEMANTICS = {
         "source_release_ref": "refs/tags/abci-v8r13-376d1b9-18e62c0",
         "config_sha256": "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa",
         "source_candidate": (
-            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
         ),
-        "source_candidate_sha256": (
-            "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
-        ),
+        "source_candidate_sha256": ("b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"),
         "target_receipt": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
             "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.json"
@@ -392,9 +372,7 @@ TRAINING_SEMANTICS = {
             "qwen38_dense_c24_ta20_v20.yaml"
         ),
         "config_sha256": "24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237",
-        "wrapper_relative": (
-            "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
-        ),
+        "wrapper_relative": ("pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"),
         "wrapper_sha256": "f7ee2f1a8fee2144bc2c9d939b68816a2119e0a6b263e8797facafab10ad2bec",
         "experiment_name": "abci-or-ta-swe32-q38-v16",
         "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
@@ -412,48 +390,30 @@ TRAINING_SEMANTICS = {
             "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
             "qwen38_dense_c24_ta20_v16.yaml"
         ),
-        "source_config_sha256": (
-            "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"
-        ),
+        "source_config_sha256": ("a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"),
         "source_candidate": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
             "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.candidate.json"
         ),
         "authorized_ancestor_candidate": (
-            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
         ),
-        "authorized_ancestor_candidate_sha256": (
-            "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
-        ),
+        "authorized_ancestor_candidate_sha256": ("b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"),
         "source_pbs_job_id": "2156202.pbs1",
         "source_release_root": "/home/aci18912it/rasp/releases/platoon-v8r16-376d1b9-18e62c0",
         "source_release_ref": "refs/tags/abci-v8r16-376d1b9-18e62c0",
-        "source_candidate_sha256": (
-            "12a5a385826dbb2efb4a6dbffcdc057dce7063def8ade0c0d131dae1f802cd94"
-        ),
+        "source_candidate_sha256": ("12a5a385826dbb2efb4a6dbffcdc057dce7063def8ade0c0d131dae1f802cd94"),
         "source_log": "/groups/gai51740/aci18912it/rasp/logs/2156202.pbs1.OU",
-        "source_log_sha256": (
-            "08a2837d33589671fae43e796a981ad41e16ca335ab696a1748cd660f1a1b991"
-        ),
+        "source_log_sha256": ("08a2837d33589671fae43e796a981ad41e16ca335ab696a1748cd660f1a1b991"),
         "source_terminal_accounting": (
-            "live_qstat_F_substate91_exit271_run1_obit_"
-            "2026-08-17T15:56:52+09:00_authorized_qdel"
+            "live_qstat_F_substate91_exit271_run1_obit_2026-08-17T15:56:52+09:00_authorized_qdel"
         ),
         "recover_global_step": 6,
         "recover_checkpoint_total_bytes": 383216730907,
-        "checkpoint_layout_sha256": (
-            "6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"
-        ),
-        "checkpoint_sample_manifest_sha256": (
-            "57410a3d50b2a3bf45991568abc687f334f4d02179a7d207da9c32e1872735c4"
-        ),
-        "checkpoint_fixed_content_sha256": (
-            "9417c54953c5651d5c9a73649657ca50da74995847d77258e0a256e193674251"
-        ),
-        "recover_info_content_sha256": (
-            "00c8d7ccdd27f49bd248369ffa45416d89b53dcb23a45ec9d5ea523aeeb7bddb"
-        ),
+        "checkpoint_layout_sha256": ("6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"),
+        "checkpoint_sample_manifest_sha256": ("57410a3d50b2a3bf45991568abc687f334f4d02179a7d207da9c32e1872735c4"),
+        "checkpoint_fixed_content_sha256": ("9417c54953c5651d5c9a73649657ca50da74995847d77258e0a256e193674251"),
+        "recover_info_content_sha256": ("00c8d7ccdd27f49bd248369ffa45416d89b53dcb23a45ec9d5ea523aeeb7bddb"),
         "dcp_state_keys": 1472,
         "dcp_storage_entries": 18297,
         "lr_scheduler_num_steps": 7,
@@ -483,9 +443,7 @@ TRAINING_SEMANTICS = {
         "filter_zero_advantage_datums": True,
         "filter_zero_variance_groups": True,
         "dynamic_batch_recollection_max_rounds": 2,
-        "checkpoint_artifact_policy": (
-            "frozen_gs6_preserve_in_place_no_manual_rename_move_delete"
-        ),
+        "checkpoint_artifact_policy": ("frozen_gs6_preserve_in_place_no_manual_rename_move_delete"),
         "freeze_requirement": "satisfied_quiescent_census_host_pass_pinned_sif_runtime_pass",
     },
     "fresh_recursive_32node_qwen36_cp2_contract": {
@@ -496,9 +454,7 @@ TRAINING_SEMANTICS = {
             "qwen36_moe_cp2_c24_ta20_v21.yaml"
         ),
         "config_sha256": "219c745573df56f01100698b19e01fa7450337c8158716ba48549a209a77e900",
-        "wrapper_relative": (
-            "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"
-        ),
+        "wrapper_relative": ("pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"),
         "wrapper_sha256": "cefaee73152d28e31e54fde5a856a7b686da7cba61bae5c7db2e571f26de36b6",
         "experiment_name": "abci-or-ta-swe32-q36-cp2-v21",
         "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0",
@@ -508,8 +464,7 @@ TRAINING_SEMANTICS = {
             "abci-or-ta-swe32-q36-cp2-v21/abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0"
         ),
         "target_receipt": (
-            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0.success.json"
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0.success.json"
         ),
         "stale_checkpoint_and_receipt_policy": "reject_before_controller",
         "recover_mode": "auto_with_preexisting_root_forbidden",
@@ -637,6 +592,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _object_sha256(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _require_owned_regular(path: Path, *, mode: int) -> os.stat_result:
     if not path.is_absolute() or path.resolve() != path:
         raise RuntimeError(f"release artifact is not direct and canonical: {path}")
@@ -682,9 +642,7 @@ def _require_model_artifacts() -> None:
         declared = set(weight_map.values())
         on_disk = {path.name for path in snapshot.glob("model-*-of-*.safetensors") if path.is_file()}
         if declared != expected or on_disk != expected:
-            raise RuntimeError(
-                f"release model shard set does not match its pinned {count}-shard contract: {contract}"
-            )
+            raise RuntimeError(f"release model shard set does not match its pinned {count}-shard contract: {contract}")
 
 
 def _require_ancestor(root: Path, older: str, newer: str) -> None:
@@ -911,8 +869,25 @@ def verify(root: Path) -> None:
         raise RuntimeError("release component revisions mismatch")
     if manifest.get("model_artifacts") != MODEL_ARTIFACTS:
         raise RuntimeError("release model artifact identity mismatch")
-    if manifest.get("training_semantics") != TRAINING_SEMANTICS:
+    training_semantics = manifest.get("training_semantics")
+    if not isinstance(training_semantics, dict):
+        raise RuntimeError("release training semantics are missing")
+    base_training_semantics = dict(training_semantics)
+    successor_contracts = base_training_semantics.pop("v8r22_successor_contracts", None)
+    memory_guard_contract = base_training_semantics.pop("service_node_memory_guard", None)
+    if base_training_semantics != TRAINING_SEMANTICS:
         raise RuntimeError("release training semantics mismatch")
+    if (
+        not isinstance(successor_contracts, dict)
+        or set(successor_contracts) != V8R22_SUCCESSOR_CONTRACT_NAMES
+        or _object_sha256(successor_contracts) != V8R22_SUCCESSOR_CONTRACTS_SHA256
+    ):
+        raise RuntimeError("release v8r22 successor contracts mismatch")
+    if (
+        not isinstance(memory_guard_contract, dict)
+        or _object_sha256(memory_guard_contract) != SERVICE_NODE_MEMORY_GUARD_SHA256
+    ):
+        raise RuntimeError("release service-node memory guard contract mismatch")
     for contract_name in (
         "nonrecursive_16node_resume_contract",
         "fresh_recursive_32node_qwen36_cp2_contract",
@@ -922,14 +897,29 @@ def verify(root: Path) -> None:
         for kind in ("config", "wrapper"):
             relative = contract[f"{kind}_relative"]
             asset = root / relative
+            if not asset.is_file() or asset.is_symlink() or _sha256(asset) != contract[f"{kind}_sha256"]:
+                raise RuntimeError(f"release {contract_name} {kind} content mismatch: {relative}")
+    for contract_name, contract in successor_contracts.items():
+        if not isinstance(contract, dict):
+            raise RuntimeError(f"release {contract_name} successor contract is invalid")
+        for kind in ("config", "wrapper"):
+            relative = contract.get(f"{kind}_relative")
+            expected_sha256 = contract.get(f"{kind}_sha256")
+            if (
+                not isinstance(relative, str)
+                or relative.startswith("/")
+                or ".." in Path(relative).parts
+                or re.fullmatch(r"[0-9a-f]{64}", str(expected_sha256)) is None
+            ):
+                raise RuntimeError(f"release {contract_name} {kind} binding is invalid")
+            asset = root / relative
             if (
                 not asset.is_file()
                 or asset.is_symlink()
-                or _sha256(asset) != contract[f"{kind}_sha256"]
+                or _sha256(asset) != expected_sha256
+                or (kind == "wrapper" and not asset.stat().st_mode & 0o111)
             ):
-                raise RuntimeError(
-                    f"release {contract_name} {kind} content mismatch: {relative}"
-                )
+                raise RuntimeError(f"release {contract_name} {kind} content mismatch: {relative}")
     if manifest.get("training_runtime_assets") != TRAINING_RUNTIME_ASSETS:
         raise RuntimeError("release training runtime asset identity mismatch")
     for relative, expected_sha256 in TRAINING_RUNTIME_ASSETS.items():

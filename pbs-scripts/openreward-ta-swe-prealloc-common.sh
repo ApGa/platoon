@@ -52,6 +52,7 @@ OPENREWARD_DIR=${PLATOON_REPO_ROOT}/plugins/openreward
 PREPARE_ENV=${SCRIPT_DIR}/prepare_openreward_env.sh
 PREPARE_CONTROLLER_ENV=${SCRIPT_DIR}/prepare_openreward_controller_env.sh
 NODE_SERVICES=${SCRIPT_DIR}/openreward-node-services.sh
+NODE_MEMORY_GUARD=${SCRIPT_DIR}/openreward-node-memory-guard.py
 SERVICE_CLEANUP_RECEIPT=${SCRIPT_DIR}/openreward-service-cleanup-receipt.py
 SERVICE_SHUTDOWN_REQUEST=${SCRIPT_DIR}/openreward-service-shutdown-request.py
 CONTROLLER_RUNTIME_RECEIPT_HELPER=${SCRIPT_DIR}/openreward-controller-runtime-receipt.py
@@ -72,6 +73,7 @@ ALLOW_PREUPDATE_RESUME=${OPENREWARD_ALLOW_PREUPDATE_RESUME:-0}
 PREUPDATE_RESUME_BINDING=${OPENREWARD_PREUPDATE_RESUME_BINDING:-}
 PREUPDATE_LOAD_POLICY=${OPENREWARD_PREUPDATE_LOAD_POLICY:-}
 PREUPDATE_NO_LOAD_OPTIM=${OPENREWARD_PREUPDATE_NO_LOAD_OPTIM:-0}
+RESUME_SUCCESSOR_BINDING=${OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING:-}
 EXPECTED_RESUME_GLOBAL_STEP=${OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP:-}
 EXPECTED_START_GLOBAL_STEP=${OPENREWARD_EXPECTED_START_GLOBAL_STEP:-}
 EXPECTED_RESUME_CHECKPOINT_ROOT=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT:-}
@@ -106,6 +108,12 @@ APEX_PIN=6424da3b4faa6c8f062da4a48c424fff3f02d42d
 TE_PIN=2.12.0
 TE_COMMIT_PIN=5671fd3675906cda1ade26c24a65d3dedd88eb89
 TRAINING_BASE_PIN=sha256:829404319e32cc15c1a1fa0e8a47b807f98154c6287079b0548d031f1af30882
+NODE_MEMORY_GUARD_ENABLED=${OPENREWARD_NODE_MEMORY_GUARD_ENABLED:-1}
+NODE_MEMORY_LIMIT_BYTES=${OPENREWARD_NODE_MEMORY_LIMIT_BYTES:-2061584302080}
+NODE_MEMORY_TRIGGER_PERCENT=${OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT:-85}
+NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=${OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES:-274877906944}
+NODE_MEMORY_POLL_SECONDS=${OPENREWARD_NODE_MEMORY_POLL_SECONDS:-2}
+NODE_MEMORY_TELEMETRY_SECONDS=${OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS:-60}
 
 die() {
     echo "[pbs-openreward] ERROR: $*" >&2
@@ -121,6 +129,26 @@ require_uint() {
 
 require_uint OPENREWARD_EXPECTED_NNODES "${EXPECTED_NNODES}" 1
 require_uint OPENREWARD_EXPECTED_MODEL_SHARDS "${EXPECTED_MODEL_SHARDS}" 1
+require_uint OPENREWARD_NODE_MEMORY_LIMIT_BYTES "${NODE_MEMORY_LIMIT_BYTES}" 1
+require_uint OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT "${NODE_MEMORY_TRIGGER_PERCENT}" 1
+require_uint OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES \
+    "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" 1
+require_uint OPENREWARD_NODE_MEMORY_POLL_SECONDS "${NODE_MEMORY_POLL_SECONDS}" 1
+require_uint OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS "${NODE_MEMORY_TELEMETRY_SECONDS}" 1
+[[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 && \
+    "${NODE_MEMORY_LIMIT_BYTES}" == 2061584302080 && \
+    "${NODE_MEMORY_TRIGGER_PERCENT}" == 85 && \
+    "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" == 274877906944 && \
+    "${NODE_MEMORY_POLL_SECONDS}" == 2 && \
+    "${NODE_MEMORY_TELEMETRY_SECONDS}" == 60 ]] || \
+    die "node memory guard must use the exact enabled PBS service-node contract"
+export \
+    OPENREWARD_NODE_MEMORY_GUARD_ENABLED=${NODE_MEMORY_GUARD_ENABLED} \
+    OPENREWARD_NODE_MEMORY_LIMIT_BYTES=${NODE_MEMORY_LIMIT_BYTES} \
+    OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=${NODE_MEMORY_TRIGGER_PERCENT} \
+    OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES} \
+    OPENREWARD_NODE_MEMORY_POLL_SECONDS=${NODE_MEMORY_POLL_SECONDS} \
+    OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS=${NODE_MEMORY_TELEMETRY_SECONDS}
 [[ "${EXPECTED_RECURSIVE}" == 0 || "${EXPECTED_RECURSIVE}" == 1 ]] || \
     die "OPENREWARD_EXPECTED_RECURSIVE must be 0 or 1"
 [[ -z "${EXPECTED_PTC}" || "${EXPECTED_PTC}" == 0 || "${EXPECTED_PTC}" == 1 ]] || \
@@ -164,6 +192,7 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
             "${PREUPDATE_NO_LOAD_OPTIM}" == 1 && \
             "${EXPECTED_NNODES}" == 16 && "${EXPECTED_RECURSIVE}" == 0 && \
             "${EXPECTED_PTC}" == 0 && \
+            -z "${RESUME_SUCCESSOR_BINDING}" && \
             "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe16-q38-v18 && \
             "${EXPECTED_TRIAL}" == abci-ta-swe16-nr-q38d-c12-v18-t0 && \
             "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" == 3600 && \
@@ -183,16 +212,53 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
             die "OPENREWARD_PREUPDATE_RESUME_BINDING requires preupdate resume mode"
         [[ -z "${PREUPDATE_LOAD_POLICY}" && "${PREUPDATE_NO_LOAD_OPTIM}" == 0 ]] || \
             die "preupdate optimizer-load policy is forbidden for normal resume"
-        [[ -z "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}" ]] || \
-            die "optimizer-moment absence is restricted to preupdate resume"
         if [[ -z "${EXPECTED_START_GLOBAL_STEP}" ]]; then
             EXPECTED_START_GLOBAL_STEP=$((10#${EXPECTED_RESUME_GLOBAL_STEP} + 1))
         fi
         require_uint OPENREWARD_EXPECTED_START_GLOBAL_STEP "${EXPECTED_START_GLOBAL_STEP}" 1
         ((10#${EXPECTED_RESUME_GLOBAL_STEP} >= 1 && \
-          10#${EXPECTED_START_GLOBAL_STEP} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1 && \
-          10#${EXPECTED_RESUME_LR_NUM_STEPS} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1)) || \
-            die "normal resume requires start/LR scheduler steps equal recovered global step plus one"
+          10#${EXPECTED_START_GLOBAL_STEP} == 10#${EXPECTED_RESUME_GLOBAL_STEP} + 1)) || \
+            die "normal resume requires start step equal recovered global step plus one"
+        if [[ -n "${RESUME_SUCCESSOR_BINDING}" ]]; then
+            require_uint OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS \
+                "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}" 1
+            case "${RESUME_SUCCESSOR_BINDING}" in
+                qwen38-32-v22-gs10)
+                    [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
+                        "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q38-v16 && \
+                        "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q38d-c24-v16-t0 && \
+                        "${EXPECTED_RESUME_GLOBAL_STEP}:${EXPECTED_START_GLOBAL_STEP}" == 10:11 && \
+                        "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 1472:18297:160 && \
+                        "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 16:11:512:64 ]] || \
+                        die "Qwen3.8 32-node v8r22 successor runtime binding mismatch"
+                    ;;
+                qwen38-16-v22-gs11-ordinary)
+                    [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 16:0:0 && \
+                        "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe16-q38-v18 && \
+                        "${EXPECTED_TRIAL}" == abci-ta-swe16-nr-q38d-c12-v18-t0 && \
+                        "${EXPECTED_RESUME_GLOBAL_STEP}:${EXPECTED_START_GLOBAL_STEP}" == 11:12 && \
+                        "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 1472:18057:80 && \
+                        "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 16:8:304:38 ]] || \
+                        die "Qwen3.8 16-node v8r22 successor runtime binding mismatch"
+                    ;;
+                qwen36-32-v22-depth2)
+                    [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
+                        "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q36-cp2-v21 && \
+                        "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0 && \
+                        "${EXPECTED_RESUME_GLOBAL_STEP}:${EXPECTED_START_GLOBAL_STEP}" == 1:2 && \
+                        "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 21768:127481:160 && \
+                        "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 48:2:184:23 ]] || \
+                        die "Qwen3.6 32-node depth-two v8r22 successor runtime binding mismatch"
+                    ;;
+                *) die "unknown exact v8r22 successor runtime binding" ;;
+            esac
+        else
+            [[ -z "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}" ]] || \
+                die "optimizer-moment binding requires an exact v8r22 successor"
+            ((10#${EXPECTED_RESUME_LR_NUM_STEPS} == \
+              10#${EXPECTED_RESUME_GLOBAL_STEP} + 1)) || \
+                die "legacy normal resume requires LR step equal global step plus one"
+        fi
     fi
 else
     [[ "${ALLOW_PREUPDATE_RESUME}" == 0 ]] || \
@@ -201,6 +267,8 @@ else
         die "OPENREWARD_PREUPDATE_RESUME_BINDING requires existing recovery"
     [[ -z "${PREUPDATE_LOAD_POLICY}" && "${PREUPDATE_NO_LOAD_OPTIM}" == 0 ]] || \
         die "preupdate optimizer-load policy requires existing recovery"
+    [[ -z "${RESUME_SUCCESSOR_BINDING}" ]] || \
+        die "successor binding requires existing recovery"
     for unexpected_resume_value in \
         "${EXPECTED_RESUME_GLOBAL_STEP}" \
         "${EXPECTED_START_GLOBAL_STEP}" \
@@ -253,7 +321,7 @@ fi
 [[ "${NODE_LOCAL_INIT_PYTHON}" == /* && -x "${NODE_LOCAL_INIT_PYTHON}" ]] || \
     die "node-local initializer Python must be an absolute executable: ${NODE_LOCAL_INIT_PYTHON}"
 for required_file in \
-    "${PREPARE_ENV}" "${PREPARE_CONTROLLER_ENV}" "${NODE_SERVICES}" \
+    "${PREPARE_ENV}" "${PREPARE_CONTROLLER_ENV}" "${NODE_SERVICES}" "${NODE_MEMORY_GUARD}" \
     "${SERVICE_CLEANUP_RECEIPT}" "${SERVICE_SHUTDOWN_REQUEST}" \
     "${CONTROLLER_RUNTIME_RECEIPT_HELPER}" "${SWE_CLEANUP}" \
     "${NODE_LOCAL_INIT}" "${UPDATE_GATE}"; do
@@ -767,6 +835,12 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
             --expected-optimizer-moment-keys \
                 "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}"
         )
+    elif [[ -n "${RESUME_SUCCESSOR_BINDING}" ]]; then
+        resume_runtime_mode_args+=(
+            --successor-binding "${RESUME_SUCCESSOR_BINDING}"
+            --expected-optimizer-moment-keys \
+                "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}"
+        )
     fi
     "${RUNTIME}" exec --nv --cleanenv --containall --no-home \
         --no-mount home,cwd,bind-paths \
@@ -1223,6 +1297,12 @@ while IFS=$'\t' read -r host vnode_index; do
         "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${service_shutdown_request}" \
         "PLATOON_NODE_SERVICES_EXPECTED_HOST=${host}" \
         "PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}" \
+        "OPENREWARD_NODE_MEMORY_GUARD_ENABLED=${NODE_MEMORY_GUARD_ENABLED}" \
+        "OPENREWARD_NODE_MEMORY_LIMIT_BYTES=${NODE_MEMORY_LIMIT_BYTES}" \
+        "OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=${NODE_MEMORY_TRIGGER_PERCENT}" \
+        "OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" \
+        "OPENREWARD_NODE_MEMORY_POLL_SECONDS=${NODE_MEMORY_POLL_SECONDS}" \
+        "OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS=${NODE_MEMORY_TELEMETRY_SECONDS}" \
         "${NODE_SERVICES}" \
         >"${LOG_DIR}/services-${safe_host}.log" 2>&1 &
     service_pids+=("$!")

@@ -18,14 +18,9 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 VERIFY = PBS_ROOT / "verify_openreward_resume_checkpoint.py"
 COMMON = PBS_ROOT / "openreward-ta-swe-prealloc-common.sh"
 WRAPPER = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
-SUCCESSOR_WRAPPER = (
-    PBS_ROOT / "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
-)
+SUCCESSOR_WRAPPER = PBS_ROOT / "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
 WRAPPER_16 = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
-NOOPTIM_WRAPPER_16 = (
-    PBS_ROOT
-    / "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
-)
+NOOPTIM_WRAPPER_16 = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
 EXPERIMENT = "abci-or-ta-swe32-q38-v16"
 TRIAL = "abci-ta-swe32-rec-q38d-c24-v16-t0"
 EXPERIMENT_16 = "abci-or-ta-swe16-q38-v18"
@@ -117,14 +112,7 @@ def _sample_manifest_sha256(paths: list[Path]) -> str:
                 sample.update(stream.read(1024 * 1024))
                 stream.seek(size - 1024 * 1024)
                 sample.update(stream.read(1024 * 1024))
-        digest.update(
-            path.name.encode()
-            + b"\0"
-            + str(size).encode()
-            + b"\0"
-            + sample.hexdigest().encode()
-            + b"\n"
-        )
+        digest.update(path.name.encode() + b"\0" + str(size).encode() + b"\0" + sample.hexdigest().encode() + b"\n")
     return digest.hexdigest()
 
 
@@ -229,12 +217,10 @@ def test_qwen38_v20_successor_composes_exact_timeout_and_step_contract() -> None
     assert config["actor"]["mb_spec"]["max_tokens_per_mb"] == 32768
     assert config["sglang"]["context_length"] == 32769
 
-    workflow_source = (
-        REPO_ROOT / "platoon/train/areal/workflows/group_rollout_workflow.py"
-    ).read_text(encoding="utf-8")
-    child_source = (REPO_ROOT / "platoon/train/areal/subprocess_worker.py").read_text(
+    workflow_source = (REPO_ROOT / "platoon/train/areal/workflows/group_rollout_workflow.py").read_text(
         encoding="utf-8"
     )
+    child_source = (REPO_ROOT / "platoon/train/areal/subprocess_worker.py").read_text(encoding="utf-8")
     assert "_SUBPROCESS_INIT_BUDGET_SECONDS = 120" in workflow_source
     assert "_SUBPROCESS_CLEANUP_GRACE_SECONDS = 60" in workflow_source
     assert "_PARENT_FUTURE_GRACE_SECONDS = 30" in workflow_source
@@ -421,9 +407,7 @@ def test_qwen38_v20_successor_wrapper_binds_frozen_gs6_before_services() -> None
     assert "9417c54953c5651d5c9a73649657ca50da74995847d77258e0a256e193674251" in source
     assert "00c8d7ccdd27f49bd248369ffa45416d89b53dcb23a45ec9d5ea523aeeb7bddb" in source
     assert "export OPENREWARD_MODEL_FAMILY=qwen38" in source
-    assert source.index("export OPENREWARD_MODEL_FAMILY=qwen38") < source.index(
-        'source "${ABCI_ENV}"'
-    )
+    assert source.index("export OPENREWARD_MODEL_FAMILY=qwen38") < source.index('source "${ABCI_ENV}"')
     guard = source.index('[[ "${BINDING_STATE}" == FROZEN_POST_STEP6_CHECKPOINT ]]')
     assert guard < source.index('source "${ABCI_ENV}"')
     assert guard < source.index('"${RESUME_VERIFY}"')
@@ -512,22 +496,14 @@ def _build_authorized_fixture(
     config_bytes = (
         (REPO_ROOT / (CONFIG_RELATIVE_16 if preupdate else CONFIG_RELATIVE)).read_bytes()
         if successor_config or preupdate
-        else (
-            f"experiment_name: {experiment}\n"
-            f"trial_name: {trial}\n"
-            "recover:\n  mode: auto\n"
-        ).encode()
+        else (f"experiment_name: {experiment}\ntrial_name: {trial}\nrecover:\n  mode: auto\n").encode()
     )
     source_config.write_bytes(config_bytes)
     current_config = tmp_path / "current-config.yaml"
     current_config.write_bytes(
         (REPO_ROOT / SUCCESSOR_CONFIG_RELATIVE).read_bytes()
         if successor_config
-        else (
-            (REPO_ROOT / NOOPTIM_CONFIG_RELATIVE_16).read_bytes()
-            if preupdate
-            else config_bytes
-        )
+        else ((REPO_ROOT / NOOPTIM_CONFIG_RELATIVE_16).read_bytes() if preupdate else config_bytes)
     )
     source_ref = "refs/tags/source-release"
     _write_json(
@@ -594,9 +570,7 @@ def _build_authorized_fixture(
     receipt_dir = tmp_path / "receipts"
     receipt_dir.mkdir()
     source_candidate = receipt_dir / (
-        f"{trial}.resume-gs5-v8r16.success.candidate.json"
-        if successor_config
-        else f"{trial}.success.candidate.json"
+        f"{trial}.resume-gs5-v8r16.success.candidate.json" if successor_config else f"{trial}.success.candidate.json"
     )
     ancestor_candidate = receipt_dir / f"{trial}.success.candidate.json"
     source_log = tmp_path / f"{source_job_id}.OU"
@@ -612,18 +586,9 @@ def _build_authorized_fixture(
                 (
                     f"openreward_v9_release=PASS release_commit={source_commit}",
                     "[h200-16-v9] accepted gate2=/gate2 all-MCP=/all-mcp",
-                    (
-                        "[pbs-openreward] starting host controller "
-                        f"experiment={experiment} trial={trial} nodes=16"
-                    ),
-                    (
-                        "Recover INFO: Saved recover checkpoint to "
-                        f"{checkpoint_root}/default/recover_checkpoint"
-                    ),
-                    (
-                        "RLTrainer ERROR: Training failed with exception: "
-                        "optimizer_batch_datums must be an integer >= 1"
-                    ),
+                    (f"[pbs-openreward] starting host controller experiment={experiment} trial={trial} nodes=16"),
+                    (f"Recover INFO: Saved recover checkpoint to {checkpoint_root}/default/recover_checkpoint"),
+                    ("RLTrainer ERROR: Training failed with exception: optimizer_batch_datums must be an integer >= 1"),
                 )
             )
             + "\n",
@@ -641,14 +606,11 @@ def _build_authorized_fixture(
                 "checkpoint_root": str(checkpoint_root),
                 "recover_info_path": str(recover_info),
                 "recover_info": {
-                    path.name: {"size": path.stat().st_size, "sha256": _sha256(path)}
-                    for path in recover_info.iterdir()
+                    path.name: {"size": path.stat().st_size, "sha256": _sha256(path)} for path in recover_info.iterdir()
                 },
                 "recover_checkpoint_path": str(checkpoint),
                 "recover_checkpoint_file_count": len(checkpoint_files),
-                "recover_checkpoint_total_bytes": sum(
-                    path.stat().st_size for path in checkpoint_files
-                ),
+                "recover_checkpoint_total_bytes": sum(path.stat().st_size for path in checkpoint_files),
                 "recover_checkpoint_manifest": {
                     path.name: {
                         "size": path.stat().st_size,
@@ -692,7 +654,9 @@ def _build_authorized_fixture(
         if successor_config:
             _write_json(ancestor_candidate, {"authorized_ancestor": True})
     target_receipt = receipt_dir / (
-        f"{trial}.resume-gs0-nooptim-v8r20.success.json" if preupdate else (
+        f"{trial}.resume-gs0-nooptim-v8r20.success.json"
+        if preupdate
+        else (
             f"{trial}.resume-post-step6-v8r20.success.json"
             if successor_config
             else f"{trial}.resume-gs5-v8r16.success.json"
@@ -749,7 +713,7 @@ def _build_authorized_fixture(
         str(target_receipt),
     ]
     if successor_config:
-        command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
+        command[command.index("--source-pbs-job-id") : command.index("--source-pbs-job-id")] = [
             "--expected-source-config-sha256",
             _sha256(source_config),
             "--successor-binding",
@@ -764,15 +728,18 @@ def _build_authorized_fixture(
         # checkpoint fixtures can exercise the rest of the exact binding.
         fixture_verify = tmp_path / "verify-successor-fixture.py"
         verifier_source = VERIFY.read_text(encoding="utf-8")
-        assert verifier_source.count(ANCESTOR_SHA256) == 1
+        # The v8r22 bindings legitimately reuse this historical ancestor. Only
+        # substitute the first occurrence, which is the legacy v20 constant
+        # exercised by this synthetic fixture.
+        assert verifier_source.count(ANCESTOR_SHA256) >= 1
         fixture_verify.write_text(
-            verifier_source.replace(ANCESTOR_SHA256, _sha256(ancestor_candidate)),
+            verifier_source.replace(ANCESTOR_SHA256, _sha256(ancestor_candidate), 1),
             encoding="utf-8",
         )
         fixture_verify.chmod(0o755)
         command[0] = str(fixture_verify)
     if preupdate:
-        command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
+        command[command.index("--source-pbs-job-id") : command.index("--source-pbs-job-id")] = [
             "--expected-source-config-sha256",
             _sha256(source_config),
             "--source-log",
@@ -786,7 +753,7 @@ def _build_authorized_fixture(
             "qwen38-16-v20-gs0-no-load-optim",
         ]
     else:
-        command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
+        command[command.index("--source-pbs-job-id") : command.index("--source-pbs-job-id")] = [
             "--source-candidate",
             str(source_candidate),
             "--expected-source-candidate-sha256",
@@ -810,10 +777,7 @@ def test_resume_verifier_executes_complete_authorization(tmp_path: Path) -> None
     result = subprocess.run(command, check=False, capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-    assert (
-        "openreward_resume_checkpoint=PASS global_step=5 shards=160 "
-        in result.stdout
-    )
+    assert "openreward_resume_checkpoint=PASS global_step=5 shards=160 " in result.stdout
 
 
 def test_resume_verifier_binds_distinct_source_and_successor_config_hashes(
@@ -843,9 +807,7 @@ def test_successor_binding_rejects_self_consistent_alternative_config(
 ) -> None:
     command, paths = _build_authorized_fixture(tmp_path, successor_config=True)
     paths["current_config"].write_text("alternative successor\n", encoding="utf-8")
-    command[command.index("--expected-config-sha256") + 1] = _sha256(
-        paths["current_config"]
-    )
+    command[command.index("--expected-config-sha256") + 1] = _sha256(paths["current_config"])
 
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     assert result.returncode != 0
@@ -1100,32 +1062,22 @@ def test_preupdate_runtime_schema_requires_zero_moments_and_eight_groups() -> No
         pristine[f"{prefix}.optimizer/shard_0_1"] = object()
         pristine[f"{prefix}.per_bucket_numel/shard_0_1"] = object()
         pristine[f"{prefix}.per_bucket_numel_unpadded/shard_0_1"] = object()
-        pristine[
-            f"{prefix}.gbuf_idx_0.dtype_(torch.bfloat16, torch.float32)."
-            "bucket_idx_0.param"
-        ] = object()
+        pristine[f"{prefix}.gbuf_idx_0.dtype_(torch.bfloat16, torch.float32).bucket_idx_0.param"] = object()
 
     module._verify_optimizer_moment_metadata(pristine, 0)
     with_moments = dict(pristine)
     with_moments[
-        "optimizer.distributed.dp_group_idx_0.gbuf_idx_0."
-        "dtype_(torch.bfloat16, torch.float32).bucket_idx_0.exp_avg"
+        "optimizer.distributed.dp_group_idx_0.gbuf_idx_0.dtype_(torch.bfloat16, torch.float32).bucket_idx_0.exp_avg"
     ] = object()
     with pytest.raises(RuntimeError, match="optimizer-moment key count mismatch"):
         module._verify_optimizer_moment_metadata(with_moments, 0)
 
-    missing_group = {
-        key: value
-        for key, value in pristine.items()
-        if "dp_group_idx_7" not in key
-    }
+    missing_group = {key: value for key, value in pristine.items() if "dp_group_idx_7" not in key}
     with pytest.raises(RuntimeError, match="eight-group skeleton"):
         module._verify_optimizer_moment_metadata(missing_group, 0)
 
     unexpected_bookkeeping = dict(pristine)
-    unexpected_bookkeeping[
-        "optimizer.distributed.dp_group_idx_0.extra_bookkeeping/shard_0_1"
-    ] = object()
+    unexpected_bookkeeping["optimizer.distributed.dp_group_idx_0.extra_bookkeeping/shard_0_1"] = object()
     with pytest.raises(RuntimeError, match="eight-group skeleton"):
         module._verify_optimizer_moment_metadata(unexpected_bookkeeping, 0)
 
@@ -1272,13 +1224,13 @@ def test_preupdate_nooptim_wrapper_binds_exact_step_zero_checkpoint_and_heartbea
     assert "--expected-shards 80" in wrapper
     assert "--expected-total-bytes 164220069555" in wrapper
     assert "--allow-preupdate-global-step-zero" in wrapper
-    assert 'PREUPDATE_BINDING=qwen38-16-v18-job2155389' in wrapper
-    assert 'PREUPDATE_LOAD_POLICY=qwen38-16-v20-gs0-no-load-optim' in wrapper
+    assert "PREUPDATE_BINDING=qwen38-16-v18-job2155389" in wrapper
+    assert "PREUPDATE_LOAD_POLICY=qwen38-16-v20-gs0-no-load-optim" in wrapper
     assert '--preupdate-binding "${PREUPDATE_BINDING}"' in wrapper
     assert '--preupdate-load-policy "${PREUPDATE_LOAD_POLICY}"' in wrapper
     assert "--expected-source-config-sha256" in wrapper
     assert "--expected-start-global-step 1" in wrapper
-    assert "--source-log \"${SOURCE_LOG}\"" in wrapper
+    assert '--source-log "${SOURCE_LOG}"' in wrapper
     assert "--source-candidate" not in wrapper
     assert "export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
     assert "export OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper

@@ -35,16 +35,9 @@ PREUPDATE_LOAD_POLICY_ID = "qwen38-16-v20-gs0-no-load-optim"
 PREUPDATE_EXPERIMENT = "abci-or-ta-swe16-q38-v18"
 PREUPDATE_TRIAL = "abci-ta-swe16-nr-q38d-c12-v18-t0"
 PREUPDATE_SOURCE_JOB = "2155389.pbs1"
-PREUPDATE_SOURCE_CONFIG_SHA256 = (
-    "0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39"
-)
-PREUPDATE_CURRENT_CONFIG_SHA256 = (
-    "efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97"
-)
-PREUPDATE_RECEIPT = (
-    "abci-ta-swe16-nr-q38d-c12-v18-t0."
-    "resume-gs0-nooptim-v8r20.success.json"
-)
+PREUPDATE_SOURCE_CONFIG_SHA256 = "0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39"
+PREUPDATE_CURRENT_CONFIG_SHA256 = "efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97"
+PREUPDATE_RECEIPT = "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-nooptim-v8r20.success.json"
 QWEN38_SUCCESSOR_BINDING_ID = "qwen38-32-v20-post-step6"
 QWEN38_SUCCESSOR_EXPERIMENT = "abci-or-ta-swe32-q38-v16"
 QWEN38_SUCCESSOR_TRIAL = "abci-ta-swe32-rec-q38d-c24-v16-t0"
@@ -53,24 +46,173 @@ QWEN38_SUCCESSOR_SOURCE_CONFIG = Path(
     "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
     "qwen38_dense_c24_ta20_v16.yaml"
 )
-QWEN38_SUCCESSOR_SOURCE_CONFIG_SHA256 = (
-    "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"
-)
-QWEN38_SUCCESSOR_CURRENT_CONFIG_SHA256 = (
-    "24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237"
-)
+QWEN38_SUCCESSOR_SOURCE_CONFIG_SHA256 = "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"
+QWEN38_SUCCESSOR_CURRENT_CONFIG_SHA256 = "24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237"
 QWEN38_SUCCESSOR_GLOBAL_STEP = 6
 QWEN38_SUCCESSOR_RECOVER_STATS_COMMIT_STEP = 4
-QWEN38_SUCCESSOR_ANCESTOR_SHA256 = (
-    "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
-)
-QWEN38_SUCCESSOR_RECEIPT = (
-    "abci-ta-swe32-rec-q38d-c24-v16-t0."
-    "resume-post-step6-v8r20.success.json"
-)
-QWEN38_SUCCESSOR_ANCESTOR_RECEIPT = (
-    "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
-)
+QWEN38_SUCCESSOR_ANCESTOR_SHA256 = "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
+QWEN38_SUCCESSOR_RECEIPT = "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r20.success.json"
+QWEN38_SUCCESSOR_ANCESTOR_RECEIPT = "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
+
+# Post-v8r21 successors are exact, immutable bindings rather than a general
+# permission to resume an arbitrary later checkpoint.  The source candidate
+# proves that the named PBS job performed and synchronized at least one update;
+# the independently frozen checkpoint census below authorizes the later durable
+# head left by that same failed job.
+QWEN38_32_V22_BINDING_ID = "qwen38-32-v22-gs10"
+QWEN38_16_V22_BINDING_ID = "qwen38-16-v22-gs11-ordinary"
+QWEN36_32_V22_BINDING_ID = "qwen36-32-v22-depth2"
+
+V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
+    QWEN38_32_V22_BINDING_ID: {
+        "experiment": "abci-or-ta-swe32-q38-v16",
+        "trial": "abci-ta-swe32-rec-q38d-c24-v16-t0",
+        "checkpoint_root": Path(
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/"
+            "aci18912it/abci-or-ta-swe32-q38-v16/"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0"
+        ),
+        "source_job": "2159203.pbs1",
+        "source_release_root": Path("/home/aci18912it/rasp/releases/platoon-v8r19-376d1b9-18e62c0"),
+        "source_release_ref": "refs/tags/abci-v8r19-376d1b9-18e62c0",
+        "source_config": Path(
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen38_dense_c24_ta20_v20.yaml"
+        ),
+        "source_config_sha256": ("24f6dc1c9ff7be36948dff1da59c8ded92d9f42d29ac9bf71fa3045f3fec8237"),
+        "current_config_name": (
+            "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen38_dense_c24_ta20_v22_resume_gs10.yaml"
+        ),
+        "current_config_sha256": ("578f64de97188829c84958f6aff785722ade4bf1571d9fdc93ac548944a54233"),
+        "source_candidate_name": ("abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r19.success.candidate.json"),
+        "source_candidate_sha256": ("4efedc4c9e86bf00cb6b1ed9f0881f44b13e19f792019160624c9520d685fa57"),
+        "ancestor_receipts": {
+            (
+                "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.candidate.json"
+            ): "12a5a385826dbb2efb4a6dbffcdc057dce7063def8ade0c0d131dae1f802cd94",
+            (
+                "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
+            ): "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22",
+        },
+        "source_log_name": "2159203.pbs1.OU",
+        "source_log_sha256": ("2021fe0893d707272736e87f243bb17510db9ee7bec104947f5d4053dcaa7322"),
+        "target_receipt_name": ("abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs10-v8r22.success.json"),
+        "global_step": 10,
+        "start_global_step": 11,
+        "steps_per_epoch": 846,
+        "shards": 160,
+        "total_bytes": 383216730907,
+        "checkpoint_layout_sha256": ("6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"),
+        "checkpoint_sample_manifest_sha256": ("568a3fba94e9af17578de0550a0e86cacc9b4777f22d2e1bee4b4e6a9e369136"),
+        "fixed_content_sha256": ("fce62008329da13fb14e74be2c6117d94efb9789631764804aca74d871a5a997"),
+        "recover_info_content_sha256": ("cdc22676a6075771c319413fbec4bee2b3ac39bbf015782365cab882b8a7fa0e"),
+        "stats_commit_step": 9,
+        "state_keys": 1472,
+        "storage_entries": 18297,
+        "optimizer_moment_keys": 16,
+        "optimizer_layout": "single",
+        "lr_num_steps": 11,
+        "samples_yielded": 512,
+        "iterator_yielded": 64,
+    },
+    QWEN38_16_V22_BINDING_ID: {
+        "experiment": "abci-or-ta-swe16-q38-v18",
+        "trial": "abci-ta-swe16-nr-q38d-c12-v18-t0",
+        "checkpoint_root": Path(
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/"
+            "aci18912it/abci-or-ta-swe16-q38-v18/"
+            "abci-ta-swe16-nr-q38d-c12-v18-t0"
+        ),
+        "source_job": "2159631.pbs1",
+        "source_release_root": Path("/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0"),
+        "source_release_ref": "refs/tags/abci-v8r20-376d1b9-18e62c0",
+        "source_config": Path(
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+            "qwen38_dense_c12_ta20_v20_gs0_no_load_optim.yaml"
+        ),
+        "source_config_sha256": ("efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97"),
+        "current_config_name": (
+            "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+            "qwen38_dense_c12_ta20_v22_resume_gs11.yaml"
+        ),
+        "current_config_sha256": ("a5886ed07ef6adcf0681e8f577edc9da205983b4ab94fcd96638b1ad52ef0400"),
+        "source_candidate_name": ("abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-nooptim-v8r20.success.candidate.json"),
+        "source_candidate_sha256": ("2ddbea585030511632246700bc0adfcc20f79205b09a902f5a1823f98535f5a4"),
+        "ancestor_receipts": {},
+        "source_log_name": "2159631.pbs1.OU",
+        "source_log_sha256": ("6c1c610f57941a5f0e021353e431bf9387934be6df5485c95d92562a824ee539"),
+        "target_receipt_name": ("abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs11-v8r22.success.json"),
+        "global_step": 11,
+        "start_global_step": 12,
+        "steps_per_epoch": 846,
+        "shards": 80,
+        "total_bytes": 383216293802,
+        "checkpoint_layout_sha256": ("b25138786744bb5afe7c683fd58bec87c59b28b398f0b5bc3d531ea1d1bde9af"),
+        "checkpoint_sample_manifest_sha256": ("70dbcd55159fd741ed6e754fa1d39cff94a9c06ec5cd1c935d696b1abc9ad93f"),
+        "fixed_content_sha256": ("583a9c9810d1bcd56af359c20b9380b0788c6c28d0931c9f02238e921dcd1cd1"),
+        "recover_info_content_sha256": ("3afc16096bb9315e9d452fe63e112f6b603195e27592911ce36821dff740d0f9"),
+        "stats_commit_step": 10,
+        "state_keys": 1472,
+        "storage_entries": 18057,
+        "optimizer_moment_keys": 16,
+        "optimizer_layout": "single",
+        # Four data-empty steps advance trainer/global state without stepping
+        # the optimizer.  The saved scheduler value is therefore intentionally
+        # lower than global_step + 1 and is bound exactly here.
+        "lr_num_steps": 8,
+        "samples_yielded": 304,
+        "iterator_yielded": 38,
+    },
+    QWEN36_32_V22_BINDING_ID: {
+        "experiment": "abci-or-ta-swe32-q36-cp2-v21",
+        "trial": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0",
+        "checkpoint_root": Path(
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/"
+            "aci18912it/abci-or-ta-swe32-q36-cp2-v21/"
+            "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0"
+        ),
+        "source_job": "2160316.pbs1",
+        "source_release_root": Path("/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0"),
+        "source_release_ref": "refs/tags/abci-v8r21-376d1b9-18e62c0",
+        "source_config": Path(
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen36_moe_cp2_c24_ta20_v21.yaml"
+        ),
+        "source_config_sha256": ("219c745573df56f01100698b19e01fa7450337c8158716ba48549a209a77e900"),
+        "current_config_name": (
+            "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen36_moe_cp2_c24_ta20_v22_resume_d2.yaml"
+        ),
+        "current_config_sha256": ("71125b89cb5cf096f777272287bd7732755f0b99e1ffa1e449e572894f96abc8"),
+        "source_candidate_name": ("abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0.success.candidate.json"),
+        "source_candidate_sha256": ("c8ce5438c3b12985225bf4cbddd518735e53346c19b669aabf28061a1bb4adf2"),
+        "ancestor_receipts": {},
+        "source_log_name": "2160316.pbs1.OU",
+        "source_log_sha256": ("3dfd23b2f4f48c685e790ac60bd5159f1d34a907986b13cada0359bf61d9c124"),
+        "target_receipt_name": ("abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0.resume-gs1-depth2-v8r22.success.json"),
+        "global_step": 1,
+        "start_global_step": 2,
+        "steps_per_epoch": 846,
+        "shards": 160,
+        "total_bytes": 492651122383,
+        "checkpoint_layout_sha256": ("9be96f2038038d2fb4c4edc9fb5d0777d481844228de865a2999f4d3f2205d5d"),
+        "checkpoint_sample_manifest_sha256": ("02918e0a4f699513161894a794e6c7505073f1abcf10d18bb2ccfafff7aea275"),
+        "fixed_content_sha256": ("fff02ac663779e3449a67ebb4db3f078df7f44a263a7170a180e8a767f8d06d0"),
+        "recover_info_content_sha256": ("c2553a9d7cebdc1bcb6ed610b129cb7b839199f5b2cce998f38aee6be748e3d8"),
+        "stats_commit_step": 0,
+        "state_keys": 21768,
+        "storage_entries": 127481,
+        "optimizer_moment_keys": 48,
+        "optimizer_layout": "two_group",
+        "lr_num_steps": 2,
+        "samples_yielded": 184,
+        "iterator_yielded": 23,
+    },
+}
 
 
 def _sha256(path: Path) -> str:
@@ -179,8 +321,7 @@ def _current_candidate_recover_evidence(
         "checkpoint_root": str(checkpoint_root),
         "recover_info_path": str(recover_info),
         "recover_info": {
-            path.name: {"size": path.stat().st_size, "sha256": _sha256(path)}
-            for path in recover_info_paths
+            path.name: {"size": path.stat().st_size, "sha256": _sha256(path)} for path in recover_info_paths
         },
         "recover_checkpoint_path": str(checkpoint),
         "recover_checkpoint_file_count": len(checkpoint_files),
@@ -222,12 +363,7 @@ def _require_owned_regular(path: Path, *, label: str) -> os.stat_result:
     if not path.is_absolute() or path.resolve(strict=True) != path:
         raise RuntimeError(f"{label} is not an exact canonical file: {path}")
     value = path.lstat()
-    if (
-        not stat.S_ISREG(value.st_mode)
-        or value.st_uid != os.getuid()
-        or value.st_nlink != 1
-        or value.st_size <= 0
-    ):
+    if not stat.S_ISREG(value.st_mode) or value.st_uid != os.getuid() or value.st_nlink != 1 or value.st_size <= 0:
         raise RuntimeError(f"{label} identity/owner/size mismatch: {path}")
     return value
 
@@ -265,6 +401,71 @@ def _checkpoint_snapshot(path: Path) -> tuple[tuple[str, int, int, int, int], ..
             for entry in path.iterdir()
         )
     )
+
+
+def _v22_successor_binding(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Return and validate one exact post-v8r21 successor binding."""
+
+    if args.successor_binding not in V22_SUCCESSOR_BINDINGS:
+        return None
+    binding = V22_SUCCESSOR_BINDINGS[args.successor_binding]
+    ancestor_receipts = {
+        path.name: digest
+        for path, digest in zip(
+            args.authorized_ancestor_receipt,
+            args.expected_authorized_ancestor_receipt_sha256,
+        )
+    }
+    exact_values = {
+        "experiment": args.expected_experiment,
+        "trial": args.expected_trial,
+        "checkpoint_root": args.checkpoint_root,
+        "source_job": args.source_pbs_job_id,
+        "source_release_root": args.source_release_root,
+        "source_release_ref": args.source_release_ref,
+        "source_config": args.source_config_relative,
+        "source_config_sha256": args.expected_source_config_sha256,
+        "current_config_name": args.current_config.name,
+        "current_config_sha256": args.expected_config_sha256,
+        "source_candidate_name": (args.source_candidate.name if args.source_candidate is not None else None),
+        "source_candidate_sha256": args.expected_source_candidate_sha256,
+        "source_log_name": args.source_log.name if args.source_log is not None else None,
+        "source_log_sha256": args.expected_source_log_sha256,
+        "target_receipt_name": args.target_receipt.name,
+        "global_step": args.expected_global_step,
+        "start_global_step": args.expected_start_global_step,
+        "steps_per_epoch": args.expected_steps_per_epoch,
+        "shards": args.expected_shards,
+        "total_bytes": args.expected_total_bytes,
+        "checkpoint_layout_sha256": args.expected_checkpoint_layout_sha256,
+        "checkpoint_sample_manifest_sha256": (args.expected_checkpoint_sample_manifest_sha256),
+        "fixed_content_sha256": args.expected_fixed_content_sha256,
+        "recover_info_content_sha256": args.expected_recover_info_content_sha256,
+    }
+    mismatches = sorted(key for key, value in exact_values.items() if binding.get(key) != value)
+    if mismatches:
+        raise RuntimeError("v8r22 successor binding argument mismatch: " + ", ".join(mismatches))
+    if (
+        len(args.authorized_ancestor_receipt) != len(args.expected_authorized_ancestor_receipt_sha256)
+        or ancestor_receipts != binding["ancestor_receipts"]
+    ):
+        raise RuntimeError("v8r22 successor ancestor receipt binding mismatch")
+    return binding
+
+
+def _verify_v22_source_log(
+    *,
+    source_log: Path,
+    expected_source_log_sha256: str,
+    source_pbs_job_id: str,
+) -> None:
+    """Bind a later durable head to the exact source PBS output."""
+
+    if source_log.name != f"{source_pbs_job_id}.OU":
+        raise RuntimeError("v8r22 source log name does not match its PBS job ID")
+    _require_owned_regular(source_log, label="v8r22 source job log")
+    if _sha256(source_log) != expected_source_log_sha256:
+        raise RuntimeError("v8r22 source job log content digest mismatch")
 
 
 def _verify_source_release(
@@ -309,20 +510,42 @@ def _verify_source_release(
         label="source release manifest",
     )
     config_name = source_config_relative.name
-    if (
-        "swe32" in expected_experiment
-        and "32node_recursive" in config_name
-        and "swe32" in expected_trial
-    ):
+    if "qwen36_moe_cp2" in config_name:
+        if not (
+            expected_experiment == "abci-or-ta-swe32-q36-cp2-v21"
+            and expected_trial == "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0"
+            and config_name.endswith("qwen36_moe_cp2_c24_ta20_v21.yaml")
+        ):
+            raise RuntimeError("source Qwen3.6 config lineage mismatch")
+        model_artifact_key = "fresh_recursive_32node_qwen36_cp2"
+        wrapper_name = "openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"
+        model_family = "qwen36"
+        expected_architecture = "qwen3_5_moe"
+        expected_model_shards = 26
+    elif config_name.endswith("qwen38_dense_c24_ta20_v20.yaml"):
+        model_artifact_key = "recursive_32node"
+        wrapper_name = "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
+        model_family = "qwen38"
+        expected_architecture = "dense_transformer"
+        expected_model_shards = 18
+    elif config_name.endswith("qwen38_dense_c12_ta20_v20_gs0_no_load_optim.yaml"):
+        model_artifact_key = "nonrecursive_16node"
+        wrapper_name = "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
+        model_family = "qwen38"
+        expected_architecture = "dense_transformer"
+        expected_model_shards = 18
+    elif "swe32" in expected_experiment and "32node_recursive" in config_name and "swe32" in expected_trial:
         model_artifact_key = "recursive_32node"
         wrapper_name = "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
-    elif (
-        "swe16" in expected_experiment
-        and "16node_nonrecursive" in config_name
-        and "swe16" in expected_trial
-    ):
+        model_family = "qwen38"
+        expected_architecture = "dense_transformer"
+        expected_model_shards = 18
+    elif "swe16" in expected_experiment and "16node_nonrecursive" in config_name and "swe16" in expected_trial:
         model_artifact_key = "nonrecursive_16node"
         wrapper_name = "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
+        model_family = "qwen38"
+        expected_architecture = "dense_transformer"
+        expected_model_shards = 18
     else:
         raise RuntimeError("source config/experiment/trial topology lineage mismatch")
     model = manifest.get("model_artifacts", {}).get(model_artifact_key)
@@ -333,8 +556,8 @@ def _verify_source_release(
         or model.get("repository") != model_repository
         or model.get("revision") != model_revision
         or model.get("snapshot_path") != str(model_snapshot)
-        or model.get("architecture") != "dense_transformer"
-        or model.get("safetensors_shard_count") != 18
+        or model.get("architecture") != expected_architecture
+        or model.get("safetensors_shard_count") != expected_model_shards
     ):
         raise RuntimeError("source release/model lineage mismatch")
 
@@ -344,13 +567,15 @@ def _verify_source_release(
     _require_owned_regular(wrapper, label="source release wrapper")
     overlay_text = overlay.read_text(encoding="utf-8")
     wrapper_text = wrapper.read_text(encoding="utf-8")
+    model_prefix = "OPENREWARD_QWEN36" if model_family == "qwen36" else "OPENREWARD_QWEN38"
     required_overlay_lines = {
-        f"export OPENREWARD_QWEN38_MODEL_REPOSITORY={model_repository}",
-        f"export OPENREWARD_QWEN38_MODEL_REVISION={model_revision}",
-        f"export OPENREWARD_QWEN38_MODEL_SNAPSHOT={model_snapshot}",
-        "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}",
+        f"export {model_prefix}_MODEL_REPOSITORY={model_repository}",
+        f"export {model_prefix}_MODEL_REVISION={model_revision}",
+        f"export {model_prefix}_MODEL_SNAPSHOT={model_snapshot}",
+        f"export PLATOON_MODEL_SNAPSHOT=${{{model_prefix}_MODEL_SNAPSHOT}}",
     }
-    if not required_overlay_lines.issubset(set(overlay_text.splitlines())):
+    overlay_lines = {line.strip() for line in overlay_text.splitlines()}
+    if not required_overlay_lines.issubset(overlay_lines):
         raise RuntimeError("source release overlay does not bind the expected model")
     required_wrapper_lines = {
         f"REPO_ROOT={source_release_root}",
@@ -417,9 +642,7 @@ def _verify_receipts(
         if current_candidate_recover_evidence is None:
             raise RuntimeError("same-step candidate recovery evidence was not reconstructed")
         if recover != current_candidate_recover_evidence:
-            raise RuntimeError(
-                "same-step candidate does not exactly bind the current recovery checkpoint"
-            )
+            raise RuntimeError("same-step candidate does not exactly bind the current recovery checkpoint")
         if (
             candidate.get("stats_logger_last_commit_step") != expected_global_step
             or candidate.get("optimizer_update_successful") is not True
@@ -434,18 +657,12 @@ def _verify_receipts(
             or candidate.get("actor_version") != expected_global_step + 1
             or candidate.get("rollout_version") != expected_global_step + 1
         ):
-            raise RuntimeError(
-                "same-step candidate lacks the exact post-checkpoint commit/update evidence"
-            )
+            raise RuntimeError("same-step candidate lacks the exact post-checkpoint commit/update evidence")
     elif current_candidate_recover_evidence is not None:
         raise RuntimeError("current candidate recovery evidence is restricted to same-step resumes")
 
-    source_final = source_candidate.with_name(
-        source_candidate.name.removesuffix(".candidate.json") + ".json"
-    )
-    source_error = source_candidate.with_name(
-        source_candidate.name.removesuffix(".candidate.json") + ".error.json"
-    )
+    source_final = source_candidate.with_name(source_candidate.name.removesuffix(".candidate.json") + ".json")
+    source_error = source_candidate.with_name(source_candidate.name.removesuffix(".candidate.json") + ".error.json")
     if source_final.exists() or source_final.is_symlink() or source_error.exists() or source_error.is_symlink():
         raise RuntimeError("source receipt state is ambiguous or already final")
 
@@ -459,9 +676,7 @@ def _verify_receipts(
     if any(path.exists() or path.is_symlink() for path in target_paths):
         raise RuntimeError("target resume receipt state is stale")
 
-    if len(authorized_ancestor_receipts) != len(
-        expected_authorized_ancestor_receipt_sha256s
-    ):
+    if len(authorized_ancestor_receipts) != len(expected_authorized_ancestor_receipt_sha256s):
         raise RuntimeError("authorized ancestor receipt/hash counts differ")
     authorized_names: set[str] = set()
     for path, digest in zip(
@@ -475,10 +690,7 @@ def _verify_receipts(
             raise RuntimeError("authorized ancestor receipt content digest mismatch")
         authorized_names.add(path.name)
 
-    matching = {
-        entry.name
-        for entry in source_candidate.parent.glob(f"{expected_trial}*")
-    }
+    matching = {entry.name for entry in source_candidate.parent.glob(f"{expected_trial}*")}
     if matching != {source_candidate.name, *authorized_names}:
         raise RuntimeError(f"receipt state is missing or ambiguous: {sorted(matching)!r}")
 
@@ -506,18 +718,9 @@ def _verify_failed_preupdate_source(
     required_fragments = {
         f"openreward_v9_release=PASS release_commit={source_commit}",
         "[h200-16-v9] accepted gate2=",
-        (
-            "[pbs-openreward] starting host controller "
-            f"experiment={expected_experiment} trial={expected_trial} nodes=16"
-        ),
-        (
-            "Recover INFO: Saved recover checkpoint to "
-            f"{expected_checkpoint_root}/default/recover_checkpoint"
-        ),
-        (
-            "RLTrainer ERROR: Training failed with exception: "
-            "optimizer_batch_datums must be an integer >= 1"
-        ),
+        (f"[pbs-openreward] starting host controller experiment={expected_experiment} trial={expected_trial} nodes=16"),
+        (f"Recover INFO: Saved recover checkpoint to {expected_checkpoint_root}/default/recover_checkpoint"),
+        ("RLTrainer ERROR: Training failed with exception: optimizer_batch_datums must be an integer >= 1"),
     }
     missing = sorted(fragment for fragment in required_fragments if fragment not in log_text)
     if missing:
@@ -525,15 +728,9 @@ def _verify_failed_preupdate_source(
     if "training_success_candidate=published" in log_text:
         raise RuntimeError("failed preupdate source log unexpectedly published a success candidate")
 
-    if (
-        not target_receipt.is_absolute()
-        or target_receipt.name
-        != PREUPDATE_RECEIPT
-    ):
+    if not target_receipt.is_absolute() or target_receipt.name != PREUPDATE_RECEIPT:
         raise RuntimeError("target preupdate resume receipt identity mismatch")
-    _require_canonical_directory(
-        target_receipt.parent, label="target resume receipt directory"
-    )
+    _require_canonical_directory(target_receipt.parent, label="target resume receipt directory")
     source_paths = {
         target_receipt.parent / f"{expected_trial}.success.json",
         target_receipt.parent / f"{expected_trial}.success.candidate.json",
@@ -554,6 +751,7 @@ def _verify_failed_preupdate_source(
 
 
 def verify(args: argparse.Namespace) -> None:
+    v22_binding = _v22_successor_binding(args)
     if args.allow_preupdate_global_step_zero and (
         args.preupdate_binding != PREUPDATE_BINDING_ID
         or args.preupdate_load_policy != PREUPDATE_LOAD_POLICY_ID
@@ -599,17 +797,12 @@ def verify(args: argparse.Namespace) -> None:
             f"unexpected={sorted(set(shard_paths) - expected_ordinals)!r}"
         )
     checkpoint_files = [checkpoint / name for name in fixed_names] + list(shard_paths.values())
-    checkpoint_stats = [
-        _require_owned_regular(path, label="recover checkpoint file")
-        for path in checkpoint_files
-    ]
+    checkpoint_stats = [_require_owned_regular(path, label="recover checkpoint file") for path in checkpoint_files]
     if len(checkpoint_files) != args.expected_shards + len(fixed_names):
         raise RuntimeError("recover checkpoint file count mismatch")
     total_bytes = sum(value.st_size for value in checkpoint_stats)
     if total_bytes != args.expected_total_bytes:
-        raise RuntimeError(
-            f"recover checkpoint byte count mismatch: {total_bytes} != {args.expected_total_bytes}"
-        )
+        raise RuntimeError(f"recover checkpoint byte count mismatch: {total_bytes} != {args.expected_total_bytes}")
     if _size_manifest_sha256(checkpoint_files) != args.expected_checkpoint_layout_sha256:
         raise RuntimeError("recover checkpoint exact name/size manifest digest mismatch")
     if _sample_manifest_sha256(checkpoint_files) != args.expected_checkpoint_sample_manifest_sha256:
@@ -635,11 +828,12 @@ def verify(args: argparse.Namespace) -> None:
     }:
         raise RuntimeError("recover step info does not equal the authorized global step")
     stats_info = _load_object(recover_info / "stats_logger_info.json", label="stats logger info")
-    expected_stats_commit_step = (
-        QWEN38_SUCCESSOR_RECOVER_STATS_COMMIT_STEP
-        if args.successor_binding == QWEN38_SUCCESSOR_BINDING_ID
-        else args.expected_global_step - 1
-    )
+    if v22_binding is not None:
+        expected_stats_commit_step = v22_binding["stats_commit_step"]
+    elif args.successor_binding == QWEN38_SUCCESSOR_BINDING_ID:
+        expected_stats_commit_step = QWEN38_SUCCESSOR_RECOVER_STATS_COMMIT_STEP
+    else:
+        expected_stats_commit_step = args.expected_global_step - 1
     if stats_info != {"last_commit_step": expected_stats_commit_step}:
         raise RuntimeError("stats logger recovery state is not coherent with the checkpoint step")
     checkpoint_info = _load_object(recover_info / "checkpoint_info.json", label="checkpoint timer info")
@@ -704,6 +898,12 @@ def verify(args: argparse.Namespace) -> None:
             target_receipt=args.target_receipt,
         )
     else:
+        if v22_binding is not None:
+            _verify_v22_source_log(
+                source_log=args.source_log,
+                expected_source_log_sha256=args.expected_source_log_sha256,
+                source_pbs_job_id=args.source_pbs_job_id,
+            )
         _verify_receipts(
             source_candidate=args.source_candidate,
             expected_source_candidate_sha256=args.expected_source_candidate_sha256,
@@ -715,14 +915,10 @@ def verify(args: argparse.Namespace) -> None:
             expected_trial=args.expected_trial,
             expected_global_step=args.expected_global_step,
             target_receipt=args.target_receipt,
-            source_candidate_at_recover_step=(
-                args.successor_binding == QWEN38_SUCCESSOR_BINDING_ID
-            ),
+            source_candidate_at_recover_step=(args.successor_binding == QWEN38_SUCCESSOR_BINDING_ID),
             current_candidate_recover_evidence=candidate_recover_evidence,
             authorized_ancestor_receipts=args.authorized_ancestor_receipt,
-            expected_authorized_ancestor_receipt_sha256s=(
-                args.expected_authorized_ancestor_receipt_sha256
-            ),
+            expected_authorized_ancestor_receipt_sha256s=(args.expected_authorized_ancestor_receipt_sha256),
         )
     if _checkpoint_snapshot(checkpoint) != before:
         raise RuntimeError("recover checkpoint changed during authorization")
@@ -740,20 +936,15 @@ def _verify_optimizer_moment_metadata(
     optimizer_moment_keys = {
         name
         for name in state_metadata
-        if isinstance(name, str)
-        and (name.endswith(".exp_avg") or name.endswith(".exp_avg_sq"))
+        if isinstance(name, str) and (name.endswith(".exp_avg") or name.endswith(".exp_avg_sq"))
     }
-    if (
-        expected_optimizer_moment_keys is not None
-        and len(optimizer_moment_keys) != expected_optimizer_moment_keys
-    ):
+    if expected_optimizer_moment_keys is not None and len(optimizer_moment_keys) != expected_optimizer_moment_keys:
         raise RuntimeError("DCP optimizer-moment key count mismatch")
     if expected_optimizer_moment_keys == 0:
         optimizer_keys = {
             name
             for name in state_metadata
-            if isinstance(name, str)
-            and name.startswith("optimizer.distributed.dp_group_idx_")
+            if isinstance(name, str) and name.startswith("optimizer.distributed.dp_group_idx_")
         }
         expected_optimizer_keys: set[str] = set()
         for group in range(8):
@@ -763,16 +954,11 @@ def _verify_optimizer_moment_metadata(
                     f"{prefix}.optimizer/shard_0_1",
                     f"{prefix}.per_bucket_numel/shard_0_1",
                     f"{prefix}.per_bucket_numel_unpadded/shard_0_1",
-                    (
-                        f"{prefix}.gbuf_idx_0."
-                        "dtype_(torch.bfloat16, torch.float32).bucket_idx_0.param"
-                    ),
+                    (f"{prefix}.gbuf_idx_0.dtype_(torch.bfloat16, torch.float32).bucket_idx_0.param"),
                 }
             )
         if optimizer_keys != expected_optimizer_keys:
-            raise RuntimeError(
-                "pristine optimizer checkpoint lacks its exact eight-group skeleton"
-            )
+            raise RuntimeError("pristine optimizer checkpoint lacks its exact eight-group skeleton")
 
 
 def _verify_runtime_objects(
@@ -788,6 +974,7 @@ def _verify_runtime_objects(
     expected_samples_yielded: int,
     expected_iterator_yielded: int,
     expected_optimizer_moment_keys: int | None = None,
+    expected_optimizer_layout: str = "single",
 ) -> None:
     state_metadata = getattr(metadata, "state_dict_metadata", None)
     storage_data = getattr(metadata, "storage_data", None)
@@ -798,9 +985,7 @@ def _verify_runtime_objects(
         raise RuntimeError("DCP storage entry count mismatch")
     if getattr(metadata, "version", None) != "1.0.0":
         raise RuntimeError("DCP metadata version mismatch")
-    _verify_optimizer_moment_metadata(
-        state_metadata, expected_optimizer_moment_keys
-    )
+    _verify_optimizer_moment_metadata(state_metadata, expected_optimizer_moment_keys)
     if (
         storage_meta is None
         or getattr(storage_meta, "checkpoint_id", None) != str(checkpoint) + "_new"
@@ -849,10 +1034,19 @@ def _verify_runtime_objects(
         if expected_offset != (checkpoint / relative).stat().st_size:
             raise RuntimeError(f"DCP storage coverage is not exactly in bounds: {relative}")
 
+    if expected_optimizer_layout == "single":
+        expected_common_optimizer: dict[str, Any] = {"param_state_sharding_type": "dp_reshardable"}
+    elif expected_optimizer_layout == "two_group":
+        expected_common_optimizer = {
+            0: {"param_state_sharding_type": "dp_reshardable"},
+            1: {"param_state_sharding_type": "dp_reshardable"},
+        }
+    else:
+        raise RuntimeError("unsupported common.pt optimizer layout binding")
     if (
         not isinstance(common, dict)
         or set(common) != {"optimizer", "lr_scheduler"}
-        or common.get("optimizer") != {"param_state_sharding_type": "dp_reshardable"}
+        or common.get("optimizer") != expected_common_optimizer
         or not isinstance(common.get("lr_scheduler"), dict)
         or common["lr_scheduler"].get("num_steps") != expected_lr_num_steps
     ):
@@ -883,6 +1077,7 @@ def runtime_main(argv: list[str]) -> None:
     parser.add_argument("--allow-preupdate-global-step-zero", action="store_true")
     parser.add_argument("--preupdate-binding")
     parser.add_argument("--preupdate-load-policy")
+    parser.add_argument("--successor-binding")
     parser.add_argument("--expected-state-keys", type=int, required=True)
     parser.add_argument("--expected-storage-entries", type=int, required=True)
     parser.add_argument("--expected-shards", type=int, required=True)
@@ -891,6 +1086,7 @@ def runtime_main(argv: list[str]) -> None:
     parser.add_argument("--expected-samples-yielded", type=int, required=True)
     parser.add_argument("--expected-iterator-yielded", type=int, required=True)
     args = parser.parse_args(argv)
+    runtime_binding = V22_SUCCESSOR_BINDINGS.get(args.successor_binding)
     digests = (
         args.expected_checkpoint_layout_sha256,
         args.expected_checkpoint_sample_manifest_sha256,
@@ -921,6 +1117,7 @@ def runtime_main(argv: list[str]) -> None:
                 or args.expected_shards != 80
                 or args.expected_samples_yielded != 72
                 or args.expected_iterator_yielded != 9
+                or args.successor_binding is not None
             )
         )
         or (
@@ -928,10 +1125,36 @@ def runtime_main(argv: list[str]) -> None:
             and (
                 args.preupdate_binding is not None
                 or args.preupdate_load_policy is not None
-                or args.expected_optimizer_moment_keys is not None
                 or args.expected_global_step < 1
                 or args.expected_start_global_step != args.expected_global_step + 1
-                or args.expected_lr_num_steps != args.expected_global_step + 1
+                or (
+                    runtime_binding is None
+                    and (
+                        args.successor_binding is not None
+                        or args.expected_optimizer_moment_keys is not None
+                        or args.expected_lr_num_steps != args.expected_global_step + 1
+                    )
+                )
+            )
+        )
+        or (
+            runtime_binding is not None
+            and (
+                args.checkpoint_root != runtime_binding["checkpoint_root"]
+                or args.expected_checkpoint_layout_sha256 != runtime_binding["checkpoint_layout_sha256"]
+                or args.expected_checkpoint_sample_manifest_sha256
+                != runtime_binding["checkpoint_sample_manifest_sha256"]
+                or args.expected_fixed_content_sha256 != runtime_binding["fixed_content_sha256"]
+                or args.expected_recover_info_content_sha256 != runtime_binding["recover_info_content_sha256"]
+                or args.expected_global_step != runtime_binding["global_step"]
+                or args.expected_start_global_step != runtime_binding["start_global_step"]
+                or args.expected_state_keys != runtime_binding["state_keys"]
+                or args.expected_storage_entries != runtime_binding["storage_entries"]
+                or args.expected_shards != runtime_binding["shards"]
+                or args.expected_optimizer_moment_keys != runtime_binding["optimizer_moment_keys"]
+                or args.expected_lr_num_steps != runtime_binding["lr_num_steps"]
+                or args.expected_samples_yielded != runtime_binding["samples_yielded"]
+                or args.expected_iterator_yielded != runtime_binding["iterator_yielded"]
             )
         )
     ):
@@ -948,10 +1171,7 @@ def runtime_main(argv: list[str]) -> None:
         recover_paths = [recover_info / name for name in RECOVER_INFO_FILES]
         if _size_manifest_sha256(checkpoint_paths) != args.expected_checkpoint_layout_sha256:
             raise RuntimeError("runtime checkpoint name/size manifest changed")
-        if (
-            _sample_manifest_sha256(checkpoint_paths)
-            != args.expected_checkpoint_sample_manifest_sha256
-        ):
+        if _sample_manifest_sha256(checkpoint_paths) != args.expected_checkpoint_sample_manifest_sha256:
             raise RuntimeError("runtime checkpoint bounded-sample manifest changed")
         if _content_manifest_sha256(fixed_paths) != args.expected_fixed_content_sha256:
             raise RuntimeError("runtime checkpoint fixed contents changed")
@@ -979,6 +1199,9 @@ def runtime_main(argv: list[str]) -> None:
             expected_samples_yielded=args.expected_samples_yielded,
             expected_iterator_yielded=args.expected_iterator_yielded,
             expected_optimizer_moment_keys=args.expected_optimizer_moment_keys,
+            expected_optimizer_layout=(
+                runtime_binding["optimizer_layout"] if runtime_binding is not None else "single"
+            ),
         )
     except (OSError, RuntimeError, pickle.PickleError) as exc:
         parser.error(str(exc))
@@ -1036,9 +1259,7 @@ def composition_main(argv: list[str]) -> None:
             from areal.api.cli_args import load_expr_config
             from platoon.openreward.areal_config import OpenRewardArealTrainerConfig
         except ImportError as exc:
-            raise RuntimeError(
-                "composition verifier requires the pinned host-controller environment"
-            ) from exc
+            raise RuntimeError("composition verifier requires the pinned host-controller environment") from exc
         config, _ = load_expr_config(
             [
                 "--config",
@@ -1052,10 +1273,7 @@ def composition_main(argv: list[str]) -> None:
         _verify_preupdate_composition(config, args)
     except (AttributeError, OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
-    print(
-        "openreward_resume_composition=PASS "
-        "global_step=0 start_global_step=1 no_load_optim=true no_save_optim=false"
-    )
+    print("openreward_resume_composition=PASS global_step=0 start_global_step=1 no_load_optim=true no_save_optim=false")
 
 
 def main() -> None:
@@ -1084,12 +1302,8 @@ def main() -> None:
     parser.add_argument("--expected-source-config-sha256")
     parser.add_argument("--source-candidate", type=Path)
     parser.add_argument("--expected-source-candidate-sha256")
-    parser.add_argument(
-        "--authorized-ancestor-receipt", type=Path, action="append", default=[]
-    )
-    parser.add_argument(
-        "--expected-authorized-ancestor-receipt-sha256", action="append", default=[]
-    )
+    parser.add_argument("--authorized-ancestor-receipt", type=Path, action="append", default=[])
+    parser.add_argument("--expected-authorized-ancestor-receipt-sha256", action="append", default=[])
     parser.add_argument("--source-log", type=Path)
     parser.add_argument("--expected-source-log-sha256")
     parser.add_argument("--allow-preupdate-global-step-zero", action="store_true")
@@ -1108,9 +1322,9 @@ def main() -> None:
     if args.expected_source_config_sha256 is None:
         args.expected_source_config_sha256 = args.expected_config_sha256
     successor_binding = args.successor_binding == QWEN38_SUCCESSOR_BINDING_ID
+    v22_successor_binding = args.successor_binding in V22_SUCCESSOR_BINDINGS
     preupdate_nooptim_binding = (
-        args.allow_preupdate_global_step_zero
-        and args.preupdate_load_policy == PREUPDATE_LOAD_POLICY_ID
+        args.allow_preupdate_global_step_zero and args.preupdate_load_policy == PREUPDATE_LOAD_POLICY_ID
     )
     if (
         (
@@ -1125,10 +1339,8 @@ def main() -> None:
                 or args.source_pbs_job_id != PREUPDATE_SOURCE_JOB
                 or args.expected_steps_per_epoch != 846
                 or args.expected_shards != 80
-                or args.expected_source_config_sha256
-                != PREUPDATE_SOURCE_CONFIG_SHA256
-                or args.expected_config_sha256
-                != PREUPDATE_CURRENT_CONFIG_SHA256
+                or args.expected_source_config_sha256 != PREUPDATE_SOURCE_CONFIG_SHA256
+                or args.expected_config_sha256 != PREUPDATE_CURRENT_CONFIG_SHA256
                 or args.target_receipt.name != PREUPDATE_RECEIPT
                 or args.source_log is None
                 or re.fullmatch(r"[0-9a-f]{64}", args.expected_source_log_sha256 or "") is None
@@ -1147,18 +1359,14 @@ def main() -> None:
                 or args.preupdate_binding is not None
                 or args.preupdate_load_policy is not None
                 or args.source_candidate is None
-                or re.fullmatch(
-                    r"[0-9a-f]{64}", args.expected_source_candidate_sha256 or ""
+                or re.fullmatch(r"[0-9a-f]{64}", args.expected_source_candidate_sha256 or "") is None
+                or (
+                    not v22_successor_binding
+                    and (args.source_log is not None or args.expected_source_log_sha256 is not None)
                 )
-                is None
-                or args.source_log is not None
-                or args.expected_source_log_sha256 is not None
             )
         )
-        or (
-            args.successor_binding is not None
-            and not successor_binding
-        )
+        or (args.successor_binding is not None and not successor_binding and not v22_successor_binding)
         or (
             successor_binding
             and (
@@ -1168,25 +1376,22 @@ def main() -> None:
                 or args.source_config_relative != QWEN38_SUCCESSOR_SOURCE_CONFIG
                 or args.target_receipt.name != QWEN38_SUCCESSOR_RECEIPT
                 or args.expected_global_step != QWEN38_SUCCESSOR_GLOBAL_STEP
-                or args.expected_source_config_sha256
-                != QWEN38_SUCCESSOR_SOURCE_CONFIG_SHA256
-                or args.expected_config_sha256
-                != QWEN38_SUCCESSOR_CURRENT_CONFIG_SHA256
+                or args.expected_source_config_sha256 != QWEN38_SUCCESSOR_SOURCE_CONFIG_SHA256
+                or args.expected_config_sha256 != QWEN38_SUCCESSOR_CURRENT_CONFIG_SHA256
                 or len(args.authorized_ancestor_receipt) != 1
                 or len(args.expected_authorized_ancestor_receipt_sha256) != 1
-                or args.authorized_ancestor_receipt[0].name
-                != QWEN38_SUCCESSOR_ANCESTOR_RECEIPT
+                or args.authorized_ancestor_receipt[0].name != QWEN38_SUCCESSOR_ANCESTOR_RECEIPT
                 or re.fullmatch(
                     r"[0-9a-f]{64}",
                     args.expected_authorized_ancestor_receipt_sha256[0],
                 )
                 is None
-                or args.expected_authorized_ancestor_receipt_sha256[0]
-                != QWEN38_SUCCESSOR_ANCESTOR_SHA256
+                or args.expected_authorized_ancestor_receipt_sha256[0] != QWEN38_SUCCESSOR_ANCESTOR_SHA256
             )
         )
         or (
             not successor_binding
+            and not v22_successor_binding
             and not preupdate_nooptim_binding
             and (
                 args.expected_source_config_sha256 != args.expected_config_sha256

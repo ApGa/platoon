@@ -1,0 +1,96 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v21
+  - _self_
+
+# Depth-two v8r22 resume successor. Preserve the established experiment,
+# trial, checkpoint, and W&B lineage even though their historical names contain
+# "d1"; only recursive depth and the pinned runtime implementation change.
+experiment_name: abci-or-ta-swe32-q36-cp2-v21
+trial_name: abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0
+
+dynamic_bs: false
+
+workflow_config:
+  filter_zero_advantage_datums: false
+  filter_zero_variance_groups: false
+  dynamic_batch_recollection_max_rounds: 1
+  min_successful_group_size: 5
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  rollout_config:
+    max_steps: 150
+    timeout: 5400
+
+rollout:
+  backend: sglang:d12p1t8
+  max_concurrent_rollouts: 24
+  consumer_batch_size: 8
+  max_head_offpolicyness: 1
+  ensure_batch_divisible_by: 20
+  return_routed_experts: true
+  agent:
+    engine_max_tokens: 65536
+
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  router_replay_num_experts: 256
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_mtp: false
+    enable_fp32_lm_head: true
+    use_deterministic_algorithms: true
+
+ref:
+  backend: ${actor.backend}
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_fp32_lm_head: true
+
+sglang:
+  context_length: 65537
+  max_prefill_tokens: 65536
+
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+  no_load_optim: false
+  no_save_optim: false
+
+openreward:
+  enable_recursive_subagents: true
+  subagent_default_max_steps: 100
+  subagent_max_depth: 2
+  subagent_reward_judge_max_steps: 100
+  condenser_max_tokens: 52428
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe32-rec-q36m-cp2-d1-v21

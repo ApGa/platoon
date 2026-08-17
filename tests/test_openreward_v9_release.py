@@ -18,15 +18,10 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 MANIFEST_PATH = PBS_ROOT / "openreward-v9-release.json"
 OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
-RECURSIVE_WRAPPER_PATH = (
-    PBS_ROOT / "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
-)
-NONRECURSIVE_WRAPPER_PATH = (
-    PBS_ROOT
-    / "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
-)
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r21-376d1b9-18e62c0"
+RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
+NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r22-e11d720-057108f"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r22-e11d720-057108f"
 EXPECTED_PLATOON_UPSTREAM = "e11d7201ae8118a9350210615038ff2fe582945f"
 EXPECTED_OPENHANDS_REVISION = "057108f1f1235940e5d04401b4c294e4777c3baf"
 HISTORICAL_V8_OPENHANDS_REVISION = "b1acf52ee362884f092b9eaf5e701a1bb5d1b335"
@@ -85,12 +80,16 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         snapshot = Path(artifact["snapshot_path"])
         assert snapshot.name == artifact["revision"]
         index_path = snapshot / "model.safetensors.index.json"
-        assert hashlib.sha256(index_path.read_bytes()).hexdigest() == artifact[
-            "safetensors_index_sha256"
-        ]
+        assert hashlib.sha256(index_path.read_bytes()).hexdigest() == artifact["safetensors_index_sha256"]
         index = json.loads(index_path.read_text())
         assert len(set(index["weight_map"].values())) == artifact["safetensors_shard_count"]
-    assert manifest["training_semantics"] == verifier_module.TRAINING_SEMANTICS
+    base_semantics = dict(manifest["training_semantics"])
+    successor_contracts = base_semantics.pop("v8r22_successor_contracts")
+    memory_guard = base_semantics.pop("service_node_memory_guard")
+    assert base_semantics == verifier_module.TRAINING_SEMANTICS
+    assert set(successor_contracts) == verifier_module.V8R22_SUCCESSOR_CONTRACT_NAMES
+    assert verifier_module._object_sha256(successor_contracts) == verifier_module.V8R22_SUCCESSOR_CONTRACTS_SHA256
+    assert verifier_module._object_sha256(memory_guard) == verifier_module.SERVICE_NODE_MEMORY_GUARD_SHA256
     for contract_name in (
         "nonrecursive_16node_resume_contract",
         "fresh_recursive_32node_qwen36_cp2_contract",
@@ -100,9 +99,11 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         for kind in ("config", "wrapper"):
             path = REPO_ROOT / contract[f"{kind}_relative"]
             assert hashlib.sha256(path.read_bytes()).hexdigest() == contract[f"{kind}_sha256"]
-    successor = manifest["training_semantics"][
-        "recursive_32node_qwen38_v20_successor_contract"
-    ]
+    for contract in successor_contracts.values():
+        for kind in ("config", "wrapper"):
+            path = REPO_ROOT / contract[f"{kind}_relative"]
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == contract[f"{kind}_sha256"]
+    successor = manifest["training_semantics"]["recursive_32node_qwen38_v20_successor_contract"]
     assert successor["binding_status"] == "frozen_gs6_checkpoint"
     assert successor["launchable"] is True
     assert successor["recover_global_step"] == 6
@@ -119,9 +120,7 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     assert preupdate["recover_no_load_optim"] is True
     assert preupdate["recover_no_save_optim"] is False
     assert preupdate["one_shot_after_checkpoint_advance"] is True
-    assert preupdate["first_step_lr_alignment"] == (
-        "fresh_lr0_fast_forward_once_then_successful_gs1_update_saves_lr2"
-    )
+    assert preupdate["first_step_lr_alignment"] == ("fresh_lr0_fast_forward_once_then_successful_gs1_update_saves_lr2")
     assert preupdate["first_step_checkpoint_promotion_guard"] == (
         "requires_datums_update_and_weight_sync_before_overwriting_gs0"
     )
@@ -269,16 +268,21 @@ def test_v9_verifier_binds_exact_manifest_tag_externals_and_swe_contract() -> No
     assert "release host acceptance asset set mismatch" in source
     assert "release model artifact identity mismatch" in source
     assert manifest["training_runtime_assets"] == {
-        "platoon/train/areal/rl.py": hashlib.sha256(
-            (REPO_ROOT / "platoon/train/areal/rl.py").read_bytes()
-        ).hexdigest(),
+        "platoon/train/areal/rl.py": hashlib.sha256((REPO_ROOT / "platoon/train/areal/rl.py").read_bytes()).hexdigest(),
         "plugins/openreward/platoon/openreward/config_defs.py": hashlib.sha256(
-            (
-                REPO_ROOT / "plugins/openreward/platoon/openreward/config_defs.py"
-            ).read_bytes()
+            (REPO_ROOT / "plugins/openreward/platoon/openreward/config_defs.py").read_bytes()
         ).hexdigest(),
         "plugins/openreward/platoon/openreward/rollout.py": hashlib.sha256(
             (REPO_ROOT / "plugins/openreward/platoon/openreward/rollout.py").read_bytes()
+        ).hexdigest(),
+        "pbs-scripts/openreward-ta-swe-prealloc-common.sh": hashlib.sha256(
+            (PBS_ROOT / "openreward-ta-swe-prealloc-common.sh").read_bytes()
+        ).hexdigest(),
+        "pbs-scripts/openreward-node-services.sh": hashlib.sha256(
+            (PBS_ROOT / "openreward-node-services.sh").read_bytes()
+        ).hexdigest(),
+        "pbs-scripts/openreward-node-memory-guard.py": hashlib.sha256(
+            (PBS_ROOT / "openreward-node-memory-guard.py").read_bytes()
         ).hexdigest(),
     }
     assert "release training runtime asset content mismatch" in source
@@ -320,8 +324,8 @@ def test_v9_release_binds_exact_resume_dense_qwen38_recursive_wrapper() -> None:
 
     subprocess.run(["bash", "-n", str(RECURSIVE_WRAPPER_PATH)], check=True)
     assert "#PBS -N rasp-h200-32q38-rsp6-v20" in wrapper
-    assert f"REPO_ROOT={EXPECTED_RELEASE_ROOT}" in wrapper
-    assert f"RELEASE_REF={EXPECTED_RELEASE_REF}" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r21-376d1b9-18e62c0" in wrapper
     assert (
         "CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/"
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
@@ -341,9 +345,7 @@ def test_v9_release_binds_exact_resume_dense_qwen38_recursive_wrapper() -> None:
     assert f"OPENREWARD_QWEN38_UPSTREAM_SOURCE={EXPECTED_MODEL_SOURCE}" in overlay
     assert f"OPENREWARD_QWEN38_MODEL_SNAPSHOT={EXPECTED_MODEL_SNAPSHOT}" in overlay
     assert "export OPENREWARD_MODEL_FAMILY=qwen38" in wrapper
-    assert wrapper.index("export OPENREWARD_MODEL_FAMILY=qwen38") < wrapper.index(
-        'source "${ABCI_ENV}"'
-    )
+    assert wrapper.index("export OPENREWARD_MODEL_FAMILY=qwen38") < wrapper.index('source "${ABCI_ENV}"')
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" in overlay
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in overlay
 
@@ -354,8 +356,8 @@ def test_v9_release_binds_step_zero_resume_dense_qwen38_nonrecursive_wrapper() -
     subprocess.run(["bash", "-n", str(NONRECURSIVE_WRAPPER_PATH)], check=True)
     assert "#PBS -N rasp-h200-16q38-rs0n-v20" in wrapper
     assert "#PBS -l walltime=72:00:00" in wrapper
-    assert f"REPO_ROOT={EXPECTED_RELEASE_ROOT}" in wrapper
-    assert f"RELEASE_REF={EXPECTED_RELEASE_REF}" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r21-376d1b9-18e62c0" in wrapper
     assert (
         "CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/"
         "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
@@ -371,14 +373,11 @@ def test_v9_release_binds_step_zero_resume_dense_qwen38_nonrecursive_wrapper() -
     assert "resume-gs0-nooptim-v8r20.success.json" in wrapper
     assert "export OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
     assert (
-        "export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="
-        "${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}"
+        "export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}"
     ) in wrapper
     assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
     assert "export OPENREWARD_MODEL_FAMILY=qwen38" in wrapper
-    assert wrapper.index("export OPENREWARD_MODEL_FAMILY=qwen38") < wrapper.index(
-        'source "${ABCI_ENV}"'
-    )
+    assert wrapper.index("export OPENREWARD_MODEL_FAMILY=qwen38") < wrapper.index('source "${ABCI_ENV}"')
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
     for literal in (
         "no_load_optim: true",

@@ -125,8 +125,10 @@ class ABCILaunchAssetTests(unittest.TestCase):
             "PLATOON_AREAL_PBS_WORKER_PYTHON=${OPENREWARD_WORKER_JOB_PYTHON}",
             common,
         )
+        self.assertIn("controller_args=(", common)
+        self.assertIn('-m "${TRAIN_MODULE}"', common)
         self.assertIn(
-            '"${OPENREWARD_CONTROLLER_JOB_PYTHON}" -m "${TRAIN_MODULE}"',
+            '"${OPENREWARD_CONTROLLER_JOB_PYTHON}" "${controller_args[@]}"',
             common,
         )
         self.assertIn(

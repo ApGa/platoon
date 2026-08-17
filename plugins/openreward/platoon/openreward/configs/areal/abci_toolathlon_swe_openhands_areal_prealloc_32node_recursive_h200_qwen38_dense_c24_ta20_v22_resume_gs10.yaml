@@ -1,0 +1,47 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v20
+  - _self_
+
+# Immutable v8r22 successor for the durable global-step-10 Qwen3.8 lineage.
+# The verifier-spawn and Qwen3.8 reasoning fixes live in the pinned runtime;
+# model, optimizer, batching, timeout, and rollout topology remain compatible
+# with the existing checkpoint.
+experiment_name: abci-or-ta-swe32-q38-v16
+trial_name: abci-ta-swe32-rec-q38d-c24-v16-t0
+
+recover:
+  mode: auto
+  no_load_optim: false
+  no_save_optim: false
+
+workflow_config:
+  rollout_config:
+    max_steps: 150
+    timeout: 7200
+    step_timeout: 5400
+
+rollout:
+  # Preserve the observed production throughput while node-level memory is
+  # monitored independently by the PBS service guard.
+  max_concurrent_rollouts: 24
+  request_timeout: 16200
+  agent:
+    session_timeout_seconds: 9000
+
+openreward:
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+  subagent_default_max_steps: 100
+  # Root is depth zero; permit children and one nested helper generation.
+  subagent_max_depth: 2
+  subagent_reward_judge_max_steps: 100
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}

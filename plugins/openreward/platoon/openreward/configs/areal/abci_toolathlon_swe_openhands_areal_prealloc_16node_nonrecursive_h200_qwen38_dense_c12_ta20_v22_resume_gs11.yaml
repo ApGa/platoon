@@ -1,0 +1,53 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v18
+  - _self_
+
+# Ordinary optimizer-loading successor for the durable global-step-11 state.
+# The one-shot no-load policy was valid only for the retired pristine gs0
+# checkpoint; this leaf must restore the saved Adam moments and LR scheduler.
+experiment_name: abci-or-ta-swe16-q38-v18
+trial_name: abci-ta-swe16-nr-q38d-c12-v18-t0
+
+recover:
+  mode: auto
+  no_load_optim: false
+  no_save_optim: false
+
+dynamic_bs: true
+
+workflow_config:
+  filter_zero_advantage_datums: true
+  filter_zero_variance_groups: true
+  dynamic_batch_recollection_max_rounds: 1
+  enable_router_replay: false
+
+rollout:
+  backend: sglang:d6p1t8
+  max_concurrent_rollouts: 12
+  consumer_batch_size: 8
+  max_head_offpolicyness: 1
+  return_routed_experts: false
+
+actor:
+  backend: megatron:d10p2t4c1
+  enable_router_replay: false
+  mb_spec:
+    n_mbs: 8
+  megatron:
+    enable_mtp: false
+    use_deterministic_algorithms: false
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 16
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+openreward:
+  enable_recursive_subagents: false
+  enable_programmatic_tool_calling: false
