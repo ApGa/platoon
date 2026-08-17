@@ -1,0 +1,106 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded
+  - _self_
+
+# Fresh Qwen3.6 MoE lineage. The release wrapper binds the exact local
+# preserve-thinking snapshot and refuses every pre-existing checkpoint or
+# success artifact for this identity. Per-step recovery remains enabled only
+# after that fresh-start guard so receipts and wall-time successors are durable.
+experiment_name: abci-or-ta-swe32-q36-cp2-v19
+trial_name: abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0
+tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+dynamic_bs: false
+
+workflow_config:
+  filter_zero_advantage_datums: false
+  filter_zero_variance_groups: false
+  dynamic_batch_recollection_max_rounds: 1
+  # Eight accepted groups with at least five roots each guarantee the CP2
+  # actor's topology-derived 40-datum floor without relying on child sampling.
+  min_successful_group_size: 5
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  rollout_config:
+    max_steps: 150
+    timeout: 5400
+
+rollout:
+  backend: sglang:d12p1t8
+  max_concurrent_rollouts: 24
+  consumer_batch_size: 8
+  max_head_offpolicyness: 1
+  ensure_batch_divisible_by: 20
+  return_routed_experts: true
+
+actor:
+  # Attention and FFN each occupy the same 160 ranks. CP2 keeps each rank's
+  # share of a full 65,536-token microbatch at no more than 32,768 tokens.
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  router_replay_num_experts: 256
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_mtp: false
+    enable_fp32_lm_head: true
+    use_deterministic_algorithms: true
+
+ref:
+  backend: ${actor.backend}
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_fp32_lm_head: true
+
+sglang:
+  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+  # SGLang rejects a request whose length is equal to context_length. The
+  # exclusive 65,537 ceiling therefore admits exactly 65,536 usable tokens.
+  context_length: 65537
+  max_prefill_tokens: 65536
+
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+# OpenHands condenses only when total_tokens > max_tokens. The exact integer
+# floor of 80% is (4 * 65,536) // 5 = 52,428, so the first triggering token is
+# 52,429. Child launch tools expose no caller-controlled max_steps argument.
+openreward:
+  enable_recursive_subagents: true
+  subagent_default_max_steps: 100
+  subagent_max_depth: 1
+  subagent_reward_judge_max_steps: 100
+  condenser_max_tokens: 52428
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+
+# Repeat literals consumed by the host launcher's pre-Hydra checks.
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 32
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+stats_logger:
+  wandb:
+    group: abci-ta-swe32-rec-q36m-cp2-d1-v19

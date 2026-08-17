@@ -442,7 +442,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             condenser=SafeLLMSummarizingCondenser(
                 llm=condenser_llm,
                 keep_first=OPENREWARD_CONDENSER_KEEP_FIRST,
-                max_tokens=int(0.8 * 32768),  # TODO: Make this configurable
+                max_tokens=openreward_config.condenser_max_tokens,
             ),
         ),
         openreward_config,

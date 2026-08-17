@@ -1,0 +1,130 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=32:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-32q36-v19
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh Qwen3.6 MoE CP2 lineage. Submission must bind the v8r18 Gate2 and
+# all-MCP results; this launcher refuses all prior success and checkpoint paths.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0
+RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
+GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
+ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
+GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
+ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v19.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
+EXPERIMENT=abci-or-ta-swe32-q36-cp2-v19
+TRIAL=abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
+
+die() {
+    echo "[h200-32-q36-cp2] ERROR: $*" >&2
+    exit 2
+}
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && \
+    -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && \
+    -x "${ALL_MCP_VERIFY}" ]] || die "immutable v8r18 release is incomplete: ${REPO_ROOT}"
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
+    die "release root must be the exact non-symlink path"
+
+# These are literal leaf checks, before Hydra or the worker environment exists.
+for literal in \
+    'dynamic_bs: false' \
+    '  filter_zero_advantage_datums: false' \
+    '  filter_zero_variance_groups: false' \
+    '  dynamic_batch_recollection_max_rounds: 1' \
+    '  min_successful_group_size: 5' \
+    '    max_steps: 150' \
+    '  subagent_default_max_steps: 100' \
+    '  subagent_max_depth: 1' \
+    '  subagent_reward_judge_max_steps: 100' \
+    '  condenser_max_tokens: 52428' \
+    '  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)' \
+    '  backend: sglang:d12p1t8' \
+    '  consumer_batch_size: 8' \
+    '  ensure_batch_divisible_by: 20' \
+    '  context_length: 65537' \
+    '  max_prefill_tokens: 65536' \
+    '  return_routed_experts: true' \
+    '  mode: auto'; do
+    [[ "$(grep -Fxc "${literal}" "${CONFIG}")" == 1 ]] || \
+        die "fresh CP2 leaf lacks exact literal: ${literal}"
+done
+[[ "$(grep -Fxc '    n_mbs: 1' "${CONFIG}")" == 2 && \
+    "$(grep -Fxc '    granularity: 1' "${CONFIG}")" == 2 && \
+    "$(grep -Fxc '    max_tokens_per_mb: 65536' "${CONFIG}")" == 2 && \
+    "$(grep -Fxc '    n_mbs_divisor: 1' "${CONFIG}")" == 2 && \
+    "$(grep -Fxc '  enable_router_replay: true' "${CONFIG}")" == 2 && \
+    "$(grep -Fxc '  router_replay_num_layers: 40' "${CONFIG}")" == 2 && \
+    "$(grep -Fxc '  router_replay_topk: 8' "${CONFIG}")" == 2 && \
+    "$(grep -Fxc '    use_deterministic_algorithms: true' "${CONFIG}")" == 1 ]] || \
+    die "Qwen3.6 R3 or CP2 microbatch contract is incomplete"
+
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || die "release HEAD is not ${RELEASE_REF}"
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || die "release tracked tree is dirty"
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || die "release index is dirty"
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
+    die "release has tracked or ordinary untracked changes"
+
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || die "v9 overlay selected another repository"
+[[ "${OPENREWARD_QWEN36_MODEL_REPOSITORY:-}" == apurvaga/Qwen3.6-35B-A3B-preserve-thinking && \
+    "${OPENREWARD_QWEN36_MODEL_REVISION:-}" == ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    "${OPENREWARD_QWEN36_MODEL_SNAPSHOT:-}" == /groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    -d "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" && ! -L "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" && \
+    "$(readlink -f "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}")" == "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" ]] || \
+    die "pinned Qwen3.6 preserve-thinking model binding is incomplete"
+export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN36_MODEL_SNAPSHOT}
+
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || \
+    die "submission must pass one absolute final v9 Gate2 RESULT"
+"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"
+[[ "${ALL_MCP_RESULT}" == /* && -f "${ALL_MCP_RESULT}" && ! -L "${ALL_MCP_RESULT}" ]] || \
+    die "submission must pass one absolute final all-MCP RESULT"
+"${ALL_MCP_VERIFY}" --release-root "${REPO_ROOT}" --result "${ALL_MCP_RESULT}" \
+    --gate2-result "${GATE2_RESULT}"
+
+for prior in "${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || \
+        die "refusing stale success artifact; use a fresh trial: ${prior}"
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || \
+    die "refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}"
+
+export OPENREWARD_EXPECTED_NNODES=32
+export OPENREWARD_EXPECTED_MODEL_SHARDS=26
+export OPENREWARD_SERVICE_NODE_COUNT=12
+export OPENREWARD_EXPECTED_RECURSIVE=1
+export OPENREWARD_EXPECTED_PTC=1
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+unset OPENREWARD_REQUIRE_EXISTING_RECOVERY OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP
+unset OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT OPENREWARD_PREUPDATE_RECOVERY_BINDING_ID
+
+exec "${COMMON}" "${CONFIG}"

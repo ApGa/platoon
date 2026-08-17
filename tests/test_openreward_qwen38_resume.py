@@ -15,6 +15,9 @@ PBS_ROOT = REPO_ROOT / "pbs-scripts"
 VERIFY = PBS_ROOT / "verify_openreward_resume_checkpoint.py"
 COMMON = PBS_ROOT / "openreward-ta-swe-prealloc-common.sh"
 WRAPPER = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
+SUCCESSOR_WRAPPER = (
+    PBS_ROOT / "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
+)
 WRAPPER_16 = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
 EXPERIMENT = "abci-or-ta-swe32-q38-v16"
 TRIAL = "abci-ta-swe32-rec-q38d-c24-v16-t0"
@@ -32,6 +35,40 @@ CONFIG_RELATIVE_16 = Path(
     "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
     "qwen38_dense_c12_ta20_v18.yaml"
 )
+SUCCESSOR_CONFIG_RELATIVE = Path(
+    "plugins/openreward/platoon/openreward/configs/areal/"
+    "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+    "qwen38_dense_c24_ta20_v20.yaml"
+)
+ANCESTOR_SHA256 = "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
+
+
+def _merge(base, overlay):
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        result = dict(base)
+        for key, value in overlay.items():
+            result[key] = _merge(result[key], value) if key in result else value
+        return result
+    return overlay
+
+
+def _compose_config(relative: Path, ancestry: tuple[Path, ...] = ()) -> dict:
+    yaml = pytest.importorskip("yaml")
+    if relative in ancestry:
+        raise AssertionError(f"recursive defaults: {relative}")
+    path = REPO_ROOT / relative
+    value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    defaults = value.pop("defaults", [])
+    result: dict = {}
+    for default in defaults:
+        if default == "_self_":
+            result = _merge(result, value)
+        else:
+            parent = relative.parent / f"{default}.yaml"
+            result = _merge(result, _compose_config(parent, (*ancestry, relative)))
+    if "_self_" not in defaults:
+        result = _merge(result, value)
+    return result
 
 
 def _sha256(path: Path) -> str:
@@ -79,21 +116,150 @@ def _sample_manifest_sha256(paths: list[Path]) -> str:
     return digest.hexdigest()
 
 
+def _candidate_sampled_sha256(path: Path) -> str:
+    size = path.stat().st_size
+    digest = hashlib.sha256()
+    digest.update(b"platoon-checkpoint-sample-v1\0")
+    digest.update(str(size).encode() + b"\0")
+    with path.open("rb") as stream:
+        if size <= 2 * 1024 * 1024:
+            digest.update(stream.read())
+        else:
+            digest.update(stream.read(1024 * 1024))
+            stream.seek(size - 1024 * 1024)
+            digest.update(stream.read(1024 * 1024))
+    return digest.hexdigest()
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def test_qwen38_v20_successor_composes_exact_timeout_and_step_contract() -> None:
+    config = _compose_config(SUCCESSOR_CONFIG_RELATIVE)
+    source = _compose_config(CONFIG_RELATIVE)
+    rollout_config = config["workflow_config"]["rollout_config"]
+
+    assert config["experiment_name"] == source["experiment_name"] == EXPERIMENT
+    assert config["trial_name"] == source["trial_name"] == TRIAL
+    assert rollout_config["max_steps"] == 150
+    assert rollout_config["timeout"] == 7200
+    assert rollout_config["step_timeout"] == 5400
+    assert config["openreward"]["subagent_default_max_steps"] == 100
+    assert config["openreward"]["subagent_reward_judge_max_steps"] == 100
+    assert config["openreward"]["subagent_max_depth"] == source["openreward"]["subagent_max_depth"] == 2
+
+    # The controller timeout admits one 7,380s child cohort ahead, this
+    # workflow's cohort, and the established 1,440s export/cleanup margin.
+    child_hard_timeout = rollout_config["timeout"] + 120 + 60
+    parent_future_timeout = child_hard_timeout + 30
+    assert (child_hard_timeout, parent_future_timeout) == (7380, 7410)
+    assert config["rollout"]["request_timeout"] == 2 * child_hard_timeout + 1440 == 16200
+    assert config["rollout"]["agent"]["session_timeout_seconds"] == 9000
+
+    # All requested non-timeout behavior stays on the active dense lineage.
+    assert config["dynamic_bs"] is source["dynamic_bs"] is True
+    assert config["actor"] == source["actor"]
+    assert config["ref"] == source["ref"]
+    assert config["sglang"] == source["sglang"]
+    assert config["recover"] == source["recover"]
+    assert config["workflow_config"]["filter_zero_advantage_datums"] is True
+    assert config["workflow_config"]["filter_zero_variance_groups"] is True
+    assert config["workflow_config"]["dynamic_batch_recollection_max_rounds"] == 2
+    assert config["rollout"]["backend"] == source["rollout"]["backend"] == "sglang:d12p1t8"
+    assert config["rollout"]["return_routed_experts"] is False
+    assert config["actor"]["mb_spec"]["max_tokens_per_mb"] == 32768
+    assert config["sglang"]["context_length"] == 32769
+
+    workflow_source = (
+        REPO_ROOT / "platoon/train/areal/workflows/group_rollout_workflow.py"
+    ).read_text(encoding="utf-8")
+    child_source = (REPO_ROOT / "platoon/train/areal/subprocess_worker.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_SUBPROCESS_INIT_BUDGET_SECONDS = 120" in workflow_source
+    assert "_SUBPROCESS_CLEANUP_GRACE_SECONDS = 60" in workflow_source
+    assert "_PARENT_FUTURE_GRACE_SECONDS = 30" in workflow_source
+    assert '(config_dict.get("timeout") or 900)' in child_source
+    assert "+ 120  # AppWorld init budget" in child_source
+    assert "+ 60  # cleanup grace" in child_source
+
+
+def test_successor_stats_cursor_matches_save_before_commit_resume_order() -> None:
+    trainer_source = (REPO_ROOT / "platoon/train/areal/rl.py").read_text(encoding="utf-8")
+    loop = trainer_source.index("for global_step in range(start_step, max_steps):")
+    checkpoint = trainer_source.index("self._save_recover_checkpoint(", loop)
+    commit = trainer_source.index("self._export_and_commit_stats(", checkpoint)
+    candidate = trainer_source.index("maybe_publish_training_success_candidate(", commit)
+    assert checkpoint < commit < candidate
+
+    areal_candidates = (
+        REPO_ROOT / "external/AReaL",
+        Path("/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0/external/AReaL"),
+    )
+    areal_root = next((path for path in areal_candidates if path.is_dir()), None)
+    if areal_root is None:
+        pytest.skip("materialized pinned AReaL checkout is unavailable")
+    stats_source = (areal_root / "areal/utils/stats_logger.py").read_text(encoding="utf-8")
+    recover_source = (areal_root / "areal/utils/recover.py").read_text(encoding="utf-8")
+    assert "stats_logger_info=stats_logger.state_dict()" in recover_source
+    assert "stats_logger.load_state_dict(recover_info.stats_logger_info)" in recover_source
+    assert "log_step = max(global_step, self._last_commit_step + 1)" in stats_source
+    # gs5 persisted cursor4; gs6 saves cursor4 before commit6. Loading that
+    # exact state for the next step still logs at 7, never replaying 5 or 6.
+    assert max(7, 4 + 1) == 7
+
+
+def test_qwen38_v20_successor_wrapper_binds_frozen_gs6_before_services() -> None:
+    subprocess.run(["bash", "-n", str(SUCCESSOR_WRAPPER)], check=True)
+    source = SUCCESSOR_WRAPPER.read_text(encoding="utf-8")
+    assert SUCCESSOR_WRAPPER.stat().st_mode & 0o111 == 0o111
+    assert "#PBS -N rasp-h200-32q38-rsp6-v20" in source
+    assert "BINDING_STATE=FROZEN_POST_STEP6_CHECKPOINT" in source
+    assert "UNOBSERVED" not in source
+    assert "--successor-binding qwen38-32-v20-post-step6" in source
+    assert "--expected-source-config-sha256" in source
+    assert "--authorized-ancestor-receipt" in source
+    assert "resume-post-step6-v8r18.success.json" in source
+    assert "resume-gs5-v8r16.success.candidate.json" in source
+    assert "SOURCE_PBS_JOB_ID=2156202.pbs1" in source
+    assert "EXPECTED_GLOBAL_STEP=6" in source
+    assert "EXPECTED_DCP_STATE_KEYS=1472" in source
+    assert "EXPECTED_DCP_STORAGE_ENTRIES=18297" in source
+    assert "EXPECTED_LR_NUM_STEPS=7" in source
+    assert "EXPECTED_SAMPLES_YIELDED=336" in source
+    assert "EXPECTED_ITERATOR_YIELDED=42" in source
+    assert "12a5a385826dbb2efb4a6dbffcdc057dce7063def8ade0c0d131dae1f802cd94" in source
+    assert "08a2837d33589671fae43e796a981ad41e16ca335ab696a1748cd660f1a1b991" in source
+    assert '[[ "${EXPECTED_GLOBAL_STEP}" == 6 && \\' in source
+    assert '"${EXPECTED_GLOBAL_STEP}" -ge 6' not in source
+    assert "6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8" in source
+    assert "57410a3d50b2a3bf45991568abc687f334f4d02179a7d207da9c32e1872735c4" in source
+    assert "9417c54953c5651d5c9a73649657ca50da74995847d77258e0a256e193674251" in source
+    assert "00c8d7ccdd27f49bd248369ffa45416d89b53dcb23a45ec9d5ea523aeeb7bddb" in source
+    guard = source.index('[[ "${BINDING_STATE}" == FROZEN_POST_STEP6_CHECKPOINT ]]')
+    assert guard < source.index('source "${ABCI_ENV}"')
+    assert guard < source.index('"${RESUME_VERIFY}"')
+    assert guard < source.index('exec "${COMMON}"')
+
+    source_log_check = source.index('sha256sum -- "${SOURCE_LOG}"')
+    assert guard < source_log_check < source.index('source "${ABCI_ENV}"')
+    assert "qsub" not in source.lower()
+
+
 def _build_authorized_fixture(
-    tmp_path: Path, *, preupdate: bool = False
+    tmp_path: Path, *, preupdate: bool = False, successor_config: bool = False
 ) -> tuple[list[str], dict[str, Path]]:
+    if preupdate and successor_config:
+        raise ValueError("preupdate fixtures do not use a successor config")
     experiment = EXPERIMENT_16 if preupdate else EXPERIMENT
     trial = TRIAL_16 if preupdate else TRIAL
     config_relative = CONFIG_RELATIVE_16 if preupdate else CONFIG_RELATIVE
     shard_count = 80 if preupdate else 160
-    global_step = 0 if preupdate else 5
+    global_step = 0 if preupdate else (6 if successor_config else 5)
     source_job_id = "2155389.pbs1" if preupdate else "2154492.pbs1"
-    checkpoint_root = tmp_path / "checkpoints" / experiment / trial
+    checkpoint_root = tmp_path / "checkpoints" / "test-user" / experiment / trial
     checkpoint = checkpoint_root / "default" / "recover_checkpoint"
     recover_info = checkpoint_root / "recover_info"
     checkpoint.mkdir(parents=True)
@@ -132,7 +298,8 @@ def _build_authorized_fixture(
         },
     )
     _write_json(
-        recover_info / "stats_logger_info.json", {"last_commit_step": global_step - 1}
+        recover_info / "stats_logger_info.json",
+        {"last_commit_step": 4 if successor_config else global_step - 1},
     )
     _write_json(
         recover_info / "checkpoint_info.json",
@@ -157,13 +324,21 @@ def _build_authorized_fixture(
     source_config = source_release / config_relative
     source_config.parent.mkdir(parents=True)
     config_bytes = (
-        f"experiment_name: {experiment}\n"
-        f"trial_name: {trial}\n"
-        "recover:\n  mode: auto\n"
-    ).encode()
+        (REPO_ROOT / CONFIG_RELATIVE).read_bytes()
+        if successor_config
+        else (
+            f"experiment_name: {experiment}\n"
+            f"trial_name: {trial}\n"
+            "recover:\n  mode: auto\n"
+        ).encode()
+    )
     source_config.write_bytes(config_bytes)
     current_config = tmp_path / "current-config.yaml"
-    current_config.write_bytes(config_bytes)
+    current_config.write_bytes(
+        (REPO_ROOT / SUCCESSOR_CONFIG_RELATIVE).read_bytes()
+        if successor_config
+        else config_bytes
+    )
     source_ref = "refs/tags/source-release"
     _write_json(
         source_release / "pbs-scripts" / "openreward-v9-release.json",
@@ -228,7 +403,12 @@ def _build_authorized_fixture(
 
     receipt_dir = tmp_path / "receipts"
     receipt_dir.mkdir()
-    source_candidate = receipt_dir / f"{trial}.success.candidate.json"
+    source_candidate = receipt_dir / (
+        f"{trial}.resume-gs5-v8r16.success.candidate.json"
+        if successor_config
+        else f"{trial}.success.candidate.json"
+    )
+    ancestor_candidate = receipt_dir / f"{trial}.success.candidate.json"
     source_log = tmp_path / f"{source_job_id}.OU"
     if preupdate:
         source_commit = subprocess.run(
@@ -260,6 +440,35 @@ def _build_authorized_fixture(
             encoding="utf-8",
         )
     else:
+        candidate_step = global_step if successor_config else 0
+        recover_evidence: dict[str, object] = {
+            "checkpoint_root": str(checkpoint_root),
+            "global_step": candidate_step,
+        }
+        if successor_config:
+            recover_evidence = {
+                "fileroot": str(checkpoint_root.parent.parent.parent.parent),
+                "checkpoint_root": str(checkpoint_root),
+                "recover_info_path": str(recover_info),
+                "recover_info": {
+                    path.name: {"size": path.stat().st_size, "sha256": _sha256(path)}
+                    for path in recover_info.iterdir()
+                },
+                "recover_checkpoint_path": str(checkpoint),
+                "recover_checkpoint_file_count": len(checkpoint_files),
+                "recover_checkpoint_total_bytes": sum(
+                    path.stat().st_size for path in checkpoint_files
+                ),
+                "recover_checkpoint_manifest": {
+                    path.name: {
+                        "size": path.stat().st_size,
+                        "mtime_ns": path.stat().st_mtime_ns,
+                        "sample_sha256": _candidate_sampled_sha256(path),
+                    }
+                    for path in checkpoint_files
+                },
+                "global_step": candidate_step,
+            }
         _write_json(
             source_candidate,
             {
@@ -271,15 +480,33 @@ def _build_authorized_fixture(
                 "trial_name": trial,
                 "config_path": str(source_config),
                 "config_sha256": _sha256(source_config),
-                "global_step": 0,
-                "recover": {"checkpoint_root": str(checkpoint_root), "global_step": 0},
+                "global_step": candidate_step,
+                **(
+                    {
+                        "stats_logger_last_commit_step": candidate_step,
+                        "optimizer_update_successful": True,
+                        "optimizer_batch_datums": 40,
+                        "optimizer_action_tokens": 100,
+                        "weight_sync_succeeded": True,
+                        "expected_version": candidate_step + 1,
+                        "actor_version": candidate_step + 1,
+                        "rollout_version": candidate_step + 1,
+                    }
+                    if successor_config
+                    else {}
+                ),
+                "recover": recover_evidence,
                 "wandb": {"run_id": f"{experiment}_{trial}_train"},
             },
         )
+        if successor_config:
+            _write_json(ancestor_candidate, {"authorized_ancestor": True})
     target_receipt = receipt_dir / (
-        f"{trial}.resume-gs0-v8r17.success.json"
-        if preupdate
-        else f"{trial}.resume-gs5-v8r16.success.json"
+        f"{trial}.resume-gs0-v8r18.success.json" if preupdate else (
+            f"{trial}.resume-post-step6-v8r18.success.json"
+            if successor_config
+            else f"{trial}.resume-gs5-v8r16.success.json"
+        )
     )
     total_bytes = sum(path.stat().st_size for path in checkpoint.iterdir())
     command = [
@@ -311,7 +538,7 @@ def _build_authorized_fixture(
         "--current-config",
         str(current_config),
         "--expected-config-sha256",
-        _sha256(source_config),
+        _sha256(current_config),
         "--source-pbs-job-id",
         source_job_id,
         "--source-release-root",
@@ -329,6 +556,29 @@ def _build_authorized_fixture(
         "--target-receipt",
         str(target_receipt),
     ]
+    if successor_config:
+        command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
+            "--expected-source-config-sha256",
+            _sha256(source_config),
+            "--successor-binding",
+            "qwen38-32-v20-post-step6",
+            "--authorized-ancestor-receipt",
+            str(ancestor_candidate),
+            "--expected-authorized-ancestor-receipt-sha256",
+            _sha256(ancestor_candidate),
+        ]
+        # Production pins the real ancestor digest. This isolated executable
+        # copy substitutes only that immutable evidence value so synthetic
+        # checkpoint fixtures can exercise the rest of the exact binding.
+        fixture_verify = tmp_path / "verify-successor-fixture.py"
+        verifier_source = VERIFY.read_text(encoding="utf-8")
+        assert verifier_source.count(ANCESTOR_SHA256) == 1
+        fixture_verify.write_text(
+            verifier_source.replace(ANCESTOR_SHA256, _sha256(ancestor_candidate)),
+            encoding="utf-8",
+        )
+        fixture_verify.chmod(0o755)
+        command[0] = str(fixture_verify)
     if preupdate:
         command[command.index("--source-pbs-job-id"):command.index("--source-pbs-job-id")] = [
             "--source-log",
@@ -352,6 +602,10 @@ def _build_authorized_fixture(
         "receipt_dir": receipt_dir,
         "target_receipt": target_receipt,
         "source_log": source_log,
+        "source_config": source_config,
+        "current_config": current_config,
+        "ancestor_candidate": ancestor_candidate,
+        "source_candidate": source_candidate,
     }
 
 
@@ -364,6 +618,100 @@ def test_resume_verifier_executes_complete_authorization(tmp_path: Path) -> None
         "openreward_resume_checkpoint=PASS global_step=5 shards=160 "
         in result.stdout
     )
+
+
+def test_resume_verifier_binds_distinct_source_and_successor_config_hashes(
+    tmp_path: Path,
+) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, successor_config=True)
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    paths["current_config"].write_text("changed after binding\n", encoding="utf-8")
+    rejected = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "current resume config identity mismatch" in rejected.stderr
+
+
+def test_successor_binding_rejects_later_checkpoint_step(tmp_path: Path) -> None:
+    command, _ = _build_authorized_fixture(tmp_path, successor_config=True)
+    command[command.index("--expected-global-step") + 1] = "7"
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "expected steps/counts/digests are invalid" in result.stderr
+
+
+def test_successor_binding_rejects_self_consistent_alternative_config(
+    tmp_path: Path,
+) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, successor_config=True)
+    paths["current_config"].write_text("alternative successor\n", encoding="utf-8")
+    command[command.index("--expected-config-sha256") + 1] = _sha256(
+        paths["current_config"]
+    )
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "expected steps/counts/digests are invalid" in result.stderr
+
+
+def test_successor_binding_rejects_unhashed_receipt_lineage_entries(tmp_path: Path) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, successor_config=True)
+    unexpected = paths["receipt_dir"] / f"{TRIAL}.unexpected"
+    unexpected.write_text("not authorized\n", encoding="utf-8")
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "receipt state is missing or ambiguous" in result.stderr
+
+
+def test_successor_binding_rejects_same_step_candidate_for_different_checkpoint(
+    tmp_path: Path,
+) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, successor_config=True)
+    candidate = json.loads(paths["source_candidate"].read_text(encoding="utf-8"))
+    candidate["recover"]["recover_checkpoint_manifest"]["__0_0.distcp"]["size"] += 1
+    _write_json(paths["source_candidate"], candidate)
+    digest_index = command.index("--expected-source-candidate-sha256") + 1
+    command[digest_index] = _sha256(paths["source_candidate"])
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "does not exactly bind the current recovery checkpoint" in result.stderr
+
+
+@pytest.mark.parametrize("persisted_commit", [3, 5])
+def test_successor_binding_rejects_any_other_recover_stats_cursor(
+    tmp_path: Path,
+    persisted_commit: int,
+) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, successor_config=True)
+    _write_json(
+        paths["recover_info"] / "stats_logger_info.json",
+        {"last_commit_step": persisted_commit},
+    )
+    digest_index = command.index("--expected-recover-info-content-sha256") + 1
+    command[digest_index] = _content_manifest_sha256(list(paths["recover_info"].iterdir()))
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "stats logger recovery state is not coherent" in result.stderr
+
+
+def test_successor_binding_requires_post_checkpoint_stats_commit_in_candidate(
+    tmp_path: Path,
+) -> None:
+    command, paths = _build_authorized_fixture(tmp_path, successor_config=True)
+    candidate = json.loads(paths["source_candidate"].read_text(encoding="utf-8"))
+    candidate["stats_logger_last_commit_step"] = 5
+    _write_json(paths["source_candidate"], candidate)
+    digest_index = command.index("--expected-source-candidate-sha256") + 1
+    command[digest_index] = _sha256(paths["source_candidate"])
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "lacks the exact post-checkpoint commit/update evidence" in result.stderr
 
 
 def test_preupdate_resume_verifier_executes_candidate_free_step_zero_authorization(
@@ -467,6 +815,7 @@ def test_runtime_semantic_verifier_executes_gap_free_dcp_and_progress_checks(
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    assert module.QWEN38_SUCCESSOR_ANCESTOR_SHA256 == ANCESTOR_SHA256
 
     class Value:
         pass
@@ -672,7 +1021,7 @@ def test_preupdate_resume_wrapper_binds_exact_step_zero_checkpoint_and_heartbeat
     assert "export OPENREWARD_PREUPDATE_RESUME_BINDING=qwen38-16-v18-job2155389" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=0" in wrapper
-    assert "resume-gs0-v8r17.success.json" in wrapper
+    assert "resume-gs0-v8r18.success.json" in wrapper
     assert "OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
     assert "preupdate resume requires exact recovered global step 0" in common
     assert "normal resume requires LR scheduler step equal recovered global step plus one" in common

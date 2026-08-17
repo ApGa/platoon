@@ -181,10 +181,13 @@ def test_openreward_config_defaults_to_bounded_reasoning_condensations():
     config = config_mod.OpenRewardConfig.from_mapping({})
 
     assert config.condenser_disable_thinking is False
+    assert config.condenser_max_tokens == 26_214
     assert config.condenser_max_completion_tokens == 26_214
 
     with pytest.raises(ValueError, match="condenser_disable_thinking"):
         config_mod.OpenRewardConfig.from_mapping({"condenser_disable_thinking": 1})
+    with pytest.raises(ValueError, match="condenser_max_tokens"):
+        config_mod.OpenRewardConfig.from_mapping({"condenser_max_tokens": 0})
     with pytest.raises(ValueError, match="condenser_max_completion_tokens"):
         config_mod.OpenRewardConfig.from_mapping({"condenser_max_completion_tokens": 0})
 

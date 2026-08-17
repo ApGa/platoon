@@ -20,8 +20,8 @@ OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
 RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
 NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r17-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r18-376d1b9-18e62c0"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -40,6 +40,18 @@ EXPECTED_RECEIPT_PATH = (
 EXPECTED_RECEIPT_SHA256 = "37286eeb005f83e3b9133ceb8204b12d93220ac02cc033118e98c5f314908598"
 
 
+def _load_release_verifier(module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, VERIFIER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(PBS_ROOT))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(PBS_ROOT))
+    return module
+
+
 def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text())
 
@@ -54,267 +66,29 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         "toolathlon": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
         "swe_rebench": "25b14c06b9236c075a4ede25bff6979e5783bb09",
     }
-    expected_model = {
-        "architecture": "dense_transformer",
-        "repository": EXPECTED_MODEL_REPOSITORY,
-        "revision": EXPECTED_MODEL_REVISION,
-        "release_tag": "preserve-thinking-v1",
-        "upstream_source": EXPECTED_MODEL_SOURCE,
-        "thinking_policy": "preserved",
-        "safetensors_shard_count": 18,
-        "snapshot_path": EXPECTED_MODEL_SNAPSHOT,
-    }
-    assert manifest["model_artifacts"] == {
-        "nonrecursive_16node": expected_model,
-        "recursive_32node": expected_model,
-    }
-    assert manifest["training_semantics"] == {
-        "full_horizon": True,
-        "total_train_epochs": 10,
-        "total_train_steps": None,
-        "qwen35_gdn_cp_size": 1,
-        "qwen35_gdn_packed": False,
-        "qwen35_gdn_layout_selection": "model_architecture_and_context_parallel_topology",
-        "qwen35_gdn_cp1_layout": "padded_bshd_upstream_gdn",
-        "qwen35_gdn_cp_gt1_layout": "packed_thd_platoon_custom_gdn_cp",
-        "r3_padded_routes_layout": "sequence_major",
-        "dynamic_bs": True,
-        "filter_zero_advantage_datums": True,
-        "filter_zero_variance_groups": True,
-        "trainable_datums_missing_mask_normalization": (
-            "missing_masks_treated_as_all_trainable_before_filter_and_concat"
-        ),
-        "rollout_max_head_offpolicyness_16node": 1,
-        "rollout_max_head_offpolicyness_32node": 1,
-        "max_concurrent_rollouts_16node": 12,
-        "max_concurrent_rollouts_32node": 24,
-        "actor_safe_dynamic_batch": {
-            "minimum_policy": "topology_derived",
-            "divisor_policy": (
-                "lcm(actor_dp_times_ppo_minibatches_times_microbatch_granularity_"
-                "times_engine_microbatch_divisor,"
-                "rollout_ensure_batch_divisible_by)"
-            ),
-            "engine_microbatch_divisor_policy": ("lcm(pipeline_parallel_size,configured_n_mbs_divisor)"),
-            "engine_min_microbatches_policy": ("engine_divisor_aligned_max_of_configured_n_mbs_and_2pp_when_pp_gt_1"),
-            "under_minimum_policy": "bounded_recollection_then_skip_optimizer_step",
-            "leaf_contracts": {
-                "16node_nonrecursive": {
-                    "actor_dp_size": 10,
-                    "actor_pipeline_parallel_size": 2,
-                    "actor_engine_min_microbatches": 8,
-                    "actor_batch_divisor": 20,
-                    "actor_safe_minimum_datums": 80,
-                    "dynamic_batch_recollection_max_rounds": 1,
-                    "rollout_consumer_batch_size": 8,
-                },
-                "32node_recursive": {
-                    "actor_dp_size": 20,
-                    "actor_pipeline_parallel_size": 2,
-                    "actor_engine_min_microbatches": 8,
-                    "actor_batch_divisor": 40,
-                    "actor_safe_minimum_datums": 160,
-                    "dynamic_batch_recollection_max_rounds": 2,
-                    "rollout_consumer_batch_size": 16,
-                },
-            },
-        },
-        "balance_accepted_batches": False,
-        "resume_training_start_guard": "require_loaded_recover_info_global_step_and_next_step_before_loop",
-        "success_candidate_requires_actor_update_and_weight_sync": True,
-        "fresh_16node_model_only_lineage": False,
-        "fresh_16node_lineage": "v18_qwen38_dense_resume_global_step0_source_job_2155389",
-        "nonrecursive_16node_dense_contract": {
-            "actor_backend": "megatron:d10p2t4c1",
-            "actor_topology": {
-                "nodes": 10,
-                "gpus": 80,
-                "data_parallel_size": 10,
-                "pipeline_parallel_size": 2,
-                "tensor_parallel_size": 4,
-                "context_parallel_size": 1,
-                "expert_parallelism": False,
-            },
-            "rollout_backend": "sglang:d6p1t8",
-            "rollout_topology": {
-                "nodes": 6,
-                "gpus": 48,
-                "replicas": 6,
-                "pipeline_parallel_size": 1,
-                "tensor_parallel_size": 8,
-            },
-            "r3_enabled": False,
-            "return_routed_experts": False,
-            "actor_router_replay_enabled": False,
-            "actor_megatron_use_deterministic_algorithms": False,
-            "actor_mtp_enabled": False,
-            "expected_model_shards": 18,
-            "torch_nccl_heartbeat_timeout_sec": 3600,
-        },
-        "nonrecursive_16node_resume_contract": {
-            "source_pbs_job_id": "2155389.pbs1",
-            "experiment_name": "abci-or-ta-swe16-q38-v18",
-            "trial_name": "abci-ta-swe16-nr-q38d-c12-v18-t0",
-            "recover_mode": "on",
-            "allow_preupdate_global_step_zero": True,
-            "preupdate_binding_id": "qwen38-16-v18-job2155389",
-            "recover_global_step": 0,
-            "next_global_step": 1,
-            "steps_per_epoch": 846,
-            "checkpoint_root": (
-                "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
-                "abci-or-ta-swe16-q38-v18/abci-ta-swe16-nr-q38d-c12-v18-t0"
-            ),
-            "recover_checkpoint_shards": 80,
-            "recover_checkpoint_total_bytes": 164220069555,
-            "checkpoint_layout_sha256": (
-                "25af0d65a233ee77165489dad0c4bbe43a0a56b6745aa9785eddb23f5b720d0c"
-            ),
-            "checkpoint_sample_manifest_sha256": (
-                "3ab2c47cbe8b1d95f1c13ce09d026c57da8752db14749e0ce4011a762dd9505e"
-            ),
-            "checkpoint_fixed_content_sha256": (
-                "bb5ec86330f5acfdae93b04e6101d88a7244e702fcda812ccc0a97adcc6bf6da"
-            ),
-            "recover_info_content_sha256": (
-                "bfb4e310dc3f28946bd86b437cd8d0267875fd07a627346b151811ab83fd2bdb"
-            ),
-            "runtime_semantic_verification": "pinned_training_sif_before_controller",
-            "dcp_state_keys": 1456,
-            "dcp_storage_entries": 9169,
-            "dcp_storage_coverage": "80_exact_paths_gap_free_and_in_bounds",
-            "lr_scheduler_num_steps": 0,
-            "dataloader_samples_yielded": 72,
-            "dataloader_iterator_yielded": 9,
-            "source_release_root": (
-                "/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0"
-            ),
-            "source_release_ref": "refs/tags/abci-v8r15-376d1b9-18e62c0",
-            "config_sha256": (
-                "0ff5430c6be22ff8419af655243ed005757880bcafa61e40381175fa3bc6ab39"
-            ),
-            "source_log": "/groups/gai51740/aci18912it/rasp/logs/2155389.pbs1.OU",
-            "source_log_sha256": (
-                "2497762da279fd93486521b9bf8dad78c02d0fc0bec8f39e7172d188cbcdd552"
-            ),
-            "source_candidate_absent": True,
-            "source_success_receipt_absent": True,
-            "target_receipt": (
-                "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-                "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r17.success.json"
-            ),
-            "success_receipt_isolated": True,
-            "pbs_walltime_hours": 72,
-            "checkpoint_artifact_policy": "preserve_in_place_no_rename_move_delete",
-        },
-        "recursive_32node_lineage": "v16_qwen38_dense_resume_global_step5_source_job_2154492",
-        "recursive_32node_dense_contract": {
-            "actor_backend": "megatron:d20p2t4c1",
-            "actor_topology": {
-                "nodes": 20,
-                "gpus": 160,
-                "data_parallel_size": 20,
-                "pipeline_parallel_size": 2,
-                "tensor_parallel_size": 4,
-                "context_parallel_size": 1,
-                "expert_parallelism": False,
-            },
-            "rollout_backend": "sglang:d12p1t8",
-            "rollout_topology": {
-                "nodes": 12,
-                "gpus": 96,
-                "replicas": 12,
-                "pipeline_parallel_size": 1,
-                "tensor_parallel_size": 8,
-            },
-            "r3_enabled": False,
-            "return_routed_experts": False,
-            "actor_router_replay_enabled": False,
-            "actor_megatron_use_deterministic_algorithms": False,
-            "actor_mtp_enabled": False,
-            "expected_model_shards": 18,
-        },
-        "recursive_32node_resume_contract": {
-            "source_pbs_job_id": "2154492.pbs1",
-            "experiment_name": "abci-or-ta-swe32-q38-v16",
-            "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
-            "recover_mode": "on",
-            "recover_global_step": 5,
-            "next_global_step": 6,
-            "steps_per_epoch": 846,
-            "checkpoint_root": (
-                "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
-                "abci-or-ta-swe32-q38-v16/abci-ta-swe32-rec-q38d-c24-v16-t0"
-            ),
-            "recover_checkpoint_shards": 160,
-            "recover_checkpoint_total_bytes": 383216730907,
-            "checkpoint_layout_sha256": (
-                "6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"
-            ),
-            "checkpoint_sample_manifest_sha256": (
-                "23aea8bf8cc932936d250dd1646d191efe664047169445da1ce2ef67d7168e11"
-            ),
-            "checkpoint_fixed_content_sha256": (
-                "ff7dccef8552800b23f1888cbf646c9b8f8c9019f5e83831264cd75ad6a15e6d"
-            ),
-            "recover_info_content_sha256": (
-                "86e7b2726bcbc86328deb65dae0544c30afec2664d548b349aa87224626cfd3c"
-            ),
-            "runtime_semantic_verification": "pinned_training_sif_before_controller",
-            "dcp_state_keys": 1472,
-            "dcp_storage_entries": 18297,
-            "dcp_storage_coverage": "160_exact_paths_gap_free_and_in_bounds",
-            "lr_scheduler_num_steps": 6,
-            "dataloader_samples_yielded": 208,
-            "dataloader_iterator_yielded": 26,
-            "source_release_root": (
-                "/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0"
-            ),
-            "source_release_ref": "refs/tags/abci-v8r13-376d1b9-18e62c0",
-            "config_sha256": (
-                "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"
-            ),
-            "source_candidate": (
-                "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-                "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
-            ),
-            "source_candidate_sha256": (
-                "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
-            ),
-            "target_receipt": (
-                "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-                "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.json"
-            ),
-            "success_receipt_isolated": True,
-            "checkpoint_artifact_policy": "preserve_in_place_no_rename_move_delete",
-        },
-        "environment_health_monitor": {
-            "toolathlon_endpoint": "/health",
-            "swe_rebench_endpoint": "/health",
-            "toolathlon_worker_count": 8,
-            "toolathlon_worker_base_port": 28100,
-            "toolathlon_direct_worker_endpoint": "/health",
-            "toolathlon_direct_worker_quorum": 5,
-            "toolathlon_affinity_header": "X-Session-ID",
-            "toolathlon_affinity_policy": "nginx_consistent_hash",
-            "toolathlon_public_probe_count": 4,
-            "toolathlon_public_quorum": 1,
-            "all_hosts_and_endpoints_concurrent": True,
-            "per_probe_max_time_seconds": 15,
-            "expected_sweep_bound_seconds": 20,
-            "connect_timeout_seconds": 3,
-            "request_timeout_seconds": 15,
-            "failure_threshold": 10,
-            "check_interval_seconds": 30,
-            "minimum_consecutive_failure_window_seconds": 270,
-            "failure_diagnostic_fields": ["host", "port", "url", "rc", "http", "elapsed"],
-        },
-        "nonrecursive_16node_ptc": False,
-        "recursive_32node_ptc": True,
-        "recursive_32node_ptc_mode": "orchestration_only",
-        "recursive_32node_ptc_max_tool_calls_per_execution": 1024,
-        "recursive_32node_subagent_datum_keep_probability": 0.25,
-    }
+    verifier_module = _load_release_verifier("verify_openreward_v9_release_semantics_test")
+    assert manifest["model_artifacts"] == verifier_module.MODEL_ARTIFACTS
+    assert manifest["training_semantics"] == verifier_module.TRAINING_SEMANTICS
+    for contract_name in (
+        "fresh_recursive_32node_qwen36_cp2_contract",
+        "recursive_32node_qwen38_v20_successor_contract",
+    ):
+        contract = manifest["training_semantics"][contract_name]
+        for kind in ("config", "wrapper"):
+            path = REPO_ROOT / contract[f"{kind}_relative"]
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == contract[f"{kind}_sha256"]
+    successor = manifest["training_semantics"][
+        "recursive_32node_qwen38_v20_successor_contract"
+    ]
+    assert successor["binding_status"] == "frozen_gs6_checkpoint"
+    assert successor["launchable"] is True
+    assert successor["recover_global_step"] == 6
+    assert successor["source_pbs_job_id"] == "2156202.pbs1"
+    assert successor["dcp_state_keys"] == 1472
+    assert successor["dcp_storage_entries"] == 18297
+    assert successor["lr_scheduler_num_steps"] == 7
+    assert successor["dataloader_samples_yielded"] == 336
+    assert successor["dataloader_iterator_yielded"] == 42
     assert manifest["toolathlon_image_derivation"]["playwright"] == {
         "browsers_path": "/opt/ms-playwright",
         "base_browser_tree_sha256": "84d979d1a301e24d7ee04009ff85b806cda195cce9d6bd1a8a686f06887805e5",
@@ -456,10 +230,18 @@ def test_v9_verifier_binds_exact_manifest_tag_externals_and_swe_contract() -> No
         "platoon/train/areal/rl.py": hashlib.sha256(
             (REPO_ROOT / "platoon/train/areal/rl.py").read_bytes()
         ).hexdigest(),
+        "plugins/openreward/platoon/openreward/config_defs.py": hashlib.sha256(
+            (
+                REPO_ROOT / "plugins/openreward/platoon/openreward/config_defs.py"
+            ).read_bytes()
+        ).hexdigest(),
+        "plugins/openreward/platoon/openreward/rollout.py": hashlib.sha256(
+            (REPO_ROOT / "plugins/openreward/platoon/openreward/rollout.py").read_bytes()
+        ).hexdigest(),
     }
     assert "release training runtime asset content mismatch" in source
     assert "_require_model_artifacts()" in source
-    assert "release model shard set does not match its pinned 18-shard contract" in source
+    assert "release model shard set does not match its pinned" in source
 
 
 def test_v9_release_binds_exact_resume_dense_qwen38_recursive_wrapper() -> None:
@@ -513,7 +295,7 @@ def test_v9_release_binds_step_zero_resume_dense_qwen38_nonrecursive_wrapper() -
     assert "export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1" in wrapper
     assert "export OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper
     assert "export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
-    assert "resume-gs0-v8r17.success.json" in wrapper
+    assert "resume-gs0-v8r18.success.json" in wrapper
     assert "export OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
     assert (
         "export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="

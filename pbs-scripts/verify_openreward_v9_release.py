@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r17/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r18/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0")
-RELEASE_REF = "refs/tags/abci-v8r17-376d1b9-18e62c0"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0")
+RELEASE_REF = "refs/tags/abci-v8r18-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "39e82136f6aeeb97d38af4a1b4a8ca67790899519067a360da714d56344b2cab"
+MANIFEST_SHA256 = "22f20679acf73d8a9599a8fe2c9e34f1c33308cd4f24536b5c67b4ee452d7bf1"
 UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
@@ -103,7 +103,21 @@ MODEL_ARTIFACTS = {
             "models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/"
             "97c725615b8aa025b800da4ceed38811358b30f1"
         ),
-    }
+    },
+    "fresh_recursive_32node_qwen36_cp2": {
+        "architecture": "qwen3_5_moe",
+        "repository": "apurvaga/Qwen3.6-35B-A3B-preserve-thinking",
+        "revision": "ce815485d640a33461c25e3d5c505b5346e8c857",
+        "upstream_source": "Qwen/Qwen3.6-35B-A3B",
+        "thinking_policy": "preserved",
+        "weights_policy": "unchanged_from_upstream",
+        "safetensors_shard_count": 26,
+        "snapshot_path": (
+            "/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/"
+            "models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/"
+            "ce815485d640a33461c25e3d5c505b5346e8c857"
+        ),
+    },
 }
 EXTERNAL_PATHS = {
     "areal": "external/AReaL",
@@ -113,6 +127,12 @@ EXTERNAL_PATHS = {
 }
 TRAINING_RUNTIME_ASSETS = {
     "platoon/train/areal/rl.py": "9ce579fa76b43d61223cd9a6c9f5bebec45b7801c5407e2258825a86f71c765b",
+    "plugins/openreward/platoon/openreward/config_defs.py": (
+        "f8acd3bbbe9738211c8103f38c23b6fe9f65c4b11e00b505240e969b6588c51e"
+    ),
+    "plugins/openreward/platoon/openreward/rollout.py": (
+        "653f501c985bd84b3bc5553849d224755fc5c119ae461c4ba5ea8e753b8dfd44"
+    ),
 }
 TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION = "missing_masks_treated_as_all_trainable_before_filter_and_concat"
 TRAINING_SEMANTICS = {
@@ -242,7 +262,7 @@ TRAINING_SEMANTICS = {
         "source_success_receipt_absent": True,
         "target_receipt": (
             "/groups/gai51740/aci18912it/rasp/job-state/gates/"
-            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r17.success.json"
+            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-v8r18.success.json"
         ),
         "success_receipt_isolated": True,
         "pbs_walltime_hours": 72,
@@ -324,6 +344,182 @@ TRAINING_SEMANTICS = {
         ),
         "success_receipt_isolated": True,
         "checkpoint_artifact_policy": "preserve_in_place_no_rename_move_delete",
+    },
+    "recursive_32node_qwen38_v20_successor_contract": {
+        "binding_status": "frozen_gs6_checkpoint",
+        "launchable": True,
+        "fail_closed_before_services": True,
+        "successor_binding_id": "qwen38-32-v20-post-step6",
+        "config_relative": (
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen38_dense_c24_ta20_v20.yaml"
+        ),
+        "config_sha256": "f3ffb459d1ed6e9427124e8e7d6daafebb2709f965f86c5629a99e508449fe5c",
+        "wrapper_relative": (
+            "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
+        ),
+        "wrapper_sha256": "9aa09ba8c1d97485b1f2730e1687158904c3461d4269e943b2dccc46f582a29e",
+        "experiment_name": "abci-or-ta-swe32-q38-v16",
+        "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
+        "pbs_job_name": "rasp-h200-32q38-rsp6-v20",
+        "checkpoint_root": (
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
+            "abci-or-ta-swe32-q38-v16/abci-ta-swe32-rec-q38d-c24-v16-t0"
+        ),
+        "target_receipt": (
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-post-step6-v8r18.success.json"
+        ),
+        "source_config_relative": (
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen38_dense_c24_ta20_v16.yaml"
+        ),
+        "source_config_sha256": (
+            "a3f8c04b2a3e59edd708f4f3a39eb38e1a22fa72b63a1f962afb54ac80183ffa"
+        ),
+        "source_candidate": (
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0.resume-gs5-v8r16.success.candidate.json"
+        ),
+        "authorized_ancestor_candidate": (
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+            "abci-ta-swe32-rec-q38d-c24-v16-t0.success.candidate.json"
+        ),
+        "authorized_ancestor_candidate_sha256": (
+            "b432e3a12ff78921e7aac6cff3914f1c4c5aeffd9f08e3c9918ad5daa7714a22"
+        ),
+        "source_pbs_job_id": "2156202.pbs1",
+        "source_release_root": "/home/aci18912it/rasp/releases/platoon-v8r16-376d1b9-18e62c0",
+        "source_release_ref": "refs/tags/abci-v8r16-376d1b9-18e62c0",
+        "source_candidate_sha256": (
+            "12a5a385826dbb2efb4a6dbffcdc057dce7063def8ade0c0d131dae1f802cd94"
+        ),
+        "source_log": "/groups/gai51740/aci18912it/rasp/logs/2156202.pbs1.OU",
+        "source_log_sha256": (
+            "08a2837d33589671fae43e796a981ad41e16ca335ab696a1748cd660f1a1b991"
+        ),
+        "source_terminal_accounting": (
+            "live_qstat_F_substate91_exit271_run1_obit_"
+            "2026-08-17T15:56:52+09:00_authorized_qdel"
+        ),
+        "recover_global_step": 6,
+        "recover_checkpoint_total_bytes": 383216730907,
+        "checkpoint_layout_sha256": (
+            "6699027815f1628a6522c0520d3e30b17df124a41e3583b6ff4a3e4937b556f8"
+        ),
+        "checkpoint_sample_manifest_sha256": (
+            "57410a3d50b2a3bf45991568abc687f334f4d02179a7d207da9c32e1872735c4"
+        ),
+        "checkpoint_fixed_content_sha256": (
+            "9417c54953c5651d5c9a73649657ca50da74995847d77258e0a256e193674251"
+        ),
+        "recover_info_content_sha256": (
+            "00c8d7ccdd27f49bd248369ffa45416d89b53dcb23a45ec9d5ea523aeeb7bddb"
+        ),
+        "dcp_state_keys": 1472,
+        "dcp_storage_entries": 18297,
+        "lr_scheduler_num_steps": 7,
+        "dataloader_samples_yielded": 336,
+        "dataloader_iterator_yielded": 42,
+        "required_recover_global_step": 6,
+        "recover_stats_logger_last_commit_step": 4,
+        "candidate_stats_logger_last_commit_step": 6,
+        "stats_recovery_order": "load_gs5_cursor4_save_gs6_before_commit_then_candidate_commit6_next_resume_logs7",
+        "root_max_steps": 150,
+        "subagent_max_steps": 100,
+        "subagent_reward_judge_max_steps": 100,
+        "workflow_timeout_seconds": 7200,
+        "agent_act_and_env_step_timeout_seconds": 5400,
+        "subprocess_init_budget_seconds": 120,
+        "subprocess_cleanup_grace_seconds": 60,
+        "subprocess_sigalrm_seconds": 7380,
+        "parent_future_grace_seconds": 30,
+        "parent_future_timeout_seconds": 7410,
+        "rollout_request_timeout_seconds": 16200,
+        "session_inactivity_timeout_seconds": 9000,
+        "usable_context_window_tokens": 32768,
+        "actor_backend": "megatron:d20p2t4c1",
+        "rollout_backend": "sglang:d12p1t8",
+        "r3_enabled": False,
+        "dynamic_bs": True,
+        "filter_zero_advantage_datums": True,
+        "filter_zero_variance_groups": True,
+        "dynamic_batch_recollection_max_rounds": 2,
+        "checkpoint_artifact_policy": (
+            "frozen_gs6_preserve_in_place_no_manual_rename_move_delete"
+        ),
+        "freeze_requirement": "satisfied_quiescent_census_host_pass_pinned_sif_runtime_pass",
+    },
+    "fresh_recursive_32node_qwen36_cp2_contract": {
+        "fresh_start": True,
+        "config_relative": (
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen36_moe_cp2_c24_ta20_v19.yaml"
+        ),
+        "config_sha256": "b4f8594c5451bfed2d0539ddc266ca6546fd0eade2b9b5b7f5506f092853e201",
+        "wrapper_relative": (
+            "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs"
+        ),
+        "wrapper_sha256": "31fb65adfd8f20acc138418abfb47f421a6449564c877db56c84bdb55b3e02a3",
+        "experiment_name": "abci-or-ta-swe32-q36-cp2-v19",
+        "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0",
+        "pbs_job_name": "rasp-h200-32q36-v19",
+        "checkpoint_root": (
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/"
+            "abci-or-ta-swe32-q36-cp2-v19/abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0"
+        ),
+        "target_receipt": (
+            "/groups/gai51740/aci18912it/rasp/job-state/gates/"
+            "abci-ta-swe32-rec-q36m-cp2-c24-d1-v19-t0.success.json"
+        ),
+        "stale_checkpoint_and_receipt_policy": "reject_before_controller",
+        "recover_mode": "auto_with_preexisting_root_forbidden",
+        "actor_backend": "megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)",
+        "actor_topology": {
+            "nodes": 20,
+            "gpus": 160,
+            "data_parallel_size": 10,
+            "pipeline_parallel_size": 2,
+            "attention_tensor_parallel_size": 4,
+            "context_parallel_size": 2,
+            "expert_tensor_parallel_size": 1,
+            "expert_parallel_size": 8,
+            "expert_data_parallel_size": 10,
+        },
+        "rollout_backend": "sglang:d12p1t8",
+        "rollout_gpus": 96,
+        "r3_enabled": True,
+        "router_replay_num_layers": 40,
+        "router_replay_topk": 8,
+        "router_replay_num_experts": 256,
+        "root_max_steps": 150,
+        "subagent_max_steps": 100,
+        "subagent_reward_judge_max_steps": 100,
+        "subagent_max_depth": 1,
+        "usable_context_window_tokens": 65536,
+        "sglang_exclusive_context_length": 65537,
+        "sglang_max_prefill_tokens": 65536,
+        "condenser_trigger_ratio": "4/5",
+        "condenser_max_tokens": 52428,
+        "condenser_first_trigger_token": 52429,
+        "dynamic_bs": False,
+        "filter_zero_advantage_datums": False,
+        "filter_zero_variance_groups": False,
+        "dynamic_batch_recollection_max_rounds": 1,
+        "actor_n_mbs": 1,
+        "actor_microbatch_granularity": 1,
+        "actor_n_mbs_divisor": 1,
+        "actor_engine_microbatch_divisor": 2,
+        "actor_engine_min_microbatches": 4,
+        "actor_batch_divisor": 20,
+        "actor_safe_minimum_datums": 40,
+        "train_dataset_batch_size": 8,
+        "minimum_successful_group_size": 5,
+        "rollout_consumer_batch_size": 8,
+        "expected_model_shards": 26,
     },
     "environment_health_monitor": {
         "toolathlon_endpoint": "/health",
@@ -419,33 +615,36 @@ def _require_owned_regular(path: Path, *, mode: int) -> os.stat_result:
 
 
 def _require_model_artifacts() -> None:
-    artifact = MODEL_ARTIFACTS["recursive_32node"]
-    if MODEL_ARTIFACTS["nonrecursive_16node"] != artifact:
+    dense = MODEL_ARTIFACTS["recursive_32node"]
+    if MODEL_ARTIFACTS["nonrecursive_16node"] != dense:
         raise RuntimeError("release dense model identities differ between node-count contracts")
-    snapshot = Path(artifact["snapshot_path"])
-    if (
-        not snapshot.is_absolute()
-        or snapshot.resolve() != snapshot
-        or snapshot.is_symlink()
-        or not snapshot.is_dir()
-    ):
-        raise RuntimeError("release model snapshot is unavailable or indirect")
-    for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors.index.json"):
-        if not (snapshot / name).is_file():
-            raise RuntimeError(f"release model snapshot is incomplete: {name}")
-    try:
-        index = json.loads((snapshot / "model.safetensors.index.json").read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("release model shard index is unreadable") from exc
-    weight_map = index.get("weight_map") if isinstance(index, dict) else None
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise RuntimeError("release model shard index has no weight map")
-    count = artifact["safetensors_shard_count"]
-    expected = {f"model-{ordinal:05d}-of-{count:05d}.safetensors" for ordinal in range(1, count + 1)}
-    declared = set(weight_map.values())
-    on_disk = {path.name for path in snapshot.glob("model-*-of-*.safetensors") if path.is_file()}
-    if declared != expected or on_disk != expected:
-        raise RuntimeError("release model shard set does not match its pinned 18-shard contract")
+    for contract, artifact in MODEL_ARTIFACTS.items():
+        snapshot = Path(artifact["snapshot_path"])
+        if (
+            not snapshot.is_absolute()
+            or snapshot.resolve() != snapshot
+            or snapshot.is_symlink()
+            or not snapshot.is_dir()
+        ):
+            raise RuntimeError(f"release model snapshot is unavailable or indirect: {contract}")
+        for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors.index.json"):
+            if not (snapshot / name).is_file():
+                raise RuntimeError(f"release model snapshot is incomplete ({contract}): {name}")
+        try:
+            index = json.loads((snapshot / "model.safetensors.index.json").read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"release model shard index is unreadable: {contract}") from exc
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise RuntimeError(f"release model shard index has no weight map: {contract}")
+        count = artifact["safetensors_shard_count"]
+        expected = {f"model-{ordinal:05d}-of-{count:05d}.safetensors" for ordinal in range(1, count + 1)}
+        declared = set(weight_map.values())
+        on_disk = {path.name for path in snapshot.glob("model-*-of-*.safetensors") if path.is_file()}
+        if declared != expected or on_disk != expected:
+            raise RuntimeError(
+                f"release model shard set does not match its pinned {count}-shard contract: {contract}"
+            )
 
 
 def _require_ancestor(root: Path, older: str, newer: str) -> None:
@@ -674,6 +873,22 @@ def verify(root: Path) -> None:
         raise RuntimeError("release model artifact identity mismatch")
     if manifest.get("training_semantics") != TRAINING_SEMANTICS:
         raise RuntimeError("release training semantics mismatch")
+    for contract_name in (
+        "fresh_recursive_32node_qwen36_cp2_contract",
+        "recursive_32node_qwen38_v20_successor_contract",
+    ):
+        contract = TRAINING_SEMANTICS[contract_name]
+        for kind in ("config", "wrapper"):
+            relative = contract[f"{kind}_relative"]
+            asset = root / relative
+            if (
+                not asset.is_file()
+                or asset.is_symlink()
+                or _sha256(asset) != contract[f"{kind}_sha256"]
+            ):
+                raise RuntimeError(
+                    f"release {contract_name} {kind} content mismatch: {relative}"
+                )
     if manifest.get("training_runtime_assets") != TRAINING_RUNTIME_ASSETS:
         raise RuntimeError("release training runtime asset identity mismatch")
     for relative, expected_sha256 in TRAINING_RUNTIME_ASSETS.items():
@@ -715,7 +930,7 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r17.  The
+    # The SWE dependency closure did not change between v8r2 and v8r18.  The
     # existing runtime verifier reads the retained v8 manifest, so require both
     # manifests to carry byte-for-byte equal SWE contracts before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())

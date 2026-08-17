@@ -191,6 +191,11 @@ class OpenRewardConfig:
     # the model to reason for summary quality, but keep that reasoning out of
     # the public summary and training data.
     condenser_disable_thinking: bool = False
+    # OpenHands condenses once the current view is strictly greater than this
+    # integer token ceiling.  Keep this separate from the condenser completion
+    # budget: it controls agent-context pressure and the input budget used by
+    # SafeLLMSummarizingCondenser.
+    condenser_max_tokens: int = (4 * 32_768) // 5
     # Total generation budget shared by reasoning and the public summary.
     condenser_max_completion_tokens: int = int(0.8 * 32_768)
 
@@ -220,6 +225,12 @@ class OpenRewardConfig:
             )
         if not isinstance(self.condenser_disable_thinking, bool):
             raise ValueError("condenser_disable_thinking must be a boolean")
+        if (
+            isinstance(self.condenser_max_tokens, bool)
+            or not isinstance(self.condenser_max_tokens, int)
+            or self.condenser_max_tokens <= 0
+        ):
+            raise ValueError("condenser_max_tokens must be a positive integer")
         if (
             isinstance(self.condenser_max_completion_tokens, bool)
             or not isinstance(self.condenser_max_completion_tokens, int)

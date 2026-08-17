@@ -22,8 +22,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0
-RELEASE_REF=refs/tags/abci-v8r17-376d1b9-18e62c0
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0
+RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
@@ -35,7 +35,7 @@ COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
 ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 EXPERIMENT=abci-or-ta-swe16-q38-v18
 TRIAL=abci-ta-swe16-nr-q38d-c12-v18-t0
-RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs0-v8r17.success.json
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs0-v8r18.success.json
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/abci-or-ta-swe16-q38-v18/abci-ta-swe16-nr-q38d-c12-v18-t0
 SOURCE_LOG=/groups/gai51740/aci18912it/rasp/logs/2155389.pbs1.OU
 SOURCE_RELEASE_ROOT=/home/aci18912it/rasp/releases/platoon-v8r15-376d1b9-18e62c0
@@ -45,7 +45,7 @@ SOURCE_CONFIG_RELATIVE=plugins/openreward/platoon/openreward/configs/areal/abci_
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -x "${COMMON}" && -r "${ABCI_ENV}" && \
     -x "${RELEASE_VERIFY}" && -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" && \
     -x "${RESUME_VERIFY}" ]] || {
-    echo "[h200-16-v9] ERROR: immutable v8r17 release is incomplete: ${REPO_ROOT}" >&2
+    echo "[h200-16-v9] ERROR: immutable v8r18 release is incomplete: ${REPO_ROOT}" >&2
     exit 2
 }
 [[ "$(grep -Fxc '  dynamic_batch_recollection_max_rounds: 1' "${CONFIG}")" == 1 && \

@@ -110,15 +110,20 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_cp1_c24_ta20_v10_padded.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v18.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v16.yaml",
+        "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v20.yaml",
+        "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v19.yaml",
     ):
         assert config in source
     for host_only in (
         "openreward-toolathlon-pbs-portable-build.pbs",
         "openreward-toolathlon-all-mcp-health-v9.pbs",
+        "openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs",
+        "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs",
         "openreward-node-local-init.py",
         "toolathlon_all_mcp_health.py",
         "publish_toolathlon_all_mcp_health_result.py",
         "publish_openreward_v9_gate2_result.py",
+        "verify_openreward_resume_checkpoint.py",
         "publish_toolathlon_pbs_build_receipt.py",
         "launch_toolathlon_python_mcp.py",
         "probe_toolathlon_python_mcp_launchers.py",
@@ -129,8 +134,8 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
     assert '"containers/probe_toolathlon_python_mcp_launchers.py",' in source
     assert 'print "    pbs-scripts/publish_openreward_v9_gate2_result.py"' not in adapter
     assert 'print "    pbs-scripts/openreward-node-local-init.py"' not in adapter
-    assert "RELEASE_REF=refs/tags/abci-v8r17-376d1b9-18e62c0" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0" in GATE2_V9.read_text()
+    assert "RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0" in GATE2_V9.read_text()
 
 
 def test_gate2_archives_and_imports_rollout_rpc_patch_entrypoint():

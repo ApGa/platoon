@@ -1293,9 +1293,9 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_step0_resume_release_and_leaf_c
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r17-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
@@ -1345,7 +1345,7 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_step0_resume_release_and_leaf_c
     assert "OPENREWARD_ALLOW_PREUPDATE_RESUME=1" in wrapper
     assert "OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=0" in wrapper
     assert "--allow-preupdate-global-step-zero" in wrapper
-    assert "resume-gs0-v8r17.success.json" in wrapper
+    assert "resume-gs0-v8r18.success.json" in wrapper
     assert "OPENREWARD_QWEN38_MODEL_REPOSITORY:-}" in wrapper
     assert "apurvaga/Qwen3.8-27B-preserve-thinking" in wrapper
     assert "OPENREWARD_QWEN38_MODEL_REVISION:-}" in wrapper
@@ -1382,8 +1382,8 @@ def test_qwen38_dense_wrapper_binds_exact_step5_resume_and_leaf_contract() -> No
     assert "#PBS -l select=32:mpiprocs=8" in wrapper
     assert "#PBS -l walltime=168:00:00" in wrapper
     assert "#PBS -N rasp-h200-32q38-rs5-v16" in wrapper
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r17-376d1b9-18e62c0" in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r17-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r18-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r18-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert "GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py" in wrapper
     assert "ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py" in wrapper

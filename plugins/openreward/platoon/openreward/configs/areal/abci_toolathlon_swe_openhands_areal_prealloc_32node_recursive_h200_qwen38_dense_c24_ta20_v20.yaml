@@ -1,0 +1,31 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v16
+  - _self_
+
+# Resume successor for the existing dense-Qwen lineage.  Experiment, trial,
+# optimizer topology, 32K context, R3-off policy, dynamic batching and rollout
+# recollection remain unchanged so the post-step-6 checkpoint is compatible.
+# The release wrapper remains deliberately non-launchable until that checkpoint
+# has been observed complete and all exact recovery digests are frozen.
+workflow_config:
+  rollout_config:
+    max_steps: 150
+    timeout: 7200
+    step_timeout: 5400
+
+rollout:
+  # A child hard deadline is 7,200 + 120 seconds of initialization + 60
+  # seconds of cleanup = 7,380 seconds.  Permit one such cohort ahead of this
+  # workflow plus its own cohort and retain the established 1,440s controller
+  # cleanup/export margin: 2 * 7,380 + 1,440 = 16,200.
+  request_timeout: 16200
+  agent:
+    # This is an inactivity deadline. Keep it beyond one complete subprocess
+    # hard deadline so a live recursive trajectory is not reaped first.
+    session_timeout_seconds: 9000
+
+openreward:
+  # The launch tool exposes only a goal, so every child receives this fixed
+  # typed budget while the root budget comes from rollout_config.max_steps.
+  subagent_default_max_steps: 100
+  subagent_reward_judge_max_steps: 100
