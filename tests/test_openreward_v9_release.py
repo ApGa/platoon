@@ -27,6 +27,9 @@ NONRECURSIVE_WRAPPER_PATH = (
 )
 EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0"
 EXPECTED_RELEASE_REF = "refs/tags/abci-v8r21-376d1b9-18e62c0"
+EXPECTED_PLATOON_UPSTREAM = "e11d7201ae8118a9350210615038ff2fe582945f"
+EXPECTED_OPENHANDS_REVISION = "057108f1f1235940e5d04401b4c294e4777c3baf"
+HISTORICAL_V8_OPENHANDS_REVISION = "b1acf52ee362884f092b9eaf5e701a1bb5d1b335"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -64,13 +67,18 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     assert manifest["release_root"] == EXPECTED_RELEASE_ROOT
     assert manifest["release_ref"] == EXPECTED_RELEASE_REF
     assert manifest["components"]["toolathlon"] == ("18e62c0d0419da88209af911528f2f8a0b44a5ed")
-    assert manifest["upstream_refresh"]["fetched_at_utc"] == "2026-08-13T16:38:39Z"
+    assert manifest["components"]["platoon_upstream"] == EXPECTED_PLATOON_UPSTREAM
+    assert manifest["components"]["openhands"] == EXPECTED_OPENHANDS_REVISION
+    assert manifest["upstream_refresh"]["fetched_at_utc"] == "2026-08-17T21:00:22Z"
     assert {name: value["sha"] for name, value in manifest["upstream_refresh"].items() if name != "fetched_at_utc"} == {
-        "platoon": "376d1b9885ea40464766fb3fea74815c6a698fbf",
-        "openhands": "b1acf52ee362884f092b9eaf5e701a1bb5d1b335",
+        "platoon": EXPECTED_PLATOON_UPSTREAM,
+        "openhands": EXPECTED_OPENHANDS_REVISION,
         "toolathlon": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
-        "swe_rebench": "25b14c06b9236c075a4ede25bff6979e5783bb09",
+        "swe_rebench": "287a0dcb0f747dee110037107e4792d5c6511299",
     }
+    assert manifest["upstream_refresh"]["openhands"]["ref"] == "refs/heads/main"
+    assert manifest["upstream_refresh"]["swe_rebench"]["release_ahead"] == 1
+    assert manifest["upstream_refresh"]["swe_rebench"]["release_behind"] == 2
     verifier_module = _load_release_verifier("verify_openreward_v9_release_semantics_test")
     assert manifest["model_artifacts"] == verifier_module.MODEL_ARTIFACTS
     for artifact in manifest["model_artifacts"].values():
@@ -276,6 +284,34 @@ def test_v9_verifier_binds_exact_manifest_tag_externals_and_swe_contract() -> No
     assert "release training runtime asset content mismatch" in source
     assert "_require_model_artifacts()" in source
     assert "release model shard set does not match its pinned" in source
+
+
+def test_v9_openhands_pin_advances_without_rewriting_historical_v8_artifacts() -> None:
+    active_paths = (
+        PBS_ROOT / "openreward-v9-release.json",
+        PBS_ROOT / "verify_openreward_v9_release.py",
+        REPO_ROOT / "plugins/openreward/pyproject.toml",
+        REPO_ROOT / "plugins/openreward/uv.lock",
+    )
+    for path in active_paths:
+        source = path.read_text()
+        assert EXPECTED_OPENHANDS_REVISION in source
+        assert HISTORICAL_V8_OPENHANDS_REVISION not in source
+
+    historical_paths = (
+        PBS_ROOT / "openreward-v8-release.json",
+        PBS_ROOT / "verify_openreward_v8_release.py",
+        PBS_ROOT / "openreward_v8_ptc_e2e.py",
+        PBS_ROOT / "openreward-v8-ptc-e2e-smoke.pbs",
+    )
+    for path in historical_paths:
+        source = path.read_text()
+        assert HISTORICAL_V8_OPENHANDS_REVISION in source
+        assert EXPECTED_OPENHANDS_REVISION not in source
+
+    verifier = VERIFIER_PATH.read_text()
+    assert "retained v8 artifacts remain immutable" in verifier
+    assert "Only their SWE contract is consumed" in verifier
 
 
 def test_v9_release_binds_exact_resume_dense_qwen38_recursive_wrapper() -> None:

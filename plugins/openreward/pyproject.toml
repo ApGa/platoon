@@ -84,22 +84,22 @@ platoon-openhands = { path = "../openhands", editable = true }
 
 [tool.uv.sources.openhands-sdk]
 git = "https://github.com/ApGa/openhands-agent-sdk.git"
-rev = "b1acf52ee362884f092b9eaf5e701a1bb5d1b335"
+rev = "057108f1f1235940e5d04401b4c294e4777c3baf"
 subdirectory = "openhands-sdk"
 
 [tool.uv.sources.openhands-tools]
 git = "https://github.com/ApGa/openhands-agent-sdk.git"
-rev = "b1acf52ee362884f092b9eaf5e701a1bb5d1b335"
+rev = "057108f1f1235940e5d04401b4c294e4777c3baf"
 subdirectory = "openhands-tools"
 
 [tool.uv.sources.openhands-workspace]
 git = "https://github.com/ApGa/openhands-agent-sdk.git"
-rev = "b1acf52ee362884f092b9eaf5e701a1bb5d1b335"
+rev = "057108f1f1235940e5d04401b4c294e4777c3baf"
 subdirectory = "openhands-workspace"
 
 [tool.uv.sources.openhands-agent-server]
 git = "https://github.com/ApGa/openhands-agent-sdk.git"
-rev = "b1acf52ee362884f092b9eaf5e701a1bb5d1b335"
+rev = "057108f1f1235940e5d04401b4c294e4777c3baf"
 subdirectory = "openhands-agent-server"
 
 [tool.ruff]

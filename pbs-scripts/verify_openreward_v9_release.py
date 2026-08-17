@@ -17,8 +17,8 @@ from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0")
 RELEASE_REF = "refs/tags/abci-v8r21-376d1b9-18e62c0"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "6b4fc48885a23cada1c332ecd2e8b35d134c10c3479815993a7c061be7a427b6"
-UPSTREAM_COMMIT = "376d1b9885ea40464766fb3fea74815c6a698fbf"
+MANIFEST_SHA256 = "4159bff92679f66cfb0934fe7c16c2955beee2688ccd900eae37e2b20ec6c959"
+UPSTREAM_COMMIT = "e11d7201ae8118a9350210615038ff2fe582945f"
 TOOLATHLON_BUILD_COMMIT = "69d04f210097870a984d26024016a705a278c1d2"
 TOOLATHLON_IMAGE_PATH = Path(
     "/groups/gai51740/aci18912it/rasp/images/openreward-toolathlon-18e62c0d-pbs-53541066e97b.sif"
@@ -71,7 +71,7 @@ EMBEDDED_RECEIPT_KEYS = {
 COMPONENTS = {
     "platoon_upstream": UPSTREAM_COMMIT,
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
-    "openhands": "b1acf52ee362884f092b9eaf5e701a1bb5d1b335",
+    "openhands": "057108f1f1235940e5d04401b4c294e4777c3baf",
     "swe_rebench": "538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7",
     "toolathlon": "18e62c0d0419da88209af911528f2f8a0b44a5ed",
 }
@@ -971,9 +971,9 @@ def verify(root: Path) -> None:
         if _git(external, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeError(f"materialized external checkout is dirty: {name}")
 
-    # The SWE dependency closure did not change between v8r2 and v8r21.  The
-    # existing runtime verifier reads the retained v8 manifest, so require both
-    # manifests to carry byte-for-byte equal SWE contracts before delegating.
+    # The retained v8 artifacts remain immutable at their original OpenHands
+    # revision. Only their SWE contract is consumed by the active v9 verifier.
+    # Require that contract to remain byte-for-byte equal before delegating.
     v8_manifest = json.loads((root / "pbs-scripts/openreward-v8-release.json").read_text())
     if v8_manifest.get("swe_runtime") != manifest.get("swe_runtime"):
         raise RuntimeError("v9 and retained v8 SWE runtime contracts differ")

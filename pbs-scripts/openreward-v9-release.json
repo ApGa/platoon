@@ -3,9 +3,9 @@
   "release_ref": "refs/tags/abci-v8r21-376d1b9-18e62c0",
   "release_root": "/home/aci18912it/rasp/releases/platoon-v8r21-376d1b9-18e62c0",
   "components": {
-    "platoon_upstream": "376d1b9885ea40464766fb3fea74815c6a698fbf",
+    "platoon_upstream": "e11d7201ae8118a9350210615038ff2fe582945f",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
-    "openhands": "b1acf52ee362884f092b9eaf5e701a1bb5d1b335",
+    "openhands": "057108f1f1235940e5d04401b4c294e4777c3baf",
     "swe_rebench": "538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7",
     "toolathlon": "18e62c0d0419da88209af911528f2f8a0b44a5ed"
   },
@@ -45,18 +45,18 @@
     }
   },
   "upstream_refresh": {
-    "fetched_at_utc": "2026-08-13T16:38:39Z",
+    "fetched_at_utc": "2026-08-17T21:00:22Z",
     "platoon": {
       "remote": "https://github.com/ApGa/platoon.git",
       "ref": "refs/heads/apga/update-areal-with-registry",
-      "sha": "376d1b9885ea40464766fb3fea74815c6a698fbf",
+      "sha": "e11d7201ae8118a9350210615038ff2fe582945f",
       "release_ahead": 0,
       "release_behind": 0
     },
     "openhands": {
       "remote": "https://github.com/apga/openhands-agent-sdk.git",
-      "ref": "refs/heads/apga/ptc",
-      "sha": "b1acf52ee362884f092b9eaf5e701a1bb5d1b335",
+      "ref": "refs/heads/main",
+      "sha": "057108f1f1235940e5d04401b4c294e4777c3baf",
       "release_ahead": 0,
       "release_behind": 0
     },
@@ -70,9 +70,9 @@
     "swe_rebench": {
       "remote": "https://github.com/ApGa/SWE-rebench-V2-OpenRewardEnv.git",
       "ref": "refs/heads/main",
-      "sha": "25b14c06b9236c075a4ede25bff6979e5783bb09",
+      "sha": "287a0dcb0f747dee110037107e4792d5c6511299",
       "release_ahead": 1,
-      "release_behind": 0
+      "release_behind": 2
     }
   },
   "toolathlon_image": {
