@@ -296,7 +296,7 @@ QWEN38_DENSE_CONFIG = "abci_toolathlon_swe_openhands_areal_prealloc_32node_recur
 QWEN38_DENSE_WRAPPER = "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
 QWEN38_DENSE_16_CONFIG = (
     "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
-    "qwen38_dense_c12_ta20_v16"
+    "qwen38_dense_c12_ta20_v17"
 )
 QWEN38_DENSE_16_WRAPPER = "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
 
@@ -1151,9 +1151,9 @@ def test_qwen38_dense_nonrecursive_leaf_has_exact_safe_training_contract() -> No
     parent = _compose(parent_name)
 
     assert leaf["defaults"] == [parent_name, "_self_"]
-    assert config["experiment_name"] == "abci-or-ta-swe16-q38-v16"
-    assert config["trial_name"] == "abci-ta-swe16-nr-q38d-c12-v16-t0"
-    assert config["stats_logger"]["wandb"]["group"] == "abci-ta-swe16-nr-q38d-c12-v16"
+    assert config["experiment_name"] == "abci-or-ta-swe16-q38-v17"
+    assert config["trial_name"] == "abci-ta-swe16-nr-q38d-c12-v17-t0"
+    assert config["stats_logger"]["wandb"]["group"] == "abci-ta-swe16-nr-q38d-c12-v17"
     snapshot = "${oc.env:PLATOON_MODEL_SNAPSHOT}"
     assert config["tokenizer_path"] == snapshot
     assert config["actor"]["path"] == snapshot
@@ -1293,9 +1293,9 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_fresh_model_release_and_leaf_co
     wrapper = path.read_text()
 
     assert path.stat().st_mode & 0o111 == 0o111
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r14-376d1b9-18e62c0" in wrapper
     assert "REPO_ROOT=/home/aci18912it/rasp/source/platoon" not in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r13-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r14-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert ("GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py") in wrapper
     assert "GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}" in wrapper
@@ -1317,14 +1317,14 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_fresh_model_release_and_leaf_co
         '    --gate2-result "${GATE2_RESULT}"'
     ) in wrapper
     assert "#PBS -l select=16:mpiprocs=8" in wrapper
-    assert "#PBS -N rasp-h200-16q38-v16" in wrapper
+    assert "#PBS -N rasp-h200-16q38-v17" in wrapper
     assert "#PBS -l walltime=168:00:00" in wrapper
     assert (
         f"CONFIG=${{REPO_ROOT}}/plugins/openreward/platoon/openreward/configs/areal/{QWEN38_DENSE_16_CONFIG}.yaml"
         in wrapper
     )
-    assert "EXPERIMENT=abci-or-ta-swe16-q38-v16" in wrapper
-    assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v16-t0" in wrapper
+    assert "EXPERIMENT=abci-or-ta-swe16-q38-v17" in wrapper
+    assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v17-t0" in wrapper
     for literal in (
         "  dynamic_batch_recollection_max_rounds: 1",
         "  consumer_batch_size: 8",
@@ -1349,6 +1349,11 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_fresh_model_release_and_leaf_co
     assert "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0" in wrapper
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
     assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
+    assert "export OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
+    assert (
+        "export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="
+        "${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}"
+    ) in wrapper
     assert "PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0" in wrapper
     assert "PLATOON_QWEN35_GDN_PACKED" not in wrapper
     assert "OPENREWARD_EXPECTED_QWEN35_GDN_PACKED" not in wrapper
@@ -1358,7 +1363,7 @@ def test_qwen38_dense_nonrecursive_wrapper_binds_fresh_model_release_and_leaf_co
     assert 'exec "${COMMON}" "${CONFIG}"' in wrapper
     assert "qsub" not in wrapper.lower()
 
-    wandb_id = "abci-or-ta-swe16-q38-v16_abci-ta-swe16-nr-q38d-c12-v16-t0_train"
+    wandb_id = "abci-or-ta-swe16-q38-v17_abci-ta-swe16-nr-q38d-c12-v17-t0_train"
     assert len(wandb_id) == 63
     assert 128 - len(wandb_id) >= 32
 
@@ -1372,8 +1377,8 @@ def test_qwen38_dense_wrapper_binds_fresh_model_release_and_leaf_contract() -> N
     assert "#PBS -l select=32:mpiprocs=8" in wrapper
     assert "#PBS -l walltime=168:00:00" in wrapper
     assert "#PBS -N rasp-h200-32q38-v16" in wrapper
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0" in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r13-376d1b9-18e62c0" in wrapper
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r14-376d1b9-18e62c0" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r14-376d1b9-18e62c0" in wrapper
     assert "RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py" in wrapper
     assert "GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py" in wrapper
     assert "ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py" in wrapper
@@ -1384,6 +1389,8 @@ def test_qwen38_dense_wrapper_binds_fresh_model_release_and_leaf_contract() -> N
     )
     assert "EXPERIMENT=abci-or-ta-swe32-q38-v16" in wrapper
     assert "TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0" in wrapper
+    assert "OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC" not in wrapper
+    assert "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC" not in wrapper
 
     assert "OPENREWARD_QWEN38_MODEL_REPOSITORY:-}" in wrapper
     assert "apurvaga/Qwen3.8-27B-preserve-thinking" in wrapper
@@ -1433,6 +1440,24 @@ def test_common_launcher_leaves_qwen35_layout_to_model_and_topology() -> None:
     assert "PLATOON_QWEN35_GDN_PACKED" not in forwarded
     assert "PLATOON_QWEN35_GDN_CP" not in forwarded
     assert forwarded.count("PLATOON_QWEN35_GDN_CP_CONV_BACKEND") == 1
+
+
+def test_qwen38_retry_heartbeat_is_fail_closed_and_reaches_contained_workers() -> None:
+    common = (PBS_ROOT / "openreward-ta-swe-prealloc-common.sh").read_text()
+    scheduler = (REPO_ROOT / "platoon/train/areal/preallocated_pbs.py").read_text()
+    supervisor = (REPO_ROOT / "platoon/train/areal/pbs_role_supervisor.py").read_text()
+
+    assert (
+        "EXPECTED_NCCL_HEARTBEAT_TIMEOUT="
+        "${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}"
+    ) in common
+    assert "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC must equal the retry contract" in common
+    assert 'PLATOON_AREAL_PBS_FORWARD_ENV+=" TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"' in common
+    assert "contained worker NCCL heartbeat retry contract is missing" in common
+    assert '[[ "\\${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}" ==' in common
+    assert '"worker_environment": self._worker_environment(role, spec)' in scheduler
+    assert 'result[f"SINGULARITYENV_{name}"] = value' in supervisor
+    assert 'result[f"APPTAINERENV_{name}"] = value' in supervisor
 
 
 def test_common_launcher_routes_urls_and_service_lifecycle_only_to_validated_tail() -> None:

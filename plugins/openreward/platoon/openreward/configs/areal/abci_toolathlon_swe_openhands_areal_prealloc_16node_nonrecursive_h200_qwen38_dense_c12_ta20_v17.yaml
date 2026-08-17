@@ -5,8 +5,8 @@ defaults:
 # Fresh nonrecursive dense-Qwen lineage. The release wrapper binds the exact
 # preserve-thinking snapshot; no MoE/R3 optimizer, rollout queue, or checkpoint
 # from the retired v14 lineage is discoverable.
-experiment_name: abci-or-ta-swe16-q38-v16
-trial_name: abci-ta-swe16-nr-q38d-c12-v16-t0
+experiment_name: abci-or-ta-swe16-q38-v17
+trial_name: abci-ta-swe16-nr-q38d-c12-v17-t0
 tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
 
 dynamic_bs: true
@@ -67,4 +67,4 @@ openreward:
 
 stats_logger:
   wandb:
-    group: abci-ta-swe16-nr-q38d-c12-v16
+    group: abci-ta-swe16-nr-q38d-c12-v17

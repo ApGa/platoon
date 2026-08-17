@@ -20,8 +20,8 @@ OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
 RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
 NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-h200-v9-abci.pbs"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r13-376d1b9-18e62c0"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r13-376d1b9-18e62c0"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r14-376d1b9-18e62c0"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r14-376d1b9-18e62c0"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
 EXPECTED_MODEL_REVISION = "97c725615b8aa025b800da4ceed38811358b30f1"
 EXPECTED_MODEL_SOURCE = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -121,7 +121,7 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
         },
         "balance_accepted_batches": False,
         "fresh_16node_model_only_lineage": True,
-        "fresh_16node_lineage": "v16_qwen38_dense_actor_batch_safe",
+        "fresh_16node_lineage": "v17_qwen38_dense_actor_batch_safe_nccl_heartbeat3600",
         "nonrecursive_16node_dense_contract": {
             "actor_backend": "megatron:d10p2t4c1",
             "actor_topology": {
@@ -147,6 +147,7 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
             "actor_megatron_use_deterministic_algorithms": False,
             "actor_mtp_enabled": False,
             "expected_model_shards": 18,
+            "torch_nccl_heartbeat_timeout_sec": 3600,
         },
         "fresh_32node_lineage": "v16_qwen38_dense_actor_batch_safe",
         "recursive_32node_dense_contract": {
@@ -356,16 +357,21 @@ def test_v9_release_binds_fresh_dense_qwen38_nonrecursive_wrapper() -> None:
     wrapper = NONRECURSIVE_WRAPPER_PATH.read_text()
 
     subprocess.run(["bash", "-n", str(NONRECURSIVE_WRAPPER_PATH)], check=True)
-    assert "#PBS -N rasp-h200-16q38-v16" in wrapper
+    assert "#PBS -N rasp-h200-16q38-v17" in wrapper
     assert f"REPO_ROOT={EXPECTED_RELEASE_ROOT}" in wrapper
     assert f"RELEASE_REF={EXPECTED_RELEASE_REF}" in wrapper
     assert (
         "CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/"
         "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
-        "qwen38_dense_c12_ta20_v16.yaml"
+        "qwen38_dense_c12_ta20_v17.yaml"
     ) in wrapper
-    assert "EXPERIMENT=abci-or-ta-swe16-q38-v16" in wrapper
-    assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v16-t0" in wrapper
+    assert "EXPERIMENT=abci-or-ta-swe16-q38-v17" in wrapper
+    assert "TRIAL=abci-ta-swe16-nr-q38d-c12-v17-t0" in wrapper
+    assert "export OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600" in wrapper
+    assert (
+        "export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="
+        "${OPENREWARD_EXPECTED_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}"
+    ) in wrapper
     assert "export OPENREWARD_EXPECTED_MODEL_SHARDS=18" in wrapper
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in wrapper
     for literal in (
