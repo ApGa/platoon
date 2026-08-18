@@ -74,6 +74,7 @@ PREUPDATE_RESUME_BINDING=${OPENREWARD_PREUPDATE_RESUME_BINDING:-}
 PREUPDATE_LOAD_POLICY=${OPENREWARD_PREUPDATE_LOAD_POLICY:-}
 PREUPDATE_NO_LOAD_OPTIM=${OPENREWARD_PREUPDATE_NO_LOAD_OPTIM:-0}
 RESUME_SUCCESSOR_BINDING=${OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING:-}
+FRESH_RUN_BINDING=${OPENREWARD_EXPECTED_FRESH_RUN_BINDING:-}
 EXPECTED_RESUME_GLOBAL_STEP=${OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP:-}
 EXPECTED_START_GLOBAL_STEP=${OPENREWARD_EXPECTED_START_GLOBAL_STEP:-}
 EXPECTED_RESUME_CHECKPOINT_ROOT=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT:-}
@@ -144,19 +145,26 @@ require_uint OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS "${NODE_MEMORY_TELEMETRY_S
     "${NODE_MEMORY_TELEMETRY_SECONDS}" == 60 ]] || \
     die "node memory guard policy must use the exact enabled-or-disabled PBS service-node contract"
 if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
-    case "${RESUME_SUCCESSOR_BINDING}" in
-        qwen38-32-v22-gs10|qwen36-32-v22-depth2)
+    case "${RESUME_SUCCESSOR_BINDING}:${FRESH_RUN_BINDING}" in
+        qwen38-32-v22-gs10:|qwen36-32-v22-depth2:)
             [[ "${EXPECTED_NNODES}" == 32 && "${EXPECTED_RECURSIVE}" == 1 ]] || \
                 die "recursive guard disablement requires an exact 32-node resume"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
             ;;
-        qwen38-16-v25-gs12)
+        qwen38-16-v25-gs12:)
             [[ "${EXPECTED_NNODES}" == 16 && "${EXPECTED_RECURSIVE}" == 0 ]] || \
                 die "Qwen3.8 gs12 guard disablement requires an exact nonrecursive 16-node resume"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
             ;;
+        :qwen36-32-v26-fresh-d2-noeff)
+            [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
+                "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q36-cp2-effoff-v26 && \
+                "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0 ]] || \
+                die "Qwen3.6 fresh efficiency-disabled guard binding mismatch"
+            NODE_MEMORY_GUARD_DISABLED_BINDING=${FRESH_RUN_BINDING}
+            ;;
         *)
-            die "node memory guard disablement is not authorized for successor binding ${RESUME_SUCCESSOR_BINDING@Q}"
+            die "node memory guard disablement is not authorized for resume/fresh bindings ${RESUME_SUCCESSOR_BINDING@Q}/${FRESH_RUN_BINDING@Q}"
             ;;
     esac
 fi
@@ -179,6 +187,8 @@ export \
 [[ "${PREUPDATE_NO_LOAD_OPTIM}" == 0 || "${PREUPDATE_NO_LOAD_OPTIM}" == 1 ]] || \
     die "OPENREWARD_PREUPDATE_NO_LOAD_OPTIM must be 0 or 1"
 if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
+    [[ -z "${FRESH_RUN_BINDING}" ]] || \
+        die "fresh-run binding is forbidden when existing recovery is required"
     require_uint OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP "${EXPECTED_RESUME_GLOBAL_STEP}" 0
     [[ "${EXPECTED_RESUME_CHECKPOINT_ROOT}" == /* && \
         -d "${EXPECTED_RESUME_CHECKPOINT_ROOT}" && \
@@ -297,6 +307,14 @@ else
         die "preupdate optimizer-load policy requires existing recovery"
     [[ -z "${RESUME_SUCCESSOR_BINDING}" ]] || \
         die "successor binding requires existing recovery"
+    if [[ -n "${FRESH_RUN_BINDING}" ]]; then
+        [[ "${FRESH_RUN_BINDING}" == qwen36-32-v26-fresh-d2-noeff && \
+            "${NODE_MEMORY_GUARD_ENABLED}" == 0 && \
+            "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
+            "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q36-cp2-effoff-v26 && \
+            "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0 ]] || \
+            die "unknown or mismatched fresh-run binding"
+    fi
     for unexpected_resume_value in \
         "${EXPECTED_RESUME_GLOBAL_STEP}" \
         "${EXPECTED_START_GLOBAL_STEP}" \

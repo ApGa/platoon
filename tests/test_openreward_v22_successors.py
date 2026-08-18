@@ -27,8 +27,8 @@ def _load_resume_verifier():
 
 def test_v22_manifest_binds_three_successors_and_exact_assets() -> None:
     manifest = json.loads(MANIFEST.read_text())
-    assert manifest["release_root"] == ("/home/aci18912it/rasp/releases/platoon-v8r25-e11d720-057108f")
-    assert manifest["release_ref"] == "refs/tags/abci-v8r25-e11d720-057108f"
+    assert manifest["release_root"] == ("/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f")
+    assert manifest["release_ref"] == "refs/tags/abci-v8r26-e11d720-057108f"
     contracts = manifest["training_semantics"]["v8r22_successor_contracts"]
     assert set(contracts) == {
         "qwen38_32node_gs10",
@@ -114,6 +114,7 @@ def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() ->
     common = (PBS / "openreward-ta-swe-prealloc-common.sh").read_text()
     services = (PBS / "openreward-node-services.sh").read_text()
     assert "OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING" in common
+    assert "OPENREWARD_EXPECTED_FRESH_RUN_BINDING" in common
     for binding in (
         "qwen38-32-v22-gs10",
         "qwen38-16-v22-gs11-ordinary",
@@ -130,8 +131,10 @@ def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() ->
     ):
         assert literal in common
         assert literal in services
-    assert "qwen38-32-v22-gs10|qwen36-32-v22-depth2" in common
+    assert "qwen38-32-v22-gs10:|qwen36-32-v22-depth2:" in common
     assert "qwen38-32-v22-gs10|qwen36-32-v22-depth2|qwen38-16-v25-gs12" in services
+    assert "qwen36-32-v26-fresh-d2-noeff" in common
+    assert "qwen36-32-v26-fresh-d2-noeff" in services
 
     q38_32 = (
         PBS / "openreward-ta-swe-32node-recursive-qwen38-resume-gs10-h200-v12-abci.pbs"

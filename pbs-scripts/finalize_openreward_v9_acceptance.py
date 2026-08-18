@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r25-e11d720-057108f")
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f")
 QSTAT = Path("/opt/pbs/bin/qstat")
 QSTAT_SHA256 = "293e9861ccedf01b55e6cc46afea5fdd07630d3c8feceb1796ce2f2eb74a55ae"
 QSTAT_VERSION = "pbs_version = 2022.1.6.20240517133149"

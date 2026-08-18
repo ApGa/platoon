@@ -18,8 +18,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r25-e11d720-057108f
-RELEASE_REF=refs/tags/abci-v8r25-e11d720-057108f
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f
+RELEASE_REF=refs/tags/abci-v8r26-e11d720-057108f
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py

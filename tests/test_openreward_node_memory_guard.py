@@ -342,7 +342,7 @@ def test_node_supervisor_and_common_launcher_wire_guard_fail_closed() -> None:
     assert "TOOLATHLON_WORKER_QUORUM=${OPENREWARD_TOOLATHLON_WORKER_QUORUM:-5}" in common
 
 
-def test_guard_disablement_is_limited_to_exact_successors() -> None:
+def test_guard_disablement_is_limited_to_exact_resume_or_fresh_bindings() -> None:
     node_services = NODE_SERVICES_PATH.read_text()
     common = COMMON_PATH.read_text()
 
@@ -353,6 +353,7 @@ def test_guard_disablement_is_limited_to_exact_successors() -> None:
         "qwen38-32-v22-gs10",
         "qwen36-32-v22-depth2",
         "qwen38-16-v25-gs12",
+        "qwen36-32-v26-fresh-d2-noeff",
     ):
         assert binding in common
         assert binding in node_services

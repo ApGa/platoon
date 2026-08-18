@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r25-e11d720-057108f",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r25-e11d720-057108f",
+  "release_ref": "refs/tags/abci-v8r26-e11d720-057108f",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f",
   "components": {
     "platoon_upstream": "e11d7201ae8118a9350210615038ff2fe582945f",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -554,8 +554,8 @@
     "platoon/train/areal/rl.py": "4eeea66565f513a6cc08aab76e80f55043db6199abafc9059435df1899cac84b",
     "plugins/openreward/platoon/openreward/config_defs.py": "f8acd3bbbe9738211c8103f38c23b6fe9f65c4b11e00b505240e969b6588c51e",
     "plugins/openreward/platoon/openreward/rollout.py": "653f501c985bd84b3bc5553849d224755fc5c119ae461c4ba5ea8e753b8dfd44",
-    "pbs-scripts/openreward-ta-swe-prealloc-common.sh": "9deb780b532e87d806fa2e7a753e2117bd8f3cb6d8c81d83d43cbbada0588613",
-    "pbs-scripts/openreward-node-services.sh": "4aa669542e9e83a847dc5c9bf0a98fb32157965707a747dbfba6bf1687052c74",
+    "pbs-scripts/openreward-ta-swe-prealloc-common.sh": "9adc231b3623c12cf682e0e6e606073756799d5256273fe58b81bf30b8d1f729",
+    "pbs-scripts/openreward-node-services.sh": "aede66fda6967b8404019e99a5e77e39dd41391a99cb18843d54424a0d6875e7",
     "pbs-scripts/openreward-node-memory-guard.py": "234d25909ca7bef46885308e5ef039414aa838f15c30cc993830451eb784558a"
   },
   "host_acceptance_assets": [
@@ -878,13 +878,38 @@
       "rollout_consumer_batch_size": 8,
       "expected_model_shards": 26
     },
+    "fresh_recursive_32node_qwen36_cp2_noeff_contract": {
+      "fresh_start": true,
+      "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff.yaml",
+      "config_sha256": "c071d05e4d22140d347cb3971e6218cc3a51c4df25fa592160a934e83ae6d757",
+      "wrapper_relative": "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-fresh-d2-noeff-h200-v13-abci.pbs",
+      "wrapper_sha256": "6eeef63e181f6286fcd3d2368c83936427d6aab79d36664e914e5162df7cb81d",
+      "experiment_name": "abci-or-ta-swe32-q36-cp2-effoff-v26",
+      "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0",
+      "pbs_job_name": "rasp-h200-32q36-d2-noeff-v26",
+      "checkpoint_root": "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/abci-or-ta-swe32-q36-cp2-effoff-v26/abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0",
+      "target_receipt": "/groups/gai51740/aci18912it/rasp/job-state/gates/abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0.success.json",
+      "stale_checkpoint_and_receipt_policy": "reject_before_controller",
+      "recover_mode": "auto_with_preexisting_root_forbidden",
+      "fresh_run_binding": "qwen36-32-v26-fresh-d2-noeff",
+      "base_model_revision": "ce815485d640a33461c25e3d5c505b5346e8c857",
+      "actor_backend": "megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)",
+      "rollout_backend": "sglang:d12p1t8",
+      "node_count": 32,
+      "expected_model_shards": 26,
+      "max_concurrent_rollouts": 24,
+      "subagent_max_depth": 2,
+      "token_efficiency_reward_enabled": false,
+      "token_efficiency_reward_only_reward_delta": true,
+      "node_memory_guard_enabled": false
+    },
     "v8r22_successor_contracts": {
       "qwen38_32node_gs10": {
         "successor_binding_id": "qwen38-32-v22-gs10",
         "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v22_resume_gs10.yaml",
         "config_sha256": "578f64de97188829c84958f6aff785722ade4bf1571d9fdc93ac548944a54233",
         "wrapper_relative": "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-gs10-h200-v12-abci.pbs",
-        "wrapper_sha256": "b22603927189b73f9db766115cb120697b1f0c1040eb03016713051e4a37efc5",
+        "wrapper_sha256": "6c5e180c936289742888a5f40a8483624e84b8a8e7096e2448390e46ef001bbc",
         "experiment_name": "abci-or-ta-swe32-q38-v16",
         "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
         "pbs_job_name": "rasp-h200-32q38-rs10-v22",
@@ -916,7 +941,7 @@
         "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v22_resume_gs11.yaml",
         "config_sha256": "a5886ed07ef6adcf0681e8f577edc9da205983b4ab94fcd96638b1ad52ef0400",
         "wrapper_relative": "pbs-scripts/openreward-ta-swe-16node-nonrecursive-qwen38-resume-gs12-noguard-h200-v12-abci.pbs",
-        "wrapper_sha256": "59416e919750c78077da299313e8abfc5d3d2280a302e256c4bd532f8a9f3c89",
+        "wrapper_sha256": "59709a63bde19df409f654dfec8832906f985bdbc233fddd0c49aedd96975e58",
         "experiment_name": "abci-or-ta-swe16-q38-v18",
         "trial_name": "abci-ta-swe16-nr-q38d-c12-v18-t0",
         "pbs_job_name": "rasp-h200-16q38-rs12-v25",
@@ -953,7 +978,7 @@
         "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v22_resume_d2.yaml",
         "config_sha256": "71125b89cb5cf096f777272287bd7732755f0b99e1ffa1e449e572894f96abc8",
         "wrapper_relative": "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-resume-d2-h200-v11-abci.pbs",
-        "wrapper_sha256": "7968a95cd5815ecb19b2ad0ad0f1351ba74613daececda73761fe655e9aa8f46",
+        "wrapper_sha256": "8fdfc1c7befa801b2c1aacda40caf9f55c540d6dd5abea8ca908eba246bc99c5",
         "experiment_name": "abci-or-ta-swe32-q36-cp2-v21",
         "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0",
         "lineage_policy": "preserve_existing_experiment_trial_checkpoint_and_wandb_group",
@@ -990,6 +1015,9 @@
         "qwen36-32-v22-depth2",
         "qwen38-16-v25-gs12"
       ],
+      "disabled_fresh_bindings": [
+        "qwen36-32-v26-fresh-d2-noeff"
+      ],
       "enabled_successor_bindings": [],
       "node_limit_bytes": 2061584302080,
       "trigger_percent": 85,
@@ -999,7 +1027,7 @@
       "telemetry_seconds": 60,
       "cgroup_policy": "highest_exact_finite_v2_ancestor_else_memavailable",
       "enabled_post_start_error_policy": "fail_closed",
-      "disabled_scope_policy": "exact_successor_binding_only",
+      "disabled_scope_policy": "exact_resume_or_fresh_binding_only",
       "rollout_concurrency_policy": "preserve_24_12_24"
     },
     "environment_health_monitor": {
