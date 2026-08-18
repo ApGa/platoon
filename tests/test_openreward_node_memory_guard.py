@@ -340,3 +340,18 @@ def test_node_supervisor_and_common_launcher_wire_guard_fail_closed() -> None:
     assert 'OPENREWARD_WORKERS="${OPENREWARD_WORKERS:-8}"' in node_services
     assert "export OPENREWARD_WORKERS=${OPENREWARD_WORKERS:-8}" in common
     assert "TOOLATHLON_WORKER_QUORUM=${OPENREWARD_TOOLATHLON_WORKER_QUORUM:-5}" in common
+
+
+def test_guard_disablement_is_limited_to_exact_recursive_successors() -> None:
+    node_services = NODE_SERVICES_PATH.read_text()
+    common = COMMON_PATH.read_text()
+
+    assert 'NODE_MEMORY_GUARD_DISABLED_BINDING=' in common
+    assert '"${EXPECTED_NNODES}" == 32 && "${EXPECTED_RECURSIVE}" == 1' in common
+    for binding in ("qwen38-32-v22-gs10", "qwen36-32-v22-depth2"):
+        assert binding in common
+        assert binding in node_services
+    assert 'memory_guard_healthy()' in node_services
+    assert '[[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]' in node_services
+    assert 'memory guard disabled binding=${NODE_MEMORY_GUARD_DISABLED_BINDING}' in node_services
+    assert 'if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 ]]; then' in node_services

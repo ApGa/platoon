@@ -13,13 +13,13 @@
 # Exact ordinary-optimizer resume from the quiescent global-step-10 Qwen3.8
 # recursive checkpoint.  The v8r22 runtime carries the corrected verifier
 # subagent spawning implementation; the production rollout concurrency remains
-# 24 while every service node is protected by the fail-closed memory guard.
+# 24 with the exact v8r24 recursive-resume contract disabling the memory guard.
 
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r23-e11d720-057108f
-RELEASE_REF=refs/tags/abci-v8r23-e11d720-057108f
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r24-e11d720-057108f
+RELEASE_REF=refs/tags/abci-v8r24-e11d720-057108f
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
@@ -174,7 +174,7 @@ export OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS=${EXPECTED_OPTIMIZER_MOM
 export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=${EXPECTED_LR_NUM_STEPS}
 export OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED=${EXPECTED_SAMPLES_YIELDED}
 export OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED=${EXPECTED_ITERATOR_YIELDED}
-export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=1
+export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0
 export OPENREWARD_NODE_MEMORY_LIMIT_BYTES=2061584302080
 export OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=85
 export OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=274877906944

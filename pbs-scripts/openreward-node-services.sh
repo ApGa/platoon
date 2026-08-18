@@ -66,6 +66,7 @@ SHUTDOWN_REQUEST=${PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST:-}
 EXPECTED_HOST=${PLATOON_NODE_SERVICES_EXPECTED_HOST:-}
 EXPECTED_JOB_ID=${PLATOON_NODE_SERVICES_EXPECTED_JOB_ID:-}
 NODE_MEMORY_GUARD_ENABLED=${OPENREWARD_NODE_MEMORY_GUARD_ENABLED:-1}
+NODE_MEMORY_GUARD_DISABLED_BINDING=${OPENREWARD_NODE_MEMORY_GUARD_DISABLED_BINDING:-}
 NODE_MEMORY_LIMIT_BYTES=${OPENREWARD_NODE_MEMORY_LIMIT_BYTES:-2061584302080}
 NODE_MEMORY_TRIGGER_PERCENT=${OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT:-85}
 NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=${OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES:-274877906944}
@@ -85,13 +86,21 @@ die() {
 [[ -x "${SWE_CLEANUP}" ]] || die "SWE cleanup helper is missing"
 [[ -x "${MEMORY_GUARD}" ]] || die "node memory guard is missing"
 [[ -r "${OPENREWARD_TOOLATHLON_SIF}" ]] || die "Toolathlon SIF is missing"
-[[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 && \
+[[ ( "${NODE_MEMORY_GUARD_ENABLED}" == 0 || "${NODE_MEMORY_GUARD_ENABLED}" == 1 ) && \
     "${NODE_MEMORY_LIMIT_BYTES}" == 2061584302080 && \
     "${NODE_MEMORY_TRIGGER_PERCENT}" == 85 && \
     "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" == 274877906944 && \
     "${NODE_MEMORY_POLL_SECONDS}" == 2 && \
     "${NODE_MEMORY_TELEMETRY_SECONDS}" == 60 ]] || \
-    die "node memory guard must use the exact enabled PBS service-node contract"
+    die "node memory guard policy must use the exact enabled-or-disabled PBS service-node contract"
+if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
+    case "${NODE_MEMORY_GUARD_DISABLED_BINDING}" in
+        qwen38-32-v22-gs10|qwen36-32-v22-depth2) ;;
+        *) die "node memory guard disablement lacks an exact recursive successor binding" ;;
+    esac
+elif [[ -n "${NODE_MEMORY_GUARD_DISABLED_BINDING}" ]]; then
+    die "enabled node memory guard must not carry a disabled binding"
+fi
 [[ "${MKFS_EXT3}" == /* ]] || \
     die "PLATOON_MKFS_EXT3_BIN must be an absolute path: ${MKFS_EXT3}"
 [[ -x "${MKFS_EXT3}" ]] || die "mkfs.ext3 is missing or not executable: ${MKFS_EXT3}"
@@ -279,7 +288,8 @@ cleanup() {
             cleanup_ok=0
             status=1
         fi
-        if [[ -z "${memory_guard_pid}" ]] || ! kill -0 "${memory_guard_pid}" 2>/dev/null; then
+        if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 ]] && \
+            { [[ -z "${memory_guard_pid}" ]] || ! kill -0 "${memory_guard_pid}" 2>/dev/null; }; then
             echo "[node-services] ERROR: memory guard was already dead before natural cleanup" >&2
             cleanup_ok=0
             status=1
@@ -419,17 +429,21 @@ mkdir -p \
     "${TOOLATHLON_STATE}/tmp"
 
 echo "[node-services] starting Toolathlon host=$(hostname) port=${TOOLATHLON_PORT} image_sha256=${TOOLATHLON_SHA256}"
-# The guard watches the aggregate PBS allocation cgroup when it can identify
-# that cgroup by the exact node memory limit.  Its only fallback is explicit
-# host MemAvailable telemetry.
-echo "[node-services] starting memory guard host=$(hostname) limit_bytes=${NODE_MEMORY_LIMIT_BYTES} trigger_percent=${NODE_MEMORY_TRIGGER_PERCENT}"
-/usr/bin/python3 -I "${MEMORY_GUARD}" \
-    --node-limit-bytes "${NODE_MEMORY_LIMIT_BYTES}" \
-    --trigger-percent "${NODE_MEMORY_TRIGGER_PERCENT}" \
-    --fallback-available-bytes "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" \
-    --poll-seconds "${NODE_MEMORY_POLL_SECONDS}" \
-    --telemetry-seconds "${NODE_MEMORY_TELEMETRY_SECONDS}" &
-memory_guard_pid=$!
+if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 ]]; then
+    # The guard watches the aggregate PBS allocation cgroup when it can identify
+    # that cgroup by the exact node memory limit.  Its only fallback is explicit
+    # host MemAvailable telemetry.
+    echo "[node-services] starting memory guard host=$(hostname) limit_bytes=${NODE_MEMORY_LIMIT_BYTES} trigger_percent=${NODE_MEMORY_TRIGGER_PERCENT}"
+    /usr/bin/python3 -I "${MEMORY_GUARD}" \
+        --node-limit-bytes "${NODE_MEMORY_LIMIT_BYTES}" \
+        --trigger-percent "${NODE_MEMORY_TRIGGER_PERCENT}" \
+        --fallback-available-bytes "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" \
+        --poll-seconds "${NODE_MEMORY_POLL_SECONDS}" \
+        --telemetry-seconds "${NODE_MEMORY_TELEMETRY_SECONDS}" &
+    memory_guard_pid=$!
+else
+    echo "[node-services] memory guard disabled binding=${NODE_MEMORY_GUARD_DISABLED_BINDING} host=$(hostname)"
+fi
 
 # The Toolathlon application uses PostgreSQL's standard localhost port; there
 # is exactly one service per physical allocation node.
@@ -461,12 +475,16 @@ export SWE_APPTAINER_MKFS_BIN=${MKFS_EXT3}
 OPENREWARD_SWE_REBENCH_PORT=${SWE_PORT} "${SWE_HELPER}" &
 swe_pid=$!
 
-# A long-lived pbsdsh connection owns this supervisor.  If either pool or the
-# memory guard dies, tear down the live children and fail the controller's
-# node-service health check.
+# A long-lived pbsdsh connection owns this supervisor.  If either pool or an
+# enabled memory guard dies, tear down the live children and fail the
+# controller's node-service health check.
+memory_guard_healthy() {
+    [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]] || \
+        { [[ -n "${memory_guard_pid}" ]] && kill -0 "${memory_guard_pid}" 2>/dev/null; }
+}
 while kill -0 "${toolathlon_pid}" 2>/dev/null && \
     kill -0 "${swe_pid}" 2>/dev/null && \
-    kill -0 "${memory_guard_pid}" 2>/dev/null; do
+    memory_guard_healthy; do
     if [[ -e "${SHUTDOWN_REQUEST}" || -L "${SHUTDOWN_REQUEST}" ]]; then
         if ! /usr/bin/python3 -I "${SHUTDOWN_REQUEST_HELPER}" verify \
             --request "${SHUTDOWN_REQUEST}" \
@@ -482,7 +500,7 @@ while kill -0 "${toolathlon_pid}" 2>/dev/null && \
 done
 
 status=1
-if ! kill -0 "${memory_guard_pid}" 2>/dev/null; then
+if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 ]] && ! kill -0 "${memory_guard_pid}" 2>/dev/null; then
     memory_guard_status=0
     wait "${memory_guard_pid}" || memory_guard_status=$?
     memory_guard_reaped=1

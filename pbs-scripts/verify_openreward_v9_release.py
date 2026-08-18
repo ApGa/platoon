@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r23/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r24/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r23-e11d720-057108f")
-RELEASE_REF = "refs/tags/abci-v8r23-e11d720-057108f"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r24-e11d720-057108f")
+RELEASE_REF = "refs/tags/abci-v8r24-e11d720-057108f"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "be640d6f8df4c009aca886064b3950dc283fad3a099be714a7052e7633dbf741"
-V8R22_SUCCESSOR_CONTRACTS_SHA256 = "88ae0e979242ed7a831a6b557b1b9131ac87a84c322bcd7b595a81aee97a1acb"
-SERVICE_NODE_MEMORY_GUARD_SHA256 = "049ef25bebacddd8e3d665de23afe37db258d3a16d5d45794ce1bbf734a95f60"
+MANIFEST_SHA256 = "2a768a84e052fb6dcb40307f3640627d809ae4f80b615b2df066449294166daa"
+V8R22_SUCCESSOR_CONTRACTS_SHA256 = "f378f6a0fee76ede9d41824b0ae29bc2bdf38a2f9fdf1b4cfef00d11e8879967"
+SERVICE_NODE_MEMORY_GUARD_SHA256 = "15330f5d9fd12041a88d7605510331b45f8d396d1d13643d8d6a653b1cee6c5e"
 V8R22_SUCCESSOR_CONTRACT_NAMES = {
     "qwen38_32node_gs10",
     "qwen38_16node_gs11",

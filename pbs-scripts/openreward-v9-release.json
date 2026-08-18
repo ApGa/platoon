@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "release_ref": "refs/tags/abci-v8r23-e11d720-057108f",
-  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r23-e11d720-057108f",
+  "release_ref": "refs/tags/abci-v8r24-e11d720-057108f",
+  "release_root": "/home/aci18912it/rasp/releases/platoon-v8r24-e11d720-057108f",
   "components": {
     "platoon_upstream": "e11d7201ae8118a9350210615038ff2fe582945f",
     "areal": "d99124ec15102ca2fcd4960cc8beaef3950c2672",
@@ -554,8 +554,8 @@
     "platoon/train/areal/rl.py": "4eeea66565f513a6cc08aab76e80f55043db6199abafc9059435df1899cac84b",
     "plugins/openreward/platoon/openreward/config_defs.py": "f8acd3bbbe9738211c8103f38c23b6fe9f65c4b11e00b505240e969b6588c51e",
     "plugins/openreward/platoon/openreward/rollout.py": "653f501c985bd84b3bc5553849d224755fc5c119ae461c4ba5ea8e753b8dfd44",
-    "pbs-scripts/openreward-ta-swe-prealloc-common.sh": "6d3e5c47705dd470985261759457c1255d49a3ef62fa32c5d3b5735161e5ad9c",
-    "pbs-scripts/openreward-node-services.sh": "244a2c4d26962ad5269fe225f451feb07d43ff32e4cc55d809fc99259b9306a5",
+    "pbs-scripts/openreward-ta-swe-prealloc-common.sh": "d695ba4043f1d21082ca6602d3a9f907ce51e464b9ed2e638951fc736673ea5b",
+    "pbs-scripts/openreward-node-services.sh": "553d9caed6e686f75d237dc08dfee68447d04dce5ee4925518b7d587bd6d4c1c",
     "pbs-scripts/openreward-node-memory-guard.py": "234d25909ca7bef46885308e5ef039414aa838f15c30cc993830451eb784558a"
   },
   "host_acceptance_assets": [
@@ -884,7 +884,7 @@
         "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v22_resume_gs10.yaml",
         "config_sha256": "578f64de97188829c84958f6aff785722ade4bf1571d9fdc93ac548944a54233",
         "wrapper_relative": "pbs-scripts/openreward-ta-swe-32node-recursive-qwen38-resume-gs10-h200-v12-abci.pbs",
-        "wrapper_sha256": "3452f13a1569ae7ff1a383bb84fe1667ac6766436c7a9ae31f364d91a4598994",
+        "wrapper_sha256": "35e751be32448e4fb9cfe98d20f9b1823440042dc9db4c8178c9602394a89223",
         "experiment_name": "abci-or-ta-swe32-q38-v16",
         "trial_name": "abci-ta-swe32-rec-q38d-c24-v16-t0",
         "pbs_job_name": "rasp-h200-32q38-rs10-v22",
@@ -908,6 +908,7 @@
         "dataloader_iterator_yielded": 64,
         "recover_no_load_optim": false,
         "max_concurrent_rollouts": 24,
+        "node_memory_guard_enabled": false,
         "subagent_max_depth": 2
       },
       "qwen38_16node_gs11": {
@@ -915,7 +916,7 @@
         "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_qwen38_dense_c12_ta20_v22_resume_gs11.yaml",
         "config_sha256": "a5886ed07ef6adcf0681e8f577edc9da205983b4ab94fcd96638b1ad52ef0400",
         "wrapper_relative": "pbs-scripts/openreward-ta-swe-16node-nonrecursive-qwen38-resume-gs11-h200-v11-abci.pbs",
-        "wrapper_sha256": "4668f6a9e8a559f6765501d1a2c280439183f857a7ca496baef06e3c2556300a",
+        "wrapper_sha256": "98291498144879eca9c7e8b7257eda4f77d58dc76daba5ed81fc89efe36b0277",
         "experiment_name": "abci-or-ta-swe16-q38-v18",
         "trial_name": "abci-ta-swe16-nr-q38d-c12-v18-t0",
         "pbs_job_name": "rasp-h200-16q38-rs11-v22",
@@ -939,6 +940,7 @@
         "dataloader_iterator_yielded": 38,
         "recover_no_load_optim": false,
         "max_concurrent_rollouts": 12,
+        "node_memory_guard_enabled": true,
         "recursive": false
       },
       "qwen36_32node_gs1_depth2": {
@@ -946,7 +948,7 @@
         "config_relative": "plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v22_resume_d2.yaml",
         "config_sha256": "71125b89cb5cf096f777272287bd7732755f0b99e1ffa1e449e572894f96abc8",
         "wrapper_relative": "pbs-scripts/openreward-ta-swe-32node-recursive-qwen36-cp2-resume-d2-h200-v11-abci.pbs",
-        "wrapper_sha256": "0805ac477b218cd47c788954c5137862b30a0c67bab143aa4be3463faedec466",
+        "wrapper_sha256": "2535718d6e2dad2e613672afdfa3ed353a1253c94f36d5910230c52d747f03e4",
         "experiment_name": "abci-or-ta-swe32-q36-cp2-v21",
         "trial_name": "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0",
         "lineage_policy": "preserve_existing_experiment_trial_checkpoint_and_wandb_group",
@@ -972,11 +974,19 @@
         "dataloader_iterator_yielded": 23,
         "recover_no_load_optim": false,
         "max_concurrent_rollouts": 24,
+        "node_memory_guard_enabled": false,
         "subagent_max_depth": 2
       }
     },
     "service_node_memory_guard": {
-      "enabled": true,
+      "default_enabled": true,
+      "disabled_successor_bindings": [
+        "qwen38-32-v22-gs10",
+        "qwen36-32-v22-depth2"
+      ],
+      "enabled_successor_bindings": [
+        "qwen38-16-v22-gs11-ordinary"
+      ],
       "node_limit_bytes": 2061584302080,
       "trigger_percent": 85,
       "trigger_bytes": 1752346656768,
@@ -984,7 +994,8 @@
       "poll_seconds": 2,
       "telemetry_seconds": 60,
       "cgroup_policy": "highest_exact_finite_v2_ancestor_else_memavailable",
-      "post_start_error_policy": "fail_closed",
+      "enabled_post_start_error_policy": "fail_closed",
+      "disabled_scope_policy": "exact_recursive_32node_successor_binding_only",
       "rollout_concurrency_policy": "preserve_24_12_24"
     },
     "environment_health_monitor": {
