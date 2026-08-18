@@ -144,9 +144,9 @@ TRAINING_RUNTIME_ASSETS = {
         "653f501c985bd84b3bc5553849d224755fc5c119ae461c4ba5ea8e753b8dfd44"
     ),
     "pbs-scripts/openreward-ta-swe-prealloc-common.sh": (
-        "6d3e5c47705dd470985261759457c1255d49a3ef62fa32c5d3b5735161e5ad9c"
+        "d695ba4043f1d21082ca6602d3a9f907ce51e464b9ed2e638951fc736673ea5b"
     ),
-    "pbs-scripts/openreward-node-services.sh": ("244a2c4d26962ad5269fe225f451feb07d43ff32e4cc55d809fc99259b9306a5"),
+    "pbs-scripts/openreward-node-services.sh": ("553d9caed6e686f75d237dc08dfee68447d04dce5ee4925518b7d587bd6d4c1c"),
     "pbs-scripts/openreward-node-memory-guard.py": ("234d25909ca7bef46885308e5ef039414aa838f15c30cc993830451eb784558a"),
 }
 TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION = "missing_masks_treated_as_all_trainable_before_filter_and_concat"
