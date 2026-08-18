@@ -61,6 +61,7 @@ QWEN38_SUCCESSOR_ANCESTOR_RECEIPT = "abci-ta-swe32-rec-q38d-c24-v16-t0.success.c
 # head left by that same failed job.
 QWEN38_32_V22_BINDING_ID = "qwen38-32-v22-gs10"
 QWEN38_16_V22_BINDING_ID = "qwen38-16-v22-gs11-ordinary"
+QWEN38_16_V25_BINDING_ID = "qwen38-16-v25-gs12"
 QWEN36_32_V22_BINDING_ID = "qwen36-32-v22-depth2"
 
 V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
@@ -165,6 +166,85 @@ V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
         "lr_num_steps": 8,
         "samples_yielded": 304,
         "iterator_yielded": 38,
+    },
+    QWEN38_16_V25_BINDING_ID: {
+        "experiment": "abci-or-ta-swe16-q38-v18",
+        "trial": "abci-ta-swe16-nr-q38d-c12-v18-t0",
+        "checkpoint_root": Path(
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/"
+            "aci18912it/abci-or-ta-swe16-q38-v18/"
+            "abci-ta-swe16-nr-q38d-c12-v18-t0"
+        ),
+        "source_job": "2162322.pbs1",
+        "source_release_root": Path(
+            "/home/aci18912it/rasp/releases/platoon-v8r23-e11d720-057108f"
+        ),
+        "source_release_ref": "refs/tags/abci-v8r23-e11d720-057108f",
+        "source_config": Path(
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+            "qwen38_dense_c12_ta20_v22_resume_gs11.yaml"
+        ),
+        "source_config_sha256": (
+            "a5886ed07ef6adcf0681e8f577edc9da205983b4ab94fcd96638b1ad52ef0400"
+        ),
+        "current_config_name": (
+            "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+            "qwen38_dense_c12_ta20_v22_resume_gs11.yaml"
+        ),
+        "current_config_sha256": (
+            "a5886ed07ef6adcf0681e8f577edc9da205983b4ab94fcd96638b1ad52ef0400"
+        ),
+        "source_candidate_name": (
+            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs0-nooptim-v8r20.success.candidate.json"
+        ),
+        "source_candidate_sha256": (
+            "2ddbea585030511632246700bc0adfcc20f79205b09a902f5a1823f98535f5a4"
+        ),
+        "source_candidate_job": "2159631.pbs1",
+        "source_candidate_config": Path(
+            "/home/aci18912it/rasp/releases/platoon-v8r20-376d1b9-18e62c0/"
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_swe_openhands_areal_prealloc_16node_nonrecursive_h200_"
+            "qwen38_dense_c12_ta20_v20_gs0_no_load_optim.yaml"
+        ),
+        "source_candidate_config_sha256": (
+            "efe71fd7616310aa7822f199600cf10f92e6cfdace31398d4e12c49084e61d97"
+        ),
+        "source_candidate_global_step": 1,
+        "ancestor_receipts": {},
+        "source_log_name": "2162322.pbs1.OU",
+        "source_log_sha256": (
+            "f8ab527fc08146bc740047945d46302ac0ef064674e24a61ce89a6062bdc5b8e"
+        ),
+        "target_receipt_name": (
+            "abci-ta-swe16-nr-q38d-c12-v18-t0.resume-gs12-noguard-v8r25.success.json"
+        ),
+        "global_step": 12,
+        "start_global_step": 13,
+        "steps_per_epoch": 846,
+        "shards": 80,
+        "total_bytes": 383216293802,
+        "checkpoint_layout_sha256": (
+            "b25138786744bb5afe7c683fd58bec87c59b28b398f0b5bc3d531ea1d1bde9af"
+        ),
+        "checkpoint_sample_manifest_sha256": (
+            "ffa96b9113144ee10d82d59d6ca9459e5b48d8fb1d5c09859744ffc020193237"
+        ),
+        "fixed_content_sha256": (
+            "83f5b0c8c95749a767e7cc63c2467708e0a0dd926c2681091458af64b20de4d7"
+        ),
+        "recover_info_content_sha256": (
+            "71d0b1a9c1a09b1bda504d6844ae8b33d74bf7120541706374ee2d19f2734d79"
+        ),
+        "stats_commit_step": 10,
+        "state_keys": 1472,
+        "storage_entries": 18057,
+        "optimizer_moment_keys": 16,
+        "optimizer_layout": "single",
+        "lr_num_steps": 8,
+        "samples_yielded": 376,
+        "iterator_yielded": 47,
     },
     QWEN36_32_V22_BINDING_ID: {
         "experiment": "abci-or-ta-swe32-q36-cp2-v21",
@@ -534,6 +614,14 @@ def _verify_source_release(
         model_family = "qwen38"
         expected_architecture = "dense_transformer"
         expected_model_shards = 18
+    elif config_name.endswith("qwen38_dense_c12_ta20_v22_resume_gs11.yaml"):
+        model_artifact_key = "nonrecursive_16node"
+        wrapper_name = (
+            "openreward-ta-swe-16node-nonrecursive-qwen38-resume-gs11-h200-v11-abci.pbs"
+        )
+        model_family = "qwen38"
+        expected_architecture = "dense_transformer"
+        expected_model_shards = 18
     elif "swe32" in expected_experiment and "32node_recursive" in config_name and "swe32" in expected_trial:
         model_artifact_key = "recursive_32node"
         wrapper_name = "openreward-ta-swe-32node-recursive-h200-v9-abci.pbs"
@@ -593,10 +681,11 @@ def _verify_receipts(
     *,
     source_candidate: Path,
     expected_source_candidate_sha256: str,
-    source_pbs_job_id: str,
+    source_candidate_pbs_job_id: str,
     expected_checkpoint_root: Path,
-    source_config: Path,
-    expected_source_config_sha256: str,
+    source_candidate_config: Path,
+    expected_source_candidate_config_sha256: str,
+    expected_source_candidate_global_step: int | None,
     expected_experiment: str,
     expected_trial: str,
     expected_global_step: int,
@@ -611,6 +700,9 @@ def _verify_receipts(
     _require_owned_regular(source_candidate, label="source success candidate")
     if _sha256(source_candidate) != expected_source_candidate_sha256:
         raise RuntimeError("source success candidate content digest mismatch")
+    _require_owned_regular(source_candidate_config, label="source candidate config")
+    if _sha256(source_candidate_config) != expected_source_candidate_config_sha256:
+        raise RuntimeError("source candidate config content digest mismatch")
     candidate = _load_object(source_candidate, label="source success candidate")
     recover = candidate.get("recover")
     wandb = candidate.get("wandb")
@@ -619,17 +711,21 @@ def _verify_receipts(
         candidate.get("schema_version") != 2
         or candidate.get("gate") != "abci-openreward-one-update-success"
         or candidate.get("kind") != "candidate"
-        or candidate.get("pbs_job_id") != source_pbs_job_id
+        or candidate.get("pbs_job_id") != source_candidate_pbs_job_id
         or candidate.get("experiment_name") != expected_experiment
         or candidate.get("trial_name") != expected_trial
-        or candidate.get("config_path") != str(source_config)
-        or candidate.get("config_sha256") != expected_source_config_sha256
+        or candidate.get("config_path") != str(source_candidate_config)
+        or candidate.get("config_sha256") != expected_source_candidate_config_sha256
         or not isinstance(candidate.get("global_step"), int)
         or candidate["global_step"] < 0
         or (
-            candidate["global_step"] != expected_global_step
-            if source_candidate_at_recover_step
-            else candidate["global_step"] >= expected_global_step
+            candidate["global_step"] != expected_source_candidate_global_step
+            if expected_source_candidate_global_step is not None
+            else (
+                candidate["global_step"] != expected_global_step
+                if source_candidate_at_recover_step
+                else candidate["global_step"] >= expected_global_step
+            )
         )
         or not isinstance(recover, dict)
         or recover.get("checkpoint_root") != str(expected_checkpoint_root)
@@ -907,10 +1003,25 @@ def verify(args: argparse.Namespace) -> None:
         _verify_receipts(
             source_candidate=args.source_candidate,
             expected_source_candidate_sha256=args.expected_source_candidate_sha256,
-            source_pbs_job_id=args.source_pbs_job_id,
+            source_candidate_pbs_job_id=(
+                v22_binding.get("source_candidate_job", args.source_pbs_job_id)
+                if v22_binding is not None
+                else args.source_pbs_job_id
+            ),
             expected_checkpoint_root=checkpoint_root,
-            source_config=source_config,
-            expected_source_config_sha256=args.expected_source_config_sha256,
+            source_candidate_config=(
+                v22_binding.get("source_candidate_config", source_config)
+                if v22_binding is not None
+                else source_config
+            ),
+            expected_source_candidate_config_sha256=(
+                v22_binding.get("source_candidate_config_sha256", args.expected_source_config_sha256)
+                if v22_binding is not None
+                else args.expected_source_config_sha256
+            ),
+            expected_source_candidate_global_step=(
+                v22_binding.get("source_candidate_global_step") if v22_binding is not None else None
+            ),
             expected_experiment=args.expected_experiment,
             expected_trial=args.expected_trial,
             expected_global_step=args.expected_global_step,

@@ -144,10 +144,15 @@ require_uint OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS "${NODE_MEMORY_TELEMETRY_S
     "${NODE_MEMORY_TELEMETRY_SECONDS}" == 60 ]] || \
     die "node memory guard policy must use the exact enabled-or-disabled PBS service-node contract"
 if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
-    [[ "${EXPECTED_NNODES}" == 32 && "${EXPECTED_RECURSIVE}" == 1 ]] || \
-        die "only an exact recursive 32-node resume may disable the node memory guard"
     case "${RESUME_SUCCESSOR_BINDING}" in
         qwen38-32-v22-gs10|qwen36-32-v22-depth2)
+            [[ "${EXPECTED_NNODES}" == 32 && "${EXPECTED_RECURSIVE}" == 1 ]] || \
+                die "recursive guard disablement requires an exact 32-node resume"
+            NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
+            ;;
+        qwen38-16-v25-gs12)
+            [[ "${EXPECTED_NNODES}" == 16 && "${EXPECTED_RECURSIVE}" == 0 ]] || \
+                die "Qwen3.8 gs12 guard disablement requires an exact nonrecursive 16-node resume"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
             ;;
         *)
@@ -255,6 +260,15 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
                         "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 16:8:304:38 ]] || \
                         die "Qwen3.8 16-node v8r22 successor runtime binding mismatch"
                     ;;
+                qwen38-16-v25-gs12)
+                    [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 16:0:0 && \
+                        "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe16-q38-v18 && \
+                        "${EXPECTED_TRIAL}" == abci-ta-swe16-nr-q38d-c12-v18-t0 && \
+                        "${EXPECTED_RESUME_GLOBAL_STEP}:${EXPECTED_START_GLOBAL_STEP}" == 12:13 && \
+                        "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 1472:18057:80 && \
+                        "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 16:8:376:47 ]] || \
+                        die "Qwen3.8 16-node v8r25 successor runtime binding mismatch"
+                    ;;
                 qwen36-32-v22-depth2)
                     [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
                         "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q36-cp2-v21 && \
@@ -264,7 +278,7 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
                         "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 48:2:184:23 ]] || \
                         die "Qwen3.6 32-node depth-two v8r22 successor runtime binding mismatch"
                     ;;
-                *) die "unknown exact v8r22 successor runtime binding" ;;
+                *) die "unknown exact successor runtime binding" ;;
             esac
         else
             [[ -z "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}" ]] || \

@@ -95,8 +95,8 @@ die() {
     die "node memory guard policy must use the exact enabled-or-disabled PBS service-node contract"
 if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
     case "${NODE_MEMORY_GUARD_DISABLED_BINDING}" in
-        qwen38-32-v22-gs10|qwen36-32-v22-depth2) ;;
-        *) die "node memory guard disablement lacks an exact recursive successor binding" ;;
+        qwen38-32-v22-gs10|qwen36-32-v22-depth2|qwen38-16-v25-gs12) ;;
+        *) die "node memory guard disablement lacks an exact successor binding" ;;
     esac
 elif [[ -n "${NODE_MEMORY_GUARD_DISABLED_BINDING}" ]]; then
     die "enabled node memory guard must not carry a disabled binding"

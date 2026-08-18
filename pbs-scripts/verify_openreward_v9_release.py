@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r24/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r25/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,15 +14,15 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r24-e11d720-057108f")
-RELEASE_REF = "refs/tags/abci-v8r24-e11d720-057108f"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r25-e11d720-057108f")
+RELEASE_REF = "refs/tags/abci-v8r25-e11d720-057108f"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "2a768a84e052fb6dcb40307f3640627d809ae4f80b615b2df066449294166daa"
-V8R22_SUCCESSOR_CONTRACTS_SHA256 = "f378f6a0fee76ede9d41824b0ae29bc2bdf38a2f9fdf1b4cfef00d11e8879967"
-SERVICE_NODE_MEMORY_GUARD_SHA256 = "15330f5d9fd12041a88d7605510331b45f8d396d1d13643d8d6a653b1cee6c5e"
+MANIFEST_SHA256 = "4759e2a4e15daa95f2d51a94e04988d7aa3deedf0233284e4b37bcb1f201b6d8"
+V8R22_SUCCESSOR_CONTRACTS_SHA256 = "b235fc7b81719276f9329868abcef06b8b114dbcf227a3a85663f1c7bc30a044"
+SERVICE_NODE_MEMORY_GUARD_SHA256 = "2d55502f8b04a62a0e169a0f98147241b911dd4f50ced7b17d557d219de42bcb"
 V8R22_SUCCESSOR_CONTRACT_NAMES = {
     "qwen38_32node_gs10",
-    "qwen38_16node_gs11",
+    "qwen38_16node_gs12",
     "qwen36_32node_gs1_depth2",
 }
 UPSTREAM_COMMIT = "e11d7201ae8118a9350210615038ff2fe582945f"
@@ -144,9 +144,9 @@ TRAINING_RUNTIME_ASSETS = {
         "653f501c985bd84b3bc5553849d224755fc5c119ae461c4ba5ea8e753b8dfd44"
     ),
     "pbs-scripts/openreward-ta-swe-prealloc-common.sh": (
-        "d695ba4043f1d21082ca6602d3a9f907ce51e464b9ed2e638951fc736673ea5b"
+        "9deb780b532e87d806fa2e7a753e2117bd8f3cb6d8c81d83d43cbbada0588613"
     ),
-    "pbs-scripts/openreward-node-services.sh": ("553d9caed6e686f75d237dc08dfee68447d04dce5ee4925518b7d587bd6d4c1c"),
+    "pbs-scripts/openreward-node-services.sh": ("4aa669542e9e83a847dc5c9bf0a98fb32157965707a747dbfba6bf1687052c74"),
     "pbs-scripts/openreward-node-memory-guard.py": ("234d25909ca7bef46885308e5ef039414aa838f15c30cc993830451eb784558a"),
 }
 TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION = "missing_masks_treated_as_all_trainable_before_filter_and_concat"

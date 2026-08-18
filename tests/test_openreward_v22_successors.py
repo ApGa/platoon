@@ -27,12 +27,12 @@ def _load_resume_verifier():
 
 def test_v22_manifest_binds_three_successors_and_exact_assets() -> None:
     manifest = json.loads(MANIFEST.read_text())
-    assert manifest["release_root"] == ("/home/aci18912it/rasp/releases/platoon-v8r24-e11d720-057108f")
-    assert manifest["release_ref"] == "refs/tags/abci-v8r24-e11d720-057108f"
+    assert manifest["release_root"] == ("/home/aci18912it/rasp/releases/platoon-v8r25-e11d720-057108f")
+    assert manifest["release_ref"] == "refs/tags/abci-v8r25-e11d720-057108f"
     contracts = manifest["training_semantics"]["v8r22_successor_contracts"]
     assert set(contracts) == {
         "qwen38_32node_gs10",
-        "qwen38_16node_gs11",
+        "qwen38_16node_gs12",
         "qwen36_32node_gs1_depth2",
     }
     assert [contracts[name]["max_concurrent_rollouts"] for name in contracts] == [
@@ -42,7 +42,7 @@ def test_v22_manifest_binds_three_successors_and_exact_assets() -> None:
     ]
     assert [contracts[name]["node_memory_guard_enabled"] for name in contracts] == [
         False,
-        True,
+        False,
         False,
     ]
     for contract in contracts.values():
@@ -87,13 +87,20 @@ def test_v22_resume_verifier_exact_binding_counts() -> None:
     assert set(bindings) == {
         "qwen38-32-v22-gs10",
         "qwen38-16-v22-gs11-ordinary",
+        "qwen38-16-v25-gs12",
         "qwen36-32-v22-depth2",
     }
     q38_32 = bindings["qwen38-32-v22-gs10"]
     q38_16 = bindings["qwen38-16-v22-gs11-ordinary"]
+    q38_16_gs12 = bindings["qwen38-16-v25-gs12"]
     q36 = bindings["qwen36-32-v22-depth2"]
     assert (q38_32["global_step"], q38_32["lr_num_steps"]) == (10, 11)
     assert (q38_16["global_step"], q38_16["lr_num_steps"]) == (11, 8)
+    assert (q38_16_gs12["global_step"], q38_16_gs12["lr_num_steps"]) == (12, 8)
+    assert (q38_16_gs12["samples_yielded"], q38_16_gs12["iterator_yielded"]) == (376, 47)
+    assert q38_16_gs12["source_job"] == "2162322.pbs1"
+    assert q38_16_gs12["source_candidate_job"] == "2159631.pbs1"
+    assert q38_16_gs12["source_candidate_global_step"] == 1
     assert (q36["global_step"], q36["lr_num_steps"]) == (1, 2)
     assert q36["optimizer_layout"] == "two_group"
     assert [
@@ -110,6 +117,7 @@ def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() ->
     for binding in (
         "qwen38-32-v22-gs10",
         "qwen38-16-v22-gs11-ordinary",
+        "qwen38-16-v25-gs12",
         "qwen36-32-v22-depth2",
     ):
         assert binding in common
@@ -123,7 +131,7 @@ def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() ->
         assert literal in common
         assert literal in services
     assert "qwen38-32-v22-gs10|qwen36-32-v22-depth2" in common
-    assert "qwen38-32-v22-gs10|qwen36-32-v22-depth2" in services
+    assert "qwen38-32-v22-gs10|qwen36-32-v22-depth2|qwen38-16-v25-gs12" in services
 
     q38_32 = (
         PBS / "openreward-ta-swe-32node-recursive-qwen38-resume-gs10-h200-v12-abci.pbs"
@@ -134,9 +142,14 @@ def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() ->
     q38_16 = (
         PBS / "openreward-ta-swe-16node-nonrecursive-qwen38-resume-gs11-h200-v11-abci.pbs"
     ).read_text()
+    q38_16_gs12 = (
+        PBS
+        / "openreward-ta-swe-16node-nonrecursive-qwen38-resume-gs12-noguard-h200-v12-abci.pbs"
+    ).read_text()
     assert "export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0\n" in q38_32
     assert "export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0\n" in q36_32
     assert "export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=1\n" in q38_16
+    assert "export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0\n" in q38_16_gs12
     for wrapper in (q38_32, q36_32):
         assert "export OPENREWARD_EXPECTED_NNODES=32\n" in wrapper
         assert "export OPENREWARD_EXPECTED_RECURSIVE=1\n" in wrapper

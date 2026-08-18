@@ -342,13 +342,18 @@ def test_node_supervisor_and_common_launcher_wire_guard_fail_closed() -> None:
     assert "TOOLATHLON_WORKER_QUORUM=${OPENREWARD_TOOLATHLON_WORKER_QUORUM:-5}" in common
 
 
-def test_guard_disablement_is_limited_to_exact_recursive_successors() -> None:
+def test_guard_disablement_is_limited_to_exact_successors() -> None:
     node_services = NODE_SERVICES_PATH.read_text()
     common = COMMON_PATH.read_text()
 
     assert 'NODE_MEMORY_GUARD_DISABLED_BINDING=' in common
     assert '"${EXPECTED_NNODES}" == 32 && "${EXPECTED_RECURSIVE}" == 1' in common
-    for binding in ("qwen38-32-v22-gs10", "qwen36-32-v22-depth2"):
+    assert '"${EXPECTED_NNODES}" == 16 && "${EXPECTED_RECURSIVE}" == 0' in common
+    for binding in (
+        "qwen38-32-v22-gs10",
+        "qwen36-32-v22-depth2",
+        "qwen38-16-v25-gs12",
+    ):
         assert binding in common
         assert binding in node_services
     assert 'memory_guard_healthy()' in node_services
