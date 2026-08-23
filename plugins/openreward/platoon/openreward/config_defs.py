@@ -174,6 +174,15 @@ class OpenRewardConfig:
     subagent_max_depth: int | None = None
     enable_subagent_reward_judging: bool = False
     subagent_reward_judge_max_steps: int = 20
+    # Optionally gate the environment verifier's score with a one-shot audit
+    # from the same policy checkpoint being trained.  Keeping the judge on the
+    # rollout policy avoids a separate, potentially drifting reward model.
+    enable_subagent_behavior_judging: bool = False
+    subagent_behavior_judge_max_prompt_tokens: int = 24_576
+    # This cap includes optional private reasoning plus the small public JSON
+    # verdict.  The reasoning is never persisted as reward metadata.
+    subagent_behavior_judge_max_output_tokens: int = 4_096
+    subagent_behavior_judge_timeout_seconds: float = 300.0
     subagent_delegation_reward_coefficient: float = 0.0
     openhands_system_prompt_suffix: str | None = None
     # Context condensation is a separate state-maintenance completion. Allow
@@ -186,6 +195,53 @@ class OpenRewardConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.balance_accepted_batches, bool):
             raise ValueError("balance_accepted_batches must be a boolean")
+        if not isinstance(self.enable_subagent_reward_judging, bool):
+            raise ValueError("enable_subagent_reward_judging must be a boolean")
+        if not isinstance(self.enable_subagent_behavior_judging, bool):
+            raise ValueError("enable_subagent_behavior_judging must be a boolean")
+        if (
+            self.enable_subagent_behavior_judging
+            and not self.enable_subagent_reward_judging
+        ):
+            raise ValueError(
+                "enable_subagent_behavior_judging requires "
+                "enable_subagent_reward_judging=true"
+            )
+        for field_name, value, minimum in (
+            (
+                "subagent_behavior_judge_max_prompt_tokens",
+                self.subagent_behavior_judge_max_prompt_tokens,
+                1_024,
+            ),
+            (
+                "subagent_behavior_judge_max_output_tokens",
+                self.subagent_behavior_judge_max_output_tokens,
+                64,
+            ),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise ValueError(
+                    f"{field_name} must be an integer greater than or equal to {minimum}"
+                )
+        if (
+            isinstance(self.subagent_behavior_judge_timeout_seconds, bool)
+            or not isinstance(
+                self.subagent_behavior_judge_timeout_seconds,
+                (int, float),
+            )
+            or not math.isfinite(self.subagent_behavior_judge_timeout_seconds)
+            or self.subagent_behavior_judge_timeout_seconds <= 0
+        ):
+            raise ValueError(
+                "subagent_behavior_judge_timeout_seconds must be finite and positive"
+            )
+        self.subagent_behavior_judge_timeout_seconds = float(
+            self.subagent_behavior_judge_timeout_seconds
+        )
         if self.programmatic_tool_calling_mode not in PROGRAMMATIC_TOOL_CALLING_MODES:
             allowed = ", ".join(sorted(PROGRAMMATIC_TOOL_CALLING_MODES))
             raise ValueError(

@@ -416,6 +416,67 @@ def test_condenser_thinking_can_be_explicitly_disabled(monkeypatch) -> None:
     }
 
 
+def test_behavior_judge_uses_isolated_shallow_copy_of_exact_policy(monkeypatch) -> None:
+    rollout = _load_rollout_module(monkeypatch)
+
+    class CopiedPolicy:
+        def __init__(self, source, update):
+            self.model = source.model
+            self.base_url = source.base_url
+            self.custom_tokenizer = source.custom_tokenizer
+            self.temperature = source.temperature
+            self.shared_client = source.shared_client
+            self.__dict__.update(update)
+            self.metrics_reset = False
+
+        async def acompletion(self, *, messages, **kwargs):
+            raise AssertionError((messages, kwargs))
+
+        def reset_metrics(self):
+            self.metrics_reset = True
+
+    class Policy:
+        model = "openai/Qwen/Qwen3.6-35B-A3B"
+        base_url = "http://actor-policy/v1"
+        custom_tokenizer = "Qwen/Qwen3.6-35B-A3B"
+        temperature = 0.7
+        shared_client = object()
+
+        def model_copy(self, *, update):
+            self.copy_update = update
+            self.copy = CopiedPolicy(self, update)
+            return self.copy
+
+    policy = Policy()
+    config = rollout.OpenRewardConfig.from_mapping(
+        {
+            "enable_subagent_reward_judging": True,
+            "enable_subagent_behavior_judging": True,
+            "subagent_behavior_judge_max_prompt_tokens": 12_345,
+            "subagent_behavior_judge_max_output_tokens": 2_048,
+            "subagent_behavior_judge_timeout_seconds": 45.2,
+        }
+    )
+
+    judge = rollout._build_behavior_judge(policy, config)
+
+    copied = judge.llm
+    assert copied is policy.copy
+    assert copied.model == policy.model
+    assert copied.base_url == policy.base_url
+    assert copied.custom_tokenizer == policy.custom_tokenizer
+    assert copied.temperature == policy.temperature
+    assert copied.shared_client is policy.shared_client
+    assert policy.copy_update == {
+        "usage_id": "platoon-openreward-subagent-behavior-judge",
+        "max_output_tokens": 2_048,
+        "timeout": 46,
+    }
+    assert copied.metrics_reset is True
+    assert judge.max_prompt_tokens == 12_345
+    assert judge.timeout_seconds == 45.2
+
+
 def test_recursive_mode_still_installs_task_tracker_and_delegation_prompts(monkeypatch) -> None:
     prompts, recursive_overrides = _agent_configuration_spies()
     rollout = _load_rollout_module(

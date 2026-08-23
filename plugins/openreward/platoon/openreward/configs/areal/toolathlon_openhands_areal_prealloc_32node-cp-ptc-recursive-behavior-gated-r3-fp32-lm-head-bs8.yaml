@@ -1,0 +1,63 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8
+  - _self_
+
+# Fresh Toolathlon-only trial. A unique name prevents recovery of root-reward
+# propagation, efficiency-shaped, or mixed-environment optimizer/rollout state.
+trial_name: ta32-rec-behavior-gate-v1-trial0
+
+openreward:
+  subagent_environment_access: shared
+  subagent_default_max_steps: 50
+  subagent_max_depth: 2
+  # Retain the environment outcome verifier, then gate its positive result with
+  # a one-shot behavioral audit performed by the same rollout policy being
+  # trained. This deliberately does not configure a separate judge model.
+  enable_subagent_reward_judging: true
+  subagent_reward_judge_max_steps: 50
+  enable_subagent_behavior_judging: true
+  subagent_behavior_judge_max_prompt_tokens: 24576
+  subagent_behavior_judge_max_output_tokens: 4096
+  subagent_behavior_judge_timeout_seconds: 300.0
+  # The gated verifier score is the complete child reward for this ablation.
+  subagent_delegation_reward_coefficient: 0.0
+  # This trial has no evaluation workload; retain the full training catalog.
+  eval_split: null
+  eval_task_limit: null
+
+workflow_config:
+  # Preserve the proven BS8 throughput control while allowing each non-root
+  # trajectory a 25% independent chance of contributing gradients.
+  subagent_datum_keep_probability: 0.25
+  rollout_config:
+    propagate_root_success: false
+  # Isolate the behavioral gate by removing policy-subtree token shaping.
+  token_efficiency_reward:
+    enabled: false
+
+# Save recovery state after every completed update. The fresh trial name above
+# starts from the untouched model; later four-hour successors resume this line.
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    project: toolathlon-openhands
+    group: ta32-rec-behavior-gate-v1
+
+# Literal values are required by the pre-Hydra launcher validation. The
+# preserve-thinking repository is resolved to its complete local snapshot by
+# the launcher before offline workers start.
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: apurvaga/Qwen3.6-35B-A3B-preserve-thinking

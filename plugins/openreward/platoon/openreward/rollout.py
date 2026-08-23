@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import uuid
@@ -46,6 +47,7 @@ from platoon.utils.subagent_rewards import (
 )
 from platoon.visualization.event_sinks import JsonlFileSink
 
+from platoon.openreward.behavior_judge import OpenRewardBehaviorJudge
 from platoon.openreward.config_defs import OpenRewardConfig, OpenRewardEnvironmentConfig
 from platoon.openreward.constants import (
     OPENREWARD_ENVIRONMENT_LABEL_KEY,
@@ -340,6 +342,47 @@ def _build_condenser_llm(
     )
 
 
+def _build_behavior_judge(
+    policy_llm: LLM,
+    openreward_config: OpenRewardConfig,
+) -> OpenRewardBehaviorJudge:
+    """Build a judge backed by the exact rollout policy checkpoint.
+
+    A shallow Pydantic copy preserves the policy model, endpoint, tokenizer,
+    sampling parameters, and shared transport.  Only request-scoped limits and
+    the usage label differ, so judge traffic is distinguishable without
+    introducing a separate reward model or client.
+    """
+
+    judge_llm = policy_llm.model_copy(
+        update={
+            "usage_id": "platoon-openreward-subagent-behavior-judge",
+            "max_output_tokens": (
+                openreward_config.subagent_behavior_judge_max_output_tokens
+            ),
+            "timeout": max(
+                1,
+                math.ceil(
+                    openreward_config.subagent_behavior_judge_timeout_seconds
+                ),
+            ),
+        }
+    )
+    # ``model_copy`` is intentionally shallow so the tokenizer/client are
+    # shared, but OpenHands' metrics and telemetry must be independent.  The
+    # SDK provides this hook specifically for copied LLM instances.
+    judge_llm.reset_metrics()
+    return OpenRewardBehaviorJudge(
+        llm=judge_llm,
+        max_prompt_tokens=(
+            openreward_config.subagent_behavior_judge_max_prompt_tokens
+        ),
+        timeout_seconds=(
+            openreward_config.subagent_behavior_judge_timeout_seconds
+        ),
+    )
+
+
 def _configure_openhands_agent(
     agent: OpenHandsSDKAgent,
     openreward_config: OpenRewardConfig,
@@ -477,12 +520,19 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     traj_collection.register_event_handlers(
         JsonlFileSink(events_path, collection_id=traj_collection.id, process_id=os.getpid())
     )
+    behavior_judge: OpenRewardBehaviorJudge | None = None
+    if openreward_config.enable_subagent_behavior_judging:
+        behavior_judge = _build_behavior_judge(llm, openreward_config)
+
     tokens = [current_trajectory_collection.set(traj_collection)]
     if openreward_config.enable_recursive_subagents:
         tokens.append(budget_tracker.set(DepthAwareStepBudgetTracker(max_depth=openreward_config.subagent_max_depth)))
     tokens.append(
         subagent_reward_judge_config.set(
-            SubagentRewardJudgeConfig(max_steps=openreward_config.subagent_reward_judge_max_steps)
+            SubagentRewardJudgeConfig(
+                max_steps=openreward_config.subagent_reward_judge_max_steps,
+                behavior_judge=behavior_judge,
+            )
             if openreward_config.enable_subagent_reward_judging
             else None
         )
@@ -506,6 +556,14 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     finally:
         for token in reversed(tokens):
             token.var.reset(token)
+        if behavior_judge is not None:
+            try:
+                await behavior_judge.aclose()
+            except Exception:
+                logger.warning(
+                    "Failed to close the OpenReward behavior judge client",
+                    exc_info=True,
+                )
 
     result = traj_collection
     delegation_coefficient = openreward_config.subagent_delegation_reward_coefficient
