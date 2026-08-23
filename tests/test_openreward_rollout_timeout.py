@@ -512,7 +512,7 @@ async def test_openreward_rollout_timeout_returns_marked_partial_collection(monk
         timeout=0.01,
         step_timeout=60,
         return_dict=True,
-        propogate_root_success=False,
+        propagate_root_success=False,
     )
 
     result = await rollout.run_rollout(

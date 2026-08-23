@@ -15,6 +15,26 @@ from omegaconf import OmegaConf
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_rollout_root_success_spelling_and_legacy_config_compatibility():
+    from platoon.config_defs import RolloutConfig
+
+    canonical = RolloutConfig(propagate_root_success=True)
+    assert canonical.propagate_root_success is True
+
+    legacy_schema = OmegaConf.merge(
+        OmegaConf.structured(RolloutConfig),
+        OmegaConf.create({"propogate_root_success": True}),
+    )
+    legacy = OmegaConf.to_object(legacy_schema)
+    assert legacy.propagate_root_success is True
+
+    with pytest.raises(ValueError, match="Conflicting rollout propagation settings"):
+        RolloutConfig(
+            propagate_root_success=False,
+            propogate_root_success=True,
+        )
+
+
 def _load_module(module_name: str, path: Path):
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
@@ -326,7 +346,7 @@ def test_judged_recursive_r3_fp32_yaml_composes_all_features():
     assert composed.trial_name.endswith("trial2")
     assert composed.workflow_config.depth_level_weighting is True
     assert composed.workflow_config.leave_one_out_baseline is True
-    assert composed.workflow_config.rollout_config.propogate_root_success is False
+    assert composed.workflow_config.rollout_config.propagate_root_success is False
     assert composed.workflow_config.rollout_config.timeout == 5400
     assert composed.workflow_config.rollout_config.step_timeout == 2700
     assert composed.rollout.return_routed_experts is True
@@ -395,7 +415,7 @@ def test_mixed_recursive_r3_fp32_yaml_composes_balancing_and_child_policies():
     assert composed.workflow_config.depth_level_weighting is True
     assert composed.workflow_config.depth_level_discount_gamma is None
     assert composed.workflow_config.leave_one_out_baseline is True
-    assert composed.workflow_config.rollout_config.propogate_root_success is True
+    assert composed.workflow_config.rollout_config.propagate_root_success is True
     assert composed.trial_name.endswith("ptc-recursive-r3-fp32-lm-head-trial0")
 
     assert composed.rollout.return_routed_experts is True

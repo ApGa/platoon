@@ -49,7 +49,7 @@ workflow_config:
       temperature: 1.0
       max_completion_tokens: 512
     step_timeout: 7200
-    propogate_root_success: true
+    propagate_root_success: true
     skip_subagent_reward_computation: false
   group_size: 8
   leave_one_out_baseline: True

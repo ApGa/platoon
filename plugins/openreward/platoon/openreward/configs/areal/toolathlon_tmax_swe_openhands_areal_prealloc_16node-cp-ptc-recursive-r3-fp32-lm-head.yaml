@@ -29,7 +29,7 @@ workflow_config:
   rollout_config:
     # Train every trajectory toward the root result; all children use the same
     # reward contract.
-    propogate_root_success: true
+    propagate_root_success: true
 
 # The preallocation launcher reads these fields before Hydra composes defaults
 # so it can select the tokenizer and prepare Megatron's cached extensions.

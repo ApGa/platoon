@@ -119,7 +119,7 @@ def add_direct_subagent_delegation_rewards(
     return trajectory_collection
 
 
-def propogate_root_success(
+def propagate_root_success(
     trajectory_collection: dict[str, Any] | TrajectoryCollection,
 ) -> dict[str, Any] | TrajectoryCollection:
     """Rewrite recursive rollout rewards so all trajectories use root success."""
@@ -145,3 +145,8 @@ def propogate_root_success(
                 reward_misc["reward/subagent_succeeded"] = launched * root_success
 
     return trajectory_collection
+
+
+# Backward compatibility for external plugins importing the historical typo.
+# In-repository code and configuration use ``propagate_root_success``.
+propogate_root_success = propagate_root_success

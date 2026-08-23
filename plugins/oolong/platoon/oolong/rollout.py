@@ -3,7 +3,7 @@ from .env import OolongEnv, OolongRecursiveEnv
 from .agent import OolongAgent, OolongRecursiveAgent
 from platoon.config_defs import RolloutConfig
 from platoon.utils.llm_client import LiteLLMClient
-from platoon.utils.subagent_rewards import propogate_root_success
+from platoon.utils.subagent_rewards import propagate_root_success
 from platoon.episode.context import current_trajectory_collection, budget_tracker
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import TrajectoryCollection, DepthAwareStepBudgetTracker
@@ -159,8 +159,8 @@ async def run_recursive_rollout(task: Task, config: RolloutConfig) -> dict | Tra
             result = current_trajectory_collection.get().to_dict()
         else:
             result = current_trajectory_collection.get()
-        if config.propogate_root_success:
-            result = propogate_root_success(result)
+        if config.propagate_root_success:
+            result = propagate_root_success(result)
         return result
 
     except Exception as e:

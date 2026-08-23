@@ -42,7 +42,7 @@ from platoon.openhands.recursive import (
 )
 from platoon.utils.subagent_rewards import (
     add_direct_subagent_delegation_rewards,
-    propogate_root_success,
+    propagate_root_success,
 )
 from platoon.visualization.event_sinks import JsonlFileSink
 
@@ -500,7 +500,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         # is filtered downstream while completed siblings/descendants remain
         # usable.  Root-success propagation cannot safely use a partial root,
         # so preserve the historical discard behavior for that legacy mode.
-        if config.propogate_root_success:
+        if config.propagate_root_success:
             raise
         rollout_timed_out = True
     finally:
@@ -510,14 +510,14 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     result = traj_collection
     delegation_coefficient = openreward_config.subagent_delegation_reward_coefficient
     if delegation_coefficient > 0:
-        if config.propogate_root_success:
+        if config.propagate_root_success:
             raise ValueError(
-                "OpenReward delegation rewards require propogate_root_success=false "
+                "OpenReward delegation rewards require propagate_root_success=false "
                 "so direct child verifier scores remain intact"
             )
         add_direct_subagent_delegation_rewards(result, delegation_coefficient)
-    if config.propogate_root_success:
-        propogate_root_success(result)
+    if config.propagate_root_success:
+        propagate_root_success(result)
 
     if config.return_dict:
         result = result.to_dict()

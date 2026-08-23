@@ -161,7 +161,7 @@ def test_mixed_recursive_32node_config_combines_latest_proven_settings():
     assert workflow.min_successful_group_size == 4
     assert workflow.rollout_config.timeout == 3600
     assert workflow.rollout_config.step_timeout == 2700
-    assert workflow.rollout_config.propogate_root_success is False
+    assert workflow.rollout_config.propagate_root_success is False
     assert workflow.token_efficiency_reward.enabled is True
     assert workflow.token_efficiency_reward.attribution == "policy_subtree"
     assert workflow.token_efficiency_reward.coefficient == 0.05
