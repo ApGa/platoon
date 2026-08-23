@@ -460,9 +460,7 @@ def test_32node_recursive_bs8_config_composes_all_features_with_preserved_thinki
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
         composed = compose(config_name=config_name)
 
-    model_path = str(
-        REPO_ROOT / ".cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking"
-    )
+    model_path = "apurvaga/Qwen3.6-35B-A3B-preserve-thinking"
     assert composed.cluster.n_nodes == 32
     assert composed.trial_name.endswith("fp32-lm-head-bs8-trial2")
     assert composed.train_dataset.batch_size == 8
@@ -500,6 +498,57 @@ def test_32node_recursive_bs8_config_composes_all_features_with_preserved_thinki
     assert composed.ref.megatron.enable_fp32_lm_head is True
 
 
+def test_32node_toolathlon_rootprop_config_composes_requested_ablation():
+    config_dir = REPO_ROOT / "plugins/openreward/platoon/openreward/configs/areal"
+    config_name = (
+        "toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-rootprop-"
+        "r3-fp32-lm-head-bs8"
+    )
+    with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
+        composed = compose(config_name=config_name)
+
+    assert composed.trial_name == "ta32-rec-rootprop-v1-trial0"
+    assert composed.cluster.n_nodes == 32
+    assert composed.openreward.env_name == "toolathlongym"
+    assert OmegaConf.select(composed, "openreward.environments") is None
+    assert composed.openreward.train_task_limit is None
+    assert composed.openreward.eval_split is None
+    assert composed.openreward.eval_task_limit is None
+    assert composed.openreward.enable_recursive_subagents is True
+    assert composed.openreward.subagent_environment_access == "shared"
+    assert composed.openreward.subagent_default_max_steps == 50
+    assert composed.openreward.subagent_max_depth == 2
+    assert composed.openreward.enable_subagent_reward_judging is False
+    assert composed.openreward.subagent_delegation_reward_coefficient == 0.0
+
+    workflow_config_type = _load_config_module().WorkflowConfig
+    workflow = workflow_config_type(
+        **OmegaConf.to_container(composed.workflow_config, resolve=True)
+    )
+    assert workflow.group_size == 8
+    assert workflow.subagent_datum_keep_probability == 0.25
+    assert workflow.rollout_config.propagate_root_success is True
+    assert workflow.token_efficiency_reward.enabled is False
+    assert workflow.straggler_quorum == 6
+    assert workflow.straggler_timeout_seconds == 900
+    assert workflow.min_successful_group_size == 4
+    assert workflow.rollout_config.timeout == 3600
+    assert workflow.rollout_config.step_timeout == 2700
+
+    assert composed.train_dataset.batch_size == 8
+    assert composed.rollout.backend == "sglang:d12p1t8"
+    assert composed.rollout.max_concurrent_rollouts == 12
+    assert composed.rollout.scheduling_spec[0].mem == 128
+    assert composed.sglang.mem_fraction_static == 0.70
+    assert composed.actor.backend == "megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)"
+    assert composed.actor.path == "apurvaga/Qwen3.6-35B-A3B-preserve-thinking"
+    assert composed.recover.freq_steps == 1
+    assert composed.valid_dataset is None
+    assert composed.evaluator.eval_before_train is False
+    assert composed.stats_logger.wandb.project == "toolathlon-openhands"
+    assert composed.stats_logger.wandb.group == "ta32-rec-rootprop-v1"
+
+
 def test_32node_recursive_wrapper_preserves_allocation_for_successors():
     script_name = "openreward-toolathlon-prealloc-32node-ptc-recursive.sh"
     script = (REPO_ROOT / "slurm-scripts" / script_name).read_text()
@@ -525,6 +574,26 @@ def test_32node_recursive_bs8_wrapper_preserves_experiment_for_successors():
     assert '"${SLURM_NNODES:-32}" -ne 32' in script
     assert "OPENREWARD_CONTROLLER_CPUS=${OPENREWARD_CONTROLLER_CPUS:-64}" in script
     assert "NCCL_RAS_ENABLE=${NCCL_RAS_ENABLE:-0}" in script
+
+
+def test_32node_rootprop_wrapper_is_toolathlon_only_and_self_contained():
+    script_name = "openreward-toolathlon-prealloc-32node-ptc-recursive-bs8-rootprop.sh"
+    script_path = REPO_ROOT / "slurm-scripts" / script_name
+    script = script_path.read_text()
+
+    assert script_path.stat().st_mode & 0o111
+    assert "#SBATCH --nodes=32" in script
+    assert "openreward-toolathlon-prealloc-base.sh" in script
+    assert "openreward-multienv" not in script
+    assert "ta32-rec-rootprop-v1-trial0" in script
+    assert "recursive-rootprop-r3-fp32-lm-head-bs8.yaml" in script
+    assert f"OPENREWARD_JOB_SCRIPT=${{REPO_ROOT}}/slurm-scripts/{script_name}" in script
+    assert "OPENREWARD_SUBAGENT_DELEGATION_REWARD_COEFFICIENT=0.0" in script
+    assert "OPENREWARD_WANDB_MODE=online" in script
+    assert "apga+toolathlon-gym+18e62c0d041.sqsh" in script
+    assert "OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-1800" in script
+    assert "OPENREWARD_DEADLINE_SAFETY_SECONDS:-600" in script
+    assert 'value=${value:1:${#value}-2}' in script
 
 
 def test_prealloc_launcher_retries_plain_exit_one_with_bounded_atomic_successor():
@@ -562,6 +631,10 @@ def test_prealloc_launcher_retries_plain_exit_one_with_bounded_atomic_successor(
         (
             "toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-"
             "fp32-lm-head-bs8.yaml"
+        ),
+        (
+            "toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-rootprop-"
+            "r3-fp32-lm-head-bs8.yaml"
         ),
     ],
 )

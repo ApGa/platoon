@@ -1,0 +1,57 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8
+  - _self_
+
+# Fresh Toolathlon-only root-outcome trial. A unique name prevents recovery of
+# judged, efficiency-shaped, or mixed-environment optimizer/rollout state.
+trial_name: ta32-rec-rootprop-v1-trial0
+
+openreward:
+  # Every solver trajectory is trained from the completed root outcome, so no
+  # synthetic verifier tree or direct-child delegation bonus is needed.
+  subagent_environment_access: shared
+  subagent_default_max_steps: 50
+  subagent_max_depth: 2
+  enable_subagent_reward_judging: false
+  subagent_delegation_reward_coefficient: 0.0
+  # This trial has no evaluation workload; retain the full training catalog.
+  eval_split: null
+  eval_task_limit: null
+
+workflow_config:
+  # Preserve the proven BS8 throughput control: all descendants receive the
+  # root label, while 25% of non-root post-merge datums contribute gradients.
+  subagent_datum_keep_probability: 0.25
+  rollout_config:
+    propagate_root_success: true
+  # No policy-subtree token cost is attached in this ablation.
+  token_efficiency_reward:
+    enabled: false
+
+# Save recovery state after every completed update. The trial name above makes
+# the first allocation start from the untouched model rather than old optimizer
+# state; later four-hour successors resume this new lineage.
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    project: toolathlon-openhands
+    group: ta32-rec-rootprop-v1
+
+# Literal values are required by the pre-Hydra launcher validation. The
+# preserve-thinking repository is resolved to the complete local snapshot by
+# the launcher before offline worker startup.
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: apurvaga/Qwen3.6-35B-A3B-preserve-thinking
