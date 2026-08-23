@@ -216,6 +216,16 @@ if [[ -z "${OPENREWARD_ACTOR_PATH}" ]] && \
         OPENREWARD_LOCAL_MODEL_SNAPSHOT=${preserve_overlay}
       fi
     fi
+    # Commit-pinned worktrees intentionally omit the ignored local model
+    # overlay. Reuse the canonical checkout's content-identical overlay when
+    # available, while retaining OPENREWARD_LOCAL_MODEL_SNAPSHOT as the
+    # portable explicit override for other layouts/clusters.
+    if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
+      canonical_preserve_overlay=${USER_ROOT}/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking
+      if [[ -d "${canonical_preserve_overlay}" ]]; then
+        OPENREWARD_LOCAL_MODEL_SNAPSHOT=${canonical_preserve_overlay}
+      fi
+    fi
   fi
   if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
     echo "ERROR: config selects apurvaga/Qwen3.6-35B-A3B-preserve-thinking, but no local snapshot is available for offline startup." >&2

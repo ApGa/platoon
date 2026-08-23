@@ -155,6 +155,23 @@ def test_toolathlon_launcher_bootstraps_slurm_clients_for_export_none(tmp_path):
     ]
 
 
+def test_toolathlon_launcher_reuses_canonical_model_overlay_for_clean_worktree():
+    launcher = LAUNCHER.read_text()
+
+    assert (
+        "canonical_preserve_overlay=${USER_ROOT}/source/platoon/.cache/"
+        "platoon-models/Qwen3.6-35B-A3B-preserve-thinking"
+    ) in launcher
+    repo_local = launcher.index(
+        "preserve_overlay=${REPO_ROOT}/.cache/platoon-models/"
+    )
+    canonical = launcher.index("canonical_preserve_overlay=${USER_ROOT}/source/platoon/.cache/")
+    missing_error = launcher.index(
+        "config selects apurvaga/Qwen3.6-35B-A3B-preserve-thinking, but no local snapshot"
+    )
+    assert repo_local < canonical < missing_error
+
+
 def test_multienv_config_uses_proven_straggler_tail_policy():
     config = REPO_ROOT / (
         "plugins/openreward/platoon/openreward/configs/areal/"
