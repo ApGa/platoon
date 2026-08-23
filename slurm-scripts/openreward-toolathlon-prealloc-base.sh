@@ -32,6 +32,57 @@
 
 set -euo pipefail
 
+# `sbatch --export=NONE` intentionally gives the batch shell a minimal
+# environment.  On BCM clusters the Slurm client binaries live outside the
+# system default PATH, so relying on the submit shell's PATH makes the first
+# `scontrol`/`srun` call fail before any useful work starts.  It also leaves
+# SLURM_EXPORT_ENV=NONE in the batch environment, which would strip the
+# environment reconstructed below from nested controller/worker srun steps.
+# Resolve the Slurm client suite once, expose its absolute directory, and make
+# nested steps inherit the deliberately rebuilt batch environment.
+bootstrap_slurm_cli() {
+  local candidate command_path
+  local -a candidate_dirs=()
+
+  if [[ -n "${PLATOON_SLURM_BIN_DIR:-}" ]]; then
+    candidate_dirs+=("${PLATOON_SLURM_BIN_DIR}")
+  else
+    if command_path=$(command -v srun 2>/dev/null) && [[ "${command_path}" == */* ]]; then
+      candidate_dirs+=("${command_path%/*}")
+    fi
+    candidate_dirs+=(
+      /cm/shared/apps/slurm/current/bin
+      /usr/bin
+      /usr/local/bin
+      /opt/slurm/bin
+      /usr/local/slurm/bin
+    )
+  fi
+
+  for candidate in "${candidate_dirs[@]}"; do
+    candidate=${candidate%/}
+    [[ -n "${candidate}" ]] || continue
+    [[ -x "${candidate}/srun" ]] || continue
+    [[ -x "${candidate}/scontrol" ]] || continue
+    [[ -x "${candidate}/sbatch" ]] || continue
+
+    export PLATOON_SLURM_BIN_DIR=${candidate}
+    case ":${PATH:-}:" in
+      *":${candidate}:"*) ;;
+      *) export PATH="${candidate}${PATH:+:${PATH}}" ;;
+    esac
+    export SLURM_EXPORT_ENV=ALL
+    return 0
+  done
+
+  echo "ERROR: could not locate executable srun, scontrol, and sbatch clients." >&2
+  echo "       Set PLATOON_SLURM_BIN_DIR to the Slurm client bin directory." >&2
+  return 2
+}
+
+bootstrap_slurm_cli || exit $?
+unset -f bootstrap_slurm_cli
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd)}

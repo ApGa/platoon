@@ -32,9 +32,19 @@ USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd -P)}
 export PLATOON_USER_ROOT=${USER_ROOT}
 
 BASE_LAUNCHER=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc-base.sh
-CREDENTIAL_SOURCE=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc.sh
 DEFAULT_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-rootprop-r3-fp32-lm-head-bs8.yaml
 CONFIG=${1:-${DEFAULT_CONFIG}}
+
+# The credential-bearing launcher is intentionally gitignored, so it is absent
+# from clean, commit-pinned worktrees. Prefer an explicit source, then a local
+# source when present, and finally the user's canonical Platoon checkout.
+if [[ -n "${PLATOON_CREDENTIAL_SOURCE:-}" ]]; then
+  CREDENTIAL_SOURCE=${PLATOON_CREDENTIAL_SOURCE}
+elif [[ -r "${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc.sh" ]]; then
+  CREDENTIAL_SOURCE=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc.sh
+else
+  CREDENTIAL_SOURCE=${USER_ROOT}/source/platoon/slurm-scripts/openreward-toolathlon-prealloc.sh
+fi
 
 if [[ "${SLURM_NNODES:-32}" -ne 32 ]]; then
   echo "ERROR: this wrapper requires exactly 32 nodes; got ${SLURM_NNODES}." >&2

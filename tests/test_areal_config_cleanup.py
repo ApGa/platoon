@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 import types
 from dataclasses import asdict, dataclass, field
@@ -655,6 +657,8 @@ def test_32node_rootprop_wrapper_is_toolathlon_only_and_self_contained():
     assert "OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-1800" in script
     assert "OPENREWARD_DEADLINE_SAFETY_SECONDS:-600" in script
     assert 'value=${value:1:${#value}-2}' in script
+    assert "PLATOON_CREDENTIAL_SOURCE" in script
+    assert "${USER_ROOT}/source/platoon/slurm-scripts/" in script
 
 
 def test_32node_behavior_gate_wrapper_is_toolathlon_only_and_self_contained():
@@ -680,6 +684,84 @@ def test_32node_behavior_gate_wrapper_is_toolathlon_only_and_self_contained():
     assert 'value=${value:1:${#value}-2}' in script
     assert "OPENREWARD_SUBAGENT_BEHAVIOR_JUDGE_MODEL" not in script
     assert "inference-api.nvidia.com" not in script
+    assert "PLATOON_CREDENTIAL_SOURCE" in script
+    assert "${USER_ROOT}/source/platoon/slurm-scripts/" in script
+
+
+@pytest.mark.parametrize(
+    ("script_name", "config_name"),
+    [
+        (
+            "openreward-toolathlon-prealloc-32node-ptc-recursive-bs8-rootprop.sh",
+            "toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-"
+            "rootprop-r3-fp32-lm-head-bs8.yaml",
+        ),
+        (
+            "openreward-toolathlon-prealloc-32node-ptc-recursive-bs8-"
+            "behavior-gated.sh",
+            "toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-"
+            "behavior-gated-r3-fp32-lm-head-bs8.yaml",
+        ),
+    ],
+)
+def test_fresh_recursive_wrappers_load_credentials_from_canonical_checkout(
+    tmp_path: Path,
+    script_name: str,
+    config_name: str,
+):
+    pinned_repo = tmp_path / "source" / "platoon-pinned"
+    canonical_repo = tmp_path / "source" / "platoon"
+    pinned_scripts = pinned_repo / "slurm-scripts"
+    canonical_scripts = canonical_repo / "slurm-scripts"
+    config = (
+        pinned_repo
+        / "plugins/openreward/platoon/openreward/configs/areal"
+        / config_name
+    )
+    pinned_scripts.mkdir(parents=True)
+    canonical_scripts.mkdir(parents=True)
+    config.parent.mkdir(parents=True)
+    (pinned_repo / "pyproject.toml").touch()
+    config.touch()
+
+    credential_names = (
+        "WANDB_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "LITELLM_API_KEY",
+        "LITELLM_BASE_URL",
+        "HF_TOKEN",
+    )
+    credential_source = canonical_scripts / "openreward-toolathlon-prealloc.sh"
+    credential_source.write_text(
+        "".join(f"export {name}='test-{name}'\n" for name in credential_names)
+    )
+
+    fake_launcher = pinned_scripts / "openreward-toolathlon-prealloc-base.sh"
+    fake_launcher.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        + "".join(
+            f'[[ "${{{name}:-}}" == "test-{name}" ]] || exit 91\n'
+            for name in credential_names
+        )
+    )
+    fake_launcher.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "slurm-scripts" / script_name)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "PLATOON_REPO_ROOT": str(pinned_repo),
+            "PLATOON_USER_ROOT": str(tmp_path),
+            "SLURM_NNODES": "32",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_prealloc_launcher_retries_plain_exit_one_with_bounded_atomic_successor():

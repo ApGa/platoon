@@ -108,6 +108,53 @@ def test_toolathlon_launcher_mounts_supervisor_without_bad_exit_cascade():
     assert "/bin/bash -lc" not in launcher
 
 
+def test_toolathlon_launcher_bootstraps_slurm_clients_for_export_none(tmp_path):
+    subprocess.run(["bash", "-n", str(LAUNCHER)], check=True)
+    launcher = LAUNCHER.read_text()
+
+    bootstrap_start = launcher.index("bootstrap_slurm_cli()")
+    bootstrap_call = launcher.index("bootstrap_slurm_cli || exit $?")
+    first_slurm_use = launcher.index("scontrol show job")
+
+    assert bootstrap_start < bootstrap_call < first_slurm_use
+    assert "/cm/shared/apps/slurm/current/bin" in launcher
+    assert "PLATOON_SLURM_BIN_DIR" in launcher
+    for command in ("srun", "scontrol", "sbatch"):
+        assert f'[[ -x "${{candidate}}/{command}" ]]' in launcher
+    assert 'export PATH="${candidate}${PATH:+:${PATH}}"' in launcher
+    assert "export SLURM_EXPORT_ENV=ALL" in launcher
+
+    fake_slurm_bin = tmp_path / "slurm" / "bin"
+    fake_slurm_bin.mkdir(parents=True)
+    for command in ("srun", "scontrol", "sbatch"):
+        _write_executable(fake_slurm_bin / command, "#!/bin/sh\nexit 0\n")
+
+    bootstrap_source = launcher[bootstrap_start:bootstrap_call]
+    probe = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            bootstrap_source
+            + "bootstrap_slurm_cli\n"
+            + "printf '%s\\n' \"${PLATOON_SLURM_BIN_DIR}\" \"${PATH}\" "
+            + "\"${SLURM_EXPORT_ENV}\"\n",
+        ],
+        env={
+            "PATH": "",
+            "PLATOON_SLURM_BIN_DIR": str(fake_slurm_bin),
+            "SLURM_EXPORT_ENV": "NONE",
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout.splitlines() == [
+        str(fake_slurm_bin),
+        str(fake_slurm_bin),
+        "ALL",
+    ]
+
+
 def test_multienv_config_uses_proven_straggler_tail_policy():
     config = REPO_ROOT / (
         "plugins/openreward/platoon/openreward/configs/areal/"
