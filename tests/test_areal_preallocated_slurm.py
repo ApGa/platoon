@@ -15,6 +15,17 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+COLLECTIVE_RPC_TIMEOUT_ENV = "PLATOON_AREAL_COLLECTIVE_RPC_TIMEOUT_SECONDS"
+COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV = (
+    "PLATOON_AREAL_COMPUTE_ADVANTAGES_RPC_TIMEOUT_SECONDS"
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_collective_rpc_timeout_environment(monkeypatch):
+    monkeypatch.delenv(COLLECTIVE_RPC_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV, raising=False)
+
 
 def _load_module(module_name: str, path: Path):
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -129,6 +140,8 @@ class FakeSlurmScheduler:
         self.startup_timeout = 1
         self.health_check_interval = 0.01
         self.exp_config = None
+        self.engine_call_attempts: list[dict] = []
+        self.engine_call_failures_remaining = 0
 
     def _prepare_worker_specs(self, role, num_workers, schedulings):
         if len(schedulings) == 1:
@@ -160,6 +173,39 @@ class FakeSlurmScheduler:
             "engine": engine,
             "engine_name": engine_name,
         }
+
+    async def async_call_engine(
+        self,
+        worker_id,
+        method,
+        engine_name=None,
+        *args,
+        rpc_meta=None,
+        http_timeout=7200.0,
+        max_retries=3,
+        retry_delay=1.0,
+        **kwargs,
+    ):
+        for attempt in range(1, max_retries + 1):
+            self.engine_call_attempts.append(
+                {
+                    "attempt": attempt,
+                    "worker_id": worker_id,
+                    "method": method,
+                    "engine_name": engine_name,
+                    "args": args,
+                    "rpc_meta": rpc_meta,
+                    "http_timeout": http_timeout,
+                    "max_retries": max_retries,
+                    "retry_delay": retry_delay,
+                    "kwargs": kwargs,
+                }
+            )
+            if self.engine_call_failures_remaining > 0:
+                self.engine_call_failures_remaining -= 1
+                continue
+            return f"result:{method}"
+        raise RuntimeError(f"engine call failed after {max_retries} attempt(s)")
 
 
 def _install_fake_areal(monkeypatch):
@@ -296,6 +342,166 @@ async def test_engine_creation_preserves_other_failures(monkeypatch):
         )
 
     assert caught.value is failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rpc_meta",
+    [None, {}, {"broadcast": True}, "invalid-metadata"],
+)
+async def test_collective_or_unknown_engine_rpc_gets_exactly_one_attempt(
+    monkeypatch, rpc_meta
+):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler.engine_call_failures_remaining = 100
+
+    with pytest.raises(RuntimeError, match=r"after 1 attempt\(s\)"):
+        await scheduler.async_call_engine(
+            "actor/121",
+            "compute_advantages",
+            rpc_meta=rpc_meta,
+            max_retries=9,
+        )
+
+    assert len(scheduler.engine_call_attempts) == 1
+    call = scheduler.engine_call_attempts[0]
+    assert call["max_retries"] == 1
+    assert call["http_timeout"] == 1800.0
+
+
+@pytest.mark.asyncio
+async def test_explicit_nonbroadcast_rpc_retains_default_retries(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler.engine_call_failures_remaining = 100
+
+    with pytest.raises(RuntimeError, match=r"after 3 attempt\(s\)"):
+        await scheduler.async_call_engine(
+            "actor/121",
+            "fetch_buffer_stats",
+            rpc_meta={"broadcast": False},
+        )
+
+    assert len(scheduler.engine_call_attempts) == 3
+    assert {call["max_retries"] for call in scheduler.engine_call_attempts} == {3}
+    assert {call["http_timeout"] for call in scheduler.engine_call_attempts} == {
+        7200.0
+    }
+
+
+@pytest.mark.asyncio
+async def test_explicit_nonbroadcast_rpc_preserves_caller_policy(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+    scheduler.engine_call_failures_remaining = 100
+
+    with pytest.raises(RuntimeError, match=r"after 5 attempt\(s\)"):
+        await scheduler.async_call_engine(
+            "actor/121",
+            "fetch_buffer_stats",
+            rpc_meta={"broadcast": False},
+            http_timeout=17.5,
+            max_retries=5,
+            retry_delay=0.25,
+        )
+
+    assert len(scheduler.engine_call_attempts) == 5
+    call = scheduler.engine_call_attempts[0]
+    assert call["http_timeout"] == 17.5
+    assert call["max_retries"] == 5
+    assert call["retry_delay"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_collective_timeout_defaults_do_not_shorten_ppo(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    await scheduler.async_call_engine(
+        "actor/121",
+        "ppo_update",
+        rpc_meta={"broadcast": True},
+    )
+
+    call = scheduler.engine_call_attempts[0]
+    assert call["http_timeout"] == 7200.0
+    assert call["max_retries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_collective_timeout_environment_overrides_are_applied(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    monkeypatch.setenv(COLLECTIVE_RPC_TIMEOUT_ENV, "7100.5")
+    monkeypatch.setenv(COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV, "1250.25")
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    await scheduler.async_call_engine(
+        "actor/121",
+        "compute_advantages",
+        rpc_meta={"broadcast": True},
+    )
+    await scheduler.async_call_engine(
+        "actor/121",
+        "ppo_update",
+        rpc_meta={"broadcast": True},
+    )
+
+    assert [call["http_timeout"] for call in scheduler.engine_call_attempts] == [
+        1250.25,
+        7100.5,
+    ]
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        (COLLECTIVE_RPC_TIMEOUT_ENV, "0"),
+        (COLLECTIVE_RPC_TIMEOUT_ENV, "-1"),
+        (COLLECTIVE_RPC_TIMEOUT_ENV, "nan"),
+        (COLLECTIVE_RPC_TIMEOUT_ENV, "inf"),
+        (COLLECTIVE_RPC_TIMEOUT_ENV, "not-a-number"),
+        (COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV, "0"),
+        (COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV, "-1"),
+        (COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV, "nan"),
+        (COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV, "inf"),
+        (COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV, "not-a-number"),
+    ],
+)
+def test_collective_timeout_environment_rejects_invalid_values(
+    monkeypatch, name, value
+):
+    module = _load_scheduler_module(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=rf"{name} must be a positive finite number"):
+        module.PreallocatedSlurmScheduler()
+
+
+@pytest.mark.asyncio
+async def test_collective_explicit_timeout_is_validated_and_preserved(monkeypatch):
+    module = _load_scheduler_module(monkeypatch)
+    scheduler = module.PreallocatedSlurmScheduler()
+
+    await scheduler.async_call_engine(
+        "actor/121",
+        "compute_advantages",
+        rpc_meta={"broadcast": True},
+        http_timeout=321.5,
+        max_retries=7,
+    )
+
+    call = scheduler.engine_call_attempts[0]
+    assert call["http_timeout"] == 321.5
+    assert call["max_retries"] == 1
+
+    with pytest.raises(ValueError, match="positive finite number"):
+        await scheduler.async_call_engine(
+            "actor/121",
+            "compute_advantages",
+            rpc_meta={"broadcast": True},
+            http_timeout=float("nan"),
+        )
 
 
 def test_worker_configuration_is_parallel_across_hosts_and_serial_per_host(monkeypatch):

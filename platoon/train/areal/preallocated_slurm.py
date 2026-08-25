@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import signal
@@ -25,6 +26,29 @@ from areal.infra.utils.proc import build_streaming_log_cmd
 from areal.utils import logging
 
 logger = logging.getLogger("PreallocatedSlurmScheduler")
+
+_DEFAULT_ENGINE_RPC_TIMEOUT_SECONDS = 7200.0
+_DEFAULT_ENGINE_RPC_MAX_RETRIES = 3
+_DEFAULT_COLLECTIVE_RPC_TIMEOUT_SECONDS = 7200.0
+_DEFAULT_COMPUTE_ADVANTAGES_RPC_TIMEOUT_SECONDS = 1800.0
+_COLLECTIVE_RPC_TIMEOUT_ENV = "PLATOON_AREAL_COLLECTIVE_RPC_TIMEOUT_SECONDS"
+_COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV = (
+    "PLATOON_AREAL_COMPUTE_ADVANTAGES_RPC_TIMEOUT_SECONDS"
+)
+
+
+def _positive_finite_float(value: object, *, name: str) -> float:
+    """Parse a positive finite float with a useful configuration error."""
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a positive finite number, got {value!r}"
+        ) from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+    return parsed
 
 
 class PreallocatedSlurmScheduler(SlurmScheduler):
@@ -71,6 +95,93 @@ class PreallocatedSlurmScheduler(SlurmScheduler):
             )
         self._configure_lock = threading.Lock()
         self._configured_worker_generations: dict[str, tuple[int, ...]] = {}
+        self._collective_rpc_timeout = _positive_finite_float(
+            os.environ.get(
+                _COLLECTIVE_RPC_TIMEOUT_ENV,
+                str(_DEFAULT_COLLECTIVE_RPC_TIMEOUT_SECONDS),
+            ),
+            name=_COLLECTIVE_RPC_TIMEOUT_ENV,
+        )
+        self._compute_advantages_rpc_timeout = _positive_finite_float(
+            os.environ.get(
+                _COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV,
+                str(_DEFAULT_COMPUTE_ADVANTAGES_RPC_TIMEOUT_SECONDS),
+            ),
+            name=_COMPUTE_ADVANTAGES_RPC_TIMEOUT_ENV,
+        )
+
+    async def async_call_engine(
+        self,
+        worker_id: str,
+        method: str,
+        engine_name: str | None = None,
+        *args,
+        rpc_meta: dict | None = None,
+        http_timeout: float | None = None,
+        max_retries: int | None = None,
+        retry_delay: float = 1.0,
+        **kwargs,
+    ):
+        """Use at-most-once delivery for broadcast/SPMD engine calls.
+
+        AReaL's HTTP timeout cannot cancel work already queued on an engine
+        worker.  Retrying just one rank after an ambiguous timeout or HTTP 500
+        can therefore enqueue a second invocation while its peers remain in
+        the first distributed collective, permanently desynchronizing the
+        process group.  ``rpc_meta.broadcast`` is the controller's semantic
+        marker for calls whose input is broadcast within a model-parallel
+        group.  An omitted ``rpc_meta`` is also potentially collective because
+        initialized AReaL ``TrainEngine`` instances default it to broadcast.
+        Those calls must have exactly one delivery attempt; only an explicit
+        ``broadcast=False`` opts into ordinary retry behavior.
+
+        A failed collective may already have poisoned its process group and is
+        intentionally allowed to fail the trainer so the outer job wrapper can
+        recover from its checkpoint.  Non-broadcast calls retain AReaL's
+        normal retry policy unchanged.
+        """
+
+        is_collective = not (
+            isinstance(rpc_meta, dict) and rpc_meta.get("broadcast") is False
+        )
+        if is_collective:
+            default_timeout = (
+                self._compute_advantages_rpc_timeout
+                if method == "compute_advantages"
+                else self._collective_rpc_timeout
+            )
+            effective_timeout = (
+                default_timeout
+                if http_timeout is None
+                else _positive_finite_float(
+                    http_timeout,
+                    name="collective RPC http_timeout",
+                )
+            )
+            effective_max_retries = 1
+        else:
+            effective_timeout = (
+                _DEFAULT_ENGINE_RPC_TIMEOUT_SECONDS
+                if http_timeout is None
+                else http_timeout
+            )
+            effective_max_retries = (
+                _DEFAULT_ENGINE_RPC_MAX_RETRIES
+                if max_retries is None
+                else max_retries
+            )
+
+        return await super().async_call_engine(
+            worker_id,
+            method,
+            engine_name,
+            *args,
+            rpc_meta=rpc_meta,
+            http_timeout=effective_timeout,
+            max_retries=effective_max_retries,
+            retry_delay=retry_delay,
+            **kwargs,
+        )
 
     async def create_engine(
         self,
