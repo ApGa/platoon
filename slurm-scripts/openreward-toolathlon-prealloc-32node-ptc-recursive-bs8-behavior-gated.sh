@@ -107,10 +107,11 @@ export OPENREWARD_CONTROLLER_MEM=${OPENREWARD_CONTROLLER_MEM:-128G}
 export PLATOON_AREAL_PREALLOC_SRUN_ARGS=${PLATOON_AREAL_PREALLOC_SRUN_ARGS:-"--unbuffered --mpi=pmi2 -K --overlap --cpu-bind=none"}
 export NCCL_RAS_ENABLE=${NCCL_RAS_ENABLE:-0}
 
-# The cold first update is excluded from adaptive history. Use the established
-# 30-minute bootstrap floor and a ten-minute boundary safety margin.
+# The cold first update is excluded from adaptive history. Keep the established
+# 30-minute bootstrap floor, but rely on the adaptive 15% step-time headroom
+# instead of stacking a second fixed wall-time buffer for this trial.
 export OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS=${OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-1800}
-export OPENREWARD_DEADLINE_SAFETY_SECONDS=${OPENREWARD_DEADLINE_SAFETY_SECONDS:-600}
+export OPENREWARD_DEADLINE_SAFETY_SECONDS=0
 
 # Force a fresh behavior-gated lineage across automatic successors. The judge
 # uses the rollout policy itself, so it needs no separate model credential.
