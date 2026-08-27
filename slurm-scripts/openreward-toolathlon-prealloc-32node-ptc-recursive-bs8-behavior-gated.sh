@@ -103,7 +103,7 @@ unset required_name
 
 # Preserve the proven 32-node recursive topology and allocation safeguards.
 export OPENREWARD_CONTROLLER_CPUS=${OPENREWARD_CONTROLLER_CPUS:-64}
-export OPENREWARD_CONTROLLER_MEM=${OPENREWARD_CONTROLLER_MEM:-128G}
+export OPENREWARD_CONTROLLER_MEM=${OPENREWARD_CONTROLLER_MEM:-256G}
 export PLATOON_AREAL_PREALLOC_SRUN_ARGS=${PLATOON_AREAL_PREALLOC_SRUN_ARGS:-"--unbuffered --mpi=pmi2 -K --overlap --cpu-bind=none"}
 export NCCL_RAS_ENABLE=${NCCL_RAS_ENABLE:-0}
 
