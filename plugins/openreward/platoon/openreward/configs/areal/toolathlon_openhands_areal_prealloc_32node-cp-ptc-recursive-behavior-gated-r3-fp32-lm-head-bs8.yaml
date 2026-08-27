@@ -14,7 +14,7 @@ openreward:
   # a one-shot behavioral audit performed by the same rollout policy being
   # trained. This deliberately does not configure a separate judge model.
   enable_subagent_reward_judging: true
-  subagent_reward_judge_max_steps: 50
+  subagent_reward_judge_max_steps: 100
   enable_subagent_behavior_judging: true
   subagent_behavior_judge_max_prompt_tokens: 24576
   subagent_behavior_judge_max_output_tokens: 4096
