@@ -23,6 +23,7 @@ workflow_config:
   # root label, while 25% of non-root post-merge datums contribute gradients.
   subagent_datum_keep_probability: 0.25
   rollout_config:
+    max_steps: 200
     propagate_root_success: true
   # No policy-subtree token cost is attached in this ablation.
   token_efficiency_reward:

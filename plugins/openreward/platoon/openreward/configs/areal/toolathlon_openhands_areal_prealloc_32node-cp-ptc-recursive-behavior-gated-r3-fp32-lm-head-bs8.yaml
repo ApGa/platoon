@@ -30,6 +30,7 @@ workflow_config:
   # trajectory a 25% independent chance of contributing gradients.
   subagent_datum_keep_probability: 0.25
   rollout_config:
+    max_steps: 200
     propagate_root_success: false
   # Isolate the behavioral gate by removing policy-subtree token shaping.
   token_efficiency_reward:
