@@ -10,7 +10,7 @@ openreward:
   # Every solver trajectory is trained from the completed root outcome, so no
   # synthetic verifier tree or direct-child delegation bonus is needed.
   subagent_environment_access: shared
-  subagent_default_max_steps: 50
+  subagent_default_max_steps: 100
   subagent_max_depth: 2
   enable_subagent_reward_judging: false
   subagent_delegation_reward_coefficient: 0.0

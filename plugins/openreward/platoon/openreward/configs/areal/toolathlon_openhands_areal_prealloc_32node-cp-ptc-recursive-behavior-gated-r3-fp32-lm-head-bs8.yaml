@@ -8,7 +8,7 @@ trial_name: ta32-rec-behavior-gate-v1-trial0
 
 openreward:
   subagent_environment_access: shared
-  subagent_default_max_steps: 50
+  subagent_default_max_steps: 100
   subagent_max_depth: 2
   # Retain the environment outcome verifier, then gate its positive result with
   # a one-shot behavioral audit performed by the same rollout policy being
