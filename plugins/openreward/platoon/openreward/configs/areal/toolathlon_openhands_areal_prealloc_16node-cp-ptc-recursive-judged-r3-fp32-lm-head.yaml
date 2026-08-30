@@ -23,7 +23,7 @@ workflow_config:
     # Judged child rewards should remain visible in trajectory metrics. The
     # reward processor uses the judgment either way, but root propagation would
     # overwrite the child reward/success telemetry after rollout.
-    propogate_root_success: false
+    propagate_root_success: false
     # Child and verifier execution happens synchronously inside a parent step.
     # Allow one such step 45 minutes and leave another 45 minutes for the rest
     # of the root trajectory so the outer deadline does not preempt it first.

@@ -10,7 +10,7 @@ from platoon.episode.context import budget_tracker, current_trajectory_collectio
 from platoon.episode.loop import run_episode
 from platoon.episode.trajectory import DepthAwareStepBudgetTracker, TrajectoryCollection
 from platoon.utils.llm_client import LiteLLMClient
-from platoon.utils.subagent_rewards import propogate_root_success
+from platoon.utils.subagent_rewards import propagate_root_success
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from .agent import TextCraftAgent, TextCraftDepthAwareAgent, TextCraftRecursiveAgent
@@ -152,8 +152,8 @@ async def run_synth_depth_aware_rollout(
             result = current_trajectory_collection.get().to_dict()
         else:
             result = current_trajectory_collection.get()
-        if config.propogate_root_success:
-            result = propogate_root_success(result)
+        if config.propagate_root_success:
+            result = propagate_root_success(result)
         return result
 
     except Exception as e:
@@ -219,8 +219,8 @@ async def run_synth_recursive_rollout(task: Task, config: RolloutConfig) -> dict
             result = current_trajectory_collection.get().to_dict()
         else:
             result = current_trajectory_collection.get()
-        if config.propogate_root_success:
-            result = propogate_root_success(result)
+        if config.propagate_root_success:
+            result = propagate_root_success(result)
         return result
 
     except Exception as e:

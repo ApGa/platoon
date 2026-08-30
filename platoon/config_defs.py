@@ -38,12 +38,27 @@ class RolloutConfig:
     timeout: int | None = None  # Trajectory timeout (entire rollout)
     step_timeout: int = 300  # Per-step timeout (agent.act + env.step)
     return_dict: bool = False
-    propogate_root_success: bool = False
+    # ``None`` is used only while OmegaConf composes the canonical and legacy
+    # keys. ``__post_init__`` always resolves this to a concrete boolean.
+    propagate_root_success: bool | None = None
+    # Deprecated compatibility key for configs created before the spelling
+    # correction. New configs and code must use ``propagate_root_success``.
+    propogate_root_success: bool | None = None
     skip_subagent_reward_computation: bool = False
     inference_params: InferenceParams = field(default_factory=InferenceParams)
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        canonical = self.propagate_root_success
+        legacy = self.propogate_root_success
+        if canonical is not None and legacy is not None and canonical != legacy:
+            raise ValueError(
+                "Conflicting rollout propagation settings: "
+                "propagate_root_success and deprecated propogate_root_success"
+            )
+        self.propagate_root_success = bool(
+            legacy if canonical is None and legacy is not None else canonical
+        )
         # Support loading from plain dicts from config loaders and subprocess paths.
         if isinstance(self.inference_params, dict):
             self.inference_params = InferenceParams(**self.inference_params)

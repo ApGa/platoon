@@ -248,6 +248,38 @@ of the policy recursion-depth limit. Verifier trajectories are marked
 `reward/subagent_judgment`, and OpenReward's reward processor uses that score as
 the worker subtrajectory reward.
 
+An optional behavioral gate can audit *how* a positively verified child earned
+its result:
+
+```yaml
+openreward:
+  enable_subagent_reward_judging: true
+  enable_subagent_behavior_judging: true
+  subagent_behavior_judge_max_prompt_tokens: 24576
+  subagent_behavior_judge_max_output_tokens: 4096
+  subagent_behavior_judge_timeout_seconds: 300
+```
+
+The gate uses the same current rollout-policy model, endpoint, and tokenizer as
+the agent being trained; it is not a separate reward model. Its one-shot
+completion is sampled with `store=false`, so AReaL does not cache or export the
+auxiliary completion as policy data. The environment verifier runs first, and
+the behavioral judge runs only for a valid positive verifier score. A valid
+behavioral pass preserves that score; a valid fail multiplies it by zero and is
+trainable negative supervision. A judge timeout, malformed response, or
+insufficient-evidence verdict also fails closed but marks the child ineligible
+for policy training rather than teaching an uncertain zero.
+
+The judge does not rely on the latest condensation summary alone. Its bounded
+input combines a deterministic whole-trajectory action/error/delegation ledger,
+aggregate statistics, compact descendant-lineage metadata, the latest safe
+condensation as untrusted state context, and detailed public events after that
+boundary. Hidden reasoning, condenser reasoning, and raw descendant histories
+are excluded. Outcome and behavioral components remain separately inspectable
+in `misc.subagent_outcome_judgment`, `misc.subagent_behavior_judgment`,
+`reward/subagent_outcome_judgment`, and `reward/subagent_behavior_gate`; the
+historical `subagent_reward_judgment` fields contain the effective gated score.
+
 ## Full-allocation GPU keepalive
 
 Preallocated OpenReward jobs start `slurm-scripts/gpu_keepalive.py` before

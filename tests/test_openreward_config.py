@@ -199,7 +199,41 @@ def test_openreward_config_defaults_subagent_judging_off():
 
     assert config.enable_subagent_reward_judging is False
     assert config.subagent_reward_judge_max_steps == 20
+    assert config.enable_subagent_behavior_judging is False
+    assert config.subagent_behavior_judge_max_prompt_tokens == 24_576
+    assert config.subagent_behavior_judge_max_output_tokens == 4_096
+    assert config.subagent_behavior_judge_timeout_seconds == 300.0
     assert config.subagent_delegation_reward_coefficient == 0.0
+
+
+def test_openreward_behavior_judging_requires_outcome_verifier_and_valid_limits():
+    config_mod = _load_openreward_config_module()
+
+    with pytest.raises(ValueError, match="requires enable_subagent_reward_judging"):
+        config_mod.OpenRewardConfig.from_mapping(
+            {"enable_subagent_behavior_judging": True}
+        )
+
+    config = config_mod.OpenRewardConfig.from_mapping(
+        {
+            "enable_subagent_reward_judging": True,
+            "enable_subagent_behavior_judging": True,
+            "subagent_behavior_judge_max_prompt_tokens": 12_000,
+            "subagent_behavior_judge_max_output_tokens": 512,
+            "subagent_behavior_judge_timeout_seconds": 45,
+        }
+    )
+    assert config.subagent_behavior_judge_max_prompt_tokens == 12_000
+    assert config.subagent_behavior_judge_max_output_tokens == 512
+    assert config.subagent_behavior_judge_timeout_seconds == 45.0
+
+    for field_name, value in (
+        ("subagent_behavior_judge_max_prompt_tokens", 0),
+        ("subagent_behavior_judge_max_output_tokens", True),
+        ("subagent_behavior_judge_timeout_seconds", float("inf")),
+    ):
+        with pytest.raises(ValueError, match=field_name):
+            config_mod.OpenRewardConfig.from_mapping({field_name: value})
 
 
 def test_openreward_config_rejects_negative_delegation_reward_coefficient():
@@ -392,7 +426,7 @@ def test_openreward_rollout_honors_root_success_propagation_flag():
         and isinstance(node.test, ast.Attribute)
         and isinstance(node.test.value, ast.Name)
         and node.test.value.id == "config"
-        and node.test.attr == "propogate_root_success"
+        and node.test.attr == "propagate_root_success"
     ]
 
     propagation_guards = [
@@ -401,7 +435,7 @@ def test_openreward_rollout_honors_root_success_propagation_flag():
         if any(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "propogate_root_success"
+            and node.func.id == "propagate_root_success"
             for node in ast.walk(guard)
         )
     ]
@@ -411,7 +445,7 @@ def test_openreward_rollout_honors_root_success_propagation_flag():
 
 
 def test_root_success_propagation_relabels_helpful_child_trajectory():
-    from platoon.utils.subagent_rewards import propogate_root_success
+    from platoon.utils.subagent_rewards import propagate_root_success
 
     collection = {
         "trajectories": {
@@ -435,7 +469,7 @@ def test_root_success_propagation_relabels_helpful_child_trajectory():
         }
     }
 
-    result = propogate_root_success(collection)
+    result = propagate_root_success(collection)
 
     assert result is collection
     assert result["trajectories"]["root"]["reward"] == 0.75
@@ -443,6 +477,15 @@ def test_root_success_propagation_relabels_helpful_child_trajectory():
     child_reward_misc = result["trajectories"]["child"]["steps"][-1]["misc"]["reward_misc"]
     assert child_reward_misc["reward/success"] == 0.75
     assert child_reward_misc["reward/subagent_succeeded"] == 0.75
+
+
+def test_root_success_propagation_keeps_legacy_import_alias():
+    from platoon.utils.subagent_rewards import (
+        propagate_root_success,
+        propogate_root_success,
+    )
+
+    assert propogate_root_success is propagate_root_success
 
 
 def test_openreward_mcp_bridge_declares_tools_lockfree(monkeypatch):
