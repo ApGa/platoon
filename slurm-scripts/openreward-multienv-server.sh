@@ -18,17 +18,26 @@ USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd)}
 KIND=${OPENREWARD_SUPPLEMENTAL_KIND:?Set OPENREWARD_SUPPLEMENTAL_KIND to tmax or swe_rebench}
 JOB_ID=${SLURM_JOB_ID:-manual}
 LOCAL_ROOT=${SLURM_TMPDIR:-/tmp}/platoon-openreward-${JOB_ID}/${KIND}
+SWE_RUNTIME_GUARD=${REPO_ROOT}/plugins/openreward/swe-rebench-runtime-guard.sh
 
 export OPENREWARD_DISABLE_UPDATE_CHECK=1
 export OPENHANDS_SUPPRESS_BANNER=1
 export ENROOT_CACHE_PATH=${LOCAL_ROOT}/enroot-cache
 export ENROOT_DATA_PATH=${LOCAL_ROOT}/enroot-data
 export ENROOT_RUNTIME_PATH=${LOCAL_ROOT}/enroot-runtime
+export ENROOT_TEMP_PATH=${LOCAL_ROOT}/enroot-tmp
+export SWE_ENROOT_SESSION_TMP_ROOT=${LOCAL_ROOT}/swe-enroot-sessions
 export ENROOT_MAX_PROCESSORS=${OPENREWARD_ENROOT_MAX_PROCESSORS:-4}
 # Never let Enroot's site hook bind the submitter's home into untrusted task
 # containers. Both environment backends enforce this again per start.
 export ENROOT_MOUNT_HOME=
-mkdir -p "${ENROOT_CACHE_PATH}" "${ENROOT_DATA_PATH}" "${ENROOT_RUNTIME_PATH}"
+mkdir -p \
+  "${ENROOT_CACHE_PATH}" \
+  "${ENROOT_DATA_PATH}" \
+  "${ENROOT_RUNTIME_PATH}" \
+  "${ENROOT_TEMP_PATH}"
+mkdir -p -m 0700 "${SWE_ENROOT_SESSION_TMP_ROOT}"
+chmod 0700 "${SWE_ENROOT_SESSION_TMP_ROOT}"
 
 MAX_RESTARTS=${OPENREWARD_SUPPLEMENTAL_SERVER_MAX_RESTARTS:-20}
 RESTART_RESET_SECS=${OPENREWARD_SUPPLEMENTAL_SERVER_RESTART_RESET_SECS:-300}
@@ -157,8 +166,21 @@ case "${KIND}" in
     ;;
   swe_rebench)
     ENV_ROOT=${REPO_ROOT}/external/swe-rebench-v2-openrewardenv
-    SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_SOURCE_REVISION:-25b14c06b9236c075a4ede25bff6979e5783bb09}
-    require_source_revision "${ENV_ROOT}" "${SWE_REBENCH_SOURCE_REVISION}"
+    [[ -r "${SWE_RUNTIME_GUARD}" ]] || {
+      echo "ERROR: missing SWE-rebench runtime guard: ${SWE_RUNTIME_GUARD}" >&2
+      exit 2
+    }
+    # shellcheck source=../plugins/openreward/swe-rebench-runtime-guard.sh
+    source "${SWE_RUNTIME_GUARD}"
+    swe_rebench_require_validated_source \
+      "${REPO_ROOT}" \
+      "${ENV_ROOT}" \
+      "${SWE_REBENCH_SOURCE_REVISION:-}" \
+      "mixed-training SWE server" || exit $?
+    export SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_VALIDATED_SOURCE_REVISION}
+    swe_rebench_require_enroot_runtime \
+      "${ENROOT_TEMP_PATH}" \
+      "mixed-training SWE server" || exit $?
     PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
     # Train on Prime Intellect's full verified-solvable subset by default. The
     # environment name remains stable; DATA_DIR selects its 6,272-task catalog.

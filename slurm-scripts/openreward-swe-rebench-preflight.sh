@@ -44,9 +44,24 @@ else
   REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 fi
 ENV_ROOT=${REPO_ROOT}/external/swe-rebench-v2-openrewardenv
+SWE_RUNTIME_GUARD=${REPO_ROOT}/plugins/openreward/swe-rebench-runtime-guard.sh
 PYTHON=${ENV_ROOT}/.venv-openreward/bin/python
 DATA_DIR=${SWE_REBENCH_DATA_DIR:-${REPO_ROOT}/.cache/swe-rebench-v2-filtered-verified}
 MODE=${1:-${SWE_PREFLIGHT_MODE:-metadata}}
+
+[[ -r "${SWE_RUNTIME_GUARD}" ]] || {
+  echo "ERROR: missing SWE-rebench runtime guard: ${SWE_RUNTIME_GUARD}" >&2
+  exit 2
+}
+# Never scan or execute tasks from a stale, caller-selected, or dirty checkout.
+# shellcheck source=../plugins/openreward/swe-rebench-runtime-guard.sh
+source "${SWE_RUNTIME_GUARD}"
+swe_rebench_require_validated_source \
+  "${REPO_ROOT}" \
+  "${ENV_ROOT}" \
+  "${SWE_REBENCH_SOURCE_REVISION:-}" \
+  "SWE-rebench preflight" || exit $?
+export SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_VALIDATED_SOURCE_REVISION}
 
 [[ -x "${PYTHON}" ]] || {
   echo "ERROR: missing SWE-rebench runtime: ${PYTHON}" >&2
@@ -143,6 +158,10 @@ mkdir -p \
   "${ENROOT_RUNTIME_PATH}" \
   "${ENROOT_TEMP_PATH}" \
   "${SWE_ENROOT_SESSION_TMP_ROOT}"
+chmod 0700 "${SWE_ENROOT_SESSION_TMP_ROOT}"
+swe_rebench_require_enroot_runtime \
+  "${ENROOT_TEMP_PATH}" \
+  "SWE-rebench execute preflight" || exit $?
 
 EXECUTION_ARGS=(
   --num-shards "${NUM_SHARDS}"

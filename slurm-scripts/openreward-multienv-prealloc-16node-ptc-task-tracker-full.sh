@@ -50,6 +50,8 @@ fi
 USER_ROOT=${PLATOON_USER_ROOT:-$(cd "${REPO_ROOT}/../.." && pwd)}
 BASE_LAUNCHER=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc-base.sh
 SERVER_HELPER=${REPO_ROOT}/slurm-scripts/openreward-multienv-server.sh
+SWE_RUNTIME_GUARD=${REPO_ROOT}/plugins/openreward/swe-rebench-runtime-guard.sh
+SWE_SOURCE_ROOT=${REPO_ROOT}/external/swe-rebench-v2-openrewardenv
 CREDENTIAL_SOURCE=${REPO_ROOT}/slurm-scripts/openreward-toolathlon-prealloc.sh
 DEFAULT_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/toolathlon_tmax_swe_openhands_areal_prealloc_16node-cp-ptc-task-tracker-full-r3-fp32-lm-head-hardened-v1.yaml
 CONFIG=${1:-${DEFAULT_CONFIG}}
@@ -68,11 +70,27 @@ export OPENREWARD_JOB_SCRIPT=${WRAPPER}
   echo "ERROR: server helper is not executable: ${SERVER_HELPER}" >&2
   exit 2
 }
+[[ -r "${SWE_RUNTIME_GUARD}" ]] || {
+  echo "ERROR: missing SWE-rebench runtime guard: ${SWE_RUNTIME_GUARD}" >&2
+  exit 2
+}
 [[ -f "${CONFIG}" ]] || {
   echo "ERROR: config not found: ${CONFIG}" >&2
   exit 2
 }
 CONFIG=$(readlink -f "${CONFIG}")
+
+# Reject stale submission/continuation environments before launching any
+# allocation-wide server steps, then propagate the one reviewed source pin to
+# every node. The per-node helper independently verifies the same pin.
+# shellcheck source=../plugins/openreward/swe-rebench-runtime-guard.sh
+source "${SWE_RUNTIME_GUARD}"
+swe_rebench_require_validated_source \
+  "${REPO_ROOT}" \
+  "${SWE_SOURCE_ROOT}" \
+  "${SWE_REBENCH_SOURCE_REVISION:-}" \
+  "mixed-training launcher" || exit $?
+export SWE_REBENCH_SOURCE_REVISION=${SWE_REBENCH_VALIDATED_SOURCE_REVISION}
 
 # Reuse the established launcher's credentials without printing or duplicating
 # secret values in this experiment wrapper. Existing submission-environment
