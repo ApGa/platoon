@@ -50,6 +50,14 @@ TOOLATHLON_ONLY_BINDINGS = (
     ),
 )
 
+BEHAVIOR_RESUME_BINDING = (
+    "qwen36-32-v31-behavior-gs13",
+    "32",
+    "qwen36",
+    "abci-or-ta32-q36-cp2-behavior-gate-v27",
+    "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0",
+)
+
 
 def _marked(source: str, begin: str, end: str) -> str:
     start = source.index(begin) + len(begin)
@@ -76,6 +84,7 @@ def _run_common_authorization(
 die() {{ printf '%s\n' "$*" >&2; exit 2; }}
 ENVIRONMENT_SET=$1
 FRESH_RUN_BINDING=$2
+RESUME_SUCCESSOR_BINDING=
 EXPECTED_NNODES=$3
 OPENREWARD_MODEL_FAMILY=$4
 EXPECTED_EXPERIMENT=$5
@@ -102,6 +111,55 @@ printf 'environment_set=%s\nbinding=%s\n' \
             experiment,
             trial,
             incoming_private_binding,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_common_resume_authorization(
+    binding: str,
+    nodes: str,
+    model_family: str,
+    experiment: str,
+    trial: str,
+) -> subprocess.CompletedProcess[str]:
+    source = COMMON.read_text(encoding="utf-8")
+    authorization = _marked(
+        source,
+        "# BEGIN OPENREWARD_ENVIRONMENT_SET_AUTHORIZATION",
+        "# END OPENREWARD_ENVIRONMENT_SET_AUTHORIZATION",
+    )
+    harness = f"""set -euo pipefail
+die() {{ printf '%s\n' "$*" >&2; exit 2; }}
+ENVIRONMENT_SET=toolathlon_only
+FRESH_RUN_BINDING=
+RESUME_SUCCESSOR_BINDING=$1
+EXPECTED_NNODES=$2
+OPENREWARD_MODEL_FAMILY=$3
+EXPECTED_EXPERIMENT=$4
+EXPECTED_TRIAL=$5
+OPENREWARD_ENVIRONMENT_SET_BINDING=
+EXPECTED_RECURSIVE=1
+EXPECTED_PTC=1
+REQUIRE_EXISTING_RECOVERY=1
+ENVIRONMENT_SET_BINDING=
+{authorization}
+printf 'environment_set=%s\nbinding=%s\n' \
+    "${{OPENREWARD_ENVIRONMENT_SET}}" "${{OPENREWARD_ENVIRONMENT_SET_BINDING}}"
+"""
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "resume-authorization-test",
+            binding,
+            nodes,
+            model_family,
+            experiment,
+            trial,
         ],
         check=False,
         capture_output=True,
@@ -248,6 +306,54 @@ printf 'supervisor_disabled_binding=%s\n' "${{NODE_MEMORY_GUARD_DISABLED_BINDING
     )
 
 
+def _run_common_resume_guard_authorization(
+    binding: str,
+    *,
+    environment_binding: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    source = COMMON.read_text(encoding="utf-8")
+    authorization_end = source.index("# END OPENREWARD_ENVIRONMENT_SET_AUTHORIZATION")
+    start = source.index(
+        'if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then',
+        authorization_end,
+    )
+    end = source.index(
+        '\nexport \\\n    OPENREWARD_NODE_MEMORY_GUARD_ENABLED',
+        start,
+    )
+    authorization = source[start:end]
+    bound_environment = binding if environment_binding is None else environment_binding
+    harness = f"""set -euo pipefail
+die() {{ printf '%s\n' "$*" >&2; exit 2; }}
+NODE_MEMORY_GUARD_ENABLED=0
+RESUME_SUCCESSOR_BINDING=$1
+FRESH_RUN_BINDING=
+ENVIRONMENT_SET=toolathlon_only
+ENVIRONMENT_SET_BINDING=$2
+NODE_MEMORY_GUARD_DISABLED_BINDING=
+EXPECTED_NNODES=32
+EXPECTED_RECURSIVE=1
+EXPECTED_PTC=1
+EXPECTED_EXPERIMENT=abci-or-ta32-q36-cp2-behavior-gate-v27
+EXPECTED_TRIAL=abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0
+{authorization}
+printf 'disabled_binding=%s\n' "${{NODE_MEMORY_GUARD_DISABLED_BINDING}}"
+"""
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "common-resume-guard-authorization-test",
+            binding,
+            bound_environment,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 @pytest.mark.parametrize(
     ("binding", "nodes", "model_family", "experiment", "trial"),
     TOOLATHLON_ONLY_BINDINGS,
@@ -302,6 +408,40 @@ def test_toolathlon_only_fresh_bindings_authorize_exact_guard_disablement(
         binding, environment_binding="wrong-binding"
     )
     assert mismatched_supervisor.returncode == 2
+
+
+def test_toolathlon_only_behavior_resume_authorizes_exact_tuple_and_guard() -> None:
+    binding, nodes, model_family, experiment, trial = BEHAVIOR_RESUME_BINDING
+    common = _run_common_resume_authorization(
+        binding, nodes, model_family, experiment, trial
+    )
+    assert common.returncode == 0, common.stderr
+    assert f"binding={binding}" in common.stdout
+
+    supervisor = _run_supervisor_authorization(
+        binding, nodes, model_family, experiment, trial
+    )
+    assert supervisor.returncode == 0, supervisor.stderr
+
+    wrong_trial = _run_common_resume_authorization(
+        binding, nodes, model_family, experiment, trial + "-wrong"
+    )
+    assert wrong_trial.returncode == 2
+
+    common_guard = _run_common_resume_guard_authorization(binding)
+    assert common_guard.returncode == 0, common_guard.stderr
+    assert f"disabled_binding={binding}" in common_guard.stdout
+    supervisor_guard = _run_supervisor_guard_authorization(binding)
+    assert supervisor_guard.returncode == 0, supervisor_guard.stderr
+
+    mismatched_common_guard = _run_common_resume_guard_authorization(
+        binding, environment_binding="wrong-binding"
+    )
+    assert mismatched_common_guard.returncode == 2
+    mismatched_supervisor_guard = _run_supervisor_guard_authorization(
+        binding, environment_binding="wrong-binding"
+    )
+    assert mismatched_supervisor_guard.returncode == 2
 
 
 def test_environment_set_is_fail_closed_and_mixed_mode_remains_the_default() -> None:

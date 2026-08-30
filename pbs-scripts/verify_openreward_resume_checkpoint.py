@@ -63,6 +63,7 @@ QWEN38_32_V22_BINDING_ID = "qwen38-32-v22-gs10"
 QWEN38_16_V22_BINDING_ID = "qwen38-16-v22-gs11-ordinary"
 QWEN38_16_V25_BINDING_ID = "qwen38-16-v25-gs12"
 QWEN36_32_V22_BINDING_ID = "qwen36-32-v22-depth2"
+QWEN36_32_V31_BEHAVIOR_BINDING_ID = "qwen36-32-v31-behavior-gs13"
 
 V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
     QWEN38_32_V22_BINDING_ID: {
@@ -291,6 +292,76 @@ V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
         "lr_num_steps": 2,
         "samples_yielded": 184,
         "iterator_yielded": 23,
+    },
+    QWEN36_32_V31_BEHAVIOR_BINDING_ID: {
+        "experiment": "abci-or-ta32-q36-cp2-behavior-gate-v27",
+        "trial": "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0",
+        "checkpoint_root": Path(
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/"
+            "aci18912it/abci-or-ta32-q36-cp2-behavior-gate-v27/"
+            "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0"
+        ),
+        "source_job": "2191661.pbs1",
+        "source_release_root": Path(
+            "/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f"
+        ),
+        "source_release_ref": "refs/tags/abci-v8r28-07bebf9-057108f",
+        "source_config": Path(
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen36_moe_cp2_c12_v27_behavior_gated.yaml"
+        ),
+        "source_config_sha256": (
+            "0b9aa3c482e73cc73661272325797cdd071b260ef4d2bd1d40fbc7abae5a46f1"
+        ),
+        "current_config_name": (
+            "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen36_moe_cp2_c12_v27_behavior_gated.yaml"
+        ),
+        "current_config_sha256": (
+            "0b9aa3c482e73cc73661272325797cdd071b260ef4d2bd1d40fbc7abae5a46f1"
+        ),
+        "source_candidate_name": (
+            "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0.success.candidate.json"
+        ),
+        "source_candidate_sha256": (
+            "89ff453445edffc6ee7ed9de98cfa4db9b42220050b7c21e29d347508b11d1f0"
+        ),
+        "source_candidate_global_step": 0,
+        "ancestor_receipts": {},
+        "source_log_name": "2191661.pbs1.OU",
+        "source_log_sha256": (
+            "62d5950b0c226162a2ffcb02bdd7a9c999805f8db8488f517126bb0c32ae776b"
+        ),
+        "target_receipt_name": (
+            "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0."
+            "resume-gs13-v8r31.success.json"
+        ),
+        "global_step": 13,
+        "start_global_step": 14,
+        "steps_per_epoch": 62,
+        "shards": 160,
+        "total_bytes": 492651122403,
+        "checkpoint_layout_sha256": (
+            "c81e27a8a3c2bc65dd24b74a1d6271aefa8d56ee250e54731890367477b1ead6"
+        ),
+        "checkpoint_sample_manifest_sha256": (
+            "ac9516d2fa09a35885ead1fe05bc5108f7dd0e54645959c8ed957f103b10d597"
+        ),
+        "fixed_content_sha256": (
+            "846524d1d26c8ba0184e99ea0d6cdb63812201926f75ea007311500c7e4b6ba3"
+        ),
+        "recover_info_content_sha256": (
+            "f126b8c0b3657d22ca9e8f44cc94f9a72fa9ea51d571a3c0c683e3b1260164fc"
+        ),
+        "stats_commit_step": 12,
+        "state_keys": 21768,
+        "storage_entries": 127481,
+        "optimizer_moment_keys": 48,
+        "optimizer_layout": "two_group",
+        "lr_num_steps": 14,
+        "samples_yielded": 152,
+        "iterator_yielded": 19,
     },
 }
 
@@ -590,7 +661,21 @@ def _verify_source_release(
         label="source release manifest",
     )
     config_name = source_config_relative.name
-    if "qwen36_moe_cp2" in config_name:
+    if config_name.endswith("qwen36_moe_cp2_c12_v27_behavior_gated.yaml"):
+        if not (
+            expected_experiment == "abci-or-ta32-q36-cp2-behavior-gate-v27"
+            and expected_trial == "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0"
+        ):
+            raise RuntimeError("source Qwen3.6 behavior-gate config lineage mismatch")
+        model_artifact_key = "fresh_recursive_32node_qwen36_cp2"
+        wrapper_name = (
+            "openreward-toolathlon-32node-recursive-qwen36-cp2-"
+            "behavior-gated-64k-h200-v27-abci.pbs"
+        )
+        model_family = "qwen36"
+        expected_architecture = "qwen3_5_moe"
+        expected_model_shards = 26
+    elif "qwen36_moe_cp2" in config_name:
         if not (
             expected_experiment == "abci-or-ta-swe32-q36-cp2-v21"
             and expected_trial == "abci-ta-swe32-rec-q36m-cp2-c24-d1-v21-t0"

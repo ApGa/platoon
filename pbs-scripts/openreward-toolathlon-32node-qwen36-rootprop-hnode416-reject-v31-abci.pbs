@@ -1,0 +1,45 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=32:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-32q36-rp-clean-v31
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Allocation filter for the fresh root-propagated trial.  Both prior PPO
+# collective stalls originated on the same physical host, hnode416.  Reject
+# that allocation before creating any trial state; otherwise delegate to the
+# immutable v8r28 production launcher unchanged.
+
+set -euo pipefail
+umask 077
+
+SELF=/home/aci18912it/rasp/releases/platoon-v8r31-07bebf9-057108f/pbs-scripts/openreward-toolathlon-32node-qwen36-rootprop-hnode416-reject-v31-abci.pbs
+ROOTPROP_WRAPPER=/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f/pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-rootprop-64k-h200-v27-abci.pbs
+DENIED_HOST=hnode416
+QSUB=/opt/pbs/bin/qsub
+
+[[ -n "${PBS_JOBID:-}" && -r "${PBS_NODEFILE:-}" ]] || {
+    echo "[rootprop-allocation-filter] ERROR: missing PBS allocation metadata" >&2
+    exit 2
+}
+[[ -x "${ROOTPROP_WRAPPER}" && -x "${QSUB}" && -x "${SELF}" ]] || {
+    echo "[rootprop-allocation-filter] ERROR: immutable launcher/filter is unavailable" >&2
+    exit 2
+}
+
+if awk -v denied="${DENIED_HOST}" '$1 == denied || index($1, denied ".") == 1 { found=1 } END { exit !found }' "${PBS_NODEFILE}"; then
+    echo "[rootprop-allocation-filter] rejecting job=${PBS_JOBID}: allocation contains ${DENIED_HOST}"
+    replacement_job=$("${QSUB}" \
+        -v "RTYPE=rt_HF,OPENREWARD_V9_GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:?},OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:?}" \
+        "${SELF}")
+    echo "[rootprop-allocation-filter] replacement_job=${replacement_job}"
+    exit 0
+fi
+
+echo "[rootprop-allocation-filter] accepted job=${PBS_JOBID}; ${DENIED_HOST} is absent"
+exec "${ROOTPROP_WRAPPER}"

@@ -139,7 +139,7 @@ def _write_json(path: Path, value: object) -> None:
 def _run_common_static_config_inspection(path: Path) -> subprocess.CompletedProcess[str]:
     source = COMMON.read_text(encoding="utf-8")
     begin = source.index('CONFIG=$(readlink -f "${CONFIG}")')
-    end = source.index('[[ -f "${SWE_REBENCH_DATA_DIR}/task_index.json" ]]', begin)
+    end = source.index("for model_file in config.json", begin)
     harness = """#!/usr/bin/env bash
 set -euo pipefail
 CONFIG=$1
@@ -147,6 +147,7 @@ EXPECTED_EXPERIMENT=abci-or-ta-swe32-q38-v16
 EXPECTED_TRIAL=abci-ta-swe32-rec-q38d-c24-v16-t0
 EXPECTED_RECURSIVE=1
 EXPECTED_PTC=1
+ENVIRONMENT_SET=toolathlon_only
 die() {
     echo "[pbs-openreward] ERROR: $*" >&2
     exit 2

@@ -152,44 +152,48 @@ case "${ENVIRONMENT_SET}" in
     toolathlon_swe)
         ;;
     toolathlon_only)
-        [[ "${REQUIRE_EXISTING_RECOVERY}" == 0 ]] || \
-            die "Toolathlon-only service mode is restricted to authorized fresh trials"
-        case "${FRESH_RUN_BINDING}" in
-            qwen36-32-v27-rootprop64)
+        case "${REQUIRE_EXISTING_RECOVERY}:${RESUME_SUCCESSOR_BINDING}:${FRESH_RUN_BINDING}" in
+            0::qwen36-32-v27-rootprop64)
                 [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 32:1:1:qwen36 && \
                     "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-rootprop-v27 && \
                     "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0 ]] || \
                     die "Toolathlon-only root-propagation service binding mismatch"
                 ;;
-            qwen36-32-v27-behavior64)
+            0::qwen36-32-v27-behavior64)
                 [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 32:1:1:qwen36 && \
                     "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-behavior-gate-v27 && \
                     "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0 ]] || \
                     die "Toolathlon-only Qwen3.6 behavior-gate service binding mismatch"
                 ;;
-            qwen35-16-v27-behavior64)
+            0::qwen35-16-v27-behavior64)
                 [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 16:1:1:qwen35 && \
                     "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-dp-behavior-v27 && \
                     "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0 ]] || \
                     die "Toolathlon-only Qwen3.5 behavior-gate service binding mismatch"
                 ;;
-            qwen35-16-v28-cp2-behavior64)
+            0::qwen35-16-v28-cp2-behavior64)
                 [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 16:1:1:qwen35 && \
                     "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-cp2-behavior-v28 && \
                     "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0 ]] || \
                     die "Toolathlon-only Qwen3.5 CP2 behavior-gate service binding mismatch"
                 ;;
-            qwen35-16-v30-tp2cp2-behavior64)
+            0::qwen35-16-v30-tp2cp2-behavior64)
                 [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 16:1:1:qwen35 && \
                     "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-tp2cp2-behavior-v30 && \
                     "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0 ]] || \
                     die "Toolathlon-only Qwen3.5 TP2/CP2 behavior-gate service binding mismatch"
                 ;;
+            1:qwen36-32-v31-behavior-gs13:)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 32:1:1:qwen36 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-behavior-gate-v27 && \
+                    "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0 ]] || \
+                    die "Toolathlon-only Qwen3.6 behavior-gate resume service binding mismatch"
+                ;;
             *)
-                die "Toolathlon-only service mode is not authorized for fresh binding ${FRESH_RUN_BINDING@Q}"
+                die "Toolathlon-only service mode is not authorized for recovery/fresh bindings ${RESUME_SUCCESSOR_BINDING@Q}/${FRESH_RUN_BINDING@Q}"
                 ;;
         esac
-        ENVIRONMENT_SET_BINDING=${FRESH_RUN_BINDING}
+        ENVIRONMENT_SET_BINDING=${RESUME_SUCCESSOR_BINDING:-${FRESH_RUN_BINDING}}
         ;;
     *)
         die "OPENREWARD_ENVIRONMENT_SET must be toolathlon_swe or toolathlon_only"
@@ -212,6 +216,12 @@ if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
         qwen38-32-v22-gs10:|qwen36-32-v22-depth2:)
             [[ "${EXPECTED_NNODES}" == 32 && "${EXPECTED_RECURSIVE}" == 1 ]] || \
                 die "recursive guard disablement requires an exact 32-node resume"
+            NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
+            ;;
+        qwen36-32-v31-behavior-gs13:)
+            [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
+                "${ENVIRONMENT_SET}:${ENVIRONMENT_SET_BINDING}" == toolathlon_only:qwen36-32-v31-behavior-gs13 ]] || \
+                die "Qwen3.6 behavior-gate gs13 guard disablement binding mismatch"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
             ;;
         qwen38-16-v25-gs12:)
@@ -356,6 +366,15 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
                         "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 21768:127481:160 && \
                         "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 48:2:184:23 ]] || \
                         die "Qwen3.6 32-node depth-two v8r22 successor runtime binding mismatch"
+                    ;;
+                qwen36-32-v31-behavior-gs13)
+                    [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
+                        "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-behavior-gate-v27 && \
+                        "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0 && \
+                        "${EXPECTED_RESUME_GLOBAL_STEP}:${EXPECTED_START_GLOBAL_STEP}" == 13:14 && \
+                        "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 21768:127481:160 && \
+                        "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 48:14:152:19 ]] || \
+                        die "Qwen3.6 behavior-gate gs13 successor runtime binding mismatch"
                     ;;
                 *) die "unknown exact successor runtime binding" ;;
             esac
