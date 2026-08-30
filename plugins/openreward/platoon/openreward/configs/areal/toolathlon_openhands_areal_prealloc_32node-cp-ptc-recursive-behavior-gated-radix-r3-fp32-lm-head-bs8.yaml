@@ -1,0 +1,61 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-judged-r3-fp32-lm-head-bs8
+  - _self_
+
+# Fresh Toolathlon-only radix-cache ablation. A unique name prevents recovery
+# of the existing behavior-gated, root-reward, or efficiency-shaped state.
+trial_name: ta32-rec-behavior-gated-radix-v1-trial0
+
+openreward:
+  subagent_environment_access: shared
+  subagent_default_max_steps: 100
+  subagent_max_depth: 2
+  # Retain the environment outcome verifier, then gate its positive result with
+  # a one-shot behavioral audit performed by the same rollout policy.
+  enable_subagent_reward_judging: true
+  subagent_reward_judge_max_steps: 100
+  enable_subagent_behavior_judging: true
+  subagent_behavior_judge_max_prompt_tokens: 24576
+  subagent_behavior_judge_max_output_tokens: 4096
+  subagent_behavior_judge_timeout_seconds: 300.0
+  subagent_delegation_reward_coefficient: 0.0
+  eval_split: null
+  eval_task_limit: null
+
+workflow_config:
+  subagent_datum_keep_probability: 0.25
+  rollout_config:
+    max_steps: 200
+    propagate_root_success: false
+  token_efficiency_reward:
+    enabled: false
+
+# AReaL disables SGLang's radix cache by default for training. This ablation
+# changes only that cache policy while retaining the existing 0.70 static-memory
+# fraction and all other behavior-gated rollout settings.
+sglang:
+  disable_radix_cache: false
+
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    project: toolathlon-openhands
+    group: ta32-rec-behavior-gated-radix-v1
+
+# Keep the same untouched starting model as the existing behavior-gated and
+# root-propagated ablations.
+actor:
+  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)
+  path: apurvaga/Qwen3.6-35B-A3B-preserve-thinking

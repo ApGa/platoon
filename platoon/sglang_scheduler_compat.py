@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from functools import wraps
 from typing import Any
 
 from areal.v2.inference_service.sglang.scheduler import (
@@ -17,6 +18,66 @@ from areal.v2.inference_service.sglang.scheduler import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def install_awex_sglang_radix_cache_flush_patch(adapter_cls: Any | None = None) -> bool:
+    """Invalidate prefix KV entries after AWEX changes the policy weights.
+
+    AReaL's AWEX SGLang adapter updates model parameters in place without using
+    SGLang's native update-weight request, so SGLang does not get its usual
+    opportunity to flush the radix cache. Reusing a prefix computed by an old
+    policy after the update would mix KV state from two policy versions.
+
+    This runs inside every spawned scheduler process. It is deliberately a
+    no-op while AReaL's ``disable_radix_cache`` default remains enabled.
+    """
+
+    if adapter_cls is None:
+        from areal.v2.weight_update.awex.sglang_adapter import AwexSGLangAdapter
+
+        adapter_cls = AwexSGLangAdapter
+
+    method_names = (
+        "execute_weight_update",
+        "execute_colocate_weight_update",
+    )
+    originals = {name: getattr(adapter_cls, name) for name in method_names}
+    patched = {
+        name: getattr(method, "__platoon_radix_cache_flush_patch__", False) for name, method in originals.items()
+    }
+    if all(patched.values()):
+        return False
+    if any(patched.values()):
+        raise RuntimeError("AReaL's AWEX SGLang adapter is only partially patched for radix-cache flushing")
+
+    expected_parameters = ("self", "version")
+    for name, original in originals.items():
+        actual_parameters = tuple(inspect.signature(original).parameters)
+        if actual_parameters != expected_parameters:
+            raise RuntimeError(
+                f"Unsupported AwexSGLangAdapter.{name} signature: "
+                f"expected {expected_parameters}, got {actual_parameters}"
+            )
+
+    def _wrap_weight_update(name: str, original: Any):
+        @wraps(original)
+        def _update_then_flush(self, version: int):
+            result = original(self, version)
+            scheduler = self._scheduler
+            if not scheduler.server_args.disable_radix_cache:
+                if not scheduler.flush_cache():
+                    raise RuntimeError(
+                        "SGLang radix-cache flush failed after "
+                        f"AwexSGLangAdapter.{name}; refusing to serve stale KV cache entries"
+                    )
+            return result
+
+        _update_then_flush.__platoon_radix_cache_flush_patch__ = True
+        return _update_then_flush
+
+    for name, original in originals.items():
+        setattr(adapter_cls, name, _wrap_weight_update(name, original))
+    return True
 
 
 def install_routed_experts_capture_capacity_patch(
@@ -86,9 +147,7 @@ def install_routed_experts_capture_capacity_patch(
                         f"a positive integer max_prefill_tokens, got {max_prefill_tokens!r}"
                     )
                 if isinstance(dp_size, bool) or not isinstance(dp_size, int) or dp_size <= 0:
-                    raise RuntimeError(
-                        f"Routed-expert capture requires a positive integer dp_size, got {dp_size!r}"
-                    )
+                    raise RuntimeError(f"Routed-expert capture requires a positive integer dp_size, got {dp_size!r}")
                 token_capacity = max_prefill_tokens * dp_size
                 cache_rows = max(max_running_requests, token_capacity)
                 logger.warning(
@@ -113,9 +172,10 @@ def install_routed_experts_capture_capacity_patch(
 
 
 def areal_run_scheduler_process_with_routed_experts_fix(*args, **kwargs) -> None:
-    """Spawn-safe AReaL scheduler target that installs the route-cache fix."""
+    """Spawn-safe AReaL scheduler target that installs compatibility fixes."""
 
     install_routed_experts_capture_capacity_patch()
+    install_awex_sglang_radix_cache_flush_patch()
     _ORIGINAL_AREAL_RUN_SCHEDULER_PROCESS(*args, **kwargs)
 
 
@@ -134,4 +194,3 @@ def install_areal_scheduler_process_target() -> bool:
         raise RuntimeError("AReaL's SGLang scheduler target was unexpectedly replaced before Platoon startup")
     scheduler_module.areal_run_scheduler_process = areal_run_scheduler_process_with_routed_experts_fix
     return True
-

@@ -102,12 +102,8 @@ def test_sglang_route_capture_uses_prefill_token_capacity_when_chunking_is_disab
     capturer_module = SimpleNamespace(RoutedExpertsCapturer=FakeCapturer)
     server_args = SimpleNamespace(chunked_prefill_size=-1, max_prefill_tokens=32_768, dp_size=1)
 
-    assert compat.install_routed_experts_capture_capacity_patch(
-        capturer_module, lambda: server_args
-    )
-    assert not compat.install_routed_experts_capture_capacity_patch(
-        capturer_module, lambda: server_args
-    )
+    assert compat.install_routed_experts_capture_capacity_patch(capturer_module, lambda: server_args)
+    assert not compat.install_routed_experts_capture_capacity_patch(capturer_module, lambda: server_args)
     result = FakeCapturer.create(True, object(), 0, 100_000, 3_335, "cuda")
 
     assert result == "capturer"
@@ -136,9 +132,7 @@ def test_sglang_route_capture_capacity_patch_is_noop_when_capture_is_disabled(mo
     def unexpected_server_args_lookup():
         raise AssertionError("disabled capture must not inspect or change SGLang server args")
 
-    compat.install_routed_experts_capture_capacity_patch(
-        capturer_module, unexpected_server_args_lookup
-    )
+    compat.install_routed_experts_capture_capacity_patch(capturer_module, unexpected_server_args_lookup)
     assert FakeCapturer.create(False, object(), 0, 100_000, 3_335, "cuda") == "noop"
     assert calls == [3_335]
 
@@ -167,6 +161,134 @@ def test_sglang_route_capture_capacity_patch_preserves_positive_chunking(monkeyp
     )
     FakeCapturer.create(True, object(), 0, 100_000, 3_335, "cuda")
     assert calls == [3_335]
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["execute_weight_update", "execute_colocate_weight_update"],
+)
+def test_awex_weight_update_flushes_enabled_radix_cache(monkeypatch, method_name):
+    compat = _load_sglang_compat_module(monkeypatch)
+    events = []
+
+    class FakeAdapter:
+        def __init__(self, scheduler):
+            self._scheduler = scheduler
+
+        def execute_weight_update(self, version):
+            events.append(("update", "execute_weight_update", version))
+            return "updated"
+
+        def execute_colocate_weight_update(self, version):
+            events.append(("update", "execute_colocate_weight_update", version))
+            return "colocate-updated"
+
+    scheduler = SimpleNamespace(
+        server_args=SimpleNamespace(disable_radix_cache=False),
+        flush_cache=lambda: events.append(("flush",)) or True,
+    )
+    adapter = FakeAdapter(scheduler)
+
+    assert compat.install_awex_sglang_radix_cache_flush_patch(FakeAdapter)
+    assert not compat.install_awex_sglang_radix_cache_flush_patch(FakeAdapter)
+    result = getattr(adapter, method_name)(7)
+
+    assert events == [("update", method_name, 7), ("flush",)]
+    assert result == ("updated" if method_name == "execute_weight_update" else "colocate-updated")
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["execute_weight_update", "execute_colocate_weight_update"],
+)
+def test_awex_weight_update_skips_flush_when_radix_cache_is_disabled(monkeypatch, method_name):
+    compat = _load_sglang_compat_module(monkeypatch)
+    updates = []
+
+    class FakeAdapter:
+        def __init__(self, scheduler):
+            self._scheduler = scheduler
+
+        def execute_weight_update(self, version):
+            updates.append(("execute_weight_update", version))
+
+        def execute_colocate_weight_update(self, version):
+            updates.append(("execute_colocate_weight_update", version))
+
+    def unexpected_flush():
+        raise AssertionError("disabled radix cache must not be flushed")
+
+    adapter = FakeAdapter(
+        SimpleNamespace(
+            server_args=SimpleNamespace(disable_radix_cache=True),
+            flush_cache=unexpected_flush,
+        )
+    )
+    compat.install_awex_sglang_radix_cache_flush_patch(FakeAdapter)
+
+    getattr(adapter, method_name)(11)
+
+    assert updates == [(method_name, 11)]
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["execute_weight_update", "execute_colocate_weight_update"],
+)
+def test_awex_weight_update_fails_closed_when_radix_cache_flush_fails(monkeypatch, method_name):
+    compat = _load_sglang_compat_module(monkeypatch)
+    updates = []
+
+    class FakeAdapter:
+        def __init__(self, scheduler):
+            self._scheduler = scheduler
+
+        def execute_weight_update(self, version):
+            updates.append(("execute_weight_update", version))
+
+        def execute_colocate_weight_update(self, version):
+            updates.append(("execute_colocate_weight_update", version))
+
+    adapter = FakeAdapter(
+        SimpleNamespace(
+            server_args=SimpleNamespace(disable_radix_cache=False),
+            flush_cache=lambda: False,
+        )
+    )
+    compat.install_awex_sglang_radix_cache_flush_patch(FakeAdapter)
+
+    with pytest.raises(RuntimeError, match="refusing to serve stale KV cache entries"):
+        getattr(adapter, method_name)(13)
+
+    assert updates == [(method_name, 13)]
+
+
+def test_scheduler_target_installs_radix_flush_before_starting_scheduler(monkeypatch):
+    compat = _load_sglang_compat_module(monkeypatch)
+    events = []
+    monkeypatch.setattr(
+        compat,
+        "install_routed_experts_capture_capacity_patch",
+        lambda: events.append("route-patch"),
+    )
+    monkeypatch.setattr(
+        compat,
+        "install_awex_sglang_radix_cache_flush_patch",
+        lambda: events.append("radix-patch"),
+    )
+    monkeypatch.setattr(
+        compat,
+        "_ORIGINAL_AREAL_RUN_SCHEDULER_PROCESS",
+        lambda *args, **kwargs: events.append(("scheduler", args, kwargs)),
+    )
+
+    compat.areal_run_scheduler_process_with_routed_experts_fix("arg", key="value")
+
+    assert events == [
+        "route-patch",
+        "radix-patch",
+        ("scheduler", ("arg",), {"key": "value"}),
+    ]
 
 
 def test_areal_sglang_launcher_redirect_is_r3_only_and_idempotent():
