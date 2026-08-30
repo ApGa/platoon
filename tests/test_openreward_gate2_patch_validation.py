@@ -116,6 +116,7 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v16.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen38_dense_c24_ta20_v20.yaml",
         "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v21.yaml",
+        "abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_qwen35_9b_cp2_c12_v28_behavior_gated.yaml",
     ):
         assert config in source
     for host_only in (
@@ -123,6 +124,7 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
         "openreward-toolathlon-all-mcp-health-v9.pbs",
         "openreward-ta-swe-32node-recursive-qwen36-cp2-h200-v10-abci.pbs",
         "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs",
+        "openreward-toolathlon-16node-recursive-qwen35-9b-cp2-behavior-gated-64k-h200-v28-abci.pbs",
         "openreward-node-local-init.py",
         "toolathlon_all_mcp_health.py",
         "publish_toolathlon_all_mcp_health_result.py",
@@ -138,8 +140,8 @@ def test_v9_gate2_archive_has_explicit_allow_and_host_only_deny_sets():
     assert '"containers/probe_toolathlon_python_mcp_launchers.py",' in source
     assert 'print "    pbs-scripts/publish_openreward_v9_gate2_result.py"' not in adapter
     assert 'print "    pbs-scripts/openreward-node-local-init.py"' not in adapter
-    assert "RELEASE_REF=refs/tags/abci-v8r28-07bebf9-057108f" in source
-    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f" in GATE2_V9.read_text()
+    assert "RELEASE_REF=refs/tags/abci-v8r29-07bebf9-057108f" in source
+    assert "REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r29-07bebf9-057108f" in GATE2_V9.read_text()
 
 
 def test_gate2_archives_and_imports_rollout_rpc_patch_entrypoint():

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMON = ROOT / "pbs-scripts/openreward-ta-swe-prealloc-common.sh"
 NODE_SERVICES = ROOT / "pbs-scripts/openreward-node-services.sh"
 
-V27_BINDINGS = (
+TOOLATHLON_ONLY_BINDINGS = (
     (
         "qwen36-32-v27-rootprop64",
         "32",
@@ -33,6 +33,13 @@ V27_BINDINGS = (
         "qwen35",
         "abci-or-ta16-q35-9b-dp-behavior-v27",
         "abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0",
+    ),
+    (
+        "qwen35-16-v28-cp2-behavior64",
+        "16",
+        "qwen35",
+        "abci-or-ta16-q35-9b-cp2-behavior-v28",
+        "abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0",
     ),
 )
 
@@ -146,8 +153,97 @@ printf 'supervisor_environment_set=%s\n' "${{ENVIRONMENT_SET}}"
     )
 
 
+def _run_common_guard_authorization(
+    binding: str,
+    *,
+    environment_binding: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    source = COMMON.read_text(encoding="utf-8")
+    authorization_end = source.index("# END OPENREWARD_ENVIRONMENT_SET_AUTHORIZATION")
+    start = source.index(
+        'if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then',
+        authorization_end,
+    )
+    end = source.index(
+        '\nexport \\\n    OPENREWARD_NODE_MEMORY_GUARD_ENABLED',
+        start,
+    )
+    authorization = source[start:end]
+    bound_environment = binding if environment_binding is None else environment_binding
+    harness = f"""set -euo pipefail
+die() {{ printf '%s\n' "$*" >&2; exit 2; }}
+NODE_MEMORY_GUARD_ENABLED=0
+RESUME_SUCCESSOR_BINDING=
+FRESH_RUN_BINDING=$1
+ENVIRONMENT_SET=toolathlon_only
+ENVIRONMENT_SET_BINDING=$2
+NODE_MEMORY_GUARD_DISABLED_BINDING=
+EXPECTED_NNODES=16
+EXPECTED_RECURSIVE=1
+EXPECTED_PTC=1
+EXPECTED_EXPERIMENT=unused
+EXPECTED_TRIAL=unused
+{authorization}
+printf 'disabled_binding=%s\n' "${{NODE_MEMORY_GUARD_DISABLED_BINDING}}"
+"""
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "common-guard-authorization-test",
+            binding,
+            bound_environment,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_supervisor_guard_authorization(
+    binding: str,
+    *,
+    environment_binding: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    source = NODE_SERVICES.read_text(encoding="utf-8")
+    authorization_end = source.index(
+        "# END OPENREWARD_ENVIRONMENT_SET_SUPERVISOR_AUTHORIZATION"
+    )
+    start = source.index(
+        'if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then',
+        authorization_end,
+    )
+    end = source.index('\n[[ "${MKFS_EXT3}" == /* ]]', start)
+    authorization = source[start:end]
+    bound_environment = binding if environment_binding is None else environment_binding
+    harness = f"""set -euo pipefail
+die() {{ printf '%s\n' "$*" >&2; exit 2; }}
+NODE_MEMORY_GUARD_ENABLED=0
+NODE_MEMORY_GUARD_DISABLED_BINDING=$1
+ENVIRONMENT_SET=toolathlon_only
+ENVIRONMENT_SET_BINDING=$2
+{authorization}
+printf 'supervisor_disabled_binding=%s\n' "${{NODE_MEMORY_GUARD_DISABLED_BINDING}}"
+"""
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "supervisor-guard-authorization-test",
+            binding,
+            bound_environment,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 @pytest.mark.parametrize(
-    ("binding", "nodes", "model_family", "experiment", "trial"), V27_BINDINGS
+    ("binding", "nodes", "model_family", "experiment", "trial"),
+    TOOLATHLON_ONLY_BINDINGS,
 )
 def test_toolathlon_only_mode_requires_the_exact_fresh_tuple_on_both_hosts(
     binding: str,
@@ -177,8 +273,32 @@ def test_toolathlon_only_mode_requires_the_exact_fresh_tuple_on_both_hosts(
     assert wrong_supervisor.returncode == 2
 
 
+@pytest.mark.parametrize(
+    "binding", [binding[0] for binding in TOOLATHLON_ONLY_BINDINGS]
+)
+def test_toolathlon_only_fresh_bindings_authorize_exact_guard_disablement(
+    binding: str,
+) -> None:
+    common = _run_common_guard_authorization(binding)
+    assert common.returncode == 0, common.stderr
+    assert f"disabled_binding={binding}" in common.stdout
+
+    supervisor = _run_supervisor_guard_authorization(binding)
+    assert supervisor.returncode == 0, supervisor.stderr
+    assert f"supervisor_disabled_binding={binding}" in supervisor.stdout
+
+    mismatched_common = _run_common_guard_authorization(
+        binding, environment_binding="wrong-binding"
+    )
+    assert mismatched_common.returncode == 2
+    mismatched_supervisor = _run_supervisor_guard_authorization(
+        binding, environment_binding="wrong-binding"
+    )
+    assert mismatched_supervisor.returncode == 2
+
+
 def test_environment_set_is_fail_closed_and_mixed_mode_remains_the_default() -> None:
-    binding, nodes, model_family, experiment, trial = V27_BINDINGS[0]
+    binding, nodes, model_family, experiment, trial = TOOLATHLON_ONLY_BINDINGS[0]
     unknown = _run_common_authorization(
         binding,
         nodes,

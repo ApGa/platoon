@@ -27,8 +27,8 @@ def _load_resume_verifier():
 
 def test_v22_manifest_binds_three_successors_and_exact_assets() -> None:
     manifest = json.loads(MANIFEST.read_text())
-    assert manifest["release_root"] == ("/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f")
-    assert manifest["release_ref"] == "refs/tags/abci-v8r28-07bebf9-057108f"
+    assert manifest["release_root"] == ("/home/aci18912it/rasp/releases/platoon-v8r29-07bebf9-057108f")
+    assert manifest["release_ref"] == "refs/tags/abci-v8r29-07bebf9-057108f"
     contracts = manifest["training_semantics"]["v8r22_successor_contracts"]
     assert set(contracts) == {
         "qwen38_32node_gs10",

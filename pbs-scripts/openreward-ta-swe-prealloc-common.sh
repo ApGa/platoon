@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Common ABCI lifecycle for Toolathlon + SWE-rebench AReaL jobs, with an
-# exact-binding Toolathlon-only mode for the fresh v27 reward trials.
+# exact-binding Toolathlon-only mode for the authorized fresh reward trials.
 #
 # This script deliberately has no PBS header, continuation submission, deadline
 # resubmission, or synthetic GPU keepalive.  Topology-specific .pbs wrappers own
@@ -142,8 +142,9 @@ require_uint OPENREWARD_NODE_MEMORY_POLL_SECONDS "${NODE_MEMORY_POLL_SECONDS}" 1
 require_uint OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS "${NODE_MEMORY_TELEMETRY_SECONDS}" 1
 
 # The default is the historical mixed Toolathlon + SWE service pool.  The
-# reduced service topology is launcher-private and may only be selected by one
-# of the three fresh v27 bindings, with its full experiment tuple intact.
+# reduced service topology is launcher-private and may only be selected by an
+# explicitly authorized fresh reward binding, with its full experiment tuple
+# intact.
 # BEGIN OPENREWARD_ENVIRONMENT_SET_AUTHORIZATION
 [[ -z "${OPENREWARD_ENVIRONMENT_SET_BINDING:-}" ]] || \
     die "OPENREWARD_ENVIRONMENT_SET_BINDING is launcher-private"
@@ -152,7 +153,7 @@ case "${ENVIRONMENT_SET}" in
         ;;
     toolathlon_only)
         [[ "${REQUIRE_EXISTING_RECOVERY}" == 0 ]] || \
-            die "Toolathlon-only service mode is restricted to fresh v27 trials"
+            die "Toolathlon-only service mode is restricted to authorized fresh trials"
         case "${FRESH_RUN_BINDING}" in
             qwen36-32-v27-rootprop64)
                 [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 32:1:1:qwen36 && \
@@ -171,6 +172,12 @@ case "${ENVIRONMENT_SET}" in
                     "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-dp-behavior-v27 && \
                     "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0 ]] || \
                     die "Toolathlon-only Qwen3.5 behavior-gate service binding mismatch"
+                ;;
+            qwen35-16-v28-cp2-behavior64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 16:1:1:qwen35 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-cp2-behavior-v28 && \
+                    "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0 ]] || \
+                    die "Toolathlon-only Qwen3.5 CP2 behavior-gate service binding mismatch"
                 ;;
             *)
                 die "Toolathlon-only service mode is not authorized for fresh binding ${FRESH_RUN_BINDING@Q}"
@@ -213,10 +220,10 @@ if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
                 die "Qwen3.6 fresh efficiency-disabled guard binding mismatch"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${FRESH_RUN_BINDING}
             ;;
-        :qwen36-32-v27-rootprop64|:qwen36-32-v27-behavior64|:qwen35-16-v27-behavior64)
+        :qwen36-32-v27-rootprop64|:qwen36-32-v27-behavior64|:qwen35-16-v27-behavior64|:qwen35-16-v28-cp2-behavior64)
             [[ "${ENVIRONMENT_SET}" == toolathlon_only && \
                 "${ENVIRONMENT_SET_BINDING}" == "${FRESH_RUN_BINDING}" ]] || \
-                die "v27 Toolathlon-only guard disablement requires its exact service binding"
+                die "Toolathlon-only guard disablement requires its exact service binding"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${FRESH_RUN_BINDING}
             ;;
         *)
@@ -372,11 +379,11 @@ else
                     "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0 ]] || \
                     die "Qwen3.6 v26 fresh-run binding mismatch"
                 ;;
-            qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen35-16-v27-behavior64)
+            qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen35-16-v27-behavior64|qwen35-16-v28-cp2-behavior64)
                 [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 && \
                     "${ENVIRONMENT_SET}" == toolathlon_only && \
                     "${ENVIRONMENT_SET_BINDING}" == "${FRESH_RUN_BINDING}" ]] || \
-                    die "v27 fresh-run binding requires exact Toolathlon-only mode with the guard disabled"
+                    die "fresh reward binding requires exact Toolathlon-only mode with the guard disabled"
                 ;;
             *)
                 die "unknown fresh-run binding"

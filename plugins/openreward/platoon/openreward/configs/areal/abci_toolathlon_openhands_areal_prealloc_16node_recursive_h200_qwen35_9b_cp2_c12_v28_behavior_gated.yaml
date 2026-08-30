@@ -1,0 +1,150 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff
+  - _self_
+
+# Fresh Toolathlon-only Qwen3.5-9B trial for verifier reward gated by a
+# same-policy behavioral audit. Eight nodes (64 GPUs) host independent SGLang
+# replicas and eight nodes host a DP32/CP2 actor with its colocated reference.
+experiment_name: abci-or-ta16-q35-9b-cp2-behavior-v28
+trial_name: abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0
+tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+
+dynamic_bs: true
+
+train_dataset:
+  batch_size: 8
+
+workflow_config:
+  group_size: 8
+  # Every accepted task supplies at least five completed roots. The rollout
+  # contract requires 64 trainable datums, so one full eight-task chunk has
+  # only 40 roots. Two bounded chunks provide capacity for 2 * 8 * 5 = 80
+  # mandatory roots, independent of the 25% child-datum sample. Dynamic chunks
+  # may contain fewer accepted tasks; in that case the trainer's final actor-
+  # floor guard skips the optimizer step unless at least 64 trainable datums
+  # were actually retained. A sufficient batch is randomly trimmed (non-roots
+  # first) to a 64-datum multiple.
+  dynamic_batch_recollection_max_rounds: 2
+  min_successful_group_size: 5
+  straggler_timeout_seconds: 900
+  straggler_quorum: 6
+  subprocess_shutdown_grace_seconds: 10
+  filter_zero_advantage_datums: false
+  filter_zero_variance_groups: false
+  subagent_datum_keep_probability: 0.25
+  enable_router_replay: false
+  router_replay_num_layers: null
+  router_replay_topk: null
+  rollout_config:
+    max_steps: 200
+    timeout: 3600
+    step_timeout: 2700
+    propagate_root_success: false
+  token_efficiency_reward:
+    enabled: false
+
+rollout:
+  # 64 one-GPU replicas consume the inference half of the allocation. Twelve
+  # rollout groups may be live at once; consumer capacity 16 is the exact
+  # accepted-version reservation required to attempt two eight-task chunks.
+  backend: sglang:d64p1t1
+  max_concurrent_rollouts: 12
+  consumer_batch_size: 16
+  max_head_offpolicyness: 1
+  ensure_batch_divisible_by: 64
+  return_routed_experts: false
+  agent:
+    engine_max_tokens: 65536
+
+actor:
+  # The 64 training GPUs form 32 data-parallel replicas with context parallel
+  # size two. TP, PP, and EP remain disabled.
+  backend: megatron:d32p1t1c2
+  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+  enable_router_replay: false
+  router_replay_num_layers: null
+  router_replay_topk: null
+  router_replay_num_experts: null
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_mtp: false
+    enable_fp32_lm_head: false
+    use_deterministic_algorithms: false
+
+ref:
+  backend: ${actor.backend}
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_fp32_lm_head: false
+
+sglang:
+  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
+  context_length: 65537
+  max_prefill_tokens: 65536
+  # This remains the single radix-cache experiment; the sibling Qwen3.6 trials
+  # retain the inherited disabled-cache production setting.
+  disable_radix_cache: false
+
+openreward:
+  # Repeat the launcher-critical recursive/PTC settings in the leaf so the
+  # fail-closed ABCI preflight can attest them before Hydra composition.
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+  subagent_environment_access: shared
+  subagent_default_max_steps: 100
+  subagent_max_depth: 2
+  enable_subagent_reward_judging: true
+  subagent_reward_judge_max_steps: 100
+  enable_subagent_behavior_judging: true
+  subagent_behavior_judge_max_prompt_tokens: 24576
+  subagent_behavior_judge_max_output_tokens: 4096
+  subagent_behavior_judge_timeout_seconds: 300.0
+  subagent_delegation_reward_coefficient: 0.0
+  condenser_max_tokens: 52428
+  eval_split: null
+  eval_task_limit: null
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      split: train
+      eval_split: train
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 16
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+stats_logger:
+  wandb:
+    project: toolathlon-openhands
+    group: abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28

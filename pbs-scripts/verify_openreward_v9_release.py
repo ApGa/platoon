@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r28/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r29/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f")
-RELEASE_REF = "refs/tags/abci-v8r28-07bebf9-057108f"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r29-07bebf9-057108f")
+RELEASE_REF = "refs/tags/abci-v8r29-07bebf9-057108f"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "4338f9942a1a94435829ce9734be6a639d4ff866c76db78d7913e07158f201e1"
+MANIFEST_SHA256 = "852c11e617fc4b2649065bbe4513a9086cd9e64a7b3f98b21ba80c3c7280fd2a"
 V8R22_SUCCESSOR_CONTRACTS_SHA256 = "8ea9aa699b6394feb5a3d6fc54f14b114ba465f9fe1337c8965610a9ce7debf4"
-SERVICE_NODE_MEMORY_GUARD_SHA256 = "62623c76b9e1150367f7b839dc0b9ec357f939a195f82e469930bc1b0456c958"
+SERVICE_NODE_MEMORY_GUARD_SHA256 = "e79983a92446639c4cf20bbd73cc67a1dbba03a637a21e95af641be4685370dc"
 V8R22_SUCCESSOR_CONTRACT_NAMES = {
     "qwen38_32node_gs10",
     "qwen38_16node_gs12",
@@ -164,9 +164,9 @@ TRAINING_RUNTIME_ASSETS = {
         "2c0e960dc52d7ab266cb9eb50ab06eb17088d28b50f3f3d64573ca32e65bca06"
     ),
     "pbs-scripts/openreward-ta-swe-prealloc-common.sh": (
-        "7309135aa7bafd54ee72de35b398ac2303975b61e714fbbf5283ffc15a785ff8"
+        "266b257014906f52f60d34d7134f34817b5e41b177980665f725a9c51f114c13"
     ),
-    "pbs-scripts/openreward-node-services.sh": ("3487bf2bb2efd5d94739f92d5b6a64822c8950a70cdbc5d88f0791d5a7704031"),
+    "pbs-scripts/openreward-node-services.sh": ("582e15c026068ce2c8f1fdf521a6dc63cc9bfdbc816716d71f0ae805a7e53f6a"),
     "pbs-scripts/openreward-node-memory-guard.py": ("234d25909ca7bef46885308e5ef039414aa838f15c30cc993830451eb784558a"),
 }
 TRAINABLE_DATUMS_MISSING_MASK_NORMALIZATION = "missing_masks_treated_as_all_trainable_before_filter_and_concat"
@@ -680,6 +680,50 @@ TRAINING_SEMANTICS = {
         "context_parallel_oom_fallback": "megatron:d32p1t1c2",
         "node_memory_guard_enabled": False,
     },
+    "fresh_qwen35_cp2_behavior64_contract": {
+        "fresh_start": True,
+        "environment_set": "toolathlon_only",
+        "reward_strategy": "verifier_times_same_policy_behavior_gate",
+        "config_relative": (
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_"
+            "qwen35_9b_cp2_c12_v28_behavior_gated.yaml"
+        ),
+        "config_sha256": "42ac0f57af16840bc4444b0f2a0d42a46191c4027c7ff5367c61b4381838f24b",
+        "wrapper_relative": (
+            "pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-cp2-"
+            "behavior-gated-64k-h200-v28-abci.pbs"
+        ),
+        "wrapper_sha256": "e07786fe0e44857ba3735ac59e8dd7acc4d71112e1db564d5487ce3e1b58f5a1",
+        "experiment_name": "abci-or-ta16-q35-9b-cp2-behavior-v28",
+        "trial_name": "abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0",
+        "fresh_run_binding": "qwen35-16-v28-cp2-behavior64",
+        "model_artifact": "fresh_recursive_16node_qwen35_dp64",
+        "node_count": 16,
+        "training_nodes": 8,
+        "inference_nodes": 8,
+        "actor_backend": "megatron:d32p1t1c2",
+        "actor_data_parallel_size": 32,
+        "actor_context_parallel_size": 2,
+        "rollout_backend": "sglang:d64p1t1",
+        "max_concurrent_rollouts": 12,
+        "context_window_tokens": 65536,
+        "actor_safe_minimum_datums": 64,
+        "dynamic_batch_recollection_max_rounds": 2,
+        "rollout_consumer_batch_size": 16,
+        "root_max_steps": 200,
+        "subagent_max_steps": 100,
+        "subagent_verifier_max_steps": 100,
+        "subagent_max_depth": 2,
+        "behavior_judge_prompt_tokens": 24576,
+        "behavior_judge_output_tokens": 4096,
+        "r3_enabled": False,
+        "deterministic_kernels": False,
+        "radix_cache_enabled": True,
+        "oom_recovery_from_job": "2191659.pbs1",
+        "oom_recovery_strategy": "context_parallel_size_2",
+        "node_memory_guard_enabled": False,
+    },
     "environment_health_monitor": {
         "toolathlon_endpoint": "/health",
         "swe_rebench_endpoint": "/health",
@@ -1071,6 +1115,7 @@ def verify(root: Path) -> None:
         "fresh_qwen36_rootprop64_contract",
         "fresh_qwen36_behavior64_contract",
         "fresh_qwen35_dp64_behavior64_contract",
+        "fresh_qwen35_cp2_behavior64_contract",
         "recursive_32node_qwen38_v20_successor_contract",
     ):
         contract = TRAINING_SEMANTICS[contract_name]
