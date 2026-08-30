@@ -612,6 +612,7 @@ def test_32node_toolathlon_behavior_gate_config_composes_requested_ablation():
     assert composed.evaluator.eval_before_train is False
     assert composed.stats_logger.wandb.project == "toolathlon-openhands"
     assert composed.stats_logger.wandb.group == "ta32-rec-behavior-gate-v1"
+    assert composed.sglang.disable_radix_cache is True
 
 
 def test_32node_toolathlon_behavior_gate_radix_config_composes_requested_ablation():

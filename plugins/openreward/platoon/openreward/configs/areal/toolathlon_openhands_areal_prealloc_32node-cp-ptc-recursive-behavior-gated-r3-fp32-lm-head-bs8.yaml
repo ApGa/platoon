@@ -36,11 +36,10 @@ workflow_config:
   token_efficiency_reward:
     enabled: false
 
-# Reuse growing conversation prefixes within each rollout. Platoon's spawned
-# SGLang scheduler shim flushes this cache after every successful AWEX policy
-# weight update, so no KV state survives across policy versions.
+# Keep the established behavior-gated lineage as the non-radix control. The
+# separate behavior-gated-radix trial is the only ablation that enables reuse.
 sglang:
-  disable_radix_cache: false
+  disable_radix_cache: true
 
 # Save recovery state after every completed update. The fresh trial name above
 # starts from the untouched model; later four-hour successors resume this line.
