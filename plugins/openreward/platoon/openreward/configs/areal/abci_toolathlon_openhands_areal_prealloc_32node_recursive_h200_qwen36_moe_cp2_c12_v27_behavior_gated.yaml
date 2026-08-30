@@ -35,6 +35,13 @@ rollout:
   consumer_batch_size: 8
 
 openreward:
+  # Repeat the launcher-critical recursive/PTC settings in the leaf. The ABCI
+  # production preflight intentionally verifies these literals before Hydra
+  # composes the inherited topology.
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
   subagent_environment_access: shared
   subagent_default_max_steps: 100
   subagent_max_depth: 2
@@ -68,6 +75,12 @@ evaluator:
   freq_epochs: null
   freq_steps: null
   freq_secs: null
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
 
 stats_logger:
   wandb:

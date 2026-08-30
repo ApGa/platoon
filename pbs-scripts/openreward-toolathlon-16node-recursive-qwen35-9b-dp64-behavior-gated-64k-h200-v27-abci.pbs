@@ -17,8 +17,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r27-07bebf9-057108f
-RELEASE_REF=refs/tags/abci-v8r27-07bebf9-057108f
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f
+RELEASE_REF=refs/tags/abci-v8r28-07bebf9-057108f
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
 ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
@@ -32,7 +32,7 @@ EXPERIMENT=abci-or-ta16-q35-9b-dp-behavior-v27
 TRIAL=abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0
 RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
-CONFIG_SHA256=39c8addc162736c2c0bae7a48561ba1cf968abbcc2c5cf2bda52eeedb94cbb8e
+CONFIG_SHA256=d753bb75b5fd75bc3d679c6d8625f0a28245f64603522a1b3277efc94fd304f6
 BASE_CONFIG_SHA256=c071d05e4d22140d347cb3971e6218cc3a51c4df25fa592160a934e83ae6d757
 FRESH_BINDING=qwen35-16-v27-behavior64
 EXPECTED_QWEN35_MODEL_REPOSITORY=apurvaga/Qwen3.5-9B-preserve-thinking

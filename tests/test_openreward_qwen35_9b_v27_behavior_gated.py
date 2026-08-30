@@ -50,6 +50,18 @@ def test_qwen35_9b_v27_leaf_composes_exact_dp64_runtime_contract() -> None:
     config = _compose(CONFIG_NAME)
 
     assert literal["defaults"] == [BASE, "_self_"]
+    assert literal["scheduler"]["type"] == "pbs_prealloc"
+    assert literal["cluster"]["fileroot"] == "${oc.env:PLATOON_EXPERIMENT_ROOT}"
+    assert literal["openreward"]["enable_recursive_subagents"] is True
+    assert literal["openreward"]["enable_programmatic_tool_calling"] is True
+    assert (
+        literal["openreward"]["programmatic_tool_calling_mode"]
+        == "orchestration_only"
+    )
+    assert (
+        literal["openreward"]["programmatic_tool_calling_max_tool_calls_per_execution"]
+        == 1024
+    )
     assert config["experiment_name"] == "abci-or-ta16-q35-9b-dp-behavior-v27"
     assert config["trial_name"] == "abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0"
     assert config["stats_logger"]["wandb"]["group"] == (

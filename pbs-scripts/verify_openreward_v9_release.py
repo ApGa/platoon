@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification for the immutable ABCI v8r27/v9 checkout."""
+"""Fail-closed verification for the immutable ABCI v8r28/v9 checkout."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 from verify_openreward_v8_swe_env import verify as verify_swe_runtime
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r27-07bebf9-057108f")
-RELEASE_REF = "refs/tags/abci-v8r27-07bebf9-057108f"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f")
+RELEASE_REF = "refs/tags/abci-v8r28-07bebf9-057108f"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
-MANIFEST_SHA256 = "ed12c949411a9bb24ea3faf233d50915e8598d5d37d48a753560b1e71a787d7e"
+MANIFEST_SHA256 = "4338f9942a1a94435829ce9734be6a639d4ff866c76db78d7913e07158f201e1"
 V8R22_SUCCESSOR_CONTRACTS_SHA256 = "8ea9aa699b6394feb5a3d6fc54f14b114ba465f9fe1337c8965610a9ce7debf4"
 SERVICE_NODE_MEMORY_GUARD_SHA256 = "62623c76b9e1150367f7b839dc0b9ec357f939a195f82e469930bc1b0456c958"
 V8R22_SUCCESSOR_CONTRACT_NAMES = {
@@ -581,12 +581,12 @@ TRAINING_SEMANTICS = {
             "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
             "qwen36_moe_cp2_c12_v27_rootprop.yaml"
         ),
-        "config_sha256": "41eae7a6e76bc77e97732cf5318642a46cb33f355c4c4b18f86907efb40d4c27",
+        "config_sha256": "e13647bc2ba2a173d127cc9a1d3d3e0f6e320aec144bcaf39fad12c1218ee2b4",
         "wrapper_relative": (
             "pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-"
             "rootprop-64k-h200-v27-abci.pbs"
         ),
-        "wrapper_sha256": "f36c98569c70718341fd9adc65f83cea4d7dc969ba98c11f6954612d6bb38ca9",
+        "wrapper_sha256": "889d61674e5f7b6a615e999acfcbbb8acf8f010f796eef887b950da596c4ec9b",
         "experiment_name": "abci-or-ta32-q36-cp2-rootprop-v27",
         "trial_name": "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0",
         "fresh_run_binding": "qwen36-32-v27-rootprop64",
@@ -614,12 +614,12 @@ TRAINING_SEMANTICS = {
             "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
             "qwen36_moe_cp2_c12_v27_behavior_gated.yaml"
         ),
-        "config_sha256": "0864d2c13c6a665227f7e5f83230d6a94b5466093138d0722ddb436ca0eb81df",
+        "config_sha256": "0b9aa3c482e73cc73661272325797cdd071b260ef4d2bd1d40fbc7abae5a46f1",
         "wrapper_relative": (
             "pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-"
             "behavior-gated-64k-h200-v27-abci.pbs"
         ),
-        "wrapper_sha256": "2bda1100dc8eac41468e60c354ab8bab17584e3fc8fa9c5051a38aa07e17c496",
+        "wrapper_sha256": "3ae3631144b0a267ee196f1d397bdaf111e8468a652ab34292ab27a70ab3214c",
         "experiment_name": "abci-or-ta32-q36-cp2-behavior-gate-v27",
         "trial_name": "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0",
         "fresh_run_binding": "qwen36-32-v27-behavior64",
@@ -648,12 +648,12 @@ TRAINING_SEMANTICS = {
             "abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_"
             "qwen35_9b_dp64_c12_v27_behavior_gated.yaml"
         ),
-        "config_sha256": "39c8addc162736c2c0bae7a48561ba1cf968abbcc2c5cf2bda52eeedb94cbb8e",
+        "config_sha256": "d753bb75b5fd75bc3d679c6d8625f0a28245f64603522a1b3277efc94fd304f6",
         "wrapper_relative": (
             "pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-dp64-"
             "behavior-gated-64k-h200-v27-abci.pbs"
         ),
-        "wrapper_sha256": "e4912c6f23a5aa285ceb2969253f4e88632ab1284932c861052d182921238c5f",
+        "wrapper_sha256": "4299b88bacb940b0a604f806fdeb45e5ea9f942ff4eaabe7d5555bba7c7c8025",
         "experiment_name": "abci-or-ta16-q35-9b-dp-behavior-v27",
         "trial_name": "abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0",
         "fresh_run_binding": "qwen35-16-v27-behavior64",

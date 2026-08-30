@@ -92,6 +92,12 @@ sglang:
   disable_radix_cache: false
 
 openreward:
+  # Repeat the launcher-critical recursive/PTC settings in the leaf so the
+  # fail-closed ABCI preflight can attest them before Hydra composition.
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
   subagent_environment_access: shared
   subagent_default_max_steps: 100
   subagent_max_depth: 2

@@ -57,6 +57,18 @@ def test_v27_qwen36_reward_leaf_preserves_abci_64k_topology(strategy: str) -> No
     config = _compose(name)
 
     assert literal["defaults"] == [BASE, "_self_"]
+    assert literal["scheduler"]["type"] == "pbs_prealloc"
+    assert literal["cluster"]["fileroot"] == "${oc.env:PLATOON_EXPERIMENT_ROOT}"
+    assert literal["openreward"]["enable_recursive_subagents"] is True
+    assert literal["openreward"]["enable_programmatic_tool_calling"] is True
+    assert (
+        literal["openreward"]["programmatic_tool_calling_mode"]
+        == "orchestration_only"
+    )
+    assert (
+        literal["openreward"]["programmatic_tool_calling_max_tool_calls_per_execution"]
+        == 1024
+    )
     assert config["cluster"]["n_nodes"] == 32
     assert config["rollout"]["backend"] == "sglang:d12p1t8"
     assert config["rollout"]["max_concurrent_rollouts"] == 12
