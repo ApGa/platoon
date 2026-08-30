@@ -20,9 +20,9 @@ OVERLAY_PATH = PBS_ROOT / "openreward-v9-abci.env"
 VERIFIER_PATH = PBS_ROOT / "verify_openreward_v9_release.py"
 RECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-32node-recursive-qwen38-resume-h200-v11-abci.pbs"
 NONRECURSIVE_WRAPPER_PATH = PBS_ROOT / "openreward-ta-swe-16node-nonrecursive-qwen38-gs0-nooptim-h200-v10-abci.pbs"
-EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f"
-EXPECTED_RELEASE_REF = "refs/tags/abci-v8r26-e11d720-057108f"
-EXPECTED_PLATOON_UPSTREAM = "e11d7201ae8118a9350210615038ff2fe582945f"
+EXPECTED_RELEASE_ROOT = "/home/aci18912it/rasp/releases/platoon-v8r27-07bebf9-057108f"
+EXPECTED_RELEASE_REF = "refs/tags/abci-v8r27-07bebf9-057108f"
+EXPECTED_PLATOON_UPSTREAM = "07bebf901f0c826525c31e4014aafaf23d148e46"
 EXPECTED_OPENHANDS_REVISION = "057108f1f1235940e5d04401b4c294e4777c3baf"
 HISTORICAL_V8_OPENHANDS_REVISION = "b1acf52ee362884f092b9eaf5e701a1bb5d1b335"
 EXPECTED_MODEL_REPOSITORY = "apurvaga/Qwen3.8-27B-preserve-thinking"
@@ -64,7 +64,7 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     assert manifest["components"]["toolathlon"] == ("18e62c0d0419da88209af911528f2f8a0b44a5ed")
     assert manifest["components"]["platoon_upstream"] == EXPECTED_PLATOON_UPSTREAM
     assert manifest["components"]["openhands"] == EXPECTED_OPENHANDS_REVISION
-    assert manifest["upstream_refresh"]["fetched_at_utc"] == "2026-08-17T21:00:22Z"
+    assert manifest["upstream_refresh"]["fetched_at_utc"] == "2026-08-30T00:56:00Z"
     assert {name: value["sha"] for name, value in manifest["upstream_refresh"].items() if name != "fetched_at_utc"} == {
         "platoon": EXPECTED_PLATOON_UPSTREAM,
         "openhands": EXPECTED_OPENHANDS_REVISION,
@@ -93,6 +93,10 @@ def test_v9_manifest_records_new_identity_full_horizon_and_ptc_matrix() -> None:
     for contract_name in (
         "nonrecursive_16node_resume_contract",
         "fresh_recursive_32node_qwen36_cp2_contract",
+        "fresh_recursive_32node_qwen36_cp2_noeff_contract",
+        "fresh_qwen36_rootprop64_contract",
+        "fresh_qwen36_behavior64_contract",
+        "fresh_qwen35_dp64_behavior64_contract",
         "recursive_32node_qwen38_v20_successor_contract",
     ):
         contract = manifest["training_semantics"][contract_name]
@@ -420,6 +424,9 @@ def test_v9_model_selection_is_reentrant_and_unknown_fails_closed(tmp_path: Path
             "-c",
             """
 set -euo pipefail
+export OPENREWARD_MODEL_FAMILY=qwen35
+source "$1"
+printf '%s\n' "${PLATOON_MODEL_SNAPSHOT}"
 export OPENREWARD_MODEL_FAMILY=qwen36
 source "$1"
 printf '%s\n' "${PLATOON_MODEL_SNAPSHOT}"
@@ -437,9 +444,11 @@ printf '%s\n' "${PLATOON_MODEL_SNAPSHOT}"
         text=True,
     )
     manifest = json.loads(MANIFEST_PATH.read_text())
+    q35 = manifest["model_artifacts"]["fresh_recursive_16node_qwen35_dp64"]
     q36 = manifest["model_artifacts"]["fresh_recursive_32node_qwen36_cp2"]
     q38 = manifest["model_artifacts"]["recursive_32node"]
     assert completed.stdout.splitlines() == [
+        q35["snapshot_path"],
         q36["snapshot_path"],
         q36["snapshot_path"],
         q38["snapshot_path"],
@@ -460,7 +469,7 @@ printf '%s\n' "${PLATOON_MODEL_SNAPSHOT}"
             text=True,
         )
         assert completed.returncode == 2
-        assert "OPENREWARD_MODEL_FAMILY must be qwen36 or qwen38" in completed.stderr
+        assert "OPENREWARD_MODEL_FAMILY must be qwen35, qwen36, or qwen38" in completed.stderr
 
 
 def test_v9_verifier_rejects_hardlinked_release_artifacts(tmp_path: Path) -> None:

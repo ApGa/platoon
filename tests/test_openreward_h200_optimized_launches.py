@@ -1228,6 +1228,7 @@ def test_common_launcher_validates_parameterized_index_declared_model_shards(tmp
     overlay = (PBS_ROOT / "openreward-v9-abci.env").read_text()
     assert 'source "${ABCI_ENV}"' in common
     assert 'case "${OPENREWARD_MODEL_FAMILY:-}" in' in common
+    assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN35_MODEL_SNAPSHOT}" in overlay
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" in overlay
     assert "export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN38_MODEL_SNAPSHOT}" in overlay
     assert "EXPECTED_MODEL_SHARDS=${OPENREWARD_EXPECTED_MODEL_SHARDS:-26}" in common

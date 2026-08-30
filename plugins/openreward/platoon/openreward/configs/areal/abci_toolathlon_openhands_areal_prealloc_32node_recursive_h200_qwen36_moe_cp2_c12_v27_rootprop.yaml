@@ -1,0 +1,71 @@
+defaults:
+  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff
+  - _self_
+
+# Fresh Toolathlon-only Qwen3.6 trial for the root-outcome reward strategy.
+# This keeps the proven 64K CP2/R3/deterministic ABCI topology while using the
+# increased recursive budgets and reward semantics from the upstream trial.
+experiment_name: abci-or-ta32-q36-cp2-rootprop-v27
+trial_name: abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0
+
+train_dataset:
+  batch_size: 8
+
+workflow_config:
+  group_size: 8
+  # Independently keep 25% of completed non-root policy datums. Root datums are
+  # always retained, and every solver trajectory receives the root outcome.
+  subagent_datum_keep_probability: 0.25
+  straggler_timeout_seconds: 900
+  straggler_quorum: 6
+  subprocess_shutdown_grace_seconds: 10
+  min_successful_group_size: 4
+  rollout_config:
+    max_steps: 200
+    timeout: 3600
+    step_timeout: 2700
+    propagate_root_success: true
+  token_efficiency_reward:
+    enabled: false
+
+rollout:
+  # Twelve TP8 replicas consume the 96 inference GPUs from the inherited
+  # 32-node split. Actor and reference training retain the 160-GPU CP2 layout.
+  max_concurrent_rollouts: 12
+  consumer_batch_size: 8
+
+openreward:
+  subagent_environment_access: shared
+  subagent_default_max_steps: 100
+  subagent_max_depth: 2
+  # Root propagation is the complete reward strategy for this ablation; do not
+  # construct either verifier or behavioral-judge agents.
+  enable_subagent_reward_judging: false
+  enable_subagent_behavior_judging: false
+  subagent_delegation_reward_coefficient: 0.0
+  eval_split: null
+  eval_task_limit: null
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      split: train
+      eval_split: train
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    project: toolathlon-openhands
+    group: abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27

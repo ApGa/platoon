@@ -90,7 +90,7 @@ def test_helper_is_executable_has_no_submission_and_scrubs_finalizer_environment
 
     assert HELPER.stat().st_mode & 0o111
     assert (
-        'RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f")'
+        'RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r27-07bebf9-057108f")'
         in source
     )
     assert 'QSTAT = Path("/opt/pbs/bin/qstat")' in source

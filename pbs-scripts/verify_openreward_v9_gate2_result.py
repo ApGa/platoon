@@ -13,8 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f")
-RELEASE_REF = "refs/tags/abci-v8r26-e11d720-057108f"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r27-07bebf9-057108f")
+RELEASE_REF = "refs/tags/abci-v8r27-07bebf9-057108f"
 ENV_ADAPTER_RELATIVE = Path("pbs-scripts/prepare_openreward_env.sh")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 BASE_KEYS = {

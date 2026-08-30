@@ -13,8 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r26-e11d720-057108f")
-RELEASE_REF = "refs/tags/abci-v8r26-e11d720-057108f"
+RELEASE_ROOT = Path("/home/aci18912it/rasp/releases/platoon-v8r27-07bebf9-057108f")
+RELEASE_REF = "refs/tags/abci-v8r27-07bebf9-057108f"
 MANIFEST_RELATIVE = Path("pbs-scripts/openreward-v9-release.json")
 HEALTH_DRIVER_RELATIVE = Path("pbs-scripts/toolathlon_all_mcp_health.py")
 EXPECTED_REVISION = "18e62c0d0419da88209af911528f2f8a0b44a5ed"

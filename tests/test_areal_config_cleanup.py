@@ -361,10 +361,10 @@ def test_judged_recursive_r3_fp32_yaml_composes_all_features():
 
     assert composed.openreward.enable_programmatic_tool_calling is True
     assert composed.openreward.enable_recursive_subagents is True
-    assert composed.openreward.subagent_default_max_steps == 50
+    assert composed.openreward.subagent_default_max_steps == 100
     assert composed.openreward.subagent_max_depth == 2
     assert composed.openreward.enable_subagent_reward_judging is True
-    assert composed.openreward.subagent_reward_judge_max_steps == 50
+    assert composed.openreward.subagent_reward_judge_max_steps == 100
     assert composed.openreward.subagent_delegation_reward_coefficient == 0.4
     assert composed.trial_name.endswith("trial2")
     assert composed.workflow_config.depth_level_weighting is True
@@ -422,7 +422,7 @@ def test_mixed_recursive_r3_fp32_yaml_composes_balancing_and_child_policies():
     assert composed.openreward.enable_programmatic_tool_calling is True
     assert composed.openreward.enable_recursive_subagents is True
     assert composed.openreward.subagent_environment_access == "shared"
-    assert composed.openreward.subagent_default_max_steps == 50
+    assert composed.openreward.subagent_default_max_steps == 100
     assert composed.openreward.subagent_max_depth == 2
     assert composed.openreward.balance_accepted_batches is False
     assert composed.train_dataset.batch_size == 8
@@ -539,7 +539,7 @@ def test_32node_toolathlon_rootprop_config_composes_requested_ablation():
     assert composed.openreward.eval_task_limit is None
     assert composed.openreward.enable_recursive_subagents is True
     assert composed.openreward.subagent_environment_access == "shared"
-    assert composed.openreward.subagent_default_max_steps == 50
+    assert composed.openreward.subagent_default_max_steps == 100
     assert composed.openreward.subagent_max_depth == 2
     assert composed.openreward.enable_subagent_reward_judging is False
     assert composed.openreward.subagent_delegation_reward_coefficient == 0.0
@@ -590,10 +590,10 @@ def test_32node_toolathlon_behavior_gate_config_composes_requested_ablation():
     assert composed.openreward.eval_task_limit is None
     assert composed.openreward.enable_recursive_subagents is True
     assert composed.openreward.subagent_environment_access == "shared"
-    assert composed.openreward.subagent_default_max_steps == 50
+    assert composed.openreward.subagent_default_max_steps == 100
     assert composed.openreward.subagent_max_depth == 2
     assert composed.openreward.enable_subagent_reward_judging is True
-    assert composed.openreward.subagent_reward_judge_max_steps == 50
+    assert composed.openreward.subagent_reward_judge_max_steps == 100
     assert composed.openreward.enable_subagent_behavior_judging is True
     assert composed.openreward.subagent_behavior_judge_max_prompt_tokens == 24_576
     assert composed.openreward.subagent_behavior_judge_max_output_tokens == 4_096
@@ -701,7 +701,7 @@ def test_32node_behavior_gate_wrapper_is_toolathlon_only_and_self_contained():
     assert "OPENREWARD_WANDB_MODE=online" in script
     assert "apga+toolathlon-gym+18e62c0d041.sqsh" in script
     assert "OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-1800" in script
-    assert "OPENREWARD_DEADLINE_SAFETY_SECONDS:-600" in script
+    assert "OPENREWARD_DEADLINE_SAFETY_SECONDS=0" in script
     assert 'value=${value:1:${#value}-2}' in script
     assert "OPENREWARD_SUBAGENT_BEHAVIOR_JUDGE_MODEL" not in script
     assert "inference-api.nvidia.com" not in script

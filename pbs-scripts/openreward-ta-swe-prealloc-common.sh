@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Common ABCI lifecycle for Toolathlon + SWE-rebench AReaL jobs.
+# Common ABCI lifecycle for Toolathlon + SWE-rebench AReaL jobs, with an
+# exact-binding Toolathlon-only mode for the fresh v27 reward trials.
 #
 # This script deliberately has no PBS header, continuation submission, deadline
 # resubmission, or synthetic GPU keepalive.  Topology-specific .pbs wrappers own
@@ -15,9 +16,9 @@ SECRETS_ENV=${PLATOON_SECRETS_ENV_FILE:-/home/aci18912it/rasp/config/secrets.env
     exit 2
 }
 case "${OPENREWARD_MODEL_FAMILY:-}" in
-    qwen36|qwen38) export OPENREWARD_MODEL_FAMILY ;;
+    qwen35|qwen36|qwen38) export OPENREWARD_MODEL_FAMILY ;;
     *)
-        echo "[pbs-openreward] ERROR: OPENREWARD_MODEL_FAMILY must be qwen36 or qwen38" >&2
+        echo "[pbs-openreward] ERROR: OPENREWARD_MODEL_FAMILY must be qwen35, qwen36, or qwen38" >&2
         exit 2
         ;;
 esac
@@ -75,6 +76,8 @@ PREUPDATE_LOAD_POLICY=${OPENREWARD_PREUPDATE_LOAD_POLICY:-}
 PREUPDATE_NO_LOAD_OPTIM=${OPENREWARD_PREUPDATE_NO_LOAD_OPTIM:-0}
 RESUME_SUCCESSOR_BINDING=${OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING:-}
 FRESH_RUN_BINDING=${OPENREWARD_EXPECTED_FRESH_RUN_BINDING:-}
+ENVIRONMENT_SET=${OPENREWARD_ENVIRONMENT_SET:-toolathlon_swe}
+ENVIRONMENT_SET_BINDING=
 EXPECTED_RESUME_GLOBAL_STEP=${OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP:-}
 EXPECTED_START_GLOBAL_STEP=${OPENREWARD_EXPECTED_START_GLOBAL_STEP:-}
 EXPECTED_RESUME_CHECKPOINT_ROOT=${OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT:-}
@@ -137,6 +140,53 @@ require_uint OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES \
     "${NODE_MEMORY_FALLBACK_AVAILABLE_BYTES}" 1
 require_uint OPENREWARD_NODE_MEMORY_POLL_SECONDS "${NODE_MEMORY_POLL_SECONDS}" 1
 require_uint OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS "${NODE_MEMORY_TELEMETRY_SECONDS}" 1
+
+# The default is the historical mixed Toolathlon + SWE service pool.  The
+# reduced service topology is launcher-private and may only be selected by one
+# of the three fresh v27 bindings, with its full experiment tuple intact.
+# BEGIN OPENREWARD_ENVIRONMENT_SET_AUTHORIZATION
+[[ -z "${OPENREWARD_ENVIRONMENT_SET_BINDING:-}" ]] || \
+    die "OPENREWARD_ENVIRONMENT_SET_BINDING is launcher-private"
+case "${ENVIRONMENT_SET}" in
+    toolathlon_swe)
+        ;;
+    toolathlon_only)
+        [[ "${REQUIRE_EXISTING_RECOVERY}" == 0 ]] || \
+            die "Toolathlon-only service mode is restricted to fresh v27 trials"
+        case "${FRESH_RUN_BINDING}" in
+            qwen36-32-v27-rootprop64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 32:1:1:qwen36 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-rootprop-v27 && \
+                    "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0 ]] || \
+                    die "Toolathlon-only root-propagation service binding mismatch"
+                ;;
+            qwen36-32-v27-behavior64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 32:1:1:qwen36 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-behavior-gate-v27 && \
+                    "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0 ]] || \
+                    die "Toolathlon-only Qwen3.6 behavior-gate service binding mismatch"
+                ;;
+            qwen35-16-v27-behavior64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 16:1:1:qwen35 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-dp-behavior-v27 && \
+                    "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0 ]] || \
+                    die "Toolathlon-only Qwen3.5 behavior-gate service binding mismatch"
+                ;;
+            *)
+                die "Toolathlon-only service mode is not authorized for fresh binding ${FRESH_RUN_BINDING@Q}"
+                ;;
+        esac
+        ENVIRONMENT_SET_BINDING=${FRESH_RUN_BINDING}
+        ;;
+    *)
+        die "OPENREWARD_ENVIRONMENT_SET must be toolathlon_swe or toolathlon_only"
+        ;;
+esac
+export \
+    OPENREWARD_ENVIRONMENT_SET=${ENVIRONMENT_SET} \
+    OPENREWARD_ENVIRONMENT_SET_BINDING=${ENVIRONMENT_SET_BINDING}
+# END OPENREWARD_ENVIRONMENT_SET_AUTHORIZATION
+
 [[ ( "${NODE_MEMORY_GUARD_ENABLED}" == 0 || "${NODE_MEMORY_GUARD_ENABLED}" == 1 ) && \
     "${NODE_MEMORY_LIMIT_BYTES}" == 2061584302080 && \
     "${NODE_MEMORY_TRIGGER_PERCENT}" == 85 && \
@@ -161,6 +211,12 @@ if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
                 "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q36-cp2-effoff-v26 && \
                 "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0 ]] || \
                 die "Qwen3.6 fresh efficiency-disabled guard binding mismatch"
+            NODE_MEMORY_GUARD_DISABLED_BINDING=${FRESH_RUN_BINDING}
+            ;;
+        :qwen36-32-v27-rootprop64|:qwen36-32-v27-behavior64|:qwen35-16-v27-behavior64)
+            [[ "${ENVIRONMENT_SET}" == toolathlon_only && \
+                "${ENVIRONMENT_SET_BINDING}" == "${FRESH_RUN_BINDING}" ]] || \
+                die "v27 Toolathlon-only guard disablement requires its exact service binding"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${FRESH_RUN_BINDING}
             ;;
         *)
@@ -308,12 +364,24 @@ else
     [[ -z "${RESUME_SUCCESSOR_BINDING}" ]] || \
         die "successor binding requires existing recovery"
     if [[ -n "${FRESH_RUN_BINDING}" ]]; then
-        [[ "${FRESH_RUN_BINDING}" == qwen36-32-v26-fresh-d2-noeff && \
-            "${NODE_MEMORY_GUARD_ENABLED}" == 0 && \
-            "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
-            "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q36-cp2-effoff-v26 && \
-            "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0 ]] || \
-            die "unknown or mismatched fresh-run binding"
+        case "${FRESH_RUN_BINDING}" in
+            qwen36-32-v26-fresh-d2-noeff)
+                [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 && \
+                    "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta-swe32-q36-cp2-effoff-v26 && \
+                    "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0 ]] || \
+                    die "Qwen3.6 v26 fresh-run binding mismatch"
+                ;;
+            qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen35-16-v27-behavior64)
+                [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 && \
+                    "${ENVIRONMENT_SET}" == toolathlon_only && \
+                    "${ENVIRONMENT_SET_BINDING}" == "${FRESH_RUN_BINDING}" ]] || \
+                    die "v27 fresh-run binding requires exact Toolathlon-only mode with the guard disabled"
+                ;;
+            *)
+                die "unknown fresh-run binding"
+                ;;
+        esac
     fi
     for unexpected_resume_value in \
         "${EXPECTED_RESUME_GLOBAL_STEP}" \
@@ -366,14 +434,18 @@ fi
     die "pinned host-controller Python is unavailable: ${CONTROLLER_PYTHON_BASE}"
 [[ "${NODE_LOCAL_INIT_PYTHON}" == /* && -x "${NODE_LOCAL_INIT_PYTHON}" ]] || \
     die "node-local initializer Python must be an absolute executable: ${NODE_LOCAL_INIT_PYTHON}"
-for required_file in \
+required_files=(
     "${PREPARE_ENV}" "${PREPARE_CONTROLLER_ENV}" "${NODE_SERVICES}" "${NODE_MEMORY_GUARD}" \
     "${SERVICE_CLEANUP_RECEIPT}" "${SERVICE_SHUTDOWN_REQUEST}" \
-    "${CONTROLLER_RUNTIME_RECEIPT_HELPER}" "${SWE_CLEANUP}" \
-    "${NODE_LOCAL_INIT}" "${UPDATE_GATE}"; do
+    "${CONTROLLER_RUNTIME_RECEIPT_HELPER}" "${NODE_LOCAL_INIT}" "${UPDATE_GATE}"
+)
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    required_files+=("${SWE_CLEANUP}")
+fi
+for required_file in "${required_files[@]}"; do
     [[ -x "${required_file}" ]] || die "required helper is not executable: ${required_file}"
 done
-unset required_file
+unset required_file required_files
 if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 && ! -x "${RESUME_CHECKPOINT_VERIFY}" ]]; then
     die "resume checkpoint runtime verifier is unavailable: ${RESUME_CHECKPOINT_VERIFY}"
 fi
@@ -418,8 +490,10 @@ else
         die "no-load-optimizer config is forbidden outside the exact preupdate binding"
 fi
 
-[[ -f "${SWE_REBENCH_DATA_DIR}/task_index.json" ]] || \
-    die "verified SWE task index is missing: ${SWE_REBENCH_DATA_DIR}/task_index.json"
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    [[ -f "${SWE_REBENCH_DATA_DIR}/task_index.json" ]] || \
+        die "verified SWE task index is missing: ${SWE_REBENCH_DATA_DIR}/task_index.json"
+fi
 for model_file in config.json tokenizer.json tokenizer_config.json model.safetensors.index.json; do
     [[ -f "${PLATOON_MODEL_SNAPSHOT}/${model_file}" ]] || \
         die "model snapshot is incomplete; missing ${model_file}"
@@ -432,6 +506,7 @@ from pathlib import Path
 
 snapshot = Path(sys.argv[1])
 expected_count = int(sys.argv[2])
+model_family = sys.argv[3]
 index_path = snapshot / "model.safetensors.index.json"
 try:
     document = json.loads(index_path.read_text(encoding="utf-8"))
@@ -441,7 +516,18 @@ weight_map = document.get("weight_map")
 if not isinstance(weight_map, dict) or not weight_map:
     raise SystemExit("model shard index must contain a non-empty weight_map object")
 
-pattern = re.compile(r"model-([0-9]+)-of-([0-9]+)[.]safetensors")
+shard_prefixes = {
+    "qwen35": "model.safetensors-",
+    "qwen36": "model-",
+    "qwen38": "model-",
+}
+try:
+    shard_prefix = shard_prefixes[model_family]
+except KeyError as exc:
+    raise SystemExit(f"unsupported model family for shard validation: {model_family!r}") from exc
+pattern = re.compile(
+    re.escape(shard_prefix) + r"([0-9]+)-of-([0-9]+)[.]safetensors"
+)
 declared = set()
 for tensor_name, shard_name in weight_map.items():
     if not isinstance(tensor_name, str) or not isinstance(shard_name, str):
@@ -473,7 +559,7 @@ if on_disk != declared:
     raise SystemExit(
         f"model shard files differ from the index; missing={missing!r} unexpected={unexpected!r}"
     )
-' "${PLATOON_MODEL_SNAPSHOT}" "${EXPECTED_MODEL_SHARDS}"; then
+' "${PLATOON_MODEL_SNAPSHOT}" "${EXPECTED_MODEL_SHARDS}" "${OPENREWARD_MODEL_FAMILY}"; then
     die "model snapshot shard-manifest validation failed"
 fi
 
@@ -727,15 +813,19 @@ urls_for_port() {
 }
 
 export OPENREWARD_PORT=${OPENREWARD_PORT:-8082}
-export OPENREWARD_SWE_REBENCH_PORT=${OPENREWARD_SWE_REBENCH_PORT:-8084}
 export OPENREWARD_WORKER_BASE_PORT=${OPENREWARD_WORKER_BASE_PORT:-28100}
 export OPENREWARD_WORKERS=${OPENREWARD_WORKERS:-8}
 [[ "${OPENREWARD_WORKER_BASE_PORT}" == 28100 && "${OPENREWARD_WORKERS}" == 8 ]] || \
     die "Toolathlon node services must use the pinned 28100..28107 worker ports"
 export OPENREWARD_SESSION_URLS_TOOLATHLON
 OPENREWARD_SESSION_URLS_TOOLATHLON=$(urls_for_port "${OPENREWARD_PORT}")
-export OPENREWARD_SESSION_URLS_SWE_REBENCH
-OPENREWARD_SESSION_URLS_SWE_REBENCH=$(urls_for_port "${OPENREWARD_SWE_REBENCH_PORT}")
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    export OPENREWARD_SWE_REBENCH_PORT=${OPENREWARD_SWE_REBENCH_PORT:-8084}
+    export OPENREWARD_SESSION_URLS_SWE_REBENCH
+    OPENREWARD_SESSION_URLS_SWE_REBENCH=$(urls_for_port "${OPENREWARD_SWE_REBENCH_PORT}")
+else
+    unset OPENREWARD_SWE_REBENCH_PORT OPENREWARD_SESSION_URLS_SWE_REBENCH
+fi
 export OPENREWARD_SESSION_URLS=${OPENREWARD_SESSION_URLS_TOOLATHLON}
 export OPENREWARD_ENABLE_TMAX=0
 
@@ -1158,38 +1248,60 @@ request_all_service_shutdowns() {
 
 audit_service_shutdown() {
     local index=$1 host vnode_index audit_log audit_marker
+    local -a closed_endpoint_args
     host=${service_hosts[index]}
     vnode_index=${service_vnode_indices[index]}
     audit_log=${LOG_DIR}/services-cleanup-audit-${host//[^A-Za-z0-9_.-]/_}.log
     audit_marker=${SERVICE_CLEANUP_RECEIPT_DIR}/${host}.controller-audit
+    closed_endpoint_args=(--host "${host}" --port "${OPENREWARD_PORT}")
+    if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+        closed_endpoint_args+=(--port "${OPENREWARD_SWE_REBENCH_PORT}")
+    fi
     if ! "${CONTROLLER_PYTHON_BASE}" -I "${SERVICE_CLEANUP_RECEIPT}" assert-tcp-closed \
-        --host "${host}" --port "${OPENREWARD_PORT}" \
-        --port "${OPENREWARD_SWE_REBENCH_PORT}" --timeout-seconds 2; then
+        "${closed_endpoint_args[@]}" --timeout-seconds 2; then
         echo "[pbs-openreward] ERROR: TCP endpoint closure failed on ${host}" >&2
         return 1
     fi
-    /usr/bin/timeout --signal=TERM --kill-after=10 70 env \
-        -u WANDB_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
-        -u LITELLM_API_KEY -u LITELLM_BASE_URL -u RUBRIC_DEFAULT_LLM -u HF_TOKEN \
-        -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
-        "${PBSDSH}" -n "${vnode_index}" -- /usr/bin/env \
-        "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
-        /bin/bash -c '
-            set -euo pipefail
-            helper=$1 receipt_helper=$2 session_root=$3 runtime=$4 output=$5 marker=$6
-            /usr/bin/python3 "${helper}" --session-root "${session_root}" \
-                --runtime "${runtime}" --stop-grace-seconds 10 >"${output}"
-            grep -Fxq swe_singularity_sessions_cleaned=0 "${output}"
-            /usr/bin/python3 -I "${receipt_helper}" assert-empty-swe --session-root "${session_root}"
-            printf "node_services_remote_audit=passed\npbs_job_id=%s\nhost=%s\n" \
-                "${PBS_JOBID}" "$(hostname -s)" >"${marker}.partial"
-            chmod 0600 "${marker}.partial"
-            ln "${marker}.partial" "${marker}"
-            rm -f "${marker}.partial"
-        ' node-service-audit "${SWE_CLEANUP}" "${SERVICE_CLEANUP_RECEIPT}" \
-        "${SWE_APPTAINER_SESSION_ROOT}" "${RUNTIME}" \
-        "${PLATOON_NODE_LOCAL_ROOT}/node-services-controller-audit.log" "${audit_marker}" \
-        >"${audit_log}" 2>&1
+    if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+        /usr/bin/timeout --signal=TERM --kill-after=10 70 env \
+            -u WANDB_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+            -u LITELLM_API_KEY -u LITELLM_BASE_URL -u RUBRIC_DEFAULT_LLM -u HF_TOKEN \
+            -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+            "${PBSDSH}" -n "${vnode_index}" -- /usr/bin/env \
+            "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
+            /bin/bash -c '
+                set -euo pipefail
+                helper=$1 receipt_helper=$2 session_root=$3 runtime=$4 output=$5 marker=$6
+                /usr/bin/python3 "${helper}" --session-root "${session_root}" \
+                    --runtime "${runtime}" --stop-grace-seconds 10 >"${output}"
+                grep -Fxq swe_singularity_sessions_cleaned=0 "${output}"
+                /usr/bin/python3 -I "${receipt_helper}" assert-empty-swe --session-root "${session_root}"
+                printf "node_services_remote_audit=passed\npbs_job_id=%s\nhost=%s\n" \
+                    "${PBS_JOBID}" "$(hostname -s)" >"${marker}.partial"
+                chmod 0600 "${marker}.partial"
+                ln "${marker}.partial" "${marker}"
+                rm -f "${marker}.partial"
+            ' node-service-audit "${SWE_CLEANUP}" "${SERVICE_CLEANUP_RECEIPT}" \
+            "${SWE_APPTAINER_SESSION_ROOT}" "${RUNTIME}" \
+            "${PLATOON_NODE_LOCAL_ROOT}/node-services-controller-audit.log" "${audit_marker}" \
+            >"${audit_log}" 2>&1
+    else
+        # Toolathlon-only jobs have no SWE session tree or janitor contract.
+        /usr/bin/timeout --signal=TERM --kill-after=10 70 env \
+            -u WANDB_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+            -u LITELLM_API_KEY -u LITELLM_BASE_URL -u RUBRIC_DEFAULT_LLM -u HF_TOKEN \
+            -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+            "${PBSDSH}" -n "${vnode_index}" -- /usr/bin/env \
+            /bin/bash -c '
+                set -euo pipefail
+                marker=$1
+                printf "node_services_remote_audit=passed\npbs_job_id=%s\nhost=%s\n" \
+                    "${PBS_JOBID}" "$(hostname -s)" >"${marker}.partial"
+                chmod 0600 "${marker}.partial"
+                ln "${marker}.partial" "${marker}"
+                rm -f "${marker}.partial"
+            ' node-service-audit "${audit_marker}" >"${audit_log}" 2>&1
+    fi
     [[ -f "${audit_marker}" && ! -L "${audit_marker}" && \
         "$(stat -c %u:%a "${audit_marker}")" == "$(id -u):600" ]] && \
         grep -Fxq node_services_remote_audit=passed "${audit_marker}" && \
@@ -1316,7 +1428,11 @@ trap cleanup EXIT
 trap 'handle_signal TERM' TERM
 trap 'handle_signal INT' INT
 
-echo "[pbs-openreward] starting one Toolathlon and one SWE service on ${SERVICE_NODE_COUNT} ordered rollout-tail nodes: ${service_node_csv}"
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    echo "[pbs-openreward] starting one Toolathlon and one SWE service on ${SERVICE_NODE_COUNT} ordered rollout-tail nodes: ${service_node_csv}"
+else
+    echo "[pbs-openreward] starting one Toolathlon service on ${SERVICE_NODE_COUNT} ordered rollout-tail nodes: ${service_node_csv}"
+fi
 while IFS=$'\t' read -r host vnode_index; do
     safe_host=${host//[^A-Za-z0-9_.-]/_}
     service_receipt=${SERVICE_CLEANUP_RECEIPT_DIR}/${host}.json
@@ -1339,6 +1455,13 @@ while IFS=$'\t' read -r host vnode_index; do
         "${PBSDSH}" -n "${vnode_index}" -- /usr/bin/env \
         "PLATOON_ABCI_ENV_FILE=${ABCI_ENV}" \
         "OPENREWARD_MODEL_FAMILY=${OPENREWARD_MODEL_FAMILY}" \
+        "OPENREWARD_ENVIRONMENT_SET=${ENVIRONMENT_SET}" \
+        "OPENREWARD_ENVIRONMENT_SET_BINDING=${ENVIRONMENT_SET_BINDING}" \
+        "OPENREWARD_EXPECTED_NNODES=${EXPECTED_NNODES}" \
+        "OPENREWARD_EXPECTED_RECURSIVE=${EXPECTED_RECURSIVE}" \
+        "OPENREWARD_EXPECTED_PTC=${EXPECTED_PTC}" \
+        "OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPECTED_EXPERIMENT}" \
+        "OPENREWARD_EXPECTED_TRIAL_NAME=${EXPECTED_TRIAL}" \
         "PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${service_receipt}" \
         "PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST=${service_shutdown_request}" \
         "PLATOON_NODE_SERVICES_EXPECTED_HOST=${host}" \
@@ -1388,9 +1511,10 @@ TOOLATHLON_WORKER_QUORUM=$((10#${TOOLATHLON_WORKER_QUORUM}))
     TOOLATHLON_WORKER_BASE_PORT + TOOLATHLON_WORKERS - 1 <= 65535)) || \
     die "Toolathlon direct-worker health topology is invalid"
 
-# Probe every exact Toolathlon worker port, its public nginx endpoint, and SWE
-# concurrently across all service hosts.  Each curl owns the full sweep timeout,
-# so one sweep is bounded by that timeout instead of endpoints * hosts * timeout.
+# Probe every exact Toolathlon worker port and its public nginx endpoint.  The
+# historical mixed mode also probes SWE concurrently across all service hosts.
+# Each curl owns the full sweep timeout, so one sweep is bounded by that timeout
+# instead of endpoints * hosts * timeout.
 # BEGIN OPENREWARD_HEALTH_MONITOR_FUNCTIONS
 endpoint_healthy() {
     local service=$1 host=$2 port=$3 url=$4 session_id=${5:-}
@@ -1466,11 +1590,13 @@ service_pools_healthy() {
             probe_hosts+=("${host}")
         done
 
-        url="http://${host}:${OPENREWARD_SWE_REBENCH_PORT}/health"
-        endpoint_healthy swe-rebench "${host}" "${OPENREWARD_SWE_REBENCH_PORT}" "${url}" &
-        probe_pids+=("$!")
-        probe_kinds+=(swe)
-        probe_hosts+=("${host}")
+        if [[ "${ENVIRONMENT_SET:-toolathlon_swe}" == toolathlon_swe ]]; then
+            url="http://${host}:${OPENREWARD_SWE_REBENCH_PORT}/health"
+            endpoint_healthy swe-rebench "${host}" "${OPENREWARD_SWE_REBENCH_PORT}" "${url}" &
+            probe_pids+=("$!")
+            probe_kinds+=(swe)
+            probe_hosts+=("${host}")
+        fi
     done
 
     # Every curl is already in flight. Reap all of them before evaluating the
@@ -1523,7 +1649,8 @@ service_pools_healthy() {
                 "${TOOLATHLON_WORKER_QUORUM}" "${TOOLATHLON_WORKERS}" >&2
             healthy=0
         fi
-        if ((swe_ok["${host}"] != 1)); then
+        if [[ "${ENVIRONMENT_SET:-toolathlon_swe}" == toolathlon_swe ]] && \
+            ((swe_ok["${host}"] != 1)); then
             healthy=0
         fi
     done
@@ -1553,7 +1680,11 @@ until service_pools_healthy "${startup_health_round}"; do
     sleep 5
 done
 unset startup_health_round
-echo "[pbs-openreward] all Toolathlon and SWE service endpoints are healthy"
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    echo "[pbs-openreward] all Toolathlon and SWE service endpoints are healthy"
+else
+    echo "[pbs-openreward] all Toolathlon service endpoints are healthy"
+fi
 
 export OPENREWARD_DISABLE_UPDATE_CHECK=1
 export OPENHANDS_SUPPRESS_BANNER=1
@@ -1592,7 +1723,10 @@ export PLATOON_AREAL_PBS_HOST_PYTHON=${OPENREWARD_CONTROLLER_JOB_PYTHON}
 # absent there; give the PBS scheduler the immutable SIF-built worker Python.
 export PLATOON_AREAL_PBS_WORKER_PYTHON=${OPENREWARD_WORKER_JOB_PYTHON}
 export PLATOON_AREAL_PBS_PBSDSH_BIN=${PBSDSH}
-export PLATOON_AREAL_PBS_FORWARD_ENV="HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE OPENREWARD_DISABLE_UPDATE_CHECK OPENHANDS_SUPPRESS_BANNER OPENREWARD_SESSION_URLS OPENREWARD_SESSION_URLS_TOOLATHLON OPENREWARD_SESSION_URLS_SWE_REBENCH OPENREWARD_MODEL_FAMILY PLATOON_MODEL_SNAPSHOT PLATOON_QWEN35_GDN_CP_CONV_BACKEND PLATOON_MEGATRON_ATTENTION_BACKEND TORCH_NCCL_TRACE_BUFFER_SIZE TORCH_NCCL_DUMP_ON_TIMEOUT TORCH_NCCL_DESYNC_DEBUG"
+export PLATOON_AREAL_PBS_FORWARD_ENV="HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE OPENREWARD_DISABLE_UPDATE_CHECK OPENHANDS_SUPPRESS_BANNER OPENREWARD_SESSION_URLS OPENREWARD_SESSION_URLS_TOOLATHLON OPENREWARD_SESSION_URLS_SWE_REBENCH OPENREWARD_MODEL_FAMILY PLATOON_MODEL_SNAPSHOT OPENREWARD_ENVIRONMENT_SET PLATOON_QWEN35_GDN_CP_CONV_BACKEND PLATOON_MEGATRON_ATTENTION_BACKEND TORCH_NCCL_TRACE_BUFFER_SIZE TORCH_NCCL_DUMP_ON_TIMEOUT TORCH_NCCL_DESYNC_DEBUG"
+if [[ "${ENVIRONMENT_SET}" == toolathlon_only ]]; then
+    PLATOON_AREAL_PBS_FORWARD_ENV="HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE OPENREWARD_DISABLE_UPDATE_CHECK OPENHANDS_SUPPRESS_BANNER OPENREWARD_SESSION_URLS OPENREWARD_SESSION_URLS_TOOLATHLON OPENREWARD_MODEL_FAMILY PLATOON_MODEL_SNAPSHOT OPENREWARD_ENVIRONMENT_SET PLATOON_QWEN35_GDN_CP_CONV_BACKEND PLATOON_MEGATRON_ATTENTION_BACKEND TORCH_NCCL_TRACE_BUFFER_SIZE TORCH_NCCL_DUMP_ON_TIMEOUT TORCH_NCCL_DESYNC_DEBUG"
+fi
 if [[ -n "${EXPECTED_NCCL_HEARTBEAT_TIMEOUT}" ]]; then
     PLATOON_AREAL_PBS_FORWARD_ENV+=" TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"
 fi

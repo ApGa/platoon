@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Start one Toolathlon service and one host SWE server on one physical PBS node.
-# One copy of this helper is held by one long-lived pbsdsh connection.
+# Start one Toolathlon service and, in the default mixed mode, one host SWE
+# server on one physical PBS node. One copy of this helper is held by one
+# long-lived pbsdsh connection.
 
 set -euo pipefail
 umask 077
@@ -65,6 +66,13 @@ CLEANUP_RECEIPT=${PLATOON_NODE_SERVICES_CLEANUP_RECEIPT:-}
 SHUTDOWN_REQUEST=${PLATOON_NODE_SERVICES_SHUTDOWN_REQUEST:-}
 EXPECTED_HOST=${PLATOON_NODE_SERVICES_EXPECTED_HOST:-}
 EXPECTED_JOB_ID=${PLATOON_NODE_SERVICES_EXPECTED_JOB_ID:-}
+ENVIRONMENT_SET=${OPENREWARD_ENVIRONMENT_SET:-toolathlon_swe}
+ENVIRONMENT_SET_BINDING=${OPENREWARD_ENVIRONMENT_SET_BINDING:-}
+EXPECTED_NNODES=${OPENREWARD_EXPECTED_NNODES:-}
+EXPECTED_RECURSIVE=${OPENREWARD_EXPECTED_RECURSIVE:-}
+EXPECTED_PTC=${OPENREWARD_EXPECTED_PTC:-}
+EXPECTED_EXPERIMENT=${OPENREWARD_EXPECTED_EXPERIMENT_NAME:-}
+EXPECTED_TRIAL=${OPENREWARD_EXPECTED_TRIAL_NAME:-}
 NODE_MEMORY_GUARD_ENABLED=${OPENREWARD_NODE_MEMORY_GUARD_ENABLED:-1}
 NODE_MEMORY_GUARD_DISABLED_BINDING=${OPENREWARD_NODE_MEMORY_GUARD_DISABLED_BINDING:-}
 NODE_MEMORY_LIMIT_BYTES=${OPENREWARD_NODE_MEMORY_LIMIT_BYTES:-2061584302080}
@@ -80,10 +88,49 @@ die() {
 
 [[ -n "${PBS_JOBID:-}" ]] || die "this helper must run inside PBS"
 [[ -d "${PBS_LOCALDIR:-}" ]] || die "PBS_LOCALDIR is unavailable"
+# BEGIN OPENREWARD_ENVIRONMENT_SET_SUPERVISOR_AUTHORIZATION
+case "${ENVIRONMENT_SET}" in
+    toolathlon_swe)
+        [[ -z "${ENVIRONMENT_SET_BINDING}" ]] || \
+            die "mixed environment services must not carry a reduced-service binding"
+        ;;
+    toolathlon_only)
+        case "${ENVIRONMENT_SET_BINDING}" in
+            qwen36-32-v27-rootprop64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY:-}" == 32:1:1:qwen36 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-rootprop-v27 && \
+                    "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0 ]] || \
+                    die "Toolathlon-only root-propagation supervisor binding mismatch"
+                ;;
+            qwen36-32-v27-behavior64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY:-}" == 32:1:1:qwen36 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-behavior-gate-v27 && \
+                    "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0 ]] || \
+                    die "Toolathlon-only Qwen3.6 behavior-gate supervisor binding mismatch"
+                ;;
+            qwen35-16-v27-behavior64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY:-}" == 16:1:1:qwen35 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-dp-behavior-v27 && \
+                    "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0 ]] || \
+                    die "Toolathlon-only Qwen3.5 behavior-gate supervisor binding mismatch"
+                ;;
+            *)
+                die "Toolathlon-only supervisor mode lacks an exact v27 binding"
+                ;;
+        esac
+        unset OPENREWARD_SESSION_URLS_SWE_REBENCH OPENREWARD_SWE_REBENCH_PORT
+        ;;
+    *)
+        die "OPENREWARD_ENVIRONMENT_SET must be toolathlon_swe or toolathlon_only"
+        ;;
+esac
+# END OPENREWARD_ENVIRONMENT_SET_SUPERVISOR_AUTHORIZATION
 [[ -x "${TOOLATHLON_ENTRYPOINT}" ]] || die "Toolathlon entrypoint is missing"
 [[ -x "${TOOLATHLON_STAGER}" ]] || die "Toolathlon PGDATA stager is missing"
-[[ -x "${SWE_HELPER}" ]] || die "SWE helper is missing"
-[[ -x "${SWE_CLEANUP}" ]] || die "SWE cleanup helper is missing"
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    [[ -x "${SWE_HELPER}" ]] || die "SWE helper is missing"
+    [[ -x "${SWE_CLEANUP}" ]] || die "SWE cleanup helper is missing"
+fi
 [[ -x "${MEMORY_GUARD}" ]] || die "node memory guard is missing"
 [[ -r "${OPENREWARD_TOOLATHLON_SIF}" ]] || die "Toolathlon SIF is missing"
 [[ ( "${NODE_MEMORY_GUARD_ENABLED}" == 0 || "${NODE_MEMORY_GUARD_ENABLED}" == 1 ) && \
@@ -96,6 +143,11 @@ die() {
 if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
     case "${NODE_MEMORY_GUARD_DISABLED_BINDING}" in
         qwen38-32-v22-gs10|qwen36-32-v22-depth2|qwen38-16-v25-gs12|qwen36-32-v26-fresh-d2-noeff) ;;
+        qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen35-16-v27-behavior64)
+            [[ "${ENVIRONMENT_SET}" == toolathlon_only && \
+                "${ENVIRONMENT_SET_BINDING}" == "${NODE_MEMORY_GUARD_DISABLED_BINDING}" ]] || \
+                die "v27 guard disablement requires its exact Toolathlon-only supervisor binding"
+            ;;
         *) die "node memory guard disablement lacks an exact successor binding" ;;
     esac
 elif [[ -n "${NODE_MEMORY_GUARD_DISABLED_BINDING}" ]]; then
@@ -136,10 +188,13 @@ if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
         "${SINGULARITY_CACHEDIR:-}" == "${expected_node_local_root}/singularity-cache" && \
         "${SINGULARITY_TMPDIR:-}" == "${expected_node_local_root}/singularity-tmp" && \
         "${APPTAINER_CACHEDIR:-}" == "${SINGULARITY_CACHEDIR}" && \
-        "${APPTAINER_TMPDIR:-}" == "${SINGULARITY_TMPDIR}" && \
-        "${SWE_APPTAINER_SESSION_ROOT:-}" == "${expected_node_local_root}/swe-sessions" && \
-        "${SWE_SINGULARITY_SESSION_ROOT:-}" == "${SWE_APPTAINER_SESSION_ROOT}" ]] || \
+        "${APPTAINER_TMPDIR:-}" == "${SINGULARITY_TMPDIR}" ]] || \
         die "derived v9 service paths do not match the canonical PBS job-local root"
+    if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+        [[ "${SWE_APPTAINER_SESSION_ROOT:-}" == "${expected_node_local_root}/swe-sessions" && \
+            "${SWE_SINGULARITY_SESSION_ROOT:-}" == "${SWE_APPTAINER_SESSION_ROOT}" ]] || \
+            die "mixed SWE service paths do not match the canonical PBS job-local root"
+    fi
     unset expected_node_local_root
 fi
 
@@ -199,22 +254,29 @@ if [[ -n "${TOOLATHLON_PORTABILITY_PATCH_SHA256}" ]]; then
     )
 fi
 
-mkdir -p \
+node_service_directories=(
     "${LOCAL_ROOT}/images" \
     "${LOCAL_ROOT}/worker-home" \
     "${LOCAL_ROOT}/worker-tmp" \
     "${TOOLATHLON_STATE}" \
     "${SINGULARITY_CACHEDIR}" \
-    "${SINGULARITY_TMPDIR}" \
-    "${SWE_APPTAINER_SESSION_ROOT}"
-chmod 0700 \
+    "${SINGULARITY_TMPDIR}"
+)
+private_node_service_directories=(
     "${LOCAL_ROOT}" \
     "${LOCAL_ROOT}/images" \
     "${LOCAL_ROOT}/worker-home" \
     "${SINGULARITY_CACHEDIR}" \
-    "${SINGULARITY_TMPDIR}" \
-    "${SWE_APPTAINER_SESSION_ROOT}"
+    "${SINGULARITY_TMPDIR}"
+)
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    node_service_directories+=("${SWE_APPTAINER_SESSION_ROOT}")
+    private_node_service_directories+=("${SWE_APPTAINER_SESSION_ROOT}")
+fi
+mkdir -p "${node_service_directories[@]}"
+chmod 0700 "${private_node_service_directories[@]}"
 chmod 1777 "${LOCAL_ROOT}/worker-tmp"
+unset node_service_directories private_node_service_directories
 
 toolathlon_sif=${OPENREWARD_TOOLATHLON_SIF}
 if [[ "${STAGE_TOOLATHLON_SIF}" == 1 ]]; then
@@ -273,6 +335,14 @@ cleanup() {
     local forced_kill=0 cleanup_ok=1 janitor_log cleanup_begin
     local -a child_names=(toolathlon swe-rebench)
     local -a child_pids=("${toolathlon_pid}" "${swe_pid}")
+    local -a closed_endpoint_args=(
+        --host 127.0.0.1 --port "${TOOLATHLON_PORT}" --port "${SWE_PORT}"
+    )
+    if [[ "${ENVIRONMENT_SET}" == toolathlon_only ]]; then
+        child_names=(toolathlon)
+        child_pids=("${toolathlon_pid}")
+        closed_endpoint_args=(--host 127.0.0.1 --port "${TOOLATHLON_PORT}")
+    fi
     if ((cleanup_started)); then
         return
     fi
@@ -387,23 +457,25 @@ cleanup() {
         echo "[node-services] cleanup-child name=${name} pid=${pid:-absent} TERM=requested elapsed_seconds=${elapsed} exit_status=${wait_status} forced_KILL=${child_forced_kill}"
     done
     if ! /usr/bin/python3 -I "${CLEANUP_RECEIPT_HELPER}" assert-tcp-closed \
-        --host 127.0.0.1 --port "${TOOLATHLON_PORT}" --port "${SWE_PORT}" --timeout-seconds 2; then
+        "${closed_endpoint_args[@]}" --timeout-seconds 2; then
         echo "[node-services] ERROR: TCP endpoint closure could not be attested" >&2
         cleanup_ok=0
         status=1
     fi
-    janitor_log=${LOCAL_ROOT}/node-services-final-swe-cleanup.log
-    if ! /usr/bin/python3 "${SWE_CLEANUP}" \
-        --session-root "${SWE_APPTAINER_SESSION_ROOT}" \
-        --runtime "${RUNTIME}" \
-        --stop-grace-seconds 10 >"${janitor_log}" 2>&1 || \
-        ! grep -Fxq swe_singularity_sessions_cleaned=0 "${janitor_log}" || \
-        ! /usr/bin/python3 -I "${CLEANUP_RECEIPT_HELPER}" assert-empty-swe \
-            --session-root "${SWE_APPTAINER_SESSION_ROOT}"; then
-        echo "[node-services] ERROR: SWE sessions were not already clean at supervisor exit" >&2
-        tail -n 40 "${janitor_log}" >&2 || true
-        cleanup_ok=0
-        status=1
+    if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+        janitor_log=${LOCAL_ROOT}/node-services-final-swe-cleanup.log
+        if ! /usr/bin/python3 "${SWE_CLEANUP}" \
+            --session-root "${SWE_APPTAINER_SESSION_ROOT}" \
+            --runtime "${RUNTIME}" \
+            --stop-grace-seconds 10 >"${janitor_log}" 2>&1 || \
+            ! grep -Fxq swe_singularity_sessions_cleaned=0 "${janitor_log}" || \
+            ! /usr/bin/python3 -I "${CLEANUP_RECEIPT_HELPER}" assert-empty-swe \
+                --session-root "${SWE_APPTAINER_SESSION_ROOT}"; then
+            echo "[node-services] ERROR: SWE sessions were not already clean at supervisor exit" >&2
+            tail -n 40 "${janitor_log}" >&2 || true
+            cleanup_ok=0
+            status=1
+        fi
     fi
     if ((cleanup_ok)) && [[ -n "${CLEANUP_RECEIPT}" ]]; then
         if ! /usr/bin/python3 -I "${CLEANUP_RECEIPT_HELPER}" publish \
@@ -470,10 +542,12 @@ fi
         /app/openreward-toolathlon-resilient-entrypoint.sh &
 toolathlon_pid=$!
 
-echo "[node-services] starting SWE-rebench host=$(hostname) port=${SWE_PORT}"
-export SWE_APPTAINER_MKFS_BIN=${MKFS_EXT3}
-OPENREWARD_SWE_REBENCH_PORT=${SWE_PORT} "${SWE_HELPER}" &
-swe_pid=$!
+if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
+    echo "[node-services] starting SWE-rebench host=$(hostname) port=${SWE_PORT}"
+    export SWE_APPTAINER_MKFS_BIN=${MKFS_EXT3}
+    OPENREWARD_SWE_REBENCH_PORT=${SWE_PORT} "${SWE_HELPER}" &
+    swe_pid=$!
+fi
 
 # A long-lived pbsdsh connection owns this supervisor.  If either pool or an
 # enabled memory guard dies, tear down the live children and fail the
@@ -482,9 +556,12 @@ memory_guard_healthy() {
     [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]] || \
         { [[ -n "${memory_guard_pid}" ]] && kill -0 "${memory_guard_pid}" 2>/dev/null; }
 }
-while kill -0 "${toolathlon_pid}" 2>/dev/null && \
-    kill -0 "${swe_pid}" 2>/dev/null && \
-    memory_guard_healthy; do
+service_children_healthy() {
+    kill -0 "${toolathlon_pid}" 2>/dev/null && \
+        { [[ "${ENVIRONMENT_SET}" == toolathlon_only ]] || \
+            { [[ -n "${swe_pid}" ]] && kill -0 "${swe_pid}" 2>/dev/null; }; }
+}
+while service_children_healthy && memory_guard_healthy; do
     if [[ -e "${SHUTDOWN_REQUEST}" || -L "${SHUTDOWN_REQUEST}" ]]; then
         if ! /usr/bin/python3 -I "${SHUTDOWN_REQUEST_HELPER}" verify \
             --request "${SHUTDOWN_REQUEST}" \
@@ -509,9 +586,11 @@ if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 ]] && ! kill -0 "${memory_guard_pid}" 
 elif ! kill -0 "${toolathlon_pid}" 2>/dev/null; then
     wait "${toolathlon_pid}" || status=$?
     echo "[node-services] ERROR: Toolathlon exited status=${status}" >&2
-else
+elif [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
     wait "${swe_pid}" || status=$?
     echo "[node-services] ERROR: SWE-rebench exited status=${status}" >&2
+else
+    echo "[node-services] ERROR: Toolathlon-only supervisor lost an unclassified child" >&2
 fi
 ((status == 0)) && status=1
 exit "${status}"

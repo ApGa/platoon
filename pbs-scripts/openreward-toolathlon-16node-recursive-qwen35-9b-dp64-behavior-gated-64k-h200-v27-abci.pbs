@@ -1,0 +1,245 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=16:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-16q359b-bg-v27
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh 64K Toolathlon-only Qwen3.5-9B trial. Eight nodes run 64
+# single-GPU SGLang replicas and eight nodes run the pure-DP64 actor/reference.
+# Verifier reward is gated by the one-shot same-policy sub-agent behavior judge.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r27-07bebf9-057108f
+RELEASE_REF=refs/tags/abci-v8r27-07bebf9-057108f
+RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
+GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
+ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
+GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
+ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_qwen35_9b_dp64_c12_v27_behavior_gated.yaml
+BASE_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
+EXPERIMENT=abci-or-ta16-q35-9b-dp-behavior-v27
+TRIAL=abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
+CONFIG_SHA256=39c8addc162736c2c0bae7a48561ba1cf968abbcc2c5cf2bda52eeedb94cbb8e
+BASE_CONFIG_SHA256=c071d05e4d22140d347cb3971e6218cc3a51c4df25fa592160a934e83ae6d757
+FRESH_BINDING=qwen35-16-v27-behavior64
+EXPECTED_QWEN35_MODEL_REPOSITORY=apurvaga/Qwen3.5-9B-preserve-thinking
+EXPECTED_QWEN35_MODEL_REVISION=95987ff08644f284757951944c6c15f45bab0c8d
+EXPECTED_QWEN35_MODEL_SNAPSHOT=/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.5-9B-preserve-thinking/snapshots/95987ff08644f284757951944c6c15f45bab0c8d
+
+die() {
+    echo "[h200-16-qwen35-9b-behavior64] ERROR: $*" >&2
+    exit 2
+}
+
+require_literal_count() {
+    local file=$1
+    local expected=$2
+    local literal=$3
+    local observed
+    observed=$(grep -Fxc -- "${literal}" "${file}" || true)
+    [[ "${observed}" == "${expected}" ]] || \
+        die "$(basename -- "${file}") must contain ${expected} exact occurrence(s) of: ${literal}"
+}
+
+require_regex_count() {
+    local file=$1
+    local expected=$2
+    local regex=$3
+    local observed
+    observed=$(grep -Ec -- "${regex}" "${file}" || true)
+    [[ "${observed}" == "${expected}" ]] || \
+        die "$(basename -- "${file}") must contain ${expected} line(s) matching: ${regex}"
+}
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -r "${BASE_CONFIG}" && \
+    -x "${COMMON}" && -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && \
+    -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" ]] || \
+    die "immutable v8r27 release is incomplete: ${REPO_ROOT}"
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
+    die "release root must be the exact non-symlink path"
+
+read -r observed_config_sha _ < <(sha256sum -- "${CONFIG}")
+[[ "${observed_config_sha}" == "${CONFIG_SHA256}" ]] || \
+    die "fresh Qwen3.5 behavior-gated config digest mismatch"
+read -r observed_base_sha _ < <(sha256sum -- "${BASE_CONFIG}")
+[[ "${observed_base_sha}" == "${BASE_CONFIG_SHA256}" ]] || \
+    die "inherited Qwen3.6 64K base config digest mismatch"
+unset observed_config_sha observed_base_sha
+
+# Bind the overlay to its exact identity, 16-node/128-GPU partition, pure-DP
+# actor, one-GPU rollout replicas, 64K limits, and efficiency ablations.
+for literal in \
+    '  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff' \
+    'experiment_name: abci-or-ta16-q35-9b-dp-behavior-v27' \
+    'trial_name: abci-ta16-rec-q359b-dp-c12-d2-behavior-v27-t0' \
+    'tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}' \
+    'dynamic_bs: true' \
+    '  batch_size: 8' \
+    '  group_size: 8' \
+    '  dynamic_batch_recollection_max_rounds: 2' \
+    '  min_successful_group_size: 5' \
+    '  straggler_timeout_seconds: 900' \
+    '  straggler_quorum: 6' \
+    '  subprocess_shutdown_grace_seconds: 10' \
+    '  filter_zero_advantage_datums: false' \
+    '  filter_zero_variance_groups: false' \
+    '  subagent_datum_keep_probability: 0.25' \
+    '  backend: sglang:d64p1t1' \
+    '  max_concurrent_rollouts: 12' \
+    '  consumer_batch_size: 16' \
+    '  max_head_offpolicyness: 1' \
+    '  ensure_batch_divisible_by: 64' \
+    '  return_routed_experts: false' \
+    '  backend: megatron:d64p1t1c1' \
+    '  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}' \
+    '  router_replay_num_experts: null' \
+    '    enable_mtp: false' \
+    '    use_deterministic_algorithms: false' \
+    '  backend: ${actor.backend}' \
+    '  model_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}' \
+    '  context_length: 65537' \
+    '  max_prefill_tokens: 65536' \
+    '  disable_radix_cache: false' \
+    'cluster:' \
+    '  n_nodes: 16' \
+    '  n_gpus_per_node: 8' \
+    '    group: abci-ta16-rec-q359b-dp-c12-d2-behavior-v27'; do
+    require_literal_count "${CONFIG}" 1 "${literal}"
+done
+require_regex_count "${CONFIG}" 3 '^  backend: '
+require_literal_count "${CONFIG}" 2 '  enable_router_replay: false'
+require_literal_count "${CONFIG}" 2 '  router_replay_num_layers: null'
+require_literal_count "${CONFIG}" 2 '  router_replay_topk: null'
+require_literal_count "${CONFIG}" 2 '    max_tokens_per_mb: 65536'
+require_literal_count "${CONFIG}" 2 '    enable_fp32_lm_head: false'
+require_literal_count "${CONFIG}" 1 '    engine_max_tokens: 65536'
+require_literal_count "${CONFIG}" 0 '  return_routed_experts: true'
+require_literal_count "${CONFIG}" 0 '  enable_router_replay: true'
+require_literal_count "${CONFIG}" 0 '    use_deterministic_algorithms: true'
+require_literal_count "${CONFIG}" 0 '  backend: megatron:(attn:'
+
+# Two bounded eight-task chunks retain at least 8 * 5 * 2 = 80 roots, which
+# covers one DP64 actor step without relying on sampled child datums.
+recollected_root_capacity=$((8 * 5 * 2))
+[[ "${recollected_root_capacity}" == 80 && "${recollected_root_capacity}" -ge 64 ]] || \
+    die "bounded recollection does not cover one DP64 actor step"
+unset recollected_root_capacity
+
+# Bind recursion to the increased solver/verifier budgets and same-policy
+# behavior gate. This must remain Toolathlon-only and must not propagate root
+# success into the verifier-gated strategy.
+for literal in \
+    '    max_steps: 200' \
+    '    timeout: 3600' \
+    '    step_timeout: 2700' \
+    '    propagate_root_success: false' \
+    '  subagent_environment_access: shared' \
+    '  subagent_default_max_steps: 100' \
+    '  subagent_max_depth: 2' \
+    '  enable_subagent_reward_judging: true' \
+    '  subagent_reward_judge_max_steps: 100' \
+    '  enable_subagent_behavior_judging: true' \
+    '  subagent_behavior_judge_max_prompt_tokens: 24576' \
+    '  subagent_behavior_judge_max_output_tokens: 4096' \
+    '  subagent_behavior_judge_timeout_seconds: 300.0' \
+    '  subagent_delegation_reward_coefficient: 0.0' \
+    '  condenser_max_tokens: 52428' \
+    '    - label: toolathlon' \
+    '      env_name: toolathlongym' \
+    '      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON' \
+    '      sampling_weight: 1.0'; do
+    require_literal_count "${CONFIG}" 1 "${literal}"
+done
+require_literal_count "${CONFIG}" 1 '  token_efficiency_reward:'
+require_literal_count "${CONFIG}" 1 '    enabled: false'
+require_literal_count "${CONFIG}" 0 '    propagate_root_success: true'
+require_literal_count "${CONFIG}" 0 '  enable_subagent_reward_judging: false'
+require_literal_count "${CONFIG}" 0 '  enable_subagent_behavior_judging: false'
+require_literal_count "${CONFIG}" 0 '    - label: swe_rebench'
+
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || die "release HEAD is not ${RELEASE_REF}"
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || die "release tracked tree is dirty"
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || die "release index is dirty"
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
+    die "release has tracked or ordinary untracked changes"
+
+# shellcheck disable=SC1090
+export OPENREWARD_MODEL_FAMILY=qwen35
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || die "v9 overlay selected another repository"
+
+# Bind the approved publication commit to its canonical group-cache snapshot.
+[[ "${EXPECTED_QWEN35_MODEL_REVISION}" =~ ^[0-9a-f]{40}$ ]] || \
+    die "Qwen3.5 preserve-thinking publication revision is not finalized"
+[[ "${OPENREWARD_QWEN35_MODEL_REPOSITORY:-}" == "${EXPECTED_QWEN35_MODEL_REPOSITORY}" ]] || \
+    die "Qwen3.5 preserve-thinking model repository binding is invalid"
+[[ "${OPENREWARD_QWEN35_MODEL_REVISION:-}" == "${EXPECTED_QWEN35_MODEL_REVISION}" ]] || \
+    die "Qwen3.5 preserve-thinking model revision binding is invalid"
+[[ "${OPENREWARD_QWEN35_MODEL_SNAPSHOT:-}" == "${EXPECTED_QWEN35_MODEL_SNAPSHOT}" && \
+    "${PLATOON_MODEL_SNAPSHOT:-}" == "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}" && \
+    -d "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}" && ! -L "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}" && \
+    "$(readlink -f "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}")" == "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}" && \
+    -r "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}/config.json" && \
+    -r "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}/tokenizer_config.json" && \
+    -r "${OPENREWARD_QWEN35_MODEL_SNAPSHOT}/chat_template.jinja" ]] || \
+    die "pinned Qwen3.5 preserve-thinking model snapshot binding is incomplete"
+export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN35_MODEL_SNAPSHOT}
+
+"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
+[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || \
+    die "submission must pass one absolute final v9 Gate2 RESULT"
+"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"
+[[ "${ALL_MCP_RESULT}" == /* && -f "${ALL_MCP_RESULT}" && ! -L "${ALL_MCP_RESULT}" ]] || \
+    die "submission must pass one absolute final all-MCP RESULT"
+"${ALL_MCP_VERIFY}" --release-root "${REPO_ROOT}" --result "${ALL_MCP_RESULT}" \
+    --gate2-result "${GATE2_RESULT}"
+
+for prior in "${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || \
+        die "refusing stale success artifact; use a fresh trial: ${prior}"
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || \
+    die "refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}"
+
+export OPENREWARD_EXPECTED_NNODES=16
+export OPENREWARD_EXPECTED_MODEL_SHARDS=4
+export OPENREWARD_SERVICE_NODE_COUNT=8
+export OPENREWARD_ENVIRONMENT_SET=toolathlon_only
+export OPENREWARD_EXPECTED_RECURSIVE=1
+export OPENREWARD_EXPECTED_PTC=1
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export OPENREWARD_EXPECTED_FRESH_RUN_BINDING=${FRESH_BINDING}
+export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0
+export OPENREWARD_NODE_MEMORY_LIMIT_BYTES=2061584302080
+export OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=85
+export OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=274877906944
+export OPENREWARD_NODE_MEMORY_POLL_SECONDS=2
+export OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS=60
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+unset OPENREWARD_REQUIRE_EXISTING_RECOVERY OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP
+unset OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT OPENREWARD_PREUPDATE_RECOVERY_BINDING_ID
+unset OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING
+
+exec "${COMMON}" "${CONFIG}"
