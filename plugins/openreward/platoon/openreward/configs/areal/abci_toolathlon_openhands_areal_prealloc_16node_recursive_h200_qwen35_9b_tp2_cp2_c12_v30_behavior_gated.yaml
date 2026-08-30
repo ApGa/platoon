@@ -4,9 +4,9 @@ defaults:
 
 # Fresh Toolathlon-only Qwen3.5-9B trial for verifier reward gated by a
 # same-policy behavioral audit. Eight nodes (64 GPUs) host independent SGLang
-# replicas and eight nodes host a DP32/CP2 actor with its colocated reference.
-experiment_name: abci-or-ta16-q35-9b-cp2-behavior-v28
-trial_name: abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0
+# replicas and eight nodes host a DP16/TP2/CP2 actor with its colocated reference.
+experiment_name: abci-or-ta16-q35-9b-tp2cp2-behavior-v30
+trial_name: abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0
 tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
 
 dynamic_bs: true
@@ -57,9 +57,9 @@ rollout:
     engine_max_tokens: 65536
 
 actor:
-  # The 64 training GPUs form 32 data-parallel replicas with context parallel
-  # size two. TP, PP, and EP remain disabled.
-  backend: megatron:d32p1t1c2
+  # The 64 training GPUs form 16 data-parallel replicas with tensor and context
+  # parallel size two. PP and EP remain disabled.
+  backend: megatron:d16p1t2c2
   path: ${oc.env:PLATOON_MODEL_SNAPSHOT}
   enable_router_replay: false
   router_replay_num_layers: null
@@ -147,4 +147,4 @@ cluster:
 stats_logger:
   wandb:
     project: toolathlon-openhands
-    group: abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28
+    group: abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30

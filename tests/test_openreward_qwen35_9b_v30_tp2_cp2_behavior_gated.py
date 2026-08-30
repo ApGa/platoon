@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_ROOT = REPO_ROOT / "plugins/openreward/platoon/openreward/configs/areal"
 CONFIG_NAME = (
     "abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_"
-    "qwen35_9b_cp2_c12_v28_behavior_gated"
+    "qwen35_9b_tp2_cp2_c12_v30_behavior_gated"
 )
 BASE = (
     "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
@@ -21,8 +21,8 @@ BASE = (
 WRAPPER = (
     REPO_ROOT
     / "pbs-scripts"
-    / "openreward-toolathlon-16node-recursive-qwen35-9b-cp2-"
-    "behavior-gated-64k-h200-v28-abci.pbs"
+    / "openreward-toolathlon-16node-recursive-qwen35-9b-tp2-cp2-"
+    "behavior-gated-64k-h200-v30-abci.pbs"
 )
 
 
@@ -52,7 +52,7 @@ def _compose(name: str, ancestry: tuple[str, ...] = ()) -> dict:
     return config
 
 
-def test_qwen35_9b_v28_leaf_composes_exact_cp2_runtime_contract() -> None:
+def test_qwen35_9b_v30_leaf_composes_exact_tp2_cp2_runtime_contract() -> None:
     yaml = pytest.importorskip("yaml")
     literal = yaml.safe_load((CONFIG_ROOT / f"{CONFIG_NAME}.yaml").read_text())
     config = _compose(CONFIG_NAME)
@@ -70,20 +70,20 @@ def test_qwen35_9b_v28_leaf_composes_exact_cp2_runtime_contract() -> None:
         literal["openreward"]["programmatic_tool_calling_max_tool_calls_per_execution"]
         == 1024
     )
-    assert config["experiment_name"] == "abci-or-ta16-q35-9b-cp2-behavior-v28"
+    assert config["experiment_name"] == "abci-or-ta16-q35-9b-tp2cp2-behavior-v30"
     assert config["trial_name"] == (
-        "abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0"
+        "abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0"
     )
     assert config["stats_logger"]["wandb"]["group"] == (
-        "abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28"
+        "abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30"
     )
 
     assert config["cluster"]["n_nodes"] == 16
     assert config["cluster"]["n_gpus_per_node"] == 8
-    assert config["actor"]["backend"] == "megatron:d32p1t1c2"
+    assert config["actor"]["backend"] == "megatron:d16p1t2c2"
     assert config["ref"]["backend"] == "${actor.backend}"
     assert config["rollout"]["backend"] == "sglang:d64p1t1"
-    assert 64 + 32 * 2 == config["cluster"]["n_nodes"] * 8
+    assert 64 + 16 * 2 * 2 == config["cluster"]["n_nodes"] * 8
 
     assert config["actor"]["enable_router_replay"] is False
     assert config["workflow_config"]["enable_router_replay"] is False
@@ -107,14 +107,15 @@ def test_qwen35_9b_v28_leaf_composes_exact_cp2_runtime_contract() -> None:
     assert config["openreward"]["condenser_max_tokens"] == 52_428
 
 
-def test_qwen35_9b_v28_cp2_floor_is_protected_by_bounded_recollection() -> None:
+def test_qwen35_9b_v30_tp2_cp2_floor_is_protected_by_bounded_recollection() -> None:
     config = _compose(CONFIG_NAME)
     workflow = config["workflow_config"]
     rollout = config["rollout"]
     actor = config["actor"]
 
-    dispatch_dp = 32
+    dispatch_dp = 16
     pp = 1
+    tp = 2
     cp = 2
     ppo_minibatches = actor["ppo_n_minibatches"]
     granularity = actor["mb_spec"]["granularity"]
@@ -129,7 +130,7 @@ def test_qwen35_9b_v28_cp2_floor_is_protected_by_bounded_recollection() -> None:
     )
     minimum = math.ceil(actor_quantum * engine_min / divisor) * divisor
 
-    assert dispatch_dp * pp * cp == 64
+    assert dispatch_dp * pp * tp * cp == 64
     assert (engine_divisor, engine_min, divisor, minimum) == (1, 1, 64, 64)
     assert config["dynamic_bs"] is True
     assert config["train_dataset"]["batch_size"] == 8
@@ -156,14 +157,14 @@ def test_qwen35_9b_v28_cp2_floor_is_protected_by_bounded_recollection() -> None:
 
     # Dynamic sizing can return fewer accepted tasks than a full chunk. The
     # trainer must therefore fail closed after bounded recollection instead of
-    # dispatching an undersized global batch to DP32 with a 64-datum divisor.
+    # dispatching an undersized global batch to DP16 with a 64-datum divisor.
     trainer_source = (REPO_ROOT / "platoon/train/areal/rl.py").read_text()
     assert "target_datums=actor_batch_requirements.minimum_datums" in trainer_source
     assert "if global_trainable < min_per_step:" in trainer_source
     assert "if total < requirements.minimum_datums:" in trainer_source
 
 
-def test_qwen35_9b_v28_uses_toolathlon_behavior_gate_reward_contract() -> None:
+def test_qwen35_9b_v30_uses_toolathlon_behavior_gate_reward_contract() -> None:
     config = _compose(CONFIG_NAME)
     workflow = config["workflow_config"]
     openreward = config["openreward"]
@@ -192,22 +193,22 @@ def test_qwen35_9b_v28_uses_toolathlon_behavior_gate_reward_contract() -> None:
     assert config["evaluator"]["eval_before_train"] is False
 
 
-def test_qwen35_9b_v28_wrapper_binds_v8r29_leaf_and_digest() -> None:
+def test_qwen35_9b_v30_wrapper_binds_v8r30_leaf_and_digest() -> None:
     wrapper = WRAPPER.read_text()
     config_path = CONFIG_ROOT / f"{CONFIG_NAME}.yaml"
 
     assert (
         "REPO_ROOT=/home/aci18912it/rasp/releases/"
-        "platoon-v8r29-07bebf9-057108f"
+        "platoon-v8r30-07bebf9-057108f"
     ) in wrapper
-    assert "RELEASE_REF=refs/tags/abci-v8r29-07bebf9-057108f" in wrapper
+    assert "RELEASE_REF=refs/tags/abci-v8r30-07bebf9-057108f" in wrapper
     assert (
-        "EXPERIMENT=abci-or-ta16-q35-9b-cp2-behavior-v28" in wrapper
+        "EXPERIMENT=abci-or-ta16-q35-9b-tp2cp2-behavior-v30" in wrapper
     )
     assert (
-        "TRIAL=abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0" in wrapper
+        "TRIAL=abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0" in wrapper
     )
-    assert "FRESH_BINDING=qwen35-16-v28-cp2-behavior64" in wrapper
+    assert "FRESH_BINDING=qwen35-16-v30-tp2cp2-behavior64" in wrapper
     assert "export OPENREWARD_EXPECTED_NNODES=16" in wrapper
     assert "export OPENREWARD_SERVICE_NODE_COUNT=8" in wrapper
     assert "export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0" in wrapper

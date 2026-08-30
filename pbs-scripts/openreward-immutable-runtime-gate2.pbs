@@ -57,7 +57,7 @@ RUNTIME_VERSION=4.4.1-1.el9
 UV_BIN=/home/aci18912it/.local/bin/uv
 CONTROLLER_PYTHON_BASE=/home/aci18912it/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
 if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
-    RELEASE_REF=refs/tags/abci-v8r29-07bebf9-057108f
+    RELEASE_REF=refs/tags/abci-v8r30-07bebf9-057108f
     RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
     GATE_ROOT_BASENAME=gate2-immutable-runtime-v9
 else
@@ -125,7 +125,7 @@ if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
         pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-rootprop-64k-h200-v27-abci.pbs \
         pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-behavior-gated-64k-h200-v27-abci.pbs \
         pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-dp64-behavior-gated-64k-h200-v27-abci.pbs \
-        pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-cp2-behavior-gated-64k-h200-v28-abci.pbs \
+        pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-tp2-cp2-behavior-gated-64k-h200-v30-abci.pbs \
         pbs-scripts/openreward-toolathlon-pbs-portable-build.pbs \
         pbs-scripts/openreward-toolathlon-all-mcp-health-v9.pbs \
         pbs-scripts/openreward-immutable-runtime-gate2-v9.pbs \
@@ -338,7 +338,7 @@ if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
         plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v27_rootprop.yaml \
         plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v27_behavior_gated.yaml \
         plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_qwen35_9b_dp64_c12_v27_behavior_gated.yaml \
-        plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_qwen35_9b_cp2_c12_v28_behavior_gated.yaml; do
+        plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_qwen35_9b_tp2_cp2_c12_v30_behavior_gated.yaml; do
         grep -Fxq "${archive_member}" "${GATE_ROOT}/source-members.txt" || \
             die "v9 immutable source archive omits ${archive_member}"
     done
@@ -364,7 +364,7 @@ if [[ "${GATE2_RELEASE_FLAVOR}" == v9 ]]; then
         pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-rootprop-64k-h200-v27-abci.pbs \
         pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-behavior-gated-64k-h200-v27-abci.pbs \
         pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-dp64-behavior-gated-64k-h200-v27-abci.pbs \
-        pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-cp2-behavior-gated-64k-h200-v28-abci.pbs \
+        pbs-scripts/openreward-toolathlon-16node-recursive-qwen35-9b-tp2-cp2-behavior-gated-64k-h200-v30-abci.pbs \
         pbs-scripts/openreward-toolathlon-pbs-portable-build.pbs \
         pbs-scripts/openreward-toolathlon-all-mcp-health-v9.pbs \
         pbs-scripts/openreward-immutable-runtime-gate2-v9.pbs \

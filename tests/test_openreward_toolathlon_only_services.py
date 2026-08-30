@@ -41,6 +41,13 @@ TOOLATHLON_ONLY_BINDINGS = (
         "abci-or-ta16-q35-9b-cp2-behavior-v28",
         "abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0",
     ),
+    (
+        "qwen35-16-v30-tp2cp2-behavior64",
+        "16",
+        "qwen35",
+        "abci-or-ta16-q35-9b-tp2cp2-behavior-v30",
+        "abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0",
+    ),
 )
 
 

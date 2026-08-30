@@ -120,6 +120,12 @@ case "${ENVIRONMENT_SET}" in
                     "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0 ]] || \
                     die "Toolathlon-only Qwen3.5 CP2 behavior-gate supervisor binding mismatch"
                 ;;
+            qwen35-16-v30-tp2cp2-behavior64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY:-}" == 16:1:1:qwen35 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-tp2cp2-behavior-v30 && \
+                    "${EXPECTED_TRIAL}" == abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0 ]] || \
+                    die "Toolathlon-only Qwen3.5 TP2/CP2 behavior-gate supervisor binding mismatch"
+                ;;
             *)
                 die "Toolathlon-only supervisor mode lacks an authorized fresh binding"
                 ;;
@@ -149,7 +155,7 @@ fi
 if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
     case "${NODE_MEMORY_GUARD_DISABLED_BINDING}" in
         qwen38-32-v22-gs10|qwen36-32-v22-depth2|qwen38-16-v25-gs12|qwen36-32-v26-fresh-d2-noeff) ;;
-        qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen35-16-v27-behavior64|qwen35-16-v28-cp2-behavior64)
+        qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen35-16-v27-behavior64|qwen35-16-v28-cp2-behavior64|qwen35-16-v30-tp2cp2-behavior64)
             [[ "${ENVIRONMENT_SET}" == toolathlon_only && \
                 "${ENVIRONMENT_SET_BINDING}" == "${NODE_MEMORY_GUARD_DISABLED_BINDING}" ]] || \
                 die "guard disablement requires its exact Toolathlon-only supervisor binding"

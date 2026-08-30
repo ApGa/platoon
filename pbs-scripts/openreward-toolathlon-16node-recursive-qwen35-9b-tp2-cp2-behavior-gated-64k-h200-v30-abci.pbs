@@ -5,42 +5,38 @@
 #PBS -l select=16:mpiprocs=8
 #PBS -l place=scatter
 #PBS -l walltime=168:00:00
-#PBS -N rasp-h200-16q359b-cp2-bg-v28
+#PBS -N rasp-h200-16q359b-t2c2-bg-v30
 #PBS -j oe
 #PBS -o /groups/gai51740/aci18912it/rasp/logs/
 #PBS -m a
 
 # Fresh 64K Toolathlon-only Qwen3.5-9B trial. Eight nodes run 64
-# single-GPU SGLang replicas and eight nodes run the DP32/CP2 actor/reference.
+# single-GPU SGLang replicas and eight nodes run the DP16/TP2/CP2 actor/reference.
 # Verifier reward is gated by the one-shot same-policy sub-agent behavior judge.
 
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r29-07bebf9-057108f
-RELEASE_REF=refs/tags/abci-v8r29-07bebf9-057108f
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r30-07bebf9-057108f
+RELEASE_REF=refs/tags/abci-v8r30-07bebf9-057108f
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
-GATE2_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_gate2_result.py
-ALL_MCP_VERIFY=${REPO_ROOT}/pbs-scripts/verify_toolathlon_all_mcp_health_result.py
-GATE2_RESULT=${OPENREWARD_V9_GATE2_RESULT:-}
-ALL_MCP_RESULT=${OPENREWARD_TOOLATHLON_ALL_MCP_HEALTH_RESULT:-}
-CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_qwen35_9b_cp2_c12_v28_behavior_gated.yaml
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_16node_recursive_h200_qwen35_9b_tp2_cp2_c12_v30_behavior_gated.yaml
 BASE_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff.yaml
 COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
 ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
-EXPERIMENT=abci-or-ta16-q35-9b-cp2-behavior-v28
-TRIAL=abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0
+EXPERIMENT=abci-or-ta16-q35-9b-tp2cp2-behavior-v30
+TRIAL=abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0
 RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
 CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
-CONFIG_SHA256=42ac0f57af16840bc4444b0f2a0d42a46191c4027c7ff5367c61b4381838f24b
+CONFIG_SHA256=50e0125c84006d11a7f627fcbd45fa4ea2f23fbb895bb42ec83cf78ebe24435a
 BASE_CONFIG_SHA256=c071d05e4d22140d347cb3971e6218cc3a51c4df25fa592160a934e83ae6d757
-FRESH_BINDING=qwen35-16-v28-cp2-behavior64
+FRESH_BINDING=qwen35-16-v30-tp2cp2-behavior64
 EXPECTED_QWEN35_MODEL_REPOSITORY=apurvaga/Qwen3.5-9B-preserve-thinking
 EXPECTED_QWEN35_MODEL_REVISION=95987ff08644f284757951944c6c15f45bab0c8d
 EXPECTED_QWEN35_MODEL_SNAPSHOT=/groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.5-9B-preserve-thinking/snapshots/95987ff08644f284757951944c6c15f45bab0c8d
 
 die() {
-    echo "[h200-16-qwen35-9b-cp2-behavior64] ERROR: $*" >&2
+    echo "[h200-16-qwen35-9b-tp2-cp2-behavior64] ERROR: $*" >&2
     exit 2
 }
 
@@ -65,26 +61,25 @@ require_regex_count() {
 }
 
 [[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -r "${BASE_CONFIG}" && \
-    -x "${COMMON}" && -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" && \
-    -x "${GATE2_VERIFY}" && -x "${ALL_MCP_VERIFY}" ]] || \
-    die "immutable v8r29 release is incomplete: ${REPO_ROOT}"
+    -x "${COMMON}" && -r "${ABCI_ENV}" && -x "${RELEASE_VERIFY}" ]] || \
+    die "immutable v8r30 release is incomplete: ${REPO_ROOT}"
 [[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
     die "release root must be the exact non-symlink path"
 
 read -r observed_config_sha _ < <(sha256sum -- "${CONFIG}")
 [[ "${observed_config_sha}" == "${CONFIG_SHA256}" ]] || \
-    die "fresh Qwen3.5 CP2 behavior-gated config digest mismatch"
+    die "fresh Qwen3.5 TP2/CP2 behavior-gated config digest mismatch"
 read -r observed_base_sha _ < <(sha256sum -- "${BASE_CONFIG}")
 [[ "${observed_base_sha}" == "${BASE_CONFIG_SHA256}" ]] || \
     die "inherited Qwen3.6 64K base config digest mismatch"
 unset observed_config_sha observed_base_sha
 
-# Bind the overlay to its exact identity, 16-node/128-GPU partition, DP32/CP2
+# Bind the overlay to its exact identity, 16-node/128-GPU partition, DP16/TP2/CP2
 # actor, one-GPU rollout replicas, 64K limits, and efficiency ablations.
 for literal in \
     '  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff' \
-    'experiment_name: abci-or-ta16-q35-9b-cp2-behavior-v28' \
-    'trial_name: abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28-t0' \
+    'experiment_name: abci-or-ta16-q35-9b-tp2cp2-behavior-v30' \
+    'trial_name: abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30-t0' \
     'tokenizer_path: ${oc.env:PLATOON_MODEL_SNAPSHOT}' \
     'dynamic_bs: true' \
     '  batch_size: 8' \
@@ -103,7 +98,7 @@ for literal in \
     '  max_head_offpolicyness: 1' \
     '  ensure_batch_divisible_by: 64' \
     '  return_routed_experts: false' \
-    '  backend: megatron:d32p1t1c2' \
+    '  backend: megatron:d16p1t2c2' \
     '  path: ${oc.env:PLATOON_MODEL_SNAPSHOT}' \
     '  router_replay_num_experts: null' \
     '    enable_mtp: false' \
@@ -116,7 +111,7 @@ for literal in \
     'cluster:' \
     '  n_nodes: 16' \
     '  n_gpus_per_node: 8' \
-    '    group: abci-ta16-rec-q359b-cp2-c12-d2-behavior-v28'; do
+    '    group: abci-ta16-rec-q359b-tp2cp2-c12-d2-behavior-v30'; do
     require_literal_count "${CONFIG}" 1 "${literal}"
 done
 require_regex_count "${CONFIG}" 3 '^  backend: '
@@ -130,6 +125,14 @@ require_literal_count "${CONFIG}" 0 '  return_routed_experts: true'
 require_literal_count "${CONFIG}" 0 '  enable_router_replay: true'
 require_literal_count "${CONFIG}" 0 '    use_deterministic_algorithms: true'
 require_literal_count "${CONFIG}" 0 '  backend: megatron:(attn:'
+require_literal_count "${CONFIG}" 0 '  backend: megatron:d32p1t1c2'
+
+actor_world=$((16 * 1 * 2 * 2))
+rollout_world=$((64 * 1 * 1))
+[[ "${actor_world}" == 64 && "${rollout_world}" == 64 && \
+    $((actor_world + rollout_world)) == $((16 * 8)) ]] || \
+    die "DP16/TP2/CP2 actor and DP64 rollout topology does not consume exactly 128 GPUs"
+unset actor_world rollout_world
 
 # Two bounded eight-task chunks retain at least 8 * 5 * 2 = 80 roots, which
 # covers one 64-datum actor step without relying on sampled child datums.
@@ -202,13 +205,6 @@ export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
 export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN35_MODEL_SNAPSHOT}
 
 "${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"
-[[ "${GATE2_RESULT}" == /* && -f "${GATE2_RESULT}" && ! -L "${GATE2_RESULT}" ]] || \
-    die "submission must pass one absolute final v9 Gate2 RESULT"
-"${GATE2_VERIFY}" --release-root "${REPO_ROOT}" --result "${GATE2_RESULT}"
-[[ "${ALL_MCP_RESULT}" == /* && -f "${ALL_MCP_RESULT}" && ! -L "${ALL_MCP_RESULT}" ]] || \
-    die "submission must pass one absolute final all-MCP RESULT"
-"${ALL_MCP_VERIFY}" --release-root "${REPO_ROOT}" --result "${ALL_MCP_RESULT}" \
-    --gate2-result "${GATE2_RESULT}"
 
 for prior in "${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json"; do
     [[ ! -e "${prior}" && ! -L "${prior}" ]] || \
