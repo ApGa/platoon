@@ -58,6 +58,14 @@ BEHAVIOR_RESUME_BINDING = (
     "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0",
 )
 
+ROOTPROP_RESUME_BINDING = (
+    "qwen36-32-v32-rootprop-gs13",
+    "32",
+    "qwen36",
+    "abci-or-ta32-q36-cp2-rootprop-v27",
+    "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0",
+)
+
 
 def _marked(source: str, begin: str, end: str) -> str:
     start = source.index(begin) + len(begin)
@@ -410,8 +418,9 @@ def test_toolathlon_only_fresh_bindings_authorize_exact_guard_disablement(
     assert mismatched_supervisor.returncode == 2
 
 
-def test_toolathlon_only_behavior_resume_authorizes_exact_tuple_and_guard() -> None:
-    binding, nodes, model_family, experiment, trial = BEHAVIOR_RESUME_BINDING
+@pytest.mark.parametrize("resume_binding", (BEHAVIOR_RESUME_BINDING, ROOTPROP_RESUME_BINDING))
+def test_toolathlon_only_resume_authorizes_exact_tuple_and_guard(resume_binding) -> None:
+    binding, nodes, model_family, experiment, trial = resume_binding
     common = _run_common_resume_authorization(
         binding, nodes, model_family, experiment, trial
     )

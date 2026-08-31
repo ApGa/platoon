@@ -18,7 +18,7 @@
 set -euo pipefail
 umask 077
 
-SELF=/home/aci18912it/rasp/releases/platoon-v8r31-07bebf9-057108f/pbs-scripts/openreward-toolathlon-32node-qwen36-rootprop-hnode416-reject-v31-abci.pbs
+SELF=/home/aci18912it/rasp/releases/platoon-v8r32-07bebf9-057108f/pbs-scripts/openreward-toolathlon-32node-qwen36-rootprop-hnode416-reject-v31-abci.pbs
 ROOTPROP_WRAPPER=/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f/pbs-scripts/openreward-toolathlon-32node-recursive-qwen36-cp2-rootprop-64k-h200-v27-abci.pbs
 DENIED_HOST=hnode416
 QSUB=/opt/pbs/bin/qsub

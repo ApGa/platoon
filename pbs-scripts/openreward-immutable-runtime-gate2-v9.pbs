@@ -22,7 +22,7 @@
 set -euo pipefail
 umask 077
 
-readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r31-07bebf9-057108f
+readonly REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r32-07bebf9-057108f
 readonly ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v9-abci.env
 readonly GATE2=${REPO_ROOT}/pbs-scripts/openreward-immutable-runtime-gate2.pbs
 

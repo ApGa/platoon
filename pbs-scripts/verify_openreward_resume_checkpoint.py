@@ -64,6 +64,7 @@ QWEN38_16_V22_BINDING_ID = "qwen38-16-v22-gs11-ordinary"
 QWEN38_16_V25_BINDING_ID = "qwen38-16-v25-gs12"
 QWEN36_32_V22_BINDING_ID = "qwen36-32-v22-depth2"
 QWEN36_32_V31_BEHAVIOR_BINDING_ID = "qwen36-32-v31-behavior-gs13"
+QWEN36_32_V32_ROOTPROP_BINDING_ID = "qwen36-32-v32-rootprop-gs13"
 
 V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
     QWEN38_32_V22_BINDING_ID: {
@@ -363,6 +364,76 @@ V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
         "samples_yielded": 152,
         "iterator_yielded": 19,
     },
+    QWEN36_32_V32_ROOTPROP_BINDING_ID: {
+        "experiment": "abci-or-ta32-q36-cp2-rootprop-v27",
+        "trial": "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0",
+        "checkpoint_root": Path(
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/"
+            "aci18912it/abci-or-ta32-q36-cp2-rootprop-v27/"
+            "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0"
+        ),
+        "source_job": "2193739.pbs1",
+        "source_release_root": Path(
+            "/home/aci18912it/rasp/releases/platoon-v8r28-07bebf9-057108f"
+        ),
+        "source_release_ref": "refs/tags/abci-v8r28-07bebf9-057108f",
+        "source_config": Path(
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen36_moe_cp2_c12_v27_rootprop.yaml"
+        ),
+        "source_config_sha256": (
+            "e13647bc2ba2a173d127cc9a1d3d3e0f6e320aec144bcaf39fad12c1218ee2b4"
+        ),
+        "current_config_name": (
+            "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
+            "qwen36_moe_cp2_c12_v27_rootprop.yaml"
+        ),
+        "current_config_sha256": (
+            "e13647bc2ba2a173d127cc9a1d3d3e0f6e320aec144bcaf39fad12c1218ee2b4"
+        ),
+        "source_candidate_name": (
+            "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0.success.candidate.json"
+        ),
+        "source_candidate_sha256": (
+            "b0374070b703bc1f0fa74df76f43589e9f88388cf63d02bd73d2a07a7bd17278"
+        ),
+        "source_candidate_global_step": 0,
+        "ancestor_receipts": {},
+        "source_log_name": "2193739.pbs1.OU",
+        "source_log_sha256": (
+            "1a0956c446fa0a7cb210194feb3cf09d6e4ec033208df3f25f53a6a0bf5cd105"
+        ),
+        "target_receipt_name": (
+            "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0."
+            "resume-gs13-v8r32.success.json"
+        ),
+        "global_step": 13,
+        "start_global_step": 14,
+        "steps_per_epoch": 62,
+        "shards": 160,
+        "total_bytes": 492651122393,
+        "checkpoint_layout_sha256": (
+            "50ed05ed7490a42837036036550a47383f6256c2d981f15b26c8ebce2331f69c"
+        ),
+        "checkpoint_sample_manifest_sha256": (
+            "f194909c47ae800d6c13c18b29f93031eeb5a6800b9d9201d4743d73782c573a"
+        ),
+        "fixed_content_sha256": (
+            "8bd8ea48c5d5c1626388e9a940d9d11b8584e5323c9983ac39b4bcbc6980dd18"
+        ),
+        "recover_info_content_sha256": (
+            "189d5a17586b3f6e46958845ebb7da35957a3b3cba72c882367ec152f3330725"
+        ),
+        "stats_commit_step": 12,
+        "state_keys": 21768,
+        "storage_entries": 127481,
+        "optimizer_moment_keys": 48,
+        "optimizer_layout": "two_group",
+        "lr_num_steps": 14,
+        "samples_yielded": 160,
+        "iterator_yielded": 20,
+    },
 }
 
 
@@ -661,7 +732,21 @@ def _verify_source_release(
         label="source release manifest",
     )
     config_name = source_config_relative.name
-    if config_name.endswith("qwen36_moe_cp2_c12_v27_behavior_gated.yaml"):
+    if config_name.endswith("qwen36_moe_cp2_c12_v27_rootprop.yaml"):
+        if not (
+            expected_experiment == "abci-or-ta32-q36-cp2-rootprop-v27"
+            and expected_trial == "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0"
+        ):
+            raise RuntimeError("source Qwen3.6 root-propagated config lineage mismatch")
+        model_artifact_key = "fresh_recursive_32node_qwen36_cp2"
+        wrapper_name = (
+            "openreward-toolathlon-32node-recursive-qwen36-cp2-"
+            "rootprop-64k-h200-v27-abci.pbs"
+        )
+        model_family = "qwen36"
+        expected_architecture = "qwen3_5_moe"
+        expected_model_shards = 26
+    elif config_name.endswith("qwen36_moe_cp2_c12_v27_behavior_gated.yaml"):
         if not (
             expected_experiment == "abci-or-ta32-q36-cp2-behavior-gate-v27"
             and expected_trial == "abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0"

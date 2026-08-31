@@ -17,8 +17,8 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r31-07bebf9-057108f
-RELEASE_REF=refs/tags/abci-v8r31-07bebf9-057108f
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r32-07bebf9-057108f
+RELEASE_REF=refs/tags/abci-v8r32-07bebf9-057108f
 RELEASE_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_v9_release.py
 RESUME_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_resume_checkpoint.py
 CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v27_behavior_gated.yaml
