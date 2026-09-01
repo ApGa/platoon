@@ -13,6 +13,7 @@ from platoon.agents.actions.subagent import (
     EXCLUDE_FROM_TRAINING_MISC_KEY,
     SUBAGENT_BEHAVIOR_JUDGMENT_MISC_KEY,
     SUBAGENT_OUTCOME_JUDGMENT_MISC_KEY,
+    SUBAGENT_PARENT_USAGE_JUDGMENT_MISC_KEY,
     SUBAGENT_REWARD_JUDGMENT_MISC_KEY,
     SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY,
     SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
@@ -23,6 +24,7 @@ from platoon.agents.actions.subagent import (
     _normalize_judgment,
     _record_judgment_reward,
     _run_behavior_judge,
+    apply_subagent_parent_usage_gates,
     launch_subagent,
 )
 from platoon.agents.base import ForkableAgent
@@ -35,7 +37,12 @@ from platoon.episode.context import (
     subagent_reward_judge_config,
 )
 from platoon.episode.loop import run_episode
-from platoon.episode.trajectory import DepthAwareStepBudgetTracker, Trajectory, TrajectoryCollection
+from platoon.episode.trajectory import (
+    DepthAwareStepBudgetTracker,
+    ParentInfo,
+    Trajectory,
+    TrajectoryCollection,
+)
 
 
 @dataclass
@@ -433,6 +440,7 @@ async def test_behavior_judgment_gates_outcome_reward(
         "expected_outcome_status",
         "expected_behavior_status",
         "eligible",
+        "combined",
     ),
     [
         (
@@ -444,34 +452,33 @@ async def test_behavior_judgment_gates_outcome_reward(
                 }
             ),
             "failed",
-            "not_run_zero_outcome",
+            "pass",
+            True,
             True,
         ),
         (
             "not a structured outcome verdict",
             "unparseable",
-            "not_run_ineligible_outcome",
+            "pass",
+            False,
             False,
         ),
     ],
 )
-async def test_behavior_judge_skips_zero_and_ineligible_outcomes(
+async def test_behavior_judge_audits_zero_outcomes_in_parallel(
     verifier_message: str,
     expected_outcome_status: str,
     expected_behavior_status: str,
     eligible: bool,
+    combined: bool,
 ):
     state = JudgeRunState()
-    behavior_judge = StaticBehaviorJudge(
-        verdict={"status": "pass", "passed": True, "reason": "Should not run."}
-    )
+    behavior_judge = StaticBehaviorJudge(verdict={"status": "pass", "passed": True, "reason": "No process failure."})
     collection = TrajectoryCollection()
     tokens = [
         current_trajectory_collection.set(collection),
         budget_tracker.set(DepthAwareStepBudgetTracker()),
-        subagent_reward_judge_config.set(
-            SubagentRewardJudgeConfig(max_steps=3, behavior_judge=behavior_judge)
-        ),
+        subagent_reward_judge_config.set(SubagentRewardJudgeConfig(max_steps=3, behavior_judge=behavior_judge)),
     ]
 
     try:
@@ -491,20 +498,22 @@ async def test_behavior_judge_skips_zero_and_ineligible_outcomes(
     outcome = child.misc[SUBAGENT_OUTCOME_JUDGMENT_MISC_KEY]
     behavior = child.misc[SUBAGENT_BEHAVIOR_JUDGMENT_MISC_KEY]
     effective = child.misc[SUBAGENT_REWARD_JUDGMENT_MISC_KEY]
-    assert behavior_judge.calls == []
+    assert behavior_judge.calls == [("Create report.txt and summarize it.", child.id)]
     assert outcome["status"] == expected_outcome_status
-    assert effective == outcome
+    assert (effective != outcome) is combined
     assert effective["score"] == 0.0
     assert effective[SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY] is eligible
     assert behavior["status"] == expected_behavior_status
-    assert behavior["judged"] is False
     assert child.reward == 0.0
     assert (EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY not in child.misc) is eligible
-    assert child.steps[-1]["misc"]["reward_misc"] == {
+    expected_reward_misc = {
         "reward/success": 0.0,
         "reward/subagent_judgment": 0.0,
         "reward/subagent_outcome_judgment": 0.0,
     }
+    if combined:
+        expected_reward_misc["reward/subagent_behavior_gate"] = 1.0
+    assert child.steps[-1]["misc"]["reward_misc"] == expected_reward_misc
 
 
 def test_behavior_judgment_requires_strict_binary_schema_and_preserves_details():
@@ -779,9 +788,7 @@ def test_contradictory_outcome_verdict_is_fail_closed_and_ineligible(
     _record_judgment_reward(child, judgment)
 
     assert judgment["score"] == 0.0
-    assert judgment["schema_error"] == (
-        "Outcome verifier status and score are inconsistent."
-    )
+    assert judgment["schema_error"] == ("Outcome verifier status and score are inconsistent.")
     assert judgment[SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY] is False
     assert child.reward == 0.0
     assert child.misc[EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY] is True
@@ -798,3 +805,113 @@ def test_parseable_verdict_without_finish_is_not_trainable():
 
     assert judgment[SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY] is False
     assert child.misc[EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_parent_usage_gate_suppresses_only_decisively_unused_positive_children():
+    parent = Trajectory(
+        id="parent",
+        task=Task(id="root", goal="Assemble the final report."),
+    )
+
+    def child(
+        name: str,
+        *,
+        score: float = 1.0,
+        eligible: bool = True,
+        extra_misc: dict[str, Any] | None = None,
+    ) -> Trajectory:
+        return Trajectory(
+            id=name,
+            task=Task(id=name, goal=name),
+            parent_info=ParentInfo(id=parent.id, fork_step=1),
+            steps=[{"misc": {"reward_misc": {}}}],
+            reward=score,
+            misc={
+                SUBAGENT_REWARD_JUDGMENT_MISC_KEY: {
+                    "status": "verified" if score > 0 else "failed",
+                    "score": score,
+                    SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY: eligible,
+                },
+                **(extra_misc or {}),
+            },
+        )
+
+    used = child("used")
+    unused = child("unused")
+    inconclusive = child("inconclusive")
+    zero = child("zero", score=0.0)
+    verifier = child(
+        "verifier",
+    )
+    assert verifier.task is not None
+    verifier.task.misc[SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY] = True
+    preexcluded = child(
+        "preexcluded",
+        extra_misc={EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY: True},
+    )
+    collection = TrajectoryCollection(
+        trajectories={
+            trajectory.id: trajectory
+            for trajectory in (
+                parent,
+                used,
+                unused,
+                inconclusive,
+                zero,
+                verifier,
+                preexcluded,
+            )
+        }
+    )
+
+    class UsageJudge:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def judge_parent_usage(self, **kwargs) -> dict[str, Any]:
+            child_trajectory = kwargs["child_trajectory"]
+            self.calls.append(child_trajectory.id)
+            return {
+                "used": {
+                    "status": "used",
+                    "used": True,
+                    "reason": "The parent integrated the returned result.",
+                    "evidence": ["parent final"],
+                },
+                "unused": {
+                    "status": "not_used",
+                    "used": False,
+                    "reason": "The parent ignored the result.",
+                    "evidence": ["post-child events"],
+                },
+                "inconclusive": {
+                    "status": "insufficient_evidence",
+                    "used": None,
+                    "reason": "The parent evidence was truncated.",
+                    "evidence": [],
+                },
+            }[child_trajectory.id]
+
+    judge = UsageJudge()
+    await apply_subagent_parent_usage_gates(
+        collection,
+        judge,
+        max_concurrency=2,
+    )
+
+    assert sorted(judge.calls) == ["inconclusive", "unused", "used"]
+    assert EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY not in used.misc
+    assert unused.misc[EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY] is True
+    # Inconclusive usage is deliberately fail-open so good child behavior is
+    # not penalized by an unavailable second judge.
+    assert EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY not in inconclusive.misc
+    assert EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY not in zero.misc
+    assert EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY not in verifier.misc
+    assert preexcluded.misc[EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY] is True
+    assert unused.reward == 1.0
+    assert unused.misc[SUBAGENT_PARENT_USAGE_JUDGMENT_MISC_KEY]["gate"] == 0.0
+    assert unused.steps[-1]["misc"]["reward_misc"] == {
+        "reward/subagent_parent_usage_gate": 0.0,
+        "reward/subagent_parent_usage_judgment_valid": 1.0,
+    }

@@ -20,12 +20,14 @@ from platoon.episode.trajectory import (
     BudgetExceededError,
     SubagentDepthScope,
     Trajectory,
+    TrajectoryCollection,
 )
 from platoon.utils.span_profile import profile_span
 
 SUBAGENT_REWARD_JUDGMENT_MISC_KEY = "subagent_reward_judgment"
 SUBAGENT_OUTCOME_JUDGMENT_MISC_KEY = "subagent_outcome_judgment"
 SUBAGENT_BEHAVIOR_JUDGMENT_MISC_KEY = "subagent_behavior_judgment"
+SUBAGENT_PARENT_USAGE_JUDGMENT_MISC_KEY = "subagent_parent_usage_judgment"
 SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY = "subagent_reward_verifier_task"
 SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY = "subagent_reward_verifies_trajectory_id"
 EXCLUDE_FROM_TRAINING_MISC_KEY = "exclude_from_training"
@@ -38,6 +40,7 @@ SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY = "training_eligible"
 
 _VALID_JUDGMENT_STATUSES = frozenset({"verified", "partial", "failed", "insufficient_evidence"})
 _VALID_BEHAVIOR_JUDGMENT_STATUSES = frozenset({"pass", "fail", "insufficient_evidence"})
+_VALID_PARENT_USAGE_JUDGMENT_STATUSES = frozenset({"used", "not_used", "insufficient_evidence"})
 
 
 class SubagentBehaviorJudge(Protocol):
@@ -52,6 +55,19 @@ class SubagentBehaviorJudge(Protocol):
     """
 
     async def judge(self, *, goal: str, trajectory: Trajectory) -> dict[str, Any]: ...
+
+
+class SubagentParentUsageJudge(Protocol):
+    """Judge whether a parent observably used a successful child's contribution."""
+
+    async def judge_parent_usage(
+        self,
+        *,
+        parent_goal: str,
+        parent_trajectory: Trajectory,
+        child_goal: str,
+        child_trajectory: Trajectory,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -118,9 +134,7 @@ def _propagate_verifier_task_misc(
     if not parent_task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY):
         return child_task_misc
 
-    propagated = dict(
-        parent_task_misc if child_task_misc is None else child_task_misc
-    )
+    propagated = dict(parent_task_misc if child_task_misc is None else child_task_misc)
     propagated[SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY] = True
     propagated.pop(SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY, None)
     return propagated
@@ -136,17 +150,11 @@ def _subagent_depth_scope(
         return "policy"
     if (
         synthetic_verifier_parent is not None
-        and child_task_misc.get(
-            SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY
-        )
-        == synthetic_verifier_parent.id
+        and child_task_misc.get(SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY) == synthetic_verifier_parent.id
     ):
         return "verifier_root"
-    if (
-        parent_task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY)
-        and parent_task_misc.get(
-            SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY
-        )
+    if parent_task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY) and parent_task_misc.get(
+        SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY
     ):
         return "verifier_helper"
     return "verifier_descendant"
@@ -240,11 +248,7 @@ def _normalize_judgment(raw_message: str, verifier_traj: Trajectory) -> dict[str
             score = 0.0
             score_is_numeric = False
         else:
-            score_is_numeric = bool(
-                not isinstance(raw_score, bool)
-                and math.isfinite(score)
-                and 0.0 <= score <= 1.0
-            )
+            score_is_numeric = bool(not isinstance(raw_score, bool) and math.isfinite(score) and 0.0 <= score <= 1.0)
             if not score_is_numeric:
                 score = 0.0
 
@@ -268,14 +272,10 @@ def _normalize_judgment(raw_message: str, verifier_traj: Trajectory) -> dict[str
     # ``insufficient_evidence`` judgment remains a legitimate zero-reward
     # target; only missing/malformed/non-finished judgments are suppressed.
     normalized[SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY] = bool(
-        verifier_traj.finish_message
-        and status in _VALID_JUDGMENT_STATUSES
-        and score_is_consistent
+        verifier_traj.finish_message and status in _VALID_JUDGMENT_STATUSES and score_is_consistent
     )
     if status in _VALID_JUDGMENT_STATUSES and not score_is_consistent:
-        normalized["schema_error"] = (
-            "Outcome verifier status and score are inconsistent."
-        )
+        normalized["schema_error"] = "Outcome verifier status and score are inconsistent."
     return normalized
 
 
@@ -348,6 +348,99 @@ def _behavior_judge_error(error: Exception) -> dict[str, Any]:
         "error_type": type(error).__name__,
         SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY: False,
     }
+
+
+def _unparseable_parent_usage_judgment(
+    raw_judgment: Any,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Return a fail-closed result for a malformed parent-usage verdict."""
+
+    return {
+        "status": "unparseable",
+        "used": None,
+        "gate": 0.0,
+        "reason": reason,
+        "raw_response": raw_judgment,
+        SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY: False,
+    }
+
+
+def _normalize_parent_usage_judgment(raw_judgment: Any) -> dict[str, Any]:
+    """Validate a parent-usage verdict and derive its policy-data gate."""
+
+    if not isinstance(raw_judgment, dict):
+        return _unparseable_parent_usage_judgment(
+            raw_judgment,
+            reason="Parent-usage judge did not return a JSON object.",
+        )
+
+    raw_status = raw_judgment.get("status")
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+    has_used = "used" in raw_judgment
+    used = raw_judgment.get("used")
+    reason = raw_judgment.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return _unparseable_parent_usage_judgment(
+            raw_judgment,
+            reason="Parent-usage judgment is missing a non-empty string `reason`.",
+        )
+
+    expected_used = {
+        "used": True,
+        "not_used": False,
+        "insufficient_evidence": None,
+    }.get(status, object())
+    if status not in _VALID_PARENT_USAGE_JUDGMENT_STATUSES or not has_used or used is not expected_used:
+        return _unparseable_parent_usage_judgment(
+            raw_judgment,
+            reason=(
+                "Parent-usage judgment must pair used/true, not_used/false, or insufficient_evidence/null exactly."
+            ),
+        )
+
+    normalized = dict(raw_judgment)
+    normalized["status"] = status
+    normalized["used"] = used
+    normalized["reason"] = reason.strip()
+    normalized["gate"] = 1.0 if used is True else 0.0
+    normalized[SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY] = status in {
+        "used",
+        "not_used",
+    }
+    return normalized
+
+
+def _parent_usage_judge_error(error: Exception) -> dict[str, Any]:
+    return {
+        "status": "judge_error",
+        "used": None,
+        "gate": 0.0,
+        "reason": f"Parent-usage judge raised {type(error).__name__}: {error}",
+        "error_type": type(error).__name__,
+        SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY: False,
+    }
+
+
+async def _run_parent_usage_judge(
+    judge: SubagentParentUsageJudge,
+    *,
+    parent_goal: str,
+    parent_trajectory: Trajectory,
+    child_goal: str,
+    child_trajectory: Trajectory,
+) -> dict[str, Any]:
+    try:
+        raw_judgment = await judge.judge_parent_usage(
+            parent_goal=parent_goal,
+            parent_trajectory=parent_trajectory,
+            child_goal=child_goal,
+            child_trajectory=child_trajectory,
+        )
+    except Exception as error:
+        return _parent_usage_judge_error(error)
+    return _normalize_parent_usage_judgment(raw_judgment)
 
 
 def _combine_outcome_and_behavior_judgments(
@@ -446,6 +539,91 @@ def _record_judgment_reward(traj: Trajectory, judgment: dict[str, Any]) -> None:
             )
         if "behavior_gate" in judgment:
             reward_misc["reward/subagent_behavior_gate"] = 1.0 if judgment.get("behavior_gate") == 1.0 else 0.0
+
+
+def _record_parent_usage_judgment(
+    collection: TrajectoryCollection,
+    traj: Trajectory,
+    judgment: dict[str, Any],
+) -> None:
+    """Apply a usage verdict only to policy eligibility, never to reward."""
+
+    traj.misc[SUBAGENT_PARENT_USAGE_JUDGMENT_MISC_KEY] = judgment
+    usage_gate = 1.0 if judgment.get("gate") == 1.0 else 0.0
+    usage_eligible = bool(judgment.get(SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY))
+    # Suppress only a decisive not-used verdict. Ambiguous or unavailable
+    # usage evidence must not penalize an otherwise verified, well-behaved
+    # child. The verified reward remains intact for rollout statistics and
+    # group baselines; only this child's policy datums are suppressed.
+    if usage_eligible and usage_gate != 1.0:
+        traj.misc[EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY] = True
+    if traj.steps:
+        step = traj.steps[-1]
+        if isinstance(step, dict):
+            reward_misc = step.setdefault("misc", {}).setdefault("reward_misc", {})
+        else:
+            reward_misc = step.misc.setdefault("reward_misc", {})
+        reward_misc["reward/subagent_parent_usage_gate"] = usage_gate
+        reward_misc["reward/subagent_parent_usage_judgment_valid"] = 1.0 if usage_eligible else 0.0
+    collection.finish_trajectory(traj.id)
+
+
+async def apply_subagent_parent_usage_gates(
+    collection: TrajectoryCollection,
+    judge: SubagentParentUsageJudge,
+    *,
+    max_concurrency: int = 4,
+) -> None:
+    """Suppress positive child policy data that its completed parent did not use.
+
+    Outcome/behavior-zero children remain trainable negative examples and are
+    intentionally not audited here.  Parent usage is necessarily evaluated
+    after the episode, when the parent's post-delegation behavior is complete.
+    """
+
+    if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
+        raise ValueError("max_concurrency must be a positive integer")
+
+    candidates: list[tuple[Trajectory, Trajectory | None]] = []
+    for traj in sorted(collection.trajectories.values(), key=lambda item: item.id):
+        if traj.parent_info is None or _is_verifier_trajectory(traj):
+            continue
+        if traj.misc.get(EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY):
+            continue
+        effective = traj.misc.get(SUBAGENT_REWARD_JUDGMENT_MISC_KEY)
+        if not isinstance(effective, dict) or not bool(effective.get(SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY)):
+            continue
+        score = _coerce_score(
+            effective.get("score"),
+            status=str(effective.get("status") or ""),
+        )
+        if score <= 0.0:
+            continue
+        candidates.append((traj, collection.trajectories.get(traj.parent_info.id)))
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def judge_candidate(
+        child: Trajectory,
+        parent: Trajectory | None,
+    ) -> tuple[Trajectory, dict[str, Any]]:
+        if parent is None:
+            return child, _unparseable_parent_usage_judgment(
+                None,
+                reason=("The successful child's parent trajectory is missing from the rollout collection."),
+            )
+        async with semaphore:
+            return child, await _run_parent_usage_judge(
+                judge,
+                parent_goal=_trajectory_task_goal(parent),
+                parent_trajectory=parent,
+                child_goal=_trajectory_task_goal(child),
+                child_trajectory=child,
+            )
+
+    results = await asyncio.gather(*(judge_candidate(child, parent) for child, parent in candidates))
+    for child, judgment in results:
+        _record_parent_usage_judgment(collection, child, judgment)
 
 
 def _emit_trajectory_finished_update(traj: Trajectory) -> None:
@@ -578,67 +756,61 @@ async def _maybe_judge_subagent(*, goal: str, traj: Trajectory) -> None:
         "parent_traj": traj,
     }
     behavior_judge = config.behavior_judge
-    # Outcome verification is deliberately first: the behavior judge
-    # is useful only for positive, trainable outcomes and can otherwise add
-    # substantial latency and API load without changing the final score.
-    verifier_result = await _run_subagent_trajectory(**verifier_args)
+    # Audit behavior for every completed child, including verifier-zero
+    # outcomes: those are precisely where task-tracker loops and stuck endings
+    # would otherwise evade the behavior gate.  Run the one-shot audit beside
+    # the environment verifier so the broader coverage does not serialize two
+    # independent reward-model requests.
+    behavior_task = (
+        asyncio.create_task(_run_behavior_judge(behavior_judge, goal=goal, trajectory=traj))
+        if behavior_judge is not None
+        else None
+    )
+    try:
+        verifier_result = await _run_subagent_trajectory(**verifier_args)
 
-    if isinstance(verifier_result, str):
-        outcome_judgment = {
-            "status": "judge_error",
-            "score": 0.0,
-            "summary": verifier_result,
-            SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY: False,
-        }
-    else:
-        verifier_result.misc[SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY] = True
-        verifier_result.misc[SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY] = traj.id
-        verifier_result.misc[EXCLUDE_FROM_TRAINING_MISC_KEY] = True
-        _emit_trajectory_finished_update(verifier_result)
-        raw_message = _subagent_return_message(verifier_result)
-        outcome_judgment = _normalize_judgment(
-            raw_message,
-            verifier_result,
-        )
-
-    if behavior_judge is None:
-        judgment = outcome_judgment
-    else:
-        # Keep the source verdicts independently queryable.  The historical
-        # key remains the effective reward verdict consumed by trainers.
-        traj.misc[SUBAGENT_OUTCOME_JUDGMENT_MISC_KEY] = outcome_judgment
-        outcome_eligible = bool(
-            outcome_judgment.get(SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY)
-        )
-        outcome_score = _coerce_score(
-            outcome_judgment.get("score"),
-            status=str(outcome_judgment.get("status") or ""),
-        )
-        if outcome_eligible and outcome_score > 0.0:
-            # Own the task explicitly so cancellation of the rollout also
-            # cancels and drains an in-flight policy-judge request.
-            behavior_task = asyncio.create_task(
-                _run_behavior_judge(behavior_judge, goal=goal, trajectory=traj)
-            )
-            try:
-                behavior_judgment = await behavior_task
-            finally:
-                if not behavior_task.done():
-                    behavior_task.cancel()
-                await asyncio.gather(behavior_task, return_exceptions=True)
-            traj.misc[SUBAGENT_BEHAVIOR_JUDGMENT_MISC_KEY] = behavior_judgment
-            judgment = _combine_outcome_and_behavior_judgments(
-                outcome_judgment,
-                behavior_judgment,
-            )
+        if isinstance(verifier_result, str):
+            outcome_judgment = {
+                "status": "judge_error",
+                "score": 0.0,
+                "summary": verifier_result,
+                SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY: False,
+            }
         else:
-            # A valid zero outcome must remain a trainable zero.  This
-            # synthetic diagnostic is not folded into the effective verdict,
-            # and therefore does not emit a misleading behavior-gate metric.
-            traj.misc[SUBAGENT_BEHAVIOR_JUDGMENT_MISC_KEY] = _behavior_judgment_not_run(
-                outcome_eligible=outcome_eligible
+            verifier_result.misc[SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY] = True
+            verifier_result.misc[SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY] = traj.id
+            verifier_result.misc[EXCLUDE_FROM_TRAINING_MISC_KEY] = True
+            _emit_trajectory_finished_update(verifier_result)
+            raw_message = _subagent_return_message(verifier_result)
+            outcome_judgment = _normalize_judgment(
+                raw_message,
+                verifier_result,
             )
+
+        if behavior_task is None:
             judgment = outcome_judgment
+        else:
+            # Keep the source verdicts independently queryable.  The
+            # historical key remains the effective reward verdict consumed by
+            # trainers.
+            traj.misc[SUBAGENT_OUTCOME_JUDGMENT_MISC_KEY] = outcome_judgment
+            behavior_judgment = await behavior_task
+            traj.misc[SUBAGENT_BEHAVIOR_JUDGMENT_MISC_KEY] = behavior_judgment
+            if bool(outcome_judgment.get(SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY)):
+                judgment = _combine_outcome_and_behavior_judgments(
+                    outcome_judgment,
+                    behavior_judgment,
+                )
+            else:
+                # A malformed outcome verdict remains the authoritative reason
+                # this trajectory is ineligible, even if the parallel behavior
+                # audit happened to complete successfully.
+                judgment = outcome_judgment
+    finally:
+        if behavior_task is not None:
+            if not behavior_task.done():
+                behavior_task.cancel()
+            await asyncio.gather(behavior_task, return_exceptions=True)
     traj.misc[SUBAGENT_REWARD_JUDGMENT_MISC_KEY] = judgment
     _record_judgment_reward(traj, judgment)
     _emit_trajectory_finished_update(traj)

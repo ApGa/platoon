@@ -8,9 +8,7 @@ from typing import Any, cast
 from platoon.inference import InferenceBenchmarkConfig
 
 SUBAGENT_ENVIRONMENT_ACCESS_MODES = frozenset({"shared", "read_only"})
-PROGRAMMATIC_TOOL_CALLING_MODES = frozenset(
-    {"unrestricted", "orchestration_only"}
-)
+PROGRAMMATIC_TOOL_CALLING_MODES = frozenset({"unrestricted", "orchestration_only"})
 
 
 @dataclass
@@ -60,24 +58,18 @@ class OpenRewardEnvironmentConfig:
             or not isinstance(self.sampling_start_step, int)
             or self.sampling_start_step < 0
         ):
-            raise ValueError(
-                "OpenReward environment sampling_start_step must be a non-negative integer"
-            )
+            raise ValueError("OpenReward environment sampling_start_step must be a non-negative integer")
         invalid_routing_overrides = [
             tool_name
             for tool_name, routing in self.tool_routing_overrides.items()
-            if not isinstance(tool_name, str)
-            or not tool_name.strip()
-            or not isinstance(routing, dict)
+            if not isinstance(tool_name, str) or not tool_name.strip() or not isinstance(routing, dict)
         ]
         if invalid_routing_overrides:
             raise ValueError(
-                "OpenReward environment tool_routing_overrides must map "
-                "non-empty tool names to dictionaries"
+                "OpenReward environment tool_routing_overrides must map non-empty tool names to dictionaries"
             )
         self.tool_routing_overrides = {
-            tool_name.strip(): dict(routing)
-            for tool_name, routing in self.tool_routing_overrides.items()
+            tool_name.strip(): dict(routing) for tool_name, routing in self.tool_routing_overrides.items()
         }
         if (
             self.subagent_environment_access is not None
@@ -189,6 +181,11 @@ class OpenRewardConfig:
     # from the same policy checkpoint being trained.  Keeping the judge on the
     # rollout policy avoids a separate, potentially drifting reward model.
     enable_subagent_behavior_judging: bool = False
+    # After a parent finishes, exclude an otherwise successful child from
+    # policy training only when a second audit decisively finds that the parent
+    # never used its contribution. Reward/stat accounting is unchanged.
+    enable_subagent_parent_usage_eligibility_gate: bool = False
+    subagent_parent_usage_judge_max_concurrency: int = 4
     subagent_behavior_judge_max_prompt_tokens: int = 24_576
     # This cap includes optional private reasoning plus the small public JSON
     # verdict.  The reasoning is never persisted as reward metadata.
@@ -215,14 +212,20 @@ class OpenRewardConfig:
             raise ValueError("enable_subagent_reward_judging must be a boolean")
         if not isinstance(self.enable_subagent_behavior_judging, bool):
             raise ValueError("enable_subagent_behavior_judging must be a boolean")
-        if (
-            self.enable_subagent_behavior_judging
-            and not self.enable_subagent_reward_judging
-        ):
+        if not isinstance(self.enable_subagent_parent_usage_eligibility_gate, bool):
+            raise ValueError("enable_subagent_parent_usage_eligibility_gate must be a boolean")
+        if self.enable_subagent_behavior_judging and not self.enable_subagent_reward_judging:
+            raise ValueError("enable_subagent_behavior_judging requires enable_subagent_reward_judging=true")
+        if self.enable_subagent_parent_usage_eligibility_gate and not self.enable_subagent_behavior_judging:
             raise ValueError(
-                "enable_subagent_behavior_judging requires "
-                "enable_subagent_reward_judging=true"
+                "enable_subagent_parent_usage_eligibility_gate requires enable_subagent_behavior_judging=true"
             )
+        if (
+            isinstance(self.subagent_parent_usage_judge_max_concurrency, bool)
+            or not isinstance(self.subagent_parent_usage_judge_max_concurrency, int)
+            or self.subagent_parent_usage_judge_max_concurrency <= 0
+        ):
+            raise ValueError("subagent_parent_usage_judge_max_concurrency must be a positive integer")
         for field_name, value, minimum in (
             (
                 "subagent_behavior_judge_max_prompt_tokens",
@@ -235,14 +238,8 @@ class OpenRewardConfig:
                 64,
             ),
         ):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < minimum
-            ):
-                raise ValueError(
-                    f"{field_name} must be an integer greater than or equal to {minimum}"
-                )
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{field_name} must be an integer greater than or equal to {minimum}")
         if (
             isinstance(self.subagent_behavior_judge_timeout_seconds, bool)
             or not isinstance(
@@ -252,17 +249,12 @@ class OpenRewardConfig:
             or not math.isfinite(self.subagent_behavior_judge_timeout_seconds)
             or self.subagent_behavior_judge_timeout_seconds <= 0
         ):
-            raise ValueError(
-                "subagent_behavior_judge_timeout_seconds must be finite and positive"
-            )
-        self.subagent_behavior_judge_timeout_seconds = float(
-            self.subagent_behavior_judge_timeout_seconds
-        )
+            raise ValueError("subagent_behavior_judge_timeout_seconds must be finite and positive")
+        self.subagent_behavior_judge_timeout_seconds = float(self.subagent_behavior_judge_timeout_seconds)
         if self.programmatic_tool_calling_mode not in PROGRAMMATIC_TOOL_CALLING_MODES:
             allowed = ", ".join(sorted(PROGRAMMATIC_TOOL_CALLING_MODES))
             raise ValueError(
-                "programmatic_tool_calling_mode must be one of "
-                f"{allowed}; got {self.programmatic_tool_calling_mode!r}"
+                f"programmatic_tool_calling_mode must be one of {allowed}; got {self.programmatic_tool_calling_mode!r}"
             )
         if (
             isinstance(
@@ -275,10 +267,7 @@ class OpenRewardConfig:
             )
             or self.programmatic_tool_calling_max_tool_calls_per_execution <= 0
         ):
-            raise ValueError(
-                "programmatic_tool_calling_max_tool_calls_per_execution must be "
-                "a positive integer"
-            )
+            raise ValueError("programmatic_tool_calling_max_tool_calls_per_execution must be a positive integer")
         if not isinstance(self.condenser_disable_thinking, bool):
             raise ValueError("condenser_disable_thinking must be a boolean")
         if (
@@ -314,16 +303,11 @@ class OpenRewardConfig:
             if len(set(session_pool_env_vars)) != len(session_pool_env_vars):
                 raise ValueError("OpenReward environment session URL pool env-var names must be unique")
             if not any(environment.sampling_start_step == 0 for environment in self.environments):
-                raise ValueError(
-                    "At least one OpenReward environment must have sampling_start_step=0"
-                )
+                raise ValueError("At least one OpenReward environment must have sampling_start_step=0")
             if self.balance_accepted_batches and any(
                 environment.sampling_start_step > 0 for environment in self.environments
             ):
-                raise ValueError(
-                    "Staged OpenReward environment admission requires "
-                    "balance_accepted_batches=false"
-                )
+                raise ValueError("Staged OpenReward environment admission requires balance_accepted_batches=false")
         # Validate legacy environment fields through the same typed contract.
         if self.environments is None:
             self._legacy_environment()

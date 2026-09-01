@@ -631,3 +631,268 @@ def test_constructor_requires_policy_acompletion(llm):
     module = _load_module()
     with pytest.raises(TypeError):
         module.OpenRewardBehaviorJudge(llm=llm)
+
+
+def _tracker_trajectory(count: int, *, error_message: str | None = None) -> dict:
+    return {
+        "id": "tracker-loop",
+        "finish_message": "done" if error_message is None else None,
+        "error_message": error_message,
+        "steps": [
+            _step(
+                actions=[
+                    _action(
+                        f"tracker-{index}",
+                        f"tracker-response-{index}",
+                        "task_tracker",
+                        {"plan": f"cosmetic rewrite {index}"},
+                        f"2026-01-01T00:00:{index:02d}",
+                    )
+                ],
+                completion_id=f"tracker-response-{index}",
+            )
+            for index in range(count)
+        ],
+    }
+
+
+def test_tracker_streak_diagnostics_ignore_argument_rewrites_and_preserve_essential_line():
+    module = _load_module()
+    rendered = module.render_behavior_judge_prompt(
+        "Complete the task.",
+        _tracker_trajectory(6),
+        max_prompt_tokens=2048,
+    )
+
+    diagnostics = rendered.metadata["process_diagnostics"]
+    assert rendered.metadata["stats"]["repeated_identical_calls"] == 0
+    assert diagnostics["task_tracker_action_groups"] == 6
+    assert diagnostics["task_tracker_only_action_groups"] == 6
+    assert diagnostics["max_consecutive_task_tracker_only_groups"] == 6
+    assert diagnostics["terminal_consecutive_task_tracker_only_groups"] == 6
+    assert diagnostics["tracker_only_streaks"] == [
+        {
+            "start_group": 1,
+            "end_group": 6,
+            "length": 6,
+            "terminal": True,
+            "distinct_arguments": 6,
+        }
+    ]
+    assert "TRACKER_ONLY_STREAK G0001-G0006 length=6" in rendered.user_prompt
+
+
+def test_legitimate_tracker_updates_separated_by_work_and_parallel_work_do_not_form_loop():
+    module = _load_module()
+    steps = []
+    for index in range(5):
+        steps.append(
+            _step(
+                actions=[
+                    _action(
+                        f"tracker-{index}",
+                        f"tracker-r-{index}",
+                        "task_tracker",
+                        {"completed": index},
+                        f"2026-01-01T00:00:{index * 2:02d}",
+                    )
+                ],
+                completion_id=f"tracker-r-{index}",
+            )
+        )
+        steps.append(
+            _step(
+                actions=[
+                    _action(
+                        f"work-{index}",
+                        f"work-r-{index}",
+                        "call_tool",
+                        {"query": index},
+                        f"2026-01-01T00:00:{index * 2 + 1:02d}",
+                    )
+                ],
+                completion_id=f"work-r-{index}",
+            )
+        )
+    # Tracker plus substantive work in one response is not tracker-only.
+    steps.append(
+        _step(
+            actions=[
+                _action("mixed-t", "mixed-r", "task_tracker", {"done": True}, "2026-01-01T00:00:20"),
+                _action("mixed-w", "mixed-r", "call_tool", {"verify": True}, "2026-01-01T00:00:20"),
+            ],
+            completion_id="mixed-r",
+        )
+    )
+    rendered = module.render_behavior_judge_prompt(
+        "Complete the task.",
+        {"id": "productive", "finish_message": "done", "steps": steps},
+        max_prompt_tokens=4096,
+    )
+    diagnostics = rendered.metadata["process_diagnostics"]
+    assert diagnostics["task_tracker_action_groups"] == 6
+    assert diagnostics["task_tracker_only_action_groups"] == 5
+    assert diagnostics["max_consecutive_task_tracker_only_groups"] == 1
+    assert "TRACKER_ONLY_STREAK" not in rendered.user_prompt
+
+
+@pytest.mark.parametrize(
+    ("finish_message", "error_message", "expected"),
+    [
+        (None, "Agent got stuck", "agent_stuck"),
+        (
+            None,
+            "WARNING: Exhausted budget when running episode. Halting episode; task may be incomplete.",
+            "step_budget_exhausted",
+        ),
+        (
+            "finished on final step",
+            "WARNING: Exhausted budget when running episode. Halting episode; task may be incomplete.",
+            "finished_at_budget_limit",
+        ),
+        ("done", None, "finished"),
+    ],
+)
+def test_terminal_diagnostics_distinguish_stuck_and_budget_boundary(
+    finish_message,
+    error_message,
+    expected,
+):
+    module = _load_module()
+    rendered = module.render_behavior_judge_prompt(
+        "goal",
+        {
+            "id": "terminal",
+            "steps": [],
+            "finish_message": finish_message,
+            "error_message": error_message,
+        },
+        max_prompt_tokens=2048,
+    )
+    assert rendered.metadata["process_diagnostics"]["terminal_kind"] == expected
+
+
+def test_deterministic_tracker_loop_and_stuck_evidence_override_policy_pass():
+    module = _load_module()
+    llm = _FakePolicyLLM(
+        json.dumps(
+            {
+                "status": "pass",
+                "passed": True,
+                "reason": "The policy judge overlooked the loop.",
+                "violations": [],
+                "evidence": ["G0001"],
+            }
+        )
+    )
+    trajectory = _tracker_trajectory(4, error_message="Agent got stuck")
+
+    result = asyncio.run(module.OpenRewardBehaviorJudge(llm=llm).judge("goal", trajectory))
+
+    assert result["status"] == "fail"
+    assert result["passed"] is False
+    assert result["training_eligible"] is True
+    assert result["deterministic_behavior_override"] is True
+    assert "task_tracker_loop" in result["violations"]
+    assert "agent_stuck" in result["violations"]
+
+
+def test_parent_usage_prompt_starts_at_fork_boundary_and_async_judge_is_strict():
+    module = _load_module()
+    parent = {
+        "id": "parent",
+        "finish_message": "Used CHILD_RESULT in the final report.",
+        "error_message": None,
+        "steps": [
+            _step(
+                actions=[
+                    _action(
+                        "before",
+                        "before-r",
+                        "call_tool",
+                        {"secret": "SECRET_BEFORE_BOUNDARY"},
+                        "2026-01-01T00:00:01",
+                    )
+                ],
+                completion_id="before-r",
+            ),
+            _step(
+                actions=[
+                    _action(
+                        "launch",
+                        "launch-r",
+                        "launch_subagent",
+                        {"goal": "Find the result"},
+                        "2026-01-01T00:00:02",
+                    )
+                ],
+                observations=[
+                    _observation(
+                        "child-return",
+                        "launch",
+                        "launch_subagent",
+                        "CHILD_RESULT",
+                        "2026-01-01T00:00:03",
+                    )
+                ],
+                completion_id="launch-r",
+            ),
+            _step(
+                actions=[
+                    _action(
+                        "verify",
+                        "verify-r",
+                        "call_tool",
+                        {"value": "CHILD_RESULT"},
+                        "2026-01-01T00:00:04",
+                    )
+                ],
+                completion_id="verify-r",
+            ),
+        ],
+    }
+    child = {
+        "id": "child",
+        "parent_info": {"id": "parent", "fork_step": 1},
+        "finish_message": "CHILD_RESULT",
+        "error_message": None,
+        "misc": {
+            "subagent_reward_judgment": {
+                "status": "verified",
+                "score": 1.0,
+            }
+        },
+        "steps": [],
+    }
+    rendered = module.render_parent_usage_judge_prompt(
+        parent_goal="Assemble the report",
+        parent_trajectory=parent,
+        child_goal="Find the result",
+        child_trajectory=child,
+        max_prompt_tokens=4096,
+    )
+    assert "CHILD_RESULT" in rendered.user_prompt
+    assert "SECRET_BEFORE_BOUNDARY" not in rendered.user_prompt
+    assert rendered.metadata["fork_step"] == 1
+
+    raw = json.dumps(
+        {
+            "status": "used",
+            "used": True,
+            "reason": "The parent verified and reported the child result.",
+            "evidence": ["verify-r", "parent final"],
+        }
+    )
+    llm = _FakePolicyLLM(raw)
+    result = asyncio.run(
+        module.OpenRewardBehaviorJudge(llm=llm).judge_parent_usage(
+            parent_goal="Assemble the report",
+            parent_trajectory=parent,
+            child_goal="Find the result",
+            child_trajectory=child,
+        )
+    )
+    assert result["status"] == "used"
+    assert result["used"] is True
+    assert result["training_eligible"] is True
+    assert llm.completion_calls[0][1] == {"store": False}

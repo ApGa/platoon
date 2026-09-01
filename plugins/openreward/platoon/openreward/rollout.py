@@ -16,6 +16,7 @@ from openhands.sdk import LLM
 from openhands.sdk import Agent as OpenHandsSDKAgent
 from platoon.agents.actions.subagent import (
     SubagentRewardJudgeConfig,
+    apply_subagent_parent_usage_gates,
 )
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
@@ -95,26 +96,16 @@ class OpenRewardAgent(OpenHandsSDKAgent):
 
         tool_names = set(self.tools_map)
         completion_tool = next(
-            (
-                name
-                for name in ("finish", "submit_answer", "claim_done")
-                if name in tool_names
-            ),
+            (name for name in ("finish", "submit_answer", "claim_done") if name in tool_names),
             None,
         )
         if completion_tool is None:
             completion_instruction = (
-                "Use the terminal environment tool identified by the task prompt "
-                "when the work is complete."
+                "Use the terminal environment tool identified by the task prompt when the work is complete."
             )
         else:
-            completion_instruction = (
-                f"When the work is complete, call `{completion_tool}`."
-            )
-        logger.warning(
-            "OpenReward agent returned text without a terminal tool call; "
-            "continuing the rollout"
-        )
+            completion_instruction = f"When the work is complete, call `{completion_tool}`."
+        logger.warning("OpenReward agent returned text without a terminal tool call; continuing the rollout")
         on_event(
             MessageEvent(
                 source="user",
@@ -191,9 +182,7 @@ def _select_session_url(
     ``OPENREWARD_SESSION_URLS_<LABEL>`` therefore take precedence. The original
     process-global ``OPENREWARD_SESSION_URLS`` remains a legacy single-env path.
     """
-    candidates = environment.resolve_session_urls(
-        allow_legacy_global_pool=allow_legacy_global_pool
-    )
+    candidates = environment.resolve_session_urls(allow_legacy_global_pool=allow_legacy_global_pool)
     digest = hashlib.sha1(shard_key.encode("utf-8")).hexdigest()
     return candidates[int(digest, 16) % len(candidates)]
 
@@ -321,7 +310,7 @@ def _build_condenser_llm(
             "chat_template_kwargs": {
                 "enable_thinking": enable_thinking,
                 "preserve_thinking": False,
-            }
+            },
         }
     return _build_llm(
         config,
@@ -347,14 +336,10 @@ def _build_behavior_judge(
     judge_llm = policy_llm.model_copy(
         update={
             "usage_id": "platoon-openreward-subagent-behavior-judge",
-            "max_output_tokens": (
-                openreward_config.subagent_behavior_judge_max_output_tokens
-            ),
+            "max_output_tokens": (openreward_config.subagent_behavior_judge_max_output_tokens),
             "timeout": max(
                 1,
-                math.ceil(
-                    openreward_config.subagent_behavior_judge_timeout_seconds
-                ),
+                math.ceil(openreward_config.subagent_behavior_judge_timeout_seconds),
             ),
         }
     )
@@ -364,12 +349,8 @@ def _build_behavior_judge(
     judge_llm.reset_metrics()
     return OpenRewardBehaviorJudge(
         llm=judge_llm,
-        max_prompt_tokens=(
-            openreward_config.subagent_behavior_judge_max_prompt_tokens
-        ),
-        timeout_seconds=(
-            openreward_config.subagent_behavior_judge_timeout_seconds
-        ),
+        max_prompt_tokens=(openreward_config.subagent_behavior_judge_max_prompt_tokens),
+        timeout_seconds=(openreward_config.subagent_behavior_judge_timeout_seconds),
     )
 
 
@@ -380,30 +361,20 @@ def _configure_openhands_agent(
     suffix_parts: list[str] = []
     user_suffix_parts: list[str] = []
     configured_agent = agent
-    task_tracker_enabled = (
-        openreward_config.enable_task_tracker
-        or openreward_config.enable_recursive_subagents
-    )
+    task_tracker_enabled = openreward_config.enable_task_tracker or openreward_config.enable_recursive_subagents
     if openreward_config.enable_programmatic_tool_calling:
-        orchestration_only = (
-            openreward_config.programmatic_tool_calling_mode
-            == "orchestration_only"
-        )
+        orchestration_only = openreward_config.programmatic_tool_calling_mode == "orchestration_only"
         configured_agent = cast(
             OpenHandsSDKAgent,
             with_programmatic_tool_calling(
                 configured_agent,
                 mode=openreward_config.programmatic_tool_calling_mode,
-                max_tool_calls_per_execution=(
-                    openreward_config.programmatic_tool_calling_max_tool_calls_per_execution
-                ),
+                max_tool_calls_per_execution=(openreward_config.programmatic_tool_calling_max_tool_calls_per_execution),
             ),
         )
         suffix_parts.append(PROGRAMMATIC_TOOL_CALLING_SYSTEM_PROMPT_SUFFIX)
         if orchestration_only:
-            suffix_parts.append(
-                PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX
-            )
+            suffix_parts.append(PROGRAMMATIC_TOOL_CALLING_ORCHESTRATION_ONLY_SYSTEM_PROMPT_SUFFIX)
     if task_tracker_enabled:
         configured_agent = cast(
             OpenHandsSDKAgent,
@@ -435,10 +406,7 @@ def _configure_openhands_agent(
 
 def _initial_task_prompt_suffix(openreward_config: OpenRewardConfig) -> str | None:
     parts: list[str] = []
-    if (
-        openreward_config.enable_task_tracker
-        or openreward_config.enable_recursive_subagents
-    ):
+    if openreward_config.enable_task_tracker or openreward_config.enable_recursive_subagents:
         parts.append(TASK_TRACKER_INITIAL_TASK_SUFFIX)
     if openreward_config.enable_recursive_subagents:
         parts.append(RECURSIVE_SUBAGENT_INITIAL_TASK_SUFFIX)
@@ -498,9 +466,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         conversation_id=openhands_conversation_id,
         enable_recursive_subagents=openreward_config.enable_recursive_subagents,
         subagent_default_max_steps=openreward_config.subagent_default_max_steps,
-        subagent_environment_access=openreward_config.subagent_environment_access_for(
-            environment
-        ),
+        subagent_environment_access=openreward_config.subagent_environment_access_for(environment),
         initial_goal_suffix=initial_goal_suffix,
     )
     agent = OpenHandsAgent()
@@ -529,9 +495,11 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     )
 
     rollout_timed_out = False
+    episode_result_available = False
     try:
         rollout_task = asyncio.create_task(run_episode(agent, env, timeout=config.step_timeout))
         await asyncio.wait_for(rollout_task, timeout=config.timeout)
+        episode_result_available = True
     except asyncio.TimeoutError:
         # ``asyncio.wait_for`` has already cancelled ``run_episode`` and waited
         # for its bounded cleanup before raising.  The episode loop finalizes
@@ -543,17 +511,41 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         if config.propagate_root_success:
             raise
         rollout_timed_out = True
+        episode_result_available = True
     finally:
-        for token in reversed(tokens):
-            token.var.reset(token)
-        if behavior_judge is not None:
-            try:
-                await behavior_judge.aclose()
-            except Exception:
-                logger.warning(
-                    "Failed to close the OpenReward behavior judge client",
-                    exc_info=True,
-                )
+        try:
+            if (
+                episode_result_available
+                and behavior_judge is not None
+                and openreward_config.enable_subagent_parent_usage_eligibility_gate
+            ):
+                try:
+                    await apply_subagent_parent_usage_gates(
+                        traj_collection,
+                        behavior_judge,
+                        max_concurrency=(openreward_config.subagent_parent_usage_judge_max_concurrency),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Usage eligibility is deliberately fail-open: an audit
+                    # infrastructure failure must not discard an otherwise
+                    # verified, well-behaved child's policy data.
+                    logger.warning(
+                        "Failed to apply subagent parent-usage eligibility gates",
+                        exc_info=True,
+                    )
+        finally:
+            for token in reversed(tokens):
+                token.var.reset(token)
+            if behavior_judge is not None:
+                try:
+                    await behavior_judge.aclose()
+                except Exception:
+                    logger.warning(
+                        "Failed to close the OpenReward behavior judge client",
+                        exc_info=True,
+                    )
 
     result = traj_collection
     delegation_coefficient = openreward_config.subagent_delegation_reward_coefficient

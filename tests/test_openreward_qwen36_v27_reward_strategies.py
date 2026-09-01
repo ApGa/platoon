@@ -4,23 +4,18 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_ROOT = REPO_ROOT / "plugins/openreward/platoon/openreward/configs/areal"
-BASE = (
-    "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_"
-    "qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff"
-)
+BASE = "abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff"
 CONFIGS = {
-    "rootprop": (
-        "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
-        "qwen36_moe_cp2_c12_v27_rootprop"
-    ),
+    "rootprop": ("abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v27_rootprop"),
     "behavior_gated": (
-        "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_"
-        "qwen36_moe_cp2_c12_v27_behavior_gated"
+        "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v27_behavior_gated"
     ),
 }
+BEHAVIOR_USAGE_V33 = (
+    "abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v33_behavior_usage_gated"
+)
 
 
 def _merge(base, overlay):
@@ -61,20 +56,12 @@ def test_v27_qwen36_reward_leaf_preserves_abci_64k_topology(strategy: str) -> No
     assert literal["cluster"]["fileroot"] == "${oc.env:PLATOON_EXPERIMENT_ROOT}"
     assert literal["openreward"]["enable_recursive_subagents"] is True
     assert literal["openreward"]["enable_programmatic_tool_calling"] is True
-    assert (
-        literal["openreward"]["programmatic_tool_calling_mode"]
-        == "orchestration_only"
-    )
-    assert (
-        literal["openreward"]["programmatic_tool_calling_max_tool_calls_per_execution"]
-        == 1024
-    )
+    assert literal["openreward"]["programmatic_tool_calling_mode"] == "orchestration_only"
+    assert literal["openreward"]["programmatic_tool_calling_max_tool_calls_per_execution"] == 1024
     assert config["cluster"]["n_nodes"] == 32
     assert config["rollout"]["backend"] == "sglang:d12p1t8"
     assert config["rollout"]["max_concurrent_rollouts"] == 12
-    assert config["actor"]["backend"] == (
-        "megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)"
-    )
+    assert config["actor"]["backend"] == ("megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)")
     assert config["actor"]["enable_router_replay"] is True
     assert config["rollout"]["return_routed_experts"] is True
     assert config["actor"]["megatron"]["use_deterministic_algorithms"] is True
@@ -143,3 +130,20 @@ def test_v27_reward_strategy_identities_are_distinct() -> None:
     assert len({config["experiment_name"] for config in configs}) == 2
     assert len({config["trial_name"] for config in configs}) == 2
     assert len({config["stats_logger"]["wandb"]["group"] for config in configs}) == 2
+
+
+def test_v33_behavior_usage_gate_preserves_topology_and_enables_only_new_gate() -> None:
+    config = _compose(BEHAVIOR_USAGE_V33)
+    openreward = config["openreward"]
+
+    assert config["experiment_name"] == ("abci-or-ta32-q36-cp2-behavior-usage-gate-v33")
+    assert config["trial_name"] == ("abci-ta32-rec-q36m-cp2-c12-d2-behavior-usage-gate-v33-t0")
+    assert config["cluster"]["n_nodes"] == 32
+    assert config["sglang"]["context_length"] == 65_537
+    assert config["rollout"]["max_concurrent_rollouts"] == 12
+    assert openreward["subagent_max_depth"] == 2
+    assert openreward["enable_subagent_reward_judging"] is True
+    assert openreward["enable_subagent_behavior_judging"] is True
+    assert openreward["enable_subagent_parent_usage_eligibility_gate"] is True
+    assert openreward["subagent_parent_usage_judge_max_concurrency"] == 4
+    assert config["workflow_config"]["rollout_config"]["propagate_root_success"] is False

@@ -130,21 +130,14 @@ def test_openreward_config_splits_ptc_task_tracker_and_recursion_flags():
     assert config.enable_recursive_subagents is False
     assert config.subagent_max_depth == 2
 
-    assert (
-        config_mod.OpenRewardConfig().programmatic_tool_calling_mode
-        == "orchestration_only"
-    )
+    assert config_mod.OpenRewardConfig().programmatic_tool_calling_mode == "orchestration_only"
     with pytest.raises(ValueError, match="programmatic_tool_calling_mode"):
-        config_mod.OpenRewardConfig.from_mapping(
-            {"programmatic_tool_calling_mode": "container"}
-        )
+        config_mod.OpenRewardConfig.from_mapping({"programmatic_tool_calling_mode": "container"})
     with pytest.raises(
         ValueError,
         match="programmatic_tool_calling_max_tool_calls_per_execution",
     ):
-        config_mod.OpenRewardConfig.from_mapping(
-            {"programmatic_tool_calling_max_tool_calls_per_execution": 0}
-        )
+        config_mod.OpenRewardConfig.from_mapping({"programmatic_tool_calling_max_tool_calls_per_execution": 0})
 
 
 def test_openreward_environment_accepts_tool_routing_compatibility_overrides():
@@ -200,6 +193,8 @@ def test_openreward_config_defaults_subagent_judging_off():
     assert config.enable_subagent_reward_judging is False
     assert config.subagent_reward_judge_max_steps == 20
     assert config.enable_subagent_behavior_judging is False
+    assert config.enable_subagent_parent_usage_eligibility_gate is False
+    assert config.subagent_parent_usage_judge_max_concurrency == 4
     assert config.subagent_behavior_judge_max_prompt_tokens == 24_576
     assert config.subagent_behavior_judge_max_output_tokens == 4_096
     assert config.subagent_behavior_judge_timeout_seconds == 300.0
@@ -210,9 +205,7 @@ def test_openreward_behavior_judging_requires_outcome_verifier_and_valid_limits(
     config_mod = _load_openreward_config_module()
 
     with pytest.raises(ValueError, match="requires enable_subagent_reward_judging"):
-        config_mod.OpenRewardConfig.from_mapping(
-            {"enable_subagent_behavior_judging": True}
-        )
+        config_mod.OpenRewardConfig.from_mapping({"enable_subagent_behavior_judging": True})
 
     config = config_mod.OpenRewardConfig.from_mapping(
         {
@@ -234,6 +227,39 @@ def test_openreward_behavior_judging_requires_outcome_verifier_and_valid_limits(
     ):
         with pytest.raises(ValueError, match=field_name):
             config_mod.OpenRewardConfig.from_mapping({field_name: value})
+
+
+def test_parent_usage_gate_requires_behavior_judge_and_valid_concurrency():
+    config_mod = _load_openreward_config_module()
+
+    with pytest.raises(
+        ValueError,
+        match="enable_subagent_parent_usage_eligibility_gate requires",
+    ):
+        config_mod.OpenRewardConfig.from_mapping(
+            {
+                "enable_subagent_reward_judging": True,
+                "enable_subagent_parent_usage_eligibility_gate": True,
+            }
+        )
+
+    config = config_mod.OpenRewardConfig.from_mapping(
+        {
+            "enable_subagent_reward_judging": True,
+            "enable_subagent_behavior_judging": True,
+            "enable_subagent_parent_usage_eligibility_gate": True,
+            "subagent_parent_usage_judge_max_concurrency": 7,
+        }
+    )
+    assert config.enable_subagent_parent_usage_eligibility_gate is True
+    assert config.subagent_parent_usage_judge_max_concurrency == 7
+
+    for value in (0, True, 1.5):
+        with pytest.raises(
+            ValueError,
+            match="subagent_parent_usage_judge_max_concurrency",
+        ):
+            config_mod.OpenRewardConfig.from_mapping({"subagent_parent_usage_judge_max_concurrency": value})
 
 
 def test_openreward_config_rejects_negative_delegation_reward_coefficient():
@@ -433,9 +459,7 @@ def test_openreward_rollout_honors_root_success_propagation_flag():
         guard
         for guard in guarded_calls
         if any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "propagate_root_success"
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "propagate_root_success"
             for node in ast.walk(guard)
         )
     ]
@@ -568,9 +592,7 @@ def test_openreward_mcp_bridge_extracts_routing_from_openai_parameters(monkeypat
 def test_openreward_mcp_bridge_validates_routing_override_json(monkeypatch):
     bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
 
-    assert bridge_mod._parse_tool_routing_overrides(
-        '{"call_tool":{"version":1}}'
-    ) == {"call_tool": {"version": 1}}
+    assert bridge_mod._parse_tool_routing_overrides('{"call_tool":{"version":1}}') == {"call_tool": {"version": 1}}
     with pytest.raises(ValueError, match="must be a JSON object"):
         bridge_mod._parse_tool_routing_overrides("{")
     with pytest.raises(ValueError, match="must map"):
@@ -658,12 +680,8 @@ def test_openreward_mcp_bridge_completion_policy_uses_available_terminal_tool(
 ):
     bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
 
-    submit_policy = bridge_mod._completion_policy(
-        [{"name": "view"}, {"name": "submit_answer"}]
-    )
-    claim_policy = bridge_mod._completion_policy(
-        [{"name": "call_tool"}, {"name": "claim_done"}]
-    )
+    submit_policy = bridge_mod._completion_policy([{"name": "view"}, {"name": "submit_answer"}])
+    claim_policy = bridge_mod._completion_policy([{"name": "call_tool"}, {"name": "claim_done"}])
 
     assert "call `submit_answer`" in submit_policy
     assert "claim_done" not in submit_policy
@@ -957,10 +975,7 @@ async def test_openreward_env_finishes_on_direct_submit_answer_reward(monkeypatc
     env._stop_on_openreward_finished(event)
     reward, misc = await env.evaluate()
 
-    assert (
-        conversation.state.execution_status
-        == env_mod.ConversationExecutionStatus.FINISHED
-    )
+    assert conversation.state.execution_status == env_mod.ConversationExecutionStatus.FINISHED
     assert reward == 1.0
     assert misc["reward/openreward"] == 1.0
     assert misc["openreward/final_payload"]["text"] == "2 passed"
@@ -1158,23 +1173,15 @@ def test_openreward_config_resolves_subagent_environment_access_override():
     )
 
     assert default_config.subagent_environment_access == "shared"
-    assert (
-        config.subagent_environment_access_for(config.environment("swe_rebench"))
-        == "read_only"
-    )
-    assert (
-        config.subagent_environment_access_for(config.environment("toolathlon"))
-        == "shared"
-    )
+    assert config.subagent_environment_access_for(config.environment("swe_rebench")) == "read_only"
+    assert config.subagent_environment_access_for(config.environment("toolathlon")) == "shared"
 
 
 def test_openreward_config_rejects_invalid_subagent_environment_access():
     config_mod = _load_openreward_config_module()
 
     with pytest.raises(ValueError, match="subagent_environment_access"):
-        config_mod.OpenRewardConfig.from_mapping(
-            {"subagent_environment_access": "worktree"}
-        )
+        config_mod.OpenRewardConfig.from_mapping({"subagent_environment_access": "worktree"})
     with pytest.raises(ValueError, match="subagent_environment_access"):
         config_mod.OpenRewardConfig.from_mapping(
             {
@@ -1224,9 +1231,7 @@ def test_openreward_read_only_tools_are_strict_and_leave_parent_unchanged(monkey
     }
     agent = Agent(
         [
-            *(
-                Tool(name) for name in sorted(safe_names | mutating_or_ambiguous_names)
-            ),
+            *(Tool(name) for name in sorted(safe_names | mutating_or_ambiguous_names)),
             Tool("foreign", server_name="other"),
         ]
     )
@@ -1238,13 +1243,9 @@ def test_openreward_read_only_tools_are_strict_and_leave_parent_unchanged(monkey
     assert set(read_only_tools) == safe_names
     assert "submit_answer" not in read_only_tools
     assert "claim_done" not in read_only_tools
-    assert set(shared_tools) == safe_names | (
-        mutating_or_ambiguous_names - {"claim_done", "submit_answer"}
-    )
+    assert set(shared_tools) == safe_names | (mutating_or_ambiguous_names - {"claim_done", "submit_answer"})
     assert agent.tools_map == parent_tools_before
-    assert all(
-        agent.tools_map[name] is tool for name, tool in parent_tools_before.items()
-    )
+    assert all(agent.tools_map[name] is tool for name, tool in parent_tools_before.items())
 
 
 def test_openreward_read_only_injection_purges_stale_mcp_tools(monkeypatch):

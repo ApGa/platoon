@@ -165,6 +165,12 @@ case "${ENVIRONMENT_SET}" in
                     "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0 ]] || \
                     die "Toolathlon-only Qwen3.6 behavior-gate service binding mismatch"
                 ;;
+            0::qwen36-32-v33-behavior-usage64)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 32:1:1:qwen36 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta32-q36-cp2-behavior-usage-gate-v33 && \
+                    "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-behavior-usage-gate-v33-t0 ]] || \
+                    die "Toolathlon-only Qwen3.6 behavior/usage-gate service binding mismatch"
+                ;;
             0::qwen35-16-v27-behavior64)
                 [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 16:1:1:qwen35 && \
                     "${EXPECTED_EXPERIMENT}" == abci-or-ta16-q35-9b-dp-behavior-v27 && \
@@ -248,7 +254,7 @@ if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
                 die "Qwen3.6 fresh efficiency-disabled guard binding mismatch"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${FRESH_RUN_BINDING}
             ;;
-        :qwen36-32-v27-rootprop64|:qwen36-32-v27-behavior64|:qwen35-16-v27-behavior64|:qwen35-16-v28-cp2-behavior64|:qwen35-16-v30-tp2cp2-behavior64)
+        :qwen36-32-v27-rootprop64|:qwen36-32-v27-behavior64|:qwen36-32-v33-behavior-usage64|:qwen35-16-v27-behavior64|:qwen35-16-v28-cp2-behavior64|:qwen35-16-v30-tp2cp2-behavior64)
             [[ "${ENVIRONMENT_SET}" == toolathlon_only && \
                 "${ENVIRONMENT_SET_BINDING}" == "${FRESH_RUN_BINDING}" ]] || \
                 die "Toolathlon-only guard disablement requires its exact service binding"
@@ -425,7 +431,7 @@ else
                     "${EXPECTED_TRIAL}" == abci-ta-swe32-rec-q36m-cp2-c24-d2-effoff-v26-t0 ]] || \
                     die "Qwen3.6 v26 fresh-run binding mismatch"
                 ;;
-            qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen35-16-v27-behavior64|qwen35-16-v28-cp2-behavior64|qwen35-16-v30-tp2cp2-behavior64)
+            qwen36-32-v27-rootprop64|qwen36-32-v27-behavior64|qwen36-32-v33-behavior-usage64|qwen35-16-v27-behavior64|qwen35-16-v28-cp2-behavior64|qwen35-16-v30-tp2cp2-behavior64)
                 [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 && \
                     "${ENVIRONMENT_SET}" == toolathlon_only && \
                     "${ENVIRONMENT_SET_BINDING}" == "${FRESH_RUN_BINDING}" ]] || \

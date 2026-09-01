@@ -1,0 +1,194 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=32:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-32q36-bgusage-v33
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh 64K Toolathlon-only Qwen3.6 CP2 run. This successor keeps the
+# child-local outcome/behavior reward, suppresses positive child policy data
+# only on a decisive parent-not-used verdict, and deterministically rejects
+# pathological tracker-only loops and Agent-got-stuck endings.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r33-07bebf9-057108f
+RELEASE_REF=refs/tags/abci-v8r33-07bebf9-057108f
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v33_behavior_usage_gated.yaml
+BASE_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v33-abci.env
+EXPERIMENT=abci-or-ta32-q36-cp2-behavior-usage-gate-v33
+TRIAL=abci-ta32-rec-q36m-cp2-c12-d2-behavior-usage-gate-v33-t0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
+CONFIG_SHA256=e595b4a66b7ae0460557fc9d5fdca0b7240340c365f1e7c4cfab8f2108970c17
+BASE_CONFIG_SHA256=c071d05e4d22140d347cb3971e6218cc3a51c4df25fa592160a934e83ae6d757
+FRESH_BINDING=qwen36-32-v33-behavior-usage64
+
+die() {
+    echo "[h200-32-q36-behavior-usage-v33] ERROR: $*" >&2
+    exit 2
+}
+
+require_literal_count() {
+    local file=$1
+    local expected=$2
+    local literal=$3
+    local observed
+    observed=$(grep -Fxc -- "${literal}" "${file}" || true)
+    [[ "${observed}" == "${expected}" ]] || \
+        die "$(basename -- "${file}") must contain ${expected} exact occurrence(s) of: ${literal}"
+}
+
+require_component() {
+    local relative=$1
+    local expected=$2
+    local root=${REPO_ROOT}/${relative}
+    [[ -d "${root}" && ! -L "${root}" ]] || die "missing component ${relative}"
+    [[ "$(git -C "${root}" rev-parse --verify HEAD)" == "${expected}" ]] || \
+        die "component revision mismatch: ${relative}"
+    git -C "${root}" diff --quiet --no-ext-diff HEAD -- || \
+        die "component tracked tree is dirty: ${relative}"
+    git -C "${root}" diff --cached --quiet --no-ext-diff HEAD -- || \
+        die "component index is dirty: ${relative}"
+}
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -r "${BASE_CONFIG}" && \
+    -x "${COMMON}" && -r "${ABCI_ENV}" ]] || \
+    die "immutable v8r33 release is incomplete: ${REPO_ROOT}"
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
+    die "release root must be the exact non-symlink path"
+
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || \
+    die "release HEAD is not ${RELEASE_REF}"
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || die "release tracked tree is dirty"
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || die "release index is dirty"
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
+    die "release has tracked or ordinary untracked changes"
+unset release_head release_commit
+
+require_component external/AReaL d99124ec15102ca2fcd4960cc8beaef3950c2672
+require_component external/openhands-agent-sdk 057108f1f1235940e5d04401b4c294e4777c3baf
+require_component external/swe-rebench-v2-openrewardenv 538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7
+require_component external/toolathlon-gym 18e62c0d0419da88209af911528f2f8a0b44a5ed
+
+read -r observed_config_sha _ < <(sha256sum -- "${CONFIG}")
+[[ "${observed_config_sha}" == "${CONFIG_SHA256}" ]] || \
+    die "fresh behavior/usage-gated config digest mismatch"
+read -r observed_base_sha _ < <(sha256sum -- "${BASE_CONFIG}")
+[[ "${observed_base_sha}" == "${BASE_CONFIG_SHA256}" ]] || \
+    die "inherited Qwen3.6 64K base config digest mismatch"
+unset observed_config_sha observed_base_sha
+
+for literal in \
+    '  - abci_toolathlon_swe_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c24_ta20_v26_fresh_d2_noeff' \
+    'experiment_name: abci-or-ta32-q36-cp2-behavior-usage-gate-v33' \
+    'trial_name: abci-ta32-rec-q36m-cp2-c12-d2-behavior-usage-gate-v33-t0' \
+    '  batch_size: 8' \
+    '  group_size: 8' \
+    '  subagent_datum_keep_probability: 0.25' \
+    '  straggler_timeout_seconds: 900' \
+    '  straggler_quorum: 6' \
+    '  min_successful_group_size: 4' \
+    '    max_steps: 200' \
+    '    timeout: 3600' \
+    '    step_timeout: 2700' \
+    '    propagate_root_success: false' \
+    '  max_concurrent_rollouts: 12' \
+    '  consumer_batch_size: 8' \
+    '  subagent_environment_access: shared' \
+    '  subagent_default_max_steps: 100' \
+    '  subagent_max_depth: 2' \
+    '  enable_subagent_reward_judging: true' \
+    '  subagent_reward_judge_max_steps: 100' \
+    '  enable_subagent_behavior_judging: true' \
+    '  enable_subagent_parent_usage_eligibility_gate: true' \
+    '  subagent_parent_usage_judge_max_concurrency: 4' \
+    '  subagent_behavior_judge_max_prompt_tokens: 24576' \
+    '  subagent_behavior_judge_max_output_tokens: 4096' \
+    '  subagent_behavior_judge_timeout_seconds: 300.0' \
+    '  subagent_delegation_reward_coefficient: 0.0' \
+    '    - label: toolathlon' \
+    '      env_name: toolathlongym' \
+    '      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON' \
+    '      sampling_weight: 1.0' \
+    '    group: abci-ta32-rec-q36m-cp2-c12-d2-behavior-usage-gate-v33'; do
+    require_literal_count "${CONFIG}" 1 "${literal}"
+done
+require_literal_count "${CONFIG}" 0 '    propagate_root_success: true'
+require_literal_count "${CONFIG}" 0 '    - label: swe_rebench'
+
+for literal in \
+    '  condenser_max_tokens: 52428' \
+    '  backend: megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)' \
+    '  backend: sglang:d12p1t8' \
+    '  context_length: 65537' \
+    '  max_prefill_tokens: 65536' \
+    '    engine_max_tokens: 65536' \
+    '  return_routed_experts: true' \
+    '  no_load_optim: false' \
+    '  no_save_optim: false'; do
+    require_literal_count "${BASE_CONFIG}" 1 "${literal}"
+done
+require_literal_count "${BASE_CONFIG}" 2 '    max_tokens_per_mb: 65536'
+require_literal_count "${BASE_CONFIG}" 1 '    use_deterministic_algorithms: true'
+
+# The runtime and container pins are unchanged from the accepted v32 wave, so
+# this successor deliberately does not rerun Gate2 or all-MCP acceptance.
+# It still attests the immutable release, every component revision, exact
+# config topology, model snapshot, and fresh checkpoint namespace above.
+export OPENREWARD_MODEL_FAMILY=qwen36
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || \
+    die "v33 overlay selected another repository"
+[[ "${OPENREWARD_QWEN36_MODEL_REPOSITORY:-}" == apurvaga/Qwen3.6-35B-A3B-preserve-thinking && \
+    "${OPENREWARD_QWEN36_MODEL_REVISION:-}" == ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    "${OPENREWARD_QWEN36_MODEL_SNAPSHOT:-}" == /groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    -d "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" && ! -L "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" ]] || \
+    die "pinned Qwen3.6 preserve-thinking model binding is incomplete"
+export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN36_MODEL_SNAPSHOT}
+
+for prior in "${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || \
+        die "refusing stale success artifact; use a fresh trial: ${prior}"
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || \
+    die "refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}"
+
+export OPENREWARD_EXPECTED_NNODES=32
+export OPENREWARD_EXPECTED_MODEL_SHARDS=26
+export OPENREWARD_SERVICE_NODE_COUNT=12
+export OPENREWARD_ENVIRONMENT_SET=toolathlon_only
+export OPENREWARD_EXPECTED_RECURSIVE=1
+export OPENREWARD_EXPECTED_PTC=1
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export OPENREWARD_EXPECTED_FRESH_RUN_BINDING=${FRESH_BINDING}
+export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0
+export OPENREWARD_NODE_MEMORY_LIMIT_BYTES=2061584302080
+export OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=85
+export OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=274877906944
+export OPENREWARD_NODE_MEMORY_POLL_SECONDS=2
+export OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS=60
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+unset OPENREWARD_REQUIRE_EXISTING_RECOVERY OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP
+unset OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT OPENREWARD_PREUPDATE_RECOVERY_BINDING_ID
+unset OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING
+
+exec "${COMMON}" "${CONFIG}"

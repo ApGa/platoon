@@ -87,6 +87,9 @@ def _load_rollout_module(
     def _identity(agent, *args, **kwargs):
         return agent
 
+    async def _apply_parent_usage_gates(*args, **kwargs):
+        return None
+
     agent_type = agent_type or _Agent
     env_type = env_type or _HangingEnv
 
@@ -102,6 +105,7 @@ def _load_rollout_module(
         monkeypatch,
         "platoon.agents.actions.subagent",
         SubagentRewardJudgeConfig=_AcceptsKeywords,
+        apply_subagent_parent_usage_gates=_apply_parent_usage_gates,
     )
     _module(monkeypatch, "platoon.openhands")
     _module(monkeypatch, "platoon.openhands.agent", OpenHandsAgent=agent_type)
@@ -220,9 +224,7 @@ def test_nonrecursive_ptc_and_task_tracker_do_not_add_delegation(monkeypatch) ->
 
     assert configured.tools == ["programmatic_tool_calling", "task_tracker"]
     assert "launch_subagent" not in configured.tools
-    assert prompts["system"] == [
-        "ptc-guidance\n\nptc-orchestration-guidance\n\ntask-tracker-guidance"
-    ]
+    assert prompts["system"] == ["ptc-guidance\n\nptc-orchestration-guidance\n\ntask-tracker-guidance"]
     assert prompts["user"] == [""]
     assert all("recursive" not in prompt for values in prompts.values() for prompt in values)
 
@@ -314,10 +316,7 @@ def test_task_tracker_initial_guidance_is_shared_by_recursive_and_nonrecursive(
         }
     )
 
-    assert (
-        rollout._initial_task_prompt_suffix(nonrecursive)
-        == "task-tracker-initial-guidance"
-    )
+    assert rollout._initial_task_prompt_suffix(nonrecursive) == "task-tracker-initial-guidance"
     assert rollout._initial_task_prompt_suffix(recursive) == (
         "task-tracker-initial-guidance\n\nrecursive-initial-guidance"
     )
@@ -412,7 +411,7 @@ def test_condenser_thinking_can_be_explicitly_disabled(monkeypatch) -> None:
         "chat_template_kwargs": {
             "enable_thinking": False,
             "preserve_thinking": False,
-        }
+        },
     }
 
 
@@ -537,11 +536,7 @@ def _counting_rollout_types(*, child_max_steps: int | None = None):
             return Observation(task=self._task)
 
         async def step(self, action):
-            if (
-                child_max_steps is not None
-                and not isinstance(self._task, SubTask)
-                and not self._launched_child
-            ):
+            if child_max_steps is not None and not isinstance(self._task, SubTask) and not self._launched_child:
                 self._launched_child = True
                 await launch_subagent(
                     goal="bounded child",
@@ -609,11 +604,7 @@ async def test_openreward_rollout_applies_configured_root_step_cap(monkeypatch, 
 
     result = await rollout.run_rollout(source_task, config)
 
-    root = next(
-        trajectory
-        for trajectory in result["trajectories"].values()
-        if trajectory["parent_info"] is None
-    )
+    root = next(trajectory for trajectory in result["trajectories"].values() if trajectory["parent_info"] is None)
     assert len(root["steps"]) == 3
     assert env_type.instances[0]._task.max_steps == 3
     assert env_type.instances[0].step_calls == 2
@@ -648,18 +639,61 @@ async def test_openreward_root_cap_preserves_recursive_child_budget(monkeypatch,
         config,
     )
 
-    root = next(
-        trajectory
-        for trajectory in result["trajectories"].values()
-        if trajectory["parent_info"] is None
-    )
-    child = next(
-        trajectory
-        for trajectory in result["trajectories"].values()
-        if trajectory["parent_info"] is not None
-    )
+    root = next(trajectory for trajectory in result["trajectories"].values() if trajectory["parent_info"] is None)
+    child = next(trajectory for trajectory in result["trajectories"].values() if trajectory["parent_info"] is not None)
     assert root["task"]["max_steps"] == 4
     assert len(root["steps"]) == 4
     assert child["task"]["max_steps"] == 2
     assert len(child["steps"]) == 2
     assert result["misc"]["rollout_timed_out"] is False
+
+
+@pytest.mark.asyncio
+async def test_parent_usage_gate_runs_after_episode_and_before_judge_close(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    agent_type, env_type = _counting_rollout_types()
+    rollout = _load_rollout_module(
+        monkeypatch,
+        agent_type=agent_type,
+        env_type=env_type,
+    )
+    events: list[object] = []
+
+    class FakeJudge:
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+            events.append("close")
+
+    judge = FakeJudge()
+    monkeypatch.setattr(rollout, "_build_behavior_judge", lambda *_args: judge)
+
+    async def apply_gate(collection, observed_judge, *, max_concurrency):
+        assert collection.trajectories
+        assert observed_judge is judge
+        assert judge.closed is False
+        events.append(("apply", max_concurrency))
+
+    monkeypatch.setattr(rollout, "apply_subagent_parent_usage_gates", apply_gate)
+    config = RolloutConfig(
+        output_dir=str(tmp_path),
+        max_steps=2,
+        timeout=5,
+        step_timeout=1,
+        return_dict=True,
+        extra={
+            "openreward": {
+                "enable_subagent_reward_judging": True,
+                "enable_subagent_behavior_judging": True,
+                "enable_subagent_parent_usage_eligibility_gate": True,
+                "subagent_parent_usage_judge_max_concurrency": 3,
+            }
+        },
+    )
+
+    await rollout.run_rollout(Task(id="usage-order", goal="finish"), config)
+
+    assert events == [("apply", 3), "close"]
