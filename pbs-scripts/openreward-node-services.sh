@@ -68,6 +68,7 @@ EXPECTED_HOST=${PLATOON_NODE_SERVICES_EXPECTED_HOST:-}
 EXPECTED_JOB_ID=${PLATOON_NODE_SERVICES_EXPECTED_JOB_ID:-}
 ENVIRONMENT_SET=${OPENREWARD_ENVIRONMENT_SET:-toolathlon_swe}
 ENVIRONMENT_SET_BINDING=${OPENREWARD_ENVIRONMENT_SET_BINDING:-}
+REWARD_MODE=${OPENREWARD_REWARD_MODE:-}
 EXPECTED_NNODES=${OPENREWARD_EXPECTED_NNODES:-}
 EXPECTED_RECURSIVE=${OPENREWARD_EXPECTED_RECURSIVE:-}
 EXPECTED_PTC=${OPENREWARD_EXPECTED_PTC:-}
@@ -155,6 +156,8 @@ case "${ENVIRONMENT_SET}" in
         ;;
 esac
 # END OPENREWARD_ENVIRONMENT_SET_SUPERVISOR_AUTHORIZATION
+[[ "${REWARD_MODE}" == partial ]] || \
+    die "OPENREWARD_REWARD_MODE must be exactly partial for Toolathlon services"
 [[ -x "${TOOLATHLON_ENTRYPOINT}" ]] || die "Toolathlon entrypoint is missing"
 [[ -x "${TOOLATHLON_STAGER}" ]] || die "Toolathlon PGDATA stager is missing"
 if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then
@@ -530,7 +533,7 @@ mkdir -p \
     "${TOOLATHLON_STATE}/home" \
     "${TOOLATHLON_STATE}/tmp"
 
-echo "[node-services] starting Toolathlon host=$(hostname) port=${TOOLATHLON_PORT} image_sha256=${TOOLATHLON_SHA256}"
+echo "[node-services] starting Toolathlon host=$(hostname) port=${TOOLATHLON_PORT} reward_mode=${REWARD_MODE} image_sha256=${TOOLATHLON_SHA256}"
 if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 1 ]]; then
     # The guard watches the aggregate PBS allocation cgroup when it can identify
     # that cgroup by the exact node memory limit.  Its only fallback is explicit
@@ -561,6 +564,7 @@ fi
         VIRTUAL_ENV=/opt/venv \
         PATH=/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
         OPENREWARD_RUNTIME_MODE=user \
+        OPENREWARD_REWARD_MODE="${REWARD_MODE}" \
         OPENREWARD_STATE_DIR=/mnt/state \
         OPENREWARD_PGDATA="${pgdata_container}" \
         OPENREWARD_PG_PORT="${OPENREWARD_TOOLATHLON_PG_PORT:-5432}" \

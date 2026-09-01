@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON = ROOT / "pbs-scripts/openreward-ta-swe-prealloc-common.sh"
@@ -574,6 +574,37 @@ def test_toolathlon_only_omits_swe_urls_and_supervisor_work() -> None:
     assert 'if [[ "${ENVIRONMENT_SET}" == toolathlon_swe ]]; then\n        janitor_log=${LOCAL_ROOT}/node-services-final-swe-cleanup.log' in services
     assert 'local -a child_names=(toolathlon swe-rebench)' in services
     assert 'child_names=(toolathlon)' in services
+
+
+def test_partial_reward_mode_reaches_toolathlon_before_cleanenv_service_start() -> None:
+    common = COMMON.read_text(encoding="utf-8")
+    services = NODE_SERVICES.read_text(encoding="utf-8")
+
+    mode_export = "export OPENREWARD_REWARD_MODE=partial"
+    service_start = 'echo "[pbs-openreward] starting one Toolathlon'
+    assert common.count(mode_export) == 1
+    assert common.index(mode_export) < common.index(service_start)
+
+    controller_launch = common[
+        common.index(service_start) : common.index(
+            "\nHEALTH_CONNECT_TIMEOUT_SECONDS=", common.index(service_start)
+        )
+    ]
+    assert '"OPENREWARD_REWARD_MODE=${OPENREWARD_REWARD_MODE}"' in controller_launch
+
+    assert "REWARD_MODE=${OPENREWARD_REWARD_MODE:-}" in services
+    assert '[[ "${REWARD_MODE}" == partial ]]' in services
+    container_start = services.index('"${RUNTIME}" exec --cleanenv')
+    container_end = services.index(
+        "/app/openreward-toolathlon-resilient-entrypoint.sh &", container_start
+    )
+    container_launch = services[container_start:container_end]
+    assert 'OPENREWARD_REWARD_MODE="${REWARD_MODE}"' in container_launch
+
+    for forward_line in re.findall(
+        r'^.*PLATOON_AREAL_PBS_FORWARD_ENV="[^"]+"$', common, flags=re.MULTILINE
+    ):
+        assert "OPENREWARD_REWARD_MODE" in forward_line
 
 
 def _snapshot_validator() -> str:
