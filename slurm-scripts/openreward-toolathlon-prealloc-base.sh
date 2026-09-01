@@ -199,6 +199,16 @@ fi
 # must replace actor.path as well: SGLang and a fresh actor initialization also
 # consume that path. Recovery checkpoints created before the portable-ID change
 # used this same local overlay.
+qwen_snapshot_is_complete() {
+  local snapshot=$1 required_file shard_count
+  [[ -d "${snapshot}" ]] || return 1
+  for required_file in config.json tokenizer.json tokenizer_config.json model.safetensors.index.json; do
+    [[ -e "${snapshot}/${required_file}" ]] || return 1
+  done
+  shard_count=$(find "${snapshot}" -maxdepth 1 -name 'model-*-of-*.safetensors' | wc -l)
+  [[ "${shard_count}" -eq 26 ]]
+}
+
 if [[ -z "${OPENREWARD_ACTOR_PATH}" ]] && \
    grep -qE '^[[:space:]]*path:[[:space:]]*apurvaga/Qwen3\.6-35B-A3B-preserve-thinking' "${CONFIG}"; then
   if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
@@ -206,13 +216,15 @@ if [[ -z "${OPENREWARD_ACTOR_PATH}" ]] && \
     if [[ -f "${preserve_hf_cache}/refs/main" ]]; then
       preserve_revision=$(tr -d '\r\n' <"${preserve_hf_cache}/refs/main")
       preserve_snapshot=${preserve_hf_cache}/snapshots/${preserve_revision}
-      if [[ -d "${preserve_snapshot}" ]]; then
+      if qwen_snapshot_is_complete "${preserve_snapshot}"; then
         OPENREWARD_LOCAL_MODEL_SNAPSHOT=${preserve_snapshot}
+      elif [[ -d "${preserve_snapshot}" ]]; then
+        echo "WARNING: ignoring incomplete preserve-thinking HF snapshot: ${preserve_snapshot}" >&2
       fi
     fi
     if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
       preserve_overlay=${REPO_ROOT}/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking
-      if [[ -d "${preserve_overlay}" ]]; then
+      if qwen_snapshot_is_complete "${preserve_overlay}"; then
         OPENREWARD_LOCAL_MODEL_SNAPSHOT=${preserve_overlay}
       fi
     fi
@@ -222,7 +234,7 @@ if [[ -z "${OPENREWARD_ACTOR_PATH}" ]] && \
     # portable explicit override for other layouts/clusters.
     if [[ -z "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
       canonical_preserve_overlay=${USER_ROOT}/source/platoon/.cache/platoon-models/Qwen3.6-35B-A3B-preserve-thinking
-      if [[ -d "${canonical_preserve_overlay}" ]]; then
+      if qwen_snapshot_is_complete "${canonical_preserve_overlay}"; then
         OPENREWARD_LOCAL_MODEL_SNAPSHOT=${canonical_preserve_overlay}
       fi
     fi
@@ -254,6 +266,7 @@ if [[ -n "${OPENREWARD_LOCAL_MODEL_SNAPSHOT}" ]]; then
     echo "Using local Qwen snapshot for AReaL tokenizer startup: ${OPENREWARD_LOCAL_MODEL_SNAPSHOT}"
   fi
 fi
+unset -f qwen_snapshot_is_complete
 
 # The checked-in training config requests online W&B logging, but credentials
 # are intentionally not stored in this launcher. AReaL calls wandb.login()
