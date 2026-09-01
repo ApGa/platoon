@@ -1,0 +1,400 @@
+diff --git a/areal/api/cli_args.py b/areal/api/cli_args.py
+--- a/areal/api/cli_args.py
++++ b/areal/api/cli_args.py
+@@ -989,6 +989,18 @@ class MegatronEngineConfig:
+             "(e.g. Qwen3.5). FP8 paths fall back to the registry automatically.",
+         },
+     )
++    merge_lora_for_update_weights: bool = field(
++        default=False,
++        metadata={
++            "help": "Train Megatron-Bridge LoRA adapters but merge them into the "
++            "full Hugging Face tensors streamed to a non-LoRA rollout server. "
++            "This keeps rollout inference on the ordinary full-model kernels and "
++            "is required when the rollout backend cannot execute every trained "
++            "adapter target (for example Qwen3.5/3.6 GDN and grouped MoE layers). "
++            "Requires bridge_type='megatron-bridge', use_bridge_for_update_weights=True, "
++            "a distributed optimizer, and XCCL weight updates.",
++        },
++    )
+
+     disable_grad_buffers_cpu_backup: bool = field(
+         default=False,
+diff --git a/areal/models/mcore/registry.py b/areal/models/mcore/registry.py
+--- a/areal/models/mcore/registry.py
++++ b/areal/models/mcore/registry.py
+@@ -173,6 +173,7 @@ def make_mcore_model(
+     bridge_type: str = "mbridge",
+     is_critic: bool = False,
+     use_lora: bool = False,
++    pre_wrap_hook: Any | None = None,
+ ) -> list[GPTModel | DDP]:
+     if bridge is not None and bridge_type == "mbridge":
+         models = bridge.get_model(
+@@ -267,17 +268,18 @@ def make_mcore_model(
+         provider.finalize()
+
+         ddp_config = MCoreDDPConfig(**dataclasses.asdict(mcore_config.ddp))
+-        if use_lora:
++        if use_lora and not mcore_config.merge_lora_for_update_weights:
+             ddp_config.use_distributed_optimizer = False
+             ddp_config.overlap_grad_reduce = False
+             ddp_config.overlap_param_gather = False
+
+         models = provider.provide_distributed_model(
++            pre_wrap_hook=pre_wrap_hook,
+             ddp_config=ddp_config,
+             fp16=tf_config.fp16,
+             bf16=tf_config.bf16,
+             use_megatron_fsdp=mcore_config.use_custom_fsdp,
+             use_torch_fsdp2=mcore_config.use_torch_fsdp2,
+             wrap_with_ddp=mcore_config.wrap_with_ddp,
+             overlap_param_gather_with_optimizer_step=mcore_config.overlap_param_gather_with_optimizer_step,
+         )
+diff --git a/areal/engine/megatron_engine.py b/areal/engine/megatron_engine.py
+--- a/areal/engine/megatron_engine.py
++++ b/areal/engine/megatron_engine.py
+@@ -262,27 +262,37 @@ class MegatronEngine(TrainEngine):
+             mpu.get_data_parallel_group(),
+         )
+
+-    def _apply_megatron_bridge_lora(self) -> None:
+-        assert self.model is not None, "Model must be initialized before applying LoRA."
++    @property
++    def _merge_lora_for_update_weights(self) -> bool:
++        return bool(
++            self.config.use_lora and self.mcore_config.merge_lora_for_update_weights
++        )
++
++    def _build_megatron_bridge_lora(self) -> MegatronBridgeLoRA:
+         assert self.bridge_cls == "megatron-bridge"
+
+         target_modules = list(self.config.target_modules or [])
+         if not target_modules or "all-linear" in target_modules:
+             # Expand all-linear to explicit Megatron-Bridge linear module targets.
+             target_modules = [
+                 "linear_qkv",
+                 "linear_proj",
+                 "linear_fc1",
+                 "linear_fc2",
+             ]
+         self.bridge_lora = MegatronBridgeLoRA(
+             target_modules=target_modules,
+             dim=self.config.lora_rank,
+             alpha=self.config.lora_alpha,
+             dropout=0.0,
+         )
+-        self.model = _MegatronModelList(self.bridge_lora(self.model, training=True))
++        return self.bridge_lora
++
++    def _finalize_megatron_bridge_lora(self) -> None:
++        assert self.model is not None, "Model must be initialized before finalizing LoRA."
++        assert self.bridge_lora is not None, "LoRA must be built before DDP wrapping."
+         self.bridge_lora.set_params_to_save(self.model)
++        target_modules = list(self.bridge_lora.target_modules)
+
+         total_params = sum(param.numel() for param in self.model.parameters())
+         trainable_params = sum(
+@@ -394,7 +405,7 @@ class MegatronEngine(TrainEngine):
+                     fallback_reasons.append(f"bridge_type={self.bridge_cls!r}")
+                 if self.quantization_config:
+                     fallback_reasons.append("FP8/quantized training")
+-                if self.config.use_lora:
++                if self.config.use_lora and not self._merge_lora_for_update_weights:
+                     fallback_reasons.append("LoRA enabled")
+                 if fallback_reasons:
+                     self.logger.warning(
+@@ -403,6 +414,13 @@ class MegatronEngine(TrainEngine):
+                         f"{', '.join(fallback_reasons)}."
+                     )
+
++            lora_pre_wrap_hook = None
++            if self.config.use_lora:
++                bridge_lora = self._build_megatron_bridge_lora()
++                # Megatron DDP must see adapter parameters while it constructs
++                # grad buffers/hooks; injecting them after DDP loses DP reduction.
++                lora_pre_wrap_hook = functools.partial(bridge_lora, training=True)
++
+             with self.device:
+                 models = make_mcore_model(
+                     hf_config=self.hf_config,
+@@ -412,12 +430,13 @@ class MegatronEngine(TrainEngine):
+                     bridge_type=self.bridge_cls,
+                     is_critic=self.config.is_critic,
+                     use_lora=self.config.use_lora,
++                    pre_wrap_hook=lora_pre_wrap_hook,
+                 )
+
+         self.model = _MegatronModelList(models)
+
+         if self.config.use_lora:
+-            self._apply_megatron_bridge_lora()
++            self._finalize_megatron_bridge_lora()
+
+         with self.device:
+             self._load_model_from_hf(self.config.path)
+@@ -1387,11 +1406,13 @@ class MegatronEngine(TrainEngine):
+             return
+         assert self.model is not None and len(self.model) > 0
+
+-        use_distributed_optimizer = (
+-            False
+-            if self.config.use_lora
+-            else self.mcore_config.ddp.use_distributed_optimizer
+-        )
++        use_distributed_optimizer = self.mcore_config.ddp.use_distributed_optimizer
++        if self.config.use_lora and not self._merge_lora_for_update_weights:
++            use_distributed_optimizer = False
++        if self._merge_lora_for_update_weights and not use_distributed_optimizer:
++            raise ValueError(
++                "merge_lora_for_update_weights requires megatron.ddp.use_distributed_optimizer=True"
++            )
+
+         assert self.optimizer_config.type in [
+             "adam",
+@@ -1463,16 +1484,16 @@ class MegatronEngine(TrainEngine):
+         )
+         self.lr_scheduler = lr_scheduler
+
+-        # MegatronCheckpointManager now only support distributed optimizer which lora does not support
+-        if not self.config.use_lora:
+-            self.checkpointer = MegatronCheckpointManager(
+-                model=self.model,
+-                optimizer=self.optimizer,
+-                lr_scheduler=self.lr_scheduler,
+-                use_distributed_optimizer=use_distributed_optimizer,
+-                use_checkpoint_opt_param_scheduler=self.mcore_config.use_checkpoint_opt_param_scheduler,
+-                async_save=self.mcore_config.async_save,
+-            )
++        if use_distributed_optimizer:
++            self.checkpointer = MegatronCheckpointManager(
++                model=self.model,
++                optimizer=self.optimizer,
++                lr_scheduler=self.lr_scheduler,
++                use_distributed_optimizer=use_distributed_optimizer,
++                use_checkpoint_opt_param_scheduler=self.mcore_config.use_checkpoint_opt_param_scheduler,
++                async_save=self.mcore_config.async_save,
++                peft_config=self.bridge_lora if self._merge_lora_for_update_weights else None,
++            )
+
+     def _check_rollout_engine_connected(self) -> None:
+         """Validate that rollout engine has been connected via connect_engine()."""
+@@ -1517,7 +1537,7 @@ class MegatronEngine(TrainEngine):
+             for name, tensor in converted_named_tensors
+         ]
+
+-        if self.config.use_lora:
++        if self.config.use_lora and not self._merge_lora_for_update_weights:
+             meta.peft_config = {
+                 "r": self.config.lora_rank,
+                 "lora_alpha": self.config.lora_alpha,
+@@ -1866,13 +1886,12 @@ class MegatronEngine(TrainEngine):
+         # Bridge delegation: when bridge_type=megatron-bridge and the user opts in,
+         # stream HF tensors directly from bridge.export_hf_weights. Falls back to
+-        # the hand-rolled registry path for FP8 (quant_mapping in megatron-bridge
+-        # is amax-style, not TE blockwise) and for LoRA (separate adapter export
+-        # path not yet wired here).
++        # the hand-rolled registry path for FP8. LoRA may use this path when its
++        # adapters are explicitly merged into ordinary full-model tensors.
+         use_bridge = (
+             self.bridge_cls == "megatron-bridge"
+             and self.mcore_config.use_bridge_for_update_weights
+             and not self.quantization_config
+-            and not self.config.use_lora
++            and (not self.config.use_lora or self._merge_lora_for_update_weights)
+         )
+         if use_bridge:
+             self._update_weights_via_bridge(meta)
+@@ -1964,6 +1983,7 @@ class MegatronEngine(TrainEngine):
+             self.model,
+             cpu=False,
+             show_progress=False,
++            merge_adapter_weights=self._merge_lora_for_update_weights,
+         ):
+             if not self.is_pipeline_parallel_head():
+                 continue
+diff --git a/areal/trainer/rl_trainer.py b/areal/trainer/rl_trainer.py
+--- a/areal/trainer/rl_trainer.py
++++ b/areal/trainer/rl_trainer.py
+@@ -323,5 +323,8 @@ class RLTrainer:
+         # Proxy worker initialization (lazy, for AgentWorkflow support)
+         self._proxy_started = False
+
++        merged_lora = bool(
++            config.actor.megatron.merge_lora_for_update_weights
++        )
+         # Prepare weight update meta and connect to inference engine.
+         # v2 controllers pick transport from use_lora: LoRA must go through
+@@ -328,5 +331,5 @@ class RLTrainer:
+         # uses awex. v1 keeps the legacy weight_update_mode dispatch.
+         if self.config.actor._version == "v2":
+-            if config.actor.use_lora:
++            if config.actor.use_lora and not merged_lora:
+                 disk_kwargs: dict[str, Any] = {
+                     "experiment_name": config.experiment_name,
+@@ -355,6 +358,6 @@ class RLTrainer:
+                 "name": "default",
+                 "clear_checkpoint_after_load": True,
+             }
+-            if config.actor.use_lora:
++            if config.actor.use_lora and not merged_lora:
+                 disk_kwargs.update(
+                     {
+@@ -375,6 +378,6 @@ class RLTrainer:
+                 "gen_allocation": self.rollout_alloc,
+             }
+
+-            if config.actor.use_lora:
++            if config.actor.use_lora and not merged_lora:
+                 xccl_kwargs.update(
+                     {
+@@ -1150,7 +1153,10 @@ class RLTrainer:
+
+         Returns path to saved LoRA weights, or None if LoRA is disabled.
+         """
+-        if not self.config.actor.use_lora:
++        if (
++            not self.config.actor.use_lora
++            or self.config.actor.megatron.merge_lora_for_update_weights
++        ):
+             return None
+
+         path = os.path.join(
+@@ -1294,5 +1300,8 @@ class RLTrainer:
+         """validate config for incompatible settings before weight initialization, to avoid wasted resources on spawning workers and loading models."""
+         rollout_backend = self.rollout_alloc.backend
+         actor_backend = self.actor_alloc.backend
++        merged_lora = bool(
++            self.config.actor.megatron.merge_lora_for_update_weights
++        )
+         requires_train_engine_offload = any(
+             (
+@@ -1327,13 +1336,42 @@ class RLTrainer:
+         if (
+             actor_backend == "megatron"
+             and self.config.actor.use_lora
+             and rollout_backend == "sglang"
++            and not merged_lora
+         ):
+             raise ValueError(
+                 "Megatron actor with LoRA is not supported with SGLang rollout in "
+                 "RL trainer. Please use vLLM rollout backend, or disable LoRA, or "
+                 "switch actor backend from Megatron."
+             )
++        if merged_lora:
++            errors = []
++            if not self.config.actor.use_lora:
++                errors.append("actor.use_lora must be true")
++            if self.config.rollout.use_lora:
++                errors.append("rollout.use_lora must be false")
++            if actor_backend != "megatron":
++                errors.append("actor backend must be Megatron")
++            if rollout_backend != "sglang":
++                errors.append("rollout backend must be SGLang")
++            if self.config.actor._version != "v1":
++                errors.append("actor/rollout controller version must be v1")
++            if self.config.actor.weight_update_mode != "xccl":
++                errors.append("actor.weight_update_mode must be 'xccl'")
++            if self.config.actor.megatron.bridge_type != "megatron-bridge":
++                errors.append("actor.megatron.bridge_type must be 'megatron-bridge'")
++            if not self.config.actor.megatron.use_bridge_for_update_weights:
++                errors.append(
++                    "actor.megatron.use_bridge_for_update_weights must be true"
++                )
++            if not self.config.actor.megatron.ddp.use_distributed_optimizer:
++                errors.append(
++                    "actor.megatron.ddp.use_distributed_optimizer must be true"
++                )
++            if errors:
++                raise ValueError(
++                    "Invalid merged-full LoRA configuration: " + "; ".join(errors)
++                )
+
+         # Ensure actor and rollout controller versions match.
+         actor_version = self.config.actor._version
+diff --git a/areal/engine/megatron_utils/checkpointer.py b/areal/engine/megatron_utils/checkpointer.py
+--- a/areal/engine/megatron_utils/checkpointer.py
++++ b/areal/engine/megatron_utils/checkpointer.py
+@@ -161,8 +161,9 @@ class MegatronCheckpointManager:
+         use_distributed_optimizer: bool = True,
+         use_checkpoint_opt_param_scheduler: bool = False,
+         use_dist_checkpointing: bool = True,
+         async_save: bool = False,
++        peft_config=None,
+     ):
+         self.model = model
+         self.optimizer = optimizer
+         self.lr_scheduler = lr_scheduler
+@@ -174,7 +175,8 @@ class MegatronCheckpointManager:
+         self.use_checkpoint_opt_param_scheduler = use_checkpoint_opt_param_scheduler
+         self.rank = torch.distributed.get_rank()
+         self.use_dist_checkpointing = use_dist_checkpointing
+         self.async_save = async_save
++        self.peft_config = peft_config
+         # AsyncCallsQueue manages outstanding background save processes.
+         # Created only when async_save is enabled; sync path keeps zero overhead.
+         self._async_queue: AsyncCallsQueue | None = (
+@@ -326,8 +328,20 @@ class MegatronCheckpointManager:
+         if with_rng:
+             torch.distributed.barrier()
+             rng_state = self.get_rng_state()
+             state_dict["rng_state"] = rng_state
+
++        if self.peft_config is not None:
++            # The distributed optimizer builds its sharded state from the full
++            # model template above. Filter model sections only afterwards so
++            # optimizer moments remain valid while checkpoints stay adapter-only.
++            from megatron.bridge.training.checkpointing import (
++                apply_peft_adapter_filter_to_state_dict,
++            )
++
++            state_dict = apply_peft_adapter_filter_to_state_dict(
++                state_dict, self.peft_config
++            )
++
+         return state_dict
+
+     def load_rng_states(self, rng_states, data_parallel_random_init=False):
+@@ -394,10 +408,41 @@ class MegatronCheckpointManager:
+                         assert f"model{vpp_rank}" in state_dict, (
+                             f"model{vpp_rank} not found in state_dict"
+                         )
+                         model_state_dict = state_dict[f"model{vpp_rank}"]
+                     mpu.set_virtual_pipeline_model_parallel_rank(vpp_rank)
+-                    self.model[vpp_rank].load_state_dict(model_state_dict)
++                    if self.peft_config is None:
++                        self.model[vpp_rank].load_state_dict(model_state_dict)
++                    else:
++                        adapter_keys = [
++                            key
++                            for key in model_state_dict
++                            if self.peft_config.adapter_key_filter(key)
++                        ]
++                        if not adapter_keys:
++                            raise RuntimeError(
++                                "PEFT checkpoint contains no adapter parameters for "
++                                f"virtual pipeline rank {vpp_rank}"
++                            )
++                        incompatible = self.model[vpp_rank].load_state_dict(
++                            model_state_dict, strict=False
++                        )
++                        missing_adapter_keys = [
++                            key
++                            for key in incompatible.missing_keys
++                            if self.peft_config.adapter_key_filter(key)
++                        ]
++                        unexpected_adapter_keys = [
++                            key
++                            for key in incompatible.unexpected_keys
++                            if self.peft_config.adapter_key_filter(key)
++                        ]
++                        if missing_adapter_keys or unexpected_adapter_keys:
++                            raise RuntimeError(
++                                "PEFT checkpoint adapter-key mismatch: "
++                                f"missing={missing_adapter_keys}, "
++                                f"unexpected={unexpected_adapter_keys}"
++                            )
+                 log_with_rank(
+                     f"Loaded sharded model checkpoint from {local_path}",
+                     rank=self.rank,
+                 )

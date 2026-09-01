@@ -1,0 +1,145 @@
+diff --git a/megatron/bridge/models/conversion/model_bridge.py b/megatron/bridge/models/conversion/model_bridge.py
+--- a/megatron/bridge/models/conversion/model_bridge.py
++++ b/megatron/bridge/models/conversion/model_bridge.py
+@@ -49,6 +49,10 @@ from megatron.bridge.models.conversion.param_mapping import (
+     MegatronParamMapping,
+ )
+-from megatron.bridge.models.conversion.peft_bridge import AdapterWeightConversionTask, MegatronPeftBridge
++from megatron.bridge.models.conversion.peft_bridge import (
++    AdapterWeight,
++    AdapterWeightConversionTask,
++    MegatronPeftBridge,
++)
+ from megatron.bridge.models.conversion.transformers_compat import (
+     rope_theta_from_hf,
+ )
+@@ -1045,6 +1049,7 @@ class MegatronModelBridge(
+         adapter_tasks_by_base: Dict[str, List[AdapterWeightConversionTask]] = {}
+         if merge_adapter_weights:
+             adapter_tasks_by_base = self.build_adapter_conversion_tasks(megatron_model)
++        materialized_adapter_weights_cache: Dict[str, List[AdapterWeight]] = {}
+
+         megatron_to_hf_tasks = conversion_tasks
+         unwrapped_model = unwrap_model(megatron_model)[0]
+@@ -1069,9 +1074,25 @@ class MegatronModelBridge(
+                 megatron_module = None
+
+             converted_weights_dict = task.mapping.megatron_to_hf(megatron_weights, megatron_module)
++            adapter_tasks = None
++            task_global_base_prefix = None
++            if merge_adapter_weights and "to_wrap.weight" in task.global_param_name:
++                task_global_base_prefix, _, _ = task.global_param_name.partition(".to_wrap.weight")
++                adapter_tasks = adapter_tasks_by_base.get(task_global_base_prefix)
+
+             # --- Grouped export path: accumulate per-expert weights, yield when complete ---
+             if getattr(task.mapping, "is_grouped_export", False):
++                if merge_adapter_weights and adapter_tasks:
++                    adapter_weights = materialized_adapter_weights_cache.get(task_global_base_prefix)
++                    if adapter_weights is None:
++                        adapter_weights = self.materialize_adapter_weights(adapter_tasks)
++                        materialized_adapter_weights_cache[task_global_base_prefix] = adapter_weights
++                    converted_weights_dict = self._merge_grouped_export_adapter_weights(
++                        task,
++                        converted_weights_dict,
++                        adapter_weights,
++                        model_config.num_moe_experts,
++                    )
+                 merged_result = self._accumulate_grouped_export(
+                     task, converted_weights_dict, model_config, _grouped_buffers, hf_state_dict
+                 )
+@@ -1088,12 +1109,11 @@ class MegatronModelBridge(
+             )  # dict will be none except for one expert;
+             # All ranks get the full tensor
+
+-            adapter_tasks = None
+-            if merge_adapter_weights and "to_wrap.weight" in task.global_param_name:
+-                task_global_base_prefix, _, _ = task.global_param_name.partition(".to_wrap.weight")
+-                adapter_tasks = adapter_tasks_by_base.get(task_global_base_prefix)
+             if merge_adapter_weights and adapter_tasks:
+-                adapter_weights = self.materialize_adapter_weights(adapter_tasks)
++                adapter_weights = materialized_adapter_weights_cache.get(task_global_base_prefix)
++                if adapter_weights is None:
++                    adapter_weights = self.materialize_adapter_weights(adapter_tasks)
++                    materialized_adapter_weights_cache[task_global_base_prefix] = adapter_weights
+                 # Merge LoRA adapter weights back into the base tensor for HF export
+                 converted_weights_dict = self._merge_lora_adapter_weights(
+                     megatron_model,
+diff --git a/megatron/bridge/models/conversion/peft_bridge.py b/megatron/bridge/models/conversion/peft_bridge.py
+--- a/megatron/bridge/models/conversion/peft_bridge.py
++++ b/megatron/bridge/models/conversion/peft_bridge.py
+@@ -1065,6 +1065,75 @@ class MegatronPeftBridge:
+
+         return converted_weights_dict
+
++    def _merge_grouped_export_adapter_weights(
++        self,
++        task: "WeightConversionTask",
++        converted_weights_dict: Dict[str, torch.Tensor],
++        adapter_weights: List[AdapterWeight],
++        num_moe_experts: int,
++    ) -> Dict[str, torch.Tensor]:
++        """Merge LoRA weights into one grouped-expert export shard.
++
++        Grouped expert mappings bypass the standard export path. Merge the
++        current expert's adapter slice before the grouped exporter stacks all
++        experts back into the Hugging Face checkpoint tensor.
++        """
++
++        if not converted_weights_dict or not adapter_weights:
++            return converted_weights_dict
++
++        if len(adapter_weights) != 1 or adapter_weights[0].adapter_key is not None:
++            adapter_keys = [
++                adapter_weight.adapter_key for adapter_weight in adapter_weights
++            ]
++            raise ValueError(
++                "Unsupported adapter configuration for grouped export weight merging "
++                f"for parameter '{task.global_param_name}': expected exactly one "
++                "non-canonical adapter with adapter_key=None, but got "
++                f"{len(adapter_weights)} adapter(s) with adapter keys {adapter_keys}."
++            )
++
++        from megatron.bridge.utils.common_utils import (
++            extract_expert_number_from_param,
++        )
++
++        expert_idx = extract_expert_number_from_param(task.global_param_name)
++
++        adapter_weight = adapter_weights[0]
++        linear_in_weight = adapter_weight.linear_in_weight.weight
++        linear_out_weight = adapter_weight.linear_out_weight.weight
++
++        expert_linear_in_gathered = self._gather_expert_adapter_weight(
++            linear_in_weight
++        )
++        expert_linear_out_gathered = self._gather_expert_adapter_weight(
++            linear_out_weight
++        )
++
++        current_linear_in_weight = self._select_expert_adapter_weight(
++            linear_in_weight,
++            expert_linear_in_gathered,
++            expert_idx,
++            num_moe_experts,
++        )
++        current_linear_out_weight = self._select_expert_adapter_weight(
++            linear_out_weight,
++            expert_linear_out_gathered,
++            expert_idx,
++            num_moe_experts,
++        )
++
++        for hf_name, base_weight in list(converted_weights_dict.items()):
++            converted_weights_dict[hf_name] = self._merge_single_adapter_weight(
++                base_weight,
++                adapter_weight.alpha,
++                adapter_weight.dim,
++                current_linear_in_weight,
++                current_linear_out_weight,
++            )
++
++        return converted_weights_dict
++
+     def _merge_single_adapter_weight(
+         self,
+         base_weight: torch.Tensor,

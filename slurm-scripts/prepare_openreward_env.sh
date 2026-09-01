@@ -195,6 +195,8 @@ resolve_environment() {
     plugins/openreward/platoon
     slurm-scripts/install_te.sh
     slurm-scripts/install_apex.sh
+    slurm-scripts/patches/areal-d991-megatron-merged-lora.patch
+    slurm-scripts/patches/megatron-bridge-0.4.0-grouped-lora-merge.patch
     slurm-scripts/prepare_openreward_env.sh
   )
   (
@@ -354,6 +356,47 @@ build_environment() {
   "${uv_bin}" venv --relocatable --python 3.12 "${stage_env}"
   cd "${source_root}/plugins/openreward"
   "${uv_bin}" sync --locked --extra areal --no-editable --compile-bytecode
+
+  # AReaL d991 has an experimental Megatron LoRA path, but it injects adapters
+  # after DDP (so DP replicas never reduce adapter gradients), disables
+  # distributed-optimizer recovery, and exposes adapters directly to the
+  # rollout runtime. This backport injects adapters before DDP and explicitly
+  # merges them into the ordinary full-model XCCL stream instead. The rollout
+  # server therefore stays on its proven non-LoRA Qwen3.6 kernels.
+  local areal_direct_url megatron_bridge_version
+  areal_direct_url=$("${stage_env}/bin/python" -I -c \
+    'from importlib.metadata import distribution; print(distribution("areal").read_text("direct_url.json") or "")')
+  [[ "${areal_direct_url}" == *"d99124ec15102ca2fcd4960cc8beaef3950c2672"* ]] || \
+    die "the merged-LoRA patch requires AReaL d99124ec15102ca2fcd4960cc8beaef3950c2672"
+  megatron_bridge_version=$("${stage_env}/bin/python" -I -c \
+    'from importlib.metadata import version; print(version("megatron-bridge"))')
+  [[ "${megatron_bridge_version}" == "0.4.0" ]] || \
+    die "the grouped-expert LoRA merge patch requires Megatron Bridge 0.4.0; got ${megatron_bridge_version}"
+  command -v patch >/dev/null 2>&1 || die "the build container has no patch executable"
+  patch \
+    --batch \
+    --forward \
+    --strip=1 \
+    --directory="${stage_env}/lib/python3.12/site-packages" \
+    <"${source_root}/slurm-scripts/patches/areal-d991-megatron-merged-lora.patch"
+  patch \
+    --batch \
+    --forward \
+    --strip=1 \
+    --directory="${stage_env}/lib/python3.12/site-packages" \
+    <"${source_root}/slurm-scripts/patches/megatron-bridge-0.4.0-grouped-lora-merge.patch"
+  "${stage_env}/bin/python" -m compileall -q \
+    "${stage_env}/lib/python3.12/site-packages/areal" \
+    "${stage_env}/lib/python3.12/site-packages/megatron/bridge/models/conversion"
+  "${stage_env}/bin/python" -I -c \
+    'from areal.api.cli_args import MegatronEngineConfig; c = MegatronEngineConfig(); assert c.merge_lora_for_update_weights is False'
+  # Parse the patched source without importing Megatron Bridge here. Its LoRA
+  # modules import Transformer Engine eagerly, while TE is installed below.
+  # The full dependency smoke test after TE/APEX installation exercises the
+  # real import path.
+  "${stage_env}/bin/python" -I -c \
+    'import ast, pathlib, sys; tree = ast.parse(pathlib.Path(sys.argv[1]).read_text()); assert any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_merge_grouped_export_adapter_weights" for n in ast.walk(tree))' \
+    "${stage_env}/lib/python3.12/site-packages/megatron/bridge/models/conversion/peft_bridge.py"
 
   echo "[openreward-env] installing pinned CUDA runtime wheels at $(date -Is)"
   "${uv_bin}" pip install --python "${stage_env}/bin/python" \

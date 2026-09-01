@@ -1,0 +1,77 @@
+defaults:
+  - toolathlon_openhands_areal_prealloc_32node-cp-ptc-recursive-behavior-gated-r3-fp32-lm-head-bs8
+  - _self_
+
+# Fresh, non-radix LoRA lineage derived from the behavior-gated BS8 workload.
+trial_name: ta32-rec-behavior-gated-lora-all-layers-r32-v1-trial0
+
+openreward: {}
+
+gconfig:
+  lora_name: ta32-rec-bg-lora-all-layers-r32
+
+rollout:
+  # SGLang serves ordinary merged full weights. This preserves the proven
+  # Qwen3.6 kernels and R3 side channel; no runtime LoRA support is required.
+  backend: sglang:d12p1t8
+  use_lora: false
+  dump_to_file: false
+  return_routed_experts: true
+
+actor:
+  # Preserve the working 160-GPU hybrid Megatron topology. LoRA is injected
+  # before DDP so its gradients are reduced across the ten DP replicas.
+  backend: "megatron:(attn:d10p2t4c2|ffn:d10p2t1e8)"
+  path: apurvaga/Qwen3.6-35B-A3B-preserve-thinking
+  use_lora: true
+  peft_type: lora
+  lora_rank: 32
+  lora_alpha: 32
+  # Cover every linear path in all forty language blocks: full attention, GDN,
+  # routed/shared MoE projections, and routing gates. Fully-qualified language
+  # patterns exclude the vision tower and the disabled MTP head. Norms,
+  # embeddings/lm-head, GDN recurrent state/conv parameters, and the scalar
+  # shared-expert gate are not linear LoRA targets.
+  target_modules:
+    - language_model.decoder.layers.*.self_attention.linear_qkv
+    - language_model.decoder.layers.*.self_attention.linear_proj
+    - language_model.decoder.layers.*.self_attention.in_proj
+    - language_model.decoder.layers.*.self_attention.out_proj
+    - language_model.decoder.layers.*.mlp.experts.linear_fc1
+    - language_model.decoder.layers.*.mlp.experts.linear_fc2
+    - language_model.decoder.layers.*.mlp.shared_experts.linear_fc1
+    - language_model.decoder.layers.*.mlp.shared_experts.linear_fc2
+    - language_model.decoder.layers.*.mlp.router
+  weight_update_mode: xccl
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  router_replay_num_experts: 256
+  megatron:
+    bridge_type: megatron-bridge
+    use_bridge_for_update_weights: true
+    merge_lora_for_update_weights: true
+    enable_mtp: false
+    ddp:
+      use_distributed_optimizer: true
+
+ref:
+  backend: ${actor.backend}
+  use_lora: false
+
+sglang:
+  disable_radix_cache: true
+  enable_lora: false
+
+# Save model/adapters, optimizer, dataloader, and rollout state after every
+# completed update so four-hour successors recover the fresh LoRA lineage.
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+stats_logger:
+  wandb:
+    project: toolathlon-openhands
+    group: ta32-rec-behavior-gated-lora-all-layers-r32-v1
