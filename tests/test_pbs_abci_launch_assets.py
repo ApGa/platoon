@@ -216,6 +216,7 @@ class ABCILaunchAssetTests(unittest.TestCase):
         self.assertIn("#PBS -l walltime=00:15:00", smoke)
         self.assertIn('${PBSDSH}" -n 0 -- /usr/bin/env', smoke)
         self.assertIn('"PLATOON_ABCI_ENV_FILE=${ABCI_ENV}"', smoke)
+        self.assertIn('"OPENREWARD_REWARD_MODE=partial"', smoke)
         self.assertIn('"PLATOON_NODE_SERVICES_CLEANUP_RECEIPT=${SERVICE_RECEIPT}"', smoke)
         self.assertIn('"PLATOON_NODE_SERVICES_EXPECTED_HOST=${HOST}"', smoke)
         self.assertIn('"PLATOON_NODE_SERVICES_EXPECTED_JOB_ID=${PBS_JOBID}"', smoke)

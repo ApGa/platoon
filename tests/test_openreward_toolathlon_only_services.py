@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -605,6 +606,29 @@ def test_partial_reward_mode_reaches_toolathlon_before_cleanenv_service_start() 
         r'^.*PLATOON_AREAL_PBS_FORWARD_ENV="[^"]+"$', common, flags=re.MULTILINE
     ):
         assert "OPENREWARD_REWARD_MODE" in forward_line
+
+
+@pytest.mark.parametrize(("mode", "expected_status"), (("partial", 0), ("binary", 2), ("", 2)))
+def test_toolathlon_service_rejects_nonpartial_reward_mode(
+    mode: str, expected_status: int
+) -> None:
+    services = NODE_SERVICES.read_text(encoding="utf-8")
+    start = services.index('[[ "${REWARD_MODE}" == partial ]]')
+    end = services.index('\n[[ -x "${TOOLATHLON_ENTRYPOINT}" ]]', start)
+    validation = services[start:end]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'die() {{ printf "%s\\n" "$*" >&2; exit 2; }}\n{validation}',
+            "reward-mode-test",
+        ],
+        env={"PATH": os.environ["PATH"], "REWARD_MODE": mode},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected_status, result.stderr
 
 
 def _snapshot_validator() -> str:

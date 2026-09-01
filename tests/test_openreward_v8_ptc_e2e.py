@@ -72,6 +72,7 @@ def test_v8_ptc_wrapper_runs_exact_production_service_and_cleans_it_before_pass(
     assert "PLATOON_STAGE_TOOLATHLON_SIF=1" in source
     assert "PLATOON_STAGE_TRAINING_SIF=0" in source
     assert '"PLATOON_ABCI_ENV_FILE=${ABCI_ENV}"' in source
+    assert '"OPENREWARD_REWARD_MODE=partial"' in source
     assert '"${NODE_SERVICES}"' in source
 
 

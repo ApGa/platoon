@@ -30,6 +30,7 @@ def test_all_mcp_wrapper_uses_one_node_exact_future_release_and_no_submission() 
         'source "${ABCI_ENV}"'
     )
     assert '"OPENREWARD_MODEL_FAMILY=${OPENREWARD_MODEL_FAMILY}"' in source
+    assert '"OPENREWARD_REWARD_MODE=partial"' in source
     assert "verify_openreward_v9_release.py" in source
     assert '"${RELEASE_VERIFY}" --release-root "${REPO_ROOT}"' in source
     assert "qsub" not in source.lower()
