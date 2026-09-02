@@ -102,6 +102,13 @@ export OPENREWARD_CONTROLLER_MEM=${OPENREWARD_CONTROLLER_MEM:-256G}
 export PLATOON_AREAL_PREALLOC_SRUN_ARGS=${PLATOON_AREAL_PREALLOC_SRUN_ARGS:-"--unbuffered --mpi=pmi2 -K --overlap --cpu-bind=none"}
 export NCCL_RAS_ENABLE=${NCCL_RAS_ENABLE:-0}
 
+# All-layer LoRA still imports Megatron Bridge's Transformer Engine bindings.
+# Make that dependency invariant explicit in this wrapper instead of relying
+# solely on best-effort backend detection in the generic launcher.  Both
+# installers reuse ABI-matched wheels from the shared cache.
+export OPENREWARD_BUILD_TE=1
+export OPENREWARD_BUILD_APEX=1
+
 # Preserve the non-radix behavior-gated deadline and successor policy.
 export OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS=${OPENREWARD_DEADLINE_INITIAL_STEP_SECONDS:-1800}
 export OPENREWARD_DEADLINE_SAFETY_SECONDS=0

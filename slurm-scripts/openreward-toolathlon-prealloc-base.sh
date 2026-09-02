@@ -408,13 +408,18 @@ RESUBMITTED=0
 # disables that fusion for LoRA). APEX, like TE, isn't in the uv lock and must be
 # source-built (--cpp_ext --cuda_ext) where nvcc exists, then cached on /lustre and
 # installed after `uv sync`. install_apex.sh handles the build-once + cache.
-if grep -qiE '^[[:space:]]*backend:[[:space:]]*megatron' "${CONFIG}" 2>/dev/null; then
+# Hydra backend strings commonly include topology suffixes and may be quoted in
+# YAML (for example, `backend: "megatron:(...)"`).  Accept the optional opening
+# quote so a fresh immutable environment cannot silently omit Megatron's binary
+# dependencies.  Individual wrappers may still set either flag explicitly.
+if grep -qiE "^[[:space:]]*backend:[[:space:]]*['\"]?megatron" "${CONFIG}" 2>/dev/null; then
   OPENREWARD_BUILD_TE=${OPENREWARD_BUILD_TE:-1}
   OPENREWARD_BUILD_APEX=${OPENREWARD_BUILD_APEX:-1}
 else
   OPENREWARD_BUILD_TE=${OPENREWARD_BUILD_TE:-0}
   OPENREWARD_BUILD_APEX=${OPENREWARD_BUILD_APEX:-0}
 fi
+export OPENREWARD_BUILD_TE OPENREWARD_BUILD_APEX
 
 # Snapshot local package sources and resolve the immutable environment before
 # any worker command is assembled. This is cheap (the local packages are only a
