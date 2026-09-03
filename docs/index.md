@@ -11,9 +11,7 @@ hide:
 ![Platoon](assets/platoon-lockup.png){ .pl-hero__logo .pl-only-light }
 ![Platoon](assets/platoon-lockup-dark.png){ .pl-hero__logo .pl-only-dark }
 
-# Platoon
-
-<p class="pl-hero__tagline">Reinforcement learning for multi-agent workflows.</p>
+# Reinforcement learning for multi-agent workflows
 
 <p class="pl-hero__sub">
 Write an environment, an agent and a rollout function. Let agents delegate work to other agents.

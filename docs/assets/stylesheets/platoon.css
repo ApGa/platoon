@@ -274,14 +274,23 @@
 }
 
 .md-typeset .pl-hero h1 {
-  font-size: 1.9rem;
+  font-size: 1.62rem;
   font-weight: 720;
-  letter-spacing: -.028em;
-  margin: .1rem 0 .35rem;
+  letter-spacing: -.022em;
+  line-height: 1.18;
+  max-width: 22ch;
+  margin: .35rem auto .55rem;
+  text-wrap: balance;
   background: var(--pl-gradient);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+}
+
+/* The lockup already renders the wordmark, so the hero heading carries the tagline instead of
+   repeating the name. It is decorative framing, not a section anchor -- no permalink. */
+.md-typeset .pl-hero h1 .headerlink {
+  display: none;
 }
 
 .pl-hero__tagline {
