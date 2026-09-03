@@ -12,6 +12,9 @@ from areal.utils import stats_tracker
 
 from platoon.registry import get_registry
 
+_LOGPROBS_ONLY_TRAINING_ATTR = "__platoon_supports_logprobs_only_training__"
+
+
 @dataclass(frozen=True)
 class LossFnSpec:
     """Registered loss function plus loss-specific default kwargs."""
@@ -19,6 +22,7 @@ class LossFnSpec:
     fn: Callable
     defaults: dict[str, Any] = field(default_factory=dict)
     signature_fn: Callable | None = None
+    supports_logprobs_only_training: bool = False
 
 
 _LOSS_FN_REGISTRY = get_registry("loss")
@@ -28,13 +32,19 @@ def register_loss_fn(
     name: str,
     defaults: dict[str, Any] | None = None,
     signature_fn: Callable | None = None,
+    supports_logprobs_only_training: bool = False,
 ):
     """Decorator to register a loss function by name."""
 
     def decorator(fn: Callable) -> Callable:
         _LOSS_FN_REGISTRY.register(
             name,
-            LossFnSpec(fn=fn, defaults=dict(defaults or {}), signature_fn=signature_fn),
+            LossFnSpec(
+                fn=fn,
+                defaults=dict(defaults or {}),
+                signature_fn=signature_fn,
+                supports_logprobs_only_training=supports_logprobs_only_training,
+            ),
             exist_ok=True,
         )
         return fn
@@ -82,7 +92,15 @@ def build_loss_fn(
     signature_fn = spec.signature_fn or fn
     filtered_common_kwargs = _filter_compatible_kwargs(signature_fn, common_kwargs or {})
     filtered_kwargs = _filter_compatible_kwargs(signature_fn, {**loss_specific_kwargs, **filtered_common_kwargs})
-    return functools.partial(fn, **filtered_kwargs)
+    bound = functools.partial(fn, **filtered_kwargs)
+    setattr(bound, _LOGPROBS_ONLY_TRAINING_ATTR, spec.supports_logprobs_only_training)
+    return bound
+
+
+def supports_logprobs_only_training(loss_fn: Callable) -> bool:
+    """Return whether a bound loss can safely omit entropy and vocab diagnostics."""
+
+    return bool(getattr(loss_fn, _LOGPROBS_ONLY_TRAINING_ATTR, False))
 
 
 def _compute_sequence_level_ratio_and_advantages(
@@ -143,10 +161,11 @@ def _compute_sequence_level_ratio_and_advantages(
         "clip_low_threshold": 0.0,
         "clip_high_threshold": 5.0,
     },
+    supports_logprobs_only_training=True,
 )
 def cispo_loss_fn(
     logprobs: torch.Tensor,
-    entropy: torch.Tensor,
+    entropy: torch.Tensor | None,
     input_data: dict,
     clip_low_threshold: float = 0.0,
     clip_high_threshold: float = 5.0,
@@ -182,7 +201,8 @@ def cispo_loss_fn(
     Returns:
         Scalar loss tensor
     """
-    entropy = entropy.detach()
+    if entropy is not None:
+        entropy = entropy.detach()
 
     old_logprobs = input_data["logprobs"]
     advantages = input_data["advantages"].detach()
@@ -227,16 +247,17 @@ def cispo_loss_fn(
         dual_clipped_tokens=torch.zeros_like(clip_mask),
     )
 
-    stats_tracker.stat(
+    loss_stats = dict(
         importance_weight=ratio.detach().float(),
         clamped_importance_weight=cispo_coefficient.float(),
         approx_kl=log_ratio.detach().float(),
         new_logp=logprobs.detach().float(),
         old_logp=old_logprobs.float(),
-        entropy=entropy.float(),
         actor_loss=logging_loss.float(),
-        denominator="n_valid_tokens",
     )
+    if entropy is not None:
+        loss_stats["entropy"] = entropy.float()
+    stats_tracker.stat(**loss_stats, denominator="n_valid_tokens")
 
     return pg_loss
 

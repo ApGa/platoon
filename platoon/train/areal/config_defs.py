@@ -177,6 +177,17 @@ class PlatoonPPOActorConfig(PPOActorConfig):
 
     loss_fn: str = "grpo"
     loss_fn_kwargs: dict[str, Any] = field(default_factory=dict)
+    # Megatron-only fast path for Platoon's CISPO implementation. Entropy is
+    # metric-only for this loss and the vocab diagnostics are unused, so the
+    # actor computes selected-token log-probabilities only. The entropy metric
+    # is intentionally absent while enabled.
+    enable_cispo_logprobs_only: bool = False
+    # True pre-logits optimization: temporarily bypass the Megatron LM-head
+    # projection during CISPO training, then project/recompute bounded token
+    # chunks in a custom autograd function. Unlike Megatron's post-logits
+    # cross-entropy fusion, this never materializes [tokens, vocab/TP].
+    enable_cispo_fused_linear_logprobs: bool = False
+    cispo_fused_linear_chunk_size: int = 512
     enable_router_replay: bool = False
     router_replay_num_layers: int | None = None
     router_replay_topk: int | None = None
@@ -300,6 +311,23 @@ class PlatoonArealRLTrainerConfig(GRPOConfig):
         merged_loss_fn_kwargs = dict(getattr(self.actor, "loss_fn_kwargs", {}))
         merged_loss_fn_kwargs.update(self.loss_fn_config.loss_fn_kwargs)
         self.actor.loss_fn_kwargs = merged_loss_fn_kwargs
+
+        vocab_optimized_cispo = self.actor.enable_cispo_logprobs_only or self.actor.enable_cispo_fused_linear_logprobs
+        if vocab_optimized_cispo:
+            actor_backend = self.actor.backend.split(":", 1)[0]
+            if actor_backend != "megatron":
+                raise ValueError("CISPO vocab optimizations require the Megatron actor backend")
+            if self.actor.loss_fn != "cispo":
+                raise ValueError("CISPO vocab optimizations require loss_fn_config.loss_fn=cispo")
+            if getattr(self.actor, "enable_tree_training", False):
+                raise ValueError("CISPO vocab optimizations do not support tree training")
+        if self.actor.enable_cispo_logprobs_only and self.actor.enable_cispo_fused_linear_logprobs:
+            raise ValueError(
+                "enable_cispo_logprobs_only and enable_cispo_fused_linear_logprobs "
+                "are distinct alternatives and cannot both be enabled"
+            )
+        if self.actor.cispo_fused_linear_chunk_size <= 0:
+            raise ValueError("actor.cispo_fused_linear_chunk_size must be positive")
 
         # Keep one public R3 gate on the actor while giving remote workflows
         # the dimensions required to reshape SGLang's flattened routing data.

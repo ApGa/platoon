@@ -35,6 +35,7 @@ from platoon.train.areal.batch_transforms import (
 )
 from platoon.train.areal.config_defs import PlatoonArealRLTrainerConfig, PlatoonPPOActorConfig
 from platoon.train.areal.deadline import StepDeadlineGuard
+from platoon.train.areal.inter_update_timing import InterAppliedUpdateWallClock
 from platoon.train.areal.preallocated_pbs import PreallocatedPBSScheduler
 from platoon.train.areal.preallocated_slurm import PreallocatedSlurmScheduler
 from platoon.train.areal.workflow_serialization import normalize_remote_workflow
@@ -1555,6 +1556,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
             raise ValueError(f"Total epochs must be positive: {total_epochs}")
         steps_per_epoch = len(self.train_dataloader)
         max_steps = total_epochs * steps_per_epoch
+        inter_update_clock = InterAppliedUpdateWallClock()
 
         if workflow is None:
             agent_cfg = self.config.rollout.agent
@@ -1606,6 +1608,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
             step = global_step % steps_per_epoch
             actor_update_successful = False
             weight_sync_succeeded = False
+            applied_update_completed_at = None
             optimizer_batch_datums = 0
             optimizer_action_tokens = 0
 
@@ -1856,6 +1859,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
                             self.actor.update_weights(versioned_meta)
                             self._advance_logical_versions(new_version)
                             weight_sync_succeeded = True
+                        applied_update_completed_at = time.monotonic()
                         # The bucketed broadcast leaves gathered full-parameter buckets
                         # in the cache; drop them before DCP save's NCCL collectives.
                         self._maybe_clear_device_cache(self.actor)
@@ -1895,6 +1899,10 @@ class PlatoonArealRLTrainer(PPOTrainer):
                 else:
                     stats_tracker.scalar(**empty_training_workload_metrics)
                 self._advance_logical_versions(global_step + 1)
+
+            stats_tracker.scalar(
+                **inter_update_clock.metrics_for_step(applied_update_completed_at)
+            )
 
             _require_preupdate_checkpoint_promotion(
                 active=preupdate_no_load_optim_resume,

@@ -24,8 +24,17 @@ from areal.utils.data import batched_call, split_padded_tensor_dict_into_mb_list
 from areal.utils.perf_tracer import trace_perf  # noqa: E402
 
 from platoon.train.areal.actor_controller import PlatoonPPOActorController  # noqa: E402
+from platoon.train.areal.cispo_vocab_optimization import (  # noqa: E402
+    compute_fused_linear_megatron_cispo_loss,
+    compute_logprobs_only_megatron_loss,
+)
 from platoon.train.areal.config_defs import PlatoonPPOActorConfig  # noqa: E402
 from platoon.train.areal.fp32_lm_head import install_fp32_lm_head_output_hooks  # noqa: E402
+from platoon.train.areal.fused_linear_logprobs import (  # noqa: E402
+    activate_fused_linear_logprobs_head,
+    fused_linear_logprobs_head_is_active,
+    install_fused_linear_logprobs_head,
+)
 from platoon.train.areal.loss_functions import build_loss_fn  # noqa: E402
 from platoon.train.areal.numerical_stability import (  # noqa: E402
     install_nonfinite_gradient_guard,
@@ -277,6 +286,47 @@ def _get_platoon_megatron_actor_cls() -> type:
             super().__init__(config)
             self.actor = PlatoonActorImpl(config, self)
 
+        def _compute_logprobs_and_loss(
+            self,
+            output: torch.Tensor,
+            inputs: dict[str, Any],
+            loss_fn: Callable[..., torch.Tensor],
+            loss_weight_fn: Callable[[dict[str, Any]], torch.Tensor],
+            total_loss_weight: torch.Tensor,
+            loss_multiplier: float = 1.0,
+        ) -> torch.Tensor:
+            fused_head_state = getattr(self, "_platoon_fused_linear_logprobs_head", None)
+            if fused_linear_logprobs_head_is_active(fused_head_state):
+                return compute_fused_linear_megatron_cispo_loss(
+                    self,
+                    output,
+                    inputs,
+                    loss_fn,
+                    loss_weight_fn,
+                    total_loss_weight,
+                    fused_head_state,
+                    loss_multiplier,
+                    chunk_size=self.config.cispo_fused_linear_chunk_size,
+                )
+            if self.config.enable_cispo_logprobs_only:
+                return compute_logprobs_only_megatron_loss(
+                    self,
+                    output,
+                    inputs,
+                    loss_fn,
+                    loss_weight_fn,
+                    total_loss_weight,
+                    loss_multiplier,
+                )
+            return super()._compute_logprobs_and_loss(
+                output,
+                inputs,
+                loss_fn,
+                loss_weight_fn,
+                total_loss_weight,
+                loss_multiplier,
+            )
+
         def initialize(self, *args: Any, **kwargs: Any) -> Any:
             # ``create_process_group`` has already stored the parsed strategy on
             # the engine.  Resolve the actual model architecture and install
@@ -290,7 +340,11 @@ def _get_platoon_megatron_actor_cls() -> type:
                 result = super().initialize(*args, **kwargs)
             configure_router_replay_engine(self)
             install_nonfinite_gradient_guard(self.optimizer, logger=logger)
-            enabled = bool(self.config.megatron.enable_fp32_lm_head)
+            fused_linear_enabled = bool(self.config.enable_cispo_fused_linear_logprobs)
+            self._platoon_fused_linear_logprobs_head = (
+                install_fused_linear_logprobs_head(self.model) if fused_linear_enabled else None
+            )
+            enabled = bool(self.config.megatron.enable_fp32_lm_head) and not fused_linear_enabled
             hook_count = install_fp32_lm_head_output_hooks(
                 self.model,
                 enabled=enabled,
@@ -301,6 +355,21 @@ def _get_platoon_megatron_actor_cls() -> type:
                     "FP32 LM-head output enabled; installed %d hook(s) on this pipeline rank",
                     hook_count,
                 )
+            if fused_linear_enabled:
+                logger.info(
+                    "Fused-linear CISPO enabled on this pipeline rank: head=%s, token_chunk_size=%d; "
+                    "FP32 softmax is retained without materializing full-sequence logits",
+                    self._platoon_fused_linear_logprobs_head is not None,
+                    self.config.cispo_fused_linear_chunk_size,
+                )
+                fused_head = self._platoon_fused_linear_logprobs_head
+                if fused_head is not None and bool(
+                    getattr(fused_head.output_layer, "gradient_accumulation_fusion", False)
+                ):
+                    logger.warning(
+                        "Fused-linear CISPO bypasses ColumnParallelLinear's CUDA wgrad-accumulation "
+                        "kernel; dWeight remains correct via the standard DDP parameter hook but may be slower"
+                    )
             return result
 
         def forward_backward_batch(
@@ -310,14 +379,23 @@ def _get_platoon_megatron_actor_cls() -> type:
             forward_only: bool = False,
             gather_cp_output: bool = False,
         ):
-            return run_router_replay_forward_backward(
-                self,
-                super().forward_backward_batch,
-                mb_list,
-                process_output_fn,
-                forward_only=forward_only,
-                gather_cp_output=gather_cp_output,
-            )
+            def _run():
+                return run_router_replay_forward_backward(
+                    self,
+                    super(PlatoonMegatronPPOActor, self).forward_backward_batch,
+                    mb_list,
+                    process_output_fn,
+                    forward_only=forward_only,
+                    gather_cp_output=gather_cp_output,
+                )
+
+            # compute_logp/forward_batch must continue returning ordinary
+            # vocabulary logits. Only the backward-bearing actor train path
+            # substitutes hidden states at the LM-head boundary.
+            if self.config.enable_cispo_fused_linear_logprobs and not forward_only:
+                with activate_fused_linear_logprobs_head(self._platoon_fused_linear_logprobs_head):
+                    return _run()
+            return _run()
 
         def clear_device_cache(self) -> None:
             """Release cached allocator blocks on this worker's GPU.
