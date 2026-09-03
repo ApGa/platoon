@@ -65,6 +65,7 @@ QWEN38_16_V25_BINDING_ID = "qwen38-16-v25-gs12"
 QWEN36_32_V22_BINDING_ID = "qwen36-32-v22-depth2"
 QWEN36_32_V31_BEHAVIOR_BINDING_ID = "qwen36-32-v31-behavior-gs13"
 QWEN36_32_V32_ROOTPROP_BINDING_ID = "qwen36-32-v32-rootprop-gs13"
+QWEN36_15_V36_BEHAVIOR_BINDING_ID = "qwen36-15-v36-cp2-behavior-gs14"
 
 V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
     QWEN38_32_V22_BINDING_ID: {
@@ -434,6 +435,77 @@ V22_SUCCESSOR_BINDINGS: dict[str, dict[str, Any]] = {
         "samples_yielded": 160,
         "iterator_yielded": 20,
     },
+    QWEN36_15_V36_BEHAVIOR_BINDING_ID: {
+        "experiment": "abci-or-ta15-q36-cp2-behavior-usage-partial-v35",
+        "trial": "abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0",
+        "checkpoint_root": Path(
+            "/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/"
+            "aci18912it/abci-or-ta15-q36-cp2-behavior-usage-partial-v35/"
+            "abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0"
+        ),
+        "source_job": "2218557.pbs1",
+        "source_release_root": Path(
+            "/home/aci18912it/rasp/releases/platoon-v8r35-07bebf9-057108f"
+        ),
+        "source_release_ref": "refs/tags/abci-v8r35-07bebf9-057108f",
+        "source_config": Path(
+            "plugins/openreward/platoon/openreward/configs/areal/"
+            "abci_toolathlon_openhands_areal_prealloc_15node_recursive_h200_"
+            "qwen36_moe_cp2_c24_s3_v35_behavior_usage_gated_partial.yaml"
+        ),
+        "source_config_sha256": (
+            "1bfad688b37e36ee9707ec05bf52b7eb3af6b3a26e5fd7c01537c628626e7030"
+        ),
+        "current_config_name": (
+            "abci_toolathlon_openhands_areal_prealloc_15node_recursive_h200_"
+            "qwen36_moe_cp2_c24_s3_v35_behavior_usage_gated_partial.yaml"
+        ),
+        "current_config_sha256": (
+            "1bfad688b37e36ee9707ec05bf52b7eb3af6b3a26e5fd7c01537c628626e7030"
+        ),
+        "source_candidate_name": (
+            "abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0."
+            "success.candidate.json"
+        ),
+        "source_candidate_sha256": (
+            "ca84fe7ca5012a941216ca0a30b9204efc4e98cbf4e236770225943d05c9c0ee"
+        ),
+        "source_candidate_global_step": 0,
+        "ancestor_receipts": {},
+        "source_log_name": "2218557.pbs1.OU",
+        "source_log_sha256": (
+            "365e46ef1c32f6fbfacf24adff46c2c22094bb70f11b0738f733af867536ee2f"
+        ),
+        "target_receipt_name": (
+            "abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0."
+            "resume-gs14-v8r36.success.json"
+        ),
+        "global_step": 14,
+        "start_global_step": 15,
+        "steps_per_epoch": 62,
+        "shards": 32,
+        "total_bytes": 491703860304,
+        "checkpoint_layout_sha256": (
+            "5505f9ac2b79182f77129c58a462f1b83ec820cb0f831121f1788a41466fb6dd"
+        ),
+        "checkpoint_sample_manifest_sha256": (
+            "ac4ad5332ca02e7ccea186b661819dcdf564f828209e77c7478dbf0ef938a4e4"
+        ),
+        "fixed_content_sha256": (
+            "72dde11f099ec11ae1d04d0d823ddfc1540a6079571d25129abd13bd93388e57"
+        ),
+        "recover_info_content_sha256": (
+            "de3b8843674b39d50c7b9df733672c278240a746f1e39cab61e6f3aa6dc5e48c"
+        ),
+        "stats_commit_step": 13,
+        "state_keys": 21671,
+        "storage_entries": 116818,
+        "optimizer_moment_keys": 18,
+        "optimizer_layout": "two_group",
+        "lr_num_steps": 15,
+        "samples_yielded": 208,
+        "iterator_yielded": 26,
+    },
 }
 
 
@@ -732,7 +804,29 @@ def _verify_source_release(
         label="source release manifest",
     )
     config_name = source_config_relative.name
-    if config_name.endswith("qwen36_moe_cp2_c12_v27_rootprop.yaml"):
+    require_legacy_release_manifest = True
+    if config_name.endswith(
+        "qwen36_moe_cp2_c24_s3_v35_behavior_usage_gated_partial.yaml"
+    ):
+        if not (
+            expected_experiment == "abci-or-ta15-q36-cp2-behavior-usage-partial-v35"
+            and expected_trial
+            == "abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0"
+        ):
+            raise RuntimeError("source Qwen3.6 v35 behavior/usage config lineage mismatch")
+        model_artifact_key = "fresh_recursive_32node_qwen36_cp2"
+        wrapper_name = (
+            "openreward-toolathlon-15node-recursive-qwen36-cp2-behavior-usage-"
+            "partial-64k-h200-v35-abci.pbs"
+        )
+        model_family = "qwen36"
+        expected_architecture = "qwen3_5_moe"
+        expected_model_shards = 26
+        # Later release overlays deliberately inherit the v32 manifest.  The
+        # exact source tag/config/wrapper and pinned v9 model overlay remain
+        # independently verified below.
+        require_legacy_release_manifest = False
+    elif config_name.endswith("qwen36_moe_cp2_c12_v27_rootprop.yaml"):
         if not (
             expected_experiment == "abci-or-ta32-q36-cp2-rootprop-v27"
             and expected_trial == "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0"
@@ -807,7 +901,7 @@ def _verify_source_release(
     else:
         raise RuntimeError("source config/experiment/trial topology lineage mismatch")
     model = manifest.get("model_artifacts", {}).get(model_artifact_key)
-    if (
+    if require_legacy_release_manifest and (
         manifest.get("release_root") != str(source_release_root)
         or manifest.get("release_ref") != source_release_ref
         or not isinstance(model, dict)

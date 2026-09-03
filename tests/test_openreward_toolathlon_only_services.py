@@ -88,6 +88,14 @@ ROOTPROP_RESUME_BINDING = (
     "abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0",
 )
 
+CP2_BEHAVIOR_RESUME_BINDING = (
+    "qwen36-15-v36-cp2-behavior-gs14",
+    "15",
+    "qwen36",
+    "abci-or-ta15-q36-cp2-behavior-usage-partial-v35",
+    "abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0",
+)
+
 
 def _marked(source: str, begin: str, end: str) -> str:
     start = source.index(begin) + len(begin)
@@ -338,6 +346,9 @@ printf 'supervisor_disabled_binding=%s\n' "${{NODE_MEMORY_GUARD_DISABLED_BINDING
 
 def _run_common_resume_guard_authorization(
     binding: str,
+    nodes: str,
+    experiment: str,
+    trial: str,
     *,
     environment_binding: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -361,11 +372,11 @@ FRESH_RUN_BINDING=
 ENVIRONMENT_SET=toolathlon_only
 ENVIRONMENT_SET_BINDING=$2
 NODE_MEMORY_GUARD_DISABLED_BINDING=
-EXPECTED_NNODES=32
+EXPECTED_NNODES=$3
 EXPECTED_RECURSIVE=1
 EXPECTED_PTC=1
-EXPECTED_EXPERIMENT=abci-or-ta32-q36-cp2-behavior-gate-v27
-EXPECTED_TRIAL=abci-ta32-rec-q36m-cp2-c12-d2-behavior-gate-v27-t0
+EXPECTED_EXPERIMENT=$4
+EXPECTED_TRIAL=$5
 {authorization}
 printf 'disabled_binding=%s\n' "${{NODE_MEMORY_GUARD_DISABLED_BINDING}}"
 """
@@ -377,6 +388,9 @@ printf 'disabled_binding=%s\n' "${{NODE_MEMORY_GUARD_DISABLED_BINDING}}"
             "common-resume-guard-authorization-test",
             binding,
             bound_environment,
+            nodes,
+            experiment,
+            trial,
         ],
         check=False,
         capture_output=True,
@@ -440,7 +454,10 @@ def test_toolathlon_only_fresh_bindings_authorize_exact_guard_disablement(
     assert mismatched_supervisor.returncode == 2
 
 
-@pytest.mark.parametrize("resume_binding", (BEHAVIOR_RESUME_BINDING, ROOTPROP_RESUME_BINDING))
+@pytest.mark.parametrize(
+    "resume_binding",
+    (BEHAVIOR_RESUME_BINDING, ROOTPROP_RESUME_BINDING, CP2_BEHAVIOR_RESUME_BINDING),
+)
 def test_toolathlon_only_resume_authorizes_exact_tuple_and_guard(resume_binding) -> None:
     binding, nodes, model_family, experiment, trial = resume_binding
     common = _run_common_resume_authorization(
@@ -459,14 +476,20 @@ def test_toolathlon_only_resume_authorizes_exact_tuple_and_guard(resume_binding)
     )
     assert wrong_trial.returncode == 2
 
-    common_guard = _run_common_resume_guard_authorization(binding)
+    common_guard = _run_common_resume_guard_authorization(
+        binding, nodes, experiment, trial
+    )
     assert common_guard.returncode == 0, common_guard.stderr
     assert f"disabled_binding={binding}" in common_guard.stdout
     supervisor_guard = _run_supervisor_guard_authorization(binding)
     assert supervisor_guard.returncode == 0, supervisor_guard.stderr
 
     mismatched_common_guard = _run_common_resume_guard_authorization(
-        binding, environment_binding="wrong-binding"
+        binding,
+        nodes,
+        experiment,
+        trial,
+        environment_binding="wrong-binding",
     )
     assert mismatched_common_guard.returncode == 2
     mismatched_supervisor_guard = _run_supervisor_guard_authorization(

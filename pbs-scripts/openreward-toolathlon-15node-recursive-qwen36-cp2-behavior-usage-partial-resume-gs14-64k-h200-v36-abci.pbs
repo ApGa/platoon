@@ -1,0 +1,180 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=15:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-15q36-bgcp2-rs14-v36
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Exact optimizer-state resume of job 2218557 from the checkpoint written
+# after training update 15 (zero-based global step 14).  The original
+# experiment, trial, W&B lineage, partial rewards, and 15-node topology are
+# preserved.  A clean allocation also clears the terminated service-node
+# process tree that crossed PBS's per-node host-memory limit.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r36-07bebf9-057108f
+RELEASE_REF=refs/tags/abci-v8r36-07bebf9-057108f
+RESUME_VERIFY=${REPO_ROOT}/pbs-scripts/verify_openreward_resume_checkpoint.py
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_15node_recursive_h200_qwen36_moe_cp2_c24_s3_v35_behavior_usage_gated_partial.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v36-abci.env
+EXPERIMENT=abci-or-ta15-q36-cp2-behavior-usage-partial-v35
+TRIAL=abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
+SOURCE_CANDIDATE=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.candidate.json
+SOURCE_LOG=/groups/gai51740/aci18912it/rasp/logs/2218557.pbs1.OU
+SOURCE_RELEASE_ROOT=/home/aci18912it/rasp/releases/platoon-v8r35-07bebf9-057108f
+SOURCE_RELEASE_REF=refs/tags/abci-v8r35-07bebf9-057108f
+SOURCE_CONFIG_RELATIVE=plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_15node_recursive_h200_qwen36_moe_cp2_c24_s3_v35_behavior_usage_gated_partial.yaml
+SOURCE_PBS_JOB_ID=2218557.pbs1
+SUCCESSOR_BINDING=qwen36-15-v36-cp2-behavior-gs14
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.resume-gs14-v8r36.success.json
+CONFIG_SHA256=1bfad688b37e36ee9707ec05bf52b7eb3af6b3a26e5fd7c01537c628626e7030
+SOURCE_CANDIDATE_SHA256=ca84fe7ca5012a941216ca0a30b9204efc4e98cbf4e236770225943d05c9c0ee
+SOURCE_LOG_SHA256=365e46ef1c32f6fbfacf24adff46c2c22094bb70f11b0738f733af867536ee2f
+EXPECTED_GLOBAL_STEP=14
+EXPECTED_START_GLOBAL_STEP=15
+EXPECTED_TOTAL_BYTES=491703860304
+EXPECTED_CHECKPOINT_LAYOUT_SHA256=5505f9ac2b79182f77129c58a462f1b83ec820cb0f831121f1788a41466fb6dd
+EXPECTED_CHECKPOINT_SAMPLE_MANIFEST_SHA256=ac4ad5332ca02e7ccea186b661819dcdf564f828209e77c7478dbf0ef938a4e4
+EXPECTED_FIXED_CONTENT_SHA256=72dde11f099ec11ae1d04d0d823ddfc1540a6079571d25129abd13bd93388e57
+EXPECTED_RECOVER_INFO_CONTENT_SHA256=de3b8843674b39d50c7b9df733672c278240a746f1e39cab61e6f3aa6dc5e48c
+EXPECTED_DCP_STATE_KEYS=21671
+EXPECTED_DCP_STORAGE_ENTRIES=116818
+EXPECTED_OPTIMIZER_MOMENT_KEYS=18
+EXPECTED_LR_NUM_STEPS=15
+EXPECTED_SAMPLES_YIELDED=208
+EXPECTED_ITERATOR_YIELDED=26
+
+die() {
+    echo "[h200-15-q36-behavior-resume-v36] ERROR: $*" >&2
+    exit 2
+}
+
+require_component() {
+    local relative=$1
+    local expected=$2
+    local root=${REPO_ROOT}/${relative}
+    [[ -d "${root}" && ! -L "${root}" ]] || die "missing component ${relative}"
+    [[ "$(git -C "${root}" rev-parse --verify HEAD)" == "${expected}" ]] || \
+        die "component revision mismatch: ${relative}"
+    git -C "${root}" diff --quiet --no-ext-diff HEAD -- || \
+        die "component tracked tree is dirty: ${relative}"
+    git -C "${root}" diff --cached --quiet --no-ext-diff HEAD -- || \
+        die "component index is dirty: ${relative}"
+}
+
+[[ -d "${REPO_ROOT}/platoon" && -d "${REPO_ROOT}/external/AReaL" && \
+    -r "${CONFIG}" && -x "${COMMON}" && -r "${ABCI_ENV}" && \
+    -x "${RESUME_VERIFY}" ]] || die "immutable v8r36 release is incomplete: ${REPO_ROOT}"
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
+    die "release root must be the exact non-symlink path"
+read -r observed_config_sha _ < <(sha256sum -- "${CONFIG}")
+[[ "${observed_config_sha}" == "${CONFIG_SHA256}" ]] || \
+    die "behavior/usage-gated config digest mismatch"
+unset observed_config_sha
+
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || die "release HEAD is not ${RELEASE_REF}"
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || die "release tracked tree is dirty"
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || die "release index is dirty"
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
+    die "release has tracked or ordinary untracked changes"
+unset release_head release_commit
+
+require_component external/AReaL d99124ec15102ca2fcd4960cc8beaef3950c2672
+require_component external/openhands-agent-sdk 057108f1f1235940e5d04401b4c294e4777c3baf
+require_component external/swe-rebench-v2-openrewardenv 538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7
+require_component external/toolathlon-gym 18e62c0d0419da88209af911528f2f8a0b44a5ed
+
+export OPENREWARD_MODEL_FAMILY=qwen36
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || die "v36 overlay selected another repository"
+[[ "${OPENREWARD_QWEN36_MODEL_REPOSITORY:-}" == apurvaga/Qwen3.6-35B-A3B-preserve-thinking && \
+    "${OPENREWARD_QWEN36_MODEL_REVISION:-}" == ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    "${OPENREWARD_QWEN36_MODEL_SNAPSHOT:-}" == /groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    -d "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" && ! -L "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" ]] || \
+    die "pinned Qwen3.6 preserve-thinking model binding is incomplete"
+export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN36_MODEL_SNAPSHOT}
+
+"${RESUME_VERIFY}" \
+    --checkpoint-root "${CHECKPOINT_ROOT}" \
+    --expected-checkpoint-root "${CHECKPOINT_ROOT}" \
+    --expected-global-step "${EXPECTED_GLOBAL_STEP}" \
+    --expected-start-global-step "${EXPECTED_START_GLOBAL_STEP}" \
+    --expected-steps-per-epoch 62 \
+    --expected-shards 32 \
+    --expected-total-bytes "${EXPECTED_TOTAL_BYTES}" \
+    --expected-checkpoint-layout-sha256 "${EXPECTED_CHECKPOINT_LAYOUT_SHA256}" \
+    --expected-checkpoint-sample-manifest-sha256 "${EXPECTED_CHECKPOINT_SAMPLE_MANIFEST_SHA256}" \
+    --expected-fixed-content-sha256 "${EXPECTED_FIXED_CONTENT_SHA256}" \
+    --expected-recover-info-content-sha256 "${EXPECTED_RECOVER_INFO_CONTENT_SHA256}" \
+    --expected-experiment "${EXPERIMENT}" \
+    --expected-trial "${TRIAL}" \
+    --current-config "${CONFIG}" \
+    --expected-config-sha256 "${CONFIG_SHA256}" \
+    --expected-source-config-sha256 "${CONFIG_SHA256}" \
+    --source-candidate "${SOURCE_CANDIDATE}" \
+    --expected-source-candidate-sha256 "${SOURCE_CANDIDATE_SHA256}" \
+    --source-log "${SOURCE_LOG}" \
+    --expected-source-log-sha256 "${SOURCE_LOG_SHA256}" \
+    --successor-binding "${SUCCESSOR_BINDING}" \
+    --source-pbs-job-id "${SOURCE_PBS_JOB_ID}" \
+    --source-release-root "${SOURCE_RELEASE_ROOT}" \
+    --source-release-ref "${SOURCE_RELEASE_REF}" \
+    --source-config-relative "${SOURCE_CONFIG_RELATIVE}" \
+    --model-repository "${OPENREWARD_QWEN36_MODEL_REPOSITORY}" \
+    --model-revision "${OPENREWARD_QWEN36_MODEL_REVISION}" \
+    --model-snapshot "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" \
+    --target-receipt "${RECEIPT}"
+
+export OPENREWARD_EXPECTED_NNODES=15
+export OPENREWARD_EXPECTED_MODEL_SHARDS=26
+export OPENREWARD_SERVICE_NODE_COUNT=11
+export OPENREWARD_ENVIRONMENT_SET=toolathlon_only
+export OPENREWARD_EXPECTED_RECURSIVE=1
+export OPENREWARD_EXPECTED_PTC=1
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export OPENREWARD_REQUIRE_EXISTING_RECOVERY=1
+export OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING=${SUCCESSOR_BINDING}
+export OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP=${EXPECTED_GLOBAL_STEP}
+export OPENREWARD_EXPECTED_START_GLOBAL_STEP=${EXPECTED_START_GLOBAL_STEP}
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT=${CHECKPOINT_ROOT}
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_LAYOUT_SHA256=${EXPECTED_CHECKPOINT_LAYOUT_SHA256}
+export OPENREWARD_EXPECTED_RESUME_CHECKPOINT_SAMPLE_MANIFEST_SHA256=${EXPECTED_CHECKPOINT_SAMPLE_MANIFEST_SHA256}
+export OPENREWARD_EXPECTED_RESUME_FIXED_CONTENT_SHA256=${EXPECTED_FIXED_CONTENT_SHA256}
+export OPENREWARD_EXPECTED_RESUME_RECOVER_INFO_CONTENT_SHA256=${EXPECTED_RECOVER_INFO_CONTENT_SHA256}
+export OPENREWARD_EXPECTED_RESUME_DCP_STATE_KEYS=${EXPECTED_DCP_STATE_KEYS}
+export OPENREWARD_EXPECTED_RESUME_DCP_STORAGE_ENTRIES=${EXPECTED_DCP_STORAGE_ENTRIES}
+export OPENREWARD_EXPECTED_RESUME_DCP_SHARDS=32
+export OPENREWARD_EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS=${EXPECTED_OPTIMIZER_MOMENT_KEYS}
+export OPENREWARD_EXPECTED_RESUME_LR_NUM_STEPS=${EXPECTED_LR_NUM_STEPS}
+export OPENREWARD_EXPECTED_RESUME_SAMPLES_YIELDED=${EXPECTED_SAMPLES_YIELDED}
+export OPENREWARD_EXPECTED_RESUME_ITERATOR_YIELDED=${EXPECTED_ITERATOR_YIELDED}
+export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0
+export OPENREWARD_NODE_MEMORY_LIMIT_BYTES=2061584302080
+export OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=85
+export OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=274877906944
+export OPENREWARD_NODE_MEMORY_POLL_SECONDS=2
+export OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS=60
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH OPENREWARD_EXPECTED_FRESH_RUN_BINDING
+unset OPENREWARD_ALLOW_PREUPDATE_RESUME OPENREWARD_PREUPDATE_RESUME_BINDING
+unset OPENREWARD_PREUPDATE_LOAD_POLICY OPENREWARD_PREUPDATE_NO_LOAD_OPTIM
+
+exec "${COMMON}" "${CONFIG}"

@@ -213,6 +213,12 @@ case "${ENVIRONMENT_SET}" in
                     "${EXPECTED_TRIAL}" == abci-ta32-rec-q36m-cp2-c12-d2-rootprop-v27-t0 ]] || \
                     die "Toolathlon-only Qwen3.6 root-propagated resume service binding mismatch"
                 ;;
+            1:qwen36-15-v36-cp2-behavior-gs14:)
+                [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}:${OPENREWARD_MODEL_FAMILY}" == 15:1:1:qwen36 && \
+                    "${EXPECTED_EXPERIMENT}" == abci-or-ta15-q36-cp2-behavior-usage-partial-v35 && \
+                    "${EXPECTED_TRIAL}" == abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0 ]] || \
+                    die "Toolathlon-only 15-node Qwen3.6 behavior/usage resume service binding mismatch"
+                ;;
             *)
                 die "Toolathlon-only service mode is not authorized for recovery/fresh bindings ${RESUME_SUCCESSOR_BINDING@Q}/${FRESH_RUN_BINDING@Q}"
                 ;;
@@ -257,6 +263,12 @@ if [[ "${NODE_MEMORY_GUARD_ENABLED}" == 0 ]]; then
             [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 32:1:1 && \
                 "${ENVIRONMENT_SET}:${ENVIRONMENT_SET_BINDING}" == toolathlon_only:qwen36-32-v32-rootprop-gs13 ]] || \
                 die "Qwen3.6 root-propagated gs13 guard disablement binding mismatch"
+            NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
+            ;;
+        qwen36-15-v36-cp2-behavior-gs14:)
+            [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 15:1:1 && \
+                "${ENVIRONMENT_SET}:${ENVIRONMENT_SET_BINDING}" == toolathlon_only:qwen36-15-v36-cp2-behavior-gs14 ]] || \
+                die "Qwen3.6 15-node behavior/usage gs14 guard disablement binding mismatch"
             NODE_MEMORY_GUARD_DISABLED_BINDING=${RESUME_SUCCESSOR_BINDING}
             ;;
         qwen38-16-v25-gs12:)
@@ -419,6 +431,15 @@ if [[ "${REQUIRE_EXISTING_RECOVERY}" == 1 ]]; then
                         "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 21768:127481:160 && \
                         "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 48:14:160:20 ]] || \
                         die "Qwen3.6 root-propagated gs13 successor runtime binding mismatch"
+                    ;;
+                qwen36-15-v36-cp2-behavior-gs14)
+                    [[ "${EXPECTED_NNODES}:${EXPECTED_RECURSIVE}:${EXPECTED_PTC}" == 15:1:1 && \
+                        "${EXPECTED_EXPERIMENT}" == abci-or-ta15-q36-cp2-behavior-usage-partial-v35 && \
+                        "${EXPECTED_TRIAL}" == abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0 && \
+                        "${EXPECTED_RESUME_GLOBAL_STEP}:${EXPECTED_START_GLOBAL_STEP}" == 14:15 && \
+                        "${EXPECTED_RESUME_DCP_STATE_KEYS}:${EXPECTED_RESUME_DCP_STORAGE_ENTRIES}:${EXPECTED_RESUME_DCP_SHARDS}" == 21671:116818:32 && \
+                        "${EXPECTED_RESUME_OPTIMIZER_MOMENT_KEYS}:${EXPECTED_RESUME_LR_NUM_STEPS}:${EXPECTED_RESUME_SAMPLES_YIELDED}:${EXPECTED_RESUME_ITERATOR_YIELDED}" == 18:15:208:26 ]] || \
+                        die "Qwen3.6 15-node behavior/usage gs14 successor runtime binding mismatch"
                     ;;
                 *) die "unknown exact successor runtime binding" ;;
             esac

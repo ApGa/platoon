@@ -105,6 +105,7 @@ def test_v22_resume_verifier_exact_binding_counts() -> None:
         "qwen36-32-v22-depth2",
         "qwen36-32-v31-behavior-gs13",
         "qwen36-32-v32-rootprop-gs13",
+        "qwen36-15-v36-cp2-behavior-gs14",
     }
     q38_32 = bindings["qwen38-32-v22-gs10"]
     q38_16 = bindings["qwen38-16-v22-gs11-ordinary"]
@@ -112,6 +113,7 @@ def test_v22_resume_verifier_exact_binding_counts() -> None:
     q36 = bindings["qwen36-32-v22-depth2"]
     q36_behavior = bindings["qwen36-32-v31-behavior-gs13"]
     q36_rootprop = bindings["qwen36-32-v32-rootprop-gs13"]
+    q36_cp2_behavior = bindings["qwen36-15-v36-cp2-behavior-gs14"]
     assert (q38_32["global_step"], q38_32["lr_num_steps"]) == (10, 11)
     assert (q38_16["global_step"], q38_16["lr_num_steps"]) == (11, 8)
     assert (q38_16_gs12["global_step"], q38_16_gs12["lr_num_steps"]) == (12, 8)
@@ -132,13 +134,26 @@ def test_v22_resume_verifier_exact_binding_counts() -> None:
     assert q36_rootprop["source_job"] == "2193739.pbs1"
     assert q36_rootprop["source_candidate_global_step"] == 0
     assert q36_rootprop["optimizer_layout"] == "two_group"
+    assert (q36_cp2_behavior["global_step"], q36_cp2_behavior["start_global_step"]) == (
+        14,
+        15,
+    )
+    assert (q36_cp2_behavior["lr_num_steps"], q36_cp2_behavior["samples_yielded"]) == (
+        15,
+        208,
+    )
+    assert q36_cp2_behavior["iterator_yielded"] == 26
+    assert q36_cp2_behavior["source_job"] == "2218557.pbs1"
+    assert q36_cp2_behavior["source_candidate_global_step"] == 0
+    assert q36_cp2_behavior["optimizer_layout"] == "two_group"
     assert [
         q38_32["optimizer_moment_keys"],
         q38_16["optimizer_moment_keys"],
         q36["optimizer_moment_keys"],
         q36_behavior["optimizer_moment_keys"],
         q36_rootprop["optimizer_moment_keys"],
-    ] == [16, 16, 48, 48, 48]
+        q36_cp2_behavior["optimizer_moment_keys"],
+    ] == [16, 16, 48, 48, 48, 18]
 
 
 def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() -> None:
@@ -153,6 +168,7 @@ def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() ->
         "qwen36-32-v22-depth2",
         "qwen36-32-v31-behavior-gs13",
         "qwen36-32-v32-rootprop-gs13",
+        "qwen36-15-v36-cp2-behavior-gs14",
     ):
         assert binding in common
     for literal in (
@@ -170,6 +186,7 @@ def test_v22_common_forwards_binding_and_guard_without_changing_concurrency() ->
     assert "qwen36-32-v26-fresh-d2-noeff" in services
     assert "qwen36-32-v31-behavior-gs13" in services
     assert "qwen36-32-v32-rootprop-gs13" in services
+    assert "qwen36-15-v36-cp2-behavior-gs14" in services
 
     q38_32 = (
         PBS / "openreward-ta-swe-32node-recursive-qwen38-resume-gs10-h200-v12-abci.pbs"
