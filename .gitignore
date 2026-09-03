@@ -235,3 +235,4 @@ external/
 site/
 .docs-research/
 .DS_Store
+.docs-old/

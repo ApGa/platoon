@@ -142,62 +142,28 @@ nav:
       - Installation: get-started/installation.md
       - Quickstart: get-started/quickstart.md
       - Core concepts: get-started/concepts.md
-      - Choosing a backend: get-started/backends.md
-      - Your first custom task: get-started/first-task.md
-  - Tutorials:
-      - tutorials/index.md
-      - Train on TextCraft: tutorials/textcraft.md
-      - Evaluate a model endpoint: tutorials/inference.md
-      - Inspect rollouts in the TUI: tutorials/visualization.md
-      - Build a task from scratch: tutorials/build-a-plugin.md
-      - Train a system of agents: tutorials/recursive-agents.md
-      - Scale to multiple nodes: tutorials/multi-node.md
-  - Code walkthroughs:
-      - walkthroughs/index.md
-      - A training run, end to end: walkthroughs/training-run.md
-      - The group rollout workflow: walkthroughs/group-rollout-workflow.md
-      - Anatomy of a plugin: walkthroughs/plugin-anatomy.md
-      - A sub-agent call: walkthroughs/subagent-call.md
-      - Trajectory to training batch: walkthroughs/trajectory-to-batch.md
-  - Customization:
-      - customization/index.md
-      - Custom environment: customization/environment.md
-      - Custom agent: customization/agent.md
-      - Custom dataset and tasks: customization/dataset.md
-      - Custom rollout: customization/rollout.md
-      - Custom rewards: customization/rewards.md
-      - Custom workflow: customization/workflow.md
-      - Custom loss function: customization/loss.md
-      - Custom batch transform: customization/batch-transform.md
-      - Packaging a plugin: customization/packaging.md
-  - Recipes:
-      - recipes/index.md
-      - RL algorithms: recipes/algorithms.md
-      - Recursive agent systems: recipes/recursive.md
-      - Reward design: recipes/rewards.md
-      - Curriculum and task mixtures: recipes/curriculum.md
-      - LoRA, FSDP and Megatron: recipes/parallelism.md
-      - Long-running and preallocated jobs: recipes/scale.md
-  - Integrations:
-      - integrations/index.md
-      - OpenHands: integrations/openhands.md
-      - OpenReward: integrations/openreward.md
+  - Guides:
+      - guides/index.md
+      - Build your first task: guides/first-plugin.md
+      - Multi-agent workflows: guides/multi-agent.md
+      - Evaluate a model: guides/evaluate.md
+      - Inspect rollouts: guides/inspect-rollouts.md
+      - Extend the framework: guides/extend.md
+      - Run at scale: guides/scale.md
   - Architecture:
       - architecture/index.md
-      - Registry and Auto factories: architecture/registry.md
-      - Agents, environments, episodes: architecture/agents-envs.md
-      - The fork and sub-agent model: architecture/subagents.md
-      - AReaL backend internals: architecture/areal.md
-      - Tinker backend internals: architecture/tinker.md
-      - Data pipeline: architecture/data-pipeline.md
-      - Configuration system: architecture/config.md
+      - Components and the registry: architecture/components.md
+      - Execution model: architecture/execution.md
+      - Training backends: architecture/backends.md
+  - Plugins:
+      - plugins/index.md
+      - Plugin catalog: plugins/catalog.md
+      - OpenHands: plugins/openhands.md
+      - OpenReward: plugins/openreward.md
   - Reference:
       - reference/index.md
-      - Configuration reference: reference/configuration.md
-      - Component contracts: reference/components.md
-      - CLI reference: reference/cli.md
-      - Plugin catalog: reference/plugins.md
-      - Event and trajectory schema: reference/schemas.md
-      - Troubleshooting: reference/troubleshooting.md
+      - Configuration: reference/configuration.md
+      - CLI: reference/cli.md
       - FAQ: reference/faq.md
   - Contributing: contributing.md
+  - Citation: citation.md

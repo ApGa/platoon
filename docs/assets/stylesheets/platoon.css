@@ -464,7 +464,7 @@
   background: var(--pl-surface);
   border: 1px solid var(--pl-border);
   border-radius: .45rem;
-  padding: 1rem .6rem;
+  padding: .9rem .3rem;
   margin: 1.2rem 0;
   overflow-x: auto;
   text-align: center;
@@ -485,9 +485,13 @@
   padding: 0;
 }
 
+/* Diagrams render at natural size; the block scrolls if one is wider than the column.
+   A legible diagram you scroll beats an illegible one that fits. */
 .md-typeset pre.pl-mermaid svg {
-  max-width: 100%;
+  max-width: none;
   height: auto;
+  display: block;
+  margin: 0 auto;
 }
 
 /* --- Inline "where in the source" markers -------------------------------- */

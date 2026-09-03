@@ -1,77 +1,79 @@
 # Architecture
 
-This section explains *why* Platoon is shaped the way it is. It is the counterpart to the [code
-walkthroughs](../walkthroughs/index.md): those follow control flow, these explain design.
-
-## Layers
+Platoon trains agents on tasks you define. The shape of the system follows from one constraint: the
+code that describes a task should not know how training works, and the code that computes gradients
+should not know what a task is. Everything below is a consequence of keeping those two apart.
 
 ```mermaid
 flowchart TB
-  subgraph P["Plugins — one uv project per task suite"]
-    PL["tasks · env · agent · rollout · configs · registry module"]
-  end
-
-  subgraph C["Core — no training dependencies"]
-    EN["envs: Env, ForkableEnv, Task, SubTask, Observation"]
-    AG["agents: Agent, CodeAct, actions incl. subagent"]
-    EP["episode: run_episode, Trajectory, TrajectoryCollection, budgets"]
-    RG["registry: named components + Auto factories"]
-    UT["utils: config, llm_client, stats, data processing"]
-  end
-
-  subgraph T["Training backends"]
-    AR["AReaL: trainer, actor, losses, workflows, batch transforms, patches"]
-    TK["Tinker: trainer, proxy, workflows, batch transforms"]
-  end
-
-  subgraph O["Observability"]
-    VZ["visualization: event sinks, TUIs, CLI"]
-    AN["analysis: compare, error analysis, checkpoint acceptance"]
-  end
-
-  P --> C
-  C --> T
-  C --> O
-  T --> O
+  PL["Your plugin"] --> CO["Platoon core"]
+  CO -->|"sampling"| IN["Inference"]
+  CO -->|"steps"| ES["Env service"]
+  CO -->|"records"| TJ["Trajectory trees"]
+  TJ -->|"gradient steps"| BK["Training backend"]
+  BK -->|"updated weights"| IN
+  TJ --> OB["Visualization"]
 ```
+
+## The layers
+
+**Your plugin** supplies the task, the environment that scores it, the agent, the rollout program
+that ties them together, and the YAML naming all of it — as an ordinary Python package that can live
+in your own repository. **The core** runs episodes and holds the registry; it carries no training
+dependencies, so an episode against a hosted model never loads a training framework. **A backend**
+turns the resulting trajectories into gradient steps. **Observability** sits alongside rather than
+downstream: rollout events stream to sinks as episodes run, so the TUIs read the same files a trainer
+would.
+
+## Composition by service
+
+The expensive parts run as services addressed over the network, not as libraries linked into one
+process, so each scales and is swapped independently.
+
+- **Training engines behind the Tinker API.** That path targets an API, not a vendor, so any
+  Tinker-compatible implementation works — a hosted service or your own.
+- **Environments behind a server.** The [OpenReward](../plugins/openreward.md) integration talks to a
+  server that owns the containers and the task catalog. Rollout workers stay thin.
+- **Inference behind an endpoint.** Agents reach models through an OpenAI-compatible endpoint. In
+  training it is managed for you; in [evaluation](../guides/evaluate.md) you point at any endpoint,
+  which is why evaluation needs no GPU.
+
+So the same plugin runs against a small hosted endpoint while you debug it and against a cluster when
+you train, with no code change.
+
+## Where the code lives
+
+| Area | Package |
+| --- | --- |
+| Environments, tasks, observations | <span class="pl-src">platoon/envs</span> |
+| Agents and actions | <span class="pl-src">platoon/agents</span> |
+| Episode loop, trajectories, budgets | <span class="pl-src">platoon/episode</span> |
+| Registry and `Auto` factories | <span class="pl-src">platoon/registry.py</span> |
+| Training backends | <span class="pl-src">platoon/train</span> |
+| Evaluation | <span class="pl-src">platoon/inference</span> |
+| TUIs, event sinks, analysis | <span class="pl-src">platoon/visualization</span>, <span class="pl-src">platoon/analysis</span> |
 
 ## Pages
 
 <div class="pl-cards pl-cards--tight" markdown>
 
 <div class="pl-card" markdown>
-### [Registry and Auto factories](registry.md)
-How a string in a YAML file becomes a Python callable, and why the indirection is worth it.
+### [Components](components.md)
+The pieces you assemble — tasks, environments, agents, rollouts — and the registry that lets a
+config name them.
 </div>
 
 <div class="pl-card" markdown>
-### [Agents, environments, episodes](agents-envs.md)
-The Protocol-based core, the context-variable design, and the episode loop's termination rules.
+### [Execution](execution.md)
+What happens during a run: the episode loop, delegation to other agents, and the trajectory tree
+that comes out.
 </div>
 
 <div class="pl-card" markdown>
-### [The fork and sub-agent model](subagents.md)
-Trees of trajectories: forking, parent links, budget accounting, and reward propagation.
-</div>
-
-<div class="pl-card" markdown>
-### [AReaL backend internals](areal.md)
-Single-controller training, SGLang rollouts, the proxy, and what Platoon patches upstream.
-</div>
-
-<div class="pl-card" markdown>
-### [Tinker backend internals](tinker.md)
-The managed-service path, the sampling proxy, and where it diverges from AReaL.
-</div>
-
-<div class="pl-card" markdown>
-### [Data pipeline](data-pipeline.md)
-Trajectory tree to token tensors: grouping, advantages, masks, filtering, sampling.
-</div>
-
-<div class="pl-card" markdown>
-### [Configuration system](config.md)
-Two config loaders, two override syntaxes, and how the typed dataclasses are assembled.
+### [Backends](backends.md)
+AReaL and Tinker side by side — what each one runs, where the compute lives, and how to choose.
 </div>
 
 </div>
+
+For the vocabulary these pages assume, read [Concepts](../get-started/concepts.md) first.

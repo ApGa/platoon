@@ -24,9 +24,30 @@
       startOnLoad: false,
       theme: themeName(),
       securityLevel: "strict",
-      fontFamily: "inherit",
-      flowchart: { curve: "basis", useMaxWidth: true },
-      sequence: { useMaxWidth: true, wrap: true },
+      // Match the page font so label metrics are measured against what actually renders;
+      // a mismatch here is the usual cause of clipped text.
+      fontFamily: '"Inter", system-ui, sans-serif',
+      fontSize: 13,
+      flowchart: {
+        curve: "basis",
+        // Render at natural size and let the container scroll. useMaxWidth shrinks a wide
+        // diagram to the content column, which is what made labels illegible.
+        useMaxWidth: false,
+        htmlLabels: true,
+        nodeSpacing: 34,
+        rankSpacing: 44,
+        padding: 10,
+        diagramPadding: 8,
+      },
+      sequence: {
+        useMaxWidth: false,
+        wrap: true,
+        width: 168,
+        boxMargin: 12,
+        messageFontSize: 13,
+        actorFontSize: 13,
+        noteFontSize: 12,
+      },
     });
   }
 

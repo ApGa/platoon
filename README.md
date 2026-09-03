@@ -8,11 +8,10 @@ walkthroughs, extension guides, and the full configuration reference.
 | | |
 | --- | --- |
 | [Get started](https://apga.github.io/platoon/get-started/) | Install, run your first job, learn the core concepts |
-| [Tutorials](https://apga.github.io/platoon/tutorials/) | Train on TextCraft, evaluate an endpoint, build your own task |
-| [Code walkthroughs](https://apga.github.io/platoon/walkthroughs/) | The real source, traced end to end |
-| [Customization](https://apga.github.io/platoon/customization/) | Add your own environment, agent, reward, loss or workflow |
-| [Integrations](https://apga.github.io/platoon/integrations/) | OpenHands and OpenReward |
-| [Reference](https://apga.github.io/platoon/reference/) | Every config key, component contract and CLI flag |
+| [Guides](https://apga.github.io/platoon/guides/) | Build a task, train multi-agent workflows, evaluate, extend, scale |
+| [Architecture](https://apga.github.io/platoon/architecture/) | How the pieces fit together |
+| [Plugins](https://apga.github.io/platoon/plugins/) | The plugin model, the catalog, OpenHands and OpenReward |
+| [Reference](https://apga.github.io/platoon/reference/) | Configuration, CLI and FAQ |
 
 To build the docs locally:
 
@@ -151,3 +150,40 @@ uv run -m platoon.visualization.cli --help
 
 See [`platoon/visualization/README.md`](platoon/visualization/README.md).
 
+## Experiment Reproduction
+
+To reproduce experiments for [Recursive Agent Optimization (RAO)](https://arxiv.org/abs/2605.06639),
+refer to the [`apga/rao-snapshot`](https://github.com/ApGa/platoon/tree/apga/rao-snapshot/) branch,
+a snapshot of the codebase used for the paper.
+
+## Acknowledgements
+
+Parts of platoon's design and optimizations were inspired by many existing great RL frameworks and
+projects including [AReaL](https://github.com/areal-project/AReaL),
+[tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook) and
+[agent-lightning](https://github.com/microsoft/agent-lightning).
+
+## Citation
+
+Platoon was originally designed for the paper
+[Recursive Agent Optimization (RAO)](https://arxiv.org/abs/2605.06639).
+Please cite the following if you found platoon to be useful in your work:
+
+```bibtex
+@article{gandhi2026rao,
+  title   = {Recursive Agent Optimization},
+  author  = {Gandhi, Apurva and Chakraborty, Satyaki and Wang, Xiangjun
+             and Kumar, Aviral and Neubig, Graham},
+  journal = {arXiv preprint arXiv:2605.06639},
+  year    = {2026}
+}
+```
+
+```bibtex
+@misc{gandhi2025platoon,
+  author       = {Gandhi, Apurva},
+  title        = {{Platoon}: Build and Train Systems of Agents},
+  howpublished = {\url{https://github.com/ApGa/platoon}},
+  year         = {2025}
+}
+```
