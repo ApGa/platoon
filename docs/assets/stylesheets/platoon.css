@@ -1,0 +1,550 @@
+/* ==========================================================================
+   Platoon documentation theme
+   Palette sampled from the project logo: deep navy wordmark -> blue -> teal -> green
+   ========================================================================== */
+
+:root {
+  --pl-navy: #0d3157;
+  --pl-navy-deep: #081f38;
+  --pl-blue: #1a63a8;
+  --pl-blue-bright: #2f86d0;
+  --pl-cyan: #3c9cc0;
+  --pl-teal: #3cb484;
+  --pl-green: #45c85c;
+  --pl-green-bright: #5fd873;
+
+  --pl-gradient: linear-gradient(100deg, var(--pl-navy) 0%, var(--pl-blue) 32%, var(--pl-cyan) 58%, var(--pl-teal) 78%, var(--pl-green) 100%);
+  --pl-gradient-soft: linear-gradient(100deg, rgba(26, 99, 168, .10) 0%, rgba(60, 156, 192, .10) 45%, rgba(69, 200, 92, .10) 100%);
+}
+
+/* --- Light scheme -------------------------------------------------------- */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #0d3157;
+  --md-primary-fg-color--light: #1a63a8;
+  --md-primary-fg-color--dark: #081f38;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, .7);
+
+  --md-accent-fg-color: #16794a;
+  --md-accent-fg-color--transparent: rgba(22, 121, 74, .1);
+
+  --md-typeset-a-color: #16619e;
+  --md-default-bg-color: #ffffff;
+  --md-code-bg-color: #f4f7fa;
+
+  --md-footer-bg-color: #0d3157;
+  --md-footer-bg-color--dark: #081f38;
+
+  --pl-surface: #f7f9fc;
+  --pl-border: #e0e7ef;
+  --pl-muted: #5a6b80;
+  --pl-hero-bg: radial-gradient(120% 120% at 12% 0%, #f2f8f4 0%, #eef4fb 45%, #ffffff 100%);
+}
+
+/* --- Dark scheme --------------------------------------------------------- */
+[data-md-color-scheme="slate"] {
+  --md-hue: 215;
+
+  --md-primary-fg-color: #0b1c2e;
+  --md-primary-fg-color--light: #2f86d0;
+  --md-primary-fg-color--dark: #060f1a;
+  --md-primary-bg-color: #e9f1fa;
+
+  --md-accent-fg-color: #5fd873;
+  --md-accent-fg-color--transparent: rgba(95, 216, 115, .12);
+
+  --md-typeset-a-color: #62b4f0;
+  --md-default-bg-color: #0e1721;
+  --md-default-fg-color: #dce6f0;
+  --md-code-bg-color: #131f2c;
+
+  --md-footer-bg-color: #0a1420;
+  --md-footer-bg-color--dark: #060f1a;
+
+  --pl-surface: #131f2c;
+  --pl-border: #24344a;
+  --pl-muted: #93a6bd;
+  --pl-hero-bg: radial-gradient(120% 120% at 12% 0%, #12283a 0%, #0f1c2b 48%, #0e1721 100%);
+}
+
+/* --- Typography ---------------------------------------------------------- */
+.md-typeset {
+  font-size: .78rem;
+  line-height: 1.68;
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -.018em;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset h2 {
+  font-weight: 650;
+  letter-spacing: -.012em;
+  margin-top: 2.2em;
+  padding-top: .35em;
+  border-top: 1px solid var(--pl-border);
+}
+
+.md-typeset h3 {
+  font-weight: 620;
+  letter-spacing: -.006em;
+}
+
+.md-typeset h1 code,
+.md-typeset h2 code,
+.md-typeset h3 code {
+  font-size: .92em;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+/* Header + tabs: one gradient bar that echoes the logo.
+   .md-tabs is a SIBLING of .md-header, not a child, so both must be painted. Sharing a
+   viewport-anchored background makes the two bars read as a single continuous band -- and a
+   transparent .md-tabs would put white link text on the white page background in light mode. */
+.md-header,
+.md-tabs {
+  background-image: var(--pl-gradient);
+  background-attachment: fixed;
+  background-size: 100vw 100vh;
+  background-repeat: no-repeat;
+}
+
+.md-header {
+  box-shadow: 0 1px 0 rgba(0, 0, 0, .08);
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background-image: linear-gradient(100deg, #071726 0%, #0e2f4d 34%, #10394a 62%, #113a2c 100%);
+}
+
+.md-tabs {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12);
+}
+
+/* Tab labels sit on the gradient in both schemes, so they stay light regardless of palette.
+   Do not set opacity here: Material fades the links in with its own opacity transition. */
+.md-tabs__link {
+  color: rgba(255, 255, 255, .84);
+  font-weight: 500;
+}
+
+.md-tabs__link:hover,
+.md-tabs__link--active {
+  color: #fff;
+}
+
+.md-tabs__item--active .md-tabs__link {
+  font-weight: 650;
+}
+
+.md-header__topic:first-child {
+  font-weight: 700;
+  letter-spacing: -.01em;
+}
+
+.md-header__button.md-logo img {
+  height: 1.5rem;
+  width: 1.5rem;
+}
+
+/* --- Links --------------------------------------------------------------- */
+.md-typeset a {
+  text-decoration-color: color-mix(in srgb, var(--md-typeset-a-color) 32%, transparent);
+  text-underline-offset: .16em;
+}
+
+.md-typeset a:hover {
+  text-decoration-color: currentColor;
+}
+
+/* --- Code ---------------------------------------------------------------- */
+.md-typeset pre > code {
+  border-radius: .35rem;
+  font-size: .74rem;
+  line-height: 1.6;
+}
+
+.md-typeset code {
+  border-radius: .2rem;
+  font-size: .84em;
+}
+
+.md-typeset .highlight > pre,
+.md-typeset .tabbed-block > .highlight > pre {
+  border: 1px solid var(--pl-border);
+  border-radius: .4rem;
+}
+
+.md-typeset .highlight span.filename {
+  background: var(--pl-surface);
+  border: 1px solid var(--pl-border);
+  border-bottom: none;
+  border-radius: .4rem .4rem 0 0;
+  color: var(--pl-muted);
+  font-size: .68rem;
+  font-weight: 600;
+  letter-spacing: .01em;
+  padding: .35rem .8rem;
+}
+
+/* --- Tables -------------------------------------------------------------- */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--pl-border);
+  border-radius: .4rem;
+  font-size: .7rem;
+  box-shadow: none;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--pl-surface);
+  font-weight: 620;
+  letter-spacing: .005em;
+}
+
+.md-typeset table:not([class]) td {
+  vertical-align: top;
+}
+
+/* --- Admonitions: brand-tinted ------------------------------------------- */
+.md-typeset .admonition,
+.md-typeset details {
+  border-width: 1px;
+  border-left-width: 3px;
+  border-radius: .35rem;
+  font-size: .72rem;
+  box-shadow: none;
+}
+
+.md-typeset .admonition.tip,
+.md-typeset details.tip {
+  border-color: var(--pl-green);
+}
+
+.md-typeset .tip > .admonition-title,
+.md-typeset .tip > summary {
+  background: rgba(69, 200, 92, .1);
+}
+
+.md-typeset .tip > .admonition-title::before,
+.md-typeset .tip > summary::before {
+  background-color: var(--pl-teal);
+}
+
+/* --- Tabs ---------------------------------------------------------------- */
+.md-typeset .tabbed-labels > label {
+  font-size: .68rem;
+  font-weight: 620;
+}
+
+/* --- Landing page hero --------------------------------------------------- */
+.pl-hero {
+  background: var(--pl-hero-bg);
+  border: 1px solid var(--pl-border);
+  border-radius: .75rem;
+  padding: 2.6rem 2rem 2.2rem;
+  margin: .4rem 0 2.4rem;
+  position: relative;
+  overflow: hidden;
+  text-align: center;
+}
+
+.pl-hero::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3px;
+  background: var(--pl-gradient);
+}
+
+.pl-hero img.pl-hero__logo {
+  width: min(240px, 56%);
+  margin: 0 auto .2rem;
+  display: block;
+}
+
+/* Theme-swapped images (light/dark variants of the same asset) */
+[data-md-color-scheme="default"] .pl-only-dark,
+[data-md-color-scheme="slate"] .pl-only-light {
+  display: none !important;
+}
+
+.md-typeset .pl-hero h1 {
+  font-size: 1.9rem;
+  font-weight: 720;
+  letter-spacing: -.028em;
+  margin: .1rem 0 .35rem;
+  background: var(--pl-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.pl-hero__tagline {
+  font-size: .95rem;
+  font-weight: 500;
+  color: var(--md-default-fg-color);
+  margin: 0 auto .5rem;
+  max-width: 46ch;
+  line-height: 1.4;
+}
+
+.pl-hero__sub {
+  color: var(--pl-muted);
+  font-size: .78rem;
+  max-width: 66ch;
+  margin: 0 auto 1.5rem;
+}
+
+.pl-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .6rem;
+  justify-content: center;
+}
+
+.md-typeset .pl-hero__actions .md-button {
+  margin: 0;
+  border-radius: .35rem;
+  font-size: .72rem;
+  font-weight: 620;
+  padding: .5rem 1.1rem;
+}
+
+.md-typeset .pl-hero__actions .md-button--primary {
+  background: var(--pl-blue);
+  border-color: var(--pl-blue);
+  color: #fff;
+}
+
+.md-typeset .pl-hero__actions .md-button--primary:hover {
+  background: var(--pl-teal);
+  border-color: var(--pl-teal);
+  color: #fff;
+}
+
+/* Material's outline .md-button takes its text and border from --md-primary-fg-color, which the
+   dark scheme sets to a near-black navy for the header bar. Inheriting that puts a 1.05:1 button
+   on the dark page, so give secondary buttons their own readable foreground. */
+[data-md-color-scheme="slate"] .md-typeset .md-button:not(.md-button--primary) {
+  color: var(--md-default-fg-color);
+  border-color: color-mix(in srgb, var(--md-default-fg-color) 42%, transparent);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .md-button:not(.md-button--primary):hover,
+[data-md-color-scheme="slate"] .md-typeset .md-button:not(.md-button--primary):focus {
+  background-color: var(--pl-teal);
+  border-color: var(--pl-teal);
+  color: #06121b;
+}
+
+/* --- Feature / link cards ------------------------------------------------ */
+.pl-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: .9rem;
+  margin: 1.2rem 0 1.8rem;
+}
+
+.pl-card {
+  border: 1px solid var(--pl-border);
+  border-radius: .5rem;
+  padding: 1rem 1.1rem 1.05rem;
+  background: var(--md-default-bg-color);
+  position: relative;
+  overflow: hidden;
+  transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+
+.pl-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--pl-gradient);
+  opacity: .0;
+  transition: opacity .15s ease;
+}
+
+.pl-card:hover {
+  border-color: color-mix(in srgb, var(--pl-teal) 45%, var(--pl-border));
+  transform: translateY(-1px);
+  box-shadow: 0 4px 18px -12px rgba(13, 49, 87, .45);
+}
+
+.pl-card:hover::before {
+  opacity: 1;
+}
+
+.md-typeset .pl-card h3 {
+  margin: 0 0 .35rem;
+  font-size: .82rem;
+  font-weight: 650;
+  letter-spacing: -.004em;
+}
+
+.md-typeset .pl-card h3 a {
+  color: var(--md-default-fg-color);
+  text-decoration: none;
+}
+
+.md-typeset .pl-card h3 a:hover {
+  color: var(--md-typeset-a-color);
+}
+
+.md-typeset .pl-card p {
+  margin: 0;
+  font-size: .71rem;
+  line-height: 1.55;
+  color: var(--pl-muted);
+}
+
+.md-typeset .pl-card p + p {
+  margin-top: .5rem;
+}
+
+.pl-card__kicker {
+  display: inline-block;
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--pl-teal);
+  margin-bottom: .35rem;
+}
+
+/* Compact card variant used for long index lists */
+.pl-cards--tight {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: .65rem;
+}
+
+.pl-cards--tight .pl-card {
+  padding: .8rem .9rem .85rem;
+}
+
+/* --- Step lists ---------------------------------------------------------- */
+.md-typeset .pl-steps {
+  counter-reset: pl-step;
+  list-style: none;
+  margin-left: 0;
+  padding-left: 0;
+}
+
+.md-typeset .pl-steps > li {
+  counter-increment: pl-step;
+  position: relative;
+  padding-left: 2.1rem;
+  margin-bottom: 1.1rem;
+}
+
+.md-typeset .pl-steps > li::before {
+  content: counter(pl-step);
+  position: absolute;
+  left: 0;
+  top: -.05rem;
+  width: 1.45rem;
+  height: 1.45rem;
+  border-radius: 50%;
+  background: var(--pl-gradient-soft);
+  border: 1px solid color-mix(in srgb, var(--pl-teal) 40%, var(--pl-border));
+  color: var(--md-default-fg-color);
+  font-size: .68rem;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+/* --- Mermaid ------------------------------------------------------------- */
+.md-typeset pre.pl-mermaid {
+  background: var(--pl-surface);
+  border: 1px solid var(--pl-border);
+  border-radius: .45rem;
+  padding: 1rem .6rem;
+  margin: 1.2rem 0;
+  overflow-x: auto;
+  text-align: center;
+}
+
+/* Before render (and if render fails) the block still holds diagram source: keep it
+   readable as code rather than as reflowed prose. */
+.md-typeset pre.pl-mermaid:not(.pl-mermaid--rendered) {
+  font-family: var(--md-code-font-family);
+  font-size: .68rem;
+  text-align: left;
+  white-space: pre;
+  color: var(--pl-muted);
+}
+
+.md-typeset pre.pl-mermaid > code {
+  background: transparent;
+  padding: 0;
+}
+
+.md-typeset pre.pl-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* --- Inline "where in the source" markers -------------------------------- */
+.pl-src {
+  display: inline-block;
+  font-family: var(--md-code-font-family);
+  font-size: .66rem;
+  font-weight: 600;
+  color: var(--pl-muted);
+  background: var(--pl-surface);
+  border: 1px solid var(--pl-border);
+  border-radius: .25rem;
+  padding: .05rem .35rem;
+  white-space: nowrap;
+}
+
+/* --- Keyboard-ish pill for statuses -------------------------------------- */
+.pl-tag {
+  display: inline-block;
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: .1rem .4rem;
+  border-radius: .2rem;
+  vertical-align: .1em;
+}
+
+.pl-tag--areal { background: rgba(26, 99, 168, .14); color: var(--pl-blue-bright); }
+.pl-tag--tinker { background: rgba(69, 200, 92, .16); color: var(--pl-teal); }
+.pl-tag--both { background: rgba(60, 156, 192, .16); color: var(--pl-cyan); }
+
+[data-md-color-scheme="slate"] .pl-tag--areal { color: #7ab8ee; }
+[data-md-color-scheme="slate"] .pl-tag--tinker { color: #74dd8b; }
+[data-md-color-scheme="slate"] .pl-tag--both { color: #71c6e2; }
+
+/* --- Footer -------------------------------------------------------------- */
+.md-footer-meta {
+  background: var(--md-footer-bg-color--dark);
+}
+
+/* --- Misc ---------------------------------------------------------------- */
+.md-typeset hr {
+  border-bottom-color: var(--pl-border);
+}
+
+.md-sidebar__scrollwrap {
+  scrollbar-width: thin;
+}
+
+.md-nav__title {
+  font-weight: 650;
+}
+
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--primary .md-nav__item--section > .md-nav__link {
+    font-weight: 700;
+    letter-spacing: .01em;
+  }
+}

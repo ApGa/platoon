@@ -230,3 +230,8 @@ inference_results/
 *.deb
 slurm*.out
 external/
+# Docs site build environment and research scratch
+.docs-venv/
+site/
+.docs-research/
+.DS_Store

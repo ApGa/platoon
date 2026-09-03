@@ -1,0 +1,17 @@
+# Dependencies for building the Platoon documentation site.
+#
+# These are deliberately kept out of the root pyproject.toml: the docs build must
+# stay installable without CUDA, torch, or a training backend, and adding a group
+# here would force a re-resolve of the (very large) main lockfile.
+#
+#   uv venv .docs-venv --python 3.12
+#   uv pip install --python .docs-venv -r docs/requirements.txt
+#   ./.docs-venv/bin/mkdocs serve
+#
+# MkDocs is pinned below 2.0: that release removes the plugin and theming systems
+# Material for MkDocs depends on, with no migration path.
+mkdocs>=1.6,<2.0
+mkdocs-material>=9.7,<10
+mkdocs-glightbox>=0.5,<0.6
+mkdocs-minify-plugin>=0.8,<0.9
+pymdown-extensions>=10,<12

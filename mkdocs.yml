@@ -1,0 +1,203 @@
+site_name: platoon
+site_description: Build and train systems of agents.
+site_url: https://apga.github.io/platoon/
+repo_url: https://github.com/ApGa/platoon
+repo_name: ApGa/platoon
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; Apurva Gandhi — Apache 2.0
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  logo: assets/logo.png
+  favicon: assets/favicon.png
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil-outline
+    view: material/eye-outline
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Follow system theme
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+    - content.action.view
+    - content.tooltips
+    - announce.dismiss
+
+extra_css:
+  - assets/stylesheets/platoon.css
+
+# Mermaid is vendored rather than pulled from a CDN at runtime, so diagrams render
+# offline and behind proxies that block third-party hosts.
+extra_javascript:
+  - assets/javascripts/mermaid.min.js
+  - assets/javascripts/mermaid-init.js
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ApGa/platoon
+      name: Platoon on GitHub
+  generator: false
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Link to this section
+      toc_depth: 3
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.mark
+  - pymdownx.tilde
+  - pymdownx.critic
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: pl-mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+  - glightbox:
+      touchNavigation: true
+      loop: false
+      effect: zoom
+      width: 100%
+      height: auto
+      zoomable: true
+      draggable: false
+  - minify:
+      minify_html: true
+
+watch:
+  - docs
+
+nav:
+  - Home: index.md
+  - Get started:
+      - get-started/index.md
+      - Installation: get-started/installation.md
+      - Quickstart: get-started/quickstart.md
+      - Core concepts: get-started/concepts.md
+      - Choosing a backend: get-started/backends.md
+      - Your first custom task: get-started/first-task.md
+  - Tutorials:
+      - tutorials/index.md
+      - Train on TextCraft: tutorials/textcraft.md
+      - Evaluate a model endpoint: tutorials/inference.md
+      - Inspect rollouts in the TUI: tutorials/visualization.md
+      - Build a task from scratch: tutorials/build-a-plugin.md
+      - Train a system of agents: tutorials/recursive-agents.md
+      - Scale to multiple nodes: tutorials/multi-node.md
+  - Code walkthroughs:
+      - walkthroughs/index.md
+      - A training run, end to end: walkthroughs/training-run.md
+      - The group rollout workflow: walkthroughs/group-rollout-workflow.md
+      - Anatomy of a plugin: walkthroughs/plugin-anatomy.md
+      - A sub-agent call: walkthroughs/subagent-call.md
+      - Trajectory to training batch: walkthroughs/trajectory-to-batch.md
+  - Customization:
+      - customization/index.md
+      - Custom environment: customization/environment.md
+      - Custom agent: customization/agent.md
+      - Custom dataset and tasks: customization/dataset.md
+      - Custom rollout: customization/rollout.md
+      - Custom rewards: customization/rewards.md
+      - Custom workflow: customization/workflow.md
+      - Custom loss function: customization/loss.md
+      - Custom batch transform: customization/batch-transform.md
+      - Packaging a plugin: customization/packaging.md
+  - Recipes:
+      - recipes/index.md
+      - RL algorithms: recipes/algorithms.md
+      - Recursive agent systems: recipes/recursive.md
+      - Reward design: recipes/rewards.md
+      - Curriculum and task mixtures: recipes/curriculum.md
+      - LoRA, FSDP and Megatron: recipes/parallelism.md
+      - Long-running and preallocated jobs: recipes/scale.md
+  - Integrations:
+      - integrations/index.md
+      - OpenHands: integrations/openhands.md
+      - OpenReward: integrations/openreward.md
+  - Architecture:
+      - architecture/index.md
+      - Registry and Auto factories: architecture/registry.md
+      - Agents, environments, episodes: architecture/agents-envs.md
+      - The fork and sub-agent model: architecture/subagents.md
+      - AReaL backend internals: architecture/areal.md
+      - Tinker backend internals: architecture/tinker.md
+      - Data pipeline: architecture/data-pipeline.md
+      - Configuration system: architecture/config.md
+  - Reference:
+      - reference/index.md
+      - Configuration reference: reference/configuration.md
+      - Component contracts: reference/components.md
+      - CLI reference: reference/cli.md
+      - Plugin catalog: reference/plugins.md
+      - Event and trajectory schema: reference/schemas.md
+      - Troubleshooting: reference/troubleshooting.md
+      - FAQ: reference/faq.md
+  - Contributing: contributing.md

@@ -2,6 +2,26 @@
 
 Build and train systems of agents.
 
+**[Documentation](https://apga.github.io/platoon/)** — installation, quickstart, tutorials, code
+walkthroughs, extension guides, and the full configuration reference.
+
+| | |
+| --- | --- |
+| [Get started](https://apga.github.io/platoon/get-started/) | Install, run your first job, learn the core concepts |
+| [Tutorials](https://apga.github.io/platoon/tutorials/) | Train on TextCraft, evaluate an endpoint, build your own task |
+| [Code walkthroughs](https://apga.github.io/platoon/walkthroughs/) | The real source, traced end to end |
+| [Customization](https://apga.github.io/platoon/customization/) | Add your own environment, agent, reward, loss or workflow |
+| [Integrations](https://apga.github.io/platoon/integrations/) | OpenHands and OpenReward |
+| [Reference](https://apga.github.io/platoon/reference/) | Every config key, component contract and CLI flag |
+
+To build the docs locally:
+
+```bash
+uv venv .docs-venv --python 3.12
+uv pip install --python .docs-venv -r docs/requirements.txt
+./.docs-venv/bin/mkdocs serve
+```
+
 ## Install
 
 Use `uv` for the main development workflow:
