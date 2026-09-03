@@ -1,0 +1,153 @@
+defaults:
+  - abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v33_behavior_usage_gated
+  - _self_
+
+# Fresh CP2 successor for the 15-node Toolathlon-only Qwen3.6 trial. The v34
+# training stack and reward semantics are unchanged; CP2 selects packed THD
+# execution and removes the CP1 padded-activation OOM observed on update one.
+experiment_name: abci-or-ta15-q36-cp2-behavior-usage-partial-v35
+trial_name: abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35-t0
+
+dynamic_bs: false
+
+train_dataset:
+  batch_size: 8
+
+workflow_config:
+  group_size: 8
+  subagent_datum_keep_probability: 0.25
+  straggler_timeout_seconds: 900
+  straggler_quorum: 6
+  subprocess_shutdown_grace_seconds: 10
+  min_successful_group_size: 4
+  rollout_config:
+    max_steps: 200
+    timeout: 3600
+    step_timeout: 2700
+    propagate_root_success: false
+  token_efficiency_reward:
+    enabled: false
+
+rollout:
+  # Eleven TP8 replicas occupy the 88 inference GPUs.  With batch size eight,
+  # c24 and staleness three permit a three-batch active pipeline while keeping
+  # the actual consumer batch aligned with each optimizer update.
+  backend: sglang:d11p1t8
+  max_concurrent_rollouts: 24
+  consumer_batch_size: 8
+  max_head_offpolicyness: 3
+  # CP2 with TP1 gives attention DP16. Matching that divisor preserves every complete
+  # group while satisfying the actor's data-parallel divisibility contract.
+  ensure_batch_divisible_by: 16
+  return_routed_experts: true
+  agent:
+    engine_max_tokens: 65536
+
+actor:
+  # 32 GPUs / four nodes: attention DP16 x TP1 x CP2, and FFN DP4 x EP8.
+  backend: megatron:(attn:d16p1t1c2|ffn:d4p1t1e8)
+  path: apurvaga/Qwen3.6-35B-A3B-preserve-thinking
+  gradient_checkpointing: true
+  enable_cispo_fused_linear_logprobs: true
+  cispo_fused_linear_chunk_size: 512
+  enable_router_replay: true
+  router_replay_num_layers: 40
+  router_replay_topk: 8
+  router_replay_num_experts: 256
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_mtp: false
+    # The fused pre-logits path projects bounded BF16 chunks and performs its
+    # softmax in FP32, so the full-output FP32 hook must remain disabled.
+    enable_fp32_lm_head: false
+    use_deterministic_algorithms: true
+    recompute_granularity: full
+    recompute_method: uniform
+    recompute_num_layers: 1
+    distribute_saved_activations: null
+    recompute_modules: null
+    moe_permute_fusion: true
+    moe_router_fusion: false
+
+ref:
+  backend: ${actor.backend}
+  mb_spec:
+    n_mbs: 1
+    granularity: 1
+    max_tokens_per_mb: 65536
+    n_mbs_divisor: 1
+  megatron:
+    enable_fp32_lm_head: true
+
+sglang:
+  context_length: 65537
+  max_prefill_tokens: 65536
+
+recover:
+  mode: auto
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+  no_load_optim: false
+  no_save_optim: false
+
+openreward:
+  # Literal markers below are also inspected by the pre-Hydra PBS launcher.
+  enable_recursive_subagents: true
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+  subagent_environment_access: shared
+  subagent_default_max_steps: 100
+  subagent_max_depth: 2
+  enable_subagent_reward_judging: true
+  subagent_reward_judge_max_steps: 100
+  enable_subagent_behavior_judging: true
+  enable_subagent_parent_usage_eligibility_gate: true
+  subagent_parent_usage_judge_max_concurrency: 4
+  subagent_behavior_judge_max_prompt_tokens: 24576
+  subagent_behavior_judge_max_output_tokens: 4096
+  subagent_behavior_judge_timeout_seconds: 300.0
+  subagent_delegation_reward_coefficient: 0.0
+  condenser_max_tokens: 52428
+  eval_split: null
+  eval_task_limit: null
+  environments:
+    - label: toolathlon
+      env_name: toolathlongym
+      split: train
+      eval_split: train
+      session_url: http://localhost:8082
+      session_urls_env_var: OPENREWARD_SESSION_URLS_TOOLATHLON
+      api_key: local
+      train_task_limit: null
+      eval_task_limit: null
+      max_tool_calls: 0
+      sampling_weight: 1.0
+
+valid_dataset: null
+evaluator:
+  eval_before_train: false
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+scheduler:
+  type: pbs_prealloc
+
+cluster:
+  n_nodes: 15
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${oc.env:PLATOON_NAME_RESOLVE_ROOT}
+
+stats_logger:
+  wandb:
+    project: toolathlon-openhands
+    group: abci-ta15-rec-q36m-cp2-c24-s3-d2-behavior-usage-partial-v35
