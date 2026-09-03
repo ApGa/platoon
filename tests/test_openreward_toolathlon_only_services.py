@@ -36,6 +36,13 @@ TOOLATHLON_ONLY_BINDINGS = (
         "abci-ta32-rec-q36m-cp2-c12-d2-behavior-usage-gate-v33-t0",
     ),
     (
+        "qwen36-15-v34-behavior-usage-partial64",
+        "15",
+        "qwen36",
+        "abci-or-ta15-q36-cp1-behavior-usage-partial-v34",
+        "abci-ta15-rec-q36m-cp1-c24-s3-d2-behavior-usage-partial-v34-t0",
+    ),
+    (
         "qwen35-16-v27-behavior64",
         "16",
         "qwen35",

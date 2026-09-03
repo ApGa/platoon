@@ -1,0 +1,220 @@
+#!/bin/bash
+#PBS -P gai51740
+#PBS -q R9920261300
+#PBS -v RTYPE=rt_HF
+#PBS -l select=15:mpiprocs=8
+#PBS -l place=scatter
+#PBS -l walltime=168:00:00
+#PBS -N rasp-h200-15q36-bgopt-v34
+#PBS -j oe
+#PBS -o /groups/gai51740/aci18912it/rasp/logs/
+#PBS -m a
+
+# Fresh 64K Toolathlon-only Qwen3.6 run. Four nodes train with CP1/TP2/PP1,
+# eleven nodes serve TP8 SGLang replicas, and the rollout queue admits three
+# batches. Toolathlon's partial reward mode is an attested, fail-closed launch
+# input rather than an ambient controller-only variable.
+
+set -euo pipefail
+umask 077
+
+REPO_ROOT=/home/aci18912it/rasp/releases/platoon-v8r34-07bebf9-057108f
+RELEASE_REF=refs/tags/abci-v8r34-07bebf9-057108f
+CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_15node_recursive_h200_qwen36_moe_cp1_c24_s3_v34_behavior_usage_gated_partial.yaml
+BASE_CONFIG=${REPO_ROOT}/plugins/openreward/platoon/openreward/configs/areal/abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v33_behavior_usage_gated.yaml
+COMMON=${REPO_ROOT}/pbs-scripts/openreward-ta-swe-prealloc-common.sh
+NODE_SERVICES=${REPO_ROOT}/pbs-scripts/openreward-node-services.sh
+ABCI_ENV=${REPO_ROOT}/pbs-scripts/openreward-v34-abci.env
+EXPERIMENT=abci-or-ta15-q36-cp1-behavior-usage-partial-v34
+TRIAL=abci-ta15-rec-q36m-cp1-c24-s3-d2-behavior-usage-partial-v34-t0
+RECEIPT=/groups/gai51740/aci18912it/rasp/job-state/gates/${TRIAL}.success.json
+CHECKPOINT_ROOT=/groups/gai51740/aci18912it/rasp/experiments/areal/checkpoints/aci18912it/${EXPERIMENT}/${TRIAL}
+CONFIG_SHA256=c74e9cc99d1fda0f36e3e2b55fd586638b03585028b2dc7e64762863ccd23685
+BASE_CONFIG_SHA256=e595b4a66b7ae0460557fc9d5fdca0b7240340c365f1e7c4cfab8f2108970c17
+FRESH_BINDING=qwen36-15-v34-behavior-usage-partial64
+
+die() {
+    echo "[h200-15-q36-behavior-usage-v34] ERROR: $*" >&2
+    exit 2
+}
+
+require_literal_count() {
+    local file=$1
+    local expected=$2
+    local literal=$3
+    local observed
+    observed=$(grep -Fxc -- "${literal}" "${file}" || true)
+    [[ "${observed}" == "${expected}" ]] || \
+        die "$(basename -- "${file}") must contain ${expected} exact occurrence(s) of: ${literal}"
+}
+
+require_component() {
+    local relative=$1
+    local expected=$2
+    local root=${REPO_ROOT}/${relative}
+    [[ -d "${root}" && ! -L "${root}" ]] || die "missing component ${relative}"
+    [[ "$(git -C "${root}" rev-parse --verify HEAD)" == "${expected}" ]] || \
+        die "component revision mismatch: ${relative}"
+    git -C "${root}" diff --quiet --no-ext-diff HEAD -- || \
+        die "component tracked tree is dirty: ${relative}"
+    git -C "${root}" diff --cached --quiet --no-ext-diff HEAD -- || \
+        die "component index is dirty: ${relative}"
+}
+
+first_literal_line() {
+    local file=$1
+    local literal=$2
+    local match
+    match=$(awk -v literal="${literal}" 'index($0, literal) { print NR; exit }' "${file}") || \
+        die "$(basename -- "${file}") is missing ordered literal: ${literal}"
+    [[ -n "${match}" ]] || \
+        die "$(basename -- "${file}") is missing ordered literal: ${literal}"
+    printf '%s\n' "${match}"
+}
+
+[[ -d "${REPO_ROOT}/platoon" && -r "${CONFIG}" && -r "${BASE_CONFIG}" && \
+    -x "${COMMON}" && -x "${NODE_SERVICES}" && -r "${ABCI_ENV}" ]] || \
+    die "immutable v8r34 release is incomplete: ${REPO_ROOT}"
+[[ "$(readlink -f "${REPO_ROOT}")" == "${REPO_ROOT}" ]] || \
+    die "release root must be the exact non-symlink path"
+
+release_head=$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)
+release_commit=$(git -C "${REPO_ROOT}" rev-parse --verify "${RELEASE_REF}^{commit}")
+[[ "${release_head}" == "${release_commit}" ]] || \
+    die "release HEAD is not ${RELEASE_REF}"
+git -C "${REPO_ROOT}" diff --quiet --no-ext-diff HEAD -- || die "release tracked tree is dirty"
+git -C "${REPO_ROOT}" diff --cached --quiet --no-ext-diff HEAD -- || die "release index is dirty"
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
+    die "release has tracked or ordinary untracked changes"
+unset release_head release_commit
+
+require_component external/AReaL d99124ec15102ca2fcd4960cc8beaef3950c2672
+require_component external/openhands-agent-sdk 057108f1f1235940e5d04401b4c294e4777c3baf
+require_component external/swe-rebench-v2-openrewardenv 538b5c5c9c529d3c78d5ef7fd3df7e54e7902ad7
+require_component external/toolathlon-gym 18e62c0d0419da88209af911528f2f8a0b44a5ed
+
+read -r observed_config_sha _ < <(sha256sum -- "${CONFIG}")
+[[ "${observed_config_sha}" == "${CONFIG_SHA256}" ]] || \
+    die "optimized behavior/usage-gated config digest mismatch"
+read -r observed_base_sha _ < <(sha256sum -- "${BASE_CONFIG}")
+[[ "${observed_base_sha}" == "${BASE_CONFIG_SHA256}" ]] || \
+    die "inherited v33 behavior/usage-gated config digest mismatch"
+unset observed_config_sha observed_base_sha
+
+for literal in \
+    '  - abci_toolathlon_openhands_areal_prealloc_32node_recursive_h200_qwen36_moe_cp2_c12_v33_behavior_usage_gated' \
+    'experiment_name: abci-or-ta15-q36-cp1-behavior-usage-partial-v34' \
+    'trial_name: abci-ta15-rec-q36m-cp1-c24-s3-d2-behavior-usage-partial-v34-t0' \
+    '  batch_size: 8' \
+    '  group_size: 8' \
+    '  backend: sglang:d11p1t8' \
+    '  max_concurrent_rollouts: 24' \
+    '  consumer_batch_size: 8' \
+    '  max_head_offpolicyness: 3' \
+    '  ensure_batch_divisible_by: 16' \
+    '  return_routed_experts: true' \
+    '  backend: megatron:(attn:d16p1t2c1|ffn:d4p1t1e8)' \
+    '  gradient_checkpointing: true' \
+    '  enable_cispo_fused_linear_logprobs: true' \
+    '  cispo_fused_linear_chunk_size: 512' \
+    '  enable_router_replay: true' \
+    '  router_replay_num_layers: 40' \
+    '  router_replay_topk: 8' \
+    '  router_replay_num_experts: 256' \
+    '    enable_mtp: false' \
+    '    enable_fp32_lm_head: false' \
+    '    use_deterministic_algorithms: true' \
+    '    recompute_granularity: full' \
+    '    recompute_method: uniform' \
+    '    recompute_num_layers: 1' \
+    '    moe_permute_fusion: true' \
+    '    moe_router_fusion: false' \
+    '  context_length: 65537' \
+    '  max_prefill_tokens: 65536' \
+    '  enable_recursive_subagents: true' \
+    '  subagent_max_depth: 2' \
+    '  enable_subagent_reward_judging: true' \
+    '  enable_subagent_behavior_judging: true' \
+    '  enable_subagent_parent_usage_eligibility_gate: true' \
+    '    - label: toolathlon' \
+    '  type: pbs_prealloc' \
+    '  n_nodes: 15' \
+    '  fileroot: ${oc.env:PLATOON_EXPERIMENT_ROOT}' \
+    '    group: abci-ta15-rec-q36m-cp1-c24-s3-d2-behavior-usage-partial-v34'; do
+    require_literal_count "${CONFIG}" 1 "${literal}"
+done
+require_literal_count "${CONFIG}" 2 '    max_tokens_per_mb: 65536'
+require_literal_count "${CONFIG}" 0 '    propagate_root_success: true'
+require_literal_count "${CONFIG}" 0 '    - label: swe_rebench'
+
+# Partial credit is a launch invariant. Prove the value is established before
+# the first service launch, explicitly crosses pbsdsh, is validated by the
+# node supervisor, and is injected after Singularity --cleanenv.
+require_literal_count "${COMMON}" 1 'export OPENREWARD_REWARD_MODE=partial'
+require_literal_count "${COMMON}" 1 '        "OPENREWARD_REWARD_MODE=${OPENREWARD_REWARD_MODE}" \'
+require_literal_count "${NODE_SERVICES}" 1 'REWARD_MODE=${OPENREWARD_REWARD_MODE:-}'
+require_literal_count "${NODE_SERVICES}" 1 '[[ "${REWARD_MODE}" == partial ]] || \'
+require_literal_count "${NODE_SERVICES}" 1 '        OPENREWARD_REWARD_MODE="${REWARD_MODE}" \'
+partial_export_line=$(first_literal_line "${COMMON}" 'export OPENREWARD_REWARD_MODE=partial')
+service_start_line=$(first_literal_line "${COMMON}" 'echo "[pbs-openreward] starting one Toolathlon service on ${SERVICE_NODE_COUNT}')
+pbs_forward_line=$(first_literal_line "${COMMON}" '        "OPENREWARD_REWARD_MODE=${OPENREWARD_REWARD_MODE}" \')
+reward_validation_line=$(first_literal_line "${NODE_SERVICES}" '[[ "${REWARD_MODE}" == partial ]]')
+cleanenv_start_line=$(first_literal_line "${NODE_SERVICES}" '"${RUNTIME}" exec --cleanenv --no-home --overlay')
+cleanenv_injection_line=$(first_literal_line "${NODE_SERVICES}" '        OPENREWARD_REWARD_MODE="${REWARD_MODE}" \')
+((partial_export_line < service_start_line && \
+    service_start_line < pbs_forward_line && \
+    reward_validation_line < cleanenv_start_line && \
+    cleanenv_start_line < cleanenv_injection_line)) || \
+    die "partial-reward export/forward/validation/cleanenv injection order is invalid"
+unset partial_export_line service_start_line pbs_forward_line
+unset reward_validation_line cleanenv_start_line cleanenv_injection_line
+
+# Reuse the accepted v33 assets, but execute the optimized Python tree from the
+# immutable v34 release. External Gate2/all-MCP probes are unchanged and are
+# not repeated for this pure code/config successor.
+export OPENREWARD_MODEL_FAMILY=qwen36
+# shellcheck disable=SC1090
+source "${ABCI_ENV}"
+export PLATOON_ABCI_ENV_FILE=${ABCI_ENV}
+[[ "${PLATOON_REPO_ROOT}" == "${REPO_ROOT}" ]] || \
+    die "v34 overlay selected another repository"
+[[ "${OPENREWARD_QWEN36_MODEL_REPOSITORY:-}" == apurvaga/Qwen3.6-35B-A3B-preserve-thinking && \
+    "${OPENREWARD_QWEN36_MODEL_REVISION:-}" == ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    "${OPENREWARD_QWEN36_MODEL_SNAPSHOT:-}" == /groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.6-35B-A3B-preserve-thinking/snapshots/ce815485d640a33461c25e3d5c505b5346e8c857 && \
+    -d "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" && ! -L "${OPENREWARD_QWEN36_MODEL_SNAPSHOT}" ]] || \
+    die "pinned Qwen3.6 preserve-thinking model binding is incomplete"
+export PLATOON_MODEL_SNAPSHOT=${OPENREWARD_QWEN36_MODEL_SNAPSHOT}
+
+for prior in "${RECEIPT}" "${RECEIPT%.json}.candidate.json" "${RECEIPT%.json}.error.json"; do
+    [[ ! -e "${prior}" && ! -L "${prior}" ]] || \
+        die "refusing stale success artifact; use a fresh trial: ${prior}"
+done
+[[ ! -e "${CHECKPOINT_ROOT}" && ! -L "${CHECKPOINT_ROOT}" ]] || \
+    die "refusing stale checkpoint; use a fresh trial: ${CHECKPOINT_ROOT}"
+
+export OPENREWARD_EXPECTED_NNODES=15
+export OPENREWARD_EXPECTED_MODEL_SHARDS=26
+export OPENREWARD_SERVICE_NODE_COUNT=11
+export OPENREWARD_ENVIRONMENT_SET=toolathlon_only
+export OPENREWARD_EXPECTED_RECURSIVE=1
+export OPENREWARD_EXPECTED_PTC=1
+export OPENREWARD_EXPECTED_EXPERIMENT_NAME=${EXPERIMENT}
+export OPENREWARD_EXPECTED_TRIAL_NAME=${TRIAL}
+export OPENREWARD_EXPECTED_FRESH_RUN_BINDING=${FRESH_BINDING}
+export OPENREWARD_NODE_MEMORY_GUARD_ENABLED=0
+export OPENREWARD_NODE_MEMORY_LIMIT_BYTES=2061584302080
+export OPENREWARD_NODE_MEMORY_TRIGGER_PERCENT=85
+export OPENREWARD_NODE_MEMORY_FALLBACK_AVAILABLE_BYTES=274877906944
+export OPENREWARD_NODE_MEMORY_POLL_SECONDS=2
+export OPENREWARD_NODE_MEMORY_TELEMETRY_SECONDS=60
+export PLATOON_TRAINING_SUCCESS_RECEIPT=${RECEIPT}
+export PLATOON_TRAINING_SUCCESS_RECEIPT_REMOTE_TIMEOUT=300
+export PLATOON_TRAINING_SUCCESS_RECEIPT_FINALIZE=0
+export PLATOON_TRAINING_CONFIG_PATH=${CONFIG}
+export PLATOON_TRAINING_SUCCESS_NOT_BEFORE_EPOCH=$(date +%s)
+unset OPENREWARD_GATE_MARKER_TO_PUBLISH
+unset OPENREWARD_REQUIRE_EXISTING_RECOVERY OPENREWARD_EXPECTED_RESUME_GLOBAL_STEP
+unset OPENREWARD_EXPECTED_RESUME_CHECKPOINT_ROOT OPENREWARD_PREUPDATE_RECOVERY_BINDING_ID
+unset OPENREWARD_EXPECTED_RESUME_SUCCESSOR_BINDING
+
+exec "${COMMON}" "${CONFIG}"
