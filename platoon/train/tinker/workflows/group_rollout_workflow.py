@@ -292,9 +292,7 @@ class GroupRolloutWorkflow:
             A list-compatible datum result. An empty result still carries exact
             task generation workload for trainer-side batch accounting.
         """
-        raw_outcomes = await asyncio.gather(
-            *[self.arun_episode_single(data, i) for i in range(self.config.group_size)]
-        )
+        raw_outcomes = await self._run_group_rollouts(data)
         # Accept legacy test/custom overrides that return the old result type,
         # while the canonical single-rollout path always returns an outcome.
         outcomes = [
@@ -328,6 +326,19 @@ class GroupRolloutWorkflow:
 
         if not valid_results:
             logger.warning(f"No results found for task {data['task_id']}")
+            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+
+        min_successful = getattr(self.config, "min_successful_group_size", 1)
+        if len(valid_results) < min_successful:
+            # Too few members for a meaningful within-task baseline. The
+            # generation work is still accounted for through the outcomes.
+            logger.warning(
+                "Rejecting task %s group with %s usable rollout(s); minimum is %s",
+                data["task_id"],
+                len(valid_results),
+                min_successful,
+            )
+            self.tracker.scalar(group_size_rejected=1.0)
             return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
 
         # === Track stats BEFORE early returns ===
@@ -543,6 +554,67 @@ class GroupRolloutWorkflow:
             outcomes=outcomes,
             trainable_rollouts=trainable_rollouts,
         )
+
+    async def _run_group_rollouts(self, data: dict) -> list:
+        """Run ``group_size`` rollouts concurrently with the straggler policy.
+
+        Without ``straggler_timeout_seconds`` this is equivalent to
+        ``asyncio.gather``. With it, once ``straggler_quorum`` members
+        (default ``group_size - 1``) have settled, the remaining members get at
+        most ``straggler_timeout_seconds`` more; leftovers are cancelled and
+        reported as unobserved outcomes plus the ``straggler_cancelled`` scalar.
+        """
+        group_size = self.config.group_size
+        straggler_timeout = getattr(self.config, "straggler_timeout_seconds", None)
+        tasks = [
+            asyncio.ensure_future(self.arun_episode_single(data, i))
+            for i in range(group_size)
+        ]
+        if straggler_timeout is None:
+            return list(await asyncio.gather(*tasks))
+
+        quorum = getattr(self.config, "straggler_quorum", None)
+        if quorum is None:
+            quorum = max(group_size - 1, 1)
+        pending: set[asyncio.Future] = set(tasks)
+        try:
+            while pending and len(pending) > group_size - quorum:
+                _done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            if pending:
+                _done, pending = await asyncio.wait(pending, timeout=straggler_timeout)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        # A rollout can settle between the deadline and this cancellation;
+        # only members that are still running count as cancelled stragglers.
+        stragglers = [task for task in tasks if not task.done()]
+        if stragglers:
+            logger.warning(
+                "Cancelling %s straggler rollout(s) for task %s after %ss grace (quorum %s/%s)",
+                len(stragglers),
+                data["task_id"],
+                straggler_timeout,
+                quorum,
+                group_size,
+            )
+            for task in stragglers:
+                task.cancel()
+            # run_rollout's own cancellation cleanup marks trajectories as
+            # interrupted; leaked environment sessions are reaped server-side.
+            await asyncio.gather(*stragglers, return_exceptions=True)
+        self.tracker.scalar(straggler_cancelled=float(len(stragglers)))
+
+        outcomes: list = []
+        for task in tasks:
+            if task.cancelled():
+                outcomes.append(_SingleRolloutOutcome(result=None, workload=RolloutWorkload(), observed=False))
+            else:
+                # Propagates a legacy override's exception like gather did.
+                outcomes.append(task.result())
+        return outcomes
 
     async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> _SingleRolloutOutcome:
         """Run a single rollout and return training data.

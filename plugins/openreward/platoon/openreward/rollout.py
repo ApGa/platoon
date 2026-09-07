@@ -61,6 +61,35 @@ from platoon.openreward.env import OpenRewardOpenHandsEnv
 OPENREWARD_CONDENSER_KEEP_FIRST = 2
 logger = logging.getLogger(__name__)
 
+# Substring (OpenHands ``model_matches`` semantics) of the preserve-thinking model ids
+# (``apurvaga/Qwen3.6-35B-A3B-preserve-thinking`` under any provider prefix).
+OPENHANDS_SEND_REASONING_CONTENT_PATTERN = "preserve-thinking"
+
+
+def enable_openhands_reasoning_replay(pattern: str = OPENHANDS_SEND_REASONING_CONTENT_PATTERN) -> bool:
+    """Make OpenHands re-send ``reasoning_content`` on historical assistant turns for preserve-thinking models.
+
+    OpenHands only includes ``reasoning_content`` in outgoing message dicts for models matched by
+    ``openhands.sdk.llm.utils.model_features.SEND_REASONING_CONTENT_MODELS`` (a plain list consulted per call
+    via ``get_features``); ``qwen3.6`` is not in it.  The Qwen3.6 preserve-thinking chat template renders
+    every assistant turn's ``<think>`` block, so without the reasoning the prompt of turn k+1 is no longer an
+    extension of turn k (no prefix-merged datums, no exact-prefix R3 routing parents).  Idempotent; returns
+    whether the pattern is registered (False when the OpenHands SDK is unavailable, e.g. under test stubs).
+    """
+    try:
+        from openhands.sdk.llm.utils import model_features
+    except ImportError:  # pragma: no cover - exercised only when openhands is stubbed out
+        return False
+    models = getattr(model_features, "SEND_REASONING_CONTENT_MODELS", None)
+    if not isinstance(models, list):
+        return False
+    if pattern not in models:
+        models.append(pattern)
+    return True
+
+
+enable_openhands_reasoning_replay()
+
 
 class OpenRewardAgent(OpenHandsSDKAgent):
     """Require an environment terminal tool instead of accepting plain text."""
@@ -269,7 +298,8 @@ def _build_llm(
     # by AReaL and SGLang.  This is especially important for local Qwen model
     # overlays: using the old hard-coded Qwen3.5 tokenizer would make condenser
     # thresholds disagree with the prompts that are actually sent for rollout.
-    custom_tokenizer = model_name.removeprefix("openai/")
+    # ``platoon-tinker/<hf id>`` is the litellm custom-provider name used by the Tinker proxy.
+    custom_tokenizer = model_name.removeprefix("openai/").removeprefix("platoon-tinker/")
     if custom_tokenizer.startswith("openai/"):
         custom_tokenizer = None
     if not load_custom_tokenizer:
@@ -299,19 +329,19 @@ def _build_condenser_llm(
     # Condensation has its own reasoning + summary budget. AReaL additionally
     # clips this to the model context remaining after the condensation prompt.
     max_output_tokens = openreward_config.condenser_max_completion_tokens
-    extra_body: dict = {}
-    # AReaL exposes a local HTTP OpenAI proxy. Send a standard reasoning hint
-    # that Platoon's proxy bridge translates into Qwen chat-template kwargs.
-    # The safe condenser strips the reasoning span from the retained summary.
-    if (config.model_endpoint or "").lower().startswith("http://"):
-        enable_thinking = not openreward_config.condenser_disable_thinking
-        extra_body = {
-            "reasoning_effort": "high" if enable_thinking else "none",
-            "chat_template_kwargs": {
-                "enable_thinking": enable_thinking,
-                "preserve_thinking": False,
-            },
-        }
+    # Send a standard reasoning hint plus Qwen chat-template kwargs unconditionally: AReaL's local HTTP
+    # OpenAI proxy and the Tinker proxy (``platoon-tinker/`` provider, endpoint "None") both translate
+    # ``extra_body.chat_template_kwargs`` / ``reasoning_effort == "none"`` into the renderer's
+    # ``enable_thinking`` / ``preserve_thinking``.  The safe condenser strips the reasoning span from the
+    # retained summary.
+    enable_thinking = not openreward_config.condenser_disable_thinking
+    extra_body: dict = {
+        "reasoning_effort": "high" if enable_thinking else "none",
+        "chat_template_kwargs": {
+            "enable_thinking": enable_thinking,
+            "preserve_thinking": False,
+        },
+    }
     return _build_llm(
         config,
         usage_id="platoon-openreward-openhands-condenser",

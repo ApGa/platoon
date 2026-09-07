@@ -37,6 +37,19 @@ class WorkflowConfig:
     # a model forward/backward. Baselines and rollout metrics are computed before
     # this filter is applied.
     filter_zero_advantage_datums: bool = True
+    # Straggler policy (ported from the AReaL workflow; rollouts stay in-process).
+    # Once ``straggler_quorum`` group members have settled (completed, failed,
+    # or been interrupted), wait at most this many additional seconds for the
+    # rest, then cancel them. None keeps every member until its own rollout
+    # timeout.
+    straggler_timeout_seconds: float | None = None
+    # Number of settled members that starts the tail-grace clock. None means
+    # ``group_size - 1`` (the classic single-straggler policy). Requires
+    # ``straggler_timeout_seconds``.
+    straggler_quorum: int | None = None
+    # A group that returns fewer usable rollouts than this produces no training
+    # datums (its rollout workload is still accounted for).
+    min_successful_group_size: int = 1
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.subagent_datum_keep_probability <= 1.0:
@@ -45,6 +58,16 @@ class WorkflowConfig:
             self.subagent_datum_sampling_seed, int
         ):
             raise ValueError("subagent_datum_sampling_seed must be an integer")
+        if self.group_size < 1:
+            raise ValueError("workflow group_size must be positive")
+        if self.straggler_timeout_seconds is not None and self.straggler_timeout_seconds <= 0:
+            raise ValueError("straggler_timeout_seconds must be positive or null")
+        if self.straggler_quorum is not None and not 1 <= self.straggler_quorum <= self.group_size:
+            raise ValueError("straggler_quorum must be in [1, group_size] or null")
+        if self.straggler_timeout_seconds is None and self.straggler_quorum is not None:
+            raise ValueError("straggler_quorum requires straggler_timeout_seconds")
+        if not 1 <= self.min_successful_group_size <= self.group_size:
+            raise ValueError("min_successful_group_size must be in [1, group_size]")
 
 
 # TODO:

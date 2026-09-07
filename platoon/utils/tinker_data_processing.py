@@ -31,6 +31,18 @@ from platoon.utils.trajectory_status import trajectory_was_interrupted
 
 logger = logging.getLogger(__name__)
 
+# loss_fn_inputs key carrying the gateway routing handle (contract C2).
+ROUTING_HANDLE_KEY = "routing_handle"
+
+
+def _interaction_routing_id(interaction: TinkerLLMInteraction) -> int | None:
+    """Return the sampled sequence's gateway routing id, if the proxy captured one."""
+
+    routing_id = getattr(interaction, "routing_id", None)
+    if routing_id is None or isinstance(routing_id, bool):
+        return None
+    return int(routing_id)
+
 
 def _exclude_from_training(trajectory: dict) -> bool:
     misc = trajectory.get("misc", {})
@@ -237,6 +249,11 @@ class SequenceAccumulator:
     advantages: list[float] = field(default_factory=list)
     mask: list[float] = field(default_factory=list)
     error_action_mask: list[bool] | None = None
+    # Gateway routing id (rollout routing replay) of the LAST interaction merged
+    # into this sequence. Because merged interactions are prefix extensions, the
+    # accumulated tokens equal that call's prompt + generated tokens, so its
+    # captured expert routing covers the whole datum.
+    last_routing_id: int | None = None
 
     def clear(self):
         self.full_sequence = []
@@ -245,6 +262,7 @@ class SequenceAccumulator:
         self.mask = []
         if self.error_action_mask is not None:
             self.error_action_mask = []
+        self.last_routing_id = None
 
 
 def make_datum_from_accumulator(
@@ -289,6 +307,13 @@ def make_datum_from_accumulator(
     if traj_depth is not None:
         loss_fn_inputs["traj_depth"] = TensorData.from_torch(torch.tensor([traj_depth], dtype=torch.long))
         loss_fn_inputs["traj_start"] = TensorData.from_torch(torch.tensor([1.0 if traj_start else 0.0]))
+    if accumulator.last_routing_id is not None:
+        # Contract C2 (miles-tinker gateway): int64 [1] handle of the last
+        # merged sample call. The gateway materializes the sampled expert
+        # routing for the datum from it; never stripped by the trainer.
+        loss_fn_inputs[ROUTING_HANDLE_KEY] = TensorData.from_torch(
+            torch.tensor([int(accumulator.last_routing_id)], dtype=torch.int64)
+        )
 
     return tinker.Datum(
         model_input=input_tokens_T,
@@ -416,6 +441,9 @@ def trajectory_to_data(
             accumulator.error_action_mask.extend(
                 [completion_id in deferred_error_completion_ids] * len(ac_tokens)
             )
+        # The accumulated sequence now equals this interaction's prompt +
+        # completion, so its routing capture (if any) covers the datum.
+        accumulator.last_routing_id = _interaction_routing_id(interaction)
 
     # Flush remaining accumulated data
     if accumulator.full_sequence:

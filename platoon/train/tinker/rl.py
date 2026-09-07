@@ -158,6 +158,11 @@ def compute_training_metrics(
     return metrics
 
 
+# Upper bound for one save_checkpoint_async (full-parameter save_state of a
+# 35B model is ~490 GB and takes minutes at 1-2 GB/s).
+SAVE_CHECKPOINT_TIMEOUT_S = 7200.0
+
+
 class Watchdog:
     """Background thread that monitors for hangs and forcibly exits if no activity.
      If Tinker hangs, the only recovery is to forcibly exit the process.
@@ -934,6 +939,7 @@ class PlatoonTinkerRLTrainer:
                 i_batch=shared_state.train_step,
                 save_every=shared_state.save_every,
                 start_batch=start_batch,
+                watchdog=shared_state.watchdog,
             )
             logger.info("_save_checkpoint_and_get_sampling_client returned, updating LLM sampling client")
             shared_state.model_info.llm.update_sampling_client(sampling_client)
@@ -1056,6 +1062,7 @@ class PlatoonTinkerRLTrainer:
         i_batch: int,
         save_every: int,
         start_batch: int = 0,
+        watchdog: Watchdog | None = None,
     ) -> tinker.SamplingClient:
         """Save checkpoint with wandb_run_id and return new sampling client.
 
@@ -1074,15 +1081,21 @@ class PlatoonTinkerRLTrainer:
                 f"(steps_completed={steps_completed}, save_every={save_every})"
             )
             try:
-                path_dict = await checkpoint_utils.save_checkpoint_async(
-                    training_client=training_client,
-                    name=f"{next_batch:06d}",
-                    log_path=self.run_log_path,
-                    loop_state={
-                        "batch": next_batch,
-                        "wandb_run_id": self._stats_logger.wandb_run_id,
-                    },
-                    kind="both",
+                # A full-parameter save_state takes minutes; keep the watchdog fed.
+                path_dict = await self._await_with_heartbeat(
+                    checkpoint_utils.save_checkpoint_async(
+                        training_client=training_client,
+                        name=f"{next_batch:06d}",
+                        log_path=self.run_log_path,
+                        loop_state={
+                            "batch": next_batch,
+                            "wandb_run_id": self._stats_logger.wandb_run_id,
+                        },
+                        kind="both",
+                    ),
+                    name="save_checkpoint",
+                    watchdog=watchdog,
+                    total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
                 )
             except Exception as e:
                 logger.exception(f"save_checkpoint_async failed: {e}")
@@ -1186,16 +1199,20 @@ class PlatoonTinkerRLTrainer:
 
         training_client = await self._create_training_client(service_client, resume_info)
 
-        # Initial sampling client to use
-        path_dict = await checkpoint_utils.save_checkpoint_async(
-            training_client=training_client,
-            name=f"{start_batch:06d}",
-            log_path=self.run_log_path,
-            loop_state={
-                "batch": start_batch,
-                "wandb_run_id": self._stats_logger.wandb_run_id,
-            },
-            kind="both",
+        # Initial sampling client to use (the watchdog is not running yet).
+        path_dict = await self._await_with_heartbeat(
+            checkpoint_utils.save_checkpoint_async(
+                training_client=training_client,
+                name=f"{start_batch:06d}",
+                log_path=self.run_log_path,
+                loop_state={
+                    "batch": start_batch,
+                    "wandb_run_id": self._stats_logger.wandb_run_id,
+                },
+                kind="both",
+            ),
+            name="save_checkpoint",
+            total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
         )
         sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
         sampling_client_step = start_batch
@@ -1275,28 +1292,36 @@ class PlatoonTinkerRLTrainer:
             # Save interrupt checkpoint so we can resume
             if current_step > start_batch:
                 logger.info(f"Saving interrupt checkpoint at step {current_step}...")
-                await checkpoint_utils.save_checkpoint_async(
-                    training_client=shared_state.training_client,
-                    name=f"{current_step:06d}_interrupted",
-                    log_path=self.run_log_path,
-                    kind="both",
-                    loop_state={
-                        "batch": current_step,
-                        "wandb_run_id": self._stats_logger.wandb_run_id,
-                    },
+                await self._await_with_heartbeat(
+                    checkpoint_utils.save_checkpoint_async(
+                        training_client=shared_state.training_client,
+                        name=f"{current_step:06d}_interrupted",
+                        log_path=self.run_log_path,
+                        kind="both",
+                        loop_state={
+                            "batch": current_step,
+                            "wandb_run_id": self._stats_logger.wandb_run_id,
+                        },
+                    ),
+                    name="save_checkpoint",
+                    total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
                 )
                 logger.info(f"Checkpoint saved. Resume training to continue from step {current_step}.")
         elif start_batch < end_batch:
             # Training completed normally - save final checkpoint
-            await checkpoint_utils.save_checkpoint_async(
-                training_client=shared_state.training_client,
-                name="final",
-                log_path=self.run_log_path,
-                kind="both",
-                loop_state={
-                    "batch": end_batch,
-                    "wandb_run_id": self._stats_logger.wandb_run_id,
-                },
+            await self._await_with_heartbeat(
+                checkpoint_utils.save_checkpoint_async(
+                    training_client=shared_state.training_client,
+                    name="final",
+                    log_path=self.run_log_path,
+                    kind="both",
+                    loop_state={
+                        "batch": end_batch,
+                        "wandb_run_id": self._stats_logger.wandb_run_id,
+                    },
+                ),
+                name="save_checkpoint",
+                total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
             )
             logger.info("Training complete successfully!")
         else:

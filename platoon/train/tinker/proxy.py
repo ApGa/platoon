@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -12,6 +14,8 @@ from typing import (
     Dict,
     List,
     Literal,
+    Mapping,
+    Sequence,
     Type,
     TypeGuard,
     TypeVar,
@@ -21,6 +25,9 @@ from typing import (
 
 import litellm
 import tinker
+import tinker.types
+import tinker.types.sample_response
+import tinker.types.sampled_sequence
 from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import (
     ChatCompletionMessageToolCall,
@@ -33,7 +40,8 @@ from litellm.types.utils import ChoiceLogprobs as LitellmChoiceLogprobs
 from litellm.types.utils import Message as LitellmMessage
 from litellm.types.utils import TopLogprob as LitellmTopLogprob
 from litellm.utils import custom_llm_setup
-from tinker.types import ModelInput, SampleResponse, SamplingParams
+from pydantic import ConfigDict
+from tinker.types import ModelInput, SamplingParams
 from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.renderers import Message as TinkerMessage
 from tinker_cookbook.renderers import Renderer, get_renderer
@@ -41,15 +49,105 @@ from tinker_cookbook.renderers import ToolCall as TinkerToolCall
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from transformers import AutoProcessor, PreTrainedTokenizer
 
+from platoon.train.tinker.renderers import register as register_platoon_renderers
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# Render kwargs the proxy forwards from a request's ``chat_template_kwargs`` (litellm
+# ``optional_params["extra_body"]["chat_template_kwargs"]`` or top-level
+# ``optional_params["chat_template_kwargs"]``) into ``renderer.build_generation_prompt``.
+CHAT_TEMPLATE_RENDER_KWARGS = ("enable_thinking", "preserve_thinking")
+
+# The condenser is the only caller with this completion budget (``condenser_max_completion_tokens``);
+# its optional_params keys are logged once so the chat_template_kwargs plumbing is visible in client.log.
+CONDENSER_MAX_COMPLETION_TOKENS = 26214
+
+
+def _patch_tinker_sample_response_extra_allow() -> None:
+    """Rebind ``tinker.types.SampleResponse``/``SampledSequence`` to ``extra="allow"`` subclasses.
+
+    tinker 0.16.1 response models use ``extra="ignore"`` (``tinker/_models.py``), which drops the
+    gateway's per-sequence ``routing_id`` (contract C1).  ``SamplingClient._sample_async_impl`` resolves
+    ``types.SampleResponse`` at call time, so rebinding the module attributes before any sampling client
+    exists is enough: ``getattr(seq, "routing_id", None)`` then works on every sampled sequence.
+    Idempotent.  Subprocess sampling (``TINKER_SUBPROCESS_SAMPLING``) would run the sidecar without this
+    patch, so it must be unset.
+    """
+    subprocess_sampling = os.environ.get("TINKER_SUBPROCESS_SAMPLING", "").strip().lower()
+    assert subprocess_sampling in ("", "0", "false", "no"), (
+        "TINKER_SUBPROCESS_SAMPLING must be unset: the sampling sidecar would not carry the extra='allow' "
+        "SampleResponse patch and routing_id (R3) would be dropped"
+    )
+    if getattr(tinker.types.SampleResponse, "_platoon_extra_allow", False):
+        return
+
+    base_sequence = tinker.types.sampled_sequence.SampledSequence
+    base_response = tinker.types.sample_response.SampleResponse
+
+    class SampledSequence(base_sequence):  # type: ignore[misc,valid-type]
+        model_config = ConfigDict(frozen=True, extra="allow")
+        _platoon_extra_allow = True
+
+    class SampleResponse(base_response):  # type: ignore[misc,valid-type]
+        model_config = ConfigDict(frozen=True, extra="allow")
+        _platoon_extra_allow = True
+        sequences: Sequence[SampledSequence]  # type: ignore[assignment]
+
+    SampledSequence.__name__ = SampledSequence.__qualname__ = base_sequence.__name__
+    SampleResponse.__name__ = SampleResponse.__qualname__ = base_response.__name__
+    for module, name, cls in (
+        (tinker.types.sampled_sequence, "SampledSequence", SampledSequence),
+        (tinker.types, "SampledSequence", SampledSequence),
+        (tinker, "SampledSequence", SampledSequence),
+        (tinker.types.sample_response, "SampleResponse", SampleResponse),
+        (tinker.types, "SampleResponse", SampleResponse),
+        (tinker, "SampleResponse", SampleResponse),
+    ):
+        if hasattr(module, name):
+            setattr(module, name, cls)
+
+
+_patch_tinker_sample_response_extra_allow()
+SampleResponse = tinker.types.SampleResponse
+
+# ``train.renderer_name: qwen3_6_preserve_thinking`` must resolve in every process that calls
+# ``get_renderer`` (the trainer, and anything that unpickles a renderer); registration is idempotent.
+register_platoon_renderers()
 
 
 @dataclass
 class TinkerLLMInteraction:
     obs: tinker.ModelInput
     action: TokensWithLogprobs
+    # Gateway routing handle of the sampled sequence (contract C1); None when the gateway did not send one.
+    routing_id: int | None = None
+
+
+@dataclass(frozen=True)
+class RenderRequest:
+    """Per-request rendering inputs extracted from litellm's ``optional_params``."""
+
+    tools: list[dict[str, Any]] | None = None
+    render_kwargs: dict[str, bool] | None = None
+
+
+def to_cookbook_tool_specs(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """OpenAI ``{"type": "function", "function": {name, description, parameters}}`` -> cookbook ``ToolSpec``."""
+    specs: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function", tool) if isinstance(tool, Mapping) else tool
+        if not isinstance(function, Mapping) or "name" not in function:
+            raise ValueError(f"Invalid tool definition: {tool!r}")
+        specs.append(
+            {
+                "name": function["name"],
+                "description": function.get("description", "") or "",
+                "parameters": function.get("parameters") or {"type": "object", "properties": {}},
+            }
+        )
+    return specs
 
 
 proxy_interactions: ContextVar[dict[str, TinkerLLMInteraction]] = ContextVar("proxy_interactions")
@@ -131,6 +229,9 @@ class TinkerLLM(CustomLLM):
         self.seed = seed
         self.context_window_length = context_window_length
         self._version: int = 0
+        self._build_prompt_params = frozenset(inspect.signature(renderer.build_generation_prompt).parameters)
+        self._parse_response_params = frozenset(inspect.signature(renderer.parse_response).parameters)
+        self._logged_condenser_params = False
 
     @property
     def version(self) -> int:
@@ -189,29 +290,33 @@ class TinkerLLM(CustomLLM):
             type="function",
         )
 
-    def _normalize_message_content(self, content: Any) -> str:
-        """Convert tinker-cookbook structured content parts to plain text for LiteLLM."""
+    @staticmethod
+    def _split_message_content(content: Any) -> tuple[str, str | None]:
+        """tinker-cookbook message content -> (visible text, thinking or None) for LiteLLM."""
+        if content is None:
+            return "", None
         if isinstance(content, str):
-            return content
+            return content, None
         if isinstance(content, list):
-            parts: list[str] = []
+            texts: list[str] = []
+            thinks: list[str] = []
             for part in content:
                 if isinstance(part, dict):
                     part_type = part.get("type")
                     if part_type == "text":
-                        parts.append(str(part.get("text", "")))
+                        texts.append(str(part.get("text", "")))
                     elif part_type == "thinking":
-                        parts.append(str(part.get("thinking", "")))
+                        thinks.append(str(part.get("thinking", "")))
                     elif part_type == "image":
                         # LiteLLM's Message model expects plain string content on this path.
                         # Drop image payloads but keep a marker so content is not silently empty.
-                        parts.append("[image]")
+                        texts.append("[image]")
                     else:
-                        parts.append(str(part))
+                        texts.append(str(part))
                 else:
-                    parts.append(str(part))
-            return "".join(parts)
-        return str(content)
+                    texts.append(str(part))
+            return "".join(texts), ("".join(thinks) if thinks else None)
+        return str(content), None
 
     def _get_optional_params(
         self,
@@ -242,20 +347,109 @@ class TinkerLLM(CustomLLM):
                 return value
         return default_value
 
+    def _extract_render_request(self, kwargs: Mapping[str, Any]) -> RenderRequest:
+        """Tools and chat-template kwargs from litellm's ``optional_params``.
+
+        litellm delivers OpenHands' native tool calling as ``optional_params["tools"]`` (OpenAI
+        ``{"type": "function", "function": {...}}`` dicts) with ``optional_params["tool_choice"]``;
+        ``extra_body`` is passed through verbatim for custom providers, and a top-level
+        ``chat_template_kwargs`` kwarg lands next to it (verified against the openreward venv's litellm).
+        """
+        optional_params = cast(Dict[str, Any], kwargs.get("optional_params", {}) or {})
+        if not isinstance(optional_params, dict):  # type: ignore[redundant-expr]
+            raise ValueError(f"Invalid optional params type: {type(optional_params)}")
+
+        tools = optional_params.get("tools") or None
+        if tools is not None and not isinstance(tools, list):
+            raise ValueError(f"Invalid tools type: {type(tools)}")
+        tool_choice = optional_params.get("tool_choice")
+        if tool_choice is not None and tool_choice not in ("auto", "none"):
+            raise ValueError(
+                f"tool_choice={tool_choice!r} is not supported by the Tinker proxy (only 'auto'/'none'): "
+                "forced or named tool calls cannot be enforced by the renderer"
+            )
+
+        extra_body = optional_params.get("extra_body") or {}
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        chat_template_kwargs: dict[str, Any] = {}
+        for source in (extra_body.get("chat_template_kwargs"), optional_params.get("chat_template_kwargs")):
+            if isinstance(source, dict):
+                chat_template_kwargs.update(source)
+        render_kwargs: dict[str, bool] = {
+            key: bool(chat_template_kwargs[key])
+            for key in CHAT_TEMPLATE_RENDER_KWARGS
+            if chat_template_kwargs.get(key) is not None
+        }
+        reasoning_effort = optional_params.get("reasoning_effort", extra_body.get("reasoning_effort"))
+        if reasoning_effort == "none":
+            render_kwargs["enable_thinking"] = False
+
+        max_tokens = optional_params.get("max_tokens", optional_params.get("max_completion_tokens"))
+        if max_tokens == CONDENSER_MAX_COMPLETION_TOKENS and not self._logged_condenser_params:
+            self._logged_condenser_params = True
+            logger.info(
+                "First condenser-sized request (max_tokens=%s): optional_params keys=%s extra_body keys=%s "
+                "chat_template_kwargs=%s -> render_kwargs=%s",
+                max_tokens,
+                sorted(optional_params),
+                sorted(extra_body),
+                chat_template_kwargs,
+                render_kwargs,
+            )
+        return RenderRequest(tools=tools, render_kwargs=render_kwargs or None)
+
     def _prepare_model_input(self, **kwargs: Any) -> ModelInput:
-        """LiteLLM messages -> Tinker ModelInput."""
+        """LiteLLM messages (+ tools / chat_template_kwargs) -> Tinker ModelInput."""
         messages = kwargs.pop("messages", None)
         canonical_messages = self._canonicalize_messages(messages)
-        # TODO: Needs to be updated for latest tinker cookbook version.
-        return self.renderer.build_generation_prompt(canonical_messages)
+        request = self._extract_render_request(kwargs)
+        return self._render_prompt(canonical_messages, request)
 
-    def _parse_response(self, model_input: ModelInput, response: SampleResponse) -> ModelResponse:
+    def _render_prompt(self, messages: List[TinkerMessage], request: RenderRequest) -> ModelInput:
+        render_kwargs: dict[str, Any] = {}
+        if request.render_kwargs:
+            unsupported = [k for k in request.render_kwargs if k not in self._build_prompt_params]
+            if unsupported:
+                logger.warning("Renderer %s ignores chat_template_kwargs %s", type(self.renderer).__name__, unsupported)
+            render_kwargs.update({k: v for k, v in request.render_kwargs.items() if k in self._build_prompt_params})
+        if request.tools:
+            if "tools" in self._build_prompt_params:
+                # platoon renderers (qwen3_6_preserve_thinking) take the OpenAI tool dicts verbatim.
+                render_kwargs["tools"] = request.tools
+            else:
+                # tinker_cookbook renderers: fold the tool specs into the leading system message.
+                messages = list(messages)
+                system_prompt = ""
+                if messages and messages[0].get("role") == "system":
+                    system_prompt, _ = self._split_message_content(messages[0].get("content"))
+                    messages = messages[1:]
+                prefix = self.renderer.create_conversation_prefix_with_tools(
+                    cast(Any, to_cookbook_tool_specs(request.tools)), system_prompt=system_prompt
+                )
+                messages = list(prefix) + messages
+        return self.renderer.build_generation_prompt(messages, **render_kwargs)
+
+    @staticmethod
+    def _finish_reason(stop_reason: str, has_tool_calls: bool) -> str:
+        if has_tool_calls:
+            return "tool_calls"
+        return "length" if stop_reason == "length" else "stop"
+
+    def _parse_response(
+        self, model_input: ModelInput, response: SampleResponse, *, tools: list[dict[str, Any]] | None = None
+    ) -> ModelResponse:
         """Tinker Response -> LiteLLM Response.
 
-        Extract log probabilities as well.
+        Splits the renderer's parsed message into ``content`` (visible text), ``reasoning_content``
+        (thinking) and OpenAI ``tool_calls``; ``finish_reason`` is ``tool_calls`` when a tool call was
+        parsed, else ``length``/``stop`` from the sequence's stop reason.  Extracts log probabilities too.
         """
         choices: List[Choices] = []
         completion_token_count = 0
+        parse_kwargs: dict[str, Any] = {}
+        if tools and "tools" in self._parse_response_params:
+            parse_kwargs["tools"] = tools
         for seq in response.sequences:
             completion_token_count += len(seq.tokens)
             if seq.logprobs is not None:
@@ -278,45 +472,37 @@ class TinkerLLM(CustomLLM):
             else:
                 logprobs = None
 
-            parsed_response, parse_success = self.renderer.parse_response(seq.tokens)
+            parsed_response, parse_success = self.renderer.parse_response(seq.tokens, **parse_kwargs)
+            content, thinking = self._split_message_content(parsed_response.get("content"))
+            reasoning_content = parsed_response.get("reasoning_content")  # type: ignore[typeddict-item]
+            if not isinstance(reasoning_content, str):
+                reasoning_content = thinking
+            if reasoning_content == "":
+                reasoning_content = None
+            role = "assistant"
+            tool_calls = None
             if parse_success:
                 role = parsed_response["role"]
                 if not self._validate_role(role):
                     assert False, "This should never happen"
-                # FIXME: The content should not be still there if tool call has been parsed.
-                content = self._normalize_message_content(parsed_response["content"])
-                # NOTE(yuge): I thought about adding this to make it more robust to empty responses,
-                # but later I found it's a configuration error in my renderer. So I think it's better
-                # to just log a warning and go with the default path.
-                # if not content:
-                #     raise ValueError("Parsed content is empty. Original response: " + str(response))
-                if not content:
-                    logger.warning("Parsed content is empty. Original response: " + str(response))
-                tool_calls = parsed_response.get("tool_calls", None)
-                if tool_calls:
-                    tool_calls = [self._parse_tool_call(tool_call) for tool_call in tool_calls]
-                choices.append(
-                    Choices(
-                        message=LitellmMessage(role=role, content=content, tool_calls=tool_calls),
-                        finish_reason=seq.stop_reason,
-                        logprobs=logprobs,
-                        token_ids=seq.tokens,
-                    )
+                raw_tool_calls = parsed_response.get("tool_calls", None)
+                if raw_tool_calls:
+                    tool_calls = [self._parse_tool_call(tool_call) for tool_call in raw_tool_calls]
+            # NOTE(yuge): I thought about adding this to make it more robust to empty responses,
+            # but later I found it's a configuration error in my renderer. So I think it's better
+            # to just log a warning and go with the default path.
+            if not content and not tool_calls and not reasoning_content:
+                logger.warning("Parsed content is empty. Original response: " + str(response))
+            choices.append(
+                Choices(
+                    message=LitellmMessage(
+                        role=role, content=content, reasoning_content=reasoning_content, tool_calls=tool_calls
+                    ),
+                    finish_reason=self._finish_reason(str(seq.stop_reason), bool(tool_calls)),
+                    logprobs=logprobs,
+                    token_ids=seq.tokens,
                 )
-            else:
-                # logger.warning(f"Failed to parse response: {parsed_response}")
-                # Go with the default path
-                choices.append(
-                    Choices(
-                        message=LitellmMessage(
-                            role="assistant",
-                            content=self._normalize_message_content(parsed_response["content"]),
-                        ),
-                        finish_reason=seq.stop_reason,
-                        logprobs=logprobs,
-                        token_ids=seq.tokens,
-                    )
-                )
+            )
         prompt_token_count = model_input.length
         return ModelResponse(
             id=generate_id("tinker-sampling-"),
@@ -330,7 +516,25 @@ class TinkerLLM(CustomLLM):
             ),
         )
 
-    def _record_interaction(self, model_input: ModelInput, model_response: ModelResponse) -> None:
+    @staticmethod
+    def _routing_id_of(response: SampleResponse) -> int | None:
+        """Gateway routing handle of the (single) sampled sequence, or None (contract C1)."""
+        if not response.sequences:
+            return None
+        routing_id = getattr(response.sequences[0], "routing_id", None)
+        if routing_id is None:
+            return None
+        if isinstance(routing_id, bool) or not isinstance(routing_id, int):
+            try:
+                routing_id = int(routing_id)
+            except (TypeError, ValueError):
+                logger.warning("Ignoring non-integer routing_id %r", routing_id)
+                return None
+        return routing_id
+
+    def _record_interaction(
+        self, model_input: ModelInput, model_response: ModelResponse, routing_id: int | None = None
+    ) -> None:
         assert len(model_response.choices) == 1
 
         logprobs_content = model_response.choices[0].logprobs.content
@@ -340,6 +544,7 @@ class TinkerLLM(CustomLLM):
                 tokens=model_response.choices[0].token_ids,
                 maybe_logprobs=[c.logprob for c in logprobs_content] if logprobs_content else [],
             ),
+            routing_id=routing_id,
         )
         proxy_interactions.get()[model_response.id] = interaction
 
@@ -370,7 +575,9 @@ class TinkerLLM(CustomLLM):
         stop_sequences = self._get_optional_params(
             kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
         )
-        model_input = self._prepare_model_input(**kwargs)
+        messages = self._canonicalize_messages(kwargs.pop("messages", None))
+        render_request = self._extract_render_request(kwargs)
+        model_input = self._render_prompt(messages, render_request)
         self._check_context_window_length(model_input, max_tokens)
         params = SamplingParams(
             max_tokens=max_tokens,
@@ -400,8 +607,8 @@ class TinkerLLM(CustomLLM):
         elapsed = time.perf_counter() - start_time
         if elapsed > 30.0:
             logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
-        final_response = self._parse_response(model_input, result)
-        self._record_interaction(model_input, final_response)
+        final_response = self._parse_response(model_input, result, tools=render_request.tools)
+        self._record_interaction(model_input, final_response, routing_id=self._routing_id_of(result))
         return final_response
 
     def completion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
@@ -418,7 +625,9 @@ class TinkerLLM(CustomLLM):
         stop_sequences = self._get_optional_params(
             kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
         )
-        model_input = self._prepare_model_input(**kwargs)
+        messages = self._canonicalize_messages(kwargs.pop("messages", None))
+        render_request = self._extract_render_request(kwargs)
+        model_input = self._render_prompt(messages, render_request)
         self._check_context_window_length(model_input, max_tokens)
         params = SamplingParams(
             max_tokens=max_tokens,
@@ -429,8 +638,8 @@ class TinkerLLM(CustomLLM):
             stop=stop_sequences,
         )
         result = self.sampling_client.sample(prompt=model_input, sampling_params=params, num_samples=1)
-        final_response = self._parse_response(model_input, result)
-        self._record_interaction(model_input, final_response)
+        final_response = self._parse_response(model_input, result, tools=render_request.tools)
+        self._record_interaction(model_input, final_response, routing_id=self._routing_id_of(result))
         return final_response
 
     def as_model_list(self) -> list[dict]:
@@ -501,6 +710,7 @@ def register_tinker_llm(
             tokenizer = processor_tokenizer
         image_processor = getattr(processor, "image_processor", None)
 
+    register_platoon_renderers()  # idempotent; makes qwen3_6_preserve_thinking resolvable by get_renderer
     renderer = get_renderer(renderer_name, tokenizer, image_processor=image_processor, model_name=model_name)
     for key, value in (renderer_kwargs or {}).items():
         if not hasattr(renderer, key):
