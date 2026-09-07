@@ -169,20 +169,20 @@ def _flatten(value, prefix: str = "") -> dict[str, object]:
     return {prefix.rstrip("."): value}
 
 
-def test_nonrecursive_differs_only_in_two_openreward_flags_and_stats_identity():
+def test_nonrecursive_differs_only_in_recursion_and_stats_identity():
     recursive = _flatten(_load(RECURSIVE))
     nonrecursive = _flatten(_load(NONRECURSIVE))
     assert recursive.keys() == nonrecursive.keys()
     diff = {key for key in recursive if recursive[key] != nonrecursive[key]}
+    # Programmatic tool calling stays ON in both arms so the only difference is recursion.
     assert diff == {
         "openreward.enable_recursive_subagents",
-        "openreward.enable_programmatic_tool_calling",
         "stats.trial_name",
         "stats.wandb.group",
         "stats.wandb.tags.7",
     }
     assert nonrecursive["openreward.enable_recursive_subagents"] is False
-    assert nonrecursive["openreward.enable_programmatic_tool_calling"] is False
+    assert nonrecursive["openreward.enable_programmatic_tool_calling"] is True
     assert nonrecursive["stats.wandb.tags.7"] == "nonrecursive"
     assert "-nonrec-" in nonrecursive["stats.trial_name"]
     assert "nonrec" in nonrecursive["stats.wandb.group"]

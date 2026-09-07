@@ -1,8 +1,10 @@
 # OpenReward Toolathlon + OpenHands on the miles-tinker gateway (15 x H200 nodes:
 # 4 Megatron full-finetune nodes + 11 SGLang TP8 engines), Qwen3.6-35B-A3B,
-# NON-recursive (no subagents, no programmatic tool calling), partial rewards,
-# rollout routing replay (R3) and fp32 lm head on both sides. Two-key delta from
-# the recursive yaml (precedent: ..._16node_nonrecursive_..._v10_padded.yaml:35-37);
+# NON-recursive (no subagents; programmatic tool calling stays ON), partial rewards,
+# rollout routing replay (R3) and fp32 lm head on both sides. ONE-key delta from
+# the recursive yaml: enable_recursive_subagents. Programmatic tool calling stays
+# on (the AReaL 16-node nonrecursive precedent turned it off; we keep it so the
+# only difference between the two arms is recursion itself);
 # the judging flags stay true because they never fire without launch_subagent.
 #
 # Translated (not copied) from the AReaL v35 config
@@ -144,7 +146,7 @@ openreward:
   max_tool_calls: 0
   balance_accepted_batches: false
   accepted_batch_max_replacement_rounds: 8
-  enable_programmatic_tool_calling: false
+  enable_programmatic_tool_calling: true   # kept on: the only intended delta from the recursive arm is recursion
   programmatic_tool_calling_mode: orchestration_only
   programmatic_tool_calling_max_tool_calls_per_execution: 1024
   enable_task_tracker: true
