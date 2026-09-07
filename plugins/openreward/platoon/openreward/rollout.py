@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import sys
+import time
 import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -57,6 +58,7 @@ from platoon.openreward.constants import (
     OPENREWARD_TASK_SPLIT_KEY,
 )
 from platoon.openreward.env import OpenRewardOpenHandsEnv
+from platoon.openreward.stream_isolation import install as install_stream_isolation
 
 OPENREWARD_CONDENSER_KEEP_FIRST = 2
 logger = logging.getLogger(__name__)
@@ -155,8 +157,15 @@ class OpenRewardAgent(OpenHandsSDKAgent):
         )
 
 
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _patch_mcp_boot_timeout() -> None:
-    """Raise OpenHands' hardcoded 30s MCP tool-listing timeout.
+    """Raise OpenHands' hardcoded 30s MCP tool-listing timeout, and retry a failed boot.
 
     At episode start OpenHands spawns the openreward mcp_bridge, which boots a
     per-session env (clone Postgres DB + spawn several node/python MCP servers).
@@ -166,11 +175,22 @@ def _patch_mcp_boot_timeout() -> None:
     literal in ``openhands.sdk.agent.base`` (no config hook), so we wrap the
     ``create_mcp_tools`` symbol it calls and force a larger timeout. Override via
     ``OPENREWARD_MCP_TIMEOUT`` (seconds).
+
+    The same wrapper retries a *fast* boot failure (``MCPError``, e.g. a bridge
+    that lost its race with a service restart) ``OPENREWARD_MCP_CONNECT_RETRIES``
+    times before letting the episode die at step 0.  A ``MCPTimeoutError`` is
+    never retried: it already burned the full timeout, and a second attempt would
+    only stretch the rollout deadline.
     """
     try:
         timeout = float(os.environ.get("OPENREWARD_MCP_TIMEOUT", "120"))
     except (TypeError, ValueError):
         timeout = 120.0
+    retries = _env_int("OPENREWARD_MCP_CONNECT_RETRIES", 2)
+    try:
+        backoff = float(os.environ.get("OPENREWARD_MCP_CONNECT_RETRY_DELAY", "2.0"))
+    except (TypeError, ValueError):
+        backoff = 2.0
     try:
         from openhands.sdk.agent import base as _oh_agent_base
     except Exception:
@@ -178,14 +198,39 @@ def _patch_mcp_boot_timeout() -> None:
     original = getattr(_oh_agent_base, "create_mcp_tools", None)
     if original is None or getattr(original, "_openreward_patched", False):
         return
+    try:
+        from openhands.sdk.mcp.exceptions import MCPError, MCPTimeoutError
+    except Exception:  # pragma: no cover - SDK without the exception module
+        MCPError = MCPTimeoutError = ()  # type: ignore[assignment]
 
     def _create_mcp_tools(config, _timeout=30, *args, **kwargs):
-        return original(config, timeout, *args, **kwargs)
+        attempt = 0
+        while True:
+            try:
+                return original(config, timeout, *args, **kwargs)
+            except MCPTimeoutError:
+                raise
+            except MCPError as exc:
+                if attempt >= retries:
+                    raise
+                logger.warning(
+                    "MCP boot failed (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    retries + 1,
+                    backoff * (attempt + 1),
+                    exc,
+                )
+                time.sleep(backoff * (attempt + 1))
+                attempt += 1
 
     setattr(_create_mcp_tools, "_openreward_patched", True)
     _oh_agent_base.create_mcp_tools = _create_mcp_tools
 
 
+# One asyncio process hosts every Tinker rollout, so OpenHands' programmatic
+# tool calling must not swap the process-global streams while other rollouts
+# spawn their MCP bridge.  See ``stream_isolation`` for the failure it prevents.
+install_stream_isolation()
 _patch_mcp_boot_timeout()
 
 
