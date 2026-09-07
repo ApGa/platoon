@@ -63,6 +63,45 @@ as a hard condensation request instead of a retried transport error.
 on the watchdog exit code: `python -m platoon.train.tinker.restart_wrapper
 --max-restarts 20 --restart-delay 700 --watchdog-exit-code 2 -- <trainer cmd>`.
 
+## Single-process rollout hazards (stream isolation)
+
+The Tinker path runs *every* trajectory in one asyncio process on the head node;
+the AReaL path ran a subprocess per node, so a rollout owned its interpreter.
+Library code that mutates interpreter globals is therefore no longer per-rollout
+state. The 15-node run `ta15-rec-q36-r3-v1` lost 968 of 1060 trajectories at step
+0 to `MCPError: MCP Connection Failure` (58 % of batch 0, 100 % from batch 1 on)
+for exactly that reason, while the 4-concurrent smoke on the same code lost 0 of
+34:
+
+- `openhands.tools.programmatic_tool_calling.impl` (enabled by
+  `openreward.enable_programmatic_tool_calling`, i.e. the **recursive** yaml
+  only) wraps each cell in `contextlib.redirect_stdout` / `redirect_stderr`,
+  which rebind the process-global streams to `io.StringIO`. Tool executors run
+  on worker threads (`Agent.astep` -> `_aexecute_actions` ->
+  `loop.run_in_executor`), so cells from different rollouts overlap.
+- `fastmcp.client.transports.stdio` samples `sys.stderr` when it spawns the
+  stdio server and hands it to `subprocess.Popen`; a `StringIO` has no
+  `fileno()`, so any `mcp_bridge` spawned inside a cell's window dies with
+  `io.UnsupportedOperation: fileno` -> `RuntimeError: Client failed to connect:
+  fileno` -> `MCPError("MCP Connection Failure")` (the SDK drops the message at
+  `openhands/sdk/mcp/client.py:55`, which is what made this hard to see).
+- `redirect_*` restores the stream it observed on entry, so interleaved
+  enter/exit permanently strands `sys.stderr` on a dead buffer -- hence the
+  degradation from 58 % to 100 %.
+
+`plugins/openreward/platoon/openreward/stream_isolation.py`, installed from
+`rollout.py` at import, replaces `sys.stdout`/`sys.stderr` with a
+`ThreadScopedStream` that keeps a real `fileno()` and routes writes to a
+per-thread capture stack, rebinds the PTC module's `redirect_*` names to
+push/pop that stack, and pins `StdioMCPServer.to_transport`'s `log_file` to the
+console stream so a bridge spawn never depends on the current `sys.stderr`.
+`OPENREWARD_STREAM_ISOLATION=0` restores the upstream behaviour (debug only).
+
+Separately, `_patch_mcp_boot_timeout` now retries a *fast* `MCPError` boot
+failure (`OPENREWARD_MCP_CONNECT_RETRIES`, default 2, `..._RETRY_DELAY` 2.0 s)
+but never a `MCPTimeoutError`. That is a mitigation for transient service
+hiccups over a 168 h run, not the fix.
+
 ## Run configs
 
 `plugins/openreward/platoon/openreward/configs/tinker/`:
@@ -82,5 +121,7 @@ walks both yamls and asserts every key maps to a dataclass field.
 cd /home/aci18912it/source/platoon-tinker && HF_HUB_OFFLINE=1 plugins/openreward/.venv/bin/python -m pytest \
   tests/utils/test_tinker_data_processing_routing.py \
   tests/train/tinker/test_group_rollout_straggler.py \
-  tests/openreward/test_tinker_toolathlon_configs.py -q
+  tests/openreward/test_tinker_toolathlon_configs.py \
+  tests/test_openreward_stream_isolation.py \
+  tests/test_openreward_mcp_connect_retry.py -q
 ```
