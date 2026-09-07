@@ -210,37 +210,32 @@ def test_programmatic_tool_calling_patch_rebinds_the_module_names(isolation, mon
 
 
 def test_mcp_stdio_transport_pins_the_console_stderr(isolation):
+    """A bridge spawn must get a real descriptor whatever ``sys.stderr`` currently is.
+
+    Order-independent on purpose: importing ``platoon.openreward.rollout`` anywhere in the
+    session installs this same pin on the (process-global) pydantic class, so the test asserts
+    the resulting behaviour rather than which module instance won the race.
+    """
+
     fastmcp_config = pytest.importorskip("fastmcp.mcp_config")
     from fastmcp.client.transports import StdioTransport
 
-    original = fastmcp_config.StdioMCPServer.to_transport
+    previous = fastmcp_config.StdioMCPServer.to_transport
     try:
         with isolation.activate():
-            assert isolation.install_mcp_stdio_stderr_pin() is True
-            assert isolation.install_mcp_stdio_stderr_pin() is False
+            isolation.install_mcp_stdio_stderr_pin()
+            assert isolation.install_mcp_stdio_stderr_pin() is False  # idempotent
             server = fastmcp_config.StdioMCPServer(command=sys.executable, args=["-c", "pass"])
-            console = isolation.console_stderr()
-            with redirect_stderr(io.StringIO()):
+            buffer = io.StringIO()
+            with redirect_stderr(buffer):  # a library that still swaps globally
                 transport = server.to_transport()
+                assert transport.log_file is not sys.stderr
             assert isinstance(transport, StdioTransport)
-            # Whatever the process-global stream is doing, the bridge gets the
-            # console -- a stream that always has a real fd to hand the child.
-            assert transport.log_file is console
+            assert transport.log_file is not buffer
+            # The whole point: Popen can take this as the child's stderr.
             assert isinstance(transport.log_file.fileno(), int)
     finally:
-        fastmcp_config.StdioMCPServer.to_transport = original
-
-
-@pytest.mark.parametrize("value", ["0", "false", "off", "NO"])
-def test_the_kill_switch_makes_install_a_no_op(isolation, monkeypatch, value):
-    monkeypatch.setenv("OPENREWARD_STREAM_ISOLATION", value)
-    assert isolation.enabled() is False
-    saved_out, saved_err = sys.stdout, sys.stderr
-    assert isolation.install() == {
-        "programmatic_tool_calling": False,
-        "mcp_stdio_stderr": False,
-    }
-    assert sys.stdout is saved_out and sys.stderr is saved_err
+        fastmcp_config.StdioMCPServer.to_transport = previous
 
 
 def test_isolation_is_on_by_default(isolation, monkeypatch):
@@ -262,3 +257,12 @@ def test_a_later_rebinding_is_re_wrapped_and_the_first_console_is_kept(isolation
         # fd-less thing that wrapped it.
         assert isolation.console_stderr() is first_console
         assert isinstance(isolation.console_stderr().fileno(), int)
+
+
+@pytest.mark.parametrize("value", ["0", "false", "off", "NO"])
+def test_the_kill_switch_makes_install_a_no_op(isolation, monkeypatch, value):
+    monkeypatch.setenv("OPENREWARD_STREAM_ISOLATION", value)
+    assert isolation.enabled() is False
+    saved_out, saved_err = sys.stdout, sys.stderr
+    assert isolation.install() == {"programmatic_tool_calling": False, "mcp_stdio_stderr": False}
+    assert sys.stdout is saved_out and sys.stderr is saved_err
