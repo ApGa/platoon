@@ -101,7 +101,8 @@ class SafeLLMSummarizingCondenser(LLMSummarizingCondenser):
         for these rollouts. Reusing it as the maximum condensation *input*
         leaves at least the remaining 20% for reasoning plus summary text. The
         condenser LLM's separately configured 80%-of-context generation limit
-        remains a ceiling, not a target; the AReaL endpoint clips it to the
+        remains a ceiling, not a target; both the AReaL endpoint and the
+        Tinker proxy (``TinkerLLM._fit_max_tokens_to_context``) clip it to the
         request's actual remaining context.
 
         Truncation deliberately uses OpenHands' native policy: one uniform

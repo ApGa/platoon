@@ -487,3 +487,105 @@ def test_multi_turn_prompt_extends_with_reasoning_content(tokenizer, renderer, i
     ).to_ints()
     assert turn2 == hf_ids(tokenizer, messages + [assistant, tool_msg], tools=TOOLS)
     assert turn2[: len(turn1) + len(sampled)] == turn1 + sampled
+
+
+# --------------------------------------------------------------------------- context window fit
+
+
+class _WideRenderer(FakeRenderer):
+    """FakeRenderer whose prompt has one token per character of content (tests long prompts cheaply)."""
+
+    def build_generation_prompt(self, messages, role="assistant", prefill=None):
+        return tinker.ModelInput.from_ints([1] * sum(len(m.get("content") or "") for m in messages))
+
+
+def _long_messages(n_tokens: int):
+    return [{"role": "user", "content": "x" * n_tokens}]
+
+
+def _is_context_window_exceeded(exc: Exception) -> bool:
+    from openhands.sdk.llm.exceptions import is_context_window_exceeded
+
+    return is_context_window_exceeded(exc)
+
+
+def test_max_tokens_clamped_to_remaining_context_async():
+    llm, client = make_llm(_WideRenderer(), FakeTokenizer(), make_response([1]), context_window_length=65536)
+    with TinkerLLMProxySession():
+        asyncio.run(llm.acompletion(messages=_long_messages(40000), optional_params={"max_tokens": 26214}))
+    assert len(client.calls) == 1
+    assert client.calls[0]["sampling_params"].max_tokens == 65536 - 40000
+
+
+def test_max_tokens_clamped_to_remaining_context_sync():
+    llm, client = make_llm(_WideRenderer(), FakeTokenizer(), make_response([1]), context_window_length=65536)
+    with TinkerLLMProxySession():
+        llm.completion(messages=_long_messages(40000), optional_params={"max_completion_tokens": 26214})
+    assert client.calls[0]["sampling_params"].max_tokens == 25536
+
+
+def test_max_tokens_unchanged_when_it_fits():
+    llm, client = make_llm(_WideRenderer(), FakeTokenizer(), make_response([1]), context_window_length=65536)
+    with TinkerLLMProxySession():
+        asyncio.run(llm.acompletion(messages=_long_messages(1000), optional_params={"max_tokens": 4096}))
+    assert client.calls[0]["sampling_params"].max_tokens == 4096
+
+
+def test_no_context_window_means_no_clamp():
+    llm, client = make_llm(_WideRenderer(), FakeTokenizer(), make_response([1]))
+    assert llm.context_window_length is None
+    with TinkerLLMProxySession():
+        asyncio.run(llm.acompletion(messages=_long_messages(70000), optional_params={"max_tokens": 26214}))
+    assert client.calls[0]["sampling_params"].max_tokens == 26214
+
+
+@pytest.mark.parametrize("prompt_tokens", [65536, 70000])
+def test_prompt_overflow_raises_context_window_exceeded_async(prompt_tokens):
+    import litellm
+    from openhands.sdk.llm.llm import LLM_RETRY_EXCEPTIONS
+
+    llm, client = make_llm(_WideRenderer(), FakeTokenizer(), make_response([1]), context_window_length=65536)
+    with TinkerLLMProxySession():
+        with pytest.raises(litellm.ContextWindowExceededError) as info:
+            asyncio.run(llm.acompletion(messages=_long_messages(prompt_tokens), optional_params={"max_tokens": 1}))
+    assert client.calls == []  # never sampled
+    exc = info.value
+    assert exc.llm_provider == "platoon-tinker"
+    assert _is_context_window_exceeded(exc)
+    assert not isinstance(exc, LLM_RETRY_EXCEPTIONS)
+
+
+def test_prompt_overflow_raises_context_window_exceeded_sync():
+    import litellm
+
+    llm, client = make_llm(_WideRenderer(), FakeTokenizer(), make_response([1]), context_window_length=100)
+    with TinkerLLMProxySession():
+        with pytest.raises(litellm.ContextWindowExceededError) as info:
+            llm.completion(messages=_long_messages(100), optional_params={})
+    assert client.calls == []
+    assert _is_context_window_exceeded(info.value)
+
+
+def test_context_window_error_survives_litellm_dispatch():
+    """Through litellm.completion the error keeps its class (not wrapped as APIConnectionError)."""
+    import litellm
+
+    llm, _ = make_llm(_WideRenderer(), FakeTokenizer(), make_response([1]), context_window_length=100)
+    llm.rewrite_litellm_custom_providers()
+    with TinkerLLMProxySession():
+        with pytest.raises(litellm.ContextWindowExceededError) as info:
+            litellm.completion(model="platoon-tinker/fake", messages=_long_messages(200), max_tokens=1)
+    assert _is_context_window_exceeded(info.value)
+
+
+# --------------------------------------------------------------------------- seed
+
+
+def test_seed_only_set_when_request_carries_one():
+    llm, client = make_llm(FakeRenderer(), FakeTokenizer(), make_response([1]))
+    assert llm.seed is None
+    with TinkerLLMProxySession():
+        asyncio.run(llm.acompletion(messages=[{"role": "user", "content": "hi"}], optional_params={}))
+        asyncio.run(llm.acompletion(messages=[{"role": "user", "content": "hi"}], optional_params={"seed": 7}))
+    assert client.calls[0]["sampling_params"].seed is None
+    assert client.calls[1]["sampling_params"].seed == 7

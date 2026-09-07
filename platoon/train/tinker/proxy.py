@@ -53,6 +53,10 @@ from platoon.train.tinker.renderers import register as register_platoon_renderer
 
 logger = logging.getLogger(__name__)
 
+# A prompt that leaves fewer completion tokens than this in the context window is
+# reported as a context-window error (hard condensation) instead of being sampled.
+MIN_CONTEXT_HEADROOM_TOKENS = 1
+
 T = TypeVar("T")
 
 # Render kwargs the proxy forwards from a request's ``chat_template_kwargs`` (litellm
@@ -200,7 +204,9 @@ class TinkerLLM(CustomLLM):
         temperature: Sampling temperature.
         top_k: Top-k sampling parameter.
         top_p: Nucleus sampling parameter.
-        seed: Random seed for reproducibility.
+        seed: Sampling seed forwarded to the gateway (SGLang ``sampling_seed``) when the request
+            carries none.  ``None`` (default) leaves the gateway free to sample independently;
+            a fixed seed makes all group members identical under deterministic inference.
     """
 
     def __init__(
@@ -214,7 +220,7 @@ class TinkerLLM(CustomLLM):
         temperature: float = 1.0,
         top_k: int = -1,
         top_p: float = 1.0,
-        seed: int = 42,
+        seed: int | None = None,
         context_window_length: int | None = None,
     ) -> None:
         """Initialize the TinkerLLM."""
@@ -548,15 +554,38 @@ class TinkerLLM(CustomLLM):
         )
         proxy_interactions.get()[model_response.id] = interaction
 
-    def _check_context_window_length(self, model_input: ModelInput, max_completion_tokens: int) -> None:
+    def _fit_max_tokens_to_context(self, model_input: ModelInput, max_completion_tokens: int) -> int:
+        """Return the completion budget that fits the context window (AReaL parity).
+
+        The request's ``max_tokens`` is a ceiling, not a target: it is clamped to
+        the tokens remaining after the rendered prompt, so the condenser's large
+        completion budget no longer rejects a prompt that fits by itself.  When
+        the prompt alone leaves less than :data:`MIN_CONTEXT_HEADROOM_TOKENS`,
+        this raises ``litellm.ContextWindowExceededError``.  litellm passes that
+        class through unchanged; OpenHands classifies it as a context-window
+        error (``LLMContextWindowExceedError``), does not retry it, and answers
+        with a hard ``CondensationRequest`` instead of five blind retries.
+        """
+        if self.context_window_length is None:
+            return max_completion_tokens
         prompt_length = model_input.length
-        total_sequence_length = prompt_length + max_completion_tokens
-        if self.context_window_length is not None and total_sequence_length > self.context_window_length:
-            raise ValueError(
-                f"Prompt length plus max_tokens exceeds the model's context window: "
-                f"{prompt_length} prompt tokens + {max_completion_tokens} max_tokens > "
-                f"{self.context_window_length} context window length."
+        headroom = self.context_window_length - prompt_length
+        if headroom < MIN_CONTEXT_HEADROOM_TOKENS:
+            raise litellm.ContextWindowExceededError(
+                message=(
+                    f"Context length exceeded: {prompt_length} prompt tokens leave {headroom} of the "
+                    f"{self.context_window_length}-token context window (input exceeds the context window)."
+                ),
+                model=self.model_name,
+                llm_provider="platoon-tinker",
             )
+        if max_completion_tokens > headroom:
+            logger.info(
+                f"Clamping max_tokens {max_completion_tokens} -> {headroom}: {prompt_length} prompt tokens "
+                f"in a {self.context_window_length}-token context window."
+            )
+            return headroom
+        return max_completion_tokens
 
     async def acompletion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
         """Main entrypoint for LiteLLM to call."""
@@ -578,7 +607,7 @@ class TinkerLLM(CustomLLM):
         messages = self._canonicalize_messages(kwargs.pop("messages", None))
         render_request = self._extract_render_request(kwargs)
         model_input = self._render_prompt(messages, render_request)
-        self._check_context_window_length(model_input, max_tokens)
+        max_tokens = self._fit_max_tokens_to_context(model_input, max_tokens)
         params = SamplingParams(
             max_tokens=max_tokens,
             temperature=temperature,
@@ -628,7 +657,7 @@ class TinkerLLM(CustomLLM):
         messages = self._canonicalize_messages(kwargs.pop("messages", None))
         render_request = self._extract_render_request(kwargs)
         model_input = self._render_prompt(messages, render_request)
-        self._check_context_window_length(model_input, max_tokens)
+        max_tokens = self._fit_max_tokens_to_context(model_input, max_tokens)
         params = SamplingParams(
             max_tokens=max_tokens,
             temperature=temperature,

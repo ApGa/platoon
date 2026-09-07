@@ -117,7 +117,7 @@ def test_yaml_values(path: Path):
     assert config.checkpoint.load_checkpoint_path is None
     assert config.tinker_base_url is None
     assert config.log_path == "/groups/gai51740/aci18912it/miles-tinker/runs/default/logs"
-    assert (config.watchdog.enabled, config.watchdog.timeout_seconds, config.watchdog.exit_code) == (True, 3600, 2)
+    assert (config.watchdog.enabled, config.watchdog.timeout_seconds, config.watchdog.exit_code) == (True, 7200, 2)
     assert config.stats.experiment_name == "toolathlon-openhands-miles-tinker"
     assert config.stats.wandb.mode == "online"
     assert config.stats.wandb.project == "toolathlon-openhands"

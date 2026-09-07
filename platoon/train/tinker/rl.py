@@ -162,6 +162,10 @@ def compute_training_metrics(
 # 35B model is ~490 GB and takes minutes at 1-2 GB/s).
 SAVE_CHECKPOINT_TIMEOUT_S = 7200.0
 
+# Watchdog heartbeat cadence while a rollout group is in flight (rollouts can
+# outlast the watchdog timeout: rollout timeout + straggler grace + judge tail).
+ROLLOUT_HEARTBEAT_INTERVAL_S = 60.0
+
 
 class Watchdog:
     """Background thread that monitors for hangs and forcibly exits if no activity.
@@ -498,6 +502,36 @@ class PlatoonTinkerRLTrainer:
 
         return task.result()
 
+    async def _await_rollout_with_heartbeat(
+        self,
+        coro,
+        watchdog: Watchdog | None,
+        heartbeat_interval: float | None = None,
+    ):
+        """Await an in-flight rollout group while feeding the watchdog.
+
+        A group is bounded by the per-member rollout timeout plus the straggler
+        grace and the judge/reward tail, which can exceed the watchdog timeout;
+        without heartbeats during collection the watchdog kills the client at
+        startup and after every restart before any group completes.  Unlike
+        :meth:`_await_with_heartbeat` this does not shield the rollout, so a
+        cancellation (interrupt checkpoint) still propagates to the group and
+        its straggler members.
+        """
+        if heartbeat_interval is None:
+            heartbeat_interval = ROLLOUT_HEARTBEAT_INTERVAL_S
+        task = asyncio.ensure_future(coro)
+        try:
+            while not task.done():
+                await asyncio.wait({task}, timeout=heartbeat_interval)
+                if watchdog is not None:
+                    watchdog.heartbeat()
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        return task.result()
+
     async def _rollout_workflow_worker_loop(
         self,
         shared_state: TrainLoopSharedState,
@@ -517,7 +551,9 @@ class PlatoonTinkerRLTrainer:
             rollout_count += 1
 
             try:
-                rollout = await workflow.arun_episode(data)
+                rollout = await self._await_rollout_with_heartbeat(
+                    workflow.arun_episode(data), watchdog=shared_state.watchdog
+                )
             except Exception as e:
                 logger.exception(f"Exception in rollout worker for task {task_id}: {e}")
                 stats_tracker.scalar(failed_rollouts=1.0)

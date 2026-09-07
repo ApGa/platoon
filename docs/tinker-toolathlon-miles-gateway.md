@@ -47,8 +47,17 @@ task output (workload still accounted; `group_size_rejected` scalar).
 Every `save_checkpoint_async` in `rl.py` (launch, per-step, interrupt, final)
 runs under `_await_with_heartbeat(name="save_checkpoint", total_timeout=7200)`;
 the per-step save also feeds the watchdog (`shared_state.watchdog`), since a
-full-parameter `save_state` takes minutes. `watchdog.timeout_seconds` is 3600
-in the run configs.
+full-parameter `save_state` takes minutes. The rollout worker loop feeds the
+watchdog every 60 s while a task group is in flight
+(`_await_rollout_with_heartbeat`, unshielded so an interrupt still cancels the
+group); a group can take rollout timeout (3600 s) + straggler grace (900 s) +
+the judge/reward tail, so `watchdog.timeout_seconds` is 7200 in the run configs.
+
+The proxy clamps every request's `max_tokens` to the context tokens left after
+the rendered prompt (`TinkerLLM._fit_max_tokens_to_context`, AReaL parity), so
+the condenser's 26214-token completion budget is a ceiling; a prompt that fills
+the window raises `litellm.ContextWindowExceededError`, which OpenHands treats
+as a hard condensation request instead of a retried transport error.
 
 `platoon/train/tinker/restart_wrapper.py` (pre-existing) restarts the trainer
 on the watchdog exit code: `python -m platoon.train.tinker.restart_wrapper

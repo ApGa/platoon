@@ -103,7 +103,7 @@ tinker_base_url: null                     # --tinker_base_url; the proxy also ne
 
 watchdog:
   enabled: true
-  timeout_seconds: 3600
+  timeout_seconds: 7200
   exit_code: 2
 
 stats:
