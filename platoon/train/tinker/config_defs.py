@@ -112,6 +112,18 @@ class TrainEventTriggerConfig:
 @dataclass
 class CheckpointConfig(TrainEventTriggerConfig):
     load_checkpoint_path: str | None = None
+    # AReaL-style recovery cadence. ``strategy``/``every`` select the *permanent*
+    # checkpoints (named ``<batch>``, kept forever). When ``recovery_every`` is
+    # set, every ``recovery_every`` steps that is not already a permanent save
+    # writes a full weights+optimizer checkpoint named ``recovery-<batch>``
+    # instead of the weights-only update, so a crash loses at most that many
+    # steps. Recovery checkpoints are disposable: the client-side pruner keeps
+    # only the newest few of them. ``None`` disables the recovery cadence.
+    recovery_every: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.recovery_every is not None and self.recovery_every < 1:
+            raise ValueError("checkpoint recovery_every must be >= 1 or null")
 
 
 @dataclass

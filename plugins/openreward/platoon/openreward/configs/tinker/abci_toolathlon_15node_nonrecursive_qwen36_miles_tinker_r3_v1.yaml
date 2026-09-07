@@ -91,11 +91,17 @@ eval:
         temperature: 1.0
         max_completion_tokens: 4096
 
-# ~490 GB per save_state; ~4 h between saves at 45-min steps; the client-side
-# pruner keeps the newest 2 checkpoints.
+# ~490 GB per save_state. AReaL-style two-tier cadence: `every: 20` writes a
+# permanent checkpoint (name `<batch>`) that is kept forever (~15 h apart at
+# 45-min steps), and `recovery_every: 1` writes a full weights+optimizer
+# checkpoint (name `recovery-<batch>`) after every other step, so a crash loses
+# at most one step. Each (re)launch also writes `recovery-<start_batch>`. The
+# client-side pruner keeps only the newest 2 recovery checkpoints (plus the
+# resume point) and every permanent one.
 checkpoint:
   strategy: step
-  every: 5
+  every: 20
+  recovery_every: 1
   load_checkpoint_path: null
 
 log_path: /groups/gai51740/aci18912it/miles-tinker/runs/default/logs   # overridden by --log_path

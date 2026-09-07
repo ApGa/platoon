@@ -166,6 +166,14 @@ SAVE_CHECKPOINT_TIMEOUT_S = 7200.0
 # outlast the watchdog timeout: rollout timeout + straggler grace + judge tail).
 ROLLOUT_HEARTBEAT_INTERVAL_S = 60.0
 
+# Name prefix of AReaL-style recovery checkpoints: full weights+optimizer saves
+# written at ``checkpoint.recovery_every`` (and at every launch) so a crash
+# loses at most a step. They are disposable - the client-side pruner
+# (deploy/abci/clients/prune_tinker_checkpoints.py in miles) keeps only the
+# newest few, while the permanent ``<batch>`` / ``<batch>_interrupted`` /
+# ``final`` checkpoints are kept forever.
+RECOVERY_CHECKPOINT_PREFIX = "recovery-"
+
 
 class Watchdog:
     """Background thread that monitors for hangs and forcibly exits if no activity.
@@ -976,6 +984,7 @@ class PlatoonTinkerRLTrainer:
                 save_every=shared_state.save_every,
                 start_batch=start_batch,
                 watchdog=shared_state.watchdog,
+                recovery_every=self.config.checkpoint.recovery_every,
             )
             logger.info("_save_checkpoint_and_get_sampling_client returned, updating LLM sampling client")
             shared_state.model_info.llm.update_sampling_client(sampling_client)
@@ -1099,55 +1108,44 @@ class PlatoonTinkerRLTrainer:
         save_every: int,
         start_batch: int = 0,
         watchdog: Watchdog | None = None,
+        recovery_every: int | None = None,
     ) -> tinker.SamplingClient:
-        """Save checkpoint with wandb_run_id and return new sampling client.
+        """Save a checkpoint with wandb_run_id and return the new sampling client.
 
-        Unlike tinker_cookbook's version, this includes the wandb_run_id in the
-        checkpoint loop_state to enable proper WandB run resumption.
+        Three cadences, in precedence order (``steps_completed`` counts steps
+        since ``start_batch``; the name/batch are ``i_batch + 1`` because the
+        weights are the ones *after* training on ``i_batch``, so a resume starts
+        from ``i_batch + 1``):
+
+        1. ``steps_completed % save_every == 0`` - a *permanent* full checkpoint
+           named ``<batch>``, kept forever.
+        2. ``recovery_every`` set and ``steps_completed % recovery_every == 0``
+           - an AReaL-style *recovery* full checkpoint named
+           ``recovery-<batch>``. Same weights+optimizer payload, but the
+           client-side pruner keeps only the newest few, so the recovery cadence
+           can run every step without growing the checkpoint store.
+        3. otherwise - a weights-only update (no disk write in the gateway's
+           full mode), which cannot be resumed from.
+
+        Unlike tinker_cookbook's version this puts the wandb_run_id in the
+        checkpoint loop_state so WandB run resumption works.
         """
         # Count steps completed since start_batch (1-indexed for human intuition)
         steps_completed = i_batch - start_batch + 1
+        next_batch = i_batch + 1
         if steps_completed % save_every == 0:
-            # Save a full checkpoint with loop state
-            # Checkpoint name and batch are i_batch + 1 because this checkpoint contains
-            # weights AFTER training on batch i_batch, so resume should start from i_batch + 1
-            next_batch = i_batch + 1
-            logger.info(
-                f"Saving checkpoint {next_batch:06d} after completing batch {i_batch} "
-                f"(steps_completed={steps_completed}, save_every={save_every})"
-            )
-            try:
-                # A full-parameter save_state takes minutes; keep the watchdog fed.
-                path_dict = await self._await_with_heartbeat(
-                    checkpoint_utils.save_checkpoint_async(
-                        training_client=training_client,
-                        name=f"{next_batch:06d}",
-                        log_path=self.run_log_path,
-                        loop_state={
-                            "batch": next_batch,
-                            "wandb_run_id": self._stats_logger.wandb_run_id,
-                        },
-                        kind="both",
-                    ),
-                    name="save_checkpoint",
-                    watchdog=watchdog,
-                    total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
-                )
-            except Exception as e:
-                logger.exception(f"save_checkpoint_async failed: {e}")
-                raise
-            logger.info(f"Checkpoint async completed. Creating sampling client from {path_dict['sampler_path']}")
-            try:
-                sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
-            except Exception as e:
-                logger.exception(f"create_sampling_client failed: {e}")
-                raise
-            logger.info("Sampling client created successfully")
-            return sampling_client
+            checkpoint_kind, checkpoint_name = "permanent", f"{next_batch:06d}"
+        elif recovery_every is not None and steps_completed % recovery_every == 0:
+            checkpoint_kind = "recovery"
+            checkpoint_name = f"{RECOVERY_CHECKPOINT_PREFIX}{next_batch:06d}"
         else:
-            logger.debug(
-                f"Skipping checkpoint at batch {i_batch} "
-                f"(steps_completed={steps_completed}, save_every={save_every}), saving weights only"
+            checkpoint_kind, checkpoint_name = None, None
+
+        if checkpoint_name is None:
+            logger.info(
+                f"Saving weights only after completing batch {i_batch} "
+                f"(steps_completed={steps_completed}, save_every={save_every}, "
+                f"recovery_every={recovery_every})"
             )
             try:
                 sampling_client = await training_client.save_weights_and_get_sampling_client_async()
@@ -1156,6 +1154,41 @@ class PlatoonTinkerRLTrainer:
                 raise
             logger.debug("Weights saved and sampling client created")
             return sampling_client
+
+        # Save a full (weights + optimizer) checkpoint with loop state.
+        logger.info(
+            f"Saving {checkpoint_kind} checkpoint {checkpoint_name} after completing batch {i_batch} "
+            f"(steps_completed={steps_completed}, save_every={save_every}, "
+            f"recovery_every={recovery_every})"
+        )
+        try:
+            # A full-parameter save_state takes minutes; keep the watchdog fed.
+            path_dict = await self._await_with_heartbeat(
+                checkpoint_utils.save_checkpoint_async(
+                    training_client=training_client,
+                    name=checkpoint_name,
+                    log_path=self.run_log_path,
+                    loop_state={
+                        "batch": next_batch,
+                        "wandb_run_id": self._stats_logger.wandb_run_id,
+                    },
+                    kind="both",
+                ),
+                name="save_checkpoint",
+                watchdog=watchdog,
+                total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception(f"save_checkpoint_async failed: {e}")
+            raise
+        logger.info(f"Checkpoint async completed. Creating sampling client from {path_dict['sampler_path']}")
+        try:
+            sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
+        except Exception as e:
+            logger.exception(f"create_sampling_client failed: {e}")
+            raise
+        logger.info("Sampling client created successfully")
+        return sampling_client
 
     async def _create_training_client(
         self, service_client: tinker.ServiceClient, resume_info: checkpoint_utils.CheckpointRecord | None
@@ -1235,11 +1268,15 @@ class PlatoonTinkerRLTrainer:
 
         training_client = await self._create_training_client(service_client, resume_info)
 
-        # Initial sampling client to use (the watchdog is not running yet).
+        # Initial sampling client to use (the watchdog is not running yet). The
+        # launch save is a *recovery* checkpoint: every (re)launch writes one, so
+        # naming it permanently would accumulate a ~490 GB checkpoint per restart.
+        launch_checkpoint_name = f"{RECOVERY_CHECKPOINT_PREFIX}{start_batch:06d}"
+        logger.info(f"Saving recovery checkpoint {launch_checkpoint_name} at launch (batch {start_batch})")
         path_dict = await self._await_with_heartbeat(
             checkpoint_utils.save_checkpoint_async(
                 training_client=training_client,
-                name=f"{start_batch:06d}",
+                name=launch_checkpoint_name,
                 log_path=self.run_log_path,
                 loop_state={
                     "batch": start_batch,
@@ -1327,7 +1364,9 @@ class PlatoonTinkerRLTrainer:
         if interrupted:
             # Save interrupt checkpoint so we can resume
             if current_step > start_batch:
-                logger.info(f"Saving interrupt checkpoint at step {current_step}...")
+                logger.info(
+                    f"Saving permanent checkpoint {current_step:06d}_interrupted at step {current_step}..."
+                )
                 await self._await_with_heartbeat(
                     checkpoint_utils.save_checkpoint_async(
                         training_client=shared_state.training_client,
@@ -1345,6 +1384,7 @@ class PlatoonTinkerRLTrainer:
                 logger.info(f"Checkpoint saved. Resume training to continue from step {current_step}.")
         elif start_batch < end_batch:
             # Training completed normally - save final checkpoint
+            logger.info(f"Saving permanent checkpoint final at step {end_batch}...")
             await self._await_with_heartbeat(
                 checkpoint_utils.save_checkpoint_async(
                     training_client=shared_state.training_client,

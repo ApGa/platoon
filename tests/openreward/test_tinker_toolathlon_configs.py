@@ -113,7 +113,8 @@ def test_yaml_values(path: Path):
     assert config.eval.workflow_config.rollout_config.max_steps == 200
 
     assert config.checkpoint.strategy == "step"
-    assert config.checkpoint.every == 5
+    assert config.checkpoint.every == 20
+    assert config.checkpoint.recovery_every == 1
     assert config.checkpoint.load_checkpoint_path is None
     assert config.tinker_base_url is None
     assert config.log_path == "/groups/gai51740/aci18912it/miles-tinker/runs/default/logs"
