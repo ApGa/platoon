@@ -74,8 +74,8 @@ for exactly that reason, while the 4-concurrent smoke on the same code lost 0 of
 34:
 
 - `openhands.tools.programmatic_tool_calling.impl` (enabled by
-  `openreward.enable_programmatic_tool_calling`, i.e. the **recursive** yaml
-  only) wraps each cell in `contextlib.redirect_stdout` / `redirect_stderr`,
+  `openreward.enable_programmatic_tool_calling`, which is true in **both** run
+  yamls) wraps each cell in `contextlib.redirect_stdout` / `redirect_stderr`,
   which rebind the process-global streams to `io.StringIO`. Tool executors run
   on worker threads (`Agent.astep` -> `_aexecute_actions` ->
   `loop.run_in_executor`), so cells from different rollouts overlap.
@@ -102,6 +102,99 @@ failure (`OPENREWARD_MCP_CONNECT_RETRIES`, default 2, `..._RETRY_DELAY` 2.0 s)
 but never a `MCPTimeoutError`. That is a mitigation for transient service
 hiccups over a 168 h run, not the fix.
 
+## Runaway PTC cells (cell guard, observability only)
+
+A second consequence of the single-process design, on the same code path.
+OpenHands executes each programmatic-tool-calling cell **in-process** on an
+`InteractiveShellEmbed` (`ProgrammaticToolCallingExecutor.__call__` ->
+`_run_cell` -> `shell.run_cell_async`), and there is **no timeout anywhere on
+that path**. The call runs on a worker thread taken from the event loop's
+default executor (`Tool.acall` -> `loop.run_in_executor(None, ...)`, reached via
+`Agent.astep` -> `_aexecute_actions`), and that pool is shared by every
+concurrent rollout in the client process.
+
+The failure mode is that a model-authored cell need not terminate, and nothing
+in the stack can make it:
+
+- **A Python thread cannot be killed.** `asyncio` cancellation, `wait_for`, and
+  platoon's straggler timeout (`WorkflowConfig.straggler_timeout_seconds`,
+  `group_rollout_workflow`) all abandon the *awaiting coroutine* only. The
+  thread underneath keeps running the model's code forever, holding a core and
+  an executor slot.
+- **The leak is silent.** The trajectory is recorded as interrupted, the train
+  loop keeps turning, the watchdog keeps getting heartbeats. The only symptom is
+  throughput quietly decaying as threads are consumed, until enough have leaked
+  that rollouts stop being scheduled at all while the trainer idles on 15 nodes.
+- **The pool is capped.** The default asyncio executor is
+  `min(32, cpu_count + 4)` threads, shared across
+  `train.num_concurrent_rollout_workflow_workers` x workflow `group_size` root
+  trajectories plus their depth-2 subagents and judges.
+
+`plugins/openreward/platoon/openreward/cell_guard.py`, installed from
+`rollout.py` at import next to the stream isolation, wraps
+`ProgrammaticToolCallingExecutor.__call__` (idempotently, degrading to a no-op
+when OpenHands is absent) to record each cell's start time, worker thread and a
+one-line prefix of the source the model wrote. A daemon monitor thread
+(`ptc-cell-guard`) then reports each cell once as it crosses each threshold.
+
+**The guard only measures and reports. It never interrupts, cancels, truncates
+or kills a cell, and it never exits the process.** A legitimate long-running
+cell is reported and then left alone; the report is a diagnostic, not a verdict.
+
+| env var | default | meaning |
+| --- | --- | --- |
+| `OPENREWARD_PTC_CELL_GUARD` | `1` | `0`/`false`/`no`/`off` makes the whole module a no-op |
+| `OPENREWARD_PTC_CELL_WARN_SECONDS` | `300` | age at which a running cell is reported *stuck* (WARNING) |
+| `OPENREWARD_PTC_CELL_LEAK_SECONDS` | `1800` | age at which its thread is *presumed leaked* (ERROR); clamped up to the warn threshold |
+| `OPENREWARD_PTC_CELL_GUARD_REPORT_SECONDS` | `60` | cadence of the summary line, emitted only while a count is non-zero |
+| `OPENREWARD_PTC_CELL_SOURCE_CHARS` | `240` | how much cell source each report quotes |
+
+What an operator sees. Once per cell, as it crosses the warn threshold:
+
+```
+PTC cell guard: cell #417 still running after 305s (warn threshold 300s) on thread
+asyncio_0 (id=139742867777344). The cell runs in-process on an IPython shell with no
+timeout and cannot be interrupted; this thread is occupied until the cell returns on
+its own. Cell source: 'while True: check_status()'
+```
+
+then once more when it is written off, and a summary every 60 s while any count
+is non-zero:
+
+```
+PTC cell guard: cell #417 PRESUMED LEAKED after 1801s (leak threshold 1800s) on thread
+asyncio_0 (id=139742867777344). Treat this rollout worker thread as permanently lost:
+Python cannot kill a running thread, so it is counted, not recovered. ...
+PTC cell guard: 3 cell(s) stuck >300s, 1 thread(s) presumed leaked >1800s (5 cell(s)
+in flight; 2104 started / 2099 finished this process). Leaked threads are never
+returned to the rollout executor pool.
+```
+
+A slow-but-finite cell that eventually returns logs `-- slow, not leaked` and
+decrements the counts, so both counts are *current*, not cumulative: a non-zero
+steady state means threads that are genuinely gone.
+
+`rl.py` publishes the counters as scalars on every training step
+(`_ptc_cell_guard_stats`, folded into `step_stats` just before
+`stats_logger.log`): **`ptc_cells_stuck`** and **`ptc_threads_leaked`**, plus
+`ptc_cells_running` / `ptc_cells_started` / `ptc_cells_finished` for context.
+The import of the plugin is soft, so a run without openreward logs no such
+scalars rather than failing. `ptc_threads_leaked` climbing off zero is the
+alert: it is monotonic in practice and each unit is one rollout worker thread
+that will never come back.
+
+**This is instrumentation, not a fix.** The durable fix is to run each rollout
+in its own **process**, as the AReaL path did. A process is the only unit of
+execution Python can actually kill, so only process-per-rollout can *bound* a
+runaway cell rather than merely counting it. Process isolation is independently
+required anyway: some environments cannot share an interpreter at all --
+AppWorld patches `time` with `freezegun` process-wide, so two concurrent
+AppWorld rollouts in one process are already incorrect regardless of runaway
+risk. Until rollouts are subprocesses, the residual exposure is unchanged: a
+runaway that allocates can still OOM the client process and take training with
+it, and the guard cannot see a thread that is blocked inside a lock it does not
+own.
+
 ## Run configs
 
 `plugins/openreward/platoon/openreward/configs/tinker/`:
@@ -123,5 +216,6 @@ cd /home/aci18912it/source/platoon-tinker && HF_HUB_OFFLINE=1 plugins/openreward
   tests/train/tinker/test_group_rollout_straggler.py \
   tests/openreward/test_tinker_toolathlon_configs.py \
   tests/test_openreward_stream_isolation.py \
+  tests/test_openreward_ptc_cell_guard.py \
   tests/test_openreward_mcp_connect_retry.py -q
 ```

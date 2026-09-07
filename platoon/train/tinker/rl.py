@@ -76,6 +76,27 @@ def _get_task_workload_payload(rollout: Any) -> _TaskWorkloadPayload | None:
     return _TaskWorkloadPayload(workload, *counts)
 
 
+def _ptc_cell_guard_stats() -> dict[str, float]:
+    """Counters for programmatic-tool-calling cells that have not returned.
+
+    A PTC cell runs in-process on a rollout worker thread with no timeout, and a
+    Python thread cannot be killed, so a never-terminating cell consumes a
+    worker thread for the rest of the run without raising anything. The guard
+    that counts them ships with the plugin that owns the OpenHands rollout path
+    (``platoon.openreward.cell_guard``); core does not depend on it, so a run
+    without that plugin -- or any failure inside the guard -- contributes no
+    scalars instead of failing. Never raises: this is called inline in the train
+    loop's stats path.
+    """
+
+    try:
+        from platoon.openreward.cell_guard import snapshot
+
+        return {key: float(value) for key, value in snapshot().items()}
+    except Exception:
+        return {}
+
+
 def compute_training_metrics(
     datums: list[tinker.Datum],
     forward_backward_result: tinker.ForwardBackwardOutput,
@@ -1012,6 +1033,9 @@ class PlatoonTinkerRLTrainer:
             step_stats["progress/done_frac"] = shared_state.train_step / end_batch
             step_stats["optim/lr"] = self.config.train.optimizer.learning_rate
             step_stats["timing/batch_total"] = batch_elapsed
+            # Non-zero ``ptc_threads_leaked`` means rollout worker threads are gone
+            # for good; see ``platoon.openreward.cell_guard``.
+            step_stats.update(_ptc_cell_guard_stats())
             shared_state.stats_logger.log(step=shared_state.train_step, stats=step_stats)
 
             logger.info(

@@ -50,6 +50,7 @@ from platoon.utils.subagent_rewards import (
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from platoon.openreward.behavior_judge import OpenRewardBehaviorJudge
+from platoon.openreward.cell_guard import install as install_cell_guard
 from platoon.openreward.config_defs import OpenRewardConfig, OpenRewardEnvironmentConfig
 from platoon.openreward.constants import (
     OPENREWARD_ENVIRONMENT_LABEL_KEY,
@@ -231,6 +232,10 @@ def _patch_mcp_boot_timeout() -> None:
 # tool calling must not swap the process-global streams while other rollouts
 # spawn their MCP bridge.  See ``stream_isolation`` for the failure it prevents.
 install_stream_isolation()
+# ... and a PTC cell that never returns silently consumes a rollout worker
+# thread forever (no timeout exists on that path, and a Python thread cannot be
+# killed).  ``cell_guard`` only reports such cells; see its docstring.
+install_cell_guard()
 _patch_mcp_boot_timeout()
 
 
