@@ -332,6 +332,40 @@ For a single rollout you can `tail -f`, run
 To restore today's behaviour exactly, set
 `--train.workflow_config.rollout_isolation inprocess`.
 
+## Client-side throughput metrics
+
+A step on this path is rollout-bound while the serving engines sit nearly idle,
+and nothing measured the client, so "the client is the bottleneck" could only be
+inferred. These scalars are logged every training step through the stats logger
+and therefore reach W&B. Each answers one question.
+
+| metric | question it answers |
+| --- | --- |
+| `rollout_client/rollouts_in_flight_mean` / `_max` / `_configured` | Are we actually running as many rollouts at once as we asked for? A mean far below `_configured` means rollouts are not overlapping. |
+| `rollout_client/concurrency_achieved_fraction` | The same in one number: achieved / configured. |
+| `rollout_client/groups_in_flight_mean` / `_max` | The same at task granularity, so group-atomic admission is visible. |
+| `rollout_client/trainer_queue_wait_seconds_total` / `_mean` / `_max` | How long the training loop blocked on the rollout queue this step. Close to the step wall clock = rollout-bound; near zero = training-bound. |
+| `rollout_client/trainer_queue_ready_fraction` | Fraction of dequeues satisfied immediately. 1.0 means the producer is comfortably ahead. |
+| `rollout_client/agent_step_seconds_p50` / `_p90` | How long one agent step takes end to end (previous model-call end to this one's end). |
+| `rollout_client/agent_step_model_seconds_p50` / `_p90` | Of that, the gateway round trip (`sample_async`). |
+| `rollout_client/agent_step_client_seconds_p50` / `_p90` | Of that, time inside the client rendering/tokenizing the prompt and parsing/detokenizing the response -- the work that serialises on the GIL. A large or concurrency-growing value **is** the client bottleneck. |
+| `rollout_client/agent_step_tool_seconds_p50` / `_p90` | Of that, tool execution, environment round trips and agent scaffolding. |
+| `rollout_client/agent_step_model_fraction` / `_client_fraction` / `_tool_fraction` | The same split as shares of accounted time: one number for where the episode went. |
+| `rollout_client/model_calls_per_rollout_mean` | The multiplier on every per-call cost. |
+| `rollout_client/cpu_percent` | Trainer-process CPU over the step (100 = one core busy). |
+| `rollout_client/worker_cpu_percent` | CPU of reaped children over the step (`RUSAGE_CHILDREN`); with process isolation the rollout CPU appears here. |
+| `rollout_client/total_cpu_percent` / `cpu_cores_busy` / `cpu_saturation` | Trainer + workers; cores busy; and that as a fraction of the node's cores. Near 1.0 means the client is out of CPU. |
+| `rollout_client/rss_bytes` / `threads` | Trainer RSS and OS thread count (the pool a runaway PTC cell consumes). |
+| `rollout_client/worker_rss_bytes` / `worker_processes_live` | Live worker footprint at sample time. |
+| `rollout_client/worker_peak_rss_bytes_sum` / `_max` | The workers' own self-sampled peaks for the rollouts consumed this step. |
+| `rollout_client/dequeue_to_first_model_call_seconds_p50` / `_p90` | From a task leaving the trainer's queue to its first model call. In `process` mode this includes worker launch, so it is the startup cost as the schedule feels it. |
+| `rollout_worker_launch_seconds` | Per member, `exec` to readiness. Watch the intra-group spread against `straggler_timeout_seconds`. |
+| `rollout_worker_startup_seconds` | The child's own import and registration time, measured from process start. |
+| `rollout_worker_wall_seconds` | Total supervised wall clock for one worker. |
+| `rollout_worker_routing_id_coverage` | Fraction of model calls that came back with a gateway routing id. Below 1.0 is logged as a WARNING: a dropped routing id raises nothing anywhere, it just makes the gradient quietly worse. |
+| `rollout_worker_hard_timeout` / `_crashed` / `_oom` / `_launch_failed` / `_launch_retried` / `_killed` / `_peak_rss_bytes` | One per member outcome; see the disposition table above. Alert on `rollout_worker_launch_failed` as a first-class signal. |
+| `ptc_cells_started` / `ptc_cells_finished` / `ptc_cells_stuck_at_exit` / `ptc_threads_leaked_at_exit` / `ptc_worker_reports` | Cell-guard counters forwarded from workers. **Cumulative only**: summing the instantaneous gauges across short-lived workers would read zero precisely when cells are being killed for hanging. The instantaneous `ptc_cells_stuck` / `ptc_threads_leaked` / `ptc_cells_running` keep their original meaning in `inprocess` mode. |
+
 ## Run configs
 
 `plugins/openreward/platoon/openreward/configs/tinker/`:
