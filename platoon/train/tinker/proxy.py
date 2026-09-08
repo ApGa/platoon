@@ -7,7 +7,7 @@ import logging
 import os
 import uuid
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Any,
     Callable,
@@ -50,6 +50,7 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 from transformers import AutoProcessor, PreTrainedTokenizer
 
 from platoon.train.tinker.renderers import register as register_platoon_renderers
+from platoon.train.tinker.rollout_metrics import RolloutTimeline, record_model_call, timeline_scope
 
 logger = logging.getLogger(__name__)
 
@@ -159,12 +160,21 @@ proxy_interactions: ContextVar[dict[str, TinkerLLMInteraction]] = ContextVar("pr
 
 class TinkerLLMProxySession:
     _token: object | None = None
+    _timeline_scope: object | None = None
 
     def __enter__(self) -> TinkerLLMProxySession:
         self._token = proxy_interactions.set({})
+        # A rollout tree also gets a timeline, bound the same way and with the
+        # same context propagation, so subagents and judges record into their
+        # root rollout's timing.
+        self._timeline_scope = timeline_scope(RolloutTimeline())
+        self.timeline = self._timeline_scope.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if self._timeline_scope is not None:
+            self._timeline_scope.__exit__(exc_type, exc_value, traceback)
+            self._timeline_scope = None
         if self._token is not None:
             proxy_interactions.reset(self._token)
             self._token = None
@@ -592,6 +602,14 @@ class TinkerLLM(CustomLLM):
         import asyncio
         import time
 
+        # Phase timings for the client-throughput metrics.  The split matters:
+        # ``render`` and ``parse`` are pure client CPU (tokenizing and
+        # detokenizing a 30k-token conversation), which is exactly the work
+        # that serialises on the GIL when many rollouts share an interpreter,
+        # while ``sample`` is the gateway round trip.  Seeing which one
+        # dominates is the difference between "the engines are slow" and "the
+        # client is the bottleneck".
+        call_started = time.perf_counter()
         max_tokens = self._get_optional_params(
             kwargs, ["max_completion_tokens", "max_tokens"], int, lambda x: x >= 0, self.max_tokens
         )
@@ -617,6 +635,7 @@ class TinkerLLM(CustomLLM):
             stop=stop_sequences,
         )
         start_time = time.perf_counter()
+        render_seconds = start_time - call_started
 
         # Timeout for sample_async to prevent infinite hangs (10 minutes)
         SAMPLE_TIMEOUT_SECONDS = 600
@@ -636,8 +655,17 @@ class TinkerLLM(CustomLLM):
         elapsed = time.perf_counter() - start_time
         if elapsed > 30.0:
             logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
+        parse_started = time.perf_counter()
         final_response = self._parse_response(model_input, result, tools=render_request.tools)
         self._record_interaction(model_input, final_response, routing_id=self._routing_id_of(result))
+        ended = time.perf_counter()
+        record_model_call(
+            started_at=call_started,
+            render_seconds=render_seconds,
+            sample_seconds=elapsed,
+            parse_seconds=ended - parse_started,
+            ended_at=ended,
+        )
         return final_response
 
     def completion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
@@ -707,25 +735,34 @@ class ModelInfo:
     model_name: str
     base_url: str
     api_key: str
+    # Carried so a rollout host that is not the trainer can rebuild an
+    # equivalent renderer without reaching into trainer config.  Defaulted so
+    # every existing construction keeps working.
+    renderer_name: str = ""
+    renderer_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
-def register_tinker_llm(
+def build_tinker_llm(
+    *,
     model_name: str,
     renderer_name: str,
+    sampling_client: tinker.SamplingClient,
     context_window_length: int | None = None,
     renderer_kwargs: dict[str, Any] | None = None,
-) -> ModelInfo:
-    """
-    Register the TinkerLLMProxy as a custom provider in LiteLLM.
+    **sampling_defaults: Any,
+) -> TinkerLLM:
+    """Tokenizer + AutoProcessor + renderer + TinkerLLM, and nothing else.
 
-    Args:
-        model_name: HuggingFace model identifier (e.g., "Qwen/Qwen3-30B-A3B-Instruct-2507").
-        renderer_name: Renderer type for prompt formatting (e.g., "qwen3", "qwen3_instruct").
-        context_window_length: Context window length for the model. Defaults to None.
-        renderer_kwargs: Optional renderer attribute overrides applied after construction.
+    Deliberately constructs **no** ``ServiceClient`` and mutates **no** litellm
+    state, so a rollout worker can build its own provider without opening a
+    second gateway session (a ``ServiceClient`` per worker would mean a session
+    per rollout).  ``register_tinker_llm`` is this plus those two side effects.
+
+    The renderer is rebuilt here rather than shipped: ``Renderer.__reduce__``
+    carries only ``(renderer_name, model_name, has_image_processor)`` and drops
+    the ``renderer_kwargs`` applied below by ``setattr``, so pickling one is a
+    latent silent-drift bug.
     """
-    service_client = tinker.ServiceClient()
-    sampling_client = service_client.create_sampling_client(base_model=model_name)
 
     tokenizer = get_tokenizer(model_name)
     image_processor = None
@@ -746,15 +783,50 @@ def register_tinker_llm(
             raise ValueError(f"Renderer '{renderer_name}' does not support renderer_kwargs['{key}']")
         setattr(renderer, key, value)
 
-    tinker_llm = TinkerLLM(
+    return TinkerLLM(
         model_name=model_name,
         sampling_client=sampling_client,
         renderer=renderer,
         tokenizer=tokenizer,
         context_window_length=context_window_length,
+        **sampling_defaults,
+    )
+
+
+def register_tinker_llm(
+    model_name: str,
+    renderer_name: str,
+    context_window_length: int | None = None,
+    renderer_kwargs: dict[str, Any] | None = None,
+) -> ModelInfo:
+    """
+    Register the TinkerLLMProxy as a custom provider in LiteLLM.
+
+    Args:
+        model_name: HuggingFace model identifier (e.g., "Qwen/Qwen3-30B-A3B-Instruct-2507").
+        renderer_name: Renderer type for prompt formatting (e.g., "qwen3", "qwen3_instruct").
+        context_window_length: Context window length for the model. Defaults to None.
+        renderer_kwargs: Optional renderer attribute overrides applied after construction.
+    """
+    service_client = tinker.ServiceClient()
+    sampling_client = service_client.create_sampling_client(base_model=model_name)
+
+    tinker_llm = build_tinker_llm(
+        model_name=model_name,
+        renderer_name=renderer_name,
+        sampling_client=sampling_client,
+        context_window_length=context_window_length,
+        renderer_kwargs=renderer_kwargs,
     )
     tinker_llm.rewrite_litellm_custom_providers()
     base_url = "None"
     api_key = "None"
     model_name = "platoon-tinker/" + model_name
-    return ModelInfo(llm=tinker_llm, model_name=model_name, base_url=base_url, api_key=api_key)
+    return ModelInfo(
+        llm=tinker_llm,
+        model_name=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        renderer_name=renderer_name,
+        renderer_kwargs=dict(renderer_kwargs or {}),
+    )

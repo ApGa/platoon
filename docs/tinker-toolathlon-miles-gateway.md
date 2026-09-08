@@ -195,6 +195,143 @@ runaway that allocates can still OOM the client process and take training with
 it, and the guard cannot see a thread that is blocked inside a lock it does not
 own.
 
+## Process-per-rollout (`rollout_isolation`)
+
+The durable fix for both hazards above, and for a third: a segfault or an OOM in
+rollout code currently kills the trainer and costs a ~490 GB checkpoint reload.
+`WorkflowConfig.rollout_isolation` selects where a rollout runs.
+
+- `inprocess` (default) -- today's behaviour exactly: rollouts are asyncio tasks
+  in the trainer.
+- `process` -- one `exec`'d worker per rollout,
+  `python -m platoon.train.tinker.workers.entrypoint <request>`, in its own
+  session and process group, for exactly one rollout tree and then gone.
+
+Both modes run the **same function** (`platoon/train/tinker/workers/run.py`,
+`run_rollout_request`); only the host differs. Turning it on takes no config
+edit, because the launcher forwards arbitrary overrides:
+
+```
+EXTRA='--train.workflow_config.rollout_isolation process' <launcher>
+```
+
+Set it on **both** `train.workflow_config` and `eval.workflow_config` when eval
+is enabled: an unisolated eval rollout reintroduces exactly the unkillable-cell
+and crash-containment hazards this removes.
+
+### What isolation buys
+
+| hazard | `inprocess` | `process` |
+| --- | --- | --- |
+| a PTC cell that never returns | counted only; consumes an executor thread and a core for the rest of the run | `killpg(SIGKILL)` at the rollout deadline, with a `.diag` marker proving it |
+| a segfault in rollout code | kills the trainer | one member fails; siblings and the trainer are untouched |
+| gradual memory growth | unbounded | RSS watchdog exits with a distinct code and is classified as an OOM |
+| freezegun / IPython singleton / `sys.stdout` rebinding | shared by every concurrent rollout | one rollout tree per interpreter |
+| a rollout's MCP bridges | reaped only when the trainer exits | reaped with their own worker, via `PR_SET_PDEATHSIG` |
+
+Honest limits: depth-2 subagents, judges and the reward verifier stay inside
+their root rollout's process by design, so the IPython/stream class of bug is
+reduced to a blast radius of one trajectory tree rather than eliminated; and a
+single huge allocation can still reach the kernel OOM killer, whose victim
+selection is not ours. Run `deploy/abci/openreward-node-memory-guard.py` on the
+head node before flipping this in production.
+
+### Config keys
+
+All defaulted, so a config that sets none of them behaves exactly as before.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `rollout_isolation` | `inprocess` | `inprocess` or `process` |
+| `worker_startup_budget_seconds` | `300` | import/registration deadline; sized for a concurrent cold start on shared storage (~26 s of imports each) |
+| `worker_finalize_grace_seconds` | `120` | added to `rollout_config.timeout` for datum conversion and writing the response |
+| `worker_parent_grace_seconds` | `60` | parent wall deadline above the child's, so the child's own alarm owns its tree first and can leave a marker |
+| `worker_termination_grace_seconds` | `10` | SIGTERM -> grace -> SIGKILL; must stay well under the launcher's 30 s budget for the whole client |
+| `worker_launch_concurrent_groups` | `2` | groups (not rollouts) allowed to be starting at once; a group is admitted atomically so its members never skew against the straggler quorum clock |
+| `worker_rss_soft_limit_bytes` | `24 GiB` | per-worker RSS soft limit; above it the worker writes `phase=rss` and exits with code 87 |
+| `worker_mem_available_floor_bytes` | `0` | refuse to launch below this `MemAvailable`; 0 disables |
+| `worker_binding_poll_seconds` | `5` | how often a worker re-checks the published sampling-client binding |
+| `worker_unbounded_rollout_budget_seconds` | `86400` | child budget when `rollout_config.timeout` is null |
+| `worker_python_env_isolation` | `false` | wrap the rollout in a disposable Python overlay; requires `rollout_isolation: process` |
+
+Timeout ladder at production values (`rollout_config.timeout: 3600`):
+
+```
+child startup alarm      300 s   (armed before the imports, from the environment)
+child rollout alarm     3720 s   = timeout + finalize grace, re-armed at readiness
+parent wall deadline    3780 s   = child budget + parent grace
+straggler tail grace     900 s   after quorum settles (the dominant path)
+SIGTERM -> SIGKILL        10 s
+watchdog                7200 s
+```
+
+### Model access
+
+Workers never build a `ServiceClient` (that would be a gateway session per
+rollout). The trainer pickles its `SamplingClient` -- ~287 bytes -- into
+`$TMPDIR/platoon-rollout-ipc/model_binding.pkl` (0600) on every
+`update_sampling_client`, and each worker re-`stat`s that file at most once per
+`worker_binding_poll_seconds` and reloads on change. Workers **follow**, they do
+not pin: pinning is a no-op under the full-finetune gateway (which always serves
+the latest pushed weights) and a hard mid-rollout failure under a LoRA gateway
+(sampler versions are retired after `sampler_versions_to_keep` steps). Weight
+staleness and `max_staleness` accounting are unchanged.
+
+Every worker sets `TINKER_TELEMETRY=0` before any tinker import and reports that
+it did. This is not tidiness: an unpickled sampling client builds a *shadow*
+holder that reuses the trainer's session id, and with telemetry on it can emit
+`SESSION_END`, which the gateway reads as the client exiting -- it then reclaims
+the session's models and slots and the training state dies with the lease.
+Production sets `TINKER_TELEMETRY=1`, so a worker inherits exactly the dangerous
+value unless it fixes it.
+
+### Member dispositions
+
+A worker death is a **member** failure, decided by `min_successful_group_size`
+like any other -- never a group failure and never a trainer failure.
+Classification is **response-first**: a readable response wins regardless of the
+return code or of who sent the signal, because a worker needs ~1.9 s of
+interpreter teardown after it writes one, and its group's tail grace can expire
+inside that window.
+
+| disposition | condition | scalar |
+| --- | --- | --- |
+| `completed` / `no_trajectories` / `conversion_empty` / `error` | the worker's own verdict | (as today) |
+| `straggler_killed` | cancelled by the group's tail grace | `straggler_cancelled` |
+| `hard_timeout` | no response, `.diag` says `phase=startup` or `phase=rollout` | `rollout_worker_hard_timeout` |
+| `rollout_worker_oom` | no response, `.diag` says `phase=rss`, or exit code 87 | `rollout_worker_oom` |
+| `worker_crashed` | no response, no marker, non-zero or signalled exit | `rollout_worker_crashed` |
+| `worker_launch_failed` | exec failed twice, or the response is unreadable | `rollout_worker_launch_failed` |
+
+The `.diag` marker is what separates a hard timeout from an OOM kill from an
+external `kill-leftovers.sh` sweep -- three failures with the identical
+observable (`rc=-9`, no response) and three opposite operator responses. It also
+carries the dying worker's cumulative cell-guard counters, which is the only way
+`ptc_cells_stuck_at_exit` can ever be non-zero: the worker with the stuck cell is
+exactly the one that gets SIGKILLed and writes no response.
+
+### Where to look when something goes wrong
+
+Each worker's stdout and stderr land in
+`<log_path>/rollouts/<scope>/<version>/workers/<request_id>.log`, next to the
+rollout artifacts, and survive the worker's own SIGKILL. The first line is
+machine-readable:
+
+```
+[rollout-worker] request=<id> pid=<pid> pgid=<pgid> extra_allow=1 telemetry=0 torch_threads=1 startup=24.9s
+```
+
+`extra_allow=1` is the R3 patch (without it the gateway's `routing_id` is
+silently dropped and every datum loses `routing_handle`); `telemetry=0` is the
+session foot-gun above; `torch_threads=1` is the thread pin, without which each
+worker takes `os.cpu_count()` intra- *and* inter-op threads on the node that
+also hosts the gateway for every node.
+
+For a single rollout you can `tail -f`, run
+`--train.workflow_config.group_size 1 --train.num_concurrent_rollout_workflow_workers 1`.
+To restore today's behaviour exactly, set
+`--train.workflow_config.rollout_isolation inprocess`.
+
 ## Run configs
 
 `plugins/openreward/platoon/openreward/configs/tinker/`:

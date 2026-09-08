@@ -484,7 +484,18 @@ class ClientThroughputMonitor:
             pass
 
     # -- per-rollout timing ---------------------------------------------
-    def record_rollout_timing(self, summary: RolloutTimingSummary | None) -> None:
+    def record_rollout_timing(
+        self, summary: RolloutTimingSummary | None, *, startup_offset: float = 0.0
+    ) -> None:
+        """Fold one rollout's timing in.
+
+        ``startup_offset`` is the parent-side cost the rollout's own timeline
+        cannot see -- with process isolation, the worker's exec-to-ready time.
+        Adding it here keeps ``dequeue_to_first_model_call`` comparable between
+        ``inprocess`` and ``process`` modes, which is the whole point of
+        measuring it.
+        """
+
         if summary is None:
             return
         try:
@@ -496,7 +507,9 @@ class ClientThroughputMonitor:
                 self._sample_total += summary.sample_seconds_total
                 self._parse_total += summary.parse_seconds_total
                 if summary.first_model_call_seconds >= 0.0:
-                    self._first_call_seconds.append(summary.first_model_call_seconds)
+                    self._first_call_seconds.append(
+                        summary.first_model_call_seconds + max(0.0, float(startup_offset))
+                    )
         except Exception:  # pragma: no cover
             pass
 

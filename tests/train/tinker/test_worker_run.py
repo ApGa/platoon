@@ -13,15 +13,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from types import SimpleNamespace
 
-import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 import pytest
 import tinker
 import torch
 from tinker import TensorData
 
+import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
 from platoon.train.tinker.workers import run as run_module

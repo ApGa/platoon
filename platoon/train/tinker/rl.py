@@ -33,6 +33,8 @@ from platoon.train.tinker.config_defs import (
     TrainEventTriggerConfig,
 )
 from platoon.train.tinker.dataset_order import prepare_dataset_for_dataloader
+from platoon.train.tinker.rollout_metrics import monitor as client_monitor
+from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
 from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -76,7 +78,7 @@ def _get_task_workload_payload(rollout: Any) -> _TaskWorkloadPayload | None:
     return _TaskWorkloadPayload(workload, *counts)
 
 
-def _ptc_cell_guard_stats() -> dict[str, float]:
+def _ptc_cell_guard_stats(stats_scope: str = "train") -> dict[str, float]:
     """Counters for programmatic-tool-calling cells that have not returned.
 
     A PTC cell runs in-process on a rollout worker thread with no timeout, and a
@@ -87,8 +89,26 @@ def _ptc_cell_guard_stats() -> dict[str, float]:
     without that plugin -- or any failure inside the guard -- contributes no
     scalars instead of failing. Never raises: this is called inline in the train
     loop's stats path.
+
+    With ``rollout_isolation: process`` the guard's registry lives in the
+    *workers*, so this process's own snapshot is permanently empty.  Because
+    this function swallows everything and returns ``{}``, that regression would
+    be completely silent under unchanged key names -- so worker-reported
+    counters take precedence when there are any.  They are deliberately the
+    cumulative ones plus ``*_at_exit`` gauges: summing the instantaneous
+    ``ptc_cells_stuck`` across short-lived workers would read zero precisely
+    when cells are being killed for hanging.  The instantaneous names keep
+    their original meaning in ``inprocess`` mode.
     """
 
+    try:
+        from platoon.train.tinker.workers.telemetry import worker_cell_guard_stats
+
+        forwarded = worker_cell_guard_stats(stats_scope)
+    except Exception:
+        forwarded = {}
+    if forwarded:
+        return forwarded
     try:
         from platoon.openreward.cell_guard import snapshot
 
@@ -602,6 +622,22 @@ class PlatoonTinkerRLTrainer:
 
             rollout_result_queue.put_nowait(rollout)
 
+    @staticmethod
+    def _publish_worker_binding(workflow, sampling_client, version: int) -> None:
+        """Republish the sampling client for rollout workers.  Never raises.
+
+        A no-op for ``inprocess`` mode and for custom workflows that do not
+        run workers.
+        """
+
+        publish = getattr(workflow, "publish_model_binding", None)
+        if publish is None:
+            return
+        try:
+            publish(sampling_client, version)
+        except Exception:
+            logger.exception("could not publish the rollout worker sampling-client binding")
+
     async def _train_loop(
         self,
         task_group: asyncio.TaskGroup,
@@ -628,6 +664,17 @@ class PlatoonTinkerRLTrainer:
                 ),
                 name=f"train_rollout_workflow_worker_{i}",
             )
+
+        # Publish the initial sampling-client binding before any worker can
+        # start, then declare the concurrency ceiling the metrics compare
+        # against.
+        self._publish_worker_binding(
+            train_workflow, shared_state.sampling_client, shared_state.model_info.llm.version
+        )
+        client_monitor("train").set_configured_concurrency(
+            float(self.config.train.num_concurrent_rollout_workflow_workers)
+            * float(self.config.train.workflow_config.group_size)
+        )
 
         # Start training loop.
         shared_state.train_step = start_batch
@@ -698,6 +745,11 @@ class PlatoonTinkerRLTrainer:
                             batch_total_workflow_trainable_rollouts += workload_payload.trainable_rollouts
                             batch_total_task_retained_datums += workload_payload.task_retained_datums
                         queue_wait_elapsed = time.perf_counter() - queue_wait_start
+                        # The trainer's own view of "rollout-bound": time spent
+                        # blocked on the result queue during this step.
+                        client_monitor("train").record_queue_wait(
+                            queue_wait_elapsed, immediate=queue_wait_elapsed < 0.001
+                        )
                         if queue_wait_elapsed > 60.0:
                             logger.warning(f"Waited {queue_wait_elapsed:.1f}s for rollout from queue (slow)")
 
@@ -1009,6 +1061,11 @@ class PlatoonTinkerRLTrainer:
             )
             logger.info("_save_checkpoint_and_get_sampling_client returned, updating LLM sampling client")
             shared_state.model_info.llm.update_sampling_client(sampling_client)
+            # Rollout workers follow this file; republishing it here is what
+            # keeps them exactly as fresh as the in-process path.
+            self._publish_worker_binding(
+                train_workflow, sampling_client, shared_state.model_info.llm.version
+            )
             shared_state.sampling_client = sampling_client
             update_elapsed = time.perf_counter() - update_start
             shared_state.train_tracker.scalar(update_weights_time=update_elapsed)
@@ -1035,7 +1092,12 @@ class PlatoonTinkerRLTrainer:
             step_stats["timing/batch_total"] = batch_elapsed
             # Non-zero ``ptc_threads_leaked`` means rollout worker threads are gone
             # for good; see ``platoon.openreward.cell_guard``.
-            step_stats.update(_ptc_cell_guard_stats())
+            step_stats.update(_ptc_cell_guard_stats("train"))
+            # Client-side throughput: concurrency actually achieved, the queue
+            # wait the trainer experienced, where an agent step's wall clock
+            # went, and whether this process (plus its rollout workers) is CPU
+            # saturated.  See ``platoon.train.tinker.rollout_metrics``.
+            step_stats.update(client_step_metrics("train"))
             shared_state.stats_logger.log(step=shared_state.train_step, stats=step_stats)
 
             logger.info(

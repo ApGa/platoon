@@ -8,8 +8,9 @@ import asyncio
 import logging
 import os
 import uuid
+from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import Callable
 
 import tinker
@@ -19,6 +20,7 @@ from tinker import TensorData
 from platoon.envs.base import Task
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
@@ -29,6 +31,8 @@ from platoon.train.tinker.workers.protocol import (
     validated_ref,
 )
 from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR, run_rollout_request
+from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor, WorkerOutcome
+from platoon.train.tinker.workers.telemetry import record_worker_cell_guard
 from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.utils.rollout_workload import (
     RolloutWorkload,
@@ -45,6 +49,11 @@ from platoon.utils.tinker_data_processing import (
 from platoon.utils.trajectory_error_filtering import ERROR_ACTION_MASK_KEY
 
 logger = logging.getLogger(__name__)
+
+# Set by ``_run_group_rollouts`` before it creates its member tasks, so each
+# member can report readiness back to its group's admission permit without
+# changing ``arun_episode_single``'s signature (custom workflows override it).
+_group_ready_callback: ContextVar = ContextVar("platoon_group_ready_callback", default=None)
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,50 @@ def _filter_positive_centered_error_tokens(
     }
 
 
+class _GroupAdmission:
+    """One startup permit held for a whole group until its members are up.
+
+    Released when every member has signalled readiness or exited, or after
+    ``timeout_seconds`` -- whichever comes first -- and never released twice.
+    """
+
+    def __init__(self, semaphore: asyncio.Semaphore | None, expected: int, timeout_seconds: float):
+        self._semaphore = semaphore
+        self._pending = max(0, int(expected))
+        self._released = semaphore is None
+        self._timer: asyncio.TimerHandle | None = None
+        if semaphore is not None and timeout_seconds > 0:
+            # A group whose members never signal readiness (all of them failed
+            # to launch, say) must not hold the permit forever.
+            self._timer = asyncio.get_running_loop().call_later(timeout_seconds, self.release)
+
+    def member_slot(self):
+        """A one-shot callback for a single member."""
+
+        fired = False
+
+        def _slot() -> None:
+            nonlocal fired
+            if fired:
+                return
+            fired = True
+            self._pending -= 1
+            if self._pending <= 0:
+                self.release()
+
+        return _slot
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        if self._semaphore is not None:
+            self._semaphore.release()
+
+
 class GroupRolloutWorkflow:
     """Workflow that runs multiple rollouts per task and computes group-centered advantages.
 
@@ -199,6 +252,8 @@ class GroupRolloutWorkflow:
             else self._build_ref(reward_processor, what="reward_processor")
         )
         self._supervisor = None
+        self._admission: asyncio.Semaphore | None = None
+        self._admission_limit = 0
 
     def _build_ref(self, obj, *, what: str) -> str | None:
         """Name a callable for a worker, strictly when a worker will need it."""
@@ -309,7 +364,8 @@ class GroupRolloutWorkflow:
             A list-compatible datum result. An empty result still carries exact
             task generation workload for trainer-side batch accounting.
         """
-        raw_outcomes = await self._run_group_rollouts(data)
+        with self._monitor().group_in_flight():
+            raw_outcomes = await self._run_group_rollouts(data)
         # Accept legacy test/custom overrides that return the old result type,
         # while the canonical single-rollout path always returns an outcome.
         outcomes = [
@@ -572,6 +628,53 @@ class GroupRolloutWorkflow:
             trainable_rollouts=trainable_rollouts,
         )
 
+    def _admission_semaphore(self) -> asyncio.Semaphore:
+        limit = max(1, int(getattr(self.config, "worker_launch_concurrent_groups", 2)))
+        semaphore = getattr(self, "_admission", None)
+        if semaphore is None or getattr(self, "_admission_limit", 0) != limit:
+            semaphore = asyncio.Semaphore(limit)
+            self._admission = semaphore
+            self._admission_limit = limit
+        return semaphore
+
+    async def _admit_group(self, group_size: int) -> "_GroupAdmission":
+        """Take one startup permit for the WHOLE group, not one per rollout.
+
+        Two things make this the right granularity.  A per-rollout permit
+        released at ``exec`` bounds nothing at all: ``create_subprocess_exec``
+        returns in well under a millisecond while the child then spends 20-30 s
+        importing, so the gate must be readiness, not launch.  But a
+        *per-rollout* readiness gate would then inject start-time skew inside a
+        group, and the straggler policy has no per-member reference point -- it
+        starts its tail-grace clock when the quorum settles.  With FIFO
+        admission and tasks created in group order, the same rollout numbers
+        would deterministically start last and be cancelled having had a
+        fraction of their budget, biasing the leave-one-out baseline toward
+        whichever members launch early.  Admitting whole groups removes
+        intra-group skew entirely; inter-group skew is harmless because each
+        group has its own clock.  One acquire per group also cannot deadlock.
+        """
+
+        if self._isolation != "process":
+            return _GroupAdmission(None, group_size, 0.0)
+        semaphore = self._admission_semaphore()
+        await semaphore.acquire()
+        budget = float(getattr(self.config, "worker_startup_budget_seconds", 300.0)) + 60.0
+        return _GroupAdmission(semaphore, group_size, budget)
+
+    async def _run_group_member(
+        self, data: dict, rollout_number: int, admission: "_GroupAdmission"
+    ) -> _SingleRolloutOutcome:
+        """Run one member, reporting its readiness to the group's permit."""
+
+        slot = admission.member_slot()
+        token = _group_ready_callback.set(slot)
+        try:
+            return await self.arun_episode_single(data, rollout_number)
+        finally:
+            _group_ready_callback.reset(token)
+            slot()
+
     async def _run_group_rollouts(self, data: dict) -> list:
         """Run ``group_size`` rollouts concurrently with the straggler policy.
 
@@ -583,12 +686,16 @@ class GroupRolloutWorkflow:
         """
         group_size = self.config.group_size
         straggler_timeout = getattr(self.config, "straggler_timeout_seconds", None)
+        admission = await self._admit_group(group_size)
         tasks = [
-            asyncio.ensure_future(self.arun_episode_single(data, i))
+            asyncio.ensure_future(self._run_group_member(data, i, admission))
             for i in range(group_size)
         ]
         if straggler_timeout is None:
-            return list(await asyncio.gather(*tasks))
+            try:
+                return list(await asyncio.gather(*tasks))
+            finally:
+                admission.release()
 
         quorum = getattr(self.config, "straggler_quorum", None)
         if quorum is None:
@@ -603,6 +710,7 @@ class GroupRolloutWorkflow:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            admission.release()
             raise
 
         # A rollout can settle between the deadline and this cancellation;
@@ -623,6 +731,7 @@ class GroupRolloutWorkflow:
             # interrupted; leaked environment sessions are reaped server-side.
             await asyncio.gather(*stragglers, return_exceptions=True)
         self.tracker.scalar(straggler_cancelled=float(len(stragglers)))
+        admission.release()
 
         outcomes: list = []
         for task in tasks:
@@ -735,7 +844,57 @@ class GroupRolloutWorkflow:
         return float(timeout) + grace
 
     def _ipc_dir(self) -> str:
-        return ipc_dir()
+        cached = getattr(self, "_ipc_dir_cache", None)
+        if cached is None:
+            cached = ipc_dir()
+            self._ipc_dir_cache = cached
+        return cached
+
+    def _monitor(self):
+        """Client throughput monitor for this workflow's stats scope.
+
+        ``getattr`` because custom/legacy workflows construct this class with
+        ``__new__`` and set only the attributes they use.
+        """
+
+        return client_monitor(getattr(self, "stats_scope", "train"))
+
+    @property
+    def _isolation(self) -> str:
+        return getattr(self, "rollout_isolation", "inprocess")
+
+    @property
+    def supervisor(self) -> RolloutWorkerSupervisor:
+        """Lazily built so ``inprocess`` runs never touch node-local scratch."""
+
+        if getattr(self, "_supervisor", None) is None:
+            self._supervisor = RolloutWorkerSupervisor(
+                scratch_dir=self._ipc_dir(),
+                termination_grace_seconds=float(
+                    getattr(self.config, "worker_termination_grace_seconds", 10.0)
+                ),
+                parent_grace_seconds=float(getattr(self.config, "worker_parent_grace_seconds", 60.0)),
+                mem_available_floor_bytes=int(
+                    getattr(self.config, "worker_mem_available_floor_bytes", 0)
+                ),
+            )
+        return self._supervisor
+
+    def publish_model_binding(self, sampling_client, version: int) -> None:
+        """Republish the trainer's sampling client for its rollout workers."""
+
+        if self._isolation != "process":
+            return
+        self.supervisor.publish_binding(sampling_client, version)
+
+    def _worker_log_dir(self, checkpoint_version: int) -> str | None:
+        """Next to the rollout artifacts, so the smoke can grep both together."""
+
+        if self.log_path is None:
+            return None
+        return os.path.join(
+            self.log_path, "rollouts", self.stats_scope, str(checkpoint_version), "workers"
+        )
 
     @property
     def _binding_path(self) -> str:
@@ -762,6 +921,84 @@ class GroupRolloutWorkflow:
             disposition=disposition,
         )
 
+    def _record_worker_telemetry(self, outcome: WorkerOutcome) -> None:
+        """One scalar per disposition, plus the cost and the R3 coverage guard.
+
+        Never raises: a metric must not be able to fail a rollout.
+        """
+
+        try:
+            scalars: dict[str, float] = {
+                "rollout_worker_wall_seconds": outcome.wall_seconds,
+                "rollout_worker_launch_seconds": outcome.launch_seconds,
+            }
+            if outcome.killed_by_parent:
+                scalars["rollout_worker_killed"] = 1.0
+            if outcome.retried:
+                scalars["rollout_worker_launch_retried"] = 1.0
+            counted = {
+                "hard_timeout": "rollout_worker_hard_timeout",
+                "worker_crashed": "rollout_worker_crashed",
+                "rollout_worker_oom": "rollout_worker_oom",
+                "worker_launch_failed": "rollout_worker_launch_failed",
+            }.get(outcome.disposition)
+            if counted:
+                scalars[counted] = 1.0
+            response = outcome.response
+            if response is not None:
+                scalars["rollout_worker_startup_seconds"] = response.startup_seconds
+                scalars["rollout_worker_peak_rss_bytes"] = float(response.peak_rss_bytes)
+                if response.model_calls:
+                    coverage = response.routing_id_present / float(response.model_calls)
+                    scalars["rollout_worker_routing_id_coverage"] = coverage
+                    if coverage < 1.0:
+                        # A dropped routing_id is not an error anywhere in the
+                        # stack: the datum simply loses routing_handle and the
+                        # gradient is quietly worse.
+                        logger.warning(
+                            "rollout worker %s returned routing ids for only %s/%s model calls "
+                            "(R3 routing_handle coverage %.3f)",
+                            outcome.request_id,
+                            response.routing_id_present,
+                            response.model_calls,
+                            coverage,
+                        )
+                if not response.extra_allow_verified:
+                    logger.warning(
+                        "rollout worker %s did not verify the R3 extra='allow' patch",
+                        outcome.request_id,
+                    )
+                if not response.telemetry_disabled:
+                    logger.error(
+                        "rollout worker %s ran with tinker telemetry ENABLED; a shadow client can "
+                        "end the trainer's gateway session",
+                        outcome.request_id,
+                    )
+                record_worker_cell_guard(getattr(self, "stats_scope", "train"), response.cell_guard)
+                self._monitor().record_rollout_timing(
+                    response.timing, startup_offset=outcome.launch_seconds
+                )
+                self._monitor().record_worker_peak_rss(response.peak_rss_bytes)
+            elif outcome.diag:
+                # A SIGKILLed worker writes its cumulative cell-guard counters
+                # into the marker precisely because it cannot write a response;
+                # without this the metric would read zero exactly when a cell
+                # was killed for hanging.
+                record_worker_cell_guard(getattr(self, "stats_scope", "train"), outcome.diag)
+            self.tracker.scalar(**scalars)
+            logger.info(
+                "rollout worker %s pid=%s disposition=%s rc=%s launch=%.1fs wall=%.1fs log=%s",
+                outcome.request_id,
+                outcome.worker_pid,
+                outcome.disposition,
+                outcome.returncode,
+                outcome.launch_seconds,
+                outcome.wall_seconds,
+                outcome.log_path,
+            )
+        except Exception:  # pragma: no cover - telemetry must never break a rollout
+            logger.debug("failed to record rollout worker telemetry", exc_info=True)
+
     async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> _SingleRolloutOutcome:
         """Run a single rollout and return training data.
 
@@ -782,13 +1019,29 @@ class GroupRolloutWorkflow:
         """
         try:
             request = self._build_worker_request(data, rollout_number)
-            response = await run_rollout_request(
-                request,
-                self.model_info.llm,
-                rollout_fn=self.rollout_fn,
-                reward_processor=self.reward_processor,
-            )
-            return self._outcome_from_response(response, response.status)
+            monitor = self._monitor()
+            if self._isolation != "process":
+                with monitor.rollout_in_flight():
+                    response = await run_rollout_request(
+                        request,
+                        self.model_info.llm,
+                        rollout_fn=self.rollout_fn,
+                        reward_processor=self.reward_processor,
+                    )
+                monitor.record_rollout_timing(response.timing)
+                return self._outcome_from_response(response, response.status)
+
+            ready = _group_ready_callback.get()
+            with monitor.rollout_in_flight():
+                outcome = await self.supervisor.run(
+                    request,
+                    log_dir=self._worker_log_dir(request.model.checkpoint_version),
+                    on_ready=ready,
+                    on_launch=monitor.register_worker,
+                    on_reap=monitor.unregister_worker,
+                )
+            self._record_worker_telemetry(outcome)
+            return self._outcome_from_response(outcome.response, outcome.disposition)
         except asyncio.CancelledError:
             # The straggler policy owns cancellation.
             raise

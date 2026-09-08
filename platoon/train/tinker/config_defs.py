@@ -51,6 +51,45 @@ class WorkflowConfig:
     # datums (its rollout workload is still accounted for).
     min_successful_group_size: int = 1
 
+    # --- rollout process isolation ---------------------------------------
+    # "inprocess": rollouts are asyncio tasks in the trainer (historical).
+    # "process":   one exec'd worker process per rollout, killable as a group.
+    # A process is the only unit of execution Python can actually kill, and it
+    # is the only way two rollouts can stop sharing the interpreter's globals
+    # (freezegun's freeze stack, IPython's singleton shell, sys.stdout).
+    rollout_isolation: Literal["inprocess", "process"] = "inprocess"
+    # Import/registration budget for a worker.  Measured ~26 s of imports;
+    # sized for a concurrent cold-start storm on a shared filesystem.
+    worker_startup_budget_seconds: float = 300.0
+    # Extra seconds beyond rollout_config.timeout for datum conversion and
+    # writing the (1-6 MB) response file.
+    worker_finalize_grace_seconds: float = 120.0
+    # Parent wall deadline = the child's budget + this, so the child's own
+    # alarm always owns its tree first and can leave a diagnostic marker.
+    worker_parent_grace_seconds: float = 60.0
+    # SIGTERM -> grace -> SIGKILL.  Must stay well under the launcher's 30 s
+    # budget for the whole client.  0.0 means SIGKILL immediately.
+    worker_termination_grace_seconds: float = 10.0
+    # Groups -- not rollouts -- allowed to be starting up at once.  A group is
+    # admitted atomically so its members never skew against the straggler
+    # quorum clock, which has no notion of when each member began.
+    worker_launch_concurrent_groups: int = 2
+    # Per-worker RSS soft limit.  Above it the worker writes a diagnostic
+    # marker and exits with a distinct code, so an over-allocating rollout is
+    # classified as an OOM rather than inferred from an anonymous rc=-9.
+    # Not RLIMIT_AS: the bare import stack is ~12.7 GB of address space against
+    # ~0.7 GB resident, so any address-space limit loose enough to import torch
+    # bounds nothing and a tight one kills every worker at import.
+    worker_rss_soft_limit_bytes: int = 24 * 1024**3
+    # Refuse to launch a worker below this MemAvailable; 0 disables.
+    worker_mem_available_floor_bytes: int = 0
+    # How often a worker re-checks the published sampling-client binding.
+    worker_binding_poll_seconds: float = 5.0
+    # Child budget used when rollout_config.timeout is null.
+    worker_unbounded_rollout_budget_seconds: float = 24 * 3600.0
+    # Wrap the rollout in isolated_rollout_python_environment().
+    worker_python_env_isolation: bool = False
+
     def __post_init__(self) -> None:
         if not 0.0 <= self.subagent_datum_keep_probability <= 1.0:
             raise ValueError("subagent_datum_keep_probability must be in [0, 1]")
@@ -68,6 +107,33 @@ class WorkflowConfig:
             raise ValueError("straggler_quorum requires straggler_timeout_seconds")
         if not 1 <= self.min_successful_group_size <= self.group_size:
             raise ValueError("min_successful_group_size must be in [1, group_size]")
+        if self.rollout_isolation not in ("inprocess", "process"):
+            raise ValueError("rollout_isolation must be 'inprocess' or 'process'")
+        for name in (
+            "worker_startup_budget_seconds",
+            "worker_finalize_grace_seconds",
+            "worker_parent_grace_seconds",
+            "worker_termination_grace_seconds",
+            "worker_binding_poll_seconds",
+            "worker_unbounded_rollout_budget_seconds",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if self.worker_launch_concurrent_groups < 1:
+            raise ValueError("worker_launch_concurrent_groups must be >= 1")
+        if self.worker_rss_soft_limit_bytes < 0:
+            raise ValueError("worker_rss_soft_limit_bytes must be non-negative")
+        if self.worker_mem_available_floor_bytes < 0:
+            raise ValueError("worker_mem_available_floor_bytes must be non-negative")
+        if self.worker_python_env_isolation and self.rollout_isolation != "process":
+            # The overlay mutates sys.path, sys.executable and os.environ
+            # process-globally and restores them per call, so with concurrent
+            # in-process rollouts the first to finish would tear it down under
+            # the others -- breaking their imports and every in-flight MCP
+            # bridge launch, which uses sys.executable.
+            raise ValueError(
+                "worker_python_env_isolation requires rollout_isolation='process'"
+            )
 
 
 # TODO:

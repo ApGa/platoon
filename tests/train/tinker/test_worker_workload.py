@@ -15,7 +15,6 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
-
 from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.utils.rollout_workload import RolloutWorkload, trajectory_collection_shape
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats

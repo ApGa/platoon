@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import random
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from datasets import Dataset
-from platoon.train.tinker.config_defs import WorkflowConfig
 from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
@@ -105,15 +104,27 @@ async def main(args: list[str]) -> None:
         # compute filtering is deliberately a train-only policy.
         eval_workflow_config.filter_zero_advantage_datums = False
         if eval_workflow_config.group_size != 1:
-            eval_workflow_config = WorkflowConfig(
+            # ``replace`` rather than re-listing fields: the old field-subset
+            # construction silently dropped every key it did not name, so a
+            # setting present in the yaml -- including the rollout isolation
+            # keys -- would be quietly discarded for eval only.  An unisolated
+            # eval rollout reintroduces exactly the unkillable-cell and
+            # crash-containment hazards process isolation removes, so the keys
+            # must survive.  Eval forces exactly three fields and nothing else.
+            eval_workflow_config = replace(
+                eval_workflow_config,
                 group_size=1,
-                rollout_config=eval_workflow_config.rollout_config,
-                leave_one_out_baseline=eval_workflow_config.leave_one_out_baseline,
-                depth_level_weighting=eval_workflow_config.depth_level_weighting,
-                subagent_datum_keep_probability=eval_workflow_config.subagent_datum_keep_probability,
-                subagent_datum_sampling_seed=eval_workflow_config.subagent_datum_sampling_seed,
                 filter_errors=False,
                 filter_zero_advantage_datums=False,
+                # Both of these are validated against group_size, which eval
+                # forces to 1, so any configured value above 1 would make
+                # WorkflowConfig.__post_init__ raise at startup.  A one-member
+                # group has nothing to be a straggler against and cannot
+                # require more than one successful member.  The old
+                # field-subset construction hid this by dropping the keys along
+                # with everything else it did not name.
+                straggler_quorum=None,
+                min_successful_group_size=1,
             )
 
         eval_workflow = GroupRolloutWorkflow(

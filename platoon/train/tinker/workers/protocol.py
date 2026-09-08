@@ -397,9 +397,21 @@ def validated_ref(obj: Any, *, what: str) -> str:
         raise RefResolutionError(
             f"{what} {obj!r} maps to {ref!r} which does not import in this process: {exc}"
         ) from exc
-    if resolved is not obj:
+    if resolved is obj:
+        return ref
+    # Identity is the strongest check but it cannot always hold, and requiring
+    # it would reject exactly the case the ``__main__`` mapping exists for: a
+    # callable defined in a ``python -m pkg.script`` entry point lives in
+    # ``__main__``, and resolving ``pkg.script:name`` imports that file a second
+    # time, producing an equivalent but distinct object.  Fall back to matching
+    # the qualified name, which still catches a ref that lands on some other
+    # callable entirely.
+    if not callable(resolved) or getattr(resolved, "__qualname__", None) != getattr(
+        obj, "__qualname__", None
+    ):
         raise RefResolutionError(
             f"{what} {obj!r} maps to {ref!r} which resolves to a different object {resolved!r}; "
             "a rollout worker would silently run the wrong callable"
         )
+    logger.debug("%s %r resolves to a re-imported copy via %r", what, obj, ref)
     return ref
