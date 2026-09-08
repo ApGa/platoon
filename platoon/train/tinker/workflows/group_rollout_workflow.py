@@ -928,22 +928,26 @@ class GroupRolloutWorkflow:
         """
 
         try:
+            # Every counter is emitted on EVERY member, as 0.0 or 1.0.  The
+            # stats tracker averages a scalar over the calls in a step and
+            # publishes the call count alongside it, so this reads as "fraction
+            # of workers that hard-timed-out" with ``__count`` as the number of
+            # workers.  Emitting only on failure would make the value a
+            # constant 1.0 and hide the denominator.
             scalars: dict[str, float] = {
                 "rollout_worker_wall_seconds": outcome.wall_seconds,
                 "rollout_worker_launch_seconds": outcome.launch_seconds,
+                "rollout_worker_killed": float(outcome.killed_by_parent),
+                "rollout_worker_launch_retried": float(outcome.retried),
             }
-            if outcome.killed_by_parent:
-                scalars["rollout_worker_killed"] = 1.0
-            if outcome.retried:
-                scalars["rollout_worker_launch_retried"] = 1.0
             counted = {
                 "hard_timeout": "rollout_worker_hard_timeout",
                 "worker_crashed": "rollout_worker_crashed",
                 "rollout_worker_oom": "rollout_worker_oom",
                 "worker_launch_failed": "rollout_worker_launch_failed",
-            }.get(outcome.disposition)
-            if counted:
-                scalars[counted] = 1.0
+            }
+            for disposition, name in counted.items():
+                scalars[name] = float(outcome.disposition == disposition)
             response = outcome.response
             if response is not None:
                 scalars["rollout_worker_startup_seconds"] = response.startup_seconds

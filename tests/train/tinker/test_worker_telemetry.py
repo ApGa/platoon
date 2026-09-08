@@ -112,13 +112,16 @@ def test_each_failure_disposition_emits_exactly_its_own_scalar(disposition, expe
     scalars = _scalars(scope)
 
     assert scalars[expected] == 1.0
+    # Every counter is present on every member, so the exported value is a
+    # fraction with a real denominator rather than a constant 1.0.
     others = {
         "rollout_worker_hard_timeout",
         "rollout_worker_crashed",
         "rollout_worker_oom",
         "rollout_worker_launch_failed",
     } - {expected}
-    assert not (others & scalars.keys())
+    assert all(scalars[name] == 0.0 for name in others)
+    assert scalars[f"{expected}__count"] == 1.0
     # The cost of isolation is always reported, on every path.
     assert scalars["rollout_worker_wall_seconds"] == 30.0
     assert scalars["rollout_worker_launch_seconds"] == 1.5
@@ -128,9 +131,9 @@ def test_a_completed_rollout_emits_no_failure_scalar():
     workflow = _workflow("tel_ok")
     workflow._record_worker_telemetry(_outcome("completed", response=_response()))
     scalars = _scalars("tel_ok")
-    assert "rollout_worker_hard_timeout" not in scalars
-    assert "rollout_worker_crashed" not in scalars
-    assert "rollout_worker_killed" not in scalars
+    assert scalars["rollout_worker_hard_timeout"] == 0.0
+    assert scalars["rollout_worker_crashed"] == 0.0
+    assert scalars["rollout_worker_killed"] == 0.0
 
 
 def test_a_kill_is_recorded_separately_from_the_verdict():
@@ -143,7 +146,7 @@ def test_a_kill_is_recorded_separately_from_the_verdict():
     scalars = _scalars("tel_killed")
     assert scalars["rollout_worker_killed"] == 1.0
     assert scalars["rollout_worker_launch_retried"] == 1.0
-    assert "rollout_worker_crashed" not in scalars
+    assert scalars["rollout_worker_crashed"] == 0.0
 
 
 def test_routing_coverage_below_one_is_reported_and_warned(caplog):

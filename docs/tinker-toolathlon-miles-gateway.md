@@ -363,7 +363,8 @@ and therefore reach W&B. Each answers one question.
 | `rollout_worker_startup_seconds` | The child's own import and registration time, measured from process start. |
 | `rollout_worker_wall_seconds` | Total supervised wall clock for one worker. |
 | `rollout_worker_routing_id_coverage` | Fraction of model calls that came back with a gateway routing id. Below 1.0 is logged as a WARNING: a dropped routing id raises nothing anywhere, it just makes the gradient quietly worse. |
-| `rollout_worker_hard_timeout` / `_crashed` / `_oom` / `_launch_failed` / `_launch_retried` / `_killed` / `_peak_rss_bytes` | One per member outcome; see the disposition table above. Alert on `rollout_worker_launch_failed` as a first-class signal. |
+| `rollout_worker_hard_timeout` / `_crashed` / `_oom` / `_launch_failed` / `_launch_retried` / `_killed` | Emitted on **every** member as 0 or 1, so each reads as the fraction of workers with that outcome and `<key>__count` is the number of workers. Alert on `rollout_worker_launch_failed` as a first-class signal, not as one member outcome among eight. |
+| `rollout_worker_peak_rss_bytes` | Mean self-sampled peak RSS of the workers that returned a response. |
 | `ptc_cells_started` / `ptc_cells_finished` / `ptc_cells_stuck_at_exit` / `ptc_threads_leaked_at_exit` / `ptc_worker_reports` | Cell-guard counters forwarded from workers. **Cumulative only**: summing the instantaneous gauges across short-lived workers would read zero precisely when cells are being killed for hanging. The instantaneous `ptc_cells_stuck` / `ptc_threads_leaked` / `ptc_cells_running` keep their original meaning in `inprocess` mode. |
 
 ## Run configs
