@@ -114,12 +114,26 @@ def _supervisor(tmp_path, mode, *, response_blob=None, request_id="task-r0-aaaaa
     )
 
 
-def _alive(pid: int) -> bool:
+def _running(pid: int) -> bool:
+    """Whether a pid is a process that can still execute code.
+
+    Deliberately not ``os.kill(pid, 0)``: an orphan whose parent we just killed
+    is re-parented, and how quickly its exit status is collected depends on
+    whoever inherited it -- so a *zombie* would read as alive and make this
+    test a load-dependent flake.  A zombie has already been killed, which is
+    the property under test.
+    """
+
     try:
-        os.kill(pid, 0)
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read()
     except OSError:
         return False
-    return True
+    try:
+        state = raw[raw.rindex(b")") + 2 : raw.rindex(b")") + 3]
+    except ValueError:
+        return False
+    return state not in (b"Z", b"X", b"x")
 
 
 def test_normal_completion_and_cleanup(tmp_path):
@@ -259,14 +273,13 @@ def test_the_whole_process_group_is_reaped(tmp_path):
         if name.startswith("grandchild-pid-")
     ]
     assert grandchildren, "the stub did not report its grandchild"
-    for pid in grandchildren:
-        for _ in range(100):
-            if not _alive(pid):
-                break
-            import time as _time
+    import time as _time
 
+    for pid in grandchildren:
+        deadline = _time.monotonic() + 30.0
+        while _running(pid) and _time.monotonic() < deadline:
             _time.sleep(0.05)
-        assert not _alive(pid), f"grandchild {pid} outlived its worker"
+        assert not _running(pid), f"grandchild {pid} outlived its worker"
 
 
 def test_cancellation_reaps_the_group_and_re_raises(tmp_path):
