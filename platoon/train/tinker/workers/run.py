@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from platoon.config_defs import RolloutConfig
 from platoon.train.tinker.proxy import TinkerLLMProxySession
-from platoon.train.tinker.rollout_metrics import RolloutTimeline, timeline_scope
+from platoon.train.tinker.rollout_metrics import RolloutTimeline
 from platoon.train.tinker.workers.protocol import (
     PROTOCOL_VERSION,
     RolloutWorkerRequest,
@@ -172,6 +172,11 @@ async def run_rollout_request(
     trajectory_collection: dict | None = None
     interactions: dict = {}
     conversion_seconds = 0.0
+    # ``TinkerLLMProxySession`` binds the timeline the proxy records into,
+    # exactly as it binds the interaction map.  Binding a second one here would
+    # be shadowed by the session's, and every timing would silently read zero;
+    # so this starts as an empty timeline (well-formed if the session never
+    # opens) and is replaced by the session's as soon as there is one.
     timeline = RolloutTimeline()
 
     def _response(
@@ -219,65 +224,65 @@ async def run_rollout_request(
 
     with environment_stack:
         try:
-            with timeline_scope(timeline):
-                async with TinkerLLMProxySession() as session:
-                    try:
-                        trajectory_collection = await asyncio.create_task(rollout_fn(task, config))
-                    finally:
-                        # Copy before the context manager resets its ContextVar.
-                        interactions = dict(session.interactions)
+            async with TinkerLLMProxySession() as session:
+                timeline = getattr(session, "timeline", timeline)
+                try:
+                    trajectory_collection = await asyncio.create_task(rollout_fn(task, config))
+                finally:
+                    # Copy before the context manager resets its ContextVar.
+                    interactions = dict(session.interactions)
 
-                    workload = workload_from_raw_rollout(trajectory_collection, interactions)
+                workload = workload_from_raw_rollout(trajectory_collection, interactions)
 
-                    if not trajectory_collection.get("trajectories"):
-                        logger.warning(
-                            "No trajectories found for task %s and rollout %s", task_id, rollout_number
-                        )
-                        return _response("no_trajectories", None, workload, observed=False)
-
-                    conversion_started = time.monotonic()
-                    result = get_train_data_for_trajectory_collection(
-                        trajectory_collection=trajectory_collection,
-                        interactions=interactions,
-                        task_id=task_id,
-                        checkpoint_version=request.model.checkpoint_version,
-                        filter_errors=request.conversion.filter_errors,
-                        reward_processor=reward_processor,
-                        include_traj_depth=request.conversion.include_traj_depth,
-                        include_traj_start=request.conversion.include_traj_start,
-                        subagent_datum_sampler=request.conversion.subagent_datum_sampler,
+                if not trajectory_collection.get("trajectories"):
+                    logger.warning(
+                        "No trajectories found for task %s and rollout %s", task_id, rollout_number
                     )
-                    workload = add_datum_funnel(workload, result)
-                    conversion_seconds = time.monotonic() - conversion_started
+                    return _response("no_trajectories", None, workload, observed=False)
 
-                    # Sampling is allowed to remove every converted datum, but it
-                    # must not turn a genuinely unusable rollout into a baseline
-                    # member merely because sampling happens to be enabled.  The
-                    # per-trajectory counts are deliberately pre-sampling counts.
-                    num_pre_sampling_datums = sum(stats.num_datums for stats in result.trajectory_stats)
-                    if num_pre_sampling_datums == 0:
-                        logger.warning(
-                            "No pre-sampling train data found for task %s and rollout %s",
-                            task_id,
-                            rollout_number,
-                        )
+                conversion_started = time.monotonic()
+                result = get_train_data_for_trajectory_collection(
+                    trajectory_collection=trajectory_collection,
+                    interactions=interactions,
+                    task_id=task_id,
+                    checkpoint_version=request.model.checkpoint_version,
+                    filter_errors=request.conversion.filter_errors,
+                    reward_processor=reward_processor,
+                    include_traj_depth=request.conversion.include_traj_depth,
+                    include_traj_start=request.conversion.include_traj_start,
+                    subagent_datum_sampler=request.conversion.subagent_datum_sampler,
+                )
+                workload = add_datum_funnel(workload, result)
+                conversion_seconds = time.monotonic() - conversion_started
+
+                # Sampling is allowed to remove every converted datum, but it
+                # must not turn a genuinely unusable rollout into a baseline
+                # member merely because sampling happens to be enabled.  The
+                # per-trajectory counts are deliberately pre-sampling counts.
+                num_pre_sampling_datums = sum(stats.num_datums for stats in result.trajectory_stats)
+                if num_pre_sampling_datums == 0:
+                    logger.warning(
+                        "No pre-sampling train data found for task %s and rollout %s",
+                        task_id,
+                        rollout_number,
+                    )
+                    return _response("conversion_empty", None, workload, observed=True)
+
+                if not result.datums:
+                    logger.warning(
+                        "No train data found for task %s and rollout %s", task_id, rollout_number
+                    )
+                    # Retain an empty result produced by Bernoulli sampling or
+                    # policy exclusion: its reward and trajectory stats still
+                    # belong in group baselines/metrics, and a sibling rollout
+                    # may provide the group's actual training datums.
+                    if (
+                        request.conversion.subagent_datum_sampler is None
+                        and result.num_policy_excluded_datums == 0
+                    ):
                         return _response("conversion_empty", None, workload, observed=True)
 
-                    if not result.datums:
-                        logger.warning(
-                            "No train data found for task %s and rollout %s", task_id, rollout_number
-                        )
-                        # Retain an empty result produced by Bernoulli sampling or
-                        # policy exclusion: its reward and trajectory stats still
-                        # belong in group baselines/metrics, and a sibling rollout
-                        # may provide the group's actual training datums.
-                        if (
-                            request.conversion.subagent_datum_sampler is None
-                            and result.num_policy_excluded_datums == 0
-                        ):
-                            return _response("conversion_empty", None, workload, observed=True)
-
-                    return _response("completed", result, workload, observed=True)
+                return _response("completed", result, workload, observed=True)
 
         except Exception as exc:
             logger.exception(

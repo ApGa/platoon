@@ -24,6 +24,11 @@ from tinker import TensorData
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.envs.base import Task
+from platoon.train.tinker.rollout_metrics import (
+    RolloutTimeline,
+    record_model_call,
+    timeline_scope,
+)
 from platoon.train.tinker.workers import run as run_module
 from platoon.train.tinker.workers.protocol import (
     PROTOCOL_VERSION,
@@ -39,17 +44,25 @@ from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, Tra
 
 
 class _FakeSession:
-    """Stands in for TinkerLLMProxySession with an injectable interaction map."""
+    """Stands in for TinkerLLMProxySession with an injectable interaction map.
+
+    It binds a timeline the same way the real session does, because that
+    binding is what the proxy records model-call timings into.
+    """
 
     interactions_to_inject: dict = {}
 
     def __init__(self) -> None:
         self.interactions = dict(type(self).interactions_to_inject)
+        self._scope = timeline_scope(RolloutTimeline())
+        self.timeline = None
 
     async def __aenter__(self):
+        self.timeline = self._scope.__enter__()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        self._scope.__exit__(exc_type, exc, tb)
         return None
 
 
@@ -453,3 +466,48 @@ def test_status_and_observed_table_matches_the_pre_split_outcomes(tmp_path, monk
             observed,
             has_result,
         ), status
+
+
+def test_model_call_timings_reach_the_response(tmp_path, monkeypatch):
+    """REGRESSION GATE: the session owns the timeline the proxy writes into.
+
+    ``TinkerLLMProxySession`` binds a timeline exactly as it binds the
+    interaction map.  A second timeline bound around the session would be
+    shadowed by it, and every client-throughput timing would silently read zero
+    -- the metrics would look healthy and measure nothing.
+    """
+
+    async def rollout_fn(_task, _config):
+        # Stands in for what the litellm provider does on every model call.
+        for index in range(3):
+            record_model_call(
+                started_at=float(index) * 10.0,
+                render_seconds=0.5,
+                sample_seconds=2.0,
+                parse_seconds=0.25,
+                ended_at=float(index) * 10.0 + 2.75,
+            )
+        return {"trajectories": {"root": {"steps": [{}]}}}
+
+    response = _run(
+        _request(tmp_path), rollout_fn, result=_result(num_datums=1, stats_datums=1), monkeypatch=monkeypatch
+    )
+    assert response.timing is not None
+    assert response.timing.model_calls == 3
+    assert response.timing.sample_seconds_total == pytest.approx(6.0)
+    assert response.timing.render_seconds_total == pytest.approx(1.5)
+    assert response.timing.parse_seconds_total == pytest.approx(0.75)
+    # Two gaps between three calls, each the time between one call ending and
+    # the next beginning.
+    assert response.timing.tool_seconds_total == pytest.approx(2 * 7.25)
+    assert len(response.timing.samples) == 3
+
+
+def test_a_rollout_that_fails_before_the_session_still_returns_a_summary(tmp_path):
+    async def rollout_fn(_task, _config):
+        raise RuntimeError("boom")
+
+    response = _run(_request(tmp_path), rollout_fn)
+    assert response.timing is not None
+    assert response.timing.model_calls == 0
+    assert response.timing.first_model_call_seconds == -1.0
