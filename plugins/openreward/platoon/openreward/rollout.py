@@ -511,10 +511,18 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     openhands_conversation_id = uuid.uuid4()
     rollout_output_dir = os.path.join(config.output_dir, "openreward", _slug(task_id), rollout_id)
     bridge_output_dir = os.path.join(rollout_output_dir, "bridge")
-    openhands_persistence_dir = os.path.join(rollout_output_dir, "openhands")
+    # None disables the SDK's per-event JSON log entirely (see
+    # OpenRewardConfig.persist_openhands_events); the trajectory stream the
+    # bridge writes is unaffected either way.
+    openhands_persistence_dir = (
+        os.path.join(rollout_output_dir, "openhands")
+        if openreward_config.persist_openhands_events
+        else None
+    )
     workspace_dir = os.path.join(rollout_output_dir, "workspace")
     Path(bridge_output_dir).mkdir(parents=True, exist_ok=True)
-    Path(openhands_persistence_dir).mkdir(parents=True, exist_ok=True)
+    if openhands_persistence_dir is not None:
+        Path(openhands_persistence_dir).mkdir(parents=True, exist_ok=True)
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
 
     llm = _build_llm(config)
@@ -543,7 +551,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         agent=oh_agent,
         workspace=workspace_dir,
         persistence_dir=openhands_persistence_dir,
-        conversation_id=openhands_conversation_id,
+        conversation_id=openhands_conversation_id if openhands_persistence_dir is not None else None,
         enable_recursive_subagents=openreward_config.enable_recursive_subagents,
         subagent_default_max_steps=openreward_config.subagent_default_max_steps,
         subagent_environment_access=openreward_config.subagent_environment_access_for(environment),

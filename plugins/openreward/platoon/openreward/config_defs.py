@@ -168,6 +168,17 @@ class OpenRewardConfig:
     # inside a delegated agent subtree. This prevents runaway orchestration
     # loops while allowing a single launch_subagent call to run to completion.
     programmatic_tool_calling_max_tool_calls_per_execution: int = 1024
+    # The OpenHands SDK persists one JSON file per agent event under
+    # ``<rollout>/openhands/<session>/events/``. Measured on the archived AReaL
+    # runs, that log is ~87% of a run's entire file count and is 99.8% redundant
+    # with the trajectory stream the bridge already writes to
+    # ``<step>/events/events_*.jsonl`` (action events with thought text,
+    # observation events, per-step reward, finish/error message). On a shared
+    # Lustre filesystem the binding quota is inodes, not bytes: 28 archived runs
+    # held 23.5M inodes on a 100M-inode filesystem, ~20M of them these files.
+    # Leave off unless you specifically need the raw OpenHands event framing for
+    # one run; with it off no persistence_dir is passed and the SDK writes none.
+    persist_openhands_events: bool = False
     enable_task_tracker: bool = False
     enable_recursive_subagents: bool = False
     # Forked agents share the root OpenReward session. ``read_only`` narrows
