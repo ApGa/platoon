@@ -391,3 +391,23 @@ cd /home/aci18912it/source/platoon-tinker && HF_HUB_OFFLINE=1 plugins/openreward
   tests/test_openreward_ptc_cell_guard.py \
   tests/test_openreward_mcp_connect_retry.py -q
 ```
+
+Process isolation and the client metrics (`OPENHANDS_SUPPRESS_BANNER=1` too).
+`test_worker_entrypoint.py` and `test_group_rollout_isolation.py` launch real
+worker processes, each importing the tinker/torch stack, so budget a few
+minutes:
+
+```
+cd /home/aci18912it/source/platoon-tinker && HF_HUB_OFFLINE=1 OPENHANDS_SUPPRESS_BANNER=1 \
+  plugins/openreward/.venv/bin/python -m pytest \
+  tests/train/tinker/test_worker_protocol.py \
+  tests/train/tinker/test_worker_workload.py \
+  tests/train/tinker/test_worker_run.py \
+  tests/train/tinker/test_worker_binding.py \
+  tests/train/tinker/test_worker_supervisor.py \
+  tests/train/tinker/test_worker_entrypoint.py \
+  tests/train/tinker/test_worker_telemetry.py \
+  tests/train/tinker/test_group_rollout_isolation.py \
+  tests/train/tinker/test_rollout_client_metrics.py \
+  tests/openreward/test_tinker_eval_workflow_config.py -q -p no:cacheprovider
+```

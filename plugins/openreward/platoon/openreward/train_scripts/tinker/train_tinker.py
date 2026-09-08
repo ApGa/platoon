@@ -110,7 +110,7 @@ async def main(args: list[str]) -> None:
             # keys -- would be quietly discarded for eval only.  An unisolated
             # eval rollout reintroduces exactly the unkillable-cell and
             # crash-containment hazards process isolation removes, so the keys
-            # must survive.  Eval forces exactly three fields and nothing else.
+            # must survive.  Eval forces only the fields it has to.
             eval_workflow_config = replace(
                 eval_workflow_config,
                 group_size=1,
