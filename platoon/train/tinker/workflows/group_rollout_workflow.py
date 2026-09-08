@@ -7,8 +7,9 @@ computes group-centered advantages, and produces training data in tinker.Datum f
 import asyncio
 import logging
 import os
+import uuid
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Callable
 
 import tinker
@@ -17,12 +18,22 @@ from tinker import TensorData
 
 from platoon.envs.base import Task
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
-from platoon.train.tinker.proxy import ModelInfo, TinkerLLMProxySession
+from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.tinker.workers.protocol import (
+    PROTOCOL_VERSION,
+    ConversionPolicy,
+    ModelBinding,
+    RolloutWorkerRequest,
+    RolloutWorkerResponse,
+    ipc_dir,
+    validated_ref,
+)
+from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR, run_rollout_request
+from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.utils.rollout_workload import (
     RolloutWorkload,
     record_workload_distribution,
     sum_rollout_workloads,
-    trajectory_collection_shape,
 )
 from platoon.utils.stats_tracker import get as get_tracker
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
@@ -30,7 +41,6 @@ from platoon.utils.tinker_data_processing import (
     SubagentDatumSamplingStats,
     TrajectoryCollectionResult,
     TrajectoryStats,
-    get_train_data_for_trajectory_collection,
 )
 from platoon.utils.trajectory_error_filtering import ERROR_ACTION_MASK_KEY
 
@@ -39,11 +49,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class _SingleRolloutOutcome:
-    """Internal result that keeps raw generation work even if conversion fails."""
+    """Internal result that keeps raw generation work even if conversion fails.
+
+    ``disposition`` records *how* the member ended (see the taxonomy in
+    ``workers.supervisor``).  It is defaulted so existing callers -- including
+    tests that construct this positionally -- are unaffected, and it is never
+    load-bearing for training: a worker death is a member failure, decided by
+    ``min_successful_group_size`` like any other, never a group or trainer
+    failure.
+    """
 
     result: TrajectoryCollectionResult | None
     workload: RolloutWorkload
     observed: bool
+    disposition: str = "completed"
 
 
 class _TaskRolloutOutput(list[tinker.Datum]):
@@ -73,45 +92,11 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         self.task_retained_datums = task_retained_datums
 
 
-def _workload_from_raw_rollout(
-    trajectory_collection: dict | None,
-    interactions: dict,
-) -> RolloutWorkload:
-    """Count one raw recursive tree and its unique proxy interactions."""
-
-    trajectories, environment_steps = trajectory_collection_shape(trajectory_collection)
-    # ``interactions`` is keyed by completion ID, so walking its values counts
-    # every logical model request exactly once even when a recursive tree later
-    # excludes, interrupts, or fails to convert one of its trajectories.
-    input_tokens = sum(int(interaction.obs.length) for interaction in interactions.values())
-    output_tokens = sum(len(interaction.action.tokens) for interaction in interactions.values())
-    return RolloutWorkload(
-        environment_steps=environment_steps,
-        model_calls=len(interactions),
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        trajectories=trajectories,
-    )
-
-
-def _add_datum_funnel(
-    workload: RolloutWorkload,
-    result: TrajectoryCollectionResult | None,
-) -> RolloutWorkload:
-    """Attach post-merge, policy, and sampling counts to raw workload."""
-
-    if result is None:
-        return workload
-    postmerge = sum(stats.num_datums for stats in result.trajectory_stats)
-    policy_eligible = postmerge - result.num_policy_excluded_datums
-    post_sampling = len(result.datums)
-    # RolloutWorkload validates that the funnel is ordered and non-negative.
-    return replace(
-        workload,
-        postmerge_datums=postmerge,
-        policy_eligible_datums=policy_eligible,
-        post_sampling_datums=post_sampling,
-    )
+# Both helpers now live in ``workers.workload`` so the rollout worker calls the
+# same code the trainer does.  The module-level aliases keep the historical
+# names importable.
+_workload_from_raw_rollout = workload_from_raw_rollout
+_add_datum_funnel = add_datum_funnel
 
 
 def _filter_positive_centered_error_tokens(
@@ -164,7 +149,7 @@ class GroupRolloutWorkflow:
         log_path: str | None = None,
         stats_scope: str = "train",
         filter_errors: bool = False,
-        reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj["reward"], {}),
+        reward_processor: Callable[[dict], tuple[float, dict]] = DEFAULT_REWARD_PROCESSOR,
     ):
         """Initialize the workflow.
 
@@ -197,6 +182,38 @@ class GroupRolloutWorkflow:
             if config.subagent_datum_keep_probability < 1.0
             else None
         )
+        self.rollout_isolation = getattr(config, "rollout_isolation", "inprocess")
+        # Callable references are built ONCE, at construction, and proven to
+        # round-trip.  A closure or a functools.partial cannot cross a process
+        # boundary by name, and a ``ref or default`` fallback would silently
+        # substitute the historical reward processor -- changing task_reward,
+        # root_rewards_dict and every advantage with no error and entirely
+        # plausible metrics.  In ``inprocess`` mode the callables are handed to
+        # the shared rollout body directly, so an unnameable callable is only
+        # recorded, not rejected: today's behaviour must not change.
+        self._reward_processor_is_default = reward_processor is DEFAULT_REWARD_PROCESSOR
+        self.rollout_fn_ref = self._build_ref(rollout_fn, what="rollout_fn")
+        self.reward_processor_ref = (
+            None
+            if self._reward_processor_is_default
+            else self._build_ref(reward_processor, what="reward_processor")
+        )
+        self._supervisor = None
+
+    def _build_ref(self, obj, *, what: str) -> str | None:
+        """Name a callable for a worker, strictly when a worker will need it."""
+
+        if obj is None:
+            if self.rollout_isolation == "process":
+                raise ValueError(f"rollout_isolation='process' requires a real {what}")
+            return None
+        try:
+            return validated_ref(obj, what=what)
+        except Exception:
+            if self.rollout_isolation == "process":
+                raise
+            logger.debug("%s is not nameable across processes; inprocess mode only", what, exc_info=True)
+            return None
 
     def _get_rollout_config(self) -> RolloutConfig:
         """Get a copy of the rollout config with model info populated."""
@@ -610,14 +627,150 @@ class GroupRolloutWorkflow:
         outcomes: list = []
         for task in tasks:
             if task.cancelled():
-                outcomes.append(_SingleRolloutOutcome(result=None, workload=RolloutWorkload(), observed=False))
+                outcomes.append(
+                    _SingleRolloutOutcome(
+                        result=None,
+                        workload=RolloutWorkload(),
+                        observed=False,
+                        disposition="straggler_killed",
+                    )
+                )
             else:
                 # Propagates a legacy override's exception like gather did.
                 outcomes.append(task.result())
         return outcomes
 
+    def _slug(self, value: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(value)).strip("-") or "task"
+
+    def _model_binding(self, checkpoint_version: int) -> ModelBinding:
+        """Describe the sampling model for a rollout host.
+
+        Never pickles the ``Renderer``: ``Renderer.__reduce__`` carries only
+        ``(renderer_name, model_name, has_image_processor)`` and drops
+        ``renderer_kwargs``, which ``register_tinker_llm`` applies by
+        ``setattr``.  Today's values happen to equal the class defaults, so
+        shipping the object is a latent silent-drift bug that fires the day
+        someone sets ``preserve_thinking: false``.
+        """
+
+        llm = getattr(self.model_info, "llm", None)
+        bare_model_name = getattr(llm, "model_name", None) or str(
+            getattr(self.model_info, "model_name", "") or ""
+        ).removeprefix("platoon-tinker/")
+        return ModelBinding(
+            binding_path=self._binding_path,
+            bootstrap_blob=b"",
+            follow_poll_seconds=float(getattr(self.config, "worker_binding_poll_seconds", 5.0)),
+            model_name=bare_model_name,
+            renderer_name=getattr(self.model_info, "renderer_name", "") or "",
+            renderer_kwargs=dict(getattr(self.model_info, "renderer_kwargs", {}) or {}),
+            context_window_length=getattr(llm, "context_window_length", None),
+            max_tokens=int(getattr(llm, "max_tokens", 4096)),
+            temperature=float(getattr(llm, "temperature", 1.0)),
+            top_k=int(getattr(llm, "top_k", -1)),
+            top_p=float(getattr(llm, "top_p", 1.0)),
+            seed=getattr(llm, "seed", None),
+            checkpoint_version=checkpoint_version,
+        )
+
+    def _build_worker_request(self, data: dict, rollout_number: int) -> RolloutWorkerRequest:
+        """Everything the parent must decide before a rollout can run.
+
+        Identical to what ``arun_episode_single`` used to do inline: resolve
+        the task parent-side (which also removes the shared-mutable-``Task``
+        aliasing some plugin datasets have), apply ``max_steps``, snapshot the
+        checkpoint version and join ``output_dir`` with it.
+        """
+
+        task_id = data["task_id"]
+        task = self.get_task_fn(task_id)
+        rollout_config = self._get_rollout_config()
+        if rollout_config.max_steps is not None:
+            task.max_steps = rollout_config.max_steps
+
+        # Get checkpoint version from the LLM
+        checkpoint_version = self.model_info.llm.version
+        rollout_config.output_dir = os.path.join(rollout_config.output_dir, str(checkpoint_version))
+
+        request_id = f"{self._slug(task_id)}-r{rollout_number}-{uuid.uuid4().hex[:8]}"
+        scratch = self._ipc_dir()
+        response_path = os.path.join(scratch, f"{request_id}.res")
+        return RolloutWorkerRequest(
+            protocol_version=PROTOCOL_VERSION,
+            request_id=request_id,
+            task_id=task_id,
+            rollout_number=rollout_number,
+            task=task,
+            rollout_config=asdict(rollout_config),
+            rollout_fn_ref=self.rollout_fn_ref or "",
+            model=self._model_binding(checkpoint_version),
+            conversion=ConversionPolicy(
+                filter_errors=self.filter_errors,
+                include_traj_depth=self.config.depth_level_weighting,
+                include_traj_start=self.config.depth_level_weighting,
+                reward_processor_is_default=self._reward_processor_is_default,
+                reward_processor_ref=self.reward_processor_ref,
+                subagent_datum_sampler=self.subagent_datum_sampler,
+            ),
+            response_path=response_path,
+            ready_path=os.path.join(scratch, f"{request_id}.ready"),
+            startup_budget_seconds=float(getattr(self.config, "worker_startup_budget_seconds", 300.0)),
+            rollout_budget_seconds=self._rollout_budget_seconds(rollout_config),
+            rss_soft_limit_bytes=int(getattr(self.config, "worker_rss_soft_limit_bytes", 24 * 1024**3)),
+            python_env_isolation=bool(getattr(self.config, "worker_python_env_isolation", False)),
+        )
+
+    def _rollout_budget_seconds(self, rollout_config: RolloutConfig) -> float:
+        """The child's own deadline: the rollout timeout plus finalize grace.
+
+        The child also converts datums and writes a multi-MB response after the
+        rollout proper, so its alarm must outlast ``rollout_config.timeout``.
+        """
+
+        timeout = rollout_config.timeout
+        grace = float(getattr(self.config, "worker_finalize_grace_seconds", 120.0))
+        if timeout is None:
+            return float(getattr(self.config, "worker_unbounded_rollout_budget_seconds", 24 * 3600.0))
+        return float(timeout) + grace
+
+    def _ipc_dir(self) -> str:
+        return ipc_dir()
+
+    @property
+    def _binding_path(self) -> str:
+        return os.path.join(self._ipc_dir(), "model_binding.pkl")
+
+    def _outcome_from_response(
+        self,
+        response: RolloutWorkerResponse | None,
+        disposition: str,
+    ) -> _SingleRolloutOutcome:
+        """Map a worker response (or its absence) onto a group member outcome."""
+
+        if response is None:
+            return _SingleRolloutOutcome(
+                result=None,
+                workload=RolloutWorkload(),
+                observed=False,
+                disposition=disposition,
+            )
+        return _SingleRolloutOutcome(
+            result=response.result,
+            workload=response.workload,
+            observed=response.observed,
+            disposition=disposition,
+        )
+
     async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> _SingleRolloutOutcome:
         """Run a single rollout and return training data.
+
+        The blanket guard stays and now also covers request building: that adds
+        ``pickle.dumps``, a write to node-local scratch and (in ``process``
+        mode) opening a log file, any of which can raise on a full disk.  An
+        escape here would propagate through ``_run_group_rollouts``'s
+        ``task.result()`` and cost ALL group members, including the ones that
+        completed and would have satisfied ``min_successful_group_size``.
 
         Args:
             data: Dictionary containing 'task_id' and optionally other task data.
@@ -627,83 +780,29 @@ class GroupRolloutWorkflow:
             Internal outcome containing converted data when usable and the raw
             workload even when conversion or rollout execution failed.
         """
-        task_id = data["task_id"]
-        trajectory_collection: dict | None = None
-        interactions: dict = {}
-
         try:
-            task = self.get_task_fn(task_id)
-            rollout_config = self._get_rollout_config()
-
-            if rollout_config.max_steps is not None:
-                task.max_steps = rollout_config.max_steps
-
-            # Get checkpoint version from the LLM
-            checkpoint_version = self.model_info.llm.version
-
-            rollout_config.output_dir = os.path.join(
-                rollout_config.output_dir,
-                str(checkpoint_version),
+            request = self._build_worker_request(data, rollout_number)
+            response = await run_rollout_request(
+                request,
+                self.model_info.llm,
+                rollout_fn=self.rollout_fn,
+                reward_processor=self.reward_processor,
             )
-
-            # Use the proxy session to track LLM interactions
-            async with TinkerLLMProxySession() as session:
-                try:
-                    # Run the rollout with the proper config
-                    trajectory_collection = await asyncio.create_task(self.rollout_fn(task, rollout_config))
-                finally:
-                    # Copy before the context manager resets its ContextVar.
-                    interactions = dict(session.interactions)
-
-                workload = _workload_from_raw_rollout(trajectory_collection, interactions)
-
-                if not trajectory_collection.get("trajectories"):
-                    logger.warning(f"No trajectories found for task {task_id} and rollout {rollout_number}")
-                    return _SingleRolloutOutcome(result=None, workload=workload, observed=False)
-
-                # Extract training data
-                result = get_train_data_for_trajectory_collection(
-                    trajectory_collection=trajectory_collection,
-                    interactions=interactions,
-                    task_id=task_id,
-                    checkpoint_version=checkpoint_version,
-                    filter_errors=self.filter_errors,
-                    reward_processor=self.reward_processor,
-                    include_traj_depth=self.config.depth_level_weighting,
-                    include_traj_start=self.config.depth_level_weighting,
-                    subagent_datum_sampler=self.subagent_datum_sampler,
-                )
-                workload = _add_datum_funnel(workload, result)
-
-                # Sampling is allowed to remove every converted datum, but it
-                # must not turn a genuinely unusable rollout into a baseline
-                # member merely because sampling happens to be enabled.  The
-                # per-trajectory counts are deliberately pre-sampling counts.
-                num_pre_sampling_datums = sum(stats.num_datums for stats in result.trajectory_stats)
-                if num_pre_sampling_datums == 0:
-                    logger.warning(
-                        "No pre-sampling train data found for task %s and rollout %s",
-                        task_id,
-                        rollout_number,
-                    )
-                    return _SingleRolloutOutcome(result=None, workload=workload, observed=True)
-
-                if not result.datums:
-                    logger.warning(f"No train data found for task {task_id} and rollout {rollout_number}")
-                    # Retain an empty result produced by Bernoulli sampling or
-                    # policy exclusion: its reward and trajectory stats still
-                    # belong in group baselines/metrics, and a sibling rollout
-                    # may provide the group's actual training datums.
-                    if self.subagent_datum_sampler is None and result.num_policy_excluded_datums == 0:
-                        return _SingleRolloutOutcome(result=None, workload=workload, observed=True)
-
-                return _SingleRolloutOutcome(result=result, workload=workload, observed=True)
-
-        except Exception as e:
-            logger.exception(f"Error in tinker workflow for task {task_id} and rollout {rollout_number}: {e}")
-            workload = _workload_from_raw_rollout(trajectory_collection, interactions)
+            return self._outcome_from_response(response, response.status)
+        except asyncio.CancelledError:
+            # The straggler policy owns cancellation.
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Error in tinker workflow for task %s and rollout %s: %s",
+                data.get("task_id"),
+                rollout_number,
+                exc,
+            )
+            self.tracker.scalar(rollout_worker_launch_failed=1.0)
             return _SingleRolloutOutcome(
                 result=None,
-                workload=workload,
-                observed=workload.trajectories > 0,
+                workload=RolloutWorkload(),
+                observed=False,
+                disposition="worker_launch_failed",
             )

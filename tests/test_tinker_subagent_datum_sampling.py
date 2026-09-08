@@ -119,6 +119,14 @@ def _load_tinker_group_workflow(monkeypatch, processing, tracker):
     env_module.Task = object
     monkeypatch.setitem(sys.modules, "platoon.envs.base", env_module)
 
+    # Stub the tinker package itself (with a real __path__) so importing its
+    # light submodules -- notably ``workers.*``, which owns the single-rollout
+    # body -- does not execute the heavy package __init__ that would in turn
+    # import the stubbed config_defs.
+    package_module = types.ModuleType("platoon.train.tinker")
+    package_module.__path__ = [str(REPO_ROOT / "platoon/train/tinker")]
+    monkeypatch.setitem(sys.modules, "platoon.train.tinker", package_module)
+
     config_module = types.ModuleType("platoon.train.tinker.config_defs")
     config_module.RolloutConfig = object
     config_module.WorkflowConfig = object
@@ -1106,20 +1114,30 @@ def test_tinker_sampling_does_not_keep_rollout_with_zero_pre_sampling_datums(mon
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-    workflow_module.TinkerLLMProxySession = FakeProxySession
-    workflow_module.get_train_data_for_trajectory_collection = lambda **_kwargs: empty_result
+    # The single-rollout body moved to ``workers.run`` (one implementation for
+    # the in-process host and the worker process), so the collaborators are
+    # patched there.  The assertions below are unchanged.
+    from platoon.config_defs import RolloutConfig
+
+    run_module = sys.modules["platoon.train.tinker.workers.run"]
+    monkeypatch.setattr(run_module, "TinkerLLMProxySession", FakeProxySession)
+    monkeypatch.setattr(
+        run_module, "get_train_data_for_trajectory_collection", lambda **_kwargs: empty_result
+    )
 
     workflow = workflow_module.GroupRolloutWorkflow.__new__(workflow_module.GroupRolloutWorkflow)
     workflow.config = types.SimpleNamespace(depth_level_weighting=False)
     workflow.model_info = types.SimpleNamespace(llm=types.SimpleNamespace(version=7))
     workflow.filter_errors = False
     workflow.reward_processor = lambda trajectory: (trajectory.get("reward", 0.0), {})
+    workflow._reward_processor_is_default = False
+    workflow.reward_processor_ref = None
+    workflow.rollout_fn_ref = None
+    workflow.rollout_isolation = "inprocess"
+    workflow.tracker = tracker
     workflow.subagent_datum_sampler = object()
     workflow.get_task_fn = lambda _task_id: types.SimpleNamespace(max_steps=None)
-    workflow._get_rollout_config = lambda: types.SimpleNamespace(
-        max_steps=None,
-        output_dir=str(tmp_path),
-    )
+    workflow._get_rollout_config = lambda: RolloutConfig(output_dir=str(tmp_path))
 
     async def fake_rollout(_task, _config):
         return {"trajectories": {"root": {}}}
