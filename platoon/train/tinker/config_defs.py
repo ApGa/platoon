@@ -164,6 +164,18 @@ class TrainConfig:
     workflow_config: WorkflowConfig = field(default_factory=WorkflowConfig)
     num_concurrent_rollout_workflow_workers: int | None = None
 
+    # Client-side deadline for a single ``forward_backward`` result.  The client submits
+    # every microbatch up front and the Tinker service drains them in order, so the await on
+    # microbatch 0 covers the WHOLE accumulated window, not one microbatch: size this against
+    # a full optimizer step's training compute, not a single unit.  A 15-node Qwen3.6-35B-A3B
+    # toolathlon step measured 275-728 s non-recursive; the recursive arm keeps every subagent
+    # trajectory, needs ~2x the units, and died against the previous hardcoded 900 s
+    # (run ta15-rec-q36-r3-v3, 2026-09-08: 14 units / 840 s all ok=true, killed mid-unit-15).
+    forward_backward_timeout_seconds: float = 5400.0
+    # Deadline for the optimizer step itself, which runs after the window is finalized and is
+    # fast (0.6 s measured); this only needs to cover a pathological stall.
+    optim_step_timeout_seconds: float = 300.0
+
     def __post_init__(self):
         if self.num_concurrent_rollout_workflow_workers is None:
             self.num_concurrent_rollout_workflow_workers = self.batch_size
