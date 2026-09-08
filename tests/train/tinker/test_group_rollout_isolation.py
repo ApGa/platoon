@@ -96,6 +96,16 @@ def _scalars(scope):
     return {key.removeprefix(f"{scope}/"): value for key, value in exported.items()}
 
 
+def _members_with(scalars, key) -> float:
+    """How many members hit a counter.
+
+    The counters are emitted on every member as 0 or 1 and the tracker averages
+    them, so the count is the mean times the denominator.
+    """
+
+    return scalars.get(key, 0.0) * scalars.get(f"{key}__count", 0.0)
+
+
 def _advantages(output):
     return sorted(
         round(float(datum.loss_fn_inputs["advantages"].to_torch().sum().item()), 6) for datum in output
@@ -175,8 +185,9 @@ def test_one_member_s_launch_failure_costs_only_that_member(tmp_path, monkeypatc
     assert output.requested_rollouts == 4
     assert output.observed_rollouts == 3
     assert len(output) == 3
-    assert scalars.get("rollout_worker_launch_failed") == 1.0
-    assert scalars.get("rollout_worker_launch_retried") == 1.0
+    assert _members_with(scalars, "rollout_worker_launch_failed") == 1.0
+    assert _members_with(scalars, "rollout_worker_launch_retried") == 1.0
+    assert scalars["rollout_worker_launch_failed__count"] == 4.0
 
 
 def test_a_segfaulting_member_does_not_stop_its_siblings(tmp_path, monkeypatch):
@@ -212,7 +223,8 @@ def test_a_segfaulting_member_does_not_stop_its_siblings(tmp_path, monkeypatch):
     assert output.requested_rollouts == 4
     assert output.observed_rollouts == 3
     assert len(output) == 3
-    assert scalars.get("rollout_worker_crashed") == 1.0
+    assert _members_with(scalars, "rollout_worker_crashed") == 1.0
+    assert _members_with(scalars, "rollout_worker_hard_timeout") == 0.0
 
 
 def test_a_spinning_member_is_killed_by_the_straggler_policy(tmp_path, monkeypatch):

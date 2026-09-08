@@ -14,6 +14,14 @@ Deliberately **not** ``multiprocessing``:
   prepared removes that ordering hazard entirely.
 * ``ProcessPoolExecutor`` fails every concurrent future in the pool when one
   child is killed, and killing a child is routine here.
+
+**Where the environment is actually fixed.**  ``-m`` imports the parent
+packages before this module's body runs, so ``platoon/train/tinker/__init__.py``
+-- and therefore tinker and torch -- has already executed by the time ``main``
+starts.  The invariants that must precede those imports (telemetry off, thread
+pins, no sampling sidecar) and the pre-import startup deadline therefore live in
+:mod:`platoon.train.tinker.worker_env`, which that package init calls first.
+``main`` re-applies them so the requirement is also stated where it is used.
 """
 
 from __future__ import annotations
@@ -25,9 +33,6 @@ import signal
 import sys
 import threading
 import time
-
-# Nothing above this line may import tinker, torch or platoon's rollout stack:
-# steps 1-4 of main() must run first.
 
 _PR_SET_PDEATHSIG = 1
 
@@ -68,7 +73,11 @@ def _install_parent_death_signal() -> None:
 
 
 def _apply_environment_invariants() -> None:
-    """Set the four things that must be true before tinker or torch loads.
+    """Re-assert the invariants ``worker_env`` already applied.
+
+    ``platoon/train/tinker/__init__.py`` calls the same function before this
+    package's imports happen, which is the only point early enough to matter.
+    Repeating it here is free and keeps a direct ``main()`` call correct.
 
     ``TINKER_TELEMETRY=0``
         An unpickled ``SamplingClient`` builds a shadow holder that reuses the
@@ -293,15 +302,17 @@ def main(argv: list[str] | None = None) -> int:
     # 2. Die with the trainer.
     _install_parent_death_signal()
 
-    # 3. Environment invariants, BEFORE any tinker/torch import anywhere.
+    # 3. Environment invariants.  Already applied by ``worker_env`` from the
+    #    package init, which is the only point ahead of the tinker/torch
+    #    imports; repeated here so the requirement is stated where it is used.
     _apply_environment_invariants()
 
-    # 4. Load the request, unlink it immediately (it carries the gateway API
-    #    key), and arm the STARTUP deadline so an import storm or a hung
-    #    environment __init__ is bounded too.  The alarm is deliberately split
-    #    into a startup phase and a rollout phase: a single alarm covering both
-    #    would let time spent queueing or fighting a shared-filesystem stall
-    #    silently eat the rollout's budget.
+    # 4. Load the request and unlink it immediately -- it carries the gateway
+    #    API key inside the pickled sampling client.  The alarm is deliberately
+    #    split into a startup phase and a rollout phase: a single alarm
+    #    covering both would let time spent queueing or fighting a
+    #    shared-filesystem stall silently eat the rollout's budget and turn a
+    #    slow start into a hard timeout with no data.
     from platoon.train.tinker.workers.protocol import load_request
 
     request = load_request(request_path)
