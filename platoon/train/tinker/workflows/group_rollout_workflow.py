@@ -768,7 +768,10 @@ class GroupRolloutWorkflow:
             getattr(self.model_info, "model_name", "") or ""
         ).removeprefix("platoon-tinker/")
         return ModelBinding(
-            binding_path=self._binding_path,
+            # Same reason as the scratch paths in ``_build_worker_request``:
+            # only a worker follows this file, so only ``process`` mode resolves
+            # (and creates) the directory that holds it.
+            binding_path=self._binding_path if self._isolation == "process" else "",
             bootstrap_blob=b"",
             follow_poll_seconds=float(getattr(self.config, "worker_binding_poll_seconds", 5.0)),
             model_name=bare_model_name,
@@ -803,8 +806,17 @@ class GroupRolloutWorkflow:
         rollout_config.output_dir = os.path.join(rollout_config.output_dir, str(checkpoint_version))
 
         request_id = f"{self._slug(task_id)}-r{rollout_number}-{uuid.uuid4().hex[:8]}"
-        scratch = self._ipc_dir()
-        response_path = os.path.join(scratch, f"{request_id}.res")
+        # Only a worker needs node-local scratch, and only a worker ever writes
+        # these files.  Resolving them in ``inprocess`` mode would make the
+        # fallback -- the mode a run rolls BACK to -- create and depend on a
+        # directory it never uses, so an unwritable $TMPDIR would fail every
+        # rollout in the mode that is supposed to be unaffected by any of this.
+        if self._isolation == "process":
+            scratch = self._ipc_dir()
+            response_path = os.path.join(scratch, f"{request_id}.res")
+            ready_path = os.path.join(scratch, f"{request_id}.ready")
+        else:
+            response_path = ready_path = ""
         return RolloutWorkerRequest(
             protocol_version=PROTOCOL_VERSION,
             request_id=request_id,
@@ -823,7 +835,7 @@ class GroupRolloutWorkflow:
                 subagent_datum_sampler=self.subagent_datum_sampler,
             ),
             response_path=response_path,
-            ready_path=os.path.join(scratch, f"{request_id}.ready"),
+            ready_path=ready_path,
             startup_budget_seconds=float(getattr(self.config, "worker_startup_budget_seconds", 300.0)),
             rollout_budget_seconds=self._rollout_budget_seconds(rollout_config),
             rss_soft_limit_bytes=int(getattr(self.config, "worker_rss_soft_limit_bytes", 24 * 1024**3)),

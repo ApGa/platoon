@@ -33,9 +33,9 @@ from platoon.train.tinker.config_defs import (
     TrainEventTriggerConfig,
 )
 from platoon.train.tinker.dataset_order import prepare_dataset_for_dataloader
+from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
-from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_logger import StatsLogger
@@ -623,11 +623,21 @@ class PlatoonTinkerRLTrainer:
             rollout_result_queue.put_nowait(rollout)
 
     @staticmethod
-    def _publish_worker_binding(workflow, sampling_client, version: int) -> None:
-        """Republish the sampling client for rollout workers.  Never raises.
+    def _publish_worker_binding(workflow, sampling_client, version: int, *, required: bool = False) -> None:
+        """Republish the sampling client for rollout workers.
 
         A no-op for ``inprocess`` mode and for custom workflows that do not
-        run workers.
+        run workers.  A *re*-publication failure is logged and swallowed: every
+        worker keeps the client it already holds, and under the full-finetune
+        gateway that client samples the newest weights anyway.
+
+        The FIRST publication is different, and only under
+        ``rollout_isolation: process``.  Each worker builds its sampling client
+        by reading this file at startup and dies with ``FileNotFoundError``
+        when it is missing, so swallowing that failure would leave every
+        rollout of the run crashing and the trainer producing no training data
+        at all -- for as long as the job is allowed to run.  That one is fatal,
+        and fatal here, before the first rollout is dispatched.
         """
 
         publish = getattr(workflow, "publish_model_binding", None)
@@ -637,6 +647,8 @@ class PlatoonTinkerRLTrainer:
             publish(sampling_client, version)
         except Exception:
             logger.exception("could not publish the rollout worker sampling-client binding")
+            if required and getattr(workflow, "rollout_isolation", "inprocess") == "process":
+                raise
 
     async def _train_loop(
         self,
@@ -669,7 +681,10 @@ class PlatoonTinkerRLTrainer:
         # start, then declare the concurrency ceiling the metrics compare
         # against.
         self._publish_worker_binding(
-            train_workflow, shared_state.sampling_client, shared_state.model_info.llm.version
+            train_workflow,
+            shared_state.sampling_client,
+            shared_state.model_info.llm.version,
+            required=True,
         )
         client_monitor("train").set_configured_concurrency(
             float(self.config.train.num_concurrent_rollout_workflow_workers)

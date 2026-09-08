@@ -219,6 +219,20 @@ Set it on **both** `train.workflow_config` and `eval.workflow_config` when eval
 is enabled: an unisolated eval rollout reintroduces exactly the unkillable-cell
 and crash-containment hazards this removes.
 
+Verify the flip before a long run takes it on trust -- the one thing no offline
+test can cover is a real `sample()` through an unpickled (shadow) sampling
+client, i.e. whether the gateway's `routing_id` survives the process boundary
+(R3). `smoke_q36.sh` step 9 takes the same override:
+
+```
+PLATOON_STEP=1 PLATOON_EXTRA='--train.workflow_config.rollout_isolation process' \
+  deploy/abci/clients/smoke_q36.sh
+```
+
+`routing_covered_datums > 0` with `routing_uncovered_datums == 0` in its fact
+block is the proof, and `rollout_worker_routing_id_coverage == 1.0` is the same
+statement from the client side.
+
 ### What isolation buys
 
 | hazard | `inprocess` | `process` |
@@ -276,6 +290,15 @@ not pin: pinning is a no-op under the full-finetune gateway (which always serves
 the latest pushed weights) and a hard mid-rollout failure under a LoRA gateway
 (sampler versions are retired after `sampler_versions_to_keep` steps). Weight
 staleness and `max_staleness` accounting are unchanged.
+
+The **first** publication is a startup precondition, not best effort: every
+worker builds its sampling client by reading that file and dies with
+`FileNotFoundError` if it is missing, so a swallowed failure would leave the run
+crashing every rollout and producing no training data for as long as the job is
+allowed to live. Under `rollout_isolation: process` the trainer therefore exits
+at startup if it cannot publish. Later republications stay best effort and are
+logged: a worker that cannot reload keeps the client it holds, and under the
+full-finetune gateway that client already samples the newest weights.
 
 Every worker sets `TINKER_TELEMETRY=0` before any tinker import and reports that
 it did. This is not tidiness: an unpickled sampling client builds a *shadow*

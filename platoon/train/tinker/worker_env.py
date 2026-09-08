@@ -187,4 +187,15 @@ def arm_startup_alarm_from_env() -> float:
         signal.setitimer(signal.ITIMER_REAL, remaining)
     except (ValueError, OSError):
         return 0.0
+    # Consume the budget so it is not inherited.  The worker's whole descendant
+    # tree -- MCP bridges, and anything a programmatic-tool-calling cell spawns
+    # -- inherits this environment, and any descendant that imports
+    # ``platoon.train.tinker`` would run this function too, arm its own deadline,
+    # and on expiry ``killpg`` the group: the entire rollout tree, mid-rollout,
+    # with a ``phase=startup`` marker blaming the worker's imports.  The
+    # entrypoint does not need the variable again -- it re-arms from
+    # ``request.startup_budget_seconds`` once it can read the request -- and the
+    # itimer armed above keeps running regardless.  ``DIAG_PATH_ENV`` stays: the
+    # handler reads it when it fires.
+    os.environ.pop(STARTUP_BUDGET_ENV, None)
     return budget
