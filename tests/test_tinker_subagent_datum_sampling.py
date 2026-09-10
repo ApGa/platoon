@@ -285,6 +285,13 @@ def test_tinker_error_filter_uses_final_centered_advantage_sign(monkeypatch):
         mixed.loss_fn_inputs["mask"].to_torch(),
         torch.tensor([0.0, 1.0, 1.0, 0.0]),
     )
+    # The trainer removes mask before sending the datum. The protocol loss
+    # must still give suppressed positive errors zero policy gradient.
+    sent_advantages = mixed.loss_fn_inputs["advantages"].to_torch()
+    logprobs = torch.zeros(4, requires_grad=True)
+    cispo_loss = -(torch.exp(logprobs).clamp(0.0, 5.0).detach() * logprobs * sent_advantages).sum()
+    cispo_loss.backward()
+    torch.testing.assert_close(logprobs.grad, torch.tensor([0.0, 1.0, 0.0, 0.0]))
     assert metrics == {
         "detected_action_tokens": 4.0,
         "suppressed_positive_action_tokens": 2.0,

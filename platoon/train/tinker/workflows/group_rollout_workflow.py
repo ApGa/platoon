@@ -131,6 +131,11 @@ def _filter_positive_centered_error_tokens(
     suppressed = error_actions & (advantages > 0)
     filtered_mask = torch.where(suppressed, torch.zeros_like(action_mask), action_mask)
     datum.loss_fn_inputs["mask"] = TensorData.from_torch(filtered_mask)
+    # The trainer strips mask before protocol dispatch; CISPO and the other
+    # policy losses use advantages to suppress these tokens on the server.
+    datum.loss_fn_inputs["advantages"] = TensorData.from_torch(
+        torch.where(suppressed, torch.zeros_like(advantages), advantages)
+    )
     keep = bool(torch.any(filtered_mask > 0))
     return keep, {
         "detected_action_tokens": float(error_actions.sum().item()),
