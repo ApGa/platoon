@@ -247,6 +247,7 @@ async def run_rollout_request(
                     task_id=task_id,
                     checkpoint_version=request.model.checkpoint_version,
                     filter_errors=request.conversion.filter_errors,
+                    filter_message_actions=request.conversion.filter_message_actions,
                     reward_processor=reward_processor,
                     include_traj_depth=request.conversion.include_traj_depth,
                     include_traj_start=request.conversion.include_traj_start,

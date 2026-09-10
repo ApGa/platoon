@@ -182,3 +182,26 @@ def detected_error_completion_ids(steps: Iterable[Mapping[str, Any]]) -> set[str
         if step_reports_error(step)
         and (completion_id := completion_id_for_step(step)) is not None
     }
+
+
+def detected_message_completion_ids(steps: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Return agent-message completions that contain no executable actions.
+
+    One completion can span multiple serialized steps. A tool action anywhere
+    in that completion takes precedence over an accompanying message event.
+    User messages and tool payloads containing prose are never classified here.
+    """
+
+    messages: set[str] = set()
+    actions: set[str] = set()
+    for step in steps:
+        completion_id = completion_id_for_step(step)
+        if completion_id is None:
+            continue
+        for event in _iter_event_records(step.get("action_events"), "action_events"):
+            kind = _normalized_kind(event)
+            if kind == "actionevent":
+                actions.add(completion_id)
+            elif kind == "messageevent" and _field(event, "source") == "agent":
+                messages.add(completion_id)
+    return messages - actions

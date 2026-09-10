@@ -368,6 +368,45 @@ def test_tinker_group_filters_errors_only_after_leave_one_out_centering(monkeypa
     }
 
 
+@pytest.mark.parametrize("message_reward", [0.0, 1.0])
+@pytest.mark.parametrize("filter_errors", [False, True])
+def test_message_only_rollout_keeps_loo_baseline_without_policy_gradient(monkeypatch, message_reward, filter_errors):
+    processing = _load_tinker_data_processing(monkeypatch)
+    tracker = _RecordingTracker()
+    workflow_module = _load_tinker_group_workflow(monkeypatch, processing, tracker)
+    results = []
+    for kind, reward in [("MessageEvent", message_reward), ("ActionEvent", 1.0 - message_reward)]:
+        results.append(processing.get_train_data_for_trajectory_collection(
+            trajectory_collection={"trajectories": {"root": {"reward": reward, "steps": [{
+                "misc": {"action_misc": {"completion_id": "c"}},
+                "action_events": [{"kind": kind, "source": "agent"}],
+            }]}}},
+            interactions={"c": types.SimpleNamespace(
+                obs=types.SimpleNamespace(chunks=[DummyEncodedTextChunk([1, 2])]),
+                action=types.SimpleNamespace(tokens=[3, 4], logprobs=[-0.5, -0.5]),
+            )},
+            task_id="task", checkpoint_version=0,
+            filter_message_actions=True, filter_errors=filter_errors,
+        ))
+    message_datum = results[0].datums[0]
+    assert results[0].trajectory_stats[0].num_datums == 1
+    workflow = workflow_module.GroupRolloutWorkflow.__new__(workflow_module.GroupRolloutWorkflow)
+    workflow.config = types.SimpleNamespace(group_size=2, leave_one_out_baseline=True)
+    workflow.tracker = tracker
+    workflow.subagent_datum_sampler = None
+
+    async def fake_single(_data, rollout_number):
+        return results[rollout_number]
+
+    workflow.arun_episode_single = fake_single
+    output = asyncio.run(workflow.arun_episode({"task_id": "task"}))
+    assert results[0].datums == []
+    assert not message_datum.loss_fn_inputs["advantages"].to_torch().any()
+    assert len(output) == 1
+    torch.testing.assert_close(output[0].loss_fn_inputs["advantages"].to_torch(),
+                               torch.tensor([0.0, 1.0 - 2 * message_reward, 1.0 - 2 * message_reward]))
+
+
 def test_tinker_raw_workload_counts_full_recursive_tree_and_unique_proxy_calls(monkeypatch):
     processing = _load_tinker_data_processing(monkeypatch)
     tracker = _RecordingTracker()

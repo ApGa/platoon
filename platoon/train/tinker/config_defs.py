@@ -33,6 +33,8 @@ class WorkflowConfig:
     # Defer typed action errors until group centering, then suppress only error
     # tokens that would otherwise receive positive policy credit.
     filter_errors: bool = True
+    # Retain agent messages as context, with no policy loss for either sign.
+    filter_message_actions: bool = False
     # Zero-advantage datums have no policy-gradient contribution but still incur
     # a model forward/backward. Baselines and rollout metrics are computed before
     # this filter is applied.

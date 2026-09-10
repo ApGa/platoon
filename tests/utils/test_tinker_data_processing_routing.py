@@ -15,12 +15,64 @@ from types import SimpleNamespace
 
 import tinker
 import torch
+import pytest
 
 import platoon.train.tinker  # noqa: F401  (resolves the package's import cycle first)
 from platoon.train.tinker.batch_transforms import LOSS_NORMALIZATION_TOKENS_KEY
 from platoon.utils import tinker_data_processing as tdp
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("advantage", [-1.0, 0.0, 1.0])
+def test_message_actions_keep_context_and_routing_but_receive_no_policy_loss(advantage):
+    message = {**_step("message"), "action_events": [{"kind": "MessageEvent", "source": "agent"}]}
+    tool = {**_step("tool"), "action_events": [{"kind": "ActionEvent", "source": "agent"}]}
+    result = tdp.trajectory_to_data(
+        trajectory={"steps": [message, tool]},
+        interactions={
+            "message": _interaction([1, 2], [3, 4], 11),
+            "tool": _interaction([1, 2, 3, 4, 5], [6, 7], 12),
+        },
+        task_id="task", trajectory_id="root", trajectory_advantage=advantage,
+        checkpoint_version=0, filter_message_actions=True,
+    )
+    assert len(result.datums) == 1
+    datum = result.datums[0]
+    assert datum.model_input.to_ints() == [1, 2, 3, 4, 5, 6]
+    assert datum.loss_fn_inputs["mask"].to_torch().tolist() == [0, 0, 0, 0, 1, 1]
+    assert datum.loss_fn_inputs["advantages"].to_torch().tolist() == [0, 0, 0, 0, advantage, advantage]
+    assert _handle(datum).item() == 12
+
+
+def test_message_only_datum_keeps_baseline_membership_and_next_tool_starts_trajectory():
+    result = tdp.trajectory_to_data(
+        trajectory={"steps": [
+            {**_step("message"), "action_events": {"action_events": [{"kind": "MessageEvent", "source": "agent"}]}},
+            _step("tool"),
+        ]},
+        interactions={"message": _interaction([1, 2], [3], 11), "tool": _interaction([8, 9], [10], 12)},
+        task_id="task", trajectory_id="child", trajectory_advantage=-1.0,
+        checkpoint_version=0, traj_depth=1, filter_message_actions=True,
+    )
+    assert len(result.datums) == 2
+    assert result.datums[0].loss_fn_inputs["mask"].to_torch().sum().item() == 0
+    assert result.datums[0].loss_fn_inputs["traj_start"].to_torch().item() == 0
+    assert result.datums[1].model_input.to_ints() == [8, 9]
+    assert result.datums[1].loss_fn_inputs["traj_start"].to_torch().item() == 1
+    assert result.num_output_tokens == 2
+
+
+def test_message_detection_excludes_user_messages_and_preserves_mixed_tool_completions():
+    from platoon.utils.trajectory_error_filtering import detected_message_completion_ids
+
+    steps = [
+        {**_step("message"), "action_events": [SimpleNamespace(kind="MessageEvent", source="agent")]},
+        {**_step("user"), "action_events": [{"kind": "MessageEvent", "source": "user"}]},
+        {**_step("mixed"), "action_events": [{"kind": "MessageEvent", "source": "agent"}]},
+        {**_step("mixed"), "action_events": [{"kind": "ActionEvent", "action": {"message": "text"}}]},
+    ]
+    assert detected_message_completion_ids(steps) == {"message"}
 
 
 def _interaction(prompt: list[int], completion: list[int], routing_id: int | None):

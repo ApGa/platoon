@@ -8,6 +8,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = REPO_ROOT / "plugins" / "openreward" / "scripts" / "openreward-toolathlon-resilient-entrypoint.sh"
 LAUNCHER = REPO_ROOT / "slurm-scripts" / "openreward-toolathlon-prealloc-base.sh"
@@ -25,7 +27,7 @@ def test_toolathlon_supervisor_has_stable_port_bounded_restart_semantics():
     assert "local port=$((BASE_PORT + index))" in script
     assert "worker_pids[index]=${pid}" in script
     assert "pid_to_worker[${pid}]=${index}" in script
-    assert 'if wait -n -p exited_pid "${wait_pids[@]}"' in script
+    assert 'if wait "${pid}"; then status=0; else status=$?; fi' in script
     assert 'start_worker "${index}"' in script
     assert "worker ${index} exhausted restart budget" in script
     assert 'if [[ "${exited_pid}" == "${nginx_pid}" ]]' in script
@@ -281,7 +283,8 @@ def _read_count(path: Path) -> int:
         return 0
 
 
-def test_toolathlon_supervisor_restarts_only_failed_port_and_stops_cleanly(tmp_path):
+@pytest.mark.parametrize("fail_port", ["19000", "all"])
+def test_toolathlon_supervisor_restarts_only_failed_port_and_stops_cleanly(tmp_path, fail_port):
     worker = tmp_path / "worker.sh"
     nginx = tmp_path / "nginx.sh"
     state_dir = tmp_path / "state"
@@ -298,7 +301,7 @@ if [[ -f "${count_file}" ]]; then
 fi
 count=$((count + 1))
 printf '%s\n' "${count}" >"${count_file}"
-if [[ "${PORT}" == "${TEST_FAIL_PORT}" && "${count}" -eq 1 ]]; then
+if [[ ( "${PORT}" == "${TEST_FAIL_PORT}" || "${TEST_FAIL_PORT}" == all ) && "${count}" -eq 1 ]]; then
     exit 143
 fi
 trap 'exit 0' TERM INT
@@ -331,6 +334,9 @@ done
     env = {
         **os.environ,
         "OPENREWARD_ENTRYPOINT_SKIP_POSTGRES": "1",
+        # This test exercises supervisor recovery; namespace isolation has a
+        # separate compute-node preflight.
+        "OPENREWARD_WORKER_PID_ISOLATION": "0",
         "OPENREWARD_PORT": "19999",
         "OPENREWARD_WORKERS": "2",
         "OPENREWARD_WORKER_BASE_PORT": "19000",
@@ -346,7 +352,7 @@ done
         "OPENREWARD_NGINX_PID_FILE": str(tmp_path / "nginx.pid"),
         "OPENREWARD_NGINX_LOG_DIR": str(tmp_path / "nginx-log"),
         "TEST_STATE_DIR": str(state_dir),
-        "TEST_FAIL_PORT": "19000",
+        "TEST_FAIL_PORT": fail_port,
     }
     proc = subprocess.Popen(
         [str(SUPERVISOR)],
@@ -362,7 +368,8 @@ done
     try:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if _read_count(state_dir / "worker-19000.count") >= 2:
+            if (_read_count(state_dir / "worker-19000.count") >= 2
+                    and _read_count(state_dir / "worker-19001.count") >= (2 if fail_port == "all" else 1)):
                 break
             if proc.poll() is not None:
                 output = proc.communicate()[0]
@@ -372,7 +379,7 @@ done
             raise AssertionError("timed out waiting for failed worker restart")
 
         assert _read_count(state_dir / "worker-19000.count") == 2
-        assert _read_count(state_dir / "worker-19001.count") == 1
+        assert _read_count(state_dir / "worker-19001.count") == (2 if fail_port == "all" else 1)
         assert proc.poll() is None
 
         proc.terminate()

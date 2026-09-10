@@ -115,7 +115,9 @@ def _filter_positive_centered_error_tokens(
 
     encoded_error_mask = datum.loss_fn_inputs.pop(ERROR_ACTION_MASK_KEY, None)
     if encoded_error_mask is None:
-        return True, {}
+        # Agent-message-only datums have no policy tokens even when error
+        # filtering is disabled. Drop them after their rewards were centered.
+        return bool(datum.loss_fn_inputs["mask"].to_torch().any()), {}
     error_mask = encoded_error_mask.to_torch().bool()
     action_mask = datum.loss_fn_inputs["mask"].to_torch()
     advantages = datum.loss_fn_inputs["advantages"].to_torch()
@@ -833,6 +835,7 @@ class GroupRolloutWorkflow:
             model=self._model_binding(checkpoint_version),
             conversion=ConversionPolicy(
                 filter_errors=self.filter_errors,
+                filter_message_actions=getattr(self.config, "filter_message_actions", False),
                 include_traj_depth=self.config.depth_level_weighting,
                 include_traj_start=self.config.depth_level_weighting,
                 reward_processor_is_default=self._reward_processor_is_default,

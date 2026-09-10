@@ -26,6 +26,7 @@ from platoon.utils.trajectory_error_filtering import (
     ERROR_ACTION_MASK_KEY,
     completion_id_for_step,
     detected_error_completion_ids,
+    detected_message_completion_ids,
 )
 from platoon.utils.trajectory_status import trajectory_was_interrupted
 
@@ -341,6 +342,7 @@ def trajectory_to_data(
     filter_errors: bool = False,
     trajectory_reward: float = 0.0,
     traj_depth: int | None = None,
+    filter_message_actions: bool = False,
 ) -> TrajectoryDataResult:
     """Convert a trajectory to training data, merging sequences when possible.
 
@@ -355,6 +357,7 @@ def trajectory_to_data(
         trajectory_advantage: The advantage for this trajectory (reward - mean_reward).
         checkpoint_version: The checkpoint version for staleness checking.
         filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
+        filter_message_actions: Exclude agent-message tokens from policy loss while retaining context.
         trajectory_reward: Retained for call-site compatibility. Error
             filtering is deferred until centered advantages are available.
 
@@ -370,6 +373,11 @@ def trajectory_to_data(
     deferred_error_completion_ids = (
         detected_error_completion_ids(trajectory.get("steps", ()))
         if filter_errors
+        else set()
+    )
+    message_completion_ids = (
+        detected_message_completion_ids(trajectory.get("steps", ()))
+        if filter_message_actions
         else set()
     )
 
@@ -435,8 +443,12 @@ def trajectory_to_data(
         # Add action tokens (with actual logprobs and advantages)
         accumulator.full_sequence.extend(ac_tokens)
         accumulator.sampled_logprobs.extend(ac_logprobs)
-        accumulator.advantages.extend([trajectory_advantage] * len(ac_tokens))
-        accumulator.mask.extend([1.0] * len(ac_tokens))
+        # Keep messages in the model's context and routing sequence, but give
+        # them no gradient for either advantage sign. Masked positions stay
+        # zero during group centering; Tinker ultimately receives advantages.
+        trainable = completion_id not in message_completion_ids
+        accumulator.advantages.extend([trajectory_advantage if trainable else 0.0] * len(ac_tokens))
+        accumulator.mask.extend([float(trainable)] * len(ac_tokens))
         if accumulator.error_action_mask is not None:
             accumulator.error_action_mask.extend(
                 [completion_id in deferred_error_completion_ids] * len(ac_tokens)
@@ -455,6 +467,18 @@ def trajectory_to_data(
                 traj_start=len(data) == 0,
             )
         )
+
+    if filter_message_actions and traj_depth is not None:
+        # Empty datums survive until group centering so completed message-only
+        # rollouts still contribute their rewards to the baseline. Mark the
+        # first trainable datum for depth weighting after those are removed.
+        started = False
+        for datum in data:
+            trainable = bool(datum.loss_fn_inputs["mask"].to_torch().any())
+            datum.loss_fn_inputs["traj_start"] = TensorData.from_torch(
+                torch.tensor([float(trainable and not started)])
+            )
+            started = started or trainable
 
     logger.debug(
         f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}"
@@ -478,6 +502,7 @@ def get_train_data_for_trajectory_collection(
     include_traj_depth: bool = False,
     include_traj_start: bool = False,
     subagent_datum_sampler: SubagentDatumSampler | None = None,
+    filter_message_actions: bool = False,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -491,6 +516,7 @@ def get_train_data_for_trajectory_collection(
         task_id: Task identifier for logging.
         checkpoint_version: The checkpoint version for staleness checking.
         filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
+        filter_message_actions: Exclude agent-message tokens from policy loss while retaining context.
         reward_processor: Function to process trajectory rewards.
         subagent_datum_sampler: Optional deterministic sampler applied to each
             non-root trajectory after its steps have been merged into datums.
@@ -555,6 +581,7 @@ def get_train_data_for_trajectory_collection(
             trajectory_advantage=trajectory_reward,  # Will be further processed later.
             checkpoint_version=checkpoint_version,
             filter_errors=filter_errors,
+            filter_message_actions=filter_message_actions,
             trajectory_reward=trajectory_reward,
             traj_depth=depth if include_traj_depth else None,
         )
@@ -590,11 +617,14 @@ def get_train_data_for_trajectory_collection(
         # Sampling may remove the datum which originally carried traj_start.
         # Mark the first *retained* datum so depth weighting counts only
         # trajectories represented in the actual training batch.
-        for retained_index, datum in enumerate(retained_datums):
+        trajectory_started = False
+        for datum in retained_datums:
             if include_traj_start:
+                trainable = bool(datum.loss_fn_inputs["mask"].to_torch().any())
                 datum.loss_fn_inputs["traj_start"] = TensorData.from_torch(
-                    torch.tensor([1.0 if retained_index == 0 else 0.0])
+                    torch.tensor([float(trainable and not trajectory_started)])
                 )
+                trajectory_started = trajectory_started or trainable
             else:
                 datum.loss_fn_inputs.pop("traj_start", None)
 

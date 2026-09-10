@@ -24,6 +24,36 @@ RECURSIVE = CONFIG_DIR / "abci_toolathlon_15node_recursive_qwen36_miles_tinker_r
 NONRECURSIVE = CONFIG_DIR / "abci_toolathlon_15node_nonrecursive_qwen36_miles_tinker_r3_v1.yaml"
 
 
+@pytest.mark.parametrize("kind,nodes,reward", [
+    ("nonrecursive", 8, "binary"), ("nonrecursive", 8, "partial"), ("recursive", 14, "binary"),
+])
+def test_reward_ablation_config(kind, nodes, reward):
+    path = CONFIG_DIR / f"abci_toolathlon_{nodes}node_{kind}_qwen36_{reward}_nomsg_v7.yaml"
+    raw = yaml.safe_load(path.read_text())
+    assert _unknown_keys(OpenRewardTinkerTrainerConfig, raw) == []
+    config = _load(path)
+    workflow = config.train.workflow_config
+    assert workflow.filter_message_actions is True
+    assert workflow.rollout_isolation == "process"
+    assert workflow.rollout_config.propagate_root_success is (kind == "recursive")
+    assert config.openreward.enable_recursive_subagents is (kind == "recursive")
+    assert config.openreward.enable_subagent_reward_judging is False
+    assert config.openreward.enable_subagent_behavior_judging is False
+    assert config.openreward.enable_subagent_parent_usage_eligibility_gate is False
+    assert config.openreward.subagent_delegation_reward_coefficient == 0
+    assert config.train.num_concurrent_rollout_workflow_workers == 24
+    assert config.checkpoint.load_checkpoint_path is None
+
+
+def test_nonrecursive_reward_ablation_configs_have_identical_training_recipes():
+    recipes = []
+    for reward in ("binary", "partial"):
+        raw = yaml.safe_load((CONFIG_DIR / f"abci_toolathlon_8node_nonrecursive_qwen36_{reward}_nomsg_v7.yaml").read_text())
+        raw.pop("stats")
+        recipes.append(raw)
+    assert recipes[0] == recipes[1]
+
+
 def _load(path: Path) -> OpenRewardTinkerTrainerConfig:
     config, _raw = load_config(["--config", str(path)], OpenRewardTinkerTrainerConfig)
     return config

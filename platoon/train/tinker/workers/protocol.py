@@ -122,6 +122,7 @@ class ConversionPolicy:
     """
 
     filter_errors: bool = False
+    filter_message_actions: bool = False
     include_traj_depth: bool = False
     include_traj_start: bool = False
     reward_processor_is_default: bool = True

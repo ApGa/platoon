@@ -114,6 +114,7 @@ def _request(tmp_path, **overrides) -> RolloutWorkerRequest:
         ),
         conversion=ConversionPolicy(
             filter_errors=True,
+            filter_message_actions=True,
             include_traj_depth=True,
             include_traj_start=True,
             reward_processor_is_default=False,
@@ -134,6 +135,7 @@ def test_request_round_trips_task_config_and_sampler(tmp_path):
     loaded = load_request(path)
 
     assert loaded == request
+    assert loaded.conversion.filter_message_actions is True
     assert loaded.task.misc == {"index": 3, "name": "t"}
     # RolloutConfig must reconstruct exactly, including the nested dataclass.
     rebuilt = RolloutConfig(**loaded.rollout_config)

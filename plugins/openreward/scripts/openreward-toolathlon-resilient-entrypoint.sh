@@ -89,13 +89,9 @@ case "${RUNTIME_MODE}" in
         ;;
 esac
 
-# The privileged Slurm/Pyxis path keeps the historical private PID namespace
-# default. Native, non-fakeroot Singularity on ABCI already supplies container
-# PID isolation and may forbid creating a nested user namespace, so user mode
-# defaults this off unless the caller explicitly requests it.
-if [[ "${RUNTIME_MODE}" == user && -z "${OPENREWARD_WORKER_PID_ISOLATION+x}" ]]; then
-    WORKER_PID_ISOLATION=0
-fi
+# Require explicit opt-out on hosts without nested PID namespaces. Singularity
+# shares the host PID namespace unless launched with --pid; even with --pid,
+# per-worker namespaces keep an agent's process cleanup away from other workers.
 
 if [[ "${RUNTIME_MODE}" == user ]]; then
     STATE_DIR=${OPENREWARD_STATE_DIR:-${PBS_LOCALDIR:-${TMPDIR:-/tmp}}/openreward-toolathlon-${PUBLIC_PORT}}
@@ -514,16 +510,21 @@ while true; do
     done
     wait_pids+=("${nginx_pid}")
 
+    # Bash wait -n ignores children that exited while we restarted a sibling.
+    # Poll and reap by PID, including cached exit statuses. Calling wait -n
+    # after a liveness scan still races with simultaneous exits and can block
+    # on the surviving/new workers while the dead ones remain in the table.
     exited_pid=
-    if wait -n -p exited_pid "${wait_pids[@]}"; then
-        status=0
-    else
-        status=$?
-    fi
-
+    for pid in "${wait_pids[@]}"; do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            exited_pid=${pid}
+            if wait "${pid}"; then status=0; else status=$?; fi
+            break
+        fi
+    done
     if [[ -z "${exited_pid}" ]]; then
-        echo "[entrypoint] supervisor wait failed without an exited pid (status=${status})" >&2
-        exit 1
+        sleep 1
+        continue
     fi
     if [[ "${exited_pid}" == "${nginx_pid}" ]]; then
         echo "[entrypoint] nginx exited unexpectedly (pid=${exited_pid}, status=${status}); failing node service" >&2
