@@ -27,8 +27,9 @@ NONRECURSIVE = CONFIG_DIR / "abci_toolathlon_15node_nonrecursive_qwen36_miles_ti
 @pytest.mark.parametrize("kind,nodes,reward", [
     ("nonrecursive", 8, "binary"), ("nonrecursive", 8, "partial"), ("recursive", 14, "binary"),
 ])
-def test_reward_ablation_config(kind, nodes, reward):
-    path = CONFIG_DIR / f"abci_toolathlon_{nodes}node_{kind}_qwen36_{reward}_nomsg_v7.yaml"
+@pytest.mark.parametrize("version", ["v7", "2h_v8"])
+def test_reward_ablation_config(kind, nodes, reward, version):
+    path = CONFIG_DIR / f"abci_toolathlon_{nodes}node_{kind}_qwen36_{reward}_nomsg_{version}.yaml"
     raw = yaml.safe_load(path.read_text())
     assert _unknown_keys(OpenRewardTinkerTrainerConfig, raw) == []
     config = _load(path)
@@ -43,12 +44,18 @@ def test_reward_ablation_config(kind, nodes, reward):
     assert config.openreward.subagent_delegation_reward_coefficient == 0
     assert config.train.num_concurrent_rollout_workflow_workers == 24
     assert config.checkpoint.load_checkpoint_path is None
+    if version == "2h_v8":
+        for phase in (config.train, config.eval):
+            rollout = phase.workflow_config.rollout_config
+            assert (rollout.timeout, rollout.step_timeout) == (7200, 7200)
+        assert config.watchdog.timeout_seconds > 7200 + 120
 
 
-def test_nonrecursive_reward_ablation_configs_have_identical_training_recipes():
+@pytest.mark.parametrize("version", ["v7", "2h_v8"])
+def test_nonrecursive_reward_ablation_configs_have_identical_training_recipes(version):
     recipes = []
     for reward in ("binary", "partial"):
-        raw = yaml.safe_load((CONFIG_DIR / f"abci_toolathlon_8node_nonrecursive_qwen36_{reward}_nomsg_v7.yaml").read_text())
+        raw = yaml.safe_load((CONFIG_DIR / f"abci_toolathlon_8node_nonrecursive_qwen36_{reward}_nomsg_{version}.yaml").read_text())
         raw.pop("stats")
         recipes.append(raw)
     assert recipes[0] == recipes[1]

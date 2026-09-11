@@ -43,6 +43,14 @@ _VALID_BEHAVIOR_JUDGMENT_STATUSES = frozenset({"pass", "fail", "insufficient_evi
 _VALID_PARENT_USAGE_JUDGMENT_STATUSES = frozenset({"used", "not_used", "insufficient_evidence"})
 
 
+class SubagentLaunchFailure(str):
+    """A rejected launch, preserving the string result expected by CodeAct.
+
+    Tool adapters can report a typed error without guessing from the message
+    text or mistaking a successful child's prose for a launch failure.
+    """
+
+
 class SubagentBehaviorJudge(Protocol):
     """Judge whether a subagent's own behavior deserves its outcome reward.
 
@@ -683,7 +691,7 @@ async def _run_subagent_trajectory(
         msg = f"Not enough budget to launch subagent for goal {goal}. {e}"
         if guidance:
             msg += " " + guidance
-        return msg
+        return SubagentLaunchFailure(msg)
 
     try:
         forked_agent = await agent.fork(subtask)

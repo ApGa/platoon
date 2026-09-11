@@ -184,6 +184,35 @@ async def _run_in_sdk_thread(callable_, /, *args, **kwargs):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rejected", [True, False])
+async def test_launch_rejection_survives_runtime_and_reaches_training_error_filter(monkeypatch, rejected):
+    from platoon.utils.trajectory_error_filtering import openhands_event_reports_error
+
+    recursive = _load_recursive_module(monkeypatch)
+    # Identical prose from a successful child must not be classified as an
+    # error. Only the typed rejection should suppress positive policy credit.
+    message = "Not enough budget to launch subagent: maximum allowed depth reached."
+    result = recursive.SubagentLaunchFailure(message) if rejected else message
+
+    async def fake_launch_subagent(goal, max_steps, task_misc, verbose):
+        return result
+
+    monkeypatch.setattr(recursive, "launch_subagent", fake_launch_subagent)
+    runtime = recursive.LaunchSubagentRuntime()
+    runtime.bind(asyncio.get_running_loop(), contextvars.copy_context())
+    executor = recursive.LaunchSubagentExecutor(runtime.id, default_max_steps=100)
+    try:
+        observation = await _run_in_sdk_thread(executor, recursive.LaunchSubagentAction(goal="child"))
+    finally:
+        await runtime.aclose()
+
+    assert observation.text == message
+    assert observation.is_error is rejected
+    event = {"kind": "ObservationEvent", "observation": observation.model_dump()}
+    assert openhands_event_reports_error(event) is rejected
+
+
+@pytest.mark.asyncio
 async def test_launch_subagent_runtime_preserves_bound_context(monkeypatch):
     recursive = _load_recursive_module(monkeypatch)
     marker = contextvars.ContextVar("marker")

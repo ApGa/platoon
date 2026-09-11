@@ -9,7 +9,7 @@ from copy import deepcopy
 from typing import Any, cast
 from uuid import uuid4
 
-from platoon.agents.actions.subagent import launch_subagent
+from platoon.agents.actions.subagent import SubagentLaunchFailure, launch_subagent
 from pydantic import Field
 
 from openhands.sdk.agent.base import AgentBase
@@ -374,7 +374,10 @@ class LaunchSubagentExecutor(ToolExecutor[LaunchSubagentAction, LaunchSubagentOb
                 f"{exc.__class__.__name__}: {exc}",
                 is_error=True,
             )
-        return LaunchSubagentObservation.from_text(str(result))
+        return LaunchSubagentObservation.from_text(
+            str(result),
+            is_error=isinstance(result, SubagentLaunchFailure),
+        )
 
 
 class LaunchSubagentTool(ToolDefinition[LaunchSubagentAction, LaunchSubagentObservation]):

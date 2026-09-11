@@ -7,7 +7,7 @@ from typing import Iterator
 
 import pytest
 
-from platoon.agents.actions.subagent import launch_subagent
+from platoon.agents.actions.subagent import SubagentLaunchFailure, launch_subagent
 from platoon.envs.base import Observation, Task
 from platoon.episode.context import (
     budget_tracker,
@@ -154,6 +154,7 @@ async def test_budget_admission_precedes_resource_forks_and_denial_allocates_not
     with _launch_context(state, parent_max_steps=2) as tracker:
         message = await launch_subagent(goal="too large", max_steps=10)
 
+        assert isinstance(message, SubagentLaunchFailure)
         assert message.startswith("Not enough budget to launch subagent for goal too large.")
         assert state.events == ["budget.reserve"]
         assert state.child_agent is None
