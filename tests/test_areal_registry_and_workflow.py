@@ -498,9 +498,11 @@ def test_areal_task_workload_sidecar_preserves_no_train_data_work():
 
 
 def test_group_rollout_stats_ignore_synthetic_optional_reward_zeros():
+    from platoon.utils.areal_data_processing import reward_metric_presence_key
+
     workflow_mod = _load_group_workflow_module()
     workflow = workflow_mod.GroupRolloutWorkflow.__new__(workflow_mod.GroupRolloutWorkflow)
-    presence = workflow_mod.reward_metric_presence_key
+    presence = reward_metric_presence_key
 
     workflow._record_stats(
         {
@@ -518,10 +520,10 @@ def test_group_rollout_stats_ignore_synthetic_optional_reward_zeros():
     )
 
     values = workflow_mod._test_recording_tracker.values
-    assert values["reward/subagent_judgment"] == [0.75]
-    assert values["reward/success"] == [1.0, 0.75, 0.0]
-    assert values["root_reward/optional_diagnostic"] == [2.0]
-    assert values["root_reward/optional_diagnostic_at_k_mean"] == [2.0]
+    assert values["rollout_completion/reward/subagent_judgment"] == [0.75]
+    assert values["rollout_completion/reward/success"] == [1.0, 0.75, 0.0]
+    assert values["rollout_completion/root_reward/optional_diagnostic"] == [2.0]
+    assert values["rollout_completion/root_reward/optional_diagnostic_at_k_mean"] == [2.0]
 
 
 def test_group_sampling_mask_is_activated_after_full_metrics_and_preserves_alignment():

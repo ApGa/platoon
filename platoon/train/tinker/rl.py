@@ -37,6 +37,7 @@ from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
 from platoon.train.tinker.workflows.base import RolloutWorkflow
+from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_logger import StatsLogger
 from platoon.utils.stats_tracker import StatsTracker
@@ -605,11 +606,14 @@ class PlatoonTinkerRLTrainer:
                 )
             except Exception as e:
                 logger.exception(f"Exception in rollout worker for task {task_id}: {e}")
-                stats_tracker.scalar(failed_rollouts=1.0)
+                stats_tracker.scalar(**{"rollout_completion/failed_rollouts": 1.0})
                 rollout = None
 
             elapsed = time.perf_counter() - start_time
-            stats_tracker.scalar(rollout_time=elapsed)
+            stats_tracker.scalar(**{"rollout_completion/rollout_time": elapsed})
+            rollout_stats = getattr(rollout, "rollout_stats", None)
+            if isinstance(rollout_stats, RolloutStats):
+                rollout_stats.add("rollout_time", [elapsed])
 
             if elapsed > 120.0:
                 logger.warning(f"Rollout for task {task_id} took {elapsed:.1f}s (very slow)")
@@ -722,6 +726,9 @@ class PlatoonTinkerRLTrainer:
             batch_submitted_training_datums = 0
             batch_submitted_training_attention_tokens = 0
             batch_submitted_training_loss_tokens = 0
+            batch_rollout_stats = RolloutStats()
+            batch_stale_groups = 0
+            batch_groups_without_stats = 0
 
             # We perform num_minibatches weight updates per batch.
             for minibatch_num in range(self.config.train.num_minibatches):
@@ -746,6 +753,9 @@ class PlatoonTinkerRLTrainer:
                         )
                         rollout = await task_rollout_result_queue.get()
                         batch_total_tasks += 1
+                        rollout_stats = getattr(rollout, "rollout_stats", None)
+                        if not isinstance(rollout_stats, RolloutStats):
+                            batch_groups_without_stats += 1
                         workload_payload = _get_task_workload_payload(rollout)
                         if workload_payload is not None:
                             # Attribute generation work when this outer batch
@@ -782,9 +792,12 @@ class PlatoonTinkerRLTrainer:
                                     f"Stale rollout detected in batch {shared_state.train_step}. Filtering out."
                                 )
                                 shared_state.train_tracker.scalar(stale_rollouts=1.0)
+                                batch_stale_groups += 1
                                 rollout = None
 
                         if rollout is not None:
+                            if isinstance(rollout_stats, RolloutStats):
+                                batch_rollout_stats.merge(rollout_stats)
                             task_rollout_results.extend(rollout)
                             total_datums += len(rollout)
 
@@ -1101,6 +1114,14 @@ class PlatoonTinkerRLTrainer:
             batch_elapsed = time.perf_counter() - batch_start_time
 
             # Log stats for this step
+            batch_rollout_stats.record(shared_state.train_tracker, prefix="batch")
+            shared_state.train_tracker.scalar(
+                **{
+                    "batch/groups_dequeued": float(batch_total_tasks),
+                    "batch/stale_groups": float(batch_stale_groups),
+                    "batch/groups_without_stats": float(batch_groups_without_stats),
+                }
+            )
             step_stats = shared_state.train_tracker.export(reset=True)
             step_stats["train/step"] = shared_state.train_step
             step_stats["train/epoch"] = shared_state.train_step // shared_state.num_train_batches_per_epoch

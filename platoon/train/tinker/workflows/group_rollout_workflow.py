@@ -34,6 +34,7 @@ from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR, run_rollo
 from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor, WorkerOutcome
 from platoon.train.tinker.workers.telemetry import record_worker_cell_guard
 from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
+from platoon.utils.rollout_stats import RolloutStats, summarize_rollout_group
 from platoon.utils.rollout_workload import (
     RolloutWorkload,
     record_workload_distribution,
@@ -44,7 +45,6 @@ from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.tinker_data_processing import (
     SubagentDatumSamplingStats,
     TrajectoryCollectionResult,
-    TrajectoryStats,
 )
 from platoon.utils.trajectory_error_filtering import ERROR_ACTION_MASK_KEY
 
@@ -75,7 +75,7 @@ class _SingleRolloutOutcome:
 
 
 class _TaskRolloutOutput(list[tinker.Datum]):
-    """List-compatible task result with an out-of-band workload payload.
+    """List-compatible task result carrying workload and rollout statistics.
 
     The trainer and legacy consumers can continue treating this as an ordinary
     datum list.  In particular, an empty instance behaves like an empty list,
@@ -92,6 +92,7 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         observed_rollouts: int,
         trainable_rollouts: int,
         task_retained_datums: int,
+        rollout_stats: RolloutStats | None = None,
     ) -> None:
         super().__init__(datums)
         self.workload = workload
@@ -99,6 +100,29 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         self.observed_rollouts = observed_rollouts
         self.trainable_rollouts = trainable_rollouts
         self.task_retained_datums = task_retained_datums
+        self.rollout_stats = rollout_stats
+
+
+def _summarize_outcomes(outcomes: list[_SingleRolloutOutcome]) -> RolloutStats:
+    results = [outcome.result for outcome in outcomes if outcome.result is not None]
+    trajectories = [stats for result in results for stats in result.trajectory_stats]
+    data = {
+        "task_reward": [result.task_reward for result in results],
+        "task_reward_valid": [result.task_reward_valid for result in results],
+        **{
+            key: [getattr(stats, key) for stats in trajectories]
+            for key in ("num_steps", "num_input_tokens", "num_output_tokens")
+        },
+    }
+    root_keys = {key for result in results for key in result.root_rewards_dict}
+    for key in root_keys:
+        data[f"root_{key}"] = [
+            result.root_rewards_dict[key] for result in results if key in result.root_rewards_dict
+        ]
+    reward_keys = {key for stats in trajectories for key in stats.rewards_dict if key.startswith("reward/")}
+    for key in reward_keys:
+        data[key] = [stats.rewards_dict[key] for stats in trajectories if key in stats.rewards_dict]
+    return summarize_rollout_group(data)
 
 
 # Both helpers now live in ``workers.workload`` so the rollout worker calls the
@@ -352,6 +376,8 @@ class GroupRolloutWorkflow:
                 ),
             },
         )
+        rollout_stats = _summarize_outcomes(outcomes)
+        rollout_stats.record(self.tracker, prefix="rollout_completion")
         return _TaskRolloutOutput(
             datums,
             workload=task_workload,
@@ -359,6 +385,7 @@ class GroupRolloutWorkflow:
             observed_rollouts=sum(outcome.observed for outcome in outcomes),
             trainable_rollouts=trainable_rollouts,
             task_retained_datums=task_retained_datums,
+            rollout_stats=rollout_stats,
         )
 
     async def arun_episode(self, data: dict) -> list[tinker.Datum]:
@@ -389,16 +416,10 @@ class GroupRolloutWorkflow:
 
         # Filter out None results and collect data
         all_data: list[tinker.Datum] = []
-        task_rewards: list[float] = []
-        all_trajectory_stats: list[TrajectoryStats] = []
-        all_root_rewards_dicts: list[dict[str, float]] = []
         subagent_sampling_stats = SubagentDatumSamplingStats()
 
         for result in valid_results:
             all_data.extend(result.datums)
-            task_rewards.append(result.task_reward)
-            all_trajectory_stats.extend(result.trajectory_stats)
-            all_root_rewards_dicts.append(result.root_rewards_dict)
             subagent_sampling_stats.merge(result.subagent_sampling_stats)
 
         if self.subagent_datum_sampler is not None:
@@ -421,110 +442,10 @@ class GroupRolloutWorkflow:
             self.tracker.scalar(group_size_rejected=1.0)
             return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
 
-        # === Track stats BEFORE early returns ===
-        # This ensures we track stats even for groups that get filtered out
-
-        # Per-trajectory stats (num_steps, num_tokens are tracked per trajectory)
-        num_steps_per_traj = torch.tensor([float(s.num_steps) for s in all_trajectory_stats])
-        num_input_tokens_per_traj = torch.tensor([float(s.num_input_tokens) for s in all_trajectory_stats])
-        num_output_tokens_per_traj = torch.tensor([float(s.num_output_tokens) for s in all_trajectory_stats])
-
-        # Per-step averages (useful for understanding step-level characteristics)
-        # Avoid division by zero for trajectories with no steps
-        safe_num_steps = torch.clamp(num_steps_per_traj, min=1.0)
-        avg_input_tokens_per_step = num_input_tokens_per_traj / safe_num_steps
-        avg_output_tokens_per_step = num_output_tokens_per_traj / safe_num_steps
-
-        # Masks for per-trajectory stats
-        trajectory_mask = torch.ones(len(all_trajectory_stats), dtype=torch.bool)
-
-        self.tracker.denominator(
-            num_output_tokens_mask=trajectory_mask,
-            num_input_tokens_mask=trajectory_mask,
-            num_steps_mask=trajectory_mask,
-            avg_input_tokens_per_step_mask=trajectory_mask,
-            avg_output_tokens_per_step_mask=trajectory_mask,
-        )
-        self.tracker.stat(num_output_tokens=num_output_tokens_per_traj, denominator="num_output_tokens_mask")
-        self.tracker.stat(num_input_tokens=num_input_tokens_per_traj, denominator="num_input_tokens_mask")
-        self.tracker.stat(num_steps=num_steps_per_traj, denominator="num_steps_mask")
-        self.tracker.stat(
-            avg_input_tokens_per_step=avg_input_tokens_per_step, denominator="avg_input_tokens_per_step_mask"
-        )
-        self.tracker.stat(
-            avg_output_tokens_per_step=avg_output_tokens_per_step, denominator="avg_output_tokens_per_step_mask"
-        )
-
-        # Per-rollout stats (task_reward is the root trajectory's reward, one per rollout)
-        task_rewards_tensor = torch.tensor(task_rewards)
-        rollout_mask = torch.ones(len(task_rewards), dtype=torch.bool)
-
-        self.tracker.denominator(task_reward_mask=rollout_mask)
-        self.tracker.stat(task_reward=task_rewards_tensor, denominator="task_reward_mask")
-
-        # task_reward @ K metrics (computed per-task across K rollouts)
-        task_reward_at_k_mask = torch.ones(1, dtype=torch.bool)
-        self.tracker.denominator(task_reward_at_k_mask=task_reward_at_k_mask)
-        self.tracker.stat(
-            task_reward_at_k_mean=torch.mean(task_rewards_tensor).unsqueeze(0),
-            denominator="task_reward_at_k_mask",
-        )
-        self.tracker.stat(
-            task_reward_at_k_max=torch.max(task_rewards_tensor).unsqueeze(0),
-            denominator="task_reward_at_k_mask",
-        )
-        self.tracker.stat(
-            task_reward_at_k_min=torch.min(task_rewards_tensor).unsqueeze(0),
-            denominator="task_reward_at_k_mask",
-        )
-
-        # root_* metrics from reward_processor (per-rollout, from root trajectory only)
-        # Collect all reward component keys from the root trajectories
-        all_reward_keys: set[str] = set()
-        for rewards_dict in all_root_rewards_dicts:
-            all_reward_keys.update(rewards_dict.keys())
-
-        for key in all_reward_keys:
-            # Optional reward components must be averaged only where present;
-            # zero-filling absent judgments would underreport the metric.
-            values = torch.tensor([rewards_dict[key] for rewards_dict in all_root_rewards_dicts if key in rewards_dict])
-            root_reward_mask = torch.ones_like(values, dtype=torch.bool)
-            root_mask_name = f"root_{key}_mask"
-            self.tracker.denominator(**{root_mask_name: root_reward_mask})
-
-            self.tracker.stat(**{f"root_{key}": values}, denominator=root_mask_name)
-            self.tracker.stat(
-                **{f"root_{key}_at_k_mean": torch.mean(values).unsqueeze(0)},
-                denominator="task_reward_at_k_mask",
-            )
-            self.tracker.stat(
-                **{f"root_{key}_at_k_max": torch.max(values).unsqueeze(0)},
-                denominator="task_reward_at_k_mask",
-            )
-            self.tracker.stat(
-                **{f"root_{key}_at_k_min": torch.min(values).unsqueeze(0)},
-                denominator="task_reward_at_k_mask",
-            )
-
-        # reward/* metrics from per-trajectory rewards_dict (tracked per trajectory)
-        all_per_traj_reward_keys: set[str] = set()
-        for stats in all_trajectory_stats:
-            for key in stats.rewards_dict:
-                if key.startswith("reward/"):
-                    all_per_traj_reward_keys.add(key)
-
-        for key in all_per_traj_reward_keys:
-            values = torch.tensor(
-                [stats.rewards_dict[key] for stats in all_trajectory_stats if key in stats.rewards_dict]
-            )
-            reward_mask = torch.ones_like(values, dtype=torch.bool)
-            self.tracker.denominator(**{f"{key}_mask": reward_mask})
-            self.tracker.stat(**{key: values}, denominator=f"{key}_mask")
-
         # === Now compute advantages and filter ===
 
-        # Interrupted roots carry partial task rewards. Keep those rewards in all
-        # metrics above, but exclude them from the control-variate estimate used
+        # Interrupted roots carry partial task rewards. Keep those rewards in
+        # rollout statistics, but exclude them from the control-variate estimate used
         # to center policy advantages.
         valid_task_rewards = [result.task_reward for result in valid_results if result.task_reward_valid]
         if not valid_task_rewards:
@@ -588,7 +509,7 @@ class GroupRolloutWorkflow:
             )
         all_data = [datum for result in valid_results for datum in result.datums]
 
-        # Full-tree reward/LOO statistics above intentionally include empty and
+        # Full-tree rollout statistics intentionally include empty and
         # policy-ineligible trajectories. The train/no-train decision must not:
         # a sampled-out or invalid-verifier child with a different reward cannot
         # turn an otherwise zero-signal retained batch into an optimizer step.

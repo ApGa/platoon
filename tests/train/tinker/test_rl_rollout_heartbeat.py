@@ -135,7 +135,7 @@ def test_worker_loop_counts_failed_group_and_keeps_heartbeating(monkeypatch):
 
     result, scalars, beats = asyncio.run(run())
     assert result is None
-    assert {"failed_rollouts": 1.0} in scalars
+    assert {"rollout_completion/failed_rollouts": 1.0} in scalars
     assert beats >= 2
 
 

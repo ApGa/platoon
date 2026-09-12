@@ -99,6 +99,22 @@ def test_without_straggler_policy_every_member_is_awaited():
     assert "straggler_cancelled" not in _scalars(scope)
 
 
+def test_workflow_attaches_raw_rewards_while_centering_training_advantages():
+    scope = "test_batch_stats_before_centering"
+    workflow = _FakeWorkflow(
+        WorkflowConfig(group_size=2, leave_one_out_baseline=True),
+        delays=[0.0, 0.0],
+        rewards=[0.0, 1.0],
+        scope=scope,
+    )
+    output = _run(workflow)
+    assert output.rollout_stats.to_metrics(prefix="batch")["batch/task_reward/avg"] == 0.5
+    assert output.rollout_stats.values["task_reward"] == [0.0, 1.0]
+    assert output[0].loss_fn_inputs["advantages"].to_torch().tolist() == [0.0, -1.0, -1.0]
+    assert output[1].loss_fn_inputs["advantages"].to_torch().tolist() == [0.0, 1.0, 1.0]
+    assert _scalars(scope)["rollout_completion/task_reward/avg"] == 0.5
+
+
 def test_quorum_then_timeout_cancels_stragglers():
     scope = "test_straggler_cancel"
     config = WorkflowConfig(
@@ -190,5 +206,7 @@ def test_workflow_config_validation():
         WorkflowConfig(group_size=4, straggler_timeout_seconds=1.0, straggler_quorum=5)
     with pytest.raises(ValueError):
         WorkflowConfig(group_size=4, min_successful_group_size=5)
-    config = WorkflowConfig(group_size=8, straggler_timeout_seconds=900, straggler_quorum=6, min_successful_group_size=4)
+    config = WorkflowConfig(
+        group_size=8, straggler_timeout_seconds=900, straggler_quorum=6, min_successful_group_size=4
+    )
     assert (config.straggler_timeout_seconds, config.straggler_quorum, config.min_successful_group_size) == (900, 6, 4)

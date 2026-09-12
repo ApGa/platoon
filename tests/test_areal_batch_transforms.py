@@ -34,7 +34,7 @@ def _load_batch_transforms_module():
 
 def _load_trainer_module(batch_transforms_module):
     areal_pkg = types.ModuleType("platoon.train.areal")
-    areal_pkg.__path__ = []
+    areal_pkg.__path__ = [str(REPO_ROOT / "platoon/train/areal")]
 
     sys.modules["platoon.train.areal"] = areal_pkg
     sys.modules["platoon.train.areal.batch_transforms"] = batch_transforms_module
@@ -770,6 +770,90 @@ def test_reduce_rollout_batch_rejects_wrong_size_trainable_mask():
                 }
             ]
         )
+
+
+def test_batch_stats_count_raw_groups_once_and_only_materialize_metric_fields(monkeypatch):
+    from platoon.utils.stats_tracker import StatsTracker
+
+    batch_transforms = _load_batch_transforms_module()
+    monkeypatch.setattr(batch_transforms, "_rtensor_type", lambda: None)
+    rl_module = _load_trainer_module(batch_transforms)
+    trainer = rl_module.PlatoonArealRLTrainer.__new__(rl_module.PlatoonArealRLTrainer)
+    localized = []
+
+    class RemoteMetric:
+        def __init__(self, values):
+            self.values = torch.tensor(values)
+
+        def to_local(self):
+            localized.append(self)
+            return self.values
+
+    raw_batch = [
+        {
+            "task_reward": RemoteMetric([0.0] * 8),
+            "num_steps": RemoteMetric([3.0] * 12),
+            "reward/judge": RemoteMetric([0.0, 0.8]),
+            "_platoon_reward_metric_present/reward/judge": RemoteMetric([False, True]),
+            "rewards": torch.zeros(12, 1),
+            "attention_mask": torch.ones(12, 1, dtype=torch.bool),
+            "routed_experts": RemoteMetric([99]),
+        },
+        {
+            "task_reward": RemoteMetric([1.0] * 2),
+            "num_steps": RemoteMetric([1.0] * 2),
+            "rewards": torch.zeros(2, 1),
+            "attention_mask": torch.ones(2, 1, dtype=torch.bool),
+            "routed_experts": RemoteMetric([99]),
+        },
+    ]
+    stats = rl_module._extract_batch_rollout_stats(raw_batch)
+    tracker = StatsTracker("train")
+    stats.record(tracker, prefix="batch")
+    metrics = tracker.export()
+
+    assert len(localized) == 6
+    assert all(item["routed_experts"] not in localized for item in raw_batch)
+    assert metrics["train/batch/groups"] == 2
+    assert metrics["train/batch/task_reward/count"] == 10
+    assert metrics["train/batch/task_reward/avg"] == pytest.approx(0.2)
+    assert metrics["train/batch/num_steps/count"] == 14
+    assert metrics["train/batch/reward/judge/count"] == 1
+    assert metrics["train/batch/reward/judge/avg"] == pytest.approx(0.8)
+
+    # Actor materialization must not fetch the metric tensors a second time.
+    reduced = trainer._reduce_rollout_batch(raw_batch)
+    assert len(localized) == 8
+    assert "task_reward" not in reduced
+    assert "reward/judge" not in reduced
+    assert reduced["rewards"].shape == (14, 1)
+
+
+def test_distributed_batch_stats_weight_observations_across_data_parallel_ranks(monkeypatch):
+    from platoon.utils.rollout_stats import summarize_rollout_group
+
+    batch_transforms = _load_batch_transforms_module()
+    rl_module = _load_trainer_module(batch_transforms)
+    dp_group = object()
+    peer = summarize_rollout_group({"task_reward": [1.0] * 2, "reward/optional": [0.8]})
+
+    def gather(output, local, *, group):
+        assert group is dp_group
+        assert local.groups == 1
+        output[:] = [local, peer]
+
+    monkeypatch.setattr(rl_module.dist, "get_world_size", lambda group: 2)
+    monkeypatch.setattr(rl_module.dist, "all_gather_object", gather)
+    stats = rl_module._extract_batch_rollout_stats(
+        [{"task_reward": torch.zeros(8)}], reduce_group=dp_group
+    )
+    metrics = stats.to_metrics(prefix="batch")
+
+    assert metrics["batch/groups"] == 2
+    assert metrics["batch/task_reward/avg"] == pytest.approx(0.2)
+    assert metrics["batch/task_reward/count"] == 10
+    assert metrics["batch/reward/optional/count"] == 1
+    assert metrics["batch/reward/optional/avg"] == pytest.approx(0.8)
 
 
 def test_trainer_strips_heterogeneous_workflow_stats_before_cross_task_concat():

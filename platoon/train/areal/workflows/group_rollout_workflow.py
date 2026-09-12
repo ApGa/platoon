@@ -23,14 +23,15 @@ from platoon.train.areal.config_defs import WorkflowConfig
 from platoon.train.areal.proxy import ArealProxySession
 from platoon.train.areal.workflow_serialization import RemoteWorkflowSerializable, callable_import_path
 from platoon.utils.areal_data_processing import (
+    OPTIONAL_REWARD_METRIC_MASK_PREFIX,
     POLICY_TRAINING_ELIGIBILITY_MASK_KEY,
     SUBAGENT_DATUM_DEPTH_KEY,
     SUBAGENT_DATUM_KEEP_MASK_KEY,
     RouterReplayConfig,
     get_train_data_for_trajectory_collection,
     harmonize_optional_reward_metrics,
-    reward_metric_presence_key,
 )
+from platoon.utils.rollout_stats import summarize_rollout_group
 from platoon.utils.rollout_workload import (
     RolloutWorkload,
     record_workload_distribution,
@@ -420,58 +421,13 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         return config
 
     def _record_stats(self, train_data: dict) -> None:
+        stats = summarize_rollout_group(train_data, presence_mask_prefix=OPTIONAL_REWARD_METRIC_MASK_PREFIX)
         tracker = stats_tracker.get(workflow_context.stat_scope())
-
-        def scalar_series(name: str, values: torch.Tensor) -> None:
-            for value in values.detach().float().reshape(-1):
-                tracker.scalar(**{name: value.item()})
-
-        def scalar_value(name: str, value: torch.Tensor) -> None:
-            tracker.scalar(**{name: value.detach().float().item()})
-
-        def present_values(name: str, values: torch.Tensor) -> torch.Tensor:
-            values = values.detach().float().reshape(-1)
-            mask = train_data.get(reward_metric_presence_key(name))
-            if mask is None:
-                return values
-            mask = mask.detach().bool().reshape(-1)
-            if mask.shape != values.shape:
-                raise ValueError(
-                    f"Reward metric presence mask shape mismatch for {name}: "
-                    f"values={tuple(values.shape)}, mask={tuple(mask.shape)}"
-                )
-            return values[mask]
-
-        num_steps = train_data["num_steps"]
-        num_input_tokens = train_data["num_input_tokens"]
-        num_output_tokens = train_data["num_output_tokens"]
-        safe_num_steps = torch.clamp(num_steps, min=1.0)
-        avg_input_tokens_per_step = num_input_tokens / safe_num_steps
-        avg_output_tokens_per_step = num_output_tokens / safe_num_steps
-
-        scalar_series("task_reward", train_data["task_reward"])
-        scalar_series("num_output_tokens", num_output_tokens)
-        scalar_series("num_input_tokens", num_input_tokens)
-        scalar_series("num_steps", num_steps)
-        scalar_series("avg_input_tokens_per_step", avg_input_tokens_per_step)
-        scalar_series("avg_output_tokens_per_step", avg_output_tokens_per_step)
-
-        task_rewards = train_data["task_reward"]
-        scalar_value("task_reward_at_k_mean", torch.mean(task_rewards))
-        scalar_value("task_reward_at_k_max", torch.max(task_rewards))
-        scalar_value("task_reward_at_k_min", torch.min(task_rewards))
-
-        for key, value in train_data.items():
-            if key.startswith("root_"):
-                values = present_values(key, value)
-                if values.numel() == 0:
-                    continue
-                scalar_series(key, values)
-                scalar_value(f"{key}_at_k_mean", torch.mean(values))
-                scalar_value(f"{key}_at_k_max", torch.max(values))
-                scalar_value(f"{key}_at_k_min", torch.min(values))
-            elif key.startswith("reward/"):
-                scalar_series(key, present_values(key, value))
+        # RolloutController.export_stats combines scalar observations using
+        # their __count fields; tensor reductions are not forwarded by it.
+        for name, values in stats.values.items():
+            for value in values:
+                tracker.scalar(**{f"rollout_completion/{name}": value})
 
     def _activate_subagent_datum_sampling(self, train_data: dict) -> None:
         """Expose post-metric policy-eligibility and sampling masks.

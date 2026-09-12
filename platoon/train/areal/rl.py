@@ -44,6 +44,7 @@ from platoon.training_success_receipt import (
     maybe_publish_training_success_candidate,
 )
 from platoon.utils.areal_data_processing import OPTIONAL_REWARD_METRIC_MASK_PREFIX
+from platoon.utils.rollout_stats import RolloutStats, summarize_rollout_group
 from platoon.utils.rollout_workload import RolloutWorkload, sum_rollout_workloads
 
 if TYPE_CHECKING:
@@ -239,6 +240,33 @@ def _is_workflow_stat_key(key: str) -> bool:
         or key.startswith("reward/")
         or key.startswith(OPTIONAL_REWARD_METRIC_MASK_PREFIX)
     )
+
+
+def _extract_batch_rollout_stats(rollout_batch: list[dict[str, Any]], *, reduce_group=None) -> RolloutStats:
+    """Read each accepted group once, before splitting or padding actor data."""
+    stats = RolloutStats()
+    for item in rollout_batch:
+        if not item or "task_reward" not in item:
+            continue
+        # Only materialize the small metric fields, never tokens or R3 data.
+        data = localize_rtensors(
+            {
+                key: value
+                for key, value in item.items()
+                if _is_workflow_stat_key(key) and not key.startswith(_WORKLOAD_SIDECAR_PREFIX)
+            }
+        )
+        stats.merge(summarize_rollout_group(data, presence_mask_prefix=OPTIONAL_REWARD_METRIC_MASK_PREFIX))
+    if reduce_group is not None:
+        # Legacy distributed trainers consume disjoint groups on each DP rank.
+        # Gather small observations so optional metrics and unequal group sizes
+        # have exact global counts; model-parallel replicas are not counted twice.
+        gathered = [None] * dist.get_world_size(reduce_group)
+        dist.all_gather_object(gathered, stats, group=reduce_group)
+        stats = RolloutStats()
+        for rank_stats in gathered:
+            stats.merge(rank_stats)
+    return stats
 
 
 @dataclass(frozen=True)
@@ -1386,7 +1414,7 @@ class PlatoonArealRLTrainer(PPOTrainer):
         # keeps the *first* dict's value for anything else, which would drop every
         # rollout group but the first. Localize before concatenating.
         rollout_batch = [
-            {key: value for key, value in localize_rtensors(item).items() if not _is_workflow_stat_key(key)}
+            localize_rtensors({key: value for key, value in item.items() if not _is_workflow_stat_key(key)})
             for item in rollout_batch
         ]
 
@@ -1630,6 +1658,13 @@ class PlatoonArealRLTrainer(PPOTrainer):
                     target_datums=actor_batch_requirements.minimum_datums,
                 )
             raw_rollout_batch = rollout_collection.raw_batch
+            batch_rollout_stats = _extract_batch_rollout_stats(
+                raw_rollout_batch,
+                reduce_group=None if is_single_controller() else self.actor.data_parallel_group,
+            )
+            # Each rank records the same finalized global batch. AReaL's
+            # scalar reduction preserves these means, extrema, and counts.
+            stats_tracker.get("train").scalar(**batch_rollout_stats.to_metrics(prefix="batch"))
             accepted_workload = rollout_collection.accepted_workload
             if accepted_workload is not None:
                 stats_tracker.scalar(
