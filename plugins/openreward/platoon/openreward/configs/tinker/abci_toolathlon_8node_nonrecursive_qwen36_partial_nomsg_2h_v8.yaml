@@ -1,7 +1,7 @@
 # Two-hour episode and step limits; four-hour no-progress watchdog.
 # Toolathlon reward ablation: nonrecursive, partial root rewards.
 # 8 H200 nodes: 2 training + 6 inference/environment nodes.
-# Launch with OPENREWARD_REWARD_MODE=partial; all agent messages have zero policy loss.
+# Launch with OPENREWARD_REWARD_MODE=partial; message endings receive zero reward and train normally.
 # Keep full strict R3 capture and FA3; deterministic inference remains disabled.
 
 train:
@@ -37,7 +37,7 @@ train:
     subagent_datum_keep_probability: 1.0  # keep all subagent datums (v35: 0.25)
     subagent_datum_sampling_seed: 343
     filter_errors: true
-    filter_message_actions: true
+    filter_message_actions: false
     filter_zero_advantage_datums: false
     straggler_timeout_seconds: 900
     straggler_quorum: 6

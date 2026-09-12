@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from platoon.openreward.tinker_config import OpenRewardTinkerTrainerConfig
+
 from platoon.utils.config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +34,7 @@ def test_reward_ablation_config(kind, nodes, reward, version):
     assert _unknown_keys(OpenRewardTinkerTrainerConfig, raw) == []
     config = _load(path)
     workflow = config.train.workflow_config
-    assert workflow.filter_message_actions is True
+    assert workflow.filter_message_actions is (version == "v7")
     assert workflow.rollout_isolation == "process"
     assert workflow.rollout_config.propagate_root_success is (kind == "recursive")
     assert config.openreward.enable_recursive_subagents is (kind == "recursive")
@@ -55,7 +55,8 @@ def test_reward_ablation_config(kind, nodes, reward, version):
 def test_nonrecursive_reward_ablation_configs_have_identical_training_recipes(version):
     recipes = []
     for reward in ("binary", "partial"):
-        raw = yaml.safe_load((CONFIG_DIR / f"abci_toolathlon_8node_nonrecursive_qwen36_{reward}_nomsg_{version}.yaml").read_text())
+        path = CONFIG_DIR / f"abci_toolathlon_8node_nonrecursive_qwen36_{reward}_nomsg_{version}.yaml"
+        raw = yaml.safe_load(path.read_text())
         raw.pop("stats")
         recipes.append(raw)
     assert recipes[0] == recipes[1]

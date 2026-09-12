@@ -13,9 +13,9 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import tinker
 import torch
-import pytest
 
 import platoon.train.tinker  # noqa: F401  (resolves the package's import cycle first)
 from platoon.train.tinker.batch_transforms import LOSS_NORMALIZATION_TOKENS_KEY
@@ -25,7 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("advantage", [-1.0, 0.0, 1.0])
-def test_message_actions_keep_context_and_routing_but_receive_no_policy_loss(advantage):
+@pytest.mark.parametrize("filter_message_actions", [False, True])
+def test_message_action_policy_mask_preserves_context_and_routing(advantage, filter_message_actions):
     message = {**_step("message"), "action_events": [{"kind": "MessageEvent", "source": "agent"}]}
     tool = {**_step("tool"), "action_events": [{"kind": "ActionEvent", "source": "agent"}]}
     result = tdp.trajectory_to_data(
@@ -35,13 +36,17 @@ def test_message_actions_keep_context_and_routing_but_receive_no_policy_loss(adv
             "tool": _interaction([1, 2, 3, 4, 5], [6, 7], 12),
         },
         task_id="task", trajectory_id="root", trajectory_advantage=advantage,
-        checkpoint_version=0, filter_message_actions=True,
+        checkpoint_version=0, filter_message_actions=filter_message_actions,
     )
     assert len(result.datums) == 1
     datum = result.datums[0]
     assert datum.model_input.to_ints() == [1, 2, 3, 4, 5, 6]
-    assert datum.loss_fn_inputs["mask"].to_torch().tolist() == [0, 0, 0, 0, 1, 1]
-    assert datum.loss_fn_inputs["advantages"].to_torch().tolist() == [0, 0, 0, 0, advantage, advantage]
+    message_mask = 0 if filter_message_actions else 1
+    message_advantage = 0.0 if filter_message_actions else advantage
+    assert datum.loss_fn_inputs["mask"].to_torch().tolist() == [0, message_mask, message_mask, 0, 1, 1]
+    assert datum.loss_fn_inputs["advantages"].to_torch().tolist() == [
+        0, message_advantage, message_advantage, 0, advantage, advantage,
+    ]
     assert _handle(datum).item() == 12
 
 

@@ -370,12 +370,17 @@ def test_tinker_group_filters_errors_only_after_leave_one_out_centering(monkeypa
 
 @pytest.mark.parametrize("message_reward", [0.0, 1.0])
 @pytest.mark.parametrize("filter_errors", [False, True])
-def test_message_only_rollout_keeps_loo_baseline_without_policy_gradient(monkeypatch, message_reward, filter_errors):
+@pytest.mark.parametrize("filter_message_actions", [False, True])
+def test_message_only_rollout_loo_with_optional_policy_mask(
+    monkeypatch, message_reward, filter_errors, filter_message_actions,
+):
     processing = _load_tinker_data_processing(monkeypatch)
     tracker = _RecordingTracker()
     workflow_module = _load_tinker_group_workflow(monkeypatch, processing, tracker)
     results = []
     for kind, reward in [("MessageEvent", message_reward), ("ActionEvent", 1.0 - message_reward)]:
+        # Reproduce the degenerate EOS-only response seen in the Toolathlon runs.
+        tokens = [248046] if kind == "MessageEvent" else [3, 4]
         results.append(processing.get_train_data_for_trajectory_collection(
             trajectory_collection={"trajectories": {"root": {"reward": reward, "steps": [{
                 "misc": {"action_misc": {"completion_id": "c"}},
@@ -383,10 +388,10 @@ def test_message_only_rollout_keeps_loo_baseline_without_policy_gradient(monkeyp
             }]}}},
             interactions={"c": types.SimpleNamespace(
                 obs=types.SimpleNamespace(chunks=[DummyEncodedTextChunk([1, 2])]),
-                action=types.SimpleNamespace(tokens=[3, 4], logprobs=[-0.5, -0.5]),
+                action=types.SimpleNamespace(tokens=tokens, logprobs=[-0.5] * len(tokens)),
             )},
             task_id="task", checkpoint_version=0,
-            filter_message_actions=True, filter_errors=filter_errors,
+            filter_message_actions=filter_message_actions, filter_errors=filter_errors,
         ))
     message_datum = results[0].datums[0]
     assert results[0].trajectory_stats[0].num_datums == 1
@@ -400,10 +405,18 @@ def test_message_only_rollout_keeps_loo_baseline_without_policy_gradient(monkeyp
 
     workflow.arun_episode_single = fake_single
     output = asyncio.run(workflow.arun_episode({"task_id": "task"}))
-    assert results[0].datums == []
-    assert not message_datum.loss_fn_inputs["advantages"].to_torch().any()
-    assert len(output) == 1
-    torch.testing.assert_close(output[0].loss_fn_inputs["advantages"].to_torch(),
+    if filter_message_actions:
+        assert results[0].datums == []
+        assert not message_datum.loss_fn_inputs["advantages"].to_torch().any()
+        assert len(output) == 1
+    else:
+        assert results[0].datums == [message_datum]
+        assert len(output) == 2
+        torch.testing.assert_close(message_datum.loss_fn_inputs["mask"].to_torch(), torch.tensor([0.0, 1.0]))
+        torch.testing.assert_close(
+            message_datum.loss_fn_inputs["advantages"].to_torch(), torch.tensor([0.0, 2 * message_reward - 1.0]),
+        )
+    torch.testing.assert_close(output[-1].loss_fn_inputs["advantages"].to_torch(),
                                torch.tensor([0.0, 1.0 - 2 * message_reward, 1.0 - 2 * message_reward]))
 
 
