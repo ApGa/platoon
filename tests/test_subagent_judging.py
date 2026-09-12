@@ -807,6 +807,31 @@ def test_parseable_verdict_without_finish_is_not_trainable():
     assert child.misc[EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY] is True
 
 
+def test_subagent_judgment_cannot_replace_explicit_terminal_zero():
+    from platoon.utils.trajectory_status import TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY
+
+    child = Trajectory(
+        id="message-child", steps=[{"misc": {}}],
+        misc={TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY: True},
+    )
+    judgment = {"score": 1.0, "status": "verified", SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY: True}
+    _record_judgment_reward(child, judgment)
+    assert child.reward == 0.0
+    assert child.steps[-1]["misc"]["reward_misc"]["reward/success"] == 0.0
+    assert not child.misc.get(EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY)
+
+
+def test_verifier_message_failure_cannot_provide_a_valid_verdict():
+    from platoon.utils.trajectory_status import TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY
+
+    message = json.dumps({"status": "verified", "score": 1.0})
+    verifier = Trajectory(
+        id="verifier", finish_message=message, misc={TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY: True},
+    )
+    judgment = _normalize_judgment(message, verifier)
+    assert judgment[SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY] is False
+
+
 @pytest.mark.asyncio
 async def test_parent_usage_gate_suppresses_only_decisively_unused_positive_children():
     parent = Trajectory(

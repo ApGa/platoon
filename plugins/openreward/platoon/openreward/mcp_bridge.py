@@ -21,6 +21,24 @@ TOOL_ERROR_META_KEY = "openhands.dev/tool-error"
 OPENREWARD_TOOL_ROUTING_SCHEMA_KEY = "x-openhands-tool-routing"
 _PR_SET_PDEATHSIG = 1
 _BRIDGE_CLOSE_TIMEOUT_SECONDS = 30
+_LEGACY_TOOLATHLON_COMPLETION_INSTRUCTION = (
+    "If you believe the task is completed, you can either call the `local-claim_done` "
+    "tool or respond without calling any tool to indicate completion. This will "
+    "immediately terminate the task, and you will have no further opportunity to work on it."
+)
+
+
+def _normalize_task_prompt(prompt: str) -> str:
+    """Support Toolathlon images built before its task preambles were fixed.
+
+    Remove only the known stale preamble line. The environment's current
+    terminal-tool instruction and the bridge completion contract remain.
+    """
+    return "".join(
+        line
+        for line in prompt.splitlines(keepends=True)
+        if line.strip() != _LEGACY_TOOLATHLON_COMPLETION_INSTRUCTION
+    )
 
 
 def _install_parent_death_signal() -> None:
@@ -197,7 +215,7 @@ def _completion_policy(tools: list[dict[str, Any]]) -> str:
         "prompt for when to use it. Completion requires an environment tool call: "
         f"when the task is complete, {terminal_instruction}. Do not end with a "
         "normal assistant message; a text response does not submit the environment "
-        "and will be rejected so that the rollout can continue."
+        "and ends the rollout with zero reward."
     )
 
 
@@ -376,7 +394,7 @@ class OpenRewardMCPBridge:
         self.task_name = _task_name(self.task, config.task_index)
         self.session_context = self.environment.session(task=self.task)
         self.session = self.session_context.__enter__()
-        self.prompt_text = _prompt_to_text(self.session.get_prompt())
+        self.prompt_text = _normalize_task_prompt(_prompt_to_text(self.session.get_prompt()))
         self.tools = list(self.session.list_tools(format="openai"))
 
         self._record(

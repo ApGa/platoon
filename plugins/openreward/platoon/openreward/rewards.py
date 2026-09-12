@@ -6,6 +6,7 @@ from platoon.utils.token_efficiency import (
     TOKEN_EFFICIENCY_PENALTY_REWARD_KEY,
     trajectory_token_efficiency_metrics,
 )
+from platoon.utils.trajectory_status import trajectory_has_forced_zero_reward
 
 from platoon.openreward.constants import OPENREWARD_ENVIRONMENT_LABEL_KEY
 
@@ -38,8 +39,11 @@ def _environment_reward_key(traj: dict) -> str | None:
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     """Return task success plus delegation bonus minus subtree token cost."""
 
-    openreward_score = float(traj.get("reward", 0.0))
+    forced_zero = trajectory_has_forced_zero_reward(traj)
+    openreward_score = 0.0 if forced_zero else float(traj.get("reward", 0.0))
     judgment_score = _judgment_score(traj)
+    if forced_zero and judgment_score is not None:
+        judgment_score = 0.0
     base_reward = judgment_score if judgment_score is not None else openreward_score
     rewards_dict: dict[str, float] = {
         "reward/success": base_reward,
@@ -62,6 +66,12 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     launched = float(delegation.get("launched", 0.0))
     succeeded = float(delegation.get("succeeded", 0.0))
     delegation_bonus = float(delegation.get("bonus", 0.0))
+    if forced_zero:
+        delegation_bonus = 0.0
+        rewards_dict["reward/success"] = 0.0
+        rewards_dict["reward/openreward"] = 0.0
+        if judgment_score is not None:
+            rewards_dict["reward/subagent_judgment"] = 0.0
     pre_efficiency_reward = base_reward + delegation_bonus
     efficiency_metrics = trajectory_token_efficiency_metrics(traj)
     efficiency_penalty = efficiency_metrics.get(TOKEN_EFFICIENCY_PENALTY_REWARD_KEY, 0.0)

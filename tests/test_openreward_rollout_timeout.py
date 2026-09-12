@@ -322,7 +322,8 @@ def test_task_tracker_initial_guidance_is_shared_by_recursive_and_nonrecursive(
     )
 
 
-def test_openreward_agent_rejects_plain_message_completion(monkeypatch) -> None:
+@pytest.mark.parametrize("handler", ["_handle_content_response", "_handle_no_content_response"])
+def test_openreward_agent_ends_on_message_without_corrective_turn(monkeypatch, handler) -> None:
     rollout = _load_rollout_module(monkeypatch)
 
     class TextContent:
@@ -346,6 +347,11 @@ def test_openreward_agent_rejects_plain_message_completion(monkeypatch) -> None:
         Message=Message,
         TextContent=TextContent,
     )
+    _module(monkeypatch, "openhands.sdk.conversation")
+    _module(
+        monkeypatch, "openhands.sdk.conversation.state",
+        ConversationExecutionStatus=types.SimpleNamespace(FINISHED="finished"),
+    )
 
     emitted = []
     agent = rollout.OpenRewardAgent(tools_map={"submit_answer": object()})
@@ -353,20 +359,18 @@ def test_openreward_agent_rejects_plain_message_completion(monkeypatch) -> None:
     agent._maybe_emit_vllm_tokens = lambda *args: None
     state = types.SimpleNamespace(execution_status="running")
 
-    agent._handle_content_response(
+    extra = {"response_type": "empty"} if handler == "_handle_no_content_response" else {}
+    getattr(agent, handler)(
         message=object(),
         llm_response=object(),
         conversation=object(),
         state=state,
         on_event=emitted.append,
+        **extra,
     )
 
-    assert state.execution_status == "running"
-    assert emitted[0] == "assistant"
-    nudge = emitted[1]
-    assert nudge.source == "user"
-    assert "did not submit" in nudge.llm_message.content[0].text
-    assert "call `submit_answer`" in nudge.llm_message.content[0].text
+    assert state.execution_status == "finished"
+    assert emitted == ["assistant"]
 
 
 def test_local_condenser_defaults_to_bounded_reasoning_completion(monkeypatch) -> None:

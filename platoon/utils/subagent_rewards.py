@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from platoon.episode.trajectory import TrajectoryCollection
+from platoon.utils.trajectory_status import trajectory_has_forced_zero_reward
 
 SUBAGENT_DELEGATION_REWARD_MISC_KEY = "subagent_delegation_reward"
 
@@ -60,6 +61,9 @@ def _is_excluded_from_training(trajectory: Any) -> bool:
 def _get_base_success(trajectory: Any) -> float:
     """Return success before any delegation bonus is applied."""
 
+    if trajectory_has_forced_zero_reward(trajectory):
+        return 0.0
+
     steps = _get_steps(trajectory)
     if steps:
         reward_misc = _get_step_reward_misc(steps[-1])
@@ -113,7 +117,7 @@ def add_direct_subagent_delegation_rewards(
             "launched": float(launched),
             "succeeded": float(succeeded),
             "success_rate": float(success_rate),
-            "bonus": float(coefficient * success_rate),
+            "bonus": 0.0 if trajectory_has_forced_zero_reward(trajectory) else float(coefficient * success_rate),
         }
 
     return trajectory_collection
@@ -122,27 +126,25 @@ def add_direct_subagent_delegation_rewards(
 def propagate_root_success(
     trajectory_collection: dict[str, Any] | TrajectoryCollection,
 ) -> dict[str, Any] | TrajectoryCollection:
-    """Rewrite recursive rollout rewards so all trajectories use root success."""
+    """Propagate root success, preserving explicit terminal zero outcomes."""
     trajectories = _get_trajectories(trajectory_collection)
     if not trajectories:
         return trajectory_collection
 
     _, root_trajectory = next(iter(trajectories.items()))
-    root_steps = _get_steps(root_trajectory)
-    root_success = _get_trajectory_reward(root_trajectory)
-    if root_steps:
-        root_success = float(_get_step_reward_misc(root_steps[-1]).get("reward/success", root_success))
+    root_success = _get_base_success(root_trajectory)
 
     for trajectory in trajectories.values():
-        _set_trajectory_reward(trajectory, root_success)
+        success = 0.0 if trajectory_has_forced_zero_reward(trajectory) else root_success
+        _set_trajectory_reward(trajectory, success)
         steps = _get_steps(trajectory)
         if steps:
-            _get_step_reward_misc(steps[-1])["reward/success"] = root_success
+            _get_step_reward_misc(steps[-1])["reward/success"] = success
         for step in steps:
             reward_misc = _get_step_reward_misc(step)
             launched = float(reward_misc.get("reward/subagent_launched", 0.0))
             if launched > 0:
-                reward_misc["reward/subagent_succeeded"] = launched * root_success
+                reward_misc["reward/subagent_succeeded"] = launched * success
 
     return trajectory_collection
 

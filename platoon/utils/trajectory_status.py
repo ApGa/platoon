@@ -7,6 +7,14 @@ from typing import Any
 TRAJECTORY_CANCELLED_MISC_KEY = "trajectory_cancelled"
 TRAJECTORY_TIMED_OUT_MISC_KEY = "trajectory_timed_out"
 TRAJECTORY_INVALID_MISC_KEY = "trajectory_invalid"
+# A valid failed outcome, distinct from infrastructure errors/cancellation.
+# Recursive graders must not replace its zero reward with another score.
+TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY = "trajectory_forced_zero_reward"
+
+
+def trajectory_has_forced_zero_reward(trajectory: Any) -> bool:
+    misc = trajectory.get("misc", {}) if isinstance(trajectory, dict) else getattr(trajectory, "misc", {})
+    return isinstance(misc, dict) and bool(misc.get(TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY))
 
 
 def trajectory_was_cancelled(trajectory: Any) -> bool:

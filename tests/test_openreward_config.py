@@ -90,6 +90,9 @@ def _load_openreward_env_module(monkeypatch):
             self._enable_recursive_subagents = enable_recursive_subagents
             self._subagent_default_max_steps = subagent_default_max_steps
             self._conversation = None
+            self._state = types.SimpleNamespace(
+                terminal_event_id=None, last_step_action_id=None, last_step_observation_id=None,
+            )
 
     _module(monkeypatch, "openhands")
     _module(monkeypatch, "openhands.sdk")
@@ -99,7 +102,7 @@ def _load_openreward_env_module(monkeypatch):
         "openhands.sdk.conversation.state",
         ConversationExecutionStatus=ConversationExecutionStatus,
     )
-    _module(monkeypatch, "openhands.sdk.event")
+    _module(monkeypatch, "openhands.sdk.event", MessageEvent=type("MessageEvent", (), {}))
     _module(monkeypatch, "openhands.sdk.event.base", Event=Event)
     _module(monkeypatch, "platoon.openhands")
     _module(monkeypatch, "platoon.openhands.env", OpenHandsEnv=OpenHandsEnv)
@@ -341,6 +344,28 @@ def test_openreward_reward_processor_subtracts_efficiency_as_aux_penalty(monkeyp
     assert components["efficiency/subtree_policy_trajectories"] == 2.0
 
 
+def test_openreward_message_failure_overrides_positive_grading_and_bonus(monkeypatch):
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rewards", raising=False)
+    rewards_mod = __import__("platoon.openreward.rewards", fromlist=["reward_processor"])
+    from platoon.utils.trajectory_status import TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY
+
+    reward, components = rewards_mod.reward_processor({
+        "reward": 1.0,
+        "misc": {
+            TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY: True,
+            "subagent_reward_judgment": {"score": 1.0},
+            "subagent_delegation_reward": {"bonus": 0.2},
+        },
+        "steps": [{"misc": {"reward_misc": {"reward/success": 1.0, "reward/subagent_judgment": 1.0}}}],
+    })
+    assert reward == 0.0
+    assert components["reward/success"] == 0.0
+    assert components["reward/openreward"] == 0.0
+    assert components["reward/subagent_judgment"] == 0.0
+    assert components["reward/delegation_bonus"] == 0.0
+
+
 def test_openreward_recursive_delegation_bonus_is_direct_and_non_compounding(monkeypatch):
     from platoon.utils.subagent_rewards import (
         SUBAGENT_DELEGATION_REWARD_MISC_KEY,
@@ -510,6 +535,41 @@ def test_root_success_propagation_keeps_legacy_import_alias():
     )
 
     assert propogate_root_success is propagate_root_success
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+def test_root_success_preserves_message_failure_and_delegation_zero(serialized):
+    from platoon.episode.trajectory import ParentInfo, Trajectory, TrajectoryCollection
+    from platoon.utils.subagent_rewards import add_direct_subagent_delegation_rewards, propagate_root_success
+    from platoon.utils.trajectory_status import TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY, trajectory_was_interrupted
+
+    def trajectory(name, parent=None, forced=False, reward=0.0):
+        return Trajectory(
+            id=name, reward=reward, parent_info=ParentInfo(id=parent, fork_step=0) if parent else None,
+            steps=[{"misc": {"reward_misc": {"reward/success": reward}}}],
+            misc={TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY: True} if forced else {},
+        )
+
+    root = trajectory("root", reward=1.0)
+    failed = trajectory("message-child", "root", forced=True)
+    finished = trajectory("finish-child", "root")
+    grandchild = trajectory("finish-grandchild", "message-child")
+    collection = TrajectoryCollection(trajectories={t.id: t for t in (root, failed, finished, grandchild)})
+    if serialized:
+        from dataclasses import asdict
+        collection = asdict(collection)
+    propagate_root_success(collection)
+    add_direct_subagent_delegation_rewards(collection, coefficient=0.2)
+    rows = collection["trajectories"] if serialized else collection.trajectories
+
+    def value(t, key):
+        return t[key] if serialized else getattr(t, key)
+
+    assert value(rows["message-child"], "reward") == 0.0
+    assert value(rows["finish-child"], "reward") == 1.0
+    assert value(rows["message-child"], "misc")["subagent_delegation_reward"]["bonus"] == 0.0
+    assert value(rows["root"], "misc")["subagent_delegation_reward"]["success_rate"] == 0.5
+    assert not trajectory_was_interrupted(rows["message-child"])
 
 
 def test_openreward_mcp_bridge_declares_tools_lockfree(monkeypatch):
@@ -687,6 +747,19 @@ def test_openreward_mcp_bridge_completion_policy_uses_available_terminal_tool(
     assert "claim_done" not in submit_policy
     assert "call `claim_done`" in claim_policy
     assert "normal assistant message" in submit_policy
+    assert "zero reward" in submit_policy
+    assert "rollout can continue" not in submit_policy
+
+
+def test_openreward_normalizes_legacy_toolathlon_preamble_for_existing_images(monkeypatch):
+    bridge_mod = _load_openreward_mcp_bridge_module(monkeypatch)
+    legacy = bridge_mod._LEGACY_TOOLATHLON_COMPLETION_INSTRUCTION
+    prompt = f"Workspace: /workspace\n{legacy}\nTask: Write the report.\nCall `claim_done`.\n"
+    normalized = bridge_mod._normalize_task_prompt(prompt)
+    assert normalized == "Workspace: /workspace\nTask: Write the report.\nCall `claim_done`.\n"
+    assert bridge_mod._normalize_task_prompt(normalized) == normalized
+    unrelated = "The task is to write a message to a colleague.\n"
+    assert bridge_mod._normalize_task_prompt(unrelated) == unrelated
 
 
 def test_openreward_task_loader_marks_goal_for_env_resolution(monkeypatch):
@@ -966,6 +1039,7 @@ async def test_openreward_env_finishes_on_direct_submit_answer_reward(monkeypatc
     env._conversation = conversation
     payload = {"finished": True, "reward": 1.0, "text": "2 passed"}
     event = types.SimpleNamespace(
+        id="terminal-observation",
         observation=types.SimpleNamespace(
             tool_name="submit_answer",
             content=[types.SimpleNamespace(text=json.dumps(payload))],
@@ -973,12 +1047,15 @@ async def test_openreward_env_finishes_on_direct_submit_answer_reward(monkeypatc
     )
 
     env._stop_on_openreward_finished(event)
+    assert await env.evaluate() == (0.0, {})
+    env._state.last_step_observation_id = event.id
     reward, misc = await env.evaluate()
 
     assert conversation.state.execution_status == env_mod.ConversationExecutionStatus.FINISHED
     assert reward == 1.0
     assert misc["reward/openreward"] == 1.0
     assert misc["openreward/final_payload"]["text"] == "2 passed"
+    assert await env.evaluate() == (0.0, {})
 
 
 @pytest.mark.asyncio
@@ -1010,6 +1087,7 @@ async def test_openreward_env_marks_invalid_terminal_result_ineligible(
         },
     }
     event = types.SimpleNamespace(
+        id="invalid-terminal-observation",
         observation=types.SimpleNamespace(
             tool_name="submit_answer",
             content=[types.SimpleNamespace(text=json.dumps(payload))],
@@ -1019,6 +1097,7 @@ async def test_openreward_env_marks_invalid_terminal_result_ineligible(
     token = current_trajectory.set(trajectory)
     try:
         env._stop_on_openreward_finished(event)
+        env._state.last_step_observation_id = event.id
         reward, misc = await env.evaluate()
     finally:
         current_trajectory.reset(token)

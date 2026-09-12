@@ -14,7 +14,7 @@ from platoon.episode.context import (
     error_message,
     finish_message,
 )
-from platoon.utils.openhands_utils import get_obs_for_last_action, is_finished
+from platoon.utils.openhands_utils import events_through, get_obs_for_last_action, get_trajectory_events, is_finished
 
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation import get_agent_final_response
@@ -228,7 +228,7 @@ class OpenHandsEnv:
         self._add_trainable_condensation_steps(
             traj_collection,
             traj.id,
-            self._state.conversation_state.events,
+            events_through(get_trajectory_events(self._state), obs_events[-1].id),
         )
         self._state.last_step_observation_id = obs_events[-1].id
         return await self.observe()
@@ -247,7 +247,7 @@ class OpenHandsEnv:
         if obs_events:
             observed_event_ids = {event.id for event in obs_events}
             self._state.last_step_observation_id = next(
-                event.id for event in reversed(self._state.conversation_state.events) if event.id in observed_event_ids
+                event.id for event in reversed(get_trajectory_events(self._state)) if event.id in observed_event_ids
             )
         step = OpenHandsTrajectoryStep(
             action_events=action.action_events,
@@ -260,7 +260,7 @@ class OpenHandsEnv:
 
         if is_finished(self._state):
             self._state.finished = True
-            finish_message.set(get_agent_final_response(self._conversation.state.events))
+            finish_message.set(get_agent_final_response(get_trajectory_events(self._state)))
             self._state.misc["finish_message"] = finish_message.get()
             if _conversation_execution_status(self._state.conversation_state) == ConversationExecutionStatus.STUCK:
                 error_message.set("Agent got stuck")
@@ -268,12 +268,15 @@ class OpenHandsEnv:
 
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()
+        if action.action_events:
+            # The producer can run ahead of the episode consumer. Only export
+            # summaries preceding this action, in their actual policy order.
+            self._add_trainable_condensation_steps(
+                traj_collection,
+                traj.id,
+                events_through(get_trajectory_events(self._state), action.action_events[0].id),
+            )
         traj_collection.add_trajectory_step(traj.id, step)
-        self._add_trainable_condensation_steps(
-            traj_collection,
-            traj.id,
-            self._state.conversation_state.events,
-        )
         if self._state.finished:
             traj.reward = self._state.reward
         return await self.observe()

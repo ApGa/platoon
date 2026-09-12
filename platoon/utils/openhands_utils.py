@@ -71,6 +71,22 @@ def _event_cursor(events: Sequence[Event], event_id: EventID | None) -> int:
     return 0
 
 
+def events_through(events: Sequence[Event], event_id: EventID) -> Sequence[Event]:
+    """Take an inclusive prefix, waiting if its boundary is not persisted yet."""
+    return events[: _event_cursor(events, event_id)]
+
+
+def get_trajectory_events(observation: OpenHandsObservation) -> Sequence[Event]:
+    events = observation.conversation_state.events
+    if observation.terminal_event_id is not None:
+        return events_through(events, observation.terminal_event_id)
+    return events
+
+
+def _observation_is_terminal(observation: OpenHandsObservation) -> bool:
+    return observation.terminal_event_id is not None or _is_terminal_status(observation.conversation_state)
+
+
 def _next_action_batch(
     events: Sequence[Event],
     start_index: int,
@@ -155,7 +171,7 @@ def _last_llm_convertible_event(events: Sequence[Event]) -> LLMConvertibleEvent 
 
 def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm_call_id: bool = True) -> list[Event]:
     """Collect all actions since the last observation, once each has a corresponding future observation."""
-    events = observation.conversation_state.events
+    events = get_trajectory_events(observation)
     start_index = _event_cursor(events, observation.last_step_observation_id)
     actions, batch_start, batch_end = _next_action_batch(events, start_index)
     if not actions or batch_start is None:
@@ -174,9 +190,13 @@ def get_actions_for_last_obs(observation: OpenHandsObservation, require_same_llm
     conversation_error_seen = any(isinstance(event, ConversationErrorEvent) for event in unrelated)
     if not conversation_error_seen:
         for action in actions:
-            if action.id not in results and not _action_is_self_observing(
-                action,
-                observation.conversation_state,
+            if (
+                action.id not in results
+                and not _observation_is_terminal(observation)
+                and not _action_is_self_observing(
+                    action,
+                    observation.conversation_state,
+                )
             ):
                 logger.debug(
                     "Waiting for a result for action event %s from response %s",
@@ -230,11 +250,11 @@ def get_obs_for_last_action(
     """Collect event(s) that immediately follow a past ActionEvent and are
     fully observed by a subsequent ObservationBaseEvent referencing them.
     """
-    events = observation.conversation_state.events
+    events = get_trajectory_events(observation)
     if observation.last_step_action_id is None:
         first_action_index = next((index for index, event in enumerate(events) if is_action(event)), None)
         if first_action_index is None:
-            if not _is_terminal_status(observation.conversation_state):
+            if not _observation_is_terminal(observation):
                 return []
             first_action_index = len(events)
         return [
@@ -260,15 +280,19 @@ def get_obs_for_last_action(
     batch_events = events[batch_start:batch_end]
     results, unrelated = _batch_results(batch_events, actions)
     conversation_error_seen = any(isinstance(event, ConversationErrorEvent) for event in unrelated)
-    batch_is_closed = batch_end < len(events) or _is_terminal_status(observation.conversation_state)
+    batch_is_closed = batch_end < len(events) or _observation_is_terminal(observation)
     if not batch_is_closed and not conversation_error_seen:
         return []
 
     if not conversation_error_seen:
         for action in actions:
-            if action.id not in results and not _action_is_self_observing(
-                action,
-                observation.conversation_state,
+            if (
+                action.id not in results
+                and not _observation_is_terminal(observation)
+                and not _action_is_self_observing(
+                    action,
+                    observation.conversation_state,
+                )
             ):
                 return []
 
@@ -284,8 +308,13 @@ def get_obs_for_last_action(
 
 def is_finished(observation: OpenHandsObservation, last_event_seen: EventID | None = None) -> bool:
     conversation_state = observation.conversation_state
-    oh_conversation_finished = _is_terminal_status(conversation_state)
-    last_llm_event = _last_llm_convertible_event(conversation_state.events)
+    events = get_trajectory_events(observation)
+    # SDK callbacks run before the default callback persists the event. Never
+    # report caught-up while that terminal event is still being appended.
+    if observation.terminal_event_id is not None and not events:
+        return False
+    oh_conversation_finished = _observation_is_terminal(observation)
+    last_llm_event = _last_llm_convertible_event(events)
     last_llm_event_id = last_llm_event.id if last_llm_event is not None else None
     valid_ids = [
         event_id

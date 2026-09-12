@@ -54,6 +54,57 @@ def _state_update_event(event_id: str):
     )
 
 
+def test_terminal_boundary_excludes_buffered_actions_and_late_tool_results(monkeypatch):
+    events, types, utils = _parser_modules(monkeypatch)
+    first = _action_event(events, "submit", "call-submit", "response-1")
+    parallel = _action_event(events, "parallel", "call-parallel", "response-1")
+    done = _observation_event(events, "done", "submit", "call-submit")
+    late_result = _observation_event(events, "late-result", "parallel", "call-parallel")
+    extra = _action_event(events, "extra", "call-extra", "response-2")
+    extra_result = _observation_event(events, "extra-result", "extra", "call-extra")
+    observation = types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(
+            events=[first, parallel, done, late_result, extra, extra_result],
+            execution_status="running",
+        ),
+        terminal_event_id="done",
+    )
+    assert utils.get_actions_for_last_obs(observation) == [first, parallel]
+    observation.last_step_action_id = parallel.id
+    assert utils.get_obs_for_last_action(observation, [first, parallel]) == [done]
+    assert not utils.is_finished(observation)
+    observation.last_step_observation_id = done.id
+    assert utils.is_finished(observation)
+    assert utils.get_actions_for_last_obs(observation) == []
+    assert utils.get_trajectory_events(observation) == [first, parallel, done]
+
+
+def test_terminal_message_is_recorded_once_without_later_responses(monkeypatch):
+    events, types, utils = _parser_modules(monkeypatch)
+    message = events.MessageEvent.model_construct(id="message", source="agent", llm_response_id="response-1")
+    extra = _action_event(events, "extra", "call-extra", "response-2")
+    observation = types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(events=[message, extra], execution_status="running"),
+        terminal_event_id=message.id,
+    )
+    assert utils.get_actions_for_last_obs(observation) == [message]
+    assert not utils.is_finished(observation)
+    observation.last_step_action_id = message.id
+    assert utils.get_obs_for_last_action(observation, [message]) == []
+    assert utils.is_finished(observation)
+
+
+def test_terminal_callback_before_event_persistence_does_not_finish_early(monkeypatch):
+    events, types, utils = _parser_modules(monkeypatch)
+    action = _action_event(events, "submit", "call-submit", "response-1")
+    observation = types.OpenHandsObservation(
+        conversation_state=SimpleNamespace(events=[action], execution_status="finished"),
+        terminal_event_id="done", last_step_action_id=action.id,
+    )
+    assert utils.get_trajectory_events(observation) == []
+    assert not utils.is_finished(observation)
+
+
 def test_pending_action_polling_does_not_write_stdout(capsys, monkeypatch):
     monkeypatch.setenv("OPENHANDS_SUPPRESS_BANNER", "1")
     litellm = pytest.importorskip("litellm")

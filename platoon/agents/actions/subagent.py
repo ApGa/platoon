@@ -23,6 +23,7 @@ from platoon.episode.trajectory import (
     TrajectoryCollection,
 )
 from platoon.utils.span_profile import profile_span
+from platoon.utils.trajectory_status import trajectory_has_forced_zero_reward
 
 SUBAGENT_REWARD_JUDGMENT_MISC_KEY = "subagent_reward_judgment"
 SUBAGENT_OUTCOME_JUDGMENT_MISC_KEY = "subagent_outcome_judgment"
@@ -280,7 +281,10 @@ def _normalize_judgment(raw_message: str, verifier_traj: Trajectory) -> dict[str
     # ``insufficient_evidence`` judgment remains a legitimate zero-reward
     # target; only missing/malformed/non-finished judgments are suppressed.
     normalized[SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY] = bool(
-        verifier_traj.finish_message and status in _VALID_JUDGMENT_STATUSES and score_is_consistent
+        verifier_traj.finish_message
+        and not trajectory_has_forced_zero_reward(verifier_traj)
+        and status in _VALID_JUDGMENT_STATUSES
+        and score_is_consistent
     )
     if status in _VALID_JUDGMENT_STATUSES and not score_is_consistent:
         normalized["schema_error"] = "Outcome verifier status and score are inconsistent."
@@ -521,6 +525,8 @@ def _behavior_judgment_not_run(*, outcome_eligible: bool) -> dict[str, Any]:
 
 def _record_judgment_reward(traj: Trajectory, judgment: dict[str, Any]) -> None:
     score = _coerce_score(judgment.get("score"), status=str(judgment.get("status") or ""))
+    if trajectory_has_forced_zero_reward(traj):
+        score = 0.0
     traj.reward = score
     if bool(judgment.get(SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY)):
         traj.misc.pop(EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY, None)
@@ -731,6 +737,10 @@ async def _maybe_judge_subagent(*, goal: str, traj: Trajectory) -> None:
     if not isinstance(config, SubagentRewardJudgeConfig) or config.max_steps <= 0:
         return
     if _is_verifier_trajectory(traj):
+        return
+    if trajectory_has_forced_zero_reward(traj):
+        # The environment already established a valid failed outcome; no
+        # verifier is needed and its verdict must not relabel that failure.
         return
 
     # Fail closed while verification is in flight.  This update is persisted

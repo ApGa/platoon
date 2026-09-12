@@ -7,11 +7,12 @@ from typing import Any, cast
 from uuid import uuid4
 
 from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.event import MessageEvent
 from openhands.sdk.event.base import Event
 from platoon.envs.base import SubTask, Task
 from platoon.episode.context import current_trajectory
 from platoon.openhands.env import OpenHandsEnv
-from platoon.utils.trajectory_status import TRAJECTORY_INVALID_MISC_KEY
+from platoon.utils.trajectory_status import TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY, TRAJECTORY_INVALID_MISC_KEY
 
 _CURRENT_AGENT_TASK_GOAL_KEY = "openreward_current_agent_task_goal"
 _ROOT_AGENT_TASK_GOAL_KEY = "openreward_root_agent_task_goal"
@@ -266,6 +267,8 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
     ):
         self._final_payload: dict[str, Any] | None = None
         self._final_reward_consumed = False
+        self._terminal_event_id: str | None = None
+        self._message_terminated = False
         self._initial_goal_suffix = initial_goal_suffix
         self._shared_openreward_tools = shared_openreward_tools or {}
         if subagent_environment_access not in {"shared", "read_only"}:
@@ -392,15 +395,43 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         return _observation_json_payload(tool(action, conversation))
 
     def _stop_on_openreward_finished(self, event: Event) -> None:
-        payload = _finished_reward_payload(event)
-        if payload is None:
+        if self._terminal_event_id is not None:
             return
+        message_terminated = isinstance(event, MessageEvent) and event.source == "agent"
+        payload = _finished_reward_payload(event)
+        child_finished = (
+            isinstance(self._task, SubTask)
+            and getattr(event, "tool_name", None) == "finish"
+            and getattr(event, "observation", None) is not None
+        )
+        if message_terminated:
+            payload = {
+                "finished": True,
+                "reward": 0.0,
+                "metadata": {"termination_reason": "assistant_message"},
+            }
+        if payload is None and not child_finished:
+            return
+
+        # SDK callbacks run synchronously under the conversation state lock,
+        # before the event is persisted. Stop the producer immediately and let
+        # the consumer drain only through this first terminal event.
+        self._terminal_event_id = event.id
+        self._message_terminated = message_terminated
         self._final_payload = payload
+        self._state.terminal_event_id = event.id
         if self._conversation is not None:
             self._conversation.state.execution_status = ConversationExecutionStatus.FINISHED
 
     async def evaluate(self) -> tuple[float, dict]:
         if self._final_payload is None or self._final_reward_consumed:
+            return 0.0, {}
+        if self._terminal_event_id not in (
+            self._state.last_step_action_id,
+            self._state.last_step_observation_id,
+        ):
+            # The SDK may have finished while Platoon is exporting an earlier
+            # action. Attach reward to the terminal step, not the next poll.
             return 0.0, {}
 
         self._final_reward_consumed = True
@@ -412,14 +443,17 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             isinstance(metadata, dict)
             and metadata.get("invalid") is True
         )
+        trajectory = current_trajectory.get(None)
+        if self._message_terminated and trajectory is not None:
+            trajectory.misc[TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY] = True
         if invalid:
             reward = 0.0
-            trajectory = current_trajectory.get(None)
             if trajectory is not None:
                 trajectory.misc[TRAJECTORY_INVALID_MISC_KEY] = True
         return float(reward), {
             "reward/success": float(reward),
             "reward/openreward": float(reward),
             "openreward/invalid": float(invalid),
+            "openreward/message_terminated": float(self._message_terminated),
             "openreward/final_payload": self._final_payload,
         }

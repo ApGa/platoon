@@ -120,42 +120,28 @@ class OpenRewardAgent(OpenHandsSDKAgent):
         state: Any,
         on_event: Any,
     ) -> None:
-        from openhands.sdk.event import MessageEvent
-        from openhands.sdk.llm import Message, TextContent
+        from openhands.sdk.conversation.state import ConversationExecutionStatus
 
         self._emit_message_event(message, llm_response, conversation, on_event)
         self._maybe_emit_vllm_tokens(llm_response, on_event)
 
-        tool_names = set(self.tools_map)
-        completion_tool = next(
-            (name for name in ("finish", "submit_answer", "claim_done") if name in tool_names),
-            None,
-        )
-        if completion_tool is None:
-            completion_instruction = (
-                "Use the terminal environment tool identified by the task prompt when the work is complete."
-            )
-        else:
-            completion_instruction = f"When the work is complete, call `{completion_tool}`."
-        logger.warning("OpenReward agent returned text without a terminal tool call; continuing the rollout")
-        on_event(
-            MessageEvent(
-                source="user",
-                llm_message=Message(
-                    role="user",
-                    content=[
-                        TextContent(
-                            text=(
-                                "Your text response did not submit the environment, "
-                                "so the task is still active. Continue using tools and "
-                                "do not use a normal assistant message to end the task. "
-                                f"{completion_instruction}"
-                            )
-                        )
-                    ],
-                ),
-            )
-        )
+        # The environment records this MessageEvent as a terminal zero-reward
+        # outcome. Do not generate corrective turns, including for empty/EOS
+        # responses: those turns can otherwise fill the whole rollout budget.
+        state.execution_status = ConversationExecutionStatus.FINISHED
+        logger.warning("OpenReward agent returned a message without a terminal tool call; ending the rollout")
+
+    def _handle_no_content_response(
+        self,
+        message: Any,
+        llm_response: Any,
+        conversation: Any,
+        state: Any,
+        on_event: Any,
+        *,
+        response_type: Any,
+    ) -> None:
+        self._handle_content_response(message, llm_response, conversation, state, on_event)
 
 
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
