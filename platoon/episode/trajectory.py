@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -11,6 +12,7 @@ from platoon.episode.context import (
     current_trajectory_collection,
     finish_message,
 )
+from platoon.utils.critical_path import EXECUTION_SPAN_KEY
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -133,6 +135,7 @@ class TrajectoryCollection:
         )
 
         trajectory = Trajectory(id=str(uuid.uuid4()), parent_info=parent_info)
+        trajectory.misc[EXECUTION_SPAN_KEY] = [time.perf_counter(), None]
         self.trajectories[trajectory.id] = trajectory
         for handler in self.event_handlers:
             try:
@@ -165,6 +168,9 @@ class TrajectoryCollection:
     def finish_trajectory(self, trajectory_id: str) -> None:
         """Mark a trajectory as finished and notify handlers."""
         trajectory = self.trajectories[trajectory_id]
+        interval = trajectory.misc.get(EXECUTION_SPAN_KEY)
+        if interval is not None:
+            interval[1] = time.perf_counter()
         for handler in self.event_handlers:
             try:
                 handler.on_trajectory_finished(trajectory)

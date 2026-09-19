@@ -51,6 +51,7 @@ from transformers import AutoProcessor, PreTrainedTokenizer
 
 from platoon.train.tinker.renderers import register as register_platoon_renderers
 from platoon.train.tinker.rollout_metrics import RolloutTimeline, record_model_call, timeline_scope
+from platoon.utils.critical_path import record_model_span
 
 logger = logging.getLogger(__name__)
 
@@ -658,6 +659,7 @@ class TinkerLLM(CustomLLM):
         parse_started = time.perf_counter()
         final_response = self._parse_response(model_input, result, tools=render_request.tools)
         self._record_interaction(model_input, final_response, routing_id=self._routing_id_of(result))
+        record_model_span(final_response.id, call_started)
         ended = time.perf_counter()
         record_model_call(
             started_at=call_started,
@@ -670,6 +672,9 @@ class TinkerLLM(CustomLLM):
 
     def completion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
         """Main entrypoint for LiteLLM to call."""
+        import time
+
+        call_started = time.perf_counter()
         max_tokens = self._get_optional_params(
             kwargs, ["max_completion_tokens", "max_tokens"], int, lambda x: x >= 0, self.max_tokens
         )
@@ -697,6 +702,7 @@ class TinkerLLM(CustomLLM):
         result = self.sampling_client.sample(prompt=model_input, sampling_params=params, num_samples=1)
         final_response = self._parse_response(model_input, result, tools=render_request.tools)
         self._record_interaction(model_input, final_response, routing_id=self._routing_id_of(result))
+        record_model_span(final_response.id, call_started)
         return final_response
 
     def as_model_list(self) -> list[dict]:

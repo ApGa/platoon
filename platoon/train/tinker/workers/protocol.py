@@ -36,6 +36,7 @@ from platoon.train.tinker.rollout_metrics import RolloutTimingSummary
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult
+from platoon.utils.token_efficiency_config import TokenEfficiencyRewardConfig
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,7 @@ class ConversionPolicy:
     :class:`RefResolutionError`.
     """
 
+    token_efficiency_reward: TokenEfficiencyRewardConfig = field(default_factory=TokenEfficiencyRewardConfig)
     filter_errors: bool = False
     filter_message_actions: bool = False
     include_traj_depth: bool = False

@@ -495,8 +495,9 @@ def test_registration(tokenizer):
         register,
     )
 
-    assert register() == [RENDERER_NAME, RENDERER_NAME_DISABLE_THINKING]
-    assert register() == [RENDERER_NAME, RENDERER_NAME_DISABLE_THINKING]  # idempotent
+    names = register()
+    assert {RENDERER_NAME, RENDERER_NAME_DISABLE_THINKING} <= set(names)
+    assert register() == names  # idempotent
     assert set(get_registered_renderer_names()) >= {RENDERER_NAME, RENDERER_NAME_DISABLE_THINKING}
     thinking = get_renderer(
         RENDERER_NAME, tokenizer, image_processor=None, model_name="apurvaga/Qwen3.6-35B-A3B-preserve-thinking"

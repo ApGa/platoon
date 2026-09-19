@@ -755,6 +755,7 @@ class GroupRolloutWorkflow:
             rollout_fn_ref=self.rollout_fn_ref or "",
             model=self._model_binding(checkpoint_version),
             conversion=ConversionPolicy(
+                token_efficiency_reward=self.config.token_efficiency_reward,
                 filter_errors=self.filter_errors,
                 filter_message_actions=getattr(self.config, "filter_message_actions", False),
                 include_traj_depth=self.config.depth_level_weighting,

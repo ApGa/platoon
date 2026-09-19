@@ -34,6 +34,10 @@ from platoon.train.tinker.workers.protocol import (
 from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import get_train_data_for_trajectory_collection
+from platoon.utils.token_efficiency import (
+    annotate_policy_subtree_token_efficiency,
+    trajectory_token_efficiency_metrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,9 +133,7 @@ def _resolve_reward_processor(request: RolloutWorkerRequest) -> Callable[[dict],
         # ``lambda traj: (traj["reward"], {})`` for a real reward processor
         # would change task_reward, root_rewards_dict and every advantage with
         # no error and entirely plausible metrics.
-        raise ValueError(
-            "conversion policy declares a non-default reward processor but carries no reference"
-        )
+        raise ValueError("conversion policy declares a non-default reward processor but carries no reference")
     return resolve_ref(ref)
 
 
@@ -235,12 +237,26 @@ async def run_rollout_request(
                 workload = workload_from_raw_rollout(trajectory_collection, interactions)
 
                 if not trajectory_collection.get("trajectories"):
-                    logger.warning(
-                        "No trajectories found for task %s and rollout %s", task_id, rollout_number
-                    )
+                    logger.warning("No trajectories found for task %s and rollout %s", task_id, rollout_number)
                     return _response("no_trajectories", None, workload, observed=False)
 
                 conversion_started = time.monotonic()
+                efficiency = request.conversion.token_efficiency_reward
+                if efficiency.enabled:
+                    annotate_policy_subtree_token_efficiency(
+                        trajectory_collection,
+                        {key: (int(value.obs.length), len(value.action.tokens)) for key, value in interactions.items()},
+                        coefficient=efficiency.coefficient,
+                        reference_tokens=efficiency.reference_tokens,
+                        max_penalty=efficiency.max_penalty,
+                        input_token_weight=efficiency.input_token_weight,
+                        output_token_weight=efficiency.output_token_weight,
+                    )
+                    for trajectory in trajectory_collection["trajectories"].values():
+                        if not trajectory.get("parent_info"):
+                            logger.info(
+                                "Root critical-path efficiency: %s", trajectory_token_efficiency_metrics(trajectory)
+                            )
                 result = get_train_data_for_trajectory_collection(
                     trajectory_collection=trajectory_collection,
                     interactions=interactions,
@@ -270,25 +286,18 @@ async def run_rollout_request(
                     return _response("conversion_empty", None, workload, observed=True)
 
                 if not result.datums:
-                    logger.warning(
-                        "No train data found for task %s and rollout %s", task_id, rollout_number
-                    )
+                    logger.warning("No train data found for task %s and rollout %s", task_id, rollout_number)
                     # Retain an empty result produced by Bernoulli sampling or
                     # policy exclusion: its reward and trajectory stats still
                     # belong in group baselines/metrics, and a sibling rollout
                     # may provide the group's actual training datums.
-                    if (
-                        request.conversion.subagent_datum_sampler is None
-                        and result.num_policy_excluded_datums == 0
-                    ):
+                    if request.conversion.subagent_datum_sampler is None and result.num_policy_excluded_datums == 0:
                         return _response("conversion_empty", None, workload, observed=True)
 
                 return _response("completed", result, workload, observed=True)
 
         except Exception as exc:
-            logger.exception(
-                "Error in tinker workflow for task %s and rollout %s: %s", task_id, rollout_number, exc
-            )
+            logger.exception("Error in tinker workflow for task %s and rollout %s: %s", task_id, rollout_number, exc)
             workload = workload_from_raw_rollout(trajectory_collection, interactions)
             return _response(
                 "error",

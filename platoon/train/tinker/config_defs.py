@@ -4,6 +4,7 @@ from typing import Literal
 from platoon.config_defs import RolloutConfig
 from platoon.train.components import EnvironmentConfig, normalize_environment_configs
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
+from platoon.utils.token_efficiency_config import TokenEfficiencyRewardConfig
 
 
 @dataclass
@@ -23,6 +24,7 @@ class WorkflowConfig:
     """Configuration for the rollout workflow."""
 
     group_size: int = 8
+    token_efficiency_reward: TokenEfficiencyRewardConfig = field(default_factory=TokenEfficiencyRewardConfig)
     rollout_config: RolloutConfig = field(default_factory=RolloutConfig)
     leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
     depth_level_weighting: bool = False  # Weight trajectories inversely by depth-level frequency
@@ -93,6 +95,8 @@ class WorkflowConfig:
     worker_python_env_isolation: bool = False
 
     def __post_init__(self) -> None:
+        if isinstance(self.token_efficiency_reward, dict):
+            self.token_efficiency_reward = TokenEfficiencyRewardConfig(**self.token_efficiency_reward)
         if not 0.0 <= self.subagent_datum_keep_probability <= 1.0:
             raise ValueError("subagent_datum_keep_probability must be in [0, 1]")
         if isinstance(self.subagent_datum_sampling_seed, bool) or not isinstance(

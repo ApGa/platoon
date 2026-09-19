@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -22,6 +23,7 @@ from platoon.episode.trajectory import (
     Trajectory,
     TrajectoryCollection,
 )
+from platoon.utils.critical_path import EXECUTION_SPAN_KEY
 from platoon.utils.span_profile import profile_span
 from platoon.utils.trajectory_status import trajectory_has_forced_zero_reward
 
@@ -863,6 +865,14 @@ async def launch_subagent(goal: str, max_steps: int = 15, task_misc: dict | None
         if isinstance(result, str):
             return result
         traj = result
-        await _maybe_judge_subagent(goal=goal, traj=traj)
+        try:
+            await _maybe_judge_subagent(goal=goal, traj=traj)
+        finally:
+            # A launch returns only after grading. Preserve that join boundary
+            # when distinguishing sequential sibling calls from parallel ones;
+            # verifier tokens themselves are excluded from the cost.
+            interval = traj.misc.get(EXECUTION_SPAN_KEY)
+            if interval is not None:
+                interval[1] = time.perf_counter()
         _ = verbose
         return _subagent_return_message(traj)

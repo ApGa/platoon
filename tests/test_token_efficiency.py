@@ -125,6 +125,72 @@ def test_cross_trajectory_completion_is_ambiguous_and_not_double_charged():
         assert metadata["penalty"] == 0
 
 
+@pytest.mark.parametrize("second_span, expected", [([2, 8], 36), ([6, 10], 56)])
+def test_critical_path_counts_sequential_children_but_maximizes_parallel_children(second_span, expected):
+    # Both children may come from one programmatic-tool-calling action: the
+    # fork-step alone cannot distinguish gather(a(), b()) from await a(); await b().
+    root = _trajectory("before", "after", misc={"model_call_spans": {"before": [0, 1], "after": [11, 12]}})
+    a = _trajectory("a", parent_id="root", misc={"execution_span": [1, 6], "model_call_spans": {"a": [2, 5]}})
+    b = _trajectory("b", parent_id="root", misc={"execution_span": second_span})
+    collection = {"trajectories": {"root": root, "a": a, "b": b}}
+    annotate_policy_subtree_token_efficiency(
+        collection,
+        {"before": (0, 2), "after": (0, 4), "a": (0, 20), "b": (0, 30)},
+        coefficient=0.05,
+        reference_tokens=100,
+        max_penalty=0.2,
+        input_token_weight=0.01,
+        output_token_weight=1,
+    )
+    metadata = root["misc"][POLICY_SUBTREE_TOKEN_EFFICIENCY_MISC_KEY]
+    assert metadata["critical_path_output_tokens"] == expected
+    assert metadata["subtree_output_tokens"] == 56
+    assert metadata["penalty"] == pytest.approx(0.05 * math.log2(1 + expected / 100))
+
+
+def test_parent_work_overlapping_child_is_parallel_and_one_weighted_path_is_selected():
+    root = _trajectory("r", misc={"model_call_spans": {"r": [2, 3]}})
+    child = _trajectory("c", parent_id="root", misc={"execution_span": [1, 5], "model_call_spans": {"c": [1.5, 4]}})
+    collection = {"trajectories": {"root": root, "child": child}}
+    annotate_policy_subtree_token_efficiency(
+        collection,
+        {"r": (1000, 1), "c": (0, 15)},
+        coefficient=0.05,
+        reference_tokens=100,
+        max_penalty=0.2,
+        input_token_weight=0.01,
+        output_token_weight=1,
+    )
+    metadata = root["misc"][POLICY_SUBTREE_TOKEN_EFFICIENCY_MISC_KEY]
+    assert (metadata["critical_path_input_tokens"], metadata["critical_path_output_tokens"]) == (0, 15)
+    assert metadata["critical_path_missing_spans"] == 0
+
+
+def test_nested_critical_paths_exclude_verifiers_and_charge_unknown_order_conservatively():
+    collection = {
+        "trajectories": {
+            "root": _trajectory("r"),
+            "a": _trajectory("a", parent_id="root", misc={"execution_span": [1, 9]}),
+            "b": _trajectory("b", parent_id="root", misc={"execution_span": [1, 10]}),
+            "grandchild": _trajectory("g", parent_id="a"),
+            "verifier": _trajectory("v", parent_id="a", task_misc={"subagent_reward_verifier_task": True}),
+        }
+    }
+    annotate_policy_subtree_token_efficiency(
+        collection,
+        {k: (0, v) for k, v in {"r": 3, "a": 4, "b": 20, "g": 30, "v": 10000}.items()},
+        coefficient=0.05,
+        reference_tokens=100,
+        max_penalty=0.2,
+        input_token_weight=0,
+        output_token_weight=1,
+    )
+    metadata = collection["trajectories"]["root"]["misc"][POLICY_SUBTREE_TOKEN_EFFICIENCY_MISC_KEY]
+    assert metadata["critical_path_output_tokens"] == 37
+    assert metadata["subtree_output_tokens"] == 57
+    assert metadata["critical_path_missing_spans"] > 0
+
+
 def test_efficiency_metrics_are_positive_costs_and_annotation_is_idempotent():
     collection = {"trajectories": {"root": _trajectory("call")}}
     kwargs = dict(

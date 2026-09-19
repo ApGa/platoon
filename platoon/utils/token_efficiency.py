@@ -7,6 +7,8 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Mapping
 
+from platoon.utils.critical_path import critical_path_tokens
+
 POLICY_SUBTREE_TOKEN_EFFICIENCY_MISC_KEY = "policy_subtree_token_efficiency"
 TOKEN_EFFICIENCY_COLLECTION_MISC_KEY = "token_efficiency_attribution"
 TOKEN_EFFICIENCY_PENALTY_REWARD_KEY = "reward/efficiency_penalty"
@@ -124,9 +126,11 @@ def annotate_policy_subtree_token_efficiency(
 ) -> TokenEfficiencyAttributionStats:
     """Attach a bounded token penalty to each deployable policy trajectory.
 
-    A policy trajectory pays for its own unique model requests and every
-    non-verifier descendant. Synthetic reward-verifier branches are excluded
-    entirely because they are absent at inference. Overlap between an agent and
+    A policy trajectory pays for the longest sequential token path through
+    its own unique model requests and non-verifier descendants. Sequential
+    child calls add; overlapping child calls compete for the longest path.
+    Synthetic reward-verifier branches are excluded entirely because they are
+    absent at inference. Overlap between an agent and
     its ancestors is intentional: a child owns its local behavior, while each
     parent owns the decision to launch that subtree.
     """
@@ -171,6 +175,7 @@ def annotate_policy_subtree_token_efficiency(
 
     self_input = {trajectory_id: 0 for trajectory_id in policy_ids}
     self_output = {trajectory_id: 0 for trajectory_id in policy_ids}
+    own_counts = {trajectory_id: {} for trajectory_id in policy_ids}
     attributed_completions = 0
     verifier_completions = 0
     ambiguous_completions = 0
@@ -190,6 +195,7 @@ def annotate_policy_subtree_token_efficiency(
         input_tokens, output_tokens = token_counts
         if input_tokens < 0 or output_tokens < 0:
             raise ValueError(f"negative token count for completion {completion_id}")
+        own_counts[owner][completion_id] = (int(input_tokens), int(output_tokens))
         self_input[owner] += int(input_tokens)
         self_output[owner] += int(output_tokens)
         attributed_completions += 1
@@ -208,6 +214,8 @@ def annotate_policy_subtree_token_efficiency(
     subtree_input: dict[str, int] = {}
     subtree_output: dict[str, int] = {}
     subtree_trajectories: dict[str, int] = {}
+    critical_tokens: dict[str, tuple[int, int]] = {}
+    missing_spans: dict[str, int] = {}
     visiting: set[str] = set()
 
     def aggregate(trajectory_id: str) -> tuple[int, int, int]:
@@ -228,6 +236,15 @@ def annotate_policy_subtree_token_efficiency(
             input_tokens += child_input
             output_tokens += child_output
             trajectory_count += child_count
+        critical_input, critical_output, missing = critical_path_tokens(
+            trajectories[trajectory_id],
+            own_counts[trajectory_id],
+            [(trajectories[child], critical_tokens[child]) for child in policy_children[trajectory_id]],
+            input_weight=input_token_weight,
+            output_weight=output_token_weight,
+        )
+        critical_tokens[trajectory_id] = (critical_input, critical_output)
+        missing_spans[trajectory_id] = missing + sum(missing_spans[child] for child in policy_children[trajectory_id])
         visiting.remove(trajectory_id)
         subtree_input[trajectory_id] = input_tokens
         subtree_output[trajectory_id] = output_tokens
@@ -244,7 +261,9 @@ def annotate_policy_subtree_token_efficiency(
         subtree_effective_tokens = (
             input_token_weight * subtree_input[trajectory_id] + output_token_weight * subtree_output[trajectory_id]
         )
-        normalized_cost = math.log2(1.0 + subtree_effective_tokens / reference_tokens)
+        critical_input, critical_output = critical_tokens[trajectory_id]
+        critical_effective = input_token_weight * critical_input + output_token_weight * critical_output
+        normalized_cost = math.log2(1.0 + critical_effective / reference_tokens)
         metadata = {
             "self_input_tokens": self_input[trajectory_id],
             "self_output_tokens": self_output[trajectory_id],
@@ -253,6 +272,11 @@ def annotate_policy_subtree_token_efficiency(
             "subtree_output_tokens": subtree_output[trajectory_id],
             "subtree_effective_tokens": subtree_effective_tokens,
             "subtree_policy_trajectories": subtree_trajectories[trajectory_id],
+            "critical_path_input_tokens": critical_input,
+            "critical_path_output_tokens": critical_output,
+            "critical_path_effective_tokens": critical_effective,
+            "critical_path_missing_spans": missing_spans[trajectory_id],
+            "cost_basis": "critical_path",
             "normalized_cost": normalized_cost,
             "coefficient": coefficient,
             "reference_tokens": reference_tokens,
@@ -260,7 +284,7 @@ def annotate_policy_subtree_token_efficiency(
             "input_token_weight": input_token_weight,
             "output_token_weight": output_token_weight,
             "penalty": _penalty(
-                subtree_effective_tokens,
+                critical_effective,
                 coefficient=coefficient,
                 reference_tokens=reference_tokens,
                 max_penalty=max_penalty,
@@ -302,6 +326,10 @@ def trajectory_token_efficiency_metrics(trajectory: dict) -> dict[str, float]:
         "efficiency/subtree_output_tokens": "subtree_output_tokens",
         "efficiency/subtree_effective_tokens": "subtree_effective_tokens",
         "efficiency/subtree_policy_trajectories": "subtree_policy_trajectories",
+        "efficiency/critical_path_input_tokens": "critical_path_input_tokens",
+        "efficiency/critical_path_output_tokens": "critical_path_output_tokens",
+        "efficiency/critical_path_effective_tokens": "critical_path_effective_tokens",
+        "efficiency/critical_path_missing_spans": "critical_path_missing_spans",
         "efficiency/normalized_cost": "normalized_cost",
     }
     metrics: dict[str, float] = {}

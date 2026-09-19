@@ -37,7 +37,7 @@ def _environment_reward_key(traj: dict) -> str | None:
 
 
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
-    """Return task success plus delegation bonus minus subtree token cost."""
+    """Return task success plus delegation bonus minus critical-path token cost."""
 
     forced_zero = trajectory_has_forced_zero_reward(traj)
     openreward_score = 0.0 if forced_zero else float(traj.get("reward", 0.0))

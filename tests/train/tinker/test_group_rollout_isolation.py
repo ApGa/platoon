@@ -13,6 +13,7 @@ never a trainer failure.  These tests exercise that with real worker processes
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import sys
 from types import SimpleNamespace
@@ -110,6 +111,29 @@ def _advantages(output):
     return sorted(
         round(float(datum.loss_fn_inputs["advantages"].to_torch().sum().item()), 6) for datum in output
     )
+
+
+@pytest.mark.parametrize("isolation", ["inprocess", "process"])
+def test_critical_path_penalty_reaches_centered_advantages(tmp_path, monkeypatch, isolation):
+    monkeypatch.setenv("STUB_SLOT_DIR", str(tmp_path / "cost-slots"))
+    workflow = grw.GroupRolloutWorkflow(
+        rollout_fn=worker_stub_rollouts.varied_token_cost_rollout,
+        get_task_fn=lambda task_id: Task(goal="g", id=task_id),
+        config=WorkflowConfig(
+            group_size=4, rollout_config=RolloutConfig(output_dir=str(tmp_path / "rollouts"), timeout=180),
+            rollout_isolation=isolation, leave_one_out_baseline=True,
+            filter_zero_advantage_datums=False,
+            token_efficiency_reward={"enabled": True, "reference_tokens": 10, "input_token_weight": 0},
+        ),
+        model_info=_model_info(), log_path=str(tmp_path / "logs"),
+        stats_scope=f"cost_{isolation}", reward_processor=worker_stub_rollouts.token_cost_reward,
+    )
+    output = _run(workflow)
+    penalties = [0.05 * math.log2(1 + count / 10) for count in range(2, 6)]
+    expected = sorted((i + 2) * (sum(other for j, other in enumerate(penalties) if i != j) / 3 - penalty)
+                      for i, penalty in enumerate(penalties))
+    assert len(output) == 4
+    assert _advantages(output) == pytest.approx(expected, abs=1e-6)
 
 
 def _run(workflow, task_id="task"):

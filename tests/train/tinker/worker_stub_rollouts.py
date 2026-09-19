@@ -127,6 +127,30 @@ async def varied_reward_rollout(task, config) -> dict:
     }
 
 
+async def varied_token_cost_rollout(task, config) -> dict:
+    from tinker_cookbook.completers import TokensWithLogprobs
+
+    from platoon.train.tinker.proxy import proxy_interactions
+
+    collection = await varied_reward_rollout(task, config)
+    root = collection["trajectories"]["root"]
+    index = int(root["reward"])
+    root["reward"] = 1.0
+    completion_id = root["steps"][0]["misc"]["action_misc"]["completion_id"]
+    root["misc"] = {"model_call_spans": {completion_id: [1, 2]}}
+    proxy_interactions.get()[completion_id].action = TokensWithLogprobs(
+        tokens=[15] * (index + 2), maybe_logprobs=[-0.25] * (index + 2)
+    )
+    return collection
+
+
+def token_cost_reward(trajectory):
+    from platoon.utils.token_efficiency import trajectory_token_efficiency_metrics
+
+    metrics = trajectory_token_efficiency_metrics(trajectory)
+    return trajectory["reward"] - metrics.get("reward/efficiency_penalty", 0), metrics
+
+
 async def segfault_rollout(_task, _config) -> dict:
     import ctypes
 
