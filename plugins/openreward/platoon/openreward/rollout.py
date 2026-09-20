@@ -43,6 +43,7 @@ from platoon.openhands.recursive import (
     with_programmatic_tool_calling,
     with_task_tracker_tool,
 )
+from platoon.utils.generation import generation_for_completion, record_generation
 from platoon.utils.subagent_rewards import (
     add_direct_subagent_delegation_rewards,
     propagate_root_success,
@@ -62,6 +63,7 @@ from platoon.openreward.env import OpenRewardOpenHandsEnv
 from platoon.openreward.stream_isolation import install as install_stream_isolation
 
 OPENREWARD_CONDENSER_KEEP_FIRST = 2
+OPENREWARD_MAX_CONSECUTIVE_LENGTH_RECOVERIES = 2
 logger = logging.getLogger(__name__)
 
 # Substring (OpenHands ``model_matches`` semantics) of the preserve-thinking model ids
@@ -122,14 +124,61 @@ class OpenRewardAgent(OpenHandsSDKAgent):
     ) -> None:
         from openhands.sdk.conversation.state import ConversationExecutionStatus
 
+        generation = record_generation(llm_response)
+        recover_length = False
+        if generation.get("finish_reason") == "length":
+            from openhands.sdk.event import MessageEvent, ObservationEvent
+            from openhands.sdk.llm import Message, TextContent
+
+            consecutive = 1
+            # Count only consecutive capped generations since the most recent
+            # executed tool. The counter belongs to this conversation, so
+            # parent/child agents and copied agent configs cannot share it.
+            for event in reversed(state.events):
+                if isinstance(event, ObservationEvent):
+                    break
+                if isinstance(event, MessageEvent) and event.source == "agent":
+                    prior = generation_for_completion(event.llm_response_id)
+                    if prior.get("finish_reason") != "length":
+                        break
+                    consecutive += 1
+            recover_length = consecutive <= OPENREWARD_MAX_CONSECUTIVE_LENGTH_RECOVERIES
+            generation["consecutive_length"] = consecutive
+            generation["length_recovery"] = recover_length
+
         self._emit_message_event(message, llm_response, conversation, on_event)
         self._maybe_emit_vllm_tokens(llm_response, on_event)
+
+        if recover_length:
+            on_event(
+                MessageEvent(
+                    source="user",
+                    llm_message=Message(
+                        role="user",
+                        content=[
+                            TextContent(
+                                text=(
+                                    "Your previous response reached the generation token limit. "
+                                    "No tool call from that response was executed. Continue with "
+                                    "a shorter, complete tool call; split long code or output "
+                                    "across multiple calls."
+                                )
+                            )
+                        ],
+                    ),
+                )
+            )
+            logger.warning("Recovering generation token limit (consecutive=%s)", consecutive)
+            return
 
         # The environment records this MessageEvent as a terminal zero-reward
         # outcome. Do not generate corrective turns, including for empty/EOS
         # responses: those turns can otherwise fill the whole rollout budget.
         state.execution_status = ConversationExecutionStatus.FINISHED
-        logger.warning("OpenReward agent returned a message without a terminal tool call; ending the rollout")
+        logger.warning(
+            "OpenReward agent ended without a terminal tool call (reason=%s)",
+            "generation_limit" if generation.get("finish_reason") == "length" else "assistant_message",
+        )
 
     def _handle_no_content_response(
         self,

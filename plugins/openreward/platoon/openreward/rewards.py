@@ -37,7 +37,13 @@ def _environment_reward_key(traj: dict) -> str | None:
 
 
 def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
-    """Return task success plus delegation bonus minus critical-path token cost."""
+    """Subtract this trajectory's subtree cost only from a positive reward.
+
+    The gate uses the local reward after verifier/behavior judgment and any
+    delegation bonus. A successful child can therefore pay its own subtree
+    cost even when its root fails; a failed child pays no penalty even when
+    its root succeeds. Ancestor rewards never inherit child reward deductions.
+    """
 
     forced_zero = trajectory_has_forced_zero_reward(traj)
     openreward_score = 0.0 if forced_zero else float(traj.get("reward", 0.0))
@@ -75,6 +81,12 @@ def reward_processor(traj: dict) -> tuple[float, dict[str, float]]:
     pre_efficiency_reward = base_reward + delegation_bonus
     efficiency_metrics = trajectory_token_efficiency_metrics(traj)
     efficiency_penalty = efficiency_metrics.get(TOKEN_EFFICIENCY_PENALTY_REWARD_KEY, 0.0)
+    if efficiency_metrics:
+        efficiency_metrics["efficiency/ungated_penalty"] = efficiency_penalty
+        efficiency_metrics["efficiency/penalty_eligible"] = float(pre_efficiency_reward > 0.0)
+        if pre_efficiency_reward <= 0.0:
+            efficiency_penalty = 0.0
+        efficiency_metrics[TOKEN_EFFICIENCY_PENALTY_REWARD_KEY] = efficiency_penalty
     rewards_dict.update(efficiency_metrics)
     reward = pre_efficiency_reward - efficiency_penalty
 

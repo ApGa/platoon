@@ -52,6 +52,7 @@ from transformers import AutoProcessor, PreTrainedTokenizer
 from platoon.train.tinker.renderers import register as register_platoon_renderers
 from platoon.train.tinker.rollout_metrics import RolloutTimeline, record_model_call, timeline_scope
 from platoon.utils.critical_path import record_model_span
+from platoon.utils.generation import record_generation
 
 logger = logging.getLogger(__name__)
 
@@ -459,8 +460,10 @@ class TinkerLLM(CustomLLM):
         """Tinker Response -> LiteLLM Response.
 
         Splits the renderer's parsed message into ``content`` (visible text), ``reasoning_content``
-        (thinking) and OpenAI ``tool_calls``; ``finish_reason`` is ``tool_calls`` when a tool call was
-        parsed, else ``length``/``stop`` from the sequence's stop reason.  Extracts log probabilities too.
+        (thinking) and OpenAI ``tool_calls``. A generation-limit cutoff never
+        executes tools, including a complete prefix of an incomplete batch.
+        Otherwise ``finish_reason`` is ``tool_calls`` for parsed calls, or
+        ``stop``. Raw stop/parse information accompanies the sampled tokens.
         """
         choices: List[Choices] = []
         completion_token_count = 0
@@ -498,7 +501,7 @@ class TinkerLLM(CustomLLM):
                 reasoning_content = None
             role = "assistant"
             tool_calls = None
-            if parse_success:
+            if parse_success and str(seq.stop_reason) != "length":
                 role = parsed_response["role"]
                 if not self._validate_role(role):
                     assert False, "This should never happen"
@@ -518,6 +521,13 @@ class TinkerLLM(CustomLLM):
                     finish_reason=self._finish_reason(str(seq.stop_reason), bool(tool_calls)),
                     logprobs=logprobs,
                     token_ids=seq.tokens,
+                    platoon_generation={
+                        "stop_reason": str(seq.stop_reason),
+                        "generated_tokens": len(seq.tokens),
+                        "parse_success": bool(parse_success),
+                        "parsed_tool_calls": len(parsed_response.get("tool_calls") or []),
+                        "emitted_tool_calls": len(tool_calls or []),
+                    },
                 )
             )
         prompt_token_count = model_input.length
@@ -564,6 +574,7 @@ class TinkerLLM(CustomLLM):
             routing_id=routing_id,
         )
         proxy_interactions.get()[model_response.id] = interaction
+        record_generation(model_response)
 
     def _fit_max_tokens_to_context(self, model_input: ModelInput, max_completion_tokens: int) -> int:
         """Return the completion budget that fits the context window (AReaL parity).

@@ -12,6 +12,7 @@ from openhands.sdk.event.base import Event
 from platoon.envs.base import SubTask, Task
 from platoon.episode.context import current_trajectory
 from platoon.openhands.env import OpenHandsEnv
+from platoon.utils.generation import generation_for_completion
 from platoon.utils.trajectory_status import TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY, TRAJECTORY_INVALID_MISC_KEY
 
 _CURRENT_AGENT_TASK_GOAL_KEY = "openreward_current_agent_task_goal"
@@ -269,6 +270,7 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         self._final_reward_consumed = False
         self._terminal_event_id: str | None = None
         self._message_terminated = False
+        self._generation_limit_terminated = False
         self._initial_goal_suffix = initial_goal_suffix
         self._shared_openreward_tools = shared_openreward_tools or {}
         if subagent_environment_access not in {"shared", "read_only"}:
@@ -398,6 +400,10 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         if self._terminal_event_id is not None:
             return
         message_terminated = isinstance(event, MessageEvent) and event.source == "agent"
+        generation = generation_for_completion(getattr(event, "llm_response_id", None)) if message_terminated else {}
+        if generation.get("length_recovery") is True:
+            return
+        generation_limit = message_terminated and generation.get("finish_reason") == "length"
         payload = _finished_reward_payload(event)
         child_finished = (
             isinstance(self._task, SubTask)
@@ -408,7 +414,10 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             payload = {
                 "finished": True,
                 "reward": 0.0,
-                "metadata": {"termination_reason": "assistant_message"},
+                "metadata": {
+                    "termination_reason": "generation_limit" if generation_limit else "assistant_message",
+                    **({"generation": dict(generation)} if generation_limit else {}),
+                },
             }
         if payload is None and not child_finished:
             return
@@ -417,7 +426,8 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
         # before the event is persisted. Stop the producer immediately and let
         # the consumer drain only through this first terminal event.
         self._terminal_event_id = event.id
-        self._message_terminated = message_terminated
+        self._message_terminated = message_terminated and not generation_limit
+        self._generation_limit_terminated = generation_limit
         self._final_payload = payload
         self._state.terminal_event_id = event.id
         if self._conversation is not None:
@@ -444,7 +454,7 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             and metadata.get("invalid") is True
         )
         trajectory = current_trajectory.get(None)
-        if self._message_terminated and trajectory is not None:
+        if (self._message_terminated or self._generation_limit_terminated) and trajectory is not None:
             trajectory.misc[TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY] = True
         if invalid:
             reward = 0.0
@@ -455,5 +465,6 @@ class OpenRewardOpenHandsEnv(OpenHandsEnv):
             "reward/openreward": float(reward),
             "openreward/invalid": float(invalid),
             "openreward/message_terminated": float(self._message_terminated),
+            "openreward/generation_limit_terminated": float(self._generation_limit_terminated),
             "openreward/final_payload": self._final_payload,
         }

@@ -4,8 +4,10 @@ import asyncio
 from copy import deepcopy
 
 from platoon.envs.base import Task
-from platoon.openhands.types import OpenHandsAction, OpenHandsObservation
+from platoon.utils.generation import generation_for_completion
 from platoon.utils.openhands_utils import get_actions_for_last_obs, is_finished
+
+from platoon.openhands.types import OpenHandsAction, OpenHandsObservation
 
 
 class OpenHandsAgent:
@@ -22,6 +24,9 @@ class OpenHandsAgent:
 
         if step_actions:
             action.misc["completion_id"] = step_actions[-1].llm_response_id
+            generation = generation_for_completion(step_actions[-1].llm_response_id)
+            if generation:
+                action.misc["generation"] = dict(generation)
 
         # TODO: Consider logging usage and model here to be consistent with CodeActAgent.
         # Although, this info is probably already logged by OpenHands in the events.

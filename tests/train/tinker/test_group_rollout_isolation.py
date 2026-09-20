@@ -136,6 +136,40 @@ def test_critical_path_penalty_reaches_centered_advantages(tmp_path, monkeypatch
     assert _advantages(output) == pytest.approx(expected, abs=1e-6)
 
 
+@pytest.mark.parametrize("isolation", ["inprocess", "process"])
+def test_success_gated_penalty_reaches_centered_advantages(tmp_path, monkeypatch, isolation):
+    from platoon.openreward.rewards import reward_processor
+
+    monkeypatch.setenv("STUB_SLOT_DIR", str(tmp_path / "gated-cost-slots"))
+    workflow = grw.GroupRolloutWorkflow(
+        rollout_fn=worker_stub_rollouts.mixed_success_token_cost_rollout,
+        get_task_fn=lambda task_id: Task(goal="g", id=task_id),
+        config=WorkflowConfig(
+            group_size=4,
+            rollout_config=RolloutConfig(output_dir=str(tmp_path / "rollouts"), timeout=180),
+            rollout_isolation=isolation,
+            leave_one_out_baseline=True,
+            filter_zero_advantage_datums=False,
+            token_efficiency_reward={
+                "enabled": True, "coefficient": 0.2, "max_penalty": 0.8,
+                "reference_tokens": 10, "input_token_weight": 0,
+            },
+        ),
+        model_info=_model_info(),
+        log_path=str(tmp_path / "logs"),
+        stats_scope=f"gated_cost_{isolation}",
+        reward_processor=reward_processor,
+    )
+    output = _run(workflow)
+    rewards = [0.0, 0.0, 1 - 0.2 * math.log2(1.4), 1 - 0.2 * math.log2(1.5)]
+    expected = sorted(
+        (i + 2) * (reward - sum(other for j, other in enumerate(rewards) if i != j) / 3)
+        for i, reward in enumerate(rewards)
+    )
+    assert len(output) == 4
+    assert _advantages(output) == pytest.approx(expected, abs=1e-6)
+
+
 def _run(workflow, task_id="task"):
     return asyncio.run(workflow.arun_episode({"task_id": task_id}))
 

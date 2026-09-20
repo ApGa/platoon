@@ -144,6 +144,17 @@ async def varied_token_cost_rollout(task, config) -> dict:
     return collection
 
 
+async def mixed_success_token_cost_rollout(task, config) -> dict:
+    from platoon.train.tinker.proxy import proxy_interactions
+
+    collection = await varied_token_cost_rollout(task, config)
+    root = collection["trajectories"]["root"]
+    completion_id = root["steps"][0]["misc"]["action_misc"]["completion_id"]
+    output_tokens = len(proxy_interactions.get()[completion_id].action.tokens)
+    root["reward"] = float(output_tokens >= 4)
+    return collection
+
+
 def token_cost_reward(trajectory):
     from platoon.utils.token_efficiency import trajectory_token_efficiency_metrics
 

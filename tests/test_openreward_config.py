@@ -342,6 +342,97 @@ def test_openreward_reward_processor_subtracts_efficiency_as_aux_penalty(monkeyp
     assert components["reward/total_before_efficiency"] == 0.75
     assert components["reward/total"] == pytest.approx(0.70)
     assert components["efficiency/subtree_policy_trajectories"] == 2.0
+    assert components["efficiency/ungated_penalty"] == 0.05
+    assert components["efficiency/penalty_eligible"] == 1.0
+
+
+@pytest.mark.parametrize("task_reward", [0.0, -0.25])
+def test_openreward_efficiency_does_not_penalize_nonpositive_rewards(monkeypatch, task_reward):
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rewards", raising=False)
+    rewards_mod = __import__("platoon.openreward.rewards", fromlist=["reward_processor"])
+
+    reward, components = rewards_mod.reward_processor({
+        "reward": task_reward,
+        "misc": {"policy_subtree_token_efficiency": {"penalty": 0.4}},
+    })
+
+    assert reward == task_reward
+    assert components["reward/efficiency_penalty"] == 0.0
+    assert components["efficiency/ungated_penalty"] == 0.4
+    assert components["efficiency/penalty_eligible"] == 0.0
+
+
+def test_openreward_efficiency_uses_behavior_gated_reward(monkeypatch):
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rewards", raising=False)
+    rewards_mod = __import__("platoon.openreward.rewards", fromlist=["reward_processor"])
+
+    reward, components = rewards_mod.reward_processor({
+        "reward": 1.0,
+        "misc": {
+            "subagent_reward_judgment": {"score": 0.0, "outcome_score": 1.0, "behavior_gate": 0.0},
+            "policy_subtree_token_efficiency": {"penalty": 0.4},
+        },
+    })
+
+    assert reward == 0.0
+    assert components["reward/openreward"] == 1.0
+    assert components["reward/success"] == 0.0
+    assert components["reward/efficiency_penalty"] == 0.0
+
+
+@pytest.mark.parametrize("root_reward", [0.0, 1.0])
+def test_openreward_efficiency_recursively_gates_each_subtree(monkeypatch, root_reward):
+    import math
+
+    from platoon.utils.token_efficiency import annotate_policy_subtree_token_efficiency
+
+    _install_openreward_package(monkeypatch)
+    monkeypatch.delitem(sys.modules, "platoon.openreward.rewards", raising=False)
+    rewards_mod = __import__("platoon.openreward.rewards", fromlist=["reward_processor"])
+
+    def trajectory(name, reward, parent=None, span=None, **misc):
+        return {
+            "reward": reward,
+            "parent_info": {"id": parent} if parent else None,
+            "steps": [{"misc": {"action_misc": {"completion_id": name}}}],
+            "misc": {"execution_span": span, **misc},
+        }
+
+    # Child and sibling are parallel. Grandchild is sequential within child.
+    # A failed descendant still consumes cost for its successful parent.
+    trajectories = {
+        "root": trajectory("root", root_reward, model_call_spans={"root": [0, 1]}),
+        "child": trajectory("child", 1.0, "root", [1, 5], model_call_spans={"child": [1, 2]}),
+        "grandchild": trajectory("grandchild", 0.0, "child", [2, 5]),
+        "sibling": trajectory("sibling", 0.0, "root", [1, 5]),
+        "verifier": trajectory("verifier", 1.0, "child", [5, 6], subagent_reward_verifier_task=True),
+    }
+    annotate_policy_subtree_token_efficiency(
+        {"trajectories": trajectories},
+        {name: (0, count) for name, count in {
+            "root": 10, "child": 20, "grandchild": 30, "sibling": 40, "verifier": 10_000,
+        }.items()},
+        coefficient=0.2,
+        reference_tokens=100,
+        max_penalty=0.8,
+        input_token_weight=0,
+        output_token_weight=1,
+    )
+    results = {name: rewards_mod.reward_processor(traj) for name, traj in trajectories.items()}
+    root_penalty = 0.2 * math.log2(1 + 60 / 100)
+    child_penalty = 0.2 * math.log2(1 + 50 / 100)
+    assert results["root"][0] == pytest.approx(root_reward - root_penalty if root_reward > 0 else 0.0)
+    assert results["root"][1]["efficiency/critical_path_effective_tokens"] == 60
+    assert results["child"][0] == pytest.approx(1.0 - child_penalty)
+    assert results["child"][1]["efficiency/critical_path_effective_tokens"] == 50
+    assert results["grandchild"][0] == results["sibling"][0] == 0.0
+    assert results["grandchild"][1]["efficiency/ungated_penalty"] > 0.0
+    assert results["verifier"][0] == 1.0
+    assert "reward/efficiency_penalty" not in results["verifier"][1]
+    # Conversion can ask for root metrics separately: processing is idempotent.
+    assert rewards_mod.reward_processor(trajectories["root"]) == results["root"]
 
 
 def test_openreward_message_failure_overrides_positive_grading_and_bonus(monkeypatch):
@@ -356,6 +447,7 @@ def test_openreward_message_failure_overrides_positive_grading_and_bonus(monkeyp
             TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY: True,
             "subagent_reward_judgment": {"score": 1.0},
             "subagent_delegation_reward": {"bonus": 0.2},
+            "policy_subtree_token_efficiency": {"penalty": 0.4},
         },
         "steps": [{"misc": {"reward_misc": {"reward/success": 1.0, "reward/subagent_judgment": 1.0}}}],
     })
@@ -364,6 +456,7 @@ def test_openreward_message_failure_overrides_positive_grading_and_bonus(monkeyp
     assert components["reward/openreward"] == 0.0
     assert components["reward/subagent_judgment"] == 0.0
     assert components["reward/delegation_bonus"] == 0.0
+    assert components["reward/efficiency_penalty"] == 0.0
 
 
 def test_openreward_recursive_delegation_bonus_is_direct_and_non_compounding(monkeypatch):

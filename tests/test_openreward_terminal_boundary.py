@@ -242,3 +242,131 @@ def test_sdk_producer_stops_after_one_message_without_retry(monkeypatch, tmp_pat
     _drain(env, utils, types, collection, trajectory)
     assert trajectory.reward == 0.0
     assert len(trajectory.steps) == 1
+
+
+@pytest.mark.parametrize("reasons", [("length", "length", "length"), ("length", "stop")])
+def test_sdk_recovers_generation_limit_but_preserves_terminal_policy(monkeypatch, tmp_path, reasons):
+    events, llm, env_mod, types, utils = _modules(monkeypatch)
+    rollout = pytest.importorskip("platoon.openreward.rollout")
+    agent_mod = pytest.importorskip("openhands.sdk.agent.agent")
+    conversation_mod = pytest.importorskip("openhands.sdk.conversation.conversation")
+    from platoon.episode.context import current_trajectory
+
+    calls = []
+
+    async def completion(*args, **kwargs):
+        index = len(calls)
+        assert index < len(reasons), "length recovery must be bounded"
+        reason = reasons[index]
+        calls.append(reason)
+        return SimpleNamespace(
+            id=f"response-{index}",
+            raw_response=SimpleNamespace(
+                id=f"response-{index}",
+                choices=[SimpleNamespace(finish_reason=reason)],
+                usage=SimpleNamespace(completion_tokens=8192 if reason == "length" else 8),
+            ),
+            message=llm.Message(role="assistant", content=[], reasoning_content="Still thinking"),
+        )
+
+    monkeypatch.setattr(agent_mod, "amake_llm_completion", completion)
+    agent = rollout.OpenRewardAgent(
+        llm=llm.LLM(model="openai/test-model", api_key="test-key"),
+        tools=[],
+        include_default_tools=[],
+    )
+    env, _, collection, trajectory = _setup(env_mod, types)
+    conversation = conversation_mod.Conversation(
+        agent=agent,
+        workspace=str(tmp_path),
+        callbacks=[env._stop_on_openreward_finished],
+        visualizer=None,
+        max_iteration_per_run=10,
+    )
+    env._conversation = conversation
+    env._state.conversation_state = conversation.state
+
+    async def run():
+        token = current_trajectory.set(trajectory)
+        try:
+            conversation.send_message("Use tools to complete the task.")
+            await asyncio.wait_for(conversation.arun(), timeout=15)
+        finally:
+            current_trajectory.reset(token)
+            conversation.close()
+
+    asyncio.run(run())
+    assert calls == list(reasons)
+    messages = [e for e in conversation.state.events if isinstance(e, events.MessageEvent)]
+    assert len([e for e in messages if e.source == "agent"]) == len(reasons)
+    assert len([e for e in messages if e.source == "user"]) == len(reasons)
+    env._state.last_step_observation_id = next(e.id for e in messages if e.source == "user")
+    _drain(env, utils, types, collection, trajectory)
+    assert len(trajectory.steps) == len(reasons), "truncated generations remain trainable steps"
+    assert trajectory.reward == 0.0
+    assert trajectory.misc["trajectory_forced_zero_reward"]
+    final = trajectory.steps[-1].misc["reward_misc"]
+    assert final["openreward/generation_limit_terminated"] == float(reasons[-1] == "length")
+    assert final["openreward/message_terminated"] == float(reasons[-1] == "stop")
+    generations = trajectory.misc["model_generations"]
+    assert generations["response-0"]["generated_tokens"] == 8192
+    assert generations["response-0"]["length_recovery"] is True
+    if reasons[-1] == "length":
+        assert generations["response-2"]["consecutive_length"] == 3
+        assert generations["response-2"]["length_recovery"] is False
+
+
+def test_length_recovery_resets_after_tool_and_does_not_override_later_success(monkeypatch):
+    events, llm, env_mod, types, utils = _modules(monkeypatch)
+    rollout = pytest.importorskip("platoon.openreward.rollout")
+    from platoon.episode.context import current_trajectory
+
+    env, state, collection, trajectory = _setup(env_mod, types)
+    agent = rollout.OpenRewardAgent(
+        llm=llm.LLM(model="openai/test-model", api_key="test-key"),
+        tools=[],
+        include_default_tools=[],
+    )
+
+    def on_event(event):
+        env._stop_on_openreward_finished(event)
+        state.events.append(event)
+
+    def capped(index):
+        response = SimpleNamespace(
+            id=f"cap-{index}",
+            raw_response=SimpleNamespace(
+                id=f"cap-{index}",
+                choices=[SimpleNamespace(finish_reason="length")],
+                usage=SimpleNamespace(completion_tokens=8192),
+            ),
+        )
+        agent._handle_content_response(
+            llm.Message(role="assistant", content=[], reasoning_content="Thinking"),
+            response,
+            env._conversation,
+            state,
+            on_event,
+        )
+        assert env._terminal_event_id is None
+        assert state.execution_status == "running"
+
+    token = current_trajectory.set(trajectory)
+    try:
+        capped(0)
+        capped(1)
+        tool = _action(events, "python_execute", "response-tool")
+        on_event(tool)
+        on_event(_result(events, llm, tool))
+        capped(2)
+        capped(3)
+        assert trajectory.misc["model_generations"]["cap-2"]["consecutive_length"] == 1
+        done = _action(events, "claim_done", "response-done")
+        on_event(done)
+        on_event(_result(events, llm, done, reward=1.0))
+    finally:
+        current_trajectory.reset(token)
+    _drain(env, utils, types, collection, trajectory)
+    assert len(trajectory.steps) == 6
+    assert trajectory.reward == 1.0
+    assert not trajectory.misc.get("trajectory_forced_zero_reward")

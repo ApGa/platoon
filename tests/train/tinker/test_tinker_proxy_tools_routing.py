@@ -454,7 +454,43 @@ def test_reasoning_content_split_and_finish_reasons(tokenizer, renderer, im_end)
     # a tool call cut off by max_tokens still has stop_reason length: no parsed call -> length
     tokens = tokenizer.encode("\n</think>\n\n<tool_call>\n<function=get_we", add_special_tokens=False)
     choice = llm._parse_response(prompt, make_response(tokens, stop_reason="length"), tools=TOOLS).choices[0]
-    assert choice.finish_reason in ("length", "tool_calls")
+    assert choice.finish_reason == "length"
+    assert not choice.message.tool_calls
+
+
+@needs_snapshot
+def test_length_never_executes_tools_and_keeps_sampling_attribution(tokenizer, renderer, im_end):
+    from platoon.episode.context import current_trajectory
+    from platoon.episode.trajectory import Trajectory
+
+    # Even a parseable tool call is withheld when the sampling server reports
+    # a cutoff. Never execute a complete prefix of an incomplete multi-call.
+    tokens = tokenizer.encode("Ready\n</think>\n" + XML_TOOL_CALL, add_special_tokens=False) + [im_end]
+    llm, client = make_llm(renderer, tokenizer, make_response(tokens, stop_reason="length", routing_id=123))
+    trajectory = Trajectory(id="root")
+    token = current_trajectory.set(trajectory)
+    try:
+        with TinkerLLMProxySession() as session:
+            response = llm.completion(
+                messages=[{"role": "user", "content": "Check weather"}], optional_params={"tools": TOOLS}
+            )
+            interaction = session.interactions[response.id]
+        assert len(client.calls) == 1
+        assert interaction.action.tokens == tokens
+        assert interaction.action.maybe_logprobs == [-0.5] * len(tokens)
+        assert interaction.routing_id == 123
+        assert response.choices[0].finish_reason == "length"
+        assert not response.choices[0].message.tool_calls
+        assert trajectory.misc["model_generations"][response.id] == {
+            "stop_reason": "length",
+            "finish_reason": "length",
+            "generated_tokens": len(tokens),
+            "parse_success": True,
+            "parsed_tool_calls": 1,
+            "emitted_tool_calls": 0,
+        }
+    finally:
+        current_trajectory.reset(token)
 
 
 @needs_snapshot
