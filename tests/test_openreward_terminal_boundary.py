@@ -244,8 +244,15 @@ def test_sdk_producer_stops_after_one_message_without_retry(monkeypatch, tmp_pat
     assert len(trajectory.steps) == 1
 
 
-@pytest.mark.parametrize("reasons", [("length", "length", "length"), ("length", "stop")])
-def test_sdk_recovers_generation_limit_but_preserves_terminal_policy(monkeypatch, tmp_path, reasons):
+@pytest.mark.parametrize(
+    "recovery_enabled,reasons",
+    [
+        (True, ("length", "length", "length")),
+        (True, ("length", "stop")),
+        (False, ("length",)),
+    ],
+)
+def test_sdk_recovers_generation_limit_but_preserves_terminal_policy(monkeypatch, tmp_path, recovery_enabled, reasons):
     events, llm, env_mod, types, utils = _modules(monkeypatch)
     rollout = pytest.importorskip("platoon.openreward.rollout")
     agent_mod = pytest.importorskip("openhands.sdk.agent.agent")
@@ -274,6 +281,7 @@ def test_sdk_recovers_generation_limit_but_preserves_terminal_policy(monkeypatch
         llm=llm.LLM(model="openai/test-model", api_key="test-key"),
         tools=[],
         include_default_tools=[],
+        **({"enable_generation_limit_recovery": False} if not recovery_enabled else {}),
     )
     env, _, collection, trajectory = _setup(env_mod, types)
     conversation = conversation_mod.Conversation(
@@ -310,10 +318,11 @@ def test_sdk_recovers_generation_limit_but_preserves_terminal_policy(monkeypatch
     assert final["openreward/message_terminated"] == float(reasons[-1] == "stop")
     generations = trajectory.misc["model_generations"]
     assert generations["response-0"]["generated_tokens"] == 8192
-    assert generations["response-0"]["length_recovery"] is True
+    assert generations["response-0"]["length_recovery"] is recovery_enabled
     if reasons[-1] == "length":
-        assert generations["response-2"]["consecutive_length"] == 3
-        assert generations["response-2"]["length_recovery"] is False
+        terminal = generations[f"response-{len(reasons) - 1}"]
+        assert terminal["consecutive_length"] == (3 if recovery_enabled else 1)
+        assert terminal["length_recovery"] is False
 
 
 def test_length_recovery_resets_after_tool_and_does_not_override_later_success(monkeypatch):

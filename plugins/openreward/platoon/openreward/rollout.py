@@ -99,6 +99,8 @@ enable_openhands_reasoning_replay()
 class OpenRewardAgent(OpenHandsSDKAgent):
     """Require an environment terminal tool instead of accepting plain text."""
 
+    enable_generation_limit_recovery: bool = True
+
     @property
     def prompt_dir(self) -> str:
         """Use the prompts shipped with the OpenHands SDK agent.
@@ -142,7 +144,10 @@ class OpenRewardAgent(OpenHandsSDKAgent):
                     if prior.get("finish_reason") != "length":
                         break
                     consecutive += 1
-            recover_length = consecutive <= OPENREWARD_MAX_CONSECUTIVE_LENGTH_RECOVERIES
+            recover_length = (
+                self.enable_generation_limit_recovery
+                and consecutive <= OPENREWARD_MAX_CONSECUTIVE_LENGTH_RECOVERIES
+            )
             generation["consecutive_length"] = consecutive
             generation["length_recovery"] = recover_length
 
@@ -565,6 +570,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     oh_agent = _configure_openhands_agent(
         OpenRewardAgent(
             llm=llm,
+            enable_generation_limit_recovery=openreward_config.enable_generation_limit_recovery,
             tools=[],
             mcp_config=_build_mcp_config(
                 task,

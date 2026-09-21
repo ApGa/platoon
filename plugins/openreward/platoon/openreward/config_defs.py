@@ -179,6 +179,8 @@ class OpenRewardConfig:
     # Leave off unless you specifically need the raw OpenHands event framing for
     # one run; with it off no persistence_dir is passed and the SDK writes none.
     persist_openhands_events: bool = False
+    # Disable to end the trajectory on its first generation cutoff.
+    enable_generation_limit_recovery: bool = True
     enable_task_tracker: bool = False
     enable_recursive_subagents: bool = False
     # Forked agents share the root OpenReward session. ``read_only`` narrows
@@ -217,6 +219,8 @@ class OpenRewardConfig:
     condenser_max_completion_tokens: int = int(0.8 * 32_768)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.enable_generation_limit_recovery, bool):
+            raise ValueError("enable_generation_limit_recovery must be a boolean")
         if not isinstance(self.balance_accepted_batches, bool):
             raise ValueError("balance_accepted_batches must be a boolean")
         if not isinstance(self.enable_subagent_reward_judging, bool):

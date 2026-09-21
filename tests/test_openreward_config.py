@@ -539,6 +539,15 @@ def test_openreward_recursive_delegation_bonus_is_direct_and_non_compounding(mon
     assert child_components["reward/delegation_bonus"] == 0.2
 
 
+def test_openreward_generation_limit_recovery_config():
+    config_mod = _load_openreward_config_module()
+    assert config_mod.OpenRewardConfig().enable_generation_limit_recovery is True
+    assert config_mod.OpenRewardConfig(enable_generation_limit_recovery=False).enable_generation_limit_recovery is False
+    for invalid in (0, 1, "false"):
+        with pytest.raises(ValueError, match="enable_generation_limit_recovery"):
+            config_mod.OpenRewardConfig(enable_generation_limit_recovery=invalid)
+
+
 def test_openreward_rollout_condenser_keeps_system_prompt_and_goal_only():
     source = REPO_ROOT.joinpath("plugins/openreward/platoon/openreward/rollout.py").read_text()
     module = ast.parse(source)
