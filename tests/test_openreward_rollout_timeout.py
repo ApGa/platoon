@@ -260,7 +260,8 @@ def test_unrestricted_ptc_omits_orchestration_policy_and_passes_mode(monkeypatch
     assert prompts["system"] == ["ptc-guidance"]
 
 
-def test_mcp_bridge_receives_environment_routing_overrides(monkeypatch, tmp_path):
+@pytest.mark.parametrize("variant", [None, "frontier_cs_2_0"])
+def test_mcp_bridge_receives_environment_routing_overrides(monkeypatch, tmp_path, variant):
     rollout = _load_rollout_module(monkeypatch)
     routing = {
         "version": 1,
@@ -275,6 +276,7 @@ def test_mcp_bridge_receives_environment_routing_overrides(monkeypatch, tmp_path
     }
     environment = rollout.OpenRewardEnvironmentConfig(
         env_name="legacy",
+        variant=variant,
         tool_routing_overrides={"call_tool": routing},
     )
     task = Task(
@@ -293,6 +295,10 @@ def test_mcp_bridge_receives_environment_routing_overrides(monkeypatch, tmp_path
     option_index = args.index("--tool-routing-overrides-json")
 
     assert json.loads(args[option_index + 1]) == {"call_tool": routing}
+    if variant is None:
+        assert "--variant" not in args
+    else:
+        assert args[args.index("--variant") + 1] == variant
 
 
 def test_task_tracker_initial_guidance_is_shared_by_recursive_and_nonrecursive(

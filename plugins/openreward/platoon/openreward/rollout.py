@@ -347,6 +347,8 @@ def _build_mcp_config(
     ]
     task_index = task.misc.get(OPENREWARD_TASK_INDEX_KEY)
     task_name = task.misc.get(OPENREWARD_TASK_NAME_KEY)
+    if environment.variant is not None:
+        bridge_args.extend(["--variant", environment.variant])
     if isinstance(task_index, int) and not isinstance(task_index, bool):
         bridge_args.extend(["--task-index", str(task_index)])
     else:

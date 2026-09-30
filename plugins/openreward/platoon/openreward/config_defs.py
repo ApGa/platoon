@@ -45,10 +45,15 @@ class OpenRewardEnvironmentConfig:
     tool_routing_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Override the rollout-wide child access policy for this environment.
     subagent_environment_access: str | None = None
+    # SDK deployment name and the environment served inside it are distinct.
+    # Leave unset for the deployment's default environment.
+    variant: str | None = None
 
     def __post_init__(self) -> None:
         if not self.env_name.strip():
             raise ValueError("OpenReward environment env_name must not be empty")
+        if self.variant is not None and (not isinstance(self.variant, str) or not self.variant.strip()):
+            raise ValueError("OpenReward environment variant must be a non-empty string when set")
         if self.label is not None and not self.label.strip():
             raise ValueError("OpenReward environment label must not be empty")
         if not math.isfinite(self.sampling_weight) or self.sampling_weight <= 0:
@@ -217,6 +222,7 @@ class OpenRewardConfig:
     condenser_max_tokens: int = (4 * 32_768) // 5
     # Total generation budget shared by reasoning and the public summary.
     condenser_max_completion_tokens: int = int(0.8 * 32_768)
+    variant: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enable_generation_limit_recovery, bool):
@@ -330,6 +336,7 @@ class OpenRewardConfig:
     def _legacy_environment(self) -> OpenRewardEnvironmentConfig:
         return OpenRewardEnvironmentConfig(
             env_name=self.env_name,
+            variant=self.variant,
             label=self.env_name,
             split=self.split,
             eval_split=self.eval_split,

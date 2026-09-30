@@ -275,6 +275,55 @@ def test_mixed_config_defaults_to_equal_weights_and_validates_labels(monkeypatch
         tasks.OpenRewardConfig.from_mapping({"accepted_batch_max_replacement_rounds": -1})
 
 
+def test_environment_variant_survives_legacy_and_mixed_config_mapping(monkeypatch):
+    tasks = _load_tasks(monkeypatch)
+    assert tasks.OpenRewardConfig().environment().variant is None
+    assert tasks.OpenRewardConfig.from_mapping({"variant": "second"}).environment().variant == "second"
+    mixed = tasks.OpenRewardConfig.from_mapping({
+        "environments": [{"env_name": "deployment", "variant": "second"}],
+    })
+    assert mixed.environment().variant == "second"
+    for bad in ("", "  ", 7):
+        with pytest.raises(ValueError, match="variant"):
+            tasks.OpenRewardEnvironmentConfig(variant=bad)
+
+
+def test_two_variants_on_one_deployment_enumerate_distinct_catalogs(monkeypatch):
+    # Discovery mutates these process variables; register both with monkeypatch
+    # even when absent initially so the following tests retain their defaults.
+    monkeypatch.setenv("OPENREWARD_SESSION_URL", "http://localhost:8080")
+    monkeypatch.setenv("OPENREWARD_API_URL", "")
+    tasks = _load_tasks(monkeypatch)
+    counts = {"algorithmic": 188, "cpu": 12}
+    selected = []
+
+    class Client:
+        def __init__(self, api_key):
+            self.environments = types.SimpleNamespace(get=self.get)
+
+        def get(self, name, variant=None):
+            # The SDK's deployment name does not select a served environment;
+            # absent a variant, the shared server always uses its first one.
+            selected.append((name, variant))
+            return types.SimpleNamespace(num_tasks=lambda split: counts[variant or "algorithmic"])
+
+        def close(self):
+            pass
+
+    _module(monkeypatch, "openreward", OpenReward=Client)
+    config = tasks.OpenRewardConfig.from_mapping({"environments": [
+        {"label": name, "env_name": "shared-frontier", "variant": name,
+         "session_url": "http://same-host:8085", "eval_task_limit": None}
+        for name in counts
+    ]})
+    for evaluation in (False, True):
+        records = tasks.get_task_records(config, evaluation=evaluation)
+        references = [tasks.OpenRewardTaskReference.decode(row["task_id"]) for row in records]
+        assert Counter(ref.environment_label for ref in references) == counts
+        assert max(ref.task_index for ref in references if ref.environment_label == "cpu") == 11
+    assert selected == [("shared-frontier", "algorithmic"), ("shared-frontier", "cpu")] * 2
+
+
 def test_mixed_config_validates_staged_environment_admission(monkeypatch):
     tasks = _load_tasks(monkeypatch)
     config = tasks.OpenRewardConfig.from_mapping(
@@ -563,7 +612,8 @@ def test_legacy_single_environment_records_do_not_enable_mixture_sampler(monkeyp
     assert all(tasks.OPENREWARD_SAMPLING_WEIGHT_COLUMN not in record for record in records)
 
 
-def test_bridge_index_selection_never_lists_catalog(monkeypatch, tmp_path):
+@pytest.mark.parametrize("variant", [None, "second-environment"])
+def test_bridge_index_selection_never_lists_catalog(monkeypatch, tmp_path, variant):
     bridge = _load_bridge(monkeypatch)
 
     class TaskRecord:
@@ -607,7 +657,11 @@ def test_bridge_index_selection_never_lists_catalog(monkeypatch, tmp_path):
 
     class Client:
         def __init__(self, api_key):
-            self.environments = types.SimpleNamespace(get=lambda name: environment)
+            self.environments = types.SimpleNamespace(get=self.get)
+
+        def get(self, name, **kwargs):
+            assert kwargs == ({"variant": variant} if variant is not None else {})
+            return environment
 
         def close(self):
             pass
@@ -616,6 +670,7 @@ def test_bridge_index_selection_never_lists_catalog(monkeypatch, tmp_path):
     runtime = bridge.OpenRewardMCPBridge(
         bridge.BridgeConfig(
             env_name="large-env",
+            variant=variant,
             split="train",
             task_index=7,
             task_name=None,

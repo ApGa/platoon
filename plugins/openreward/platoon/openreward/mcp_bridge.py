@@ -320,8 +320,9 @@ def _make_environment_tool(runtime: "OpenRewardMCPBridge", tool: dict[str, Any])
     )
     signature_parameters = []
     for name, property_schema in properties.items():
-        default = inspect.Parameter.empty if name in required else None
-        annotation = _schema_type_to_annotation(property_schema if isinstance(property_schema, dict) else {})
+        property_schema = property_schema if isinstance(property_schema, dict) else {}
+        default = inspect.Parameter.empty if name in required else property_schema.get("default")
+        annotation = _schema_type_to_annotation(property_schema)
         signature_parameters.append(
             inspect.Parameter(
                 name,
@@ -363,6 +364,7 @@ class BridgeConfig:
     output_dir: Path
     max_tool_calls: int
     tool_routing_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    variant: str | None = None
 
 
 def _configure_openreward_urls(session_url: str | None, api_url: str | None) -> None:
@@ -389,7 +391,8 @@ class OpenRewardMCPBridge:
         from openreward import OpenReward
 
         self.client = OpenReward(api_key=config.api_key)
-        self.environment = self.client.environments.get(name=config.env_name)
+        variant_kwargs = {"variant": config.variant} if config.variant is not None else {}
+        self.environment = self.client.environments.get(name=config.env_name, **variant_kwargs)
         self.task = self._select_task()
         self.task_name = _task_name(self.task, config.task_index)
         self.session_context = self.environment.session(task=self.task)
@@ -401,6 +404,7 @@ class OpenRewardMCPBridge:
             "session_started",
             {
                 "env": config.env_name,
+                "variant": config.variant,
                 "split": config.split,
                 "task_index": config.task_index,
                 "task_name": self.task_name,
@@ -572,6 +576,7 @@ class OpenRewardMCPBridge:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Expose one OpenReward session through stdio MCP tools.")
     parser.add_argument("--env-name", default="toolathlongym")
+    parser.add_argument("--variant")
     parser.add_argument("--split", default="train")
     parser.add_argument("--task-index", type=int, default=0)
     parser.add_argument("--task-name")
@@ -610,6 +615,7 @@ def main(argv: list[str] | None = None) -> int:
     runtime = OpenRewardMCPBridge(
         BridgeConfig(
             env_name=args.env_name,
+            variant=args.variant,
             split=args.split,
             task_index=args.task_index,
             task_name=args.task_name,

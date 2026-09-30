@@ -103,6 +103,7 @@ stats:
     - native-reward
 openreward:
   env_name: frontier_cs_algorithmic
+  variant: frontier_cs_algorithmic
   split: train
   eval_split: null
   session_url: http://localhost:8085
@@ -138,6 +139,7 @@ openreward:
   environments:
   - label: fcs_algorithmic
     env_name: frontier_cs_algorithmic
+    variant: frontier_cs_algorithmic
     split: train
     eval_split: train
     session_url: http://localhost:8085
@@ -149,6 +151,7 @@ openreward:
     sampling_weight: 188.0
   - label: fcs_2_0
     env_name: frontier_cs_2_0
+    variant: frontier_cs_2_0
     split: train
     eval_split: train
     session_url: http://localhost:8085

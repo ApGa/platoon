@@ -201,7 +201,8 @@ def _environment_task_ids(
 
     client = OpenReward(api_key=config.api_key)
     try:
-        environment = client.environments.get(name=config.env_name)
+        variant_kwargs = {"variant": config.variant} if config.variant is not None else {}
+        environment = client.environments.get(name=config.env_name, **variant_kwargs)
         # Explicit names require the legacy catalog API. Numeric selection and
         # every true mixture use OpenReward's scalable num_tasks/get_task API.
         if config.task_names is not None:
