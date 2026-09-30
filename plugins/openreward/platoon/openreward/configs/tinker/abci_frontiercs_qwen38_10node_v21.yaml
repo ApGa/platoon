@@ -1,6 +1,7 @@
 # Frontier-CS native scores; 10 nodes: 5 training (TP2/DP20), 5 inference.
 # The recursive variants enable child verification/behavior judging via launch overrides.
-# Allow three hours of agent work plus current/best final grading (three hours each).
+# Allow native grading to drain pending iterative work and evaluate current/best
+# artifacts (up to three hours each), with room for agent work and setup queues.
 train:
   model_name: /groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/97c725615b8aa025b800da4ceed38811358b30f1
   renderer_name: qwen3_8_preserve_thinking
@@ -42,8 +43,8 @@ train:
     min_successful_group_size: 4
     rollout_config:
       max_steps: 200
-      timeout: 32400
-      step_timeout: 21600
+      timeout: 50400
+      step_timeout: 36000
       propagate_root_success: false
       verbose: true
       inference_params:
@@ -69,8 +70,8 @@ eval:
     filter_zero_advantage_datums: false
     rollout_config:
       max_steps: 200
-      timeout: 32400
-      step_timeout: 21600
+      timeout: 50400
+      step_timeout: 36000
       inference_params:
         temperature: 1.0
         max_completion_tokens: 8192
@@ -83,7 +84,7 @@ log_path: /groups/gai51740/aci18912it/miles-tinker/runs/default/logs
 tinker_base_url: null
 watchdog:
   enabled: true
-  timeout_seconds: 43200
+  timeout_seconds: 64800
   exit_code: 2
 stats:
   experiment_name: frontiercs-openhands-miles-tinker
