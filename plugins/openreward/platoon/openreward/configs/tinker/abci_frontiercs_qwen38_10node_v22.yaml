@@ -134,8 +134,8 @@ openreward:
   enable_subagent_parent_usage_eligibility_gate: false
   subagent_parent_usage_judge_max_concurrency: 4
   subagent_behavior_judge_max_prompt_tokens: 24576
-  subagent_behavior_judge_max_output_tokens: 4096
-  subagent_behavior_judge_timeout_seconds: 300.0
+  subagent_behavior_judge_max_output_tokens: 16384
+  subagent_behavior_judge_timeout_seconds: 1800.0
   subagent_delegation_reward_coefficient: 0.0
   openhands_system_prompt_suffix: null
   condenser_disable_thinking: true
