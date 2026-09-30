@@ -257,11 +257,22 @@ async def run_rollout_request(
                             logger.info(
                                 "Root critical-path efficiency: %s", trajectory_token_efficiency_metrics(trajectory)
                             )
+                # Process workers follow current weights while waiting for the
+                # environment. Anchor staleness to actual generation, retaining
+                # the oldest root/child/judge sample if weights changed mid-tree.
+                from platoon.train.tinker.workers.binding import FollowingSamplingClient
+
+                sampling_client = getattr(llm, "sampling_client", None)
+                checkpoint_version = request.model.checkpoint_version
+                if isinstance(sampling_client, FollowingSamplingClient):
+                    sampled_version = sampling_client.oldest_sampled_version
+                    if sampled_version is not None:
+                        checkpoint_version = sampled_version
                 result = get_train_data_for_trajectory_collection(
                     trajectory_collection=trajectory_collection,
                     interactions=interactions,
                     task_id=task_id,
-                    checkpoint_version=request.model.checkpoint_version,
+                    checkpoint_version=checkpoint_version,
                     filter_errors=request.conversion.filter_errors,
                     filter_message_actions=request.conversion.filter_message_actions,
                     reward_processor=reward_processor,

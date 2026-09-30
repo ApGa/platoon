@@ -368,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
             binding.binding_path,
             binding.bootstrap_blob,
             binding.follow_poll_seconds,
+            bootstrap_version=binding.checkpoint_version,
         )
         llm = proxy.build_tinker_llm(
             model_name=binding.model_name,

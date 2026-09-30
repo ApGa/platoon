@@ -84,7 +84,7 @@ def _run_batches(monkeypatch, outputs, *, start_batch=0, max_staleness=None):
             train_tracker=StatsTracker("train"),
             sampling_client=object(),
             training_client=object(),
-            model_info=SimpleNamespace(llm=SimpleNamespace(version=0, update_sampling_client=Mock())),
+            model_info=SimpleNamespace(llm=SimpleNamespace(version=start_batch, update_sampling_client=Mock())),
             watchdog=None,
             save_every=10,
             sampling_client_updated_event=asyncio.Event(),

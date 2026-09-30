@@ -25,6 +25,8 @@ from platoon.train.tinker.batch_transforms import (
     filter_zero_advantage_datums,
     get_datum_counts,
     get_loss_normalization_token_count,
+    has_zero_objective,
+    objective_is_zero_for_zero_advantages,
     run_batch_transforms,
     set_loss_normalization_token_counts,
 )
@@ -36,6 +38,7 @@ from platoon.train.tinker.dataset_order import prepare_dataset_for_dataloader
 from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
+from platoon.train.tinker.rollout_queue import RolloutTaskQueue
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -217,6 +220,19 @@ ROLLOUT_HEARTBEAT_INTERVAL_S = 60.0
 RECOVERY_CHECKPOINT_PREFIX = "recovery-"
 
 
+def _resume_policy_counters(resume_info, num_minibatches: int) -> tuple[int, int]:
+    """Read v22 counters; older checkpoints published once per consumed batch."""
+
+    batch = int(resume_info.batch or 0) if resume_info is not None else 0
+    extra = resume_info.extra if resume_info is not None else {}
+    policy_version = extra.get("policy_version", batch)
+    optimizer_steps = extra.get("optimizer_steps", batch * num_minibatches)
+    for name, value in (("policy_version", policy_version), ("optimizer_steps", optimizer_steps)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"Checkpoint {name} must be a non-negative integer")
+    return policy_version, optimizer_steps
+
+
 class Watchdog:
     """Background thread that monitors for hangs and forcibly exits if no activity.
      If Tinker hangs, the only recovery is to forcibly exit the process.
@@ -359,6 +375,7 @@ class TrainLoopSharedState:
     stats_logger: StatsLogger
     train_tracker: StatsTracker
     watchdog: Watchdog | None = None
+    optimizer_steps: int = 0
 
     def _get_event_frequency(self, config: TrainEventTriggerConfig) -> int:
         """Normalize the event frequency to the number of training steps.
@@ -493,7 +510,7 @@ class PlatoonTinkerRLTrainer:
         shared_state: TrainLoopSharedState,
         start_batch: int,
         end_batch: int,
-        data_queue: asyncio.Queue[dict],
+        data_queue: asyncio.Queue[dict] | RolloutTaskQueue,
     ):
         i_batch = start_batch
         max_staleness = self.config.train.max_staleness
@@ -586,7 +603,7 @@ class PlatoonTinkerRLTrainer:
         self,
         shared_state: TrainLoopSharedState,
         workflow: RolloutWorkflow,
-        task_data_queue: asyncio.Queue[dict],
+        task_data_queue: asyncio.Queue[dict] | RolloutTaskQueue,
         rollout_result_queue: asyncio.Queue[list[tinker.Datum | None]],
         tracker: StatsTracker | None = None,
     ):
@@ -608,6 +625,9 @@ class PlatoonTinkerRLTrainer:
                 logger.exception(f"Exception in rollout worker for task {task_id}: {e}")
                 stats_tracker.scalar(**{"rollout_completion/failed_rollouts": 1.0})
                 rollout = None
+            finally:
+                if isinstance(task_data_queue, RolloutTaskQueue):
+                    await task_data_queue.release(data)
 
             elapsed = time.perf_counter() - start_time
             stats_tracker.scalar(**{"rollout_completion/rollout_time": elapsed})
@@ -663,7 +683,16 @@ class PlatoonTinkerRLTrainer:
         train_workflow: RolloutWorkflow,
     ):
         # Initialize queues to pipeline data loading, rollout sampling and training.
-        task_data_queue = asyncio.Queue[dict](maxsize=self.config.train.batch_size)
+        group_limits = getattr(self.config.train, "rollout_group_limits", {})
+        task_data_queue = (
+            RolloutTaskQueue(
+                maxsize=self.config.train.batch_size,
+                key=self.config.train.rollout_group_key,
+                limits=group_limits,
+            )
+            if group_limits
+            else asyncio.Queue[dict](maxsize=self.config.train.batch_size)
+        )
         task_rollout_result_queue = asyncio.Queue[list[tinker.Datum | None]]()
 
         # Launch background tasks to start streaming in rollouts for training.
@@ -729,6 +758,7 @@ class PlatoonTinkerRLTrainer:
             batch_rollout_stats = RolloutStats()
             batch_stale_groups = 0
             batch_groups_without_stats = 0
+            batch_optimizer_steps = 0
 
             # We perform num_minibatches weight updates per batch.
             for minibatch_num in range(self.config.train.num_minibatches):
@@ -780,16 +810,24 @@ class PlatoonTinkerRLTrainer:
 
                         # Filter out stale rollouts. TODO: Consider requeuing.
                         if self.config.train.max_staleness is not None and rollout is not None and len(rollout) > 0:
-                            # Extract checkpoint_version from loss_fn_inputs (stored as a 1-element tensor)
-                            checkpoint_version_tensor = rollout[0].loss_fn_inputs.get("checkpoint_version")
-                            if checkpoint_version_tensor is not None:
-                                rollout_checkpoint_version = int(checkpoint_version_tensor.to_torch().item())
-                            else:
-                                rollout_checkpoint_version = shared_state.train_step  # Assume current if not present
+                            # Group members can begin sampling at different
+                            # versions after environment setup. Keep group
+                            # advantages intact and reject by its oldest datum.
+                            versions = [
+                                int(version.to_torch().item())
+                                for datum in rollout
+                                if (version := datum.loss_fn_inputs.get("checkpoint_version")) is not None
+                            ]
+                            rollout_checkpoint_version = min(versions, default=shared_state.model_info.llm.version)
 
-                            if shared_state.train_step - rollout_checkpoint_version > self.config.train.max_staleness:
+                            if (
+                                shared_state.model_info.llm.version - rollout_checkpoint_version
+                                > self.config.train.max_staleness
+                            ):
                                 logger.info(
-                                    f"Stale rollout detected in batch {shared_state.train_step}. Filtering out."
+                                    f"Stale rollout detected in batch {shared_state.train_step}: "
+                                    f"policy version {shared_state.model_info.llm.version}, "
+                                    f"rollout version {rollout_checkpoint_version}. Filtering out."
                                 )
                                 shared_state.train_tracker.scalar(stale_rollouts=1.0)
                                 batch_stale_groups += 1
@@ -826,7 +864,12 @@ class PlatoonTinkerRLTrainer:
                     # datums participate in that normalization before being
                     # removed from model compute. Moving this filter into the
                     # task workflow would change per-depth gradient weights.
-                    if self.config.train.workflow_config.filter_zero_advantage_datums:
+                    loss_fn = getattr(self.config.train, "loss_fn", "cispo")
+                    loss_fn_config = getattr(self.config.train, "loss_fn_config", {})
+                    if (
+                        self.config.train.workflow_config.filter_zero_advantage_datums
+                        and objective_is_zero_for_zero_advantages(loss_fn, loss_fn_config)
+                    ):
                         eligible_datums, eligible_attention_tokens, eligible_loss_tokens = get_datum_counts(
                             task_rollout_results
                         )
@@ -864,6 +907,15 @@ class PlatoonTinkerRLTrainer:
                         logger.warning(
                             f"All datums had zero advantage for microbatch {microbatch_num} "
                             f"(minibatch {minibatch_num})"
+                        )
+                        continue
+
+                    if has_zero_objective(task_rollout_results, loss_fn, loss_fn_config):
+                        logger.info(
+                            "Zero policy-gradient objective for microbatch %s (minibatch %s); "
+                            "skipping forward/backward and optimizer contribution",
+                            microbatch_num,
+                            minibatch_num,
                         )
                         continue
 
@@ -1018,6 +1070,8 @@ class PlatoonTinkerRLTrainer:
                     )
                     raise
                 optim_elapsed = time.perf_counter() - optim_result_start
+                batch_optimizer_steps += 1
+                shared_state.optimizer_steps = getattr(shared_state, "optimizer_steps", 0) + 1
                 if optim_elapsed > 60.0:
                     logger.warning(f"optim_step result took {optim_elapsed:.1f}s (slow)")
                 else:
@@ -1078,37 +1132,45 @@ class PlatoonTinkerRLTrainer:
                 },
             )
 
-            # Update sampling client with timing
+            # Consuming an all-zero batch does not change the policy. In
+            # particular it must not age slower, useful rollouts as stale.
             update_start = time.perf_counter()
-            logger.info(f"Calling _save_checkpoint_and_get_sampling_client for batch {shared_state.train_step}")
-            sampling_client = await self._save_checkpoint_and_get_sampling_client(
-                training_client=shared_state.training_client,
-                i_batch=shared_state.train_step,
-                save_every=shared_state.save_every,
-                start_batch=start_batch,
-                watchdog=shared_state.watchdog,
-                recovery_every=self.config.checkpoint.recovery_every,
-            )
-            logger.info("_save_checkpoint_and_get_sampling_client returned, updating LLM sampling client")
-            shared_state.model_info.llm.update_sampling_client(sampling_client)
-            # Rollout workers follow this file; republishing it here is what
-            # keeps them exactly as fresh as the in-process path.
-            self._publish_worker_binding(
-                train_workflow, sampling_client, shared_state.model_info.llm.version
-            )
-            shared_state.sampling_client = sampling_client
+            if batch_optimizer_steps:
+                logger.info(f"Calling _save_checkpoint_and_get_sampling_client for batch {shared_state.train_step}")
+                sampling_client = await self._save_checkpoint_and_get_sampling_client(
+                    training_client=shared_state.training_client,
+                    i_batch=shared_state.train_step,
+                    save_every=shared_state.save_every,
+                    start_batch=start_batch,
+                    watchdog=shared_state.watchdog,
+                    recovery_every=self.config.checkpoint.recovery_every,
+                    policy_version=shared_state.model_info.llm.version + 1,
+                    optimizer_steps=shared_state.optimizer_steps,
+                )
+                shared_state.model_info.llm.update_sampling_client(sampling_client)
+                self._publish_worker_binding(
+                    train_workflow, sampling_client, shared_state.model_info.llm.version
+                )
+                shared_state.sampling_client = sampling_client
+                shared_state.sampling_client_step += 1
+            else:
+                logger.info(
+                    "Batch %s had no optimizer updates; policy version remains %s",
+                    shared_state.train_step,
+                    shared_state.model_info.llm.version,
+                )
             update_elapsed = time.perf_counter() - update_start
             shared_state.train_tracker.scalar(update_weights_time=update_elapsed)
 
             shared_state.train_step += 1
-            shared_state.sampling_client_step += 1
+
+            # Evaluation cadence remains based on consumed batches, including
+            # zero-signal ones; the sampler itself may be unchanged.
+            shared_state.sampling_client_updated_event.set()
 
             # Heartbeat after completing a train step
             if shared_state.watchdog:
                 shared_state.watchdog.heartbeat()
-
-            # Signal eval loop that sampling client has been updated
-            shared_state.sampling_client_updated_event.set()
 
             # Track total batch time
             batch_elapsed = time.perf_counter() - batch_start_time
@@ -1120,6 +1182,10 @@ class PlatoonTinkerRLTrainer:
                     "batch/groups_dequeued": float(batch_total_tasks),
                     "batch/stale_groups": float(batch_stale_groups),
                     "batch/groups_without_stats": float(batch_groups_without_stats),
+                    "batch/optimizer_updates": float(batch_optimizer_steps),
+                    "batch/skipped_optimizer": float(batch_optimizer_steps == 0),
+                    "policy/version": float(shared_state.model_info.llm.version),
+                    "optim/updates_total": float(getattr(shared_state, "optimizer_steps", 0)),
                 }
             )
             step_stats = shared_state.train_tracker.export(reset=True)
@@ -1233,6 +1299,8 @@ class PlatoonTinkerRLTrainer:
         start_batch: int = 0,
         watchdog: Watchdog | None = None,
         recovery_every: int | None = None,
+        policy_version: int | None = None,
+        optimizer_steps: int | None = None,
     ) -> tinker.SamplingClient:
         """Save a checkpoint with wandb_run_id and return the new sampling client.
 
@@ -1295,6 +1363,8 @@ class PlatoonTinkerRLTrainer:
                     loop_state={
                         "batch": next_batch,
                         "wandb_run_id": self._stats_logger.wandb_run_id,
+                        "policy_version": next_batch if policy_version is None else policy_version,
+                        "optimizer_steps": next_batch if optimizer_steps is None else optimizer_steps,
                     },
                     kind="both",
                 ),
@@ -1389,6 +1459,9 @@ class PlatoonTinkerRLTrainer:
 
         resume_info = checkpoint_utils.get_last_checkpoint(self.run_log_path)
         start_batch = (resume_info.batch or 0) if resume_info else 0
+        policy_version, optimizer_steps = _resume_policy_counters(
+            resume_info, self.config.train.num_minibatches
+        )
 
         training_client = await self._create_training_client(service_client, resume_info)
 
@@ -1405,6 +1478,8 @@ class PlatoonTinkerRLTrainer:
                 loop_state={
                     "batch": start_batch,
                     "wandb_run_id": self._stats_logger.wandb_run_id,
+                    "policy_version": policy_version,
+                    "optimizer_steps": optimizer_steps,
                 },
                 kind="both",
             ),
@@ -1412,12 +1487,12 @@ class PlatoonTinkerRLTrainer:
             total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
         )
         sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
-        sampling_client_step = start_batch
+        sampling_client_step = policy_version
         sampling_client_updated_event = asyncio.Event()
         sampling_client_updated_event.set()
 
         # Set initial version and update sampling client (without auto-incrementing)
-        self.model_info.llm.set_version(start_batch)
+        self.model_info.llm.set_version(policy_version)
         self.model_info.llm.update_sampling_client(sampling_client, increment_version=False)
 
         optimizer_params = tinker.AdamParams(
@@ -1454,6 +1529,7 @@ class PlatoonTinkerRLTrainer:
             training_client=training_client,
             sampling_client=sampling_client,
             sampling_client_step=sampling_client_step,
+            optimizer_steps=optimizer_steps,
             sampling_client_updated_event=sampling_client_updated_event,
             model_info=self._model_info,
             train_dataloader=train_dataloader,
@@ -1500,6 +1576,8 @@ class PlatoonTinkerRLTrainer:
                         loop_state={
                             "batch": current_step,
                             "wandb_run_id": self._stats_logger.wandb_run_id,
+                            "policy_version": shared_state.model_info.llm.version,
+                            "optimizer_steps": shared_state.optimizer_steps,
                         },
                     ),
                     name="save_checkpoint",
@@ -1518,6 +1596,8 @@ class PlatoonTinkerRLTrainer:
                     loop_state={
                         "batch": end_batch,
                         "wandb_run_id": self._stats_logger.wandb_run_id,
+                        "policy_version": shared_state.model_info.llm.version,
+                        "optimizer_steps": shared_state.optimizer_steps,
                     },
                 ),
                 name="save_checkpoint",

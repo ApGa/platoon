@@ -11,6 +11,7 @@ gateway, so workers follow a republished binding instead.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import pickle
 import stat
@@ -253,13 +254,17 @@ def test_a_corrupt_binding_leaves_the_previous_client_in_service(tmp_path, caplo
 
 def test_bootstrap_blob_is_used_before_any_binding_file_exists(tmp_path):
     path = str(tmp_path / "missing.pkl")
-    follower = FollowingSamplingClient(path, pickle.dumps(_StubClient("bootstrap")), poll_seconds=0.0)
+    follower = FollowingSamplingClient(
+        path, pickle.dumps(_StubClient("bootstrap")), poll_seconds=0.0, bootstrap_version=3
+    )
     assert follower.sample() == "bootstrap-sample"
     assert follower.reload_count == 0
+    assert follower.oldest_sampled_version == 3
 
     publish_binding(_StubClient("published"), 5, path)
     assert follower.sample() == "published-sample"
     assert follower.reload_count == 1
+    assert follower.oldest_sampled_version == 3
 
 
 def test_no_bootstrap_and_no_binding_fails_loudly_at_construction(tmp_path):
@@ -273,3 +278,34 @@ def test_following_client_delegates_unknown_attributes(tmp_path):
     publish_binding(client, 1, path)
     follower = FollowingSamplingClient(path, b"", poll_seconds=5.0)
     assert follower.tag == "v1"
+
+
+def test_setup_wait_does_not_age_data_and_later_samples_keep_oldest_version(tmp_path):
+    path = str(tmp_path / "binding.pkl")
+    publish_binding(_StubClient("setup"), 3, path)
+    follower = FollowingSamplingClient(path, poll_seconds=0)
+    assert follower.current().tag == "setup"
+    assert follower.oldest_sampled_version is None
+    # Several updates while the environment is waiting for a CPU slot.
+    publish_binding(_StubClient("first-generation"), 9, path)
+    assert asyncio.run(follower.sample_async()) == "first-generation-async"
+    assert follower.oldest_sampled_version == 9
+    # Root/child/verifier calls can follow newer weights, but earlier sampled
+    # tokens remain in the training datum and must retain their older age.
+    publish_binding(_StubClient("later-generation"), 12, path)
+    assert follower.sample() == "later-generation-sample"
+    assert follower.followed_version == 12
+    assert follower.oldest_sampled_version == 9
+
+
+def test_equal_size_and_timestamp_publications_still_reload(tmp_path):
+    path = str(tmp_path / "binding.pkl")
+    publish_binding(_StubClient("v1"), 1, path)
+    first_stat = os.stat(path)
+    follower = FollowingSamplingClient(path, poll_seconds=0)
+    assert follower.sample() == "v1-sample"
+    publish_binding(_StubClient("v2"), 2, path)
+    os.utime(path, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns))
+    assert os.stat(path).st_size == first_stat.st_size
+    assert follower.sample() == "v2-sample"
+    assert follower.followed_version == 2

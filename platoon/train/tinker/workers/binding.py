@@ -20,8 +20,9 @@ started with -- is wrong twice over:
 
 So the parent republishes a small binding file on every
 ``update_sampling_client`` and the worker reloads it.  Net semantic change:
-none.  Weight staleness, ``max_staleness`` accounting and the
-``checkpoint_version`` stamped into each datum behave exactly as before.
+none for model sampling. Staleness is anchored to the oldest binding actually
+used for generation, so waiting for an environment before the first sample
+does not age otherwise fresh training data.
 
 The telemetry foot-gun
 ======================
@@ -102,7 +103,7 @@ class FollowingSamplingClient:
 
     ``TinkerLLM`` reads ``self.sampling_client`` at exactly two call sites, so
     this is a drop-in.  The binding file is ``stat``ed at most once per
-    ``poll_seconds`` and reloaded only on an mtime/size change; a corrupt or
+    ``poll_seconds`` and reloaded only on an inode/mtime/size change; a corrupt or
     unreadable binding leaves the previously loaded client in service and logs
     a warning rather than failing the rollout.
     """
@@ -112,15 +113,17 @@ class FollowingSamplingClient:
         binding_path: str,
         bootstrap_blob: bytes = b"",
         poll_seconds: float = 5.0,
+        bootstrap_version: int = 0,
     ) -> None:
         self._binding_path = binding_path
         self._poll_seconds = max(0.0, float(poll_seconds))
         self._lock = threading.Lock()
         self._client: Any = load_binding_blob(bootstrap_blob) if bootstrap_blob else None
-        self._version = 0
-        self._signature: tuple[float, int] | None = None
+        self._version = bootstrap_version
+        self._signature: tuple[int, int, int] | None = None
         self._last_poll = 0.0
         self._reloads = 0
+        self._oldest_sampled_version: int | None = None
         if self._client is None:
             # No bootstrap: the binding file is the only source, so read it now
             # and fail loudly here rather than at the first model call.
@@ -139,12 +142,20 @@ class FollowingSamplingClient:
     def reload_count(self) -> int:
         return self._reloads
 
-    def _signature_of(self) -> tuple[float, int] | None:
+    @property
+    def oldest_sampled_version(self) -> int | None:
+        """Minimum policy version used by this rollout, excluding setup waits."""
+
+        return self._oldest_sampled_version
+
+    def _signature_of(self) -> tuple[int, int, int] | None:
         try:
             info = os.stat(self._binding_path)
         except OSError:
             return None
-        return (info.st_mtime_ns / 1e9, info.st_size)
+        # Atomic publications replace the inode. Timestamp granularity can be
+        # too coarse to distinguish consecutive equal-sized bindings.
+        return (info.st_ino, info.st_mtime_ns, info.st_size)
 
     def _reload(self, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -197,11 +208,21 @@ class FollowingSamplingClient:
         return client
 
     # -- SamplingClient surface -----------------------------------------
+    def _for_sampling(self) -> Any:
+        self._reload()
+        with self._lock:
+            if self._client is None:
+                raise RuntimeError(f"no sampling client available from {self._binding_path}")
+            version = self._version
+            if self._oldest_sampled_version is None or version < self._oldest_sampled_version:
+                self._oldest_sampled_version = version
+            return self._client
+
     def sample(self, *args: Any, **kwargs: Any) -> Any:
-        return self.current().sample(*args, **kwargs)
+        return self._for_sampling().sample(*args, **kwargs)
 
     async def sample_async(self, *args: Any, **kwargs: Any) -> Any:
-        return await self.current().sample_async(*args, **kwargs)
+        return await self._for_sampling().sample_async(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):

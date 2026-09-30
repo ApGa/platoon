@@ -169,6 +169,11 @@ class TrainConfig:
     lora_rank: int = 32
     workflow_config: WorkflowConfig = field(default_factory=WorkflowConfig)
     num_concurrent_rollout_workflow_workers: int | None = None
+    # Optional whole-workflow capacities keyed by a dataset column. Admission
+    # happens before worker creation/model binding; waiting rows remain bounded
+    # in the input queue and do not occupy rollout workers.
+    rollout_group_key: str = "_openreward_environment"
+    rollout_group_limits: dict[str, int] = field(default_factory=dict)
 
     # Client-side deadline for a single ``forward_backward`` result.  The client submits
     # every microbatch up front and the Tinker service drains them in order, so the await on
@@ -185,6 +190,15 @@ class TrainConfig:
     def __post_init__(self):
         if self.num_concurrent_rollout_workflow_workers is None:
             self.num_concurrent_rollout_workflow_workers = self.batch_size
+        if not self.rollout_group_key or any(
+            not isinstance(key, str)
+            or not key
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for key, value in self.rollout_group_limits.items()
+        ):
+            raise ValueError("rollout_group_limits requires nonempty labels and positive integer capacities")
 
 
 @dataclass

@@ -22,6 +22,32 @@ if TYPE_CHECKING:
 LOSS_NORMALIZATION_TOKENS_KEY = "_loss_normalization_tokens"
 
 
+def objective_is_zero_for_zero_advantages(loss_fn: str, loss_fn_config: dict) -> bool:
+    """Whether zero advantages guarantee a zero objective for a known RL loss.
+
+    Unknown options may add an advantage-independent KL/entropy/other term.
+    Be conservative until their semantics are explicitly supported here.
+    """
+
+    return loss_fn in {"cispo", "ppo", "importance_sampling"} and not (
+        set(loss_fn_config) - {"clip_low_threshold", "clip_high_threshold"}
+    )
+
+
+def has_zero_objective(datums: list[tinker.Datum], loss_fn: str, loss_fn_config: dict) -> bool:
+    """Exact-zero check; tiny and non-finite advantages must still be processed."""
+
+    return (
+        bool(datums)
+        and objective_is_zero_for_zero_advantages(loss_fn, loss_fn_config)
+        and all(
+            "advantages" in datum.loss_fn_inputs
+            and bool(torch.all(datum.loss_fn_inputs["advantages"].to_torch() == 0))
+            for datum in datums
+        )
+    )
+
+
 def has_zero_action_advantage(datum: tinker.Datum) -> bool:
     """Return whether a datum can make no policy-gradient contribution."""
 

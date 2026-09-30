@@ -30,6 +30,7 @@ from platoon.train.tinker.rollout_metrics import (
     timeline_scope,
 )
 from platoon.train.tinker.workers import run as run_module
+from platoon.train.tinker.workers.binding import FollowingSamplingClient, publish_binding
 from platoon.train.tinker.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
@@ -145,6 +146,33 @@ def _run(request, rollout_fn, result=None, monkeypatch=None, **kwargs):
             run_module, "get_train_data_for_trajectory_collection", lambda **_kwargs: result
         )
     return asyncio.run(run_rollout_request(request, None, rollout_fn=rollout_fn, **kwargs))
+
+
+class _SamplingStub:
+    async def sample_async(self):
+        return None
+
+
+def test_conversion_stamps_oldest_actual_sample_not_request_or_latest(tmp_path, monkeypatch):
+    request = _request(tmp_path)  # Request made at version 3.
+    path = request.model.binding_path
+    publish_binding(_SamplingStub(), 3, path)
+    follower = FollowingSamplingClient(path, poll_seconds=0)
+    llm = SimpleNamespace(sampling_client=follower)
+    captured = []
+    def convert(**kwargs):
+        captured.append(kwargs["checkpoint_version"])
+        return _result(num_datums=1, stats_datums=1)
+    monkeypatch.setattr(run_module, "get_train_data_for_trajectory_collection", convert)
+    async def rollout_fn(_task, _config):
+        publish_binding(_SamplingStub(), 8, path)  # Environment setup waited.
+        await follower.sample_async()
+        publish_binding(_SamplingStub(), 10, path)
+        await follower.sample_async()  # Later child/judge sample.
+        return {"trajectories": {"root": {"steps": [{}]}}}
+    response = asyncio.run(run_rollout_request(request, llm, rollout_fn=rollout_fn))
+    assert response.status == "completed"
+    assert captured == [8]
 
 
 def test_no_trajectories_branch(tmp_path):
