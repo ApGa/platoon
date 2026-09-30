@@ -49,6 +49,9 @@ def _select_task_records(
             global_batch_size=config.train.batch_size,
             seed=seed,
             preserve_order_key=PRESERVE_DATASET_ORDER_COLUMN,
+            # This order is materialized once and repeated each epoch. Dropping
+            # its tail would omit the same tasks throughout the entire run.
+            drop_last=False,
         )
         return ordered
 

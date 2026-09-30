@@ -645,8 +645,14 @@ def materialize_balanced_record_order(
     global_batch_size: int,
     seed: int = 0,
     preserve_order_key: str | None = None,
+    drop_last: bool = True,
 ) -> list[dict[str, Any]]:
-    """Return complete batches ordered by the configured environment mixture."""
+    """Return complete batches ordered by the configured environment mixture.
+
+    With ``drop_last=False``, repeat from the environment pools to fill the
+    last batch instead of permanently excluding a fixed materialized tail.
+    Environment weights and their fair scheduling are unchanged.
+    """
 
     sampler = BalancedEnvironmentSampler(
         [str(record[environment_key]) for record in records],
@@ -654,7 +660,7 @@ def materialize_balanced_record_order(
         global_batch_size=global_batch_size,
         seed=seed,
         shuffle=True,
-        drop_last=True,
+        drop_last=drop_last,
     )
     ordered = [dict(records[index]) for index in sampler]
     if preserve_order_key is not None:
