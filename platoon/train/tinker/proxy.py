@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import os
 import uuid
 from contextvars import ContextVar
@@ -246,6 +247,9 @@ class TinkerLLM(CustomLLM):
         self.top_p = top_p
         self.seed = seed
         self.context_window_length = context_window_length
+        self.sample_timeout_seconds = float(os.environ.get("TINKER_SAMPLE_TIMEOUT_SECONDS", "600"))
+        if not math.isfinite(self.sample_timeout_seconds) or self.sample_timeout_seconds <= 0:
+            raise ValueError("TINKER_SAMPLE_TIMEOUT_SECONDS must be finite and positive")
         self._version: int = 0
         self._build_prompt_params = frozenset(inspect.signature(renderer.build_generation_prompt).parameters)
         self._parse_response_params = frozenset(inspect.signature(renderer.parse_response).parameters)
@@ -649,17 +653,16 @@ class TinkerLLM(CustomLLM):
         start_time = time.perf_counter()
         render_seconds = start_time - call_started
 
-        # Timeout for sample_async to prevent infinite hangs (10 minutes)
-        SAMPLE_TIMEOUT_SECONDS = 600
+        # Bound stalled requests while allowing deployment-specific long generations.
         try:
             result = await asyncio.wait_for(
                 self.sampling_client.sample_async(prompt=model_input, sampling_params=params, num_samples=1),
-                timeout=SAMPLE_TIMEOUT_SECONDS,
+                timeout=self.sample_timeout_seconds,
             )
         except asyncio.TimeoutError:
             elapsed = time.perf_counter() - start_time
-            logger.error(f"sample_async timed out after {elapsed:.1f}s (timeout={SAMPLE_TIMEOUT_SECONDS}s)")
-            raise TimeoutError(f"Tinker sample_async timed out after {SAMPLE_TIMEOUT_SECONDS}s")
+            logger.error(f"sample_async timed out after {elapsed:.1f}s (timeout={self.sample_timeout_seconds}s)")
+            raise TimeoutError(f"Tinker sample_async timed out after {self.sample_timeout_seconds}s")
         except Exception as e:
             elapsed = time.perf_counter() - start_time
             logger.exception(f"sample_async failed after {elapsed:.1f}s: {e}")

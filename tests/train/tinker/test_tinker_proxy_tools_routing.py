@@ -154,6 +154,30 @@ def make_llm(renderer, tokenizer, response, **kwargs) -> tuple[TinkerLLM, FakeSa
     return llm, client
 
 
+def test_sample_timeout_cancels_stalled_request(monkeypatch):
+    monkeypatch.setenv("TINKER_SAMPLE_TIMEOUT_SECONDS", "0.01")
+    llm, client = make_llm(FakeRenderer(), FakeTokenizer(), make_response([5, 0]))
+    cancelled = []
+
+    async def stalled_sample(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    client.sample_async = stalled_sample
+    with pytest.raises(TimeoutError, match="0.01s"):
+        asyncio.run(llm.acompletion(messages=[{"role": "user", "content": "hi"}], optional_params={}))
+    assert cancelled == [True]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_sample_timeout_rejects_unbounded_values(monkeypatch, value):
+    monkeypatch.setenv("TINKER_SAMPLE_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValueError, match="finite and positive"):
+        make_llm(FakeRenderer(), FakeTokenizer(), make_response([5, 0]))
+
+
 # --------------------------------------------------------------------------- fixtures
 
 
