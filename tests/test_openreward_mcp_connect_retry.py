@@ -120,6 +120,7 @@ def _load_rollout_module(monkeypatch, *, create_mcp_tools):
 def _fast_retries(monkeypatch):
     monkeypatch.setenv("OPENREWARD_MCP_CONNECT_RETRY_DELAY", "0")
     monkeypatch.setenv("OPENREWARD_MCP_TIMEOUT", "1800")
+    monkeypatch.delenv("OPENREWARD_MCP_TOOL_TIMEOUT", raising=False)
 
 
 def test_boot_timeout_override_is_forwarded(monkeypatch):
@@ -134,6 +135,24 @@ def test_boot_timeout_override_is_forwarded(monkeypatch):
     # The SDK's hardcoded 30 s must be replaced by OPENREWARD_MCP_TIMEOUT.
     assert seen == [1800.0]
     assert module is not None
+
+
+@pytest.mark.parametrize("configured,expected", [(None, 300), ("25200", 25200)])
+def test_tool_execution_has_separate_optional_deadline(monkeypatch, configured, expected):
+    if configured is not None:
+        monkeypatch.setenv("OPENREWARD_MCP_TOOL_TIMEOUT", configured)
+    executor = types.SimpleNamespace(timeout=300)
+    client = types.SimpleNamespace(tools=[types.SimpleNamespace(executor=executor)])
+    _, agent_base = _load_rollout_module(monkeypatch, create_mcp_tools=lambda *args: client)
+    assert agent_base.create_mcp_tools({"mcpServers": {}}) is client
+    assert executor.timeout == expected
+
+
+@pytest.mark.parametrize("configured", ["0", "-1", "nan", "inf", "invalid"])
+def test_invalid_tool_deadline_fails_before_connecting(monkeypatch, configured):
+    monkeypatch.setenv("OPENREWARD_MCP_TOOL_TIMEOUT", configured)
+    with pytest.raises(ValueError):
+        _load_rollout_module(monkeypatch, create_mcp_tools=lambda *args: None)
 
 
 def test_a_fast_mcp_failure_is_retried_then_succeeds(monkeypatch):

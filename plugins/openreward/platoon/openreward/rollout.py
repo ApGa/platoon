@@ -217,6 +217,9 @@ def _patch_mcp_boot_timeout() -> None:
     ``create_mcp_tools`` symbol it calls and force a larger timeout. Override via
     ``OPENREWARD_MCP_TIMEOUT`` (seconds).
 
+    ``OPENREWARD_MCP_TOOL_TIMEOUT`` optionally overrides the SDK's separate
+    300-second tool-call deadline for environments with long native graders.
+
     The same wrapper retries a *fast* boot failure (``MCPError``, e.g. a bridge
     that lost its race with a service restart) ``OPENREWARD_MCP_CONNECT_RETRIES``
     times before letting the episode die at step 0.  A ``MCPTimeoutError`` is
@@ -227,6 +230,10 @@ def _patch_mcp_boot_timeout() -> None:
         timeout = float(os.environ.get("OPENREWARD_MCP_TIMEOUT", "120"))
     except (TypeError, ValueError):
         timeout = 120.0
+    tool_timeout_value = os.environ.get("OPENREWARD_MCP_TOOL_TIMEOUT")
+    tool_timeout = float(tool_timeout_value) if tool_timeout_value is not None else None
+    if tool_timeout is not None and (not math.isfinite(tool_timeout) or tool_timeout <= 0):
+        raise ValueError("OPENREWARD_MCP_TOOL_TIMEOUT must be finite and positive")
     retries = _env_int("OPENREWARD_MCP_CONNECT_RETRIES", 2)
     try:
         backoff = float(os.environ.get("OPENREWARD_MCP_CONNECT_RETRY_DELAY", "2.0"))
@@ -248,7 +255,11 @@ def _patch_mcp_boot_timeout() -> None:
         attempt = 0
         while True:
             try:
-                return original(config, timeout, *args, **kwargs)
+                client = original(config, timeout, *args, **kwargs)
+                if tool_timeout is not None:
+                    for tool in client.tools:
+                        tool.executor.timeout = tool_timeout
+                return client
             except MCPTimeoutError:
                 raise
             except MCPError as exc:
