@@ -418,6 +418,74 @@ def test_chat_template_kwargs_from_extra_body_honoured(tokenizer, renderer):
 
 
 @needs_snapshot
+@pytest.mark.parametrize("synchronous", [False, True])
+def test_nonthinking_summary_is_visible_content(tokenizer, renderer, im_end, synchronous):
+    tokens = tokenizer.encode("Summary of completed work.", add_special_tokens=False) + [im_end]
+    llm, _ = make_llm(renderer, tokenizer, make_response(tokens))
+    request = {
+        "messages": [{"role": "user", "content": "Summarize the completed work."}],
+        "optional_params": {"extra_body": {"reasoning_effort": "none"}},
+    }
+    with TinkerLLMProxySession():
+        result = llm.completion(**request) if synchronous else asyncio.run(llm.acompletion(**request))
+    choice = result.choices[0]
+    assert choice.message.content == "Summary of completed work."
+    assert getattr(choice.message, "reasoning_content", None) is None
+    assert choice.finish_reason == "stop"
+    assert choice.token_ids == tokens
+    assert renderer.enable_thinking is True
+
+
+@needs_snapshot
+@pytest.mark.parametrize("utility_first", [False, True])
+def test_concurrent_policy_and_summary_keep_request_local_thinking(tokenizer, renderer, im_end, utility_first):
+    policy_tokens = tokenizer.encode("Unfinished policy reasoning", add_special_tokens=False)
+    summary_tokens = tokenizer.encode("Completed work summary.", add_special_tokens=False) + [im_end]
+    llm, client = make_llm(renderer, tokenizer, make_response(summary_tokens))
+
+    async def run():
+        both_started = asyncio.Event()
+        calls = []
+
+        async def sample_async(*, prompt, sampling_params, num_samples):
+            assert renderer.enable_thinking is True
+            utility = tokenizer.decode(prompt.to_ints()).endswith("<think>\n\n</think>\n\n")
+            calls.append(utility)
+            if len(calls) == 2:
+                both_started.set()
+            await both_started.wait()
+            return make_response(
+                summary_tokens if utility else policy_tokens, stop_reason="stop" if utility else "length"
+            )
+
+        client.sample_async = sample_async
+        modes = [utility_first, not utility_first]
+        results = await asyncio.gather(
+            *(
+                llm.acompletion(
+                    messages=[{"role": "user", "content": "Continue."}],
+                    optional_params={"chat_template_kwargs": {"enable_thinking": False}} if utility else {},
+                )
+                for utility in modes
+            )
+        )
+        return dict(zip(modes, results, strict=True))
+
+    with TinkerLLMProxySession() as session:
+        results = asyncio.run(run())
+        assert session.interactions[results[True].id].action.tokens == summary_tokens
+        assert session.interactions[results[False].id].action.tokens == policy_tokens
+    summary, policy = results[True].choices[0], results[False].choices[0]
+    assert summary.message.content == "Completed work summary."
+    assert getattr(summary.message, "reasoning_content", None) is None
+    assert policy.message.content == ""
+    assert policy.message.reasoning_content == "Unfinished policy reasoning"
+    assert policy.finish_reason == "length"
+    assert not policy.message.tool_calls
+    assert renderer.enable_thinking is True
+
+
+@needs_snapshot
 def test_parse_xml_tool_call_to_openai_tool_calls(tokenizer, renderer, im_end):
     completion = f"plan the call\n</think>\n\nI'll check the forecast.\n\n{XML_TOOL_CALL}"
     tokens = tokenizer.encode(completion, add_special_tokens=False) + [im_end]

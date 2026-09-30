@@ -592,26 +592,33 @@ class Qwen3_6PreserveThinkingRenderer(Renderer):
                 return str(self.tokenizer.decode(response[:i])), True
         return str(self.tokenizer.decode(list(response))), False
 
-    def parse_response(self, response: list[int], tools: Iterable[Any] | None = None) -> tuple[Message, bool]:
+    def parse_response(
+        self, response: list[int], tools: Iterable[Any] | None = None, *, enable_thinking: bool | None = None
+    ) -> tuple[Message, bool]:
         """Parse sampled tokens (after the ``<think>\\n`` generation prompt) into an assistant Message.
 
         ``success`` is False when no stop token (``<|im_end|>``/``<|endoftext|>``) was sampled;
         the message is still parsed on a best-effort basis (truncated reasoning ends up in
         ``reasoning_content`` with empty ``content``, like SGLang's force-reasoning mode).
+        ``enable_thinking`` must match the request's generation prompt when it overrides
+        the renderer default (for example, a nonthinking utility summary).
         """
         text, success = self._split_at_stop(response)
-        return self._parse_text(text, tools), success
+        return self._parse_text(text, tools, enable_thinking=enable_thinking), success
 
     def _parse_response_for_streaming(self, response: list[int]) -> tuple[Message, bool]:
         text, success = self._split_at_stop(response)
         return self._parse_text(text, None), success
 
-    def _parse_text(self, text: str, tools: Iterable[Any] | None) -> Message:
+    def _parse_text(
+        self, text: str, tools: Iterable[Any] | None, *, enable_thinking: bool | None = None
+    ) -> Message:
+        enable = self.enable_thinking if enable_thinking is None else enable_thinking
         if THINK_CLOSE in text:
             # Template semantics on re-render: reasoning before the FIRST </think>, content after the LAST.
             reasoning = text.split(THINK_CLOSE)[0].split(THINK_OPEN)[-1].strip()
             body = text.split(THINK_CLOSE)[-1]
-        elif self.enable_thinking or THINK_OPEN in text:
+        elif enable or THINK_OPEN in text:
             # Prompt ended in <think>\n and the model never closed it: everything is reasoning.
             reasoning = text.replace(THINK_OPEN, "").strip()
             body = ""

@@ -459,7 +459,12 @@ class TinkerLLM(CustomLLM):
         return "length" if stop_reason == "length" else "stop"
 
     def _parse_response(
-        self, model_input: ModelInput, response: SampleResponse, *, tools: list[dict[str, Any]] | None = None
+        self,
+        model_input: ModelInput,
+        response: SampleResponse,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        render_kwargs: dict[str, Any] | None = None,
     ) -> ModelResponse:
         """Tinker Response -> LiteLLM Response.
 
@@ -471,7 +476,11 @@ class TinkerLLM(CustomLLM):
         """
         choices: List[Choices] = []
         completion_token_count = 0
-        parse_kwargs: dict[str, Any] = {}
+        # Prompt and response must agree about the request's thinking prefix.
+        # Pass only supported overrides; never mutate the shared renderer.
+        parse_kwargs = {
+            key: value for key, value in (render_kwargs or {}).items() if key in self._parse_response_params
+        }
         if tools and "tools" in self._parse_response_params:
             parse_kwargs["tools"] = tools
         for seq in response.sequences:
@@ -671,7 +680,9 @@ class TinkerLLM(CustomLLM):
         if elapsed > 30.0:
             logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
         parse_started = time.perf_counter()
-        final_response = self._parse_response(model_input, result, tools=render_request.tools)
+        final_response = self._parse_response(
+            model_input, result, tools=render_request.tools, render_kwargs=render_request.render_kwargs
+        )
         self._record_interaction(model_input, final_response, routing_id=self._routing_id_of(result))
         record_model_span(final_response.id, call_started)
         ended = time.perf_counter()
@@ -714,7 +725,9 @@ class TinkerLLM(CustomLLM):
             stop=stop_sequences,
         )
         result = self.sampling_client.sample(prompt=model_input, sampling_params=params, num_samples=1)
-        final_response = self._parse_response(model_input, result, tools=render_request.tools)
+        final_response = self._parse_response(
+            model_input, result, tools=render_request.tools, render_kwargs=render_request.render_kwargs
+        )
         self._record_interaction(model_input, final_response, routing_id=self._routing_id_of(result))
         record_model_span(final_response.id, call_started)
         return final_response

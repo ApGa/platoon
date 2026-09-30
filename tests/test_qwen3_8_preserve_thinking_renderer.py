@@ -51,3 +51,15 @@ def test_hf_template_parity(tokenizer, effort, thinking, system, tools):
         )
         == expected
     )
+
+
+@pytest.mark.parametrize("default_thinking, request_thinking", [(True, False), (False, True), (True, None)])
+def test_response_parsing_matches_request_thinking(tokenizer, default_thinking, request_thinking):
+    renderer = Qwen3_8PreserveThinkingRenderer(tokenizer, enable_thinking=default_thinking)
+    tokens = tokenizer.encode("Summary of completed work.<|im_end|>", add_special_tokens=False)
+    message, success = renderer.parse_response(tokens, enable_thinking=request_thinking)
+    effective = default_thinking if request_thinking is None else request_thinking
+    assert success
+    assert message["content"] == ("" if effective else "Summary of completed work.")
+    assert message["reasoning_content"] == ("Summary of completed work." if effective else "")
+    assert renderer.enable_thinking == default_thinking
