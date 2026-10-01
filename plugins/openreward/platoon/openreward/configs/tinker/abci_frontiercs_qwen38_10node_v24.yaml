@@ -1,0 +1,172 @@
+# 48K policy output, 128K context, native medium reasoning; 12-hour training request limit.
+# Frontier-CS native scores; 10 nodes: 5 training (TP4/DP10), 5 inference.
+# The recursive variants enable child verification/behavior judging via launch overrides.
+# Allow native grading to drain pending iterative work and evaluate current/best
+# artifacts (up to three hours each), with room for agent work and setup queues.
+train:
+  model_name: /groups/gai51740/aci18912it/rasp/cache/huggingface/hub/models--apurvaga--Qwen3.8-27B-preserve-thinking/snapshots/97c725615b8aa025b800da4ceed38811358b30f1
+  renderer_name: qwen3_8_preserve_thinking
+  renderer_kwargs:
+    preserve_thinking: true
+    enable_thinking: true
+    reasoning_effort: medium
+  context_window_length: 131072
+  batch_size: 32
+  num_epochs: 10
+  max_training_steps: null
+  num_minibatches: 1
+  num_microbatches: 1
+  # Long-horizon batches contain many sequential gateway training units.
+  forward_backward_timeout_seconds: 43200
+  max_staleness: 3
+  lora_rank: 32
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1.0e-06
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-08
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    rollout_isolation: process
+    leave_one_out_baseline: true
+    depth_level_weighting: true
+    subagent_datum_keep_probability: 1.0
+    subagent_datum_sampling_seed: 343
+    filter_errors: true
+    filter_message_actions: false
+    filter_zero_advantage_datums: false
+    # Native optimization graders can legitimately outlast faster group members.
+    straggler_timeout_seconds: null
+    straggler_quorum: null
+    min_successful_group_size: 4
+    rollout_config:
+      max_steps: 200
+      timeout: 50400
+      step_timeout: 36000
+      propagate_root_success: false
+      verbose: true
+      inference_params:
+        temperature: 1.0
+        top_p: 1.0
+        max_completion_tokens: 49152
+    token_efficiency_reward:
+      enabled: false
+      coefficient: 0.003
+      reference_tokens: 20000.0
+      max_penalty: 0.8
+      input_token_weight: 0.01
+      output_token_weight: 1.0
+      attribution: policy_subtree
+  rollout_group_key: _openreward_environment
+  rollout_group_limits:
+    fcs_2_0: 2
+  num_concurrent_rollout_workflow_workers: 48
+eval:
+  strategy: none
+  every: 0
+  num_concurrent_rollout_workflow_workers: 1
+  workflow_config:
+    group_size: 1
+    filter_errors: false
+    filter_zero_advantage_datums: false
+    rollout_config:
+      max_steps: 200
+      timeout: 50400
+      step_timeout: 36000
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 49152
+checkpoint:
+  strategy: step
+  every: 20
+  recovery_every: 1
+  load_checkpoint_path: null
+log_path: /groups/gai51740/aci18912it/miles-tinker/runs/default/logs
+tinker_base_url: null
+watchdog:
+  enabled: true
+  timeout_seconds: 64800
+  exit_code: 2
+stats:
+  experiment_name: frontiercs-openhands-miles-tinker
+  trial_name: frontiercs-q38-v24
+  wandb:
+    mode: online
+    project: frontiercs-openhands
+    entity: null
+    group: frontiercs-q38-base-v24
+    tags:
+    - openreward
+    - frontiercs
+    - openhands
+    - miles-tinker
+    - qwen38
+    - native-reward
+openreward:
+  env_name: frontier_cs_algorithmic
+  variant: frontier_cs_algorithmic
+  split: train
+  eval_split: null
+  session_url: http://localhost:8085
+  api_url: null
+  api_key: local
+  train_task_limit: null
+  eval_task_limit: null
+  task_names: null
+  max_tool_calls: 0
+  balance_accepted_batches: false
+  accepted_batch_max_replacement_rounds: 8
+  enable_programmatic_tool_calling: true
+  programmatic_tool_calling_mode: orchestration_only
+  programmatic_tool_calling_max_tool_calls_per_execution: 1024
+  enable_task_tracker: true
+  enable_recursive_subagents: false
+  subagent_environment_access: shared
+  subagent_default_max_steps: 100
+  subagent_max_depth: 2
+  enable_subagent_reward_judging: false
+  subagent_reward_judge_max_steps: 100
+  enable_subagent_behavior_judging: false
+  enable_subagent_parent_usage_eligibility_gate: false
+  subagent_parent_usage_judge_max_concurrency: 4
+  subagent_behavior_judge_max_prompt_tokens: 24576
+  subagent_behavior_judge_max_output_tokens: 16384
+  subagent_behavior_judge_timeout_seconds: 1800.0
+  subagent_delegation_reward_coefficient: 0.0
+  openhands_system_prompt_suffix: null
+  condenser_disable_thinking: true
+  condenser_max_tokens: 60000
+  condenser_max_completion_tokens: 26214
+  environments:
+  - label: fcs_algorithmic
+    env_name: frontier_cs_algorithmic
+    variant: frontier_cs_algorithmic
+    split: train
+    eval_split: train
+    session_url: http://localhost:8085
+    session_urls_env_var: OPENREWARD_SESSION_URLS_FCS_ALGORITHMIC
+    api_key: local
+    train_task_limit: null
+    eval_task_limit: null
+    max_tool_calls: 0
+    sampling_weight: 188.0
+  - label: fcs_2_0
+    env_name: frontier_cs_2_0
+    variant: frontier_cs_2_0
+    split: train
+    eval_split: train
+    session_url: http://localhost:8085
+    session_urls_env_var: OPENREWARD_SESSION_URLS_FCS_2_0
+    api_key: local
+    train_task_limit: null
+    eval_task_limit: null
+    max_tool_calls: 0
+    sampling_weight: 12.0
+  enable_generation_limit_recovery: false
+seed: 343
