@@ -614,6 +614,11 @@ class GroupRolloutWorkflow:
         """
         group_size = self.config.group_size
         straggler_timeout = getattr(self.config, "straggler_timeout_seconds", None)
+        quorum = getattr(self.config, "straggler_quorum", None)
+        policy_key = getattr(self.config, "straggler_policy_key", None)
+        policy = getattr(self.config, "straggler_policies", {}).get(data.get(policy_key))
+        if policy is not None:
+            straggler_timeout, quorum = policy.timeout_seconds, policy.quorum
         admission = await self._admit_group(group_size)
         tasks = [
             asyncio.ensure_future(self._run_group_member(data, i, admission))
@@ -625,7 +630,6 @@ class GroupRolloutWorkflow:
             finally:
                 admission.release()
 
-        quorum = getattr(self.config, "straggler_quorum", None)
         if quorum is None:
             quorum = max(group_size - 1, 1)
         pending: set[asyncio.Future] = set(tasks)

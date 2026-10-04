@@ -16,7 +16,7 @@ import tinker
 import torch
 from tinker import TensorData
 
-from platoon.train.tinker.config_defs import WorkflowConfig
+from platoon.train.tinker.config_defs import StragglerPolicy, WorkflowConfig
 from platoon.train.tinker.workflows import group_rollout_workflow as grw
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import get as get_tracker
@@ -210,3 +210,85 @@ def test_workflow_config_validation():
         group_size=8, straggler_timeout_seconds=900, straggler_quorum=6, min_successful_group_size=4
     )
     assert (config.straggler_timeout_seconds, config.straggler_quorum, config.min_successful_group_size) == (900, 6, 4)
+
+
+@pytest.mark.parametrize("failed_fast_members", [0, 2])
+def test_environment_policy_cancels_only_algorithmic_tail_and_does_not_insert_zero_rewards(failed_fast_members):
+    config = WorkflowConfig(
+        group_size=8,
+        leave_one_out_baseline=True,
+        straggler_policy_key="_openreward_environment",
+        straggler_policies={"fcs_algorithmic": {"timeout_seconds": 0.02, "quorum": 6}},
+    )
+    assert isinstance(config.straggler_policies["fcs_algorithmic"], StragglerPolicy)
+    rewards = [1.0] * 8
+
+    class WorkflowWithFailures(_FakeWorkflow):
+        async def arun_episode_single(self, data, rollout_number=0):
+            if rollout_number < failed_fast_members:
+                return grw._SingleRolloutOutcome(
+                    result=None, workload=RolloutWorkload(), observed=False, disposition="worker_crashed"
+                )
+            return await super().arun_episode_single(data, rollout_number)
+
+    algorithmic = WorkflowWithFailures(config, [0.0] * 6 + [0.12, 0.12], rewards, "test_algo_policy")
+    cpu = WorkflowWithFailures(config, [0.0] * 6 + [0.12, 0.12], rewards, "test_cpu_policy")
+
+    async def run_both():
+        return await asyncio.gather(
+            algorithmic.arun_episode({"task_id": "a", "_openreward_environment": "fcs_algorithmic"}),
+            cpu.arun_episode({"task_id": "b", "_openreward_environment": "fcs_2_0"}),
+        )
+
+    algo_output, cpu_output = asyncio.run(run_both())
+    assert sorted(algorithmic.cancelled) == [6, 7]
+    assert cpu.cancelled == []
+    assert algo_output.requested_rollouts == cpu_output.requested_rollouts == 8
+    assert algo_output.observed_rollouts == 6 - failed_fast_members
+    assert cpu_output.observed_rollouts == 8 - failed_fast_members
+    assert algo_output.rollout_stats.values["task_reward"] == [1.0] * (6 - failed_fast_members)
+    # Failed members still settle the quorum. Cancelled members are unobserved,
+    # not reward-zero peers: equal successes have zero centered advantage.
+    assert algo_output.trainable_rollouts == 0
+    assert all(torch.all(d.loss_fn_inputs["advantages"].to_torch() == 0) for d in algo_output)
+    assert _scalars("test_algo_policy")["straggler_cancelled"] == 2
+    assert "straggler_cancelled" not in _scalars("test_cpu_policy")
+
+
+def test_explicit_disabled_policy_overrides_global_cutoff_and_unlisted_values_use_global():
+    config = WorkflowConfig(
+        group_size=2,
+        straggler_timeout_seconds=0.02,
+        straggler_quorum=1,
+        straggler_policy_key="suite",
+        straggler_policies={"slow": StragglerPolicy()},
+    )
+
+    async def run_both():
+        slow = _FakeWorkflow(config, [0, 0.08], [0, 1], "test_disabled_override")
+        default = _FakeWorkflow(config, [0, 0.08], [0, 1], "test_global_fallback")
+        outputs = await asyncio.gather(
+            slow.arun_episode({"task_id": "a", "suite": "slow"}),
+            default.arun_episode({"task_id": "b", "suite": "other"}),
+        )
+        return slow, default, outputs
+
+    slow, default, outputs = asyncio.run(run_both())
+    assert slow.cancelled == []
+    assert default.cancelled == [1]
+    assert [output.observed_rollouts for output in outputs] == [2, 1]
+    _scalars("test_disabled_override")
+    _scalars("test_global_fallback")
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"straggler_policies": {"a": {"timeout_seconds": 1, "quorum": 2}}},
+    {"straggler_policy_key": ""},
+    {"straggler_policy_key": "suite", "straggler_policies": {"": {"timeout_seconds": 1}}},
+    {"straggler_policy_key": "suite", "straggler_policies": {"a": {"quorum": 1}}},
+    {"straggler_policy_key": "suite", "straggler_policies": {"a": {"timeout_seconds": 0}}},
+    {"straggler_policy_key": "suite", "straggler_policies": {"a": {"timeout_seconds": 1, "quorum": 9}}},
+])
+def test_per_label_policy_validation(kwargs):
+    with pytest.raises(ValueError):
+        WorkflowConfig(group_size=8, **kwargs)

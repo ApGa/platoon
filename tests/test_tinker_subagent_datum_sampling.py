@@ -892,9 +892,9 @@ def test_tinker_partial_root_reward_is_metric_only_and_completed_child_uses_vali
     # Two child action tokens remain, but the denominator still includes the
     # two zero-gradient root action tokens which were removed from model compute.
     assert float(child_datum.loss_fn_inputs[normalization_key].to_torch().item()) == 4.0
-    task_reward_values, task_reward_denominator = tracker.stats["task_reward"]
+    task_reward_values, task_reward_denominator = tracker.stats["rollout_completion/task_reward"]
     assert torch.equal(task_reward_values, torch.tensor([9.0, 1.0]))
-    assert task_reward_denominator == "task_reward_mask"
+    assert task_reward_denominator == "rollout_completion/task_reward/count"
 
 
 def test_tinker_zero_advantage_datum_filter_can_be_disabled(monkeypatch):

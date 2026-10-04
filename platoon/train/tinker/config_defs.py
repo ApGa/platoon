@@ -20,6 +20,22 @@ class AdamParams:
 
 
 @dataclass
+class StragglerPolicy:
+    """A complete tail policy for groups sharing a dataset-column value."""
+
+    timeout_seconds: float | None = None
+    quorum: int | None = None
+
+    def validate(self, group_size: int) -> None:
+        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
+            raise ValueError("straggler timeout_seconds must be positive or null")
+        if self.quorum is not None and not 1 <= self.quorum <= group_size:
+            raise ValueError("straggler quorum must be in [1, group_size] or null")
+        if self.timeout_seconds is None and self.quorum is not None:
+            raise ValueError("straggler quorum requires timeout_seconds")
+
+
+@dataclass
 class WorkflowConfig:
     """Configuration for the rollout workflow."""
 
@@ -51,6 +67,12 @@ class WorkflowConfig:
     # ``group_size - 1`` (the classic single-straggler policy). Requires
     # ``straggler_timeout_seconds``.
     straggler_quorum: int | None = None
+    # Optional complete policy overrides keyed by a dataset-column value.
+    # Unlisted values retain the global policy above; a null timeout disables
+    # the cutoff for a listed value. This keeps slow native graders independent
+    # of the policy used by other environments in the same training mixture.
+    straggler_policy_key: str | None = None
+    straggler_policies: dict[str, StragglerPolicy] = field(default_factory=dict)
     # A group that returns fewer usable rollouts than this produces no training
     # datums (its rollout workload is still accounted for).
     min_successful_group_size: int = 1
@@ -105,12 +127,21 @@ class WorkflowConfig:
             raise ValueError("subagent_datum_sampling_seed must be an integer")
         if self.group_size < 1:
             raise ValueError("workflow group_size must be positive")
-        if self.straggler_timeout_seconds is not None and self.straggler_timeout_seconds <= 0:
-            raise ValueError("straggler_timeout_seconds must be positive or null")
-        if self.straggler_quorum is not None and not 1 <= self.straggler_quorum <= self.group_size:
-            raise ValueError("straggler_quorum must be in [1, group_size] or null")
-        if self.straggler_timeout_seconds is None and self.straggler_quorum is not None:
-            raise ValueError("straggler_quorum requires straggler_timeout_seconds")
+        StragglerPolicy(self.straggler_timeout_seconds, self.straggler_quorum).validate(self.group_size)
+        if self.straggler_policy_key is not None and (
+            not isinstance(self.straggler_policy_key, str) or not self.straggler_policy_key
+        ):
+            raise ValueError("straggler_policy_key must be a nonempty dataset column name")
+        if self.straggler_policies and self.straggler_policy_key is None:
+            raise ValueError("straggler_policies requires straggler_policy_key")
+        self.straggler_policies = {
+            label: StragglerPolicy(**policy) if isinstance(policy, dict) else policy
+            for label, policy in self.straggler_policies.items()
+        }
+        for label, policy in self.straggler_policies.items():
+            if not isinstance(label, str) or not label or not isinstance(policy, StragglerPolicy):
+                raise ValueError("straggler_policies requires nonempty labels and StragglerPolicy values")
+            policy.validate(self.group_size)
         if not 1 <= self.min_successful_group_size <= self.group_size:
             raise ValueError("min_successful_group_size must be in [1, group_size]")
         if self.rollout_isolation not in ("inprocess", "process"):
