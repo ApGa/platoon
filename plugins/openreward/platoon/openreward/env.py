@@ -60,10 +60,14 @@ def _finished_reward_payload(event: Event) -> dict[str, Any] | None:
 
         reward = payload.get("reward")
         has_numeric_reward = isinstance(reward, (int, float)) and not isinstance(reward, bool)
+        metadata = payload.get("metadata")
+        invalid = isinstance(metadata, dict) and metadata.get("invalid") is True
         # Preserve the bridge's explicit claim_done completion signal, while
         # also accepting environments whose own terminal tool (for example
-        # submit_answer) returns the final reward directly.
-        if tool_name == "claim_done" or has_numeric_reward:
+        # submit_answer) returns a final reward or an invalid grading result.
+        # Invalid results deliberately have no reward; stop here so evaluate()
+        # excludes the trajectory instead of a later message turning it into 0.
+        if tool_name == "claim_done" or has_numeric_reward or invalid:
             return payload
     return None
 

@@ -28,15 +28,18 @@ def _action(events, name, response):
     )
 
 
-def _result(events, llm, action, reward=None):
-    payload = {"finished": True, "reward": reward} if reward is not None else {"finished": False}
+def _result(events, llm, action, reward=None, *, payload=None):
+    from openhands.sdk.mcp import MCPToolObservation
+
+    if payload is None:
+        payload = {"finished": True, "reward": reward} if reward is not None else {"finished": False}
     return events.ObservationEvent.model_construct(
         id=f"result-{action.id}",
         source="environment",
         action_id=action.id,
         tool_call_id=action.tool_call_id,
         tool_name=action.tool_name,
-        observation=SimpleNamespace(tool_name=action.tool_name, content=[llm.TextContent(text=json.dumps(payload))]),
+        observation=MCPToolObservation(tool_name=action.tool_name, content=[llm.TextContent(text=json.dumps(payload))]),
     )
 
 
@@ -81,6 +84,122 @@ def _drain(env, utils, types, collection, trajectory):
                 variable.reset(token)
 
     asyncio.run(run())
+
+
+def _training_result(collection):
+    """Run the real collection converter with small synthetic token captures."""
+    import tinker
+
+    from platoon.train.tinker.proxy import TinkerLLMInteraction
+    from platoon.utils.tinker_data_processing import get_train_data_for_trajectory_collection
+
+    interactions = {
+        step.misc["action_misc"]["completion_id"]: TinkerLLMInteraction(
+            obs=tinker.ModelInput(chunks=[tinker.types.EncodedTextChunk(tokens=[1, 2])]),
+            action=SimpleNamespace(tokens=[3, 4], logprobs=[-0.2, -0.3]),
+        )
+        for trajectory in collection.trajectories.values()
+        for step in trajectory.steps
+    }
+    return get_train_data_for_trajectory_collection(
+        collection.to_dict(), interactions, task_id="task", checkpoint_version=3,
+    )
+
+
+@pytest.mark.parametrize("tool_name", ["submit_answer", "evaluate"])
+@pytest.mark.parametrize("role", ["root", "child"])
+def test_invalid_null_reward_stops_before_message_and_excludes_only_affected_trajectory(
+    monkeypatch, tool_name, role,
+):
+    events, llm, env_mod, types, utils = _modules(monkeypatch)
+    from platoon.envs.base import SubTask
+    from platoon.episode.trajectory import TrajectoryStep
+    from platoon.utils.trajectory_status import trajectory_has_forced_zero_reward, trajectory_was_invalid
+
+    env, state, collection, root = _setup(env_mod, types)
+    child = collection.create_trajectory(parent_traj=root)
+    target, healthy = (root, child) if role == "root" else (child, root)
+    if role == "child":
+        env._task = SubTask(id="child", goal="Check the delegated work")
+    healthy.reward = 1.0
+    healthy.steps.append(TrajectoryStep(misc={"action_misc": {"completion_id": "response-healthy"}}))
+
+    # Exact result fields from Frontier v24 task algorithmic/225 bridge logs:
+    # submit_answer attempt 15700b1e and evaluate attempt bd6e0be1.
+    reason = {
+        "submit_answer": "Algorithmic judge could not grade the submission",
+        "evaluate": "An iterative submission encountered an infrastructure failure",
+    }[tool_name]
+    text = f"Environment infrastructure failure during {tool_name}: {reason}"
+    payload = {
+        "blocks": [text], "finished": True, "reward": None, "text": text,
+        "metadata": {
+            "error_type": "InfrastructureError", "failure_class": "infrastructure",
+            "invalid": True, "ok": False, "suite": "algorithmic",
+            "task_id": "algorithmic/225", "tool": tool_name,
+        },
+    }
+    action = _action(events, tool_name, "response-invalid")
+    result = _result(events, llm, action, payload=payload)
+    later_message = events.MessageEvent(
+        source="agent",
+        llm_message=llm.Message(role="assistant", content=[llm.TextContent(text="The judge failed.")]),
+        llm_response_id="response-too-late",
+    )
+    late_success = _action(events, "claim_done", "response-late-success")
+    for event in [action, result, later_message, late_success, _result(events, llm, late_success, reward=1.0)]:
+        env._stop_on_openreward_finished(event)
+        state.events.append(event)
+    assert state.execution_status == env_mod.ConversationExecutionStatus.FINISHED
+    _drain(env, utils, types, collection, target)
+
+    assert env._terminal_event_id == result.id
+    assert len(target.steps) == 1
+    assert target.reward == 0.0
+    assert trajectory_was_invalid(target)
+    assert not trajectory_has_forced_zero_reward(target)
+    assert target.steps[0].misc["reward_misc"]["openreward/final_payload"] == payload
+    assert target.steps[0].misc["reward_misc"]["openreward/invalid"] == 1.0
+    assert not trajectory_was_invalid(healthy)
+
+    training = _training_result(collection)
+    assert len(training.datums) == 1  # Independently valid root/child remains trainable.
+    assert training.num_policy_excluded_datums == 1
+    assert training.task_reward_valid is (role == "child")
+    assert len(training.trajectory_stats) == 2  # Retain invalid-outcome diagnostics.
+    assert training.datums[0].loss_fn_inputs["advantages"].to_torch().tolist() == [0.0, 1.0, 1.0]
+
+
+@pytest.mark.parametrize("tool_name", ["submit_answer", "evaluate"])
+@pytest.mark.parametrize("reward", [0.0, 0.75])
+def test_valid_native_grade_including_zero_remains_trainable(monkeypatch, tool_name, reward):
+    events, llm, env_mod, types, utils = _modules(monkeypatch)
+    env, state, collection, trajectory = _setup(env_mod, types)
+    action = _action(events, tool_name, "response-grade")
+    result = _result(events, llm, action, reward=reward)
+    for event in [action, result]:
+        env._stop_on_openreward_finished(event)
+        state.events.append(event)
+    _drain(env, utils, types, collection, trajectory)
+
+    assert trajectory.reward == reward
+    assert trajectory.steps[0].misc["reward_misc"]["openreward/invalid"] == 0.0
+    training = _training_result(collection)
+    assert training.task_reward_valid
+    assert training.task_reward == reward
+    assert len(training.datums) == 1
+    assert training.num_policy_excluded_datums == 0
+
+
+@pytest.mark.parametrize("finished,metadata", [
+    (False, {"invalid": True}), (True, {}), (True, {"invalid": False}),
+    (True, {"invalid": "true"}), (True, "invalid"),
+])
+def test_ungraded_or_nonterminal_tool_payload_is_not_a_terminal_invalid_result(monkeypatch, finished, metadata):
+    events, llm, env_mod, _, _ = _modules(monkeypatch)
+    action = _action(events, "evaluate", "response-progress")
+    result = _result(events, llm, action, payload={"finished": finished, "reward": None, "metadata": metadata})
+    assert env_mod._finished_reward_payload(result) is None
 
 
 @pytest.mark.parametrize("text", ["Task complete.", ""])

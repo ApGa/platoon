@@ -23,7 +23,7 @@ from platoon.utils.trajectory_error_filtering import (
     ERROR_ACTION_MASK_KEY,
     step_reports_error,
 )
-from platoon.utils.trajectory_status import TRAJECTORY_CANCELLED_MISC_KEY
+from platoon.utils.trajectory_status import TRAJECTORY_CANCELLED_MISC_KEY, TRAJECTORY_INVALID_MISC_KEY
 
 
 class _Completion:
@@ -727,7 +727,8 @@ def test_policy_excluded_child_stays_in_rewards_but_skips_sampler_and_policy_bat
     assert torch.equal(result["root_reward/raw"], torch.tensor([1.0]))
 
 
-def test_cancelled_root_is_ineligible_but_completed_child_remains_trainable():
+@pytest.mark.parametrize("status_key", [TRAJECTORY_CANCELLED_MISC_KEY, TRAJECTORY_INVALID_MISC_KEY])
+def test_interrupted_root_is_ineligible_but_completed_child_remains_trainable(status_key):
     class RecordingSampler:
         def __init__(self):
             self.trajectory_ids = []
@@ -742,8 +743,7 @@ def test_cancelled_root_is_ineligible_but_completed_child_remains_trainable():
         "trajectories": {
             "root": {
                 "reward": 0.0,
-                "error_message": "Episode cancelled at step 4\nCancelledError",
-                "misc": {TRAJECTORY_CANCELLED_MISC_KEY: True},
+                "misc": {status_key: True},
                 "steps": [_step("root-completion")],
             },
             "completed-child": {
@@ -771,7 +771,7 @@ def test_cancelled_root_is_ineligible_but_completed_child_remains_trainable():
     assert torch.equal(result[POLICY_TRAINING_ELIGIBILITY_MASK_KEY], torch.tensor([False, True]))
     assert torch.equal(result["task_reward_valid"], torch.tensor([False]))
     assert sampler.trajectory_ids == ["completed-child"]
-    # Cancellation is a policy filter, not a loss of rollout diagnostics.
+    # Cancellation/invalid grading filters policy data but retains diagnostics.
     assert torch.equal(result["rewards"], torch.tensor([0.0, 0.75]))
 
 
