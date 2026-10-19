@@ -420,16 +420,19 @@ sandbox reaches through its route.
 | `judge` | no | no; kept for audit under the trajectory's `judge_calls` |
 
 A gateway step budget (`AgentSession.call_cap`) counts the policy calls of the capped agent and of every agent
-minted under it over HTTP together. A harness in a task sandbox, where code the policy runs can read its key, may
-make only policy calls: the server answers its `aux` and `judge` calls with a permission error (403).
+minted under it over HTTP together. A harness in a task sandbox, where code the policy runs can read its key
+(`AgentSession.policy_only`), makes no `judge` calls, and no `aux` calls under a gateway step budget, which would
+not count them: the server answers those with a permission error (403). Without a gateway step budget its `aux`
+calls are sampled, recorded and trained as its policy calls are (`AgentSession.sampling_kind`), and the gateway
+counts neither.
 
 **Sampling.** A rollout's `inference_params` (`temperature`, `top_p`, `top_k`, `max_completion_tokens`) are the
 default sampling of every agent in its tree. A parameter the call sets wins, then the rollout's default, then the
 gateway's own (temperature 1, top_p 1, no top-k cutoff, 4096 completion tokens). With the rollout's
 `sampling_precedence: config`, a policy call samples with the rollout's temperature, top_p and top_k (or the
-gateway's), never its own. The completion budget is clamped to the context
-the prompt leaves, and a prompt that overflows the context window gets the dialect's native context-length
-error, so a harness can condense its context instead of retrying.
+gateway's), never its own, and so does an `aux` call of a harness in a task sandbox. The completion budget is
+clamped to the context the prompt leaves, and a prompt that overflows the context window gets the dialect's native
+context-length error, so a harness can condense its context instead of retrying.
 
 **Hosted models.** For evaluation, a `HostedGateway` (`platoon/gateway/hosted.py`) puts a hosted model behind
 the same agents, call kinds, budgets and records (`inference.hosted`). Each call goes to one base URL in the

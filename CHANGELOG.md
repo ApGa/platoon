@@ -14,6 +14,38 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   `task_order: auto` (its default in 0.2.0, as a dump of that release's `config show --defaults` spells it) is
   ignored, with a warning that says so, and `task_order: weighted` does not load
   ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+- **The `openhands` harness condenses at a token count.** Its new option `condenser_max_tokens` gives its summarizing
+  condenser a token trigger, and runs that condenser whatever `condenser` says: before each model call, it condenses
+  once the prompt the agent would send is longer than that many tokens, summarizing the oldest turns after the system
+  prompt and the task until the rest fits in half the trigger. `condenser_max_tokens: 104857` condenses at 80% of a
+  131072-token context window; a trigger that a prompt passes with nothing left to forget, such as one below the
+  agent's first prompt, can never be met, and is set aside with a line in the harness log. The runner asks the
+  gateway for each count (`POST /v1/messages/count_tokens`), so it is the length of the prompt the gateway renders
+  with the policy's renderer; where a hosted model's provider gives no count, the SDK's estimate counts, and a prompt
+  that still overflows the window condenses as before. The summaries are the agent's `aux` calls (below), trained
+  with the rollout's advantage. The default, 0, sets no trigger and counts no tokens
+  ([`openhands`](docs/tutorials/builtin-harnesses.md#openhands)).
+- **The `openhands` harness's condenser keeps the task and shows its summary call what happened.** The spec is now
+  `openhands@1.54.0.post1`, from the same toolchain, and a config that names `openhands@1.54.0` gets it. With
+  `condenser: llm_summarizing` or a token trigger, the summary call reads each forgotten turn whole: the commands it
+  ran, their whole output and an earlier summary entire, where the SDK's condenser showed it 500 characters of each
+  and no tool call's arguments. A condensation that resets the whole context keeps the system prompt and the task,
+  which the SDK's summarized away with the rest, and one for the token trigger forgets only what it takes to get
+  under half the trigger. A summary call answered without text (a tool call, or a completion cut short in its
+  reasoning) still condenses, with a notice in the summary's place that the earlier turns were dropped, where the
+  SDK's condenser dropped them and said nothing.
+- **The `openhands` condenser's summary calls are `aux` calls.** The runner marks each summary call with
+  `X-Platoon-Call-Kind: aux`, and the agent's own turns stay `policy` calls. A summary's trajectory step now says
+  `kind: aux` in its `action_misc`, and an evaluation report counts the summaries under `usage.aux` rather than
+  `usage.policy`. They train as before, with the rollout's advantage, each condensation still takes one of the
+  agent's steps (`max_steps`), and the step counts in training and evaluation metrics still count each summary as a
+  step. For this the gateway now takes `aux` calls from a harness in a task sandbox, where code the policy runs can
+  read the agent's key, unless a gateway step budget (`[budget] enforce = "gateway"`) counts its calls: that budget
+  does not count `aux` calls, so under it they are still refused (403). Without one the gateway counts none of the
+  harness's calls, and it samples the harness's `aux` calls as its policy calls, also under
+  `sampling_precedence: config`, where an `aux` call elsewhere keeps its own parameters; so an `aux` call gets that
+  code nothing that a policy call would not. Its `judge` calls are still refused in every case
+  ([how a run ends](docs/how-to/sandboxes-and-harbor.md#3-how-a-run-ends)).
 - **Each environment of a mixture sets the training settings of its own groups.** An entry's `workflow_config` is laid
   over `train.workflow_config` for its groups: its `group_size`, its baseline (`leave_one_out_baseline`), its
   `min_successful_group_size`, its straggler defaults, its error filters and subagent datum sampling, and its rollout

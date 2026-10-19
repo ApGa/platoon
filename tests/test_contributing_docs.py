@@ -437,7 +437,7 @@ def test_harness_list_rows_match_the_registry():
 
     from platoon.harness.registry import available_harnesses, get_harness
 
-    header = "harness               kind      distribution   source"
+    header = "harness                 kind      distribution   source"
     rows = [line.split() for line in block(header).splitlines()[1:]]
     missing = sorted({ref for ref, *_ in rows} - set(available_harnesses()))
     assert not missing, f"CONTRIBUTING.md lists harnesses the registry does not have: {missing}"

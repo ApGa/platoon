@@ -108,7 +108,8 @@ class RolloutGateway(Protocol[AgentT]):
 
 @runtime_checkable
 class _PolicyOnlyAgent(Protocol):
-    """A gateway agent that the gateway can limit to policy calls (``AgentSession.policy_only``)."""
+    """A gateway agent whose call kinds the gateway can limit, for a key that code the policy runs can read
+    (``AgentSession.policy_only``)."""
 
     policy_only: bool
 
@@ -430,8 +431,9 @@ async def _run_and_grade(
     The harness runs for at most its spec's ``timeout_s``, the rollout's ``timeout`` and the task's own agent
     timeout (``session.agent_timeout_s``, where the env has one).  A timeout or crash then follows the route's
     ``on_harness_exit`` (:func:`platoon.harness.inline.failure_outcome`).  A harness in the task sandbox, where code
-    the policy runs can read the agent's key, may make only ``policy`` calls (``AgentSession.policy_only``, on a
-    gateway whose agents have it): the gateway refuses its ``aux`` and ``judge`` calls, which no step budget counts.
+    the policy runs can read the agent's key, is limited in the kinds of call it makes (``AgentSession.policy_only``,
+    on a gateway whose agents have it): the gateway refuses its ``judge`` calls, which never train, and under a
+    gateway step budget its ``aux`` calls too, which the budget does not count.
     """
 
     from platoon.harness.inline import agent_timeout, crash_outcome

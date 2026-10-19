@@ -338,7 +338,7 @@ environments[science] dataset: fetched hf://my-org/science-tasks@3f1c0e9b6d2a4c8
 environments[science] hold-out: 5% of each source_dataset, grouped by kaggle_dataset_name, else split_group, joined by shared input files, seed 0
   ...
 environments[science] images: built 2 with the oci builder into the image map /shared/platoon-cache/harbor/images/singularity.json
-environments[science] toolchain openhands-1.54.0: built at /shared/platoon-cache/toolchains/openhands-1.54.0 for openhands@1.54.0 (sha256:...)
+environments[science] toolchain openhands-1.54.0: built at /shared/platoon-cache/toolchains/openhands-1.54.0 for openhands@1.54.0.post1 (sha256:...)
 policy tokenizer: loaded Qwen/Qwen3.5-4B through the chat_template renderer, into the Hugging Face cache
 ready: 4 made now, 0 already current
 ```
@@ -858,7 +858,8 @@ the rollout config's `inference_params`. Set `rollout_config.sampling_precedence
 sample as configured: with the `temperature`, `top_p` and `top_k` of `inference_params`, or the gateway's defaults
 for those it leaves unset, never the harness's own; and with its `max_completion_tokens` when it sets one. A call
 keeps its own stop sequences and seed, by which its harness parses the reply, and `aux` and `judge` calls keep all
-their own parameters.
+their own parameters, except the `aux` calls of a harness in a task sandbox, which sample as its policy calls do:
+code the policy runs there can read the agent's key, and would otherwise choose how calls that train sample.
 
 ## Harness toolchains
 
@@ -920,17 +921,46 @@ any other setting (`platoon harness show openhands` lists them):
 | `reasoning_replay` | `true` | Each assistant turn goes back with its reasoning, so the calls of an episode extend each other and merge into few training sequences; `false` sends turns back as the SDK serializes them, without it, as Harbor's adapter does |
 | `request_timeout_s` | `3600` | Seconds one model call may take |
 | `num_retries` | `0` | The SDK's `num_retries`, which counts attempts at a model call that fails transiently: 0 and 1 make one, 5 up to five. A retry may send a call the gateway already recorded, so training keeps 0 |
-| `condenser` | `none` | `llm_summarizing` adds the SDK's summarizing condenser, which condenses past 240 events, or when the gateway answers that a prompt overflows the context window |
+| `condenser` | `none` | `llm_summarizing` adds a summarizing condenser, the SDK's with the changes below, which condenses past 240 events, or when the gateway answers that a prompt overflows the context window |
+| `condenser_max_tokens` | `0` | Above 0, a token trigger for the summarizing condenser, which it then runs whatever `condenser` says: it also condenses before a model call whose prompt would be longer than this many tokens, as the gateway counts them |
 
 The defaults are the training settings. The step limit is the run's `max_steps` (default 30), the runner's
 `--max-iterations`: one model call of the agent each, and with the condenser, one for each condensation (below).
 
-The condenser's summaries are model calls through the gateway with the agent's key, so they are recorded as the
-agent's own policy calls and trained on. The SDK could mark them as `aux` calls (`X-Platoon-Call-Kind`), but the
-gateway refuses `aux` calls from a harness in a task sandbox ([step 3](#3-how-a-run-ends)), so the runner leaves
-them unmarked. Each condensation takes one of `--max-iterations`, since that step makes the summary call instead of
-an agent call, and a call the gateway refused for overflowing the context window took one too. After a condensation
-the next prompt no longer extends the last, so it starts a new training sequence.
+The condenser's summaries are model calls through the gateway with the agent's key, which the runner marks as `aux`
+calls (`X-Platoon-Call-Kind: aux`, on the summary calls only): the gateway records them as the agent's `aux` calls,
+which train with the rollout's advantage as its turns do. A harness in a task sandbox may make `aux` calls only
+without a gateway step budget ([step 3](#3-how-a-run-ends)), and `openhands` has none: its step limit is the runner's
+`--max-iterations`, and each condensation takes one of those steps, since that step makes the summary call instead
+of an agent call, and a call the gateway refused for overflowing the context window took one too. After a
+condensation the next prompt no longer extends the last, so it starts a new training sequence.
+
+The condenser is the SDK's `LLMSummarizingCondenser` with its defaults, changed by the runner in four ways. The
+summary call reads each forgotten turn whole, with the commands it ran, their whole output and an earlier summary
+entire, where the SDK's shows it 500 characters of each and no tool call's arguments. A condensation keeps the system
+prompt and the task, even one that resets the whole context, which the SDK's would summarize away with the rest. A
+condensation for the token trigger (below) forgets only what it takes to get under half the trigger, where the
+SDK's also asks for a tenth of the turns and otherwise resets the whole context. And a summary call answered without
+text, with a tool call or a completion cut short in its reasoning, still condenses, with a notice in the summary's
+place that the earlier turns were dropped, where the SDK's drops them and says nothing; the runner logs it.
+
+With `condenser_max_tokens`, the condenser counts each prompt before the agent sends it, and condenses once the count
+passes the trigger (104857 condenses at 80% of a 131072-token window): it summarizes the oldest turns after the
+system prompt and the task until the rest fits in half the trigger. Set the trigger well above the agent's first
+prompt, its system prompt with the tools and the task: below twice that prompt, each condensation forgets every turn
+after the task, and a trigger that a prompt passes with nothing left to forget but a summary can never be met, so the
+condenser sets it aside for the rest of the run and says so in the harness log. The runner asks the gateway for the
+count: it sends the messages and tools of the next call to the gateway's token count,
+`POST /v1/messages/count_tokens`, as a Messages request that the gateway reads back into the same chat messages, so
+the count is the length of the prompt the gateway renders, and nothing is recorded. That length is exact for a
+renderer that writes tool results without their tool's name and serializes tool-call arguments itself, as the Qwen
+chat templates do; one that writes either as the call sent it (`kimi_k2`, `gpt_oss`) counts a few tokens off for each
+tool call. A hosted model's gateway forwards the count to its provider. Where the answer is no count (a provider
+without that route answers 404, and the runner says so once in its log), the SDK's own estimate counts: litellm's
+token counter, with the `cl100k_base` encoding for a model it does not know. That estimate runs below a Qwen chat
+template's count by about a tenth on prose and code, and by nearly half on numbers, which Qwen's tokenizers split
+into single digits, so a prompt the estimate undercounts can pass the trigger; the gateway's refusal of a prompt that
+overflows the window still condenses it. Without the option nothing counts tokens.
 
 ### 1. Build the toolchain
 
@@ -968,8 +998,8 @@ uses, and otherwise stop with exit 78 and the `platoon prepare` command for thei
 
 ```text
 platoon: what the run needs is not prepared on this site:
-  environments[harbor-openhands].harness: harness openhands@1.54.0 runs from the toolchain openhands-1.54.0, which a
-  run never builds, and it is not built there (toolchain root /shared/toolchains)
+  environments[harbor-openhands].harness: harness openhands@1.54.0.post1 runs from the toolchain openhands-1.54.0,
+  which a run never builds, and it is not built there (toolchain root /shared/toolchains)
   prepare it with: platoon prepare train.yaml
 ```
 
@@ -1020,9 +1050,11 @@ task's.
 The gateway also limits the agents a rollout may mint over its HTTP agent API (`POST /v1/platoon/agents`) to 64,
 since code the policy runs in the sandbox can read the agent's key; `PLATOON_MAX_MINTED_AGENTS` sets another
 limit. A minted agent shares its parent's step budget: the policy calls of the root and of every agent minted under
-it count against one budget. For the same reason a harness in the task sandbox may make only policy calls, the ones
-a step budget counts: the gateway answers a call it marks `aux` or `judge` (`X-Platoon-Call-Kind`) with a permission
-error (HTTP 403) and samples nothing. Harnesses on the rollout host keep their `aux` and `judge` calls.
+it count against one budget. For the same reason the gateway answers a harness in the task sandbox with a permission
+error (HTTP 403), and samples nothing, for a call it marks `judge` (`X-Platoon-Call-Kind`), which never trains, and,
+under a gateway step budget (`[budget] enforce = "gateway"`), for a call it marks `aux`, which that budget does not
+count. Without a gateway step budget, as for `openhands`, its `aux` calls are sampled, recorded and trained as its
+policy calls are, and the gateway counts neither. Harnesses on the rollout host keep their `aux` and `judge` calls.
 
 ### 4. Check a dataset first
 

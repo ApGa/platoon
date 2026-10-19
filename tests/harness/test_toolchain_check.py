@@ -83,7 +83,8 @@ def test_a_toolchain_that_is_not_built_is_refused_with_what_builds_it(tmp_path, 
     problem = toolchain_problem(spec, ref="openhands")
 
     described = (
-        "harness openhands@1.54.0 runs from the toolchain openhands-1.54.0, which a run never builds, and it is not "
+        "harness openhands@1.54.0.post1 runs from the toolchain openhands-1.54.0, which a run never builds, and it is "
+        "not "
         f"built there (toolchain root {tmp_path / 'toolchains'})"
     )
     assert (
@@ -239,7 +240,13 @@ def test_platoon_rollout_refuses_before_any_rollout(tmp_path, monkeypatch, capsy
     (harness,) = [component for component in lock["components"] if component["kind"] == "harness"]
     assert harness["options"] == {
         "default": {
-            "train": {"reasoning_replay": True, "request_timeout_s": 3600, "num_retries": 0, "condenser": "none"}
+            "train": {
+                "reasoning_replay": True,
+                "request_timeout_s": 3600,
+                "num_retries": 0,
+                "condenser": "none",
+                "condenser_max_tokens": 0,
+            }
         }
     }
 
@@ -277,6 +284,12 @@ def test_platoon_rollout_records_the_options_of_the_split_it_runs(tmp_path, monk
     (harness,) = [component for component in lock["components"] if component["kind"] == "harness"]
     assert harness["options"] == {
         "default": {
-            "eval": {"reasoning_replay": False, "request_timeout_s": 3600, "num_retries": 5, "condenser": "none"}
+            "eval": {
+                "reasoning_replay": False,
+                "request_timeout_s": 3600,
+                "num_retries": 5,
+                "condenser": "none",
+                "condenser_max_tokens": 0,
+            }
         }
     }

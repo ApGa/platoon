@@ -19,7 +19,13 @@ from platoon.train.auto import AutoTaskLoader, check_environment_routes
 from platoon.train.components import EnvironmentRoute, normalize_environment_configs
 from platoon.utils.config import ConfigError
 
-DEFAULTS = {"reasoning_replay": True, "request_timeout_s": 3600, "num_retries": 0, "condenser": "none"}
+DEFAULTS = {
+    "reasoning_replay": True,
+    "request_timeout_s": 3600,
+    "num_retries": 0,
+    "condenser": "none",
+    "condenser_max_tokens": 0,
+}
 ADAPTER = {"reasoning_replay": False, "request_timeout_s": 300, "num_retries": 5}  # Harbor's openhands-sdk adapter
 WHERE = "environments.0.harness_options"
 
@@ -143,11 +149,33 @@ def test_a_mixtures_shared_mapping_must_suit_each_of_its_harnesses(tmp_path):
         run_components(load(train_config(tmp_path, entry)))
 
     assert error.value.problems == [
-        f"{WHERE}.system_prompt: unknown key; harness openhands@1.54.0 takes reasoning_replay, request_timeout_s, "
-        "num_retries, condenser",
+        f"{WHERE}.system_prompt: unknown key; harness openhands@1.54.0.post1 takes reasoning_replay, "
+        "request_timeout_s, num_retries, condenser, condenser_max_tokens",
         f"{WHERE}: the harnesses of the mixture ['openhands', 'platoon-react'] share one mapping, which must suit each "
         "of them; give a harness whose options the others do not take an environments entry of its own",
     ]
+
+
+def test_a_token_trigger_that_is_no_count_of_tokens_is_refused_where_it_is_written(tmp_path):
+    entry = openhands(
+        harness_options={"condenser_max_tokens": -1},
+        eval_overrides={"harness_options": {"condenser_max_tokens": 0.8}},
+    )
+
+    with pytest.raises(ConfigError) as error:
+        run_components(load(train_config(tmp_path, entry)))
+
+    assert error.value.problems == [
+        f"{WHERE}.condenser_max_tokens: -1 is below the minimum 0",
+        "environments.0.eval_overrides.harness_options.condenser_max_tokens: 0.8 is not an int",
+    ]
+
+
+def test_a_token_trigger_set_on_the_command_line_reaches_the_record(tmp_path):
+    config = load(train_config(tmp_path), "environments.0.harness_options.condenser_max_tokens=104857")
+
+    # Evaluation runs the same options, so the record keeps training's only.
+    assert harness_record(config)["options"] == {"default": {"train": {**DEFAULTS, "condenser_max_tokens": 104857}}}
 
 
 def test_eval_overrides_take_options_and_say_where_the_rest_goes(tmp_path):
@@ -262,7 +290,7 @@ def test_lock_json_records_the_options_with_their_defaults(tmp_path, monkeypatch
 
     lock = json.loads((tmp_path / "logs/exp/trial/lock.json").read_text())
     (record,) = [component for component in lock["components"] if component["kind"] == "harness"]
-    assert (record["ref"], record["resolved"]) == ("openhands", "openhands@1.54.0")
+    assert (record["ref"], record["resolved"]) == ("openhands", "openhands@1.54.0.post1")
     assert record["options"] == {"default": {"train": DEFAULTS}}  # no evaluation: only training's
 
 
