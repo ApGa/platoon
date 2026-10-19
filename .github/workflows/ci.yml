@@ -1,13 +1,16 @@
 name: CI
 
+# Pull requests into any branch, so that a pull request stacked on another one is checked too, and pushes to
+# main. Every job runs only in a public repository: a private copy of this one runs none of them, and so uses
+# none of its account's Actions minutes.
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 
 jobs:
   lint:
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +27,7 @@ jobs:
   # Core's suite on every Python platoon supports (pyproject.toml's classifiers). UV_PYTHON has uv sync and uv run
   # use the job's Python.
   test:
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -52,6 +56,7 @@ jobs:
   # Each first-party extension (extensions/<name>, distribution platoon-<name>) in an environment of its own: the
   # extension, platoon from the workspace and the extension's dev group. A core change runs every extension's tests.
   extensions:
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -73,6 +78,7 @@ jobs:
 
   # The recipes (recipes/<name>): every config resolves and validates, with every first-party extension installed.
   recipes:
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

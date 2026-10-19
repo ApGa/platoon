@@ -336,8 +336,9 @@ those above, with no scope and a summary that starts with a capital letter and h
 request has a single commit, the job checks that commit's subject too, because GitHub suggests it for the squashed
 commit. The check runs again whenever you edit the title.
 
-**What CI runs on a pull request.** The jobs run on GitHub's Ubuntu runners for pull requests into `main` and
-for pushes to `main`; `test` runs on Python 3.12, 3.13 and 3.14, and the others use 3.12:
+**What CI runs on a pull request.** The jobs run on GitHub's Ubuntu runners for pull requests into any branch,
+so that a pull request stacked on another one is checked too, and for pushes to `main`. A private copy of the
+repository runs none of them. `test` runs on Python 3.12, 3.13 and 3.14, and the others use 3.12:
 
 | Job | Runs | Fails when |
 |---|---|---|
@@ -784,8 +785,8 @@ This section is for maintainers. Platoon is published to PyPI as `platoon` by th
 so no API token is stored anywhere: pushing the tag `vX.Y.Z` releases version `X.Y.Z`. The TextCraft extension is
 published the same way, as `platoon-textcraft`, from tags of its own
 ([Release the TextCraft extension](#release-the-textcraft-extension)). A tag publishes only its own distribution, and
-only a commit on `main`. The workflow also builds and checks both distributions on every pull request, without
-publishing them.
+only a commit on `main` of ApGa/platoon. The workflow also builds and checks both distributions on every pull
+request, without publishing them.
 
 ### Versions
 
