@@ -257,8 +257,9 @@ class AgentLimitError(GatewayError, ValueError):
 
 
 class CallKindRefusedError(GatewayError, ValueError):
-    """A call of a kind its agent may not make: an ``aux`` or ``judge`` call of an agent limited to ``policy`` calls
-    (``AgentSession.policy_only``).  The HTTP server answers it as a permission error (403)."""
+    """A call of a kind its agent may not make (``AgentSession.check_kind``): a ``judge`` call of an agent whose key
+    code the policy runs can read (``AgentSession.policy_only``), or an ``aux`` call of such an agent while a call cap
+    counts its ``policy`` calls.  The HTTP server answers it as a permission error (403)."""
 
 
 # --------------------------------------------------------------------------- request side
@@ -594,7 +595,8 @@ class SamplingOverrides:
         with their temperature, top_p and top_k, never its own: one these defaults leave unset stays None, so the
         gateway's default applies.  Its completion budget is theirs when they set one, else its own; its stop
         sequences and seed stay its own, since its harness parses the reply with those stop sequences.  ``aux`` and
-        ``judge`` calls keep their own parameters either way."""
+        ``judge`` calls keep their own parameters either way, but the gateway samples the ``aux`` calls of an agent
+        whose key code the policy runs can read as ``policy`` calls (``AgentSession.sampling_kind``)."""
         merged = request.over(self)
         if self.precedence != "config" or kind != "policy":
             return merged
@@ -912,9 +914,11 @@ class AgentSession:
     call_tally: CallTally = field(default_factory=CallTally, repr=False)
     budget_stops: int = 0  # policy calls answered with the budget stop instead of a sample
     policy_calls_in_flight: int = field(default=0, repr=False)
-    # Whether the agent may make only ``policy`` calls, the ones its call cap counts: set for a harness in a task
-    # sandbox, where code the policy runs can read the agent's key.  Its ``aux`` and ``judge`` calls are refused
-    # (CallKindRefusedError, HTTP 403) and nothing is sampled for them.  Agents it mints over HTTP inherit it.
+    # Whether code the policy runs can read the agent's key: set for a harness in a task sandbox.  Its ``judge`` calls,
+    # which never train, are refused, and so are its ``aux`` calls while a call cap counts its ``policy`` calls
+    # (``call_cap``), since the cap does not count them (CallKindRefusedError, HTTP 403; nothing is sampled for them).
+    # Its other ``aux`` calls sample as its ``policy`` calls do (``sampling_kind``).  Agents it mints over HTTP inherit
+    # it.
     policy_only: bool = False
     misc: dict[str, Any] = field(default_factory=dict, repr=False)  # -> trajectory misc
     step_misc: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)  # call_id -> step misc
@@ -946,12 +950,29 @@ class AgentSession:
         return self.call_cap is not None and tally.recorded + tally.in_flight >= self.call_cap
 
     def check_kind(self, kind: str) -> None:
-        """Raise :class:`CallKindRefusedError` for a call of ``kind`` this agent may not make: anything but a
-        ``policy`` call of an agent with :attr:`policy_only`."""
-        if self.policy_only and kind != "policy":
+        """Raise :class:`CallKindRefusedError` for a call of ``kind`` this agent may not make.  An agent with
+        :attr:`policy_only` may make no ``judge`` call, and no ``aux`` call while a call cap counts its ``policy``
+        calls (:attr:`call_cap`, which agents minted under a capped one share), since the cap would not count it.
+        Without a cap the gateway counts none of the agent's calls, so an ``aux`` call gets it nothing a ``policy``
+        call would not: both train alike, and sample alike (:meth:`sampling_kind`).  Any other agent may make every
+        kind."""
+        if not self.policy_only or kind == "policy":
+            return
+        if self.call_cap is not None:
             raise CallKindRefusedError(
                 f"This agent may make only policy calls, which its step budget counts; its {kind} calls are refused"
             )
+        if kind == "judge":
+            raise CallKindRefusedError(
+                "This agent may make only policy and aux calls, the calls that train; its judge calls are refused"
+            )
+
+    def sampling_kind(self, kind: str) -> str:
+        """The kind whose sampling a ``kind`` call of this agent gets (:meth:`SamplingOverrides.for_call`): ``policy``
+        for an ``aux`` call of an agent with :attr:`policy_only`, since under the rollout's ``sampling_precedence:
+        config`` an ``aux`` call keeps its own parameters, and code the policy runs would choose how calls that train
+        sample; ``kind`` otherwise."""
+        return "policy" if self.policy_only and kind == "aux" else kind
 
     def call_kind(self, call_id: str) -> str:
         return self.call_kinds.get(call_id, "policy")
@@ -1142,8 +1163,8 @@ class ModelGateway:
     ) -> PreparedCall:
         """Render the request, fit its completion budget and resolve its sampling parameters: the request's own,
         then ``defaults`` (the calling agent's ``sampling_defaults``), then the gateway's; defaults with
-        ``precedence="config"`` decide the sampling of a ``policy`` call (``kind``) instead
-        (:meth:`SamplingOverrides.for_call`)."""
+        ``precedence="config"`` decide the sampling of a ``policy`` call (``kind``, the agent's
+        ``AgentSession.sampling_kind`` of the call's) instead (:meth:`SamplingOverrides.for_call`)."""
         started_at = time.perf_counter()
         sampling = request.sampling if defaults is None else defaults.for_call(request.sampling, kind=kind)
         prompt = self.render(request.messages, request.render)
@@ -1285,7 +1306,7 @@ class ModelGateway:
 
         ``request`` may already be prepared, e.g. by a server that must report rendering errors before it
         starts a stream.  An agent closed while its call was sampling records nothing.  A kind the agent may not
-        make (``AgentSession.policy_only``) raises :class:`CallKindRefusedError`, and a ``judge`` call of an agent
+        make (``AgentSession.check_kind``) raises :class:`CallKindRefusedError`, and a ``judge`` call of an agent
         whose judges are off (``AgentSession.judges``) :class:`JudgesOffError`, before anything is sampled.
         """
         check_call_kind(kind)
@@ -1298,7 +1319,7 @@ class ModelGateway:
             call = request
         else:
             try:
-                call = self.prepare(request, defaults=agent.sampling_defaults, kind=kind)
+                call = self.prepare(request, defaults=agent.sampling_defaults, kind=agent.sampling_kind(kind))
             except ContextWindowExceededError:
                 agent.context_overflows += 1
                 raise

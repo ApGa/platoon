@@ -498,10 +498,12 @@ def test_hosted_policy_calls_that_arrive_together_never_pass_the_step_budget(pro
     assert (agent.call_tally.recorded, agent.call_tally.in_flight) == (1, 0)
 
 
-@pytest.mark.parametrize("kind", ["aux", "judge"])
-def test_a_policy_only_agent_s_hosted_aux_and_judge_calls_are_refused_unforwarded(provider, kind):
+@pytest.mark.parametrize(("kind", "call_cap"), [("aux", 5), ("judge", 5), ("judge", None)])
+def test_a_policy_only_agent_s_hosted_aux_and_judge_calls_are_refused_unforwarded(provider, kind, call_cap):
+    """A judge call always, and an aux call under a call cap, which counts only policy calls."""
+
     async def use(base_url, agent):
-        agent.policy_only = True
+        agent.policy_only, agent.call_cap = True, call_cap
         headers = {"Authorization": f"Bearer {agent.api_key}", "X-Platoon-Call-Kind": kind}
         body = {"model": "policy", "messages": [{"role": "user", "content": "go"}]}
         async with ClientSession() as session:
@@ -513,3 +515,18 @@ def test_a_policy_only_agent_s_hosted_aux_and_judge_calls_are_refused_unforwarde
     assert status == 403 and refused["error"]["type"] == "permission_error"
     assert f"its {kind} calls are refused" in refused["error"]["message"]
     assert provider.requests == [] and agent.calls == [] and "judges_refused" not in agent.misc
+
+
+def test_a_policy_only_agent_without_a_cap_has_its_hosted_aux_call_forwarded(provider):
+    async def use(base_url, agent):
+        agent.policy_only = True
+        headers = {"Authorization": f"Bearer {agent.api_key}", "X-Platoon-Call-Kind": "aux"}
+        body = {"model": "policy", "messages": [{"role": "user", "content": "go"}]}
+        async with ClientSession() as session:
+            async with session.post(f"{base_url}/v1/chat/completions", json=body, headers=headers) as reply:
+                return reply.status, reply.headers.get(CALL_ID_HEADER)
+
+    agent, (status, call_id) = asyncio.run(serve(hosted(provider), use))
+
+    assert status == 200 and len(provider.calls(CHAT)) == 1 and agent.call_ids == [call_id]
+    assert agent.call_kind(call_id) == "aux" and agent.policy_calls == 0

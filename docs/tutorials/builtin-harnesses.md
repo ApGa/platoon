@@ -20,7 +20,7 @@ a policy, `platoon-oracle` and `platoon-noop`. Each is a name you put in an envi
 | `platoon-codeact` | function, runs model code | writes Python cells that call the tools as functions | the environment's tools, `finish`, `launch_subagent` | cells run in an IPython shell in the rollout process: not a sandbox | acting in code pays off (loops, arithmetic, many calls per step), or agents should delegate to subagents |
 | `platoon-bash` | TOML spec | native tool calls | `bash`, plus the environment's tools over MCP | a process in the task sandbox, or locally | the task is files in a sandbox (Harbor tasks); smoke tests; a template for your own spec |
 | `mini-swe-agent@2.4.6` | TOML spec, third party | `bash` commands | `bash` only | the task sandbox | software-engineering tasks in Harbor sandboxes |
-| `openhands@1.54.0` | TOML spec, third party: the OpenHands SDK agent with platoon's thin runner | native tool calls | terminal, file editor, task tracker | the task sandbox, from a toolchain built once per site | training or evaluating an OpenHands agent on Harbor tasks; its options choose replay, timeout, retries and a condenser ([below](#openhands)) |
+| `openhands@1.54.0.post1` | TOML spec, third party: the OpenHands SDK agent with platoon's thin runner | native tool calls | terminal, file editor, task tracker | the task sandbox, from a toolchain built once per site | training or evaluating an OpenHands agent on Harbor tasks; its options choose replay, timeout, retries and a condenser ([below](#openhands)) |
 | `platoon-oracle`, `platoon-noop` | function, no model calls | runs the task's reference solution; does nothing | none | the rollout process | checking a dataset: a sound task scores 1 with the oracle and 0 with the no-op |
 
 List them:
@@ -30,14 +30,14 @@ uv run platoon harness list
 ```
 
 ```text
-harness               kind      distribution   source
-mini-swe-agent@2.4.6  spec      platoon 0.2.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-openhands@1.54.0      spec      platoon 0.2.0  platoon/harness/builtin/specs/openhands.toml
-platoon-bash@1        spec      platoon 0.2.0  platoon/harness/builtin/specs/platoon-bash.toml
-platoon-codeact@1     function  platoon 0.2.0  platoon.harness.builtin.codeact.harness:codeact
-platoon-noop@1        function  platoon 0.2.0  platoon.harness.builtin.oracle:noop
-platoon-oracle@1      function  platoon 0.2.0  platoon.harness.builtin.oracle:oracle
-platoon-react@1       function  platoon 0.2.0  platoon.harness.builtin.react:react
+harness                 kind      distribution   source
+mini-swe-agent@2.4.6    spec      platoon 0.2.0  platoon/harness/builtin/specs/mini-swe-agent.toml
+openhands@1.54.0.post1  spec      platoon 0.2.0  platoon/harness/builtin/specs/openhands.toml
+platoon-bash@1          spec      platoon 0.2.0  platoon/harness/builtin/specs/platoon-bash.toml
+platoon-codeact@1       function  platoon 0.2.0  platoon.harness.builtin.codeact.harness:codeact
+platoon-noop@1          function  platoon 0.2.0  platoon.harness.builtin.oracle:noop
+platoon-oracle@1        function  platoon 0.2.0  platoon.harness.builtin.oracle:oracle
+platoon-react@1         function  platoon 0.2.0  platoon.harness.builtin.react:react
 ```
 
 Harnesses that installed packages provide appear in the same list, with their package and its version; the list
@@ -228,7 +228,8 @@ too); reaching it, or the SDK finding the agent stuck, ends a graded episode.
 | `reasoning_replay` | bool | `true` | send each assistant turn back with its reasoning, so that each call extends the last and an episode trains as few sequences |
 | `request_timeout_s` | int, at least 1 | `3600` | seconds one model call may take |
 | `num_retries` | int, 0 to 10 | `0` | the SDK's `num_retries`, which counts attempts at a model call that fails transiently (0 and 1 make one); a retry may record a call twice |
-| `condenser` | `none` or `llm_summarizing` | `none` | the SDK's summarizing condenser (it condenses past 240 events, or when a prompt overflows the context window); its summaries are the agent's own model calls, recorded and trained on |
+| `condenser` | `none` or `llm_summarizing` | `none` | a summarizing condenser, the SDK's with the changes below (it condenses past 240 events, or when a prompt overflows the context window); its summary calls are the agent's `aux` calls, recorded and trained on |
+| `condenser_max_tokens` | int, at least 0 | `0` | a token trigger for that condenser, which it then runs whatever `condenser` says: it condenses before a model call whose prompt would be longer than this many tokens, as the gateway counts them; `0` sets none |
 
 The defaults are the training settings. Options change how the agent runs, never what is installed, so every
 setting runs from the same toolchain. To evaluate as Harbor's adapter does (no replay, the SDK's 300-second timeout,
@@ -256,6 +257,52 @@ platoon eval eval.yaml environments.0.harness_options.num_retries=0
 platoon train train.yaml environments.0.harness_options.condenser=llm_summarizing
 platoon train train.yaml environments.1.eval_overrides.harness_options.reasoning_replay=false
 ```
+
+To condense before the context window fills, give the condenser a token trigger. With a 131072-token window
+(`train.context_window_length`), this condenses at 80% of it:
+
+```yaml
+environments:
+  - name: harbor-openhands
+    service: harbor
+    service_kwargs: {dataset_dir: ./tasks}
+    harness: openhands
+    harness_options: {condenser_max_tokens: 104857}  # 80% of 131072
+```
+
+Before each model call, the condenser counts the prompt the agent would send. Once it is longer than the trigger,
+the agent condenses instead of calling: it summarizes its oldest turns, after the system prompt and the task, until
+the rest fits in half the trigger, and goes on from the summary. The gateway does the counting, so the count is the
+length of the prompt it renders with the policy's renderer: exactly, for a renderer that writes tool results without
+their tool's name and serializes tool-call arguments itself, as the Qwen chat templates do, and a few tokens off for
+each tool call with one that writes either as the call sent it (`kimi_k2`, `gpt_oss`). A hosted model's gateway
+passes the count on to its provider, and where that gives none, the SDK's estimate counts instead (its `cl100k_base`
+encoding runs about a tenth under a Qwen template on prose and code, and nearly half under on numbers); a prompt that
+then overflows the context window still condenses, when the gateway refuses it. The trigger is a count of tokens,
+not a share of the window, which the harness does not know. Set it well above the agent's first prompt, its system
+prompt with the tools and the task (about 8k tokens with a short task under a Qwen template): below twice that
+prompt, each condensation forgets every turn after the task, and a trigger that a prompt passes with nothing left to
+forget but a summary can never be met, so the condenser sets it aside for the rest of the run and says so in the
+harness log.
+
+The summary calls are the agent's [`aux` calls](../getting-started/concepts.md#call-kinds): the runner marks them
+with the `X-Platoon-Call-Kind` header, and the agent's own turns stay `policy` calls. A summary's step in the
+trajectory says `kind: aux` in its `action_misc`, and an evaluation report counts the summaries under `usage.aux`.
+They train with the rollout's advantage like the agent's turns, each in a training sequence of its own, and the
+prompt after a summary starts another. The gateway takes `aux` calls from a harness in a task sandbox only where no
+gateway step budget counts its calls, as here: the harness keeps its own step limit, `max_steps`, and each
+condensation takes one of those steps. The step counts in training and evaluation metrics count a trajectory's
+steps, so they count each summary call as a step, as they count the agent's turns. The summary call reads each
+forgotten turn whole, with the commands it ran, their whole output and an earlier summary entire (the SDK's condenser
+shows it 500 characters of each and no tool call's arguments), and a condensation keeps the task. A summary call
+answered without text, with a tool call or a completion cut short in its reasoning, still condenses, with a notice
+in the summary's place that the earlier turns were dropped.
+
+Leave room for completions: the gateway clamps a completion to what the window has left after its prompt, so with a
+completion budget of 49152 tokens (`max_completion_tokens`), a trigger of 81920 or less leaves every turn its whole
+budget. Above it, a turn near the trigger can be cut short: cut in its reasoning, the SDK asks the agent again for an
+answer and the episode goes on; cut in its visible text, that text becomes the agent's final message and the episode
+ends.
 
 ## Which one?
 
