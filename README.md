@@ -270,6 +270,7 @@ through entry points, which platoon imports only when a config names them
 | `platoon harbor fetch / verify / images` | the steps of `platoon prepare` for Harbor datasets, one at a time, with the flags it does not take (`--shard`, `--push`, ...) |
 | `platoon toolchain build SPEC ...` | builds the toolchains CLI harnesses run from inside task sandboxes |
 | `platoon sandbox reap RUN_DIR` | stops the sandboxes a killed run left running |
+| `platoon tasks show / export RUN_DIR` | a training run's per-task statistics: each task's groups, passes and expected pass@k |
 | `platoon env list [CONFIG]` | lists environment service schemes, or a config's environments |
 | `platoon viz ...` | the trajectory viewer: `tail`, `replay` and `show-dump` |
 

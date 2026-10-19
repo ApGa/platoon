@@ -491,6 +491,10 @@ class EnvironmentConfig:
     # how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning
     # keeps the checkpoints within the largest bound of the run and its entries.
     max_staleness: int | None = None
+    # The lowest reward that counts a training rollout of the entry as a pass, in the per-task statistics and their
+    # metrics (platoon.train.task_stats), judged as platoon eval judges success: on the reward the entry's environment
+    # scored, before any reward processor. A partial-credit environment sets its own.
+    success_threshold: float = 1.0
     # The environment service: ``harbor``, ``table``, ``python://pkg.module:EnvClass`` (an ORS environment run
     # in process), ``ors+http://host:port/EnvName`` (ORS environment servers) or ``module:Class``.
     service: str | None = None
@@ -538,6 +542,10 @@ class EnvironmentConfig:
         if problems := entry_workflow_problems(self.workflow_config, "workflow_config"):
             raise ValueError(f"{where}: " + "; ".join(problems))
         self.workflow_config = copy.deepcopy(dict(self.workflow_config))
+        threshold = self.success_threshold
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold):
+            raise ValueError(f"{where}: success_threshold must be a finite number, got {threshold!r}")
+        self.success_threshold = float(threshold)
         staleness = self.max_staleness
         if staleness is not None and (isinstance(staleness, bool) or not isinstance(staleness, int) or staleness < 0):
             raise ValueError(

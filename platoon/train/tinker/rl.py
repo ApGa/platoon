@@ -44,6 +44,7 @@ from platoon.train.tinker.checkpoint_pruning import (
     RECOVERY_CHECKPOINT_PREFIX,
     RecoveryCheckpointPruner,
     check_recovery_pruning,
+    read_checkpoint_records,
 )
 from platoon.train.tinker.config_defs import (
     PlatoonTinkerRLTrainerConfig,
@@ -58,6 +59,7 @@ from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
 from platoon.train.tinker.rollout_queue import RolloutTaskQueue
+from platoon.train.tinker.task_records import TaskRecorder, record_lost_state, resume_record
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.utils.rollout_stats import REWARD_KEY_MISMATCH, REWARD_KEY_PREFIX, RolloutStats, outcome_counts
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -150,11 +152,13 @@ LABEL_STATS = ("task_reward", "num_steps")
 class _Settled:
     """A group's output as a rollout worker hands it to the step that consumes it, with the environment entry and the
     label of the row it ran: the stale filter and the label metrics read them from the row, which the worker holds,
-    and not from the output, which a custom workflow's plain list of datums cannot carry."""
+    and not from the output, which a custom workflow's plain list of datums cannot carry.  ``record`` is the group's
+    record in the run's per-task statistics, when the trainer keeps them."""
 
     entry: str | None
     label: str | None
     rollout: Any
+    record: Any = None
 
 
 def _output_label(rollout: Any) -> str | None:
@@ -163,13 +167,13 @@ def _output_label(rollout: Any) -> str | None:
     return getattr(rollout, "label", None)
 
 
-def _settled(item: Any) -> tuple[str | None, str | None, Any]:
-    """``(entry, label, output)`` of a result queue item: a worker's :class:`_Settled`, or a bare output, whose entry
-    and label are its own (``GroupRolloutWorkflow``'s ``entry`` and ``label``), when it has them."""
+def _settled(item: Any) -> _Settled:
+    """A result queue item as a worker's :class:`_Settled`: itself, or a bare output (a test's or a custom loop's),
+    whose entry and label are its own (``GroupRolloutWorkflow``'s ``entry`` and ``label``), when it has them."""
 
     if isinstance(item, _Settled):
-        return item.entry, item.label, item.rollout
-    return getattr(item, "entry", None), getattr(item, "label", None), item
+        return item
+    return _Settled(getattr(item, "entry", None), getattr(item, "label", None), item)
 
 
 class _GroupPermits:
@@ -817,6 +821,7 @@ class PlatoonTinkerRLTrainer:
         batch_size = self.config.train.batch_size
         needed = (end_batch - start_batch) * batch_size
         capped = isinstance(data_queue, RolloutTaskQueue)
+        recorder = getattr(self, "_recorder", None)
         queued = 0
 
         def runnable() -> int:
@@ -849,8 +854,15 @@ class PlatoonTinkerRLTrainer:
                         return
                     await asyncio.sleep(20.0)
                     continue
-                if await data_queue.put(batch[index]) is not False:
+                data = batch[index]
+                if recorder is not None:
+                    recorder.draw(
+                        data, position=i_batch * batch_size + index, version=shared_state.model_info.llm.version
+                    )
+                if await data_queue.put(data) is not False:
                     queued += 1
+                elif recorder is not None:
+                    recorder.skipped(data)
                 index += 1
             i_batch += 1
 
@@ -998,7 +1010,9 @@ class PlatoonTinkerRLTrainer:
             if shared_state.watchdog:
                 shared_state.watchdog.heartbeat()
 
-            rollout_result_queue.put_nowait(_Settled(entry, label, rollout) if rows is not None else rollout)
+            recorder = getattr(self, "_recorder", None) if rows is not None else None
+            record = recorder.settle(data, entry=entry, label=label, output=rollout) if recorder is not None else None
+            rollout_result_queue.put_nowait(_Settled(entry, label, rollout, record) if rows is not None else rollout)
 
     @staticmethod
     def _publish_worker_binding(workflow, sampling_client, version: int, *, required: bool = False) -> None:
@@ -1094,6 +1108,8 @@ class PlatoonTinkerRLTrainer:
         labels = metric_labels(tasks, column)
         reward_keys: set[str] = set()
         # The stale filter's bound for each entry's groups: its own max_staleness, else the run's.
+        recorder = getattr(self, "_recorder", None)
+        prefixes = {label: metric_prefix(column, label) for label in labels}
         run_bound = self.config.train.max_staleness
         bounds = {label: own.max_staleness for label, own in entry_settings.run_settings(self.config).items()}
         skipped_seen: Counter[str] = Counter()  # rows a capped label's full backlog skipped, by label, logged so far
@@ -1130,6 +1146,10 @@ class PlatoonTinkerRLTrainer:
             batch_label_stats = {label: _no_groups_yet() for label in labels}
             batch_stale_groups = 0
             batch_label_stale: Counter[str] = Counter()
+            # The step's groups in the per-task statistics, each with its fate once the step commits, and the kinds of
+            # the groups it trained on, by label ("" for the whole batch).
+            step_fates: list[tuple[Any, str]] = []
+            batch_kinds: dict[str, Counter[str]] = {"": Counter(), **{label: Counter() for label in labels}}
             batch_groups_without_stats = 0
             batch_optimizer_steps = 0
             # Microbatches that took no forward/backward: their objective was zero, or they had no datums.
@@ -1157,11 +1177,18 @@ class PlatoonTinkerRLTrainer:
                             f"Waiting for rollout {task_num + 1}/{tasks_per_microbatch} "
                             f"(minibatch {minibatch_num}, microbatch {microbatch_num})"
                         )
-                        entry, row_label, rollout = _settled(
+                        settled = _settled(
                             await self._next_rollout(
                                 task_rollout_result_queue, shared_state, interruptible=batch_optimizer_steps == 0
                             )
                         )
+                        entry, row_label, rollout, record = (
+                            settled.entry,
+                            settled.label,
+                            settled.rollout,
+                            settled.record,
+                        )
+                        failed = rollout is None
                         batch_total_tasks += 1
                         # The group's own statistics belong to this step, which consumes it, stale or not.
                         _record_group_stats(rollout, shared_state.train_tracker)
@@ -1216,6 +1243,15 @@ class PlatoonTinkerRLTrainer:
                                 batch_stale_groups += 1
                                 batch_label_stale[row_label if row_label is not None else _output_label(rollout)] += 1
                                 rollout = None
+                                if record is not None:
+                                    step_fates.append((record, "stale"))
+                                    record = None
+                        if record is not None:
+                            step_fates.append((record, "failed" if failed else "consumed"))
+                            if not failed and (kind := record.kind(recorder.threshold(record.entry))) is not None:
+                                batch_kinds[""][kind] += 1
+                                if row_label in batch_kinds:
+                                    batch_kinds[row_label][kind] += 1
 
                         if rollout is not None:
                             if isinstance(rollout_stats, RolloutStats):
@@ -1525,6 +1561,10 @@ class PlatoonTinkerRLTrainer:
                 },
             )
 
+            # The step commits: what became of each of its groups, before a full checkpoint saves the statistics.
+            for record, fate in step_fates:
+                recorder.fate(record, fate)
+
             # Consuming an all-zero batch does not change the policy. In
             # particular it must not age slower, useful rollouts as stale.
             update_start = time.perf_counter()
@@ -1575,6 +1615,16 @@ class PlatoonTinkerRLTrainer:
                 stats.record(shared_state.train_tracker, prefix=f"batch/{metric_prefix(column, label)}")
                 shared_state.train_tracker.scalar(
                     **{f"batch/{metric_prefix(column, label)}/stale_groups": float(batch_label_stale[label])}
+                )
+            if recorder is not None and not recorder.stopped:
+                # The kinds of the groups the step trained on, and what each label's tasks' groups say so far; nothing
+                # once the statistics stopped, rather than zeros that read as no informative groups.
+                for label, kinds in batch_kinds.items():
+                    where = f"batch/{prefixes[label]}/" if label else "batch/"
+                    for kind in ("informative", "all_pass", "all_fail", "uniform_mixed"):
+                        shared_state.train_tracker.scalar(**{f"{where}{kind}_groups": float(kinds[kind])})
+                shared_state.train_tracker.scalar(
+                    **recorder.step_metrics(now=shared_state.model_info.llm.version, prefixes=prefixes)
                 )
             if isinstance(task_data_queue, RolloutTaskQueue):
                 # Rows a capped label's full backlog skipped since the last step: its share of the order asks for
@@ -1665,7 +1715,8 @@ class PlatoonTinkerRLTrainer:
         """Monitor task that waits for all eval results and then terminates the eval TaskGroup; each group's rollout
         statistics go into its label's ``label_stats``, when its label's metrics are logged."""
         for _ in range(total_eval_tasks):
-            _entry, row_label, rollout = _settled(await eval_rollout_result_queue.get())
+            settled = _settled(await eval_rollout_result_queue.get())
+            row_label, rollout = settled.label, settled.rollout
             if tracker is not None:
                 _record_group_stats(rollout, tracker)
             rollout_stats = getattr(rollout, "rollout_stats", None)
@@ -1907,12 +1958,15 @@ class PlatoonTinkerRLTrainer:
                     training_client=training_client,
                     name=checkpoint_name,
                     log_path=self.run_log_path,
-                    loop_state={
-                        "batch": next_batch,
-                        "wandb_run_id": self._stats_logger.wandb_run_id,
-                        "policy_version": next_batch if policy_version is None else policy_version,
-                        "optimizer_steps": next_batch if optimizer_steps is None else optimizer_steps,
-                    },
+                    loop_state=self._with_tasks(
+                        checkpoint_name,
+                        {
+                            "batch": next_batch,
+                            "wandb_run_id": self._stats_logger.wandb_run_id,
+                            "policy_version": next_batch if policy_version is None else policy_version,
+                            "optimizer_steps": next_batch if optimizer_steps is None else optimizer_steps,
+                        },
+                    ),
                     kind="both",
                 ),
                 name="save_checkpoint",
@@ -1932,6 +1986,52 @@ class PlatoonTinkerRLTrainer:
             raise
         logger.info("Sampling client created successfully")
         return sampling_client
+
+    def _begin_task_records(self, resume_info: Any, start_batch: int) -> None:
+        """Start this start's records of the run's per-task statistics (:class:`TaskRecorder`) over every task training
+        draws from, with those of the checkpoint ``resume_info`` resumes from, when it names a snapshot that reads back,
+        else those of the newest older checkpoint whose snapshot does, else from empty (:meth:`_task_records_started`
+        records why in ``lock.json``)."""
+
+        tasks = getattr(getattr(self, "train_order", None), "items", None)
+        if tasks is None:
+            tasks = getattr(self, "train_dataset", None) or []
+        self._recorder = None
+        self._tasks_lost = None
+        try:
+            self._recorder, self._tasks_lost = TaskRecorder.begin(
+                run_dir=self.run_log_path,
+                config=self.config,
+                tasks=tasks,
+                records=read_checkpoint_records(self.run_log_path),
+                checkpoint=resume_info.name if resume_info is not None else None,
+                resume=resume_record(resume_info) if resume_info is not None else None,
+                batch=start_batch,
+            )
+        except Exception:  # the statistics never fail training
+            logger.warning("This start keeps no per-task statistics: they could not start", exc_info=True)
+
+    def _task_records_started(self) -> None:
+        """The launch save succeeded: the start's events go to the event log, and a start that could not load the
+        statistics its checkpoint named says so in ``lock.json`` (``tasks_state_lost``).  Never raises."""
+
+        recorder = getattr(self, "_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.started()
+        except Exception:  # the statistics never fail training
+            logger.warning("Could not log the start of this start's per-task statistics", exc_info=True)
+        if (lost := getattr(self, "_tasks_lost", None)) is not None:
+            record_lost_state(self.run_log_path, lost)
+
+    def _with_tasks(self, checkpoint: str, loop_state: dict[str, Any]) -> dict[str, Any]:
+        """``loop_state`` of a full checkpoint, with the record of the snapshot of the run's per-task statistics, which
+        it writes first (``tasks``); as it is when the trainer keeps none, or they stopped."""
+
+        recorder = getattr(self, "_recorder", None)
+        record = recorder.snapshot(checkpoint) if recorder is not None else None
+        return {**loop_state, "tasks": record} if record is not None else loop_state
 
     def _start_recovery_pruning(self) -> RecoveryCheckpointPruner | None:
         """The pruner of this run's recovery checkpoints (``checkpoint.keep_recovery``), which deletes them on a Tinker
@@ -2121,6 +2221,10 @@ class PlatoonTinkerRLTrainer:
         if training_client is None:
             return  # stopped before training began: nothing to save
 
+        # The run's per-task statistics, those of the checkpoint it resumes from loaded before the launch save, which
+        # saves them: a crash before the next full save loses none of them.
+        self._begin_task_records(resume_info, start_batch)
+
         # Initial sampling client to use (the watchdog is not running yet). The
         # launch save is a *recovery* checkpoint: every (re)launch writes one, so
         # naming it permanently would accumulate a ~490 GB checkpoint per restart.
@@ -2131,17 +2235,21 @@ class PlatoonTinkerRLTrainer:
                 training_client=training_client,
                 name=launch_checkpoint_name,
                 log_path=self.run_log_path,
-                loop_state={
-                    "batch": start_batch,
-                    "wandb_run_id": self._stats_logger.wandb_run_id,
-                    "policy_version": policy_version,
-                    "optimizer_steps": optimizer_steps,
-                },
+                loop_state=self._with_tasks(
+                    launch_checkpoint_name,
+                    {
+                        "batch": start_batch,
+                        "wandb_run_id": self._stats_logger.wandb_run_id,
+                        "policy_version": policy_version,
+                        "optimizer_steps": optimizer_steps,
+                    },
+                ),
                 kind="both",
             ),
             name="save_checkpoint",
             total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
         )
+        self._task_records_started()
         # Pruning starts with the launch save, so a resumed run first deletes what its earlier starts left.
         self._recovery_pruner = self._start_recovery_pruning()
         self._recovery_saved(path_dict, policy_version)
@@ -2241,12 +2349,15 @@ class PlatoonTinkerRLTrainer:
                         name=f"{current_step:06d}_interrupted",
                         log_path=self.run_log_path,
                         kind="both",
-                        loop_state={
-                            "batch": current_step,
-                            "wandb_run_id": self._stats_logger.wandb_run_id,
-                            "policy_version": shared_state.model_info.llm.version,
-                            "optimizer_steps": shared_state.optimizer_steps,
-                        },
+                        loop_state=self._with_tasks(
+                            f"{current_step:06d}_interrupted",
+                            {
+                                "batch": current_step,
+                                "wandb_run_id": self._stats_logger.wandb_run_id,
+                                "policy_version": shared_state.model_info.llm.version,
+                                "optimizer_steps": shared_state.optimizer_steps,
+                            },
+                        ),
                     ),
                     name="save_checkpoint",
                     total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
@@ -2261,12 +2372,15 @@ class PlatoonTinkerRLTrainer:
                     name="final",
                     log_path=self.run_log_path,
                     kind="both",
-                    loop_state={
-                        "batch": end_batch,
-                        "wandb_run_id": self._stats_logger.wandb_run_id,
-                        "policy_version": shared_state.model_info.llm.version,
-                        "optimizer_steps": shared_state.optimizer_steps,
-                    },
+                    loop_state=self._with_tasks(
+                        "final",
+                        {
+                            "batch": end_batch,
+                            "wandb_run_id": self._stats_logger.wandb_run_id,
+                            "policy_version": shared_state.model_info.llm.version,
+                            "optimizer_steps": shared_state.optimizer_steps,
+                        },
+                    ),
                 ),
                 name="save_checkpoint",
                 total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
@@ -2285,3 +2399,5 @@ class PlatoonTinkerRLTrainer:
             logger.info("Training was already complete; nothing to do")
         if self._recovery_pruner is not None:
             await self._recovery_pruner.aclose()
+        if (recorder := getattr(self, "_recorder", None)) is not None:
+            recorder.close()

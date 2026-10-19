@@ -307,7 +307,9 @@ Two files go there, replacing any older copies:
   `eval` add `excluded_tasks` once they have listed the tasks: the ids left out of each list
   ([Leave tasks out](train-and-eval.md#leave-tasks-out)). When entries set training settings of their own, `train`
   adds `entry_settings`: what each entry's settings change from the run's
-  ([Settings per environment](train-and-eval.md#settings-per-environment)).
+  ([Settings per environment](train-and-eval.md#settings-per-environment)). A start that cannot load the per-task
+  statistics its checkpoint names adds itself to `tasks_state_lost`: its number, the checkpoint, why, and the older
+  checkpoint whose statistics it loaded instead, if any ([Per-task statistics](train-and-eval.md#per-task-statistics)).
 
 To repeat a run, pass its record back as the config: `platoon train <run dir>/config.resolved.yaml`. Use a new
 `stats.trial_name` for a fresh run; reusing the same run directory resumes it (see [Checkpoints and

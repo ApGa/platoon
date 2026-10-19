@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 TRAJECTORY_CANCELLED_MISC_KEY = "trajectory_cancelled"
@@ -104,6 +105,29 @@ def trained_reward_key(trajectory: Any) -> str | None:
         return None
     key = outcome.get(OUTCOME_REWARD_KEY)
     return key if isinstance(key, str) and key else None
+
+
+def scored_success(trajectory: Any) -> float | None:
+    """The reward a trajectory's environment scored, before any reward processor, as its last step records it: the
+    trace's ``reward/success`` (``misc["reward_misc"]``), or a legacy rollout's own ``success`` flag; None when it
+    records neither.  ``platoon eval`` judges success on it, and so do training's per-task statistics."""
+
+    steps = trajectory.get("steps") if isinstance(trajectory, dict) else getattr(trajectory, "steps", None)
+    if not isinstance(steps, list) or not steps or not isinstance(steps[-1], dict):
+        return None
+    misc = steps[-1].get("misc")
+    reward_misc = misc.get("reward_misc") if isinstance(misc, dict) else None
+    if not isinstance(reward_misc, dict):
+        return None
+    for key in ("reward/success", "success"):
+        if key in reward_misc:
+            try:
+                value = float(reward_misc[key])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                return value
+    return None
 
 
 def outcome_status(trajectory: Any) -> str | None:

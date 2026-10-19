@@ -218,6 +218,10 @@ class RolloutWorkerResponse:
     # when conversion left no result; else None.  Counted per step; and unlike the diagnostics, training reads it: a
     # group whose members trained different keys does not train.
     reward_key: str | None = None
+    # The reward the root's environment scored, before any reward processor
+    # (``platoon.utils.trajectory_status.scored_success``), else None.  The per-task statistics count a pass on it, as
+    # platoon eval judges success; never trained on.
+    success_reward: float | None = None
 
 
 # --------------------------------------------------------------------------
