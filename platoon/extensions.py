@@ -1190,9 +1190,28 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
             add("workflow", environment.workflow, label, "workflow", describe)
     problems += _check_options(environments, records, phases=config_phases(config, split))
     problems += _check_service_options(environments, records)
+    if getattr(config, "train", None) is not None:
+        problems += _check_entry_settings_workflow(environments, records)
     if problems:
         raise ConfigError(problems)
     return list(records.values())
+
+
+def _check_entry_settings_workflow(
+    environments: Sequence[Any], records: Mapping[tuple[str, str], dict[str, Any]]
+) -> list[str]:
+    """An entry's own training settings beside a training workflow class that does not apply them
+    (:func:`platoon.train.entry_settings.workflow_problems`), which ``platoon train`` refuses too.  The default
+    workflow applies them; one that does not resolve is reported already."""
+
+    from platoon.registry import resolve_component
+    from platoon.train import entry_settings
+    from platoon.train.components import merge_run_level_settings
+
+    workflow = merge_run_level_settings(environments).workflow
+    if workflow == "group_rollout" or ("workflow", workflow) not in records:
+        return []
+    return entry_settings.workflow_problems(environments, resolve_component("workflow", workflow), workflow)
 
 
 def _check_service_options(environments: Sequence[Any], records: Mapping[tuple[str, str], dict[str, Any]]) -> list[str]:

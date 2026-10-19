@@ -139,9 +139,16 @@ with `service="harbor"` and its `dataset_dir`; site facts such as the sandbox pr
 
 An entry that selects a named environment leaves tasks out with its own `exclude_tasks`
 ([Leave tasks out](../how-to/train-and-eval.md#leave-tasks-out)). A named environment cannot set that key, as it
-cannot set `name`, `weight`, `harness_options` or the run-level settings, which each run chooses: the entry's own
-list would replace the environment's instead of adding to it. An environment that should not offer a task leaves it
-out of its own task lists, in a new version.
+cannot set `name`, `weight`, `harness_options`, `max_staleness` or the run-level settings, which each run chooses:
+the entry's own list would replace the environment's instead of adding to it. An environment that should not offer a
+task leaves it out of its own task lists, in a new version.
+
+Of an entry's training settings ([Settings per environment](../how-to/train-and-eval.md#settings-per-environment)),
+a named environment may ship the rollout settings its tasks were measured with, `workflow_config.rollout_config`,
+such as a calibrated step budget (`workflow_config: {rollout_config: {max_steps: 30}}`): they are the lowest layer of
+the entry's settings, beneath the run's evaluation settings in its evaluations. The rest of `workflow_config` (the
+group size, the baseline, the minimum group size and the other training strategy) and `eval_overrides.workflow_config`
+are the run's to choose, and building the entry refuses them.
 
 `platoon-number-search@1` ships with platoon and needs nothing installed; `textcraft@1` and `textcraft-synth@1` come
 from the first-party extension `platoon-textcraft` (`extensions/textcraft`).

@@ -85,6 +85,12 @@ platoon config show [OPTIONS] CONFIG [ARGS...]
 
 Print the resolved config: the file merged with its extends chain and the overrides, as YAML.
 
+Then, as YAML comments, the effective settings of each environment entry that sets its own (workflow_config,
+eval_overrides.workflow_config, max_staleness): one block per phase the config runs (training groups, evaluation
+during training, or platoon eval's rollouts), each key with its value, the layer it came from (default,
+train.workflow_config, the named environment, the entry, eval.workflow_config or inference.workflow,
+eval_overrides) and the value that layer replaced.
+
 **Arguments**:
 
 * `CONFIG`: YAML config file. **[required]**
@@ -96,6 +102,7 @@ Print the resolved config: the file merged with its extends chain and the overri
     section, train when it has a train section). *[choices: auto, train, eval, none]* *[default: auto]*
 * `--schema STR`: A config class to validate against instead, as module:Class.
 * `--defaults, --no-defaults`: Print every field, with the schema defaults filled in. *[default: False]*
+* `--entry STR`: Print only the effective settings of the environment entry of this name, whether it sets its own or not.
 
 #### platoon config validate
 

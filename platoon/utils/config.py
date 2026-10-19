@@ -467,6 +467,19 @@ UNKNOWN_KEY_HINTS = "UNKNOWN_KEY_HINTS"
 # And where a required key it misses may come from instead: ``REQUIRED_KEY_HINTS = {key: hint}`` (a ClassVar), which
 # the missing-key problem quotes.
 REQUIRED_KEY_HINTS = "REQUIRED_KEY_HINTS"
+# A config class may check a free-form mapping field against a schema of its own without building it: a class
+# attribute ``FIELD_SCHEMAS = {field: schema}`` (a ClassVar).  Validation, the reading of numbers and the parsing of
+# overrides take the field's value as a value of ``schema`` (its keys, with its UNKNOWN_KEY_HINTS, and their types),
+# while the field keeps the mapping as given, so that a key it leaves out stays told apart from one it sets, null
+# included.  An environment entry's ``workflow_config`` is checked so (``platoon.train.components``).
+FIELD_SCHEMAS = "FIELD_SCHEMAS"
+
+
+def _field_annotation(schema: Any, name: str, field: _Field) -> Any:
+    """The type a config's value of field ``name`` of ``schema`` is checked as: its ``FIELD_SCHEMAS`` schema, else the
+    field's own type."""
+
+    return (getattr(schema, FIELD_SCHEMAS, None) or {}).get(name, field.annotation)
 
 
 def _unknown_key(key: str, fields: Mapping[str, _Field], parent: str, hints: Mapping[str, str] | None = None) -> str:
@@ -487,10 +500,11 @@ def unknown_key(key: Any, known: Iterable[str], parent: str, *, hint: str | None
 # --- validation ------------------------------------------------------------------------------------------------
 
 
-def validate_config(data: Any, schema: Any) -> list[str]:
-    """Every problem with ``data`` as a value of ``schema``: unknown keys, wrong types, missing required keys."""
+def validate_config(data: Any, schema: Any, *, path: str = "") -> list[str]:
+    """Every problem with ``data`` as a value of ``schema``: unknown keys, wrong types, missing required keys, each
+    with its dotted path, under ``path`` when ``data`` sits there in a config."""
 
-    return _problems(data, schema, "")
+    return _problems(data, schema, path)
 
 
 def _problems(value: Any, annotation: Any, path: str) -> list[str]:
@@ -526,7 +540,7 @@ def _problems(value: Any, annotation: Any, path: str) -> list[str]:
         hints = getattr(annotation, UNKNOWN_KEY_HINTS, None)
         for key, item in value.items():
             if key in fields:
-                problems.extend(_problems(item, fields[key].annotation, _join(path, key)))
+                problems.extend(_problems(item, _field_annotation(annotation, key, fields[key]), _join(path, key)))
             elif not free_form:
                 problems.append(_unknown_key(str(key), fields, path, hints))
         required = getattr(annotation, REQUIRED_KEY_HINTS, None) or {}
@@ -608,7 +622,7 @@ def normalize_config(data: Any, schema: Any) -> Any:
     fields = _schema_fields(annotation)
     if fields is not None and isinstance(value, Mapping):
         return {
-            key: normalize_config(item, fields[key].annotation) if key in fields else item
+            key: normalize_config(item, _field_annotation(annotation, key, fields[key])) if key in fields else item
             for key, item in value.items()
         }
     is_sequence, item_type = _sequence_item(annotation)
@@ -678,6 +692,36 @@ def _deprecations(value: Any, annotation: Any, path: str) -> list[Deprecation]:
 # sections it names are built after the others.  A training config lays ``eval.workflow_config`` over
 # ``train.workflow_config``'s rollout and worker settings (``platoon.train.tinker.config_defs``).
 LAID_OVER = "LAID_OVER"
+# The attribute in which a section the loader built keeps the mapping the config gave for it (given_mapping).
+_GIVEN = "_platoon_given"
+
+
+def given_mapping(section: Any) -> dict[str, Any] | None:
+    """The mapping a config gave for ``section``, a section (a dataclass) that :func:`build_config` built: the keys
+    the config sets for it, nested sections as given, and ``{}`` for a section the config leaves out, whatever
+    defaults or other sections it was laid over.  So a training config's ``eval.workflow_config`` tells the keys it
+    sets from those it took from ``train.workflow_config``.  None for a section the loader did not build, such as one
+    built in Python."""
+
+    given = getattr(section, _GIVEN, None)
+    return copy.deepcopy(given) if isinstance(given, dict) else None
+
+
+def _keep_given(section: Any, given: Mapping[str, Any]) -> None:
+    """Keep ``given``, the mapping a config gave for ``section``, on the built section (:func:`given_mapping`), and on
+    each of its sections what ``given`` holds for it: ``{}`` for one it leaves out, which holds its default."""
+
+    if not is_dataclass(section) or isinstance(section, type):
+        return
+    try:
+        object.__setattr__(section, _GIVEN, copy.deepcopy(dict(given)))
+    except (AttributeError, TypeError):  # a class with slots keeps nothing
+        return
+    for item in dataclasses.fields(section):
+        child = getattr(section, item.name, None)
+        if is_dataclass(child) and not isinstance(child, type):
+            nested = given.get(item.name)
+            _keep_given(child, nested if isinstance(nested, Mapping) else {})
 
 
 def build_config(schema: type[T], data: Mapping[str, Any]) -> T:
@@ -694,7 +738,19 @@ def build_config(schema: type[T], data: Mapping[str, Any]) -> T:
     (``min_successful_group_size: 4`` with the kept ``group_size: 1``).
     """
 
-    return _build(schema, data)
+    built = _build(schema, data)
+    _keep_given(built, data)
+    return built
+
+
+def lay_over(base: T, overlay: Mapping[str, Any]) -> T:
+    """``overlay``, plain config data for a section, laid over ``base``, a built section, as :func:`build_config` lays
+    a section over its field's default: a nested section merges key by key, any other value ``overlay`` gives,
+    ``null`` included, replaces ``base``'s, a free-form mapping (``rollout_config.extra``) replaces ``base``'s whole,
+    and a key and the deprecated name it was renamed from count as one key.  A new section of ``base``'s class, which
+    may be a subclass with fields of its own; ``ValueError`` when the class refuses the values."""
+
+    return build_config(type(base), _over_default(base, overlay))
 
 
 def _build(
@@ -742,25 +798,36 @@ def _build(
                 if base is not None:
                     inner[name] = base
             kwargs[key] = _build(fields[key].annotation, laid, _join(path, key), taken, inner)
+            if isinstance(item, Mapping):  # what the config gave for the section, before it was laid over anything
+                _keep_given(kwargs[key], item)
         for key, base in over.items():
             if key not in value:  # a field the section leaves out is what it would be laid over
                 kwargs[key] = copy.deepcopy(base)
+                _keep_given(kwargs[key], {})
         try:
-            return annotation(**kwargs)
+            built = annotation(**kwargs)
         except (TypeError, ValueError) as exc:
             shown = {name: item for name, item in (kept or {}).items() if _is_scalar(item)}
             if not shown:
                 raise
             defaults = ", ".join(f"{name}: {_yaml_scalar(item)}" for name, item in shown.items())
             raise ValueError(f"{path}: {exc} (the keys it leaves out keep their {path} defaults: {defaults})") from exc
+        return built
     is_sequence, item_type = _sequence_item(annotation)
     if is_sequence and isinstance(value, (list, tuple)):
         items = [_build(item_type, item, _join(path, index)) for index, item in enumerate(value)]
+        for built, item in zip(items, value):
+            if isinstance(item, Mapping):
+                _keep_given(built, item)
         origin = typing.get_origin(annotation) or annotation
         return tuple(items) if origin is tuple else items
     is_mapping, value_type = _mapping_value(annotation)
     if is_mapping and isinstance(value, Mapping):
-        return {key: _build(value_type, item, _join(path, key)) for key, item in value.items()}
+        found = {key: _build(value_type, item, _join(path, key)) for key, item in value.items()}
+        for key, item in value.items():
+            if isinstance(item, Mapping):
+                _keep_given(found[key], item)
+        return found
     return value
 
 
@@ -967,10 +1034,11 @@ def _child_annotation(annotation: Any, key: Any, path: str, override: Override) 
     fields = _schema_fields(annotation)
     if fields is not None:
         if key in fields:
-            return fields[key].annotation
+            return _field_annotation(annotation, key, fields[key])
         if _free_form_model(annotation):
             return Any
-        raise ConfigError(f"override {override}: {_unknown_key(key, fields, path)}")
+        hints = getattr(annotation, UNKNOWN_KEY_HINTS, None)
+        raise ConfigError(f"override {override}: {_unknown_key(key, fields, path, hints)}")
     is_mapping, value_type = _mapping_value(annotation)
     if is_mapping:
         return value_type
@@ -1150,6 +1218,8 @@ def resolve_config(
             raise ConfigError(problems, source=config_path)
         try:
             config = build_config(schema, data)
+        except ConfigError as exc:  # a config class's own checks, every problem with its dotted path
+            raise ConfigError(exc.problems, source=config_path) from exc
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"{type(exc).__name__}: {exc}", source=config_path) from exc
         deprecations += tuple(find_deprecations(data, schema))
