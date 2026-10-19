@@ -346,6 +346,7 @@ def test_main_runs_the_agent_with_the_token_trigger_it_reports(runner, tmp_path,
 
     reported = json.loads(capsys.readouterr().out.splitlines()[0].removeprefix("openhands: settings "))
     assert code == runner.EXIT_FINISHED and reported["condenser_max_tokens"] == 104857
+    assert reported["condenser"] == "llm_summarizing"  # what runs, though --condenser stayed "none"
     (conversation,) = CONVERSATIONS
     assert conversation.kwargs["agent"].kwargs["condenser"].kwargs["max_tokens"] == 104857
 

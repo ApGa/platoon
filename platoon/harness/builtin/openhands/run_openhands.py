@@ -571,14 +571,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def settings(args: argparse.Namespace) -> dict[str, object]:
-    """What the agent runs with, as its first line of output reports it."""
+    """What the agent runs with, as its first line of output reports it: the condenser that runs, which a token
+    trigger makes the summarizing one whatever ``--condenser`` says (:func:`build_condenser`)."""
 
     return {
         "max_iterations": args.max_iterations,
         "reasoning_replay": args.reasoning_replay,
         "llm_timeout": args.llm_timeout,
         "num_retries": args.num_retries,
-        "condenser": args.condenser,
+        "condenser": "llm_summarizing" if args.condenser_max_tokens else args.condenser,
         "condenser_max_tokens": args.condenser_max_tokens,
     }
 
