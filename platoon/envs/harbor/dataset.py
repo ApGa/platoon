@@ -12,7 +12,13 @@ from typing import Any
 
 from platoon.envs.harbor.holdout import HoldoutRow
 from platoon.envs.harbor.inputs import input_files
-from platoon.envs.harbor.task import CONFIG_FILENAME, AgentUserPolicy, HarborTask, HarborTaskError
+from platoon.envs.harbor.task import (
+    CONFIG_FILENAME,
+    AgentUserPolicy,
+    HarborTask,
+    HarborTaskError,
+    VerifierUserPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,7 @@ class HarborDataset:
         task_dirs: Sequence[str | Path] | None = None,
         splits: SplitManifest | None = None,
         agent_user: AgentUserPolicy = "refuse",
+        verifier_user: VerifierUserPolicy | None = None,
     ) -> None:
         if (dataset_dir is None) == (task_dirs is None):
             raise ValueError("Pass exactly one of dataset_dir or task_dirs")
@@ -63,7 +70,9 @@ class HarborDataset:
             if task_id in self._tasks or task_id in self._refused:
                 raise ValueError(f"Two Harbor tasks are named {task_id!r}")
             try:
-                task = HarborTask.load(task_dir, agent_user=agent_user, index=index.get(task_id))
+                task = HarborTask.load(
+                    task_dir, agent_user=agent_user, verifier_user=verifier_user, index=index.get(task_id)
+                )
             except HarborTaskError as exc:
                 logger.warning("Skipping Harbor task %s: %s", task_dir, exc)
                 self._refused[task_id] = str(exc)

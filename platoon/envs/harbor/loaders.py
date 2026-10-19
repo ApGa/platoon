@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from platoon.envs.harbor.dataset import HarborDataset, SplitManifest
-from platoon.envs.harbor.task import AgentUserPolicy, HarborTask
+from platoon.envs.harbor.task import AgentUserPolicy, HarborTask, VerifierUserPolicy
 from platoon.registry import register_dataset_loader, register_task_loader
 from platoon.task import Task
 
@@ -31,10 +31,13 @@ def load_dataset(
     split_name: str | None = None,
     limit: int | None = None,
     agent_user: AgentUserPolicy = "refuse",
+    verifier_user: VerifierUserPolicy | None = None,
 ) -> list[str]:
     """Task ids of a split (``split_name`` renames it, e.g. eval -> test), in manifest or directory order."""
 
-    dataset = HarborDataset(dataset_dir, task_dirs=task_dirs, splits=splits, agent_user=agent_user)
+    dataset = HarborDataset(
+        dataset_dir, task_dirs=task_dirs, splits=splits, agent_user=agent_user, verifier_user=verifier_user
+    )
     task_ids = [str(dataset.get(name).task_dir) for name in dataset.names(split_name or split)]
     return task_ids if limit is None else task_ids[:limit]
 

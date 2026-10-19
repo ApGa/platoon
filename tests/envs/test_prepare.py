@@ -26,7 +26,7 @@ from test_harbor_fetch import hub as fake_hub  # noqa: F401 - a fixture: the fak
 from platoon import cli
 from platoon.envs.harbor import builders
 from platoon.envs.harbor import fetch as fetch_module
-from platoon.envs.harbor.images import ImageEntry, ImageMap
+from platoon.envs.harbor.images import ImageEntry, ImageMap, update_image_map
 from platoon.envs.harbor.lock import read_lock
 from platoon.harness.toolchains import read_manifest
 from platoon.prepare import load_environments, prepare, prepare_command, summary
@@ -366,6 +366,59 @@ def test_an_entry_that_serves_a_directory_fetches_and_builds_nothing(site, tmp_p
     assert out[0] == "environments[default] dataset: serves a directory, which is not fetched"
     assert out[1].startswith("environments[default] toolchain agent-1.0: built at")
     assert out[-1] == "ready: 1 made now, 0 already current" and not site["builds"]
+
+
+def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_before_0_3_0(site, tmp_path: Path):
+    """With verifier_user: honor, an image that a verifier runs as root on, and whose receipt records no oci builder
+    revision (as the fake builds here, and the oci builder's before 0.3.0), may keep its files from the users the tests
+    switch to, and prepare replaces no image: the step fails, naming the build that makes it again.  Built again, it
+    passes; the task's own image, which only the agents run, never mattered."""
+
+    task = tmp_path / "dataset" / "rooted"
+    files = {
+        "task.toml": '[agent]\nuser = "nobody"\n[verifier]\nenvironment_mode = "separate"\nuser = "root"\n',
+        "instruction.md": "Do the task.\n",
+        "tests/test.sh": "echo 1 > /logs/verifier/reward.txt\n",
+        "tests/Dockerfile": "FROM python:3.12-slim\nRUN echo grader > /grader.txt\n",
+        "environment/Dockerfile": "FROM python:3.12-slim\nRUN echo built > /built.txt\n",
+    }
+    for relative, text in files.items():
+        (task / relative).parent.mkdir(parents=True, exist_ok=True)
+        (task / relative).write_text(text)
+    config = tmp_path / "configs" / "rooted.yaml"
+    config.parent.mkdir()
+    entry = {
+        "name": "rooted",
+        "service": "harbor",
+        "service_kwargs": {
+            "dataset": str(tmp_path / "dataset"),
+            "cache": str(tmp_path / "cache"),
+            "refuse": {"agent_user": False},
+            "agent_user": "ignore",
+            "verifier_user": "honor",
+            "provider": "singularity",
+            "verifier_provider_options": {"rootfs_layout": "copy", "fakeroot": True},
+        },
+        "harness": str(_spec(tmp_path)),
+    }
+    config.write_text(yaml.safe_dump({"environments": [entry]}))
+
+    steps, lines, code = _run(config)
+
+    (lock_path,) = (tmp_path / "cache" / "locks").iterdir()
+    verifier_key = read_lock(lock_path).get("rooted").verifier_image["key"]
+    (images,) = [step for step in steps if step.step == "images"]
+    assert code == 1 and images.status == "failed" and len(site["builds"]) == 2, images.detail
+    assert images.detail.startswith("built 2 with the oci builder")
+    assert f"build them again with `platoon harbor images build CONFIG --key {verifier_key}`" in images.detail
+    assert lines[-1] == "not ready: 1 step(s) failed (environments[rooted] images)"
+
+    default = tmp_path / "cache" / "images" / "singularity.json"
+    built = ImageMap.load(default).entries[verifier_key]
+    again = ImageEntry(image=built.image, builder="oci", receipt={"builder_revision": 1})  # built since
+    update_image_map(default, {verifier_key: again})
+    steps, lines, code = _run(config)
+    assert code == 0 and [step.status for step in steps if step.step == "images"] == ["current"], lines
 
 
 def test_a_moving_reference_is_prepared_only_once_pinned(fake_hub: FakeHub, site, tmp_path: Path, capsys):  # noqa: F811

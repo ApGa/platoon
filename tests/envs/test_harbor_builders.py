@@ -28,7 +28,7 @@ from platoon.envs.harbor.builders import (
 from platoon.envs.harbor.dockerfile import parse_dockerfile, plan_dockerfile
 from platoon.envs.harbor.fetch import fetch, fetch_config
 from platoon.envs.harbor.hashing import file_sha256
-from platoon.envs.harbor.images import ImageEntry, ImageMap, has_image
+from platoon.envs.harbor.images import ImageEntry, ImageMap, has_image, withholds_modes
 
 SHARED = "FROM python:3.12-slim\nRUN pip install numpy\nWORKDIR /app\nCOPY instance.json /app/instance.json\n"
 OWN = "FROM python:3.12-slim\nCOPY seed.py /opt/seed.py\nRUN python /opt/seed.py\n"
@@ -323,7 +323,7 @@ echo "unexpected: $*" >&2; exit 2
 """
 FAKE_UNSQUASHFS = r"""#!/bin/bash
 set -e
-echo "unsquashfs $*" >> "$FAKE_LOG"
+echo "unsquashfs $* (umask $(umask), work $(stat -c %a "$(dirname "$3")"))" >> "$FAKE_LOG"
 mkdir -p "$3/workdir"
 """
 
@@ -371,8 +371,14 @@ def test_oci_builds_extract_a_native_sif_and_record_the_config(lock, tmp_path: P
     assert entry.cmd == ("python3",) and entry.builder == "oci" and len(entry.sha256) == 64
     assert entry.receipt["builder_version"] == "singularity-ce version 4.4.1"
     assert entry.receipt["task"] == "a" and Path(entry.receipt["log"]).is_file()
+    assert entry.receipt["builder_revision"] == 1 and not withholds_modes(entry)
     calls = (tmp_path / "calls.log").read_text()
     assert "build --oci" in calls and "sif dump 1" in calls and "unsquashfs -no-xattrs -d" in calls
+    # unsquashfs, run as a user, would give the image's files the host's umask: it runs with none, in a build tree
+    # that only its owner may enter, since the image's own modes may let anyone write.
+    assert "(umask 0000, work 700)" in calls
+    before = {key: value for key, value in entry.receipt.items() if key != "builder_revision"}  # platoon before 0.3.0
+    assert withholds_modes(dataclasses.replace(entry, receipt=before))
     assert plan_images(lock, ImageMap.load(image_map)).missing == []
     assert build_images(lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "scratch") == {}
     assert not list((tmp_path / "scratch").glob("build-*"))  # build trees are removed
@@ -510,6 +516,7 @@ def test_def_builds_record_the_images_own_environment(lock, tmp_path: Path, monk
     built = build_images(lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "s", builder="def")
     shared = built[plan_images(lock).images[0].key]
     assert shared.builder == "def" and Path(shared.image).read_text() == "def\n" and shared.workdir is None
+    assert "builder_revision" not in shared.receipt and not withholds_modes(shared)
     assert shared.env == {"PATH": "/usr/local/bin:/usr/bin", "LANG": "C.UTF-8"}
     assert "build --fakeroot" in (tmp_path / "calls.log").read_text()
 

@@ -64,11 +64,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # HPC task sandboxes: the singularity and enroot providers adapt hpc-sandbox (platoon/sandbox/hpc.py), and rely on the
-# working-directory errors, download reports and image cache of its 0.2 and the root filesystem layouts of 0.3. The
-# lower bound is 0.3.0, the release they are tested against and the first on PyPI, so that an environment that holds
-# hpc-sandbox 0.2.0 (which checkouts took from git) upgrades instead of keeping it.
+# working-directory errors, download reports and image cache of its 0.2, the root filesystem layouts of 0.3 and the
+# fakeroot option of 0.4, with which Harbor verifiers run as root on Singularity. The lower bound is 0.4.0, the release
+# they are tested against, so that an environment that holds an older hpc-sandbox upgrades instead of keeping it: with
+# 0.3.0, which has no fakeroot, a run refuses those verifiers when it lists its tasks (platoon/sandbox/singularity.py).
 hpc = [
-    "hpc-sandbox>=0.3.0,<0.4",
+    "hpc-sandbox>=0.4.0,<0.5",
 ]
 # ORS-native environments (python:// and ors+http:// services); 0.1.125 and 0.1.163 are both supported. structlog
 # (which openreward requires) quiets the SDK's loggers (platoon/envs/ors/sdk.py), which needs 25.1's

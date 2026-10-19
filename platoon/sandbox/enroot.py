@@ -38,8 +38,9 @@ def enroot_options(options: Mapping[str, Any]) -> dict[str, Any]:
     there, and ``stop_grace_s`` is ignored (a sandbox stops by SIGKILL).  ``rootfs_layout``, whose ``fuse-overlay``
     hpc-sandbox's ``EnrootProvider`` refuses, is the one singularity name left out, so a block shared with a Singularity
     site may set it.  What enroot cannot honor raises ``ValueError`` when the provider is built: in hpc-sandbox,
-    ``gpu: rocm``, ``cgroup_limits: true`` (``cpus`` stays advisory, ``memory_mb`` arms the memory watchdog) and both
-    ``gpu`` and ``gpus`` set; here, both ``root`` and ``remap_root`` given.
+    ``gpu: rocm``, ``cgroup_limits: true`` (``cpus`` stays advisory, ``memory_mb`` arms the memory watchdog),
+    ``fakeroot: true`` (0.4 on: enroot maps only your uid, so root there cannot switch users) and both ``gpu`` and
+    ``gpus`` set; here, both ``root`` and ``remap_root`` given.
     """
 
     translated = dict(options)
@@ -70,6 +71,16 @@ class EnrootProvider(HpcProvider):
         return (
             "the enroot provider starts no sandbox without a network while its provider_options set "
             "allow_network_none: false (enroot needs no site permission for one: set it to true or leave it out)"
+        )
+
+    @classmethod
+    def root_refusal(cls, options: Mapping[str, Any]) -> str | None:
+        """enroot maps a sandbox's root (``remap_root``) to your uid and maps no other user: a command there runs as
+        root but cannot switch to another user (:func:`platoon.sandbox.root_refusal`)."""
+
+        return (
+            "the enroot provider maps only your own uid into a sandbox (as root, with remap_root), so a command "
+            "there cannot switch to another user"
         )
 
 

@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import IO
 
 from platoon.envs.harbor.task import ARTIFACTS_DIR, Artifact
+from platoon.envs.harbor.users import DOCKER_UMASK
 from platoon.sandbox.base import DownloadReport, Sandbox
 
 _TRANSFER_TIMEOUT_S = 600.0
@@ -146,12 +147,19 @@ async def collect_artifacts(
     return collected
 
 
-async def materialize_artifacts(sandbox: Sandbox, collected: Sequence[CollectedArtifact], *, workdir: str) -> None:
-    """Put each collected artifact at its path in ``sandbox`` (a directory replaces what is there)."""
+async def materialize_artifacts(
+    sandbox: Sandbox, collected: Sequence[CollectedArtifact], *, workdir: str, readable: bool = False
+) -> None:
+    """Put each collected artifact at its path in ``sandbox`` (a directory replaces what is there).
+
+    With ``readable`` (a verifier that runs as root, whose tests may run the agent's code as another user), the
+    directories it makes get Docker's umask, and every artifact becomes readable by every user, its directories
+    enterable (``chmod -R a+rX``), as an agent's files are under Docker's umask: the host's may have kept them from
+    other users."""
 
     if not collected:
         return
-    commands = []
+    commands = [f"umask {DOCKER_UMASK}"] if readable else []
     for artifact in collected:
         target = artifact.target(workdir)
         if artifact.is_dir:
@@ -168,6 +176,13 @@ async def materialize_artifacts(sandbox: Sandbox, collected: Sequence[CollectedA
             raise ArtifactError(
                 f"cannot hand the artifact {artifact.source} to the verifier: {type(exc).__name__}: {exc}"
             ) from exc
+    if readable:
+        targets = [artifact.target(workdir) for artifact in collected]
+        result = await sandbox.exec(["chmod", "-R", "a+rX", "--", *targets], cwd="/", timeout_s=_TRANSFER_TIMEOUT_S)
+        if result.exit_code != 0 or result.timed_out:
+            raise ArtifactError(
+                f"cannot make the artifacts readable to every user: {(result.stderr or result.stdout).strip()}"
+            )
 
 
 async def _pack(sandbox: Sandbox, path: str, archive: str, exclude: Sequence[str], max_bytes: int) -> str:

@@ -77,15 +77,19 @@ _HARBOR_SERVICE = "platoon.envs.harbor:HarborEnvironmentService"
 
 def sandbox_providers(environments: Iterable[Any] | None) -> list[tuple[str, dict[str, Any]]]:
     """The sandbox providers a run's environments start sandboxes with, each once, as ``(provider, options)``: the
-    ``provider`` and ``provider_options`` of every Harbor entry's ``service_kwargs``.  An entry that names no provider
-    (a record written before platoon recorded the site profile's) has the site profile's, with its options under the
-    entry's, else ``docker`` (:mod:`platoon.site`).
+    ``provider`` and ``provider_options`` of every Harbor entry's ``service_kwargs``, and with its
+    ``verifier_provider_options`` laid over those, the provider of its separate verifiers' sandboxes, unless those
+    options would start no sandbox here (:func:`platoon.sandbox.rootfs_layout_refusal`, such as ``fakeroot`` on an
+    hpc-sandbox that does not take it), so that no verifier's sandbox can have started with them.  An entry that
+    names no provider (a record written before platoon recorded the site profile's) has the site profile's, with its
+    options under the entry's, else ``docker`` (:mod:`platoon.site`).
 
     ``environments`` are a config's ``environments`` entries, as the loaded config holds them or as mappings, the
     form ``config.resolved.yaml`` holds them in.  Entries of other services start no sandboxes of their own.
     """
 
     from platoon.envs.service import service_target
+    from platoon.sandbox import rootfs_layout_refusal
 
     providers: list[tuple[str, dict[str, Any]]] = []
     for entry in environments or ():
@@ -102,9 +106,15 @@ def sandbox_providers(environments: Iterable[Any] | None) -> list[tuple[str, dic
                 options = {**defaults, **options}
         if not isinstance(provider, str) or not isinstance(options, Mapping):
             continue  # not a config's: a provider object passed in Python
-        found = (provider, dict(options))
-        if found not in providers:
-            providers.append(found)
+        found = [(provider, dict(options))]
+        verifier = kwargs.get("verifier_provider_options")
+        if isinstance(verifier, Mapping):  # separate verifiers' sandboxes, with these laid over the entry's options
+            laid = {**options, **verifier}
+            if rootfs_layout_refusal(provider, laid) is None:  # else a run refuses them, and none started
+                found.append((provider, laid))
+        for each in found:
+            if each not in providers:
+                providers.append(each)
     return providers
 
 

@@ -14,6 +14,42 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   `task_order: auto` (its default in 0.2.0, as a dump of that release's `config show --defaults` spells it) is
   ignored, with a warning that says so, and `task_order: weighted` does not load
   ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+- **Harbor verifiers that run as root.** Some Harbor tasks grade as root (`[verifier] user = "root"`) and run the
+  agent's code as another user, nobody as a rule, so that it cannot read the files the grader keeps for itself, such
+  as held-out answers. In a rootless sandbox their tests run as your own uid, which cannot switch users: they score
+  every attempt 0, the reference solution's included, or run the agent's code where it can read those files.
+  `verifier_user: honor` now runs such a task's separate verifier as root, in a sandbox started with
+  `verifier_provider_options` laid over `provider_options`: on Singularity, `{rootfs_layout: copy, fakeroot: true}`,
+  whose `--fakeroot` maps root to your uid and your subordinate ids to the other users, so nothing gains a privilege
+  on the host. On Singularity it needs hpc-sandbox 0.4, whose provider takes `fakeroot` and gives back what the other
+  users write before it deletes a sandbox, and which the `hpc` extra now installs (below); with an older hpc-sandbox,
+  such as 0.3.0, such a run is refused.
+  `verifier_user` (`refuse`, `ignore` or `honor`) decides for `[verifier].user` when it is set, and without it
+  `agent_user` decides for both users, as before. With a fetched dataset, set `refuse: {agent_user: false}` too: the
+  fetch otherwise leaves out every task that names a user, and a run with `honor` warns of the root verifiers it left
+  out. A run refuses, when it lists its tasks (exit 78), a root verifier whose sandboxes cannot give it root and the
+  other users (`singularity` without `fakeroot`, or with an hpc-sandbox that does not take it, `enroot`, which maps only
+  your uid, and `process`), and, for a fetched dataset, a `[verifier].user` that `honor` cannot honor (another user
+  than root, or a root verifier of a task graded in its agents' own sandbox), which a dataset directory skips with a
+  warning. Every started root verifier's sandbox is checked to run as root with every user up to nobody mapped, and
+  to let nobody run the image's shell, else the grade is an `error` (`verifier_start`). A root verifier grades as
+  Docker would: with umask 022, Docker's modes for the directories platoon makes and for a working directory the
+  image lacks, the image's own modes for those it has, its artifacts readable by every user, and the outcome records
+  `verifier_user: root`. Separate verifiers' sandboxes are reaped with their own options too
+  ([Verifiers that run as root](docs/how-to/sandboxes-and-harbor.md#verifiers-that-run-as-root)).
+- **The `oci` image builder keeps the permissions an image gives other users.** Run by anyone but root,
+  `unsquashfs` gave the files it unpacked the image's modes through the host's umask, so under a umask such as 027
+  every file of an image the `oci` builder made lost the read and execute bits the image gives other users. Rootless
+  sandboxes never noticed, since everything there runs as the files' owner, but a verifier that runs as root and
+  switches users could not even run the image's shell. The builder now unpacks under umask 0, in a build directory
+  only you can enter, and records `builder_revision` in its receipts. Images it built before are not built again by
+  themselves, since their build keys do not change: with `verifier_user: honor`, `platoon train`, `eval`, `rollout`
+  and `prepare` refuse the root verifiers' images among them, naming the build that makes them again
+  (`platoon harbor images build CONFIG --key KEY`)
+  ([Verifiers that run as root](docs/how-to/sandboxes-and-harbor.md#verifiers-that-run-as-root)).
+- **The `hpc` extra takes hpc-sandbox 0.4** (`hpc-sandbox>=0.4.0,<0.5`), whose singularity provider has the
+  `fakeroot` option that verifiers that run as root need (above), so pip upgrades an hpc-sandbox 0.3 it finds.
+  Sandboxes started without `fakeroot` behave as with 0.3.
 - **The `openhands` harness condenses at a token count.** Its new option `condenser_max_tokens` gives its summarizing
   condenser a token trigger, and runs that condenser whatever `condenser` says: before each model call, it condenses
   once the prompt the agent would send is longer than that many tokens, summarizing the oldest turns after the system

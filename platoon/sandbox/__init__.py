@@ -95,6 +95,24 @@ def rootfs_layout_refusal(provider: str | SandboxProvider, options: Mapping[str,
     return refusal(dict(options or {})) if callable(refusal) else None
 
 
+def root_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | None = None) -> str | None:
+    """Why ``provider`` (a name with its ``options``, or a built provider) could not run a sandbox's commands as root
+    with other users to switch to, as a Harbor verifier that runs as root needs (it may run the agent's code as
+    another user), read from its options without building it; None when it can, or cannot tell.  A provider class
+    tells through a ``root_refusal(options)`` class method; where it cannot tell (the image's own user decides, as
+    with ``docker``), the Harbor service checks the started sandbox."""
+
+    if isinstance(provider, str):
+        try:
+            kind = provider_class(provider)
+        except (ImportError, AttributeError, ValueError):
+            return None  # building the provider reports it
+    else:
+        kind, options = type(provider), getattr(provider, "options", None)
+    refusal = getattr(kind, "root_refusal", None)
+    return refusal(dict(options or {})) if callable(refusal) else None
+
+
 __all__ = [
     "CWD_ERROR_EXIT_CODE",
     "CWD_ERROR_PREFIX",
@@ -113,5 +131,6 @@ __all__ = [
     "network_none_refusal",
     "provider_class",
     "provider_unavailable",
+    "root_refusal",
     "rootfs_layout_refusal",
 ]

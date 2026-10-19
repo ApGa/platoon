@@ -34,7 +34,7 @@ never `process`, and only the options that do not weaken that isolation.
 |---|---|---|---|---|
 | `process` | None: a host directory, commands run as you | ignored | nothing | `root` (where sandbox directories go; default `<tmp>/platoon-sandboxes`) |
 | `docker` | One long-lived container per sandbox | `docker://repo:tag` or a plain reference | the `docker` CLI (`binary: podman` for Podman) | `binary`, `cli_timeout_s` (600; bounds `docker run` including the pull) |
-| `singularity` | Rootless SingularityCE or Apptainer instances: private PID and IPC namespaces, root filesystem, `/tmp` and environment | `docker://` references, also pinned by digest (`docker://repo@sha256:<digest>`), or local `.sif` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `allow_network_none`, `gpu`, `rootfs_layout` ([below](#the-singularity-providers-root-filesystem)), ... |
+| `singularity` | Rootless SingularityCE or Apptainer instances: private PID and IPC namespaces, root filesystem, `/tmp` and environment | `docker://` references, also pinned by digest (`docker://repo@sha256:<digest>`), or local `.sif` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `allow_network_none`, `gpu`, `rootfs_layout` ([below](#the-singularity-providers-root-filesystem)), `fakeroot` (since the next release, with hpc-sandbox 0.4: [root in a verifier](#verifiers-that-run-as-root)), ... |
 | `enroot` | Rootless enroot containers in their own user, mount, PID and IPC namespaces | `docker://` references, also pinned by digest, or local `.sqsh` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `gpus`, `remap_root`, ...; the singularity names also work (below) |
 
 Every provider runs a string command with `bash -c`, so a Harbor task's `bash` tool takes bash syntax (`[[ ]]`,
@@ -54,7 +54,7 @@ A `provider_options` block written for a Singularity site also serves an enroot 
 every singularity name with the same meaning (`gpu: nv` becomes `gpus: all`; `allow_network_none: false` turns off
 `network: none`, which enroot otherwise always offers; `bind_resolv_conf` works on both; `stop_grace_s` is ignored,
 as enroot sandboxes stop at once, and so is `rootfs_layout`, [below](#the-singularity-providers-root-filesystem))
-and refuses what enroot cannot do (`gpu: rocm`, `cgroup_limits: true`). Two
+and refuses what enroot cannot do (`gpu: rocm`, `cgroup_limits: true`, `fakeroot: true`). Two
 options are exceptions: `binary` and `extra_start_args` are each runtime's own executable and container start
 flags, passed through untranslated, so set them per site and leave them out of a block both providers read. The
 enroot provider also takes `root` as another name for `remap_root` (uid 0 inside the container, your uid outside;
@@ -67,8 +67,8 @@ commands in a sandbox need a proxy, set its variables in the Harbor service's `e
 ### The singularity provider's root filesystem
 
 `rootfs_layout` picks how each sandbox gets its root filesystem, and `HPC_SANDBOX_ROOTFS_LAYOUT` in the job's
-environment sets it for every provider that does not. hpc-sandbox has the layouts from 0.3 on, the release the `hpc`
-extra installs ([The hpc extra](../getting-started/install.md#the-hpc-extra)); with an older one, every sandbox gets a
+environment sets it for every provider that does not. hpc-sandbox has the layouts from 0.3 on, and the `hpc` extra
+installs 0.4 ([The hpc extra](../getting-started/install.md#the-hpc-extra)); with an older one, every sandbox gets a
 copy, and a run that sets `rootfs_layout`, even to `copy`, is refused when its tasks are listed. The layouts:
 
 | `rootfs_layout` | A sandbox's root filesystem | Start, alone / 64 at once on one node | Needs |
@@ -86,10 +86,11 @@ included. File operations go through FUSE, so metadata-heavy work is slower (`fi
 instead of 26 ms; 2000 small writes 195 ms instead of 25 ms), while Python imports and large reads are not. A copy
 fork (`agents.fork: copy`) snapshots only what the sandbox wrote and restores it over the same extraction: 0.8 s,
 2.5 s with 64 at once, instead of 2 s and 59 s. A separate verifier's sandbox is a fresh start like any other, a new
-empty layer over the image. GPUs, cgroup limits and `--fakeroot` need the copy layout, and the fuse-overlay layout
+empty layer over the image. GPUs, cgroup limits and `fakeroot` need the copy layout, and the fuse-overlay layout
 needs the node's extraction of the image (hpc-sandbox's `rootfs_templates`, on by default for it): an explicit
-`rootfs_layout: fuse-overlay` with `gpu`, `cgroup_limits`, `--fakeroot` or `rootfs_templates: false` is refused, and
-the job-wide default leaves such a provider on copies. The enroot provider ignores `rootfs_layout`.
+`rootfs_layout: fuse-overlay` with `gpu`, `cgroup_limits`, `fakeroot` (or `--fakeroot` in `extra_start_args`) or
+`rootfs_templates: false` is refused, and the job-wide default leaves such a provider on copies. The enroot provider
+ignores `rootfs_layout`.
 
 ## Steps
 
@@ -100,8 +101,8 @@ A dataset is a directory of task directories ([at any depth](#task-ids)). platoo
 ```text
 tasks/write-greeting/
 ├── task.toml          # [environment] docker_image, workdir, env, cpus, memory_mb, gpus, network_mode, healthcheck
-│                      # [agent] timeout_sec, network_mode; [verifier] timeout_sec, env, environment_mode,
-│                      # network_mode; [verifier.environment]; artifacts
+│                      # [agent] timeout_sec, network_mode, user; [verifier] timeout_sec, env, environment_mode,
+│                      # network_mode, user; [verifier.environment]; artifacts
 ├── instruction.md     # the instruction the agent gets (leading canary comments are dropped)
 ├── tests/test.sh      # the verifier, uploaded only at grading time
 └── solution/solve.sh  # optional reference solution, never shown to the agent
@@ -205,6 +206,8 @@ platoon runs from ([Write and override configs](configs.md#2-build-on-it-with-ex
 | `reward` | `{primary: reward}` | The [reward contract](#rewards-the-reward-contract-and-log-classifiers): `{primary, components, range, check}`, a reward name, or a list of the names that may train |
 | `verifier_classifiers` | none | Verifier-log patterns that make an outcome `invalid`: a named set (`harbor-common`), `{pattern, kind}` tables, or a list of both |
 | `agent_user` | `refuse` | A task that sets `[agent].user` or `[verifier].user`: `refuse` it, or `ignore` the user and run as the sandbox's single uid (recorded in the outcome's `ignored_users`) |
+| `verifier_user` | as `agent_user` | *Since the next release.* What `[verifier].user` gets instead, when set: `refuse`, `ignore`, or `honor`, which runs a separate verifier whose user is root as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
+| `verifier_provider_options` | none: `provider_options` | *Since the next release.* The provider options of every separate verifier's sandbox, laid over `provider_options`, such as `{rootfs_layout: copy, fakeroot: true}` for verifiers that run as root |
 | `concurrent_tools` | none | Tools that may overlap other calls on the same sandbox (`bash`, `view`) |
 | `queue_timeout_s` | 240 | How long a call or a grade waits for its turn before it is refused (`env_busy`) |
 | `close_timeout_s` | 30 | How long closing waits for calls in flight before it stops the sandbox |
@@ -620,6 +623,91 @@ tests on the `process` provider, which runs no image, point the keys at `local`:
 A separate verifier gets its image the same way. One built from `tests/Dockerfile` runs the map's image for that
 Dockerfile's key, with its own deferred steps (`platoon harbor images build` builds it too); one that runs the task's
 own image gets the task's image and deferred steps, as Harbor's verifier would run the task's built image.
+
+## Verifiers that run as root
+
+*Since the next release.* Some Harbor tasks grade as root: `task.toml` says `[verifier] user = "root"`, and the tests
+run the agent's code as another user, `nobody` (65534) as a rule, so that it cannot read the files the grader keeps
+for itself, such as held-out answers. In Docker that works as written. In a rootless sandbox the tests run as your own
+uid, which cannot switch to another user, and the files they keep for themselves are yours too: such tests either fail
+closed and score every attempt 0, the reference solution's included, or run the agent's code where it can read the
+held-out answers. platoon refuses these tasks by default, and `agent_user: ignore` runs them as the sandbox's own user
+anyway, with those consequences. `verifier_user: honor` runs their tests as root, in a separate verifier's sandbox
+that gives root and the other users:
+
+```yaml
+environments:
+  - name: graded-as-root
+    service: harbor
+    service_kwargs:
+      dataset: hf://my-org/my-harbor-dataset@<revision>
+      refuse: {agent_user: false}       # let tasks that name users through the fetch
+      agent_user: ignore                # [agent].user: the agents run as the sandbox's own user
+      verifier_user: honor              # [verifier].user = "root": the tests run as root
+      provider: singularity
+      provider_options: {allow_network_none: true, rootfs_layout: fuse-overlay}   # the agents' sandboxes
+      verifier_provider_options: {rootfs_layout: copy, fakeroot: true}           # every separate verifier's sandbox
+```
+
+On Singularity this needs an hpc-sandbox whose provider takes `fakeroot` (below): 0.4, which the `hpc` extra
+installs. With an older one, such as 0.3.0, a run with this config stops when it lists its tasks, with a message
+that says what is missing.
+
+- **What `honor` takes.** A `[verifier].user` of root (`root`, `0`, `0:0` or `root:root`) in a task with a
+  [separate verifier](#a-separate-verifier). Any other user is refused, and so is a root verifier of a task graded in
+  its agents' own sandbox, whose agents would then run as root too: set `verifier_user: ignore` for them, or leave
+  them out (`exclude_tasks`). `agent_user` still decides for `[agent].user`, and without `verifier_user` it decides
+  for both users, as before.
+- **A fetched dataset.** The fetch's `refuse.agent_user`, on by default, leaves out every task that sets
+  `[agent].user` or `[verifier].user`, before `honor` sees it: set `refuse: {agent_user: false}`, as above, and
+  `agent_user: ignore` for the tasks that also set `[agent].user`. With `honor`, a run that lists its tasks warns of the
+  root verifiers its fetch left out.
+- **The verifiers' own sandboxes.** `verifier_provider_options` start every separate verifier's sandbox, laid over
+  `provider_options`, so they name only what changes; the agents' sandboxes keep `provider_options`, and
+  `platoon sandbox reap` and a run's reaping look for both. A separate verifier whose task names no user grades as
+  root there too, as Docker would run it.
+- **Which providers give root.** The tests need root that can switch to other users, which the providers give as
+  follows:
+
+  | Provider | Root that can switch users | What gives it |
+  |---|---|---|
+  | `singularity` | With `fakeroot: true` (Singularity's `--fakeroot`; `extra_start_args: [--fakeroot]` means the same) on the copy layout, with hpc-sandbox 0.4 | Root maps to your uid, and your subordinate ids (`getsubids $USER`, from `/etc/subuid` and `/etc/subgid`) to the users after it, so nothing gains a privilege on the host. What the other users write belongs to your subordinate ids, which you cannot delete: hpc-sandbox 0.4 gives those files back to you before it deletes the sandbox, with the image's `find` and `chown` (an image without them leaves the sandbox on the node, with a warning), also when a janitor sweeps one that a killed process left, and makes a working directory the image lacks with Docker's modes. With an older hpc-sandbox the run is refused |
+  | `docker` | When the verifier's image sets no `USER`: Docker's root, or rootless Docker's and Podman's root over your subordinate ids | Checked when the verifier's sandbox starts |
+  | `enroot` | No: it maps only your uid into a sandbox | Refused |
+  | `process` | No: commands run on the host as you | Refused |
+
+- **Refused before rollouts.** `platoon train`, `eval` and `rollout` refuse, when they list the tasks (exit 78,
+  naming them and why), the tasks whose verifier runs as root where the verifiers' sandboxes cannot give it root, and
+  a session refuses one before its agent runs ([What platoon refuses](#what-platoon-refuses)). They refuse the tasks
+  of a fetched dataset whose `[verifier].user` `honor` cannot honor the same way, while a dataset directory
+  (`dataset_dir`, `task_dirs`) skips those with a warning, as it skips other tasks it refuses.
+- **The started sandbox is checked.** Whatever the provider, a root verifier's sandbox is checked when it starts: its
+  commands must run as uid 0, with every uid and gid up to 65534 mapped, and `nobody` must be able to run the image's
+  `/bin/sh` and load its libraries (through `setpriv`, else `su`, when the image has either). A sandbox that fails
+  the check makes the outcome an `error` (`verifier_start`) that does not train, and its reason says why.
+- **Graded as Docker would.** In a verifier that runs as root, platoon's commands and the tests run with Docker's
+  umask, 022, rather than the host's (often 027 on shared machines), so what the tests write as root is readable by
+  the users they switch to. What platoon makes there gets Docker's modes (755): `/logs` and its directories, and the
+  image's deferred `WORKDIR` directories. A working directory that the image lacks is made when the sandbox starts:
+  hpc-sandbox 0.4 makes it, and its missing parents, with these modes too, as Docker does. A directory the image has
+  keeps its mode, as in Docker: a workdir such as `/root`, which images keep to root (700), keeps the files the tests
+  write there from the users they switch to. The artifacts are made readable by every user (`chmod -R a+rX`), as an
+  agent's files are under Docker's umask, and the outcome's metadata records `verifier_user: root`. Files that platoon
+  uploads otherwise keep their modes from the host: `tests/`, when the verifier's image does not hold it, and the
+  files of an image's deferred `COPY` steps, with the directories that the upload makes for them.
+- **Images the other users can run.** The users the tests switch to must be able to read and run the image's
+  programs. The `oci` builder of platoon before 0.3.0 unpacked the images it built under the host's umask, so that on
+  a host whose umask withholds those bits (such as 027) their files keep other users out. Its receipts in the image
+  map record no `builder_revision`, and with `honor`, `platoon train`, `eval` and `rollout` refuse the tasks whose
+  verifier runs as root on such an image when they list them, and `platoon prepare` fails, naming the keys: build
+  them again with `platoon harbor images build CONFIG --key KEY ...`. `images build` builds only the keys the map
+  lacks unless `--key` names them (`platoon harbor images plan` lists the keys), and a fresh image map holds none.
+  Build these verifiers' images with the `def` builder where you can (`--builder def`): Singularity's rootless
+  BuildKit, which the `oci` builder runs, may fail to `chmod` files that a Dockerfile copied in, as such verifiers'
+  Dockerfiles do to keep their files to root. Check an image with
+  `singularity exec IMAGE stat -c '%a %n' /usr/local/bin/python3`: on an image whose files keep other users out,
+  `singularity exec` itself fails, since it runs as you, one of those other users; and a program that other users may
+  not run (750) fails the tests as surely as a missing one.
 
 ## Rewards: the reward contract and log classifiers
 
@@ -1207,10 +1295,13 @@ dataset skips such a task with a warning; naming it directly (as a task id, in a
 |---|---|
 | A multi-container environment: `environment/docker-compose.yaml` (or `.yml`, `compose.yaml`, `compose.yml`) with sidecar services | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. A compose file that only names `main`, with no keys (`services: {main: {}}`), is one container and runs |
 | A separate verifier built from `tests/docker-compose.yaml`, `[[verifier.collect]]` hooks, or artifacts of another compose service | They need multi-container stacks |
-| `[agent].user` or `[verifier].user`, unless the service sets `agent_user: ignore` | Rootless sandboxes run every process as one user |
+| `[agent].user` or `[verifier].user`, unless the service sets `agent_user: ignore` (or, for `[verifier].user`, `verifier_user: ignore` or `honor`) | Rootless sandboxes run every process as one user |
+| With `verifier_user: honor`: a `[verifier].user` other than root, or a root one of a task graded in its agents' own sandbox (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | platoon runs a verifier as root or as the sandbox's own user, and only in a separate verifier's sandbox, whose agents do not run as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
+| With `verifier_user: honor`: a root verifier on verifier sandboxes that cannot give root, such as `singularity` without `fakeroot`, `enroot` or `process` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | The tests could not run the agent's code as another user, and would score every attempt 0 |
+| With `verifier_user: honor`: a fetched dataset's root verifier on an image that the `oci` builder of platoon before 0.3.0 built (when the tasks are listed, with exit 78; `platoon prepare` fails too) | On a host whose umask is 027, its files keep out the users the tests switch to. Build the image again (`platoon harbor images build CONFIG --key KEY`) |
 | `gpus` above 0 on a provider that cannot give a sandbox GPUs (when the session opens) | The tests would fail for want of a GPU and score 0 |
 | `network_mode = "no-network"`, for the agents or a separate verifier, on `singularity` without `allow_network_none: true`, or on `enroot` with `allow_network_none: false` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | hpc-sandbox would refuse every such sandbox, so every rollout of the task would fail at sandbox start and the task would never train. Set `allow_network_none: true` where the site lets users create network namespaces (enroot needs no such permission: drop `allow_network_none: false` from its options), or leave the tasks out (`exclude_tasks`) |
-| Any task, on `singularity` with a `rootfs_layout` that cannot run (an unknown name; any name, `copy` included, with an hpc-sandbox that has no layouts; `fuse-overlay` without `fuse-overlayfs` or `fusermount3` on `PATH`, or with `gpu`, `cgroup_limits` or `--fakeroot`), when the tasks are listed | Every sandbox start would fail. Fix the option or the `PATH`, or leave `rootfs_layout` out |
+| Any task, on `singularity` with a `rootfs_layout` that cannot run (an unknown name; any name, `copy` included, with an hpc-sandbox that has no layouts; `fuse-overlay` without `fuse-overlayfs` or `fusermount3` on `PATH`, or with `gpu`, `cgroup_limits` or `fakeroot`), or with `fakeroot` on an hpc-sandbox that does not take it, when the tasks are listed; `verifier_provider_options` are checked the same way for tasks with a separate verifier | Every sandbox start would fail. Fix the option or the `PATH`, or leave `rootfs_layout` out |
 | Multi-step tasks (`steps` in `task.toml`) | Not supported |
 | Non-Linux tasks | Not supported |
 

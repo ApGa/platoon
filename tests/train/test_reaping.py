@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,50 @@ def test_the_providers_are_each_harbor_entrys_once_and_docker_by_default():
         ("singularity", {"scratch_root": "/scratch"}),
         ("process", {}),
     ]
+
+
+def _hpc_sandbox(*, fakeroot: bool) -> types.ModuleType:
+    """An ``hpc_sandbox`` whose Singularity provider takes ``fakeroot``, or, as 0.3.0's, does not."""
+
+    module = types.ModuleType("hpc_sandbox")
+    if fakeroot:
+
+        class SingularityProvider:
+            def __init__(self, *, scratch_root=None, rootfs_layout=None, fakeroot=False) -> None: ...
+
+    else:
+
+        class SingularityProvider:  # type: ignore[no-redef]
+            def __init__(self, *, scratch_root=None, rootfs_layout=None) -> None: ...
+
+    module.SingularityProvider = SingularityProvider  # type: ignore[attr-defined]
+    return module
+
+
+def test_separate_verifiers_are_reaped_with_their_own_options_too(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", _hpc_sandbox(fakeroot=True))
+    root = _harbor("singularity", scratch_root="/scratch", rootfs_layout="fuse-overlay")
+    root["service_kwargs"]["verifier_provider_options"] = {"rootfs_layout": "copy", "fakeroot": True}
+    same = _harbor("enroot")
+    same["service_kwargs"]["verifier_provider_options"] = {}
+
+    assert reaping.sandbox_providers([root, same]) == [
+        ("singularity", {"scratch_root": "/scratch", "rootfs_layout": "fuse-overlay"}),
+        ("singularity", {"scratch_root": "/scratch", "rootfs_layout": "copy", "fakeroot": True}),
+        ("enroot", {}),
+    ]
+
+
+def test_verifier_options_that_would_start_no_sandbox_are_not_reaped_with(monkeypatch):
+    """With an hpc-sandbox that takes no fakeroot option, no verifier's sandbox can have started with it (a run refuses
+    such options when it lists its tasks), and building that provider to reap would fail: the agents' provider reaps
+    the entry's scratch root alone."""
+
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", _hpc_sandbox(fakeroot=False))
+    root = _harbor("singularity", scratch_root="/scratch")
+    root["service_kwargs"]["verifier_provider_options"] = {"rootfs_layout": "copy", "fakeroot": True}
+
+    assert reaping.sandbox_providers([root]) == [("singularity", {"scratch_root": "/scratch"})]
 
 
 def test_the_providers_of_a_loaded_config_are_those_of_its_file(tmp_path):

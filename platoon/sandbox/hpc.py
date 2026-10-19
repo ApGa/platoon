@@ -201,6 +201,13 @@ class HpcProvider:
 
         return None
 
+    @classmethod
+    def root_refusal(cls, options: Mapping[str, Any]) -> str | None:
+        """Why a provider built with ``options`` could not run a sandbox's commands as root with other users to
+        switch to, or None (:func:`platoon.sandbox.root_refusal`); each subclass says so for its runtime."""
+
+        return None
+
     async def start(self, spec: SandboxSpec) -> HpcSandbox:
         return await self._open(spec, lambda inner_spec: self.inner.start(inner_spec))
 

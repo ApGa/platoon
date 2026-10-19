@@ -3,8 +3,9 @@
 :func:`plan_images` groups a lock's runnable tasks by build key (:mod:`platoon.envs.harbor.dockerfile`) and says
 which keys a site's image map lacks; an entry whose image file is gone counts as missing. :func:`build_images`
 builds those from a representative task's Dockerfile prefix and records each image in the map with a receipt
-(builder, version, time, log, size, SHA-256, and the digest of each base image). :func:`verify_images` checks the
-map's image files against the SHA-256 their entries record.
+(builder, version, time, log, size, SHA-256, and the digest of each base image; for ``oci``, the builder's revision,
+:data:`~platoon.envs.harbor.images.OCI_BUILDER_REVISION`). :func:`verify_images` checks the map's image files against
+the SHA-256 their entries record.
 
 A build resolves each base image (``FROM``) to the digest its registry serves for it (:func:`registry_digest`)
 and builds from ``reference@digest``, so the receipt names exactly what the image was built from. The build key,
@@ -69,7 +70,14 @@ from platoon.envs.harbor.dockerfile import (
     variables_in_scope,
 )
 from platoon.envs.harbor.hashing import file_sha256
-from platoon.envs.harbor.images import ImageEntry, ImageMap, has_image_file, local_image_path, update_image_map
+from platoon.envs.harbor.images import (
+    OCI_BUILDER_REVISION,
+    ImageEntry,
+    ImageMap,
+    has_image_file,
+    local_image_path,
+    update_image_map,
+)
 from platoon.envs.harbor.lock import DatasetLock, LockedTask
 from platoon.utils.scratch import node_scratch
 
@@ -352,6 +360,7 @@ def build_image(
         raise BuildError(f"{task_dir}/{context_name}/Dockerfile plans build key {plan.key}, not {key}")
     digests = _base_digests(plan, resolve_digest or registry_digest)
     hexkey = key.removeprefix("sha256:")
+    # Private (0700): the oci builder unpacks the image there with its own modes, files any user may write included.
     work = scratch / f"build-{hexkey[:16]}-{uuid.uuid4().hex[:8]}"
     out_dir.mkdir(parents=True, exist_ok=True)
     logs = out_dir / "logs"
@@ -360,6 +369,8 @@ def build_image(
     started = time.monotonic()
     runner = _Runner(log_path, timeout_s=timeout_s, env=_build_env(scratch))
     try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        work.mkdir(mode=0o700)
         build_context = work / "context"
         directives = list(plan.directives)
         if builder == "oci":
@@ -396,6 +407,8 @@ def build_image(
         "task": example or task_dir.name,
         "role": role,
     }
+    if builder == "oci":
+        receipt["builder_revision"] = OCI_BUILDER_REVISION
     return replace(entry, receipt=receipt)
 
 
@@ -661,7 +674,10 @@ class _Runner:
         self.env = dict(env)
         log_path.write_text("")
 
-    def run(self, argv: Sequence[str], *, cwd: Path | None = None, stdout: Path | None = None) -> str:
+    def run(self, argv: Sequence[str], *, cwd: Path | None = None, stdout: Path | None = None, umask: int = -1) -> str:
+        """Run ``argv`` (in ``cwd``, with ``umask`` when it is not -1), logging it and its output; its stdout, unless
+        ``stdout`` names a file to write it to.  ``BuildError`` when it fails or times out."""
+
         with self.log_path.open("a") as log:
             log.write(f"$ {shlex.join(argv)}\n")
             log.flush()
@@ -675,6 +691,7 @@ class _Runner:
                     stderr=log if sink is not None else subprocess.STDOUT,
                     timeout=self.timeout_s,
                     check=False,
+                    umask=umask,
                 )
             except subprocess.TimeoutExpired:
                 raise BuildError(f"{argv[0]} timed out after {self.timeout_s:.0f}s (log: {self.log_path})") from None
@@ -734,7 +751,10 @@ def _build_oci(runner: _Runner, context: Path, work: Path, target: Path) -> tupl
     if config is None:
         raise BuildError(f"the OCI-SIF holds no image config (log: {runner.log_path})")
     rootfs = work / "rootfs"
-    runner.run([_tool("unsquashfs"), "-no-xattrs", "-d", str(rootfs), str(layers[0])])
+    # Run by anyone but root, unsquashfs creates each file with the image's mode through the process's umask and never
+    # sets it after: under a host umask such as 027, the image's programs and libraries would lose the read and execute
+    # bits it gives other users, which a sandbox that switches users (a verifier run as root) needs.
+    runner.run([_tool("unsquashfs"), "-no-xattrs", "-d", str(rootfs), str(layers[0])], umask=0)
     layers[0].unlink()
     partial = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.partial")
     try:

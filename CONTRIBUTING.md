@@ -166,6 +166,7 @@ Most of the suite is self-contained. A few groups of tests need files you may no
 | `tests/renderers`, `tests/train/tinker/test_gateway_tools_routing.py` | The tokenizers and chat templates of the Qwen3.6 and Qwen3.8 snapshots named in `tests/renderers/renderer_cases.py` | The Hugging Face cache, or `PLATOON_TEST_HF_HUB` (another hub cache directory that holds them) and `QWEN36_PRESERVE_THINKING_SNAPSHOT` |
 | Parts of `tests/sandbox/test_sandbox_hpc.py`, and the test of `tests/envs/test_harbor_providers.py` that checks the root filesystem layouts a run refuses against the provider | hpc-sandbox | `uv sync --dev --extra tinker --extra ors --extra hpc` |
 | One test each in `tests/gateway/test_gateway_mcp.py` and `tests/envs/test_ors_concurrency.py` | The OpenHands SDK and fastmcp clients | Run them in an environment that has both, or set `PLATOON_CLIENT_VENV` to that environment's directory |
+| `tests/envs/test_harbor_root_verifier_singularity.py` | Singularity or Apptainer, hpc-sandbox, and a node where `--fakeroot` works (your user has subordinate ids): it starts real sandboxes | Set `PLATOON_TEST_SINGULARITY_IMAGE` to an image with `sh`, `find`, `chown` and `setpriv` or `su` (a local `.sif`, or a `docker://` reference the node can pull), and run it on such a node, never a login node; `HPC_SANDBOX_SCRATCH` puts the sandboxes on node-local disk |
 
 The tests look for snapshots in the standard Hugging Face cache: `HF_HUB_CACHE`, else `HF_HOME/hub`, else
 `~/.cache/huggingface/hub`. To download the tokenizer files (no weights) there, at the revision the tests expect:
@@ -836,7 +837,7 @@ lists them for 0.3.0.
 3. Release only requirements that are on PyPI: PyPI refuses a release whose requirements name a URL, and an extra
    whose requirement no index has cannot be installed. hpc-sandbox, which the `hpc` extra installs, is published there
    from [its repository](https://github.com/ApGa/hpc-sandbox), and the extra takes one minor release of it, from the
-   release the providers are tested against (`hpc-sandbox>=0.3.0,<0.4`). To move to another, set the range, run
+   release the providers are tested against (`hpc-sandbox>=0.4.0,<0.5`). To move to another, set the range, run
    `uv lock` in the repository root (one lock covers core and the extensions), and run
    `tests/sandbox/test_sandbox_hpc.py` and `tests/envs/test_harbor_providers.py` after
    `uv sync --dev --extra tinker --extra ors --extra hpc`: their tests of the installed hpc-sandbox check the types,

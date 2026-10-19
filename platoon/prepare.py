@@ -17,7 +17,9 @@ config that leaves ``log_path`` to its launcher prepares as it is.  For each ent
    guess: the step fails and names the command that builds and pushes them.  The map is the entry's ``image_map``,
    else its default image map, ``images/<provider>.json`` in the Harbor cache, with the image files in
    ``images/<provider>/`` (:mod:`platoon.envs.harbor.images`).  An entry that serves a directory builds nothing: its
-   tasks run their ``docker_image`` or ``default_image``.
+   tasks run their ``docker_image`` or ``default_image``.  With ``verifier_user: honor``, an image that a verifier
+   which runs as root runs on, and that the ``oci`` builder of platoon before 0.3.0 built, fails the step, naming the
+   build that makes it again: prepare never replaces an image.
 3. **The toolchains.** Each toolchain the entry's harness specs run from that is not built under the toolchain root
    is built there (:func:`platoon.harness.toolchains.ensure_toolchain`).  One built from another recipe is never
    replaced: a live run of another config, or of another platoon, may be staging its rollouts from it, so the step
@@ -364,6 +366,31 @@ def _current(settings: Any) -> tuple[DatasetLock | None, str]:
 
 
 def _images(
+    where: str, service: HarborEnvironmentService, lock: DatasetLock, *, dry_run: bool, command: str, say: Say
+) -> PrepareStep:
+    """Build the images the lock's runnable tasks need and the entry's image map lacks, with its provider's builder.
+    With ``verifier_user: honor``, the step then fails for images that verifiers which run as root run on and that
+    the ``oci`` builder of platoon before 0.3.0 built, naming the build that makes them again
+    (:meth:`~platoon.envs.harbor.service.HarborEnvironmentService.root_images_closed`): prepare never replaces an
+    image, which a run may be using."""
+
+    step = _missing_images(where, service, lock, dry_run=dry_run, command=command, say=say)
+    if step.status not in ("current", "done") or not (closed := service.root_images_closed()):
+        return step
+    tasks = len({name for needing in closed.values() for name in needing})
+    build = f"platoon harbor images build {_config_part(command)} " + " ".join(f"--key {key}" for key in closed)
+    return PrepareStep(
+        where,
+        "images",
+        "failed",
+        f"{step.detail}; but {len(closed)} of them, which {tasks} task(s) run their verifier as root on, were built by "
+        "the oci builder of platoon before 0.3.0, which unpacked them under the host's umask (under one such as 027, "
+        f"their files keep out the users the tests switch to): build them again with `{build}`, then run `{command}` "
+        "again",
+    )
+
+
+def _missing_images(
     where: str, service: HarborEnvironmentService, lock: DatasetLock, *, dry_run: bool, command: str, say: Say
 ) -> PrepareStep:
     """Build the images the lock's runnable tasks need and the entry's image map lacks, with its provider's builder."""
