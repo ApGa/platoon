@@ -1,0 +1,67 @@
+# mini-swe-agent v2 (MIT), driven the way Harbor's installed-agent wrapper drives it
+# (harbor/src/harbor/agents/installed/mini_swe_agent.py): installed with uv as a tool,
+# run headless with --yolo --exit-immediately, pointed at the gateway through litellm's
+# OpenAI provider. Its only tool is bash, so it belongs in a task sandbox.
+name = "mini-swe-agent"
+version = "2.4.6"
+dialect = "openai_chat"
+timeout_s = 3600
+max_steps = 100  # used when the run sets no step budget; the run's max_steps wins
+
+[install]
+timeout_s = 1200
+commands = [
+    """
+    set -eu
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v mini-swe-agent >/dev/null 2>&1; then
+      if ! command -v uv >/dev/null 2>&1; then
+        if command -v curl >/dev/null 2>&1; then
+          curl -LsSf https://astral.sh/uv/install.sh -o /tmp/platoon-uv-install.sh
+          sh /tmp/platoon-uv-install.sh
+        elif command -v wget >/dev/null 2>&1; then
+          wget -qO /tmp/platoon-uv-install.sh https://astral.sh/uv/install.sh
+          sh /tmp/platoon-uv-install.sh
+        else
+          # Slim Python images have pip but neither curl nor wget, and a rootless sandbox cannot
+          # apt-get them. Debian's system Python needs --break-system-packages for a user install.
+          python3 -m pip install --user --quiet uv || python3 -m pip install --user --quiet --break-system-packages uv
+        fi
+      fi
+      uv python install 3.12
+      uv tool install --python 3.12 'mini-swe-agent==2.4.6' --with litellm --with orjson --with fastapi
+    fi
+    mini-swe-agent --help >/dev/null
+    """,
+]
+
+[launch]
+# The instruction travels as "$@", never through the shell string.
+argv = [
+    "sh", "-c", 'export PATH="$HOME/.local/bin:$PATH"; exec mini-swe-agent "$@"', "mini-swe-agent",
+    "--yolo", "--exit-immediately",
+    "--model", "openai/{model}",
+    "--task", "{instruction}",
+    "--output", "{state_dir}/trajectory.json",
+    "--cost-limit", "0",
+    # Any -c replaces the packaged config, so name the builtin "mini" config first.
+    "-c", "mini",
+    "-c", "model.model_kwargs.timeout=3600",
+    # Hitting the step limit raises LimitsExceeded inside the agent loop and exits 0, so the episode is graded.
+    "-c", "agent.step_limit={max_steps}",
+]
+
+[launch.env]
+OPENAI_API_KEY = "{api_key}"
+OPENAI_BASE_URL = "{base_url}/v1"
+OPENAI_API_BASE = "{base_url}/v1"
+MSWEA_CONFIGURED = "true"
+MSWEA_COST_TRACKING = "ignore_errors"
+LITELLM_LOCAL_MODEL_COST_MAP = "True"
+
+[builtins]
+tools = ["bash"]
+
+[final_message]
+file = "{state_dir}/trajectory.json"
+json_key = "info.submission"

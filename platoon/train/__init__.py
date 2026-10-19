@@ -1,13 +1,8 @@
-"""Training backends for Platoon.
+"""Training for Platoon.
 
-Platoon supports two training backends:
-- `platoon.train.tinker`: Tinker-based training (service-based architecture)
-- `platoon.train.areal`: AReaL-based training (distributed FSDP)
-
-Each backend provides:
-- Trainer class (e.g., PlatoonTinkerRLTrainer, PlatoonArealRLTrainer)
-- Configuration classes
-- Workflow implementations
+`platoon.train.tinker` trains against a Tinker-API service (hosted Tinker or a
+self-hosted server that implements the Tinker API, such as miles-tinker): the
+trainer, its configuration and the rollout workflows live there.
 """
 
 # Re-export common configurations for convenience

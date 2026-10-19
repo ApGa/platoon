@@ -1,0 +1,28 @@
+# Evaluate a policy on 100 number-search validation tasks with the platoon-codeact harness.
+#
+#   platoon eval examples/number-search/eval.yaml                                   # the base model
+#   platoon eval examples/number-search/eval.yaml inference.model_path=tinker://... # a trained checkpoint
+#
+# Writes each evaluation's rollouts and report to a new directory, runs/eval/<policy>/<UTC time> (the checkpoint,
+# else the model), which it names on stderr, and prints the report summary.
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  workflow:
+    num_concurrent_workers: 16
+    rollout_config:
+      max_steps: 10
+      timeout: 300
+      inference_params: {max_completion_tokens: 512}
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder: platoon.envs.number_search.prompts:NumberSearchPromptBuilder
+      include_reasoning: false
+      subagents: false
+    agents:
+      max_depth: 0
+    eval_dataset_kwargs: {split_name: val, limit: 100}

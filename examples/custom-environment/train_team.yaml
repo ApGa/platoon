@@ -1,0 +1,23 @@
+# Order packing with subagents: the example-packing-team harness may delegate items to helper agents,
+# each on a platoon_fork of the root's env (its own order on the shared shelf and box).
+#
+#   cd examples/custom-environment
+#   PYTHONPATH=. uv run platoon train train_team.yaml [key=value ...]
+
+extends: train.yaml
+
+environments:
+  - name: packing
+    service: python://order_packing:OrderPackingEnv
+    harness: example-packing-team
+    package: packing_team        # imported first, so @pt.harness("example-packing-team") registers
+    agents:
+      max_depth: 1               # the root (depth 0) may spawn; its children may not
+      budget: depth_aware        # every agent has its own step budget
+      child_max_steps: 6
+      child_grading: env         # grade each child by its own forked session (its `done`)
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: test}
+
+stats:
+  trial_name: team

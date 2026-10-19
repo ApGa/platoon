@@ -1,0 +1,19 @@
+# A two-step smoke run on top of train.yaml: only what differs is written here.
+#
+#   platoon train examples/config-layers/smoke.yaml [key=value ...]
+
+extends: train.yaml
+
+train:
+  batch_size: 2
+  max_training_steps: 2
+  workflow_config:
+    group_size: 2
+
+eval:
+  every: 0                        # no evaluation in the smoke run
+
+stats:
+  trial_name: smoke
+  wandb:
+    tags: [smoke]

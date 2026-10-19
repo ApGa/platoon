@@ -1,0 +1,21 @@
+# Evaluate a policy on the GuessTheNumber test split.
+#
+#   cd examples/quickstart
+#   PYTHONPATH=. uv run platoon eval eval.yaml [inference.model_path=tinker://.../sampler_weights/...]
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  workflow:
+    num_rollouts_per_task: 4
+    rollout_config:
+      max_steps: 10
+      timeout: 300
+      inference_params: {max_completion_tokens: 256}
+
+environments:
+  - name: guess
+    service: python://guess:GuessTheNumber
+    harness: example-guesser
+    package: guesser
+    eval_dataset_kwargs: {split_name: test, limit: 20}

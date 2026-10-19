@@ -1,0 +1,24 @@
+# The first run with the platoon-react harness: the model calls the environment's guess tool natively (OpenAI
+# tool calls) instead of writing CodeAct cells.  Everything but the harness is train.yaml's.
+#
+#   platoon rollout examples/number-search/train_react.yaml --task val:0
+#   platoon train examples/number-search/train_react.yaml
+
+extends: train.yaml
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: platoon-react
+    harness_options:
+      system_prompt: >-
+        Find the hidden number. Call the guess tool with one integer per turn; it tells you whether
+        your guess is too low, too high or correct.
+    agents:
+      max_depth: 0
+    dataset_kwargs: {split_name: train, limit: 1000}
+    eval_dataset_kwargs: {split_name: val, limit: 20}
+    workflow_kwargs:
+      filter_errors: false
+
+stats:
+  trial_name: first-run-react

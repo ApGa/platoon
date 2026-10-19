@@ -1,0 +1,47 @@
+# TextCraft-Synth evaluation: the linear CodeAct agent, greedy, up to 800 steps.
+#
+#   platoon eval extensions/textcraft/configs/textcraft_synth_eval.yaml [inference.model_path=tinker://...]
+#
+# The sample: the easy, medium and hard val tasks (no extreme ones), in file order, shuffled with seed 42, first
+# 100. Set environments.0.eval_dataset_kwargs.split_name to sample one difficulty (val-medium, or val-easy,
+# val-hard, val-extreme) or the whole val split (val). For a recursive policy, use the environment entry of
+# recipes/rao/textcraft-synth/recursive.yaml with agents.max_depth: 12, and 25 steps for its root
+# (inference.workflow.rollout_config.max_steps: 25): the RAO paper evaluated its recursive agent with 25 steps for
+# every agent, root or subagent, and up to 12 levels of delegation.
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  model_path: null  # a Tinker sampler checkpoint; null samples the base model
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 16
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 800
+      verbose: true
+      timeout: 1200
+      step_timeout: 300
+      enable_subagent_verifiers: false
+      inference_params:
+        temperature: 0.0
+        top_p: null
+        max_completion_tokens: 512
+
+environments:
+  - env: textcraft-synth@1          # its prompts, the val split and the platoon-delegation reward processor
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder_options: {variant: linear}
+      subagents: false
+      cell_timeout_s: 300
+    agents:
+      max_depth: 0
+    eval_dataset_kwargs: {split_name: [val-easy, val-medium, val-hard], shuffle_seed: 42, limit: 100}
+
+split: eval
+stage: full

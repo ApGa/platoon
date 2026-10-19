@@ -1,0 +1,8 @@
+2026-10-01T08:00:01 INFO server started on port 8080
+2026-10-01T08:00:05 INFO connected to the database
+2026-10-01T08:02:17 WARN slow query took 2.4s
+2026-10-01T08:05:42 ERROR request /api/orders failed: timeout
+2026-10-01T08:06:03 INFO retrying /api/orders
+2026-10-01T08:06:04 ERROR request /api/orders failed: connection reset
+2026-10-01T08:10:00 INFO health check ok
+2026-10-01T08:12:31 ERROR disk usage above 90%

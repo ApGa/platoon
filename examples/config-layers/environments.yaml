@@ -1,0 +1,16 @@
+# The environments every config in this directory shares. It has no train: or inference: section, so
+# `platoon config validate` checks its entries alone (it reports "EnvironmentsConfig"), and it is meant to be extended.
+#
+# Number search ships with platoon (the ors extra runs it); `env: platoon-number-search@1` names the same entry.
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: platoon-react
+    harness_options:
+      system_prompt: >-
+        Find the hidden number. Call the guess tool with one integer per turn; it tells you whether
+        your guess is too low, too high or correct.
+    agents:
+      max_depth: 0
+    dataset_kwargs: {split_name: train, limit: 1000}
+    eval_dataset_kwargs: {split_name: val, limit: 20}

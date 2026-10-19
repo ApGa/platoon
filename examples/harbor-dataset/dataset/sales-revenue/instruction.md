@@ -1,0 +1,1 @@
+The file `sales.csv` in the working directory lists the units sold each month and their unit price. Write the total revenue over all the months (units times unit price, summed), with two decimals, to a file named `answer.txt` in the working directory.

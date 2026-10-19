@@ -1,0 +1,1 @@
+The file `events.txt` in the working directory is a server's log, one event per line, starting with its time. Write the time of the first ERROR event, exactly as the log writes it, to a file named `answer.txt` in the working directory.

@@ -1,81 +1,155 @@
 [project]
 name = "platoon"
-version = "0.1.0"
+# The release version, set here and nowhere else: platoon.__version__, `platoon --version` and lock.json read it from
+# this file in a checkout and from the installed metadata otherwise (CONTRIBUTING.md, "Release a version").
+version = "0.2.0"
 description = "Build and train systems of agents."
 authors = [
     {name = "Apurva Gandhi", email = "apurvag@cs.cmu.edu"}
 ]
-readme = "README.md"
-requires-python = "~=3.12.0"
+# PyPI shows README.md with its relative links and images pointed at the repository (fancy-pypi-readme, below).
+dynamic = ["readme"]
+# The tool-call parsers follow SGLang's, which are Apache-2.0 (platoon/train/tinker/renderers/tool_parsers/NOTICE).
+license = "MIT AND Apache-2.0"
+license-files = [
+    "LICENSE",
+    "platoon/train/tinker/renderers/tool_parsers/LICENSE-APACHE-2.0",
+    "platoon/train/tinker/renderers/tool_parsers/NOTICE",
+]
+requires-python = ">=3.12"
+keywords = [
+    "agents",
+    "llm",
+    "multi-agent",
+    "reinforcement-learning",
+    "rl",
+    "subagents",
+    "tinker",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# Each one is imported by platoon itself, but dill, which datasets hashes with (tests/test_packaging.py checks both
+# ways); what only the tests or the examples import is in the dev group. A lower bound is the oldest release platoon
+# works with: the tests pass on the lowest versions these requirements admit (CONTRIBUTING.md, "What the distribution
+# holds").
 dependencies = [
-    "ai-rubric>=0.2.4",
-    "datasets",
+    "aiohttp>=3.9",
+    "cyclopts>=5",
+    "datasets>=2.21",  # Dataset.batch, which the trainer's dataloader calls, is new in 2.21
+    "datasets>=4.4; python_version >= '3.14'",  # on 3.14, earlier releases' pickler cannot hash a dataset
+    # datasets admits dill 0.3 on 3.14 too, whose pickler cannot hash a dataset there: pip would keep an installed one
+    "dill>=0.4; python_version >= '3.14'",
+    "huggingface-hub>=0.25",  # hf:// Harbor datasets (platoon/envs/harbor/fetch.py); 0.25 has the errors it reads
     "ipython>=9.4.0",
-    "litellm",
-    "pandas>=2.3.3",
-    "pyarrow>=22.0.0",
+    "jinja2>=3.1",  # transformers renders chat templates only with 3.1+, and 2.x no longer imports
+    "packaging>=24",  # reads extensions' requirements on platoon (platoon.extensions)
+    "pydantic>=2",
+    "pyyaml",
     "rich>=13.9.4",
     "textual>=5.3.0",
-    "notebook>=7.4.4",
-    "tenacity",
-    "tensordict",
-]
-
-[project.optional-dependencies]
-tinker = [
-    "tinker==0.16.1",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@0be951bd38eb83c4363c1d11caddf4388bf05262",
-]
-# NOTE: areal backend requires uv for installation (not available on PyPI)
-# Install with: uv pip install -e ".[areal]"
-areal = [
-    "areal[cuda]",
-]
-# Logging integrations (optional)
-wandb = [
+    "traitlets",  # the CodeAct executor configures its IPython shells with it
     "wandb>=0.19.0",
 ]
 
-# uv-specific configuration
-# These settings are ignored by pip and only apply when using uv
-[tool.uv]
-# tinker and areal backends are mutually exclusive
-conflicts = [
-    [
-        { extra = "tinker" },
-        { extra = "areal" },
-    ],
+[project.optional-dependencies]
+# HPC task sandboxes: the singularity and enroot providers adapt hpc-sandbox (platoon/sandbox/hpc.py), and rely on the
+# working-directory errors, download reports and image cache of its 0.2 and the root filesystem layouts of 0.3. The
+# lower bound is 0.3.0, the release they are tested against and the first on PyPI, so that an environment that holds
+# hpc-sandbox 0.2.0 (which checkouts took from git) upgrades instead of keeping it.
+hpc = [
+    "hpc-sandbox>=0.3.0,<0.4",
 ]
-override-dependencies = [
-    "fastapi[standard]>=0.115.0",
-    "openai==1.99.6",
-    "xgrammar==0.1.24",
-    "outlines-core==0.1.26",
-    "pyarrow==20.0.0",
-    "huggingface_hub==1.7.1",
-    "datasets==4.3.0",
-    "networkx==3.3.0", # This can be removed if ai-rubric pins 3.3.0 or areal relaxes the pin.
+# ORS-native environments (python:// and ors+http:// services); 0.1.125 and 0.1.163 are both supported. structlog
+# (which openreward requires) quiets the SDK's loggers (platoon/envs/ors/sdk.py), which needs 25.1's
+# get_effective_level: with an older structlog, the SDK's INFO lines reach a CodeAct agent's cell output.
+ors = [
+    "openreward>=0.1.125",
+    "structlog>=25.1",
 ]
-no-build-isolation-package = ['flash-attn']
+# The Tinker SDK and tinker-cookbook, for training, evaluation, the model gateway and platoon.testing. tinker-cookbook
+# stays below 0.4: 0.4.0 made Renderer.parse_response return a ParseTermination where the gateway reads a bool, and
+# 0.4.2 and later need tinker>=0.22.3 (the SDK upgrade, RFC 0006). The trainer, the renderers and the testing kit's
+# toy tokenizer import torch, transformers and tokenizers themselves (tinker and tinker-cookbook require them too).
+tinker = [
+    "tinker==0.16.1",
+    "tinker-cookbook>=0.3.0,<0.4",
+    "tokenizers",
+    "torch",
+    "transformers",
+]
 
-[tool.uv.sources]
-areal = { git = "https://github.com/areal-project/AReaL.git", rev = "35b57e2d2743f7158894239acda8b71f7226b955" }
+[project.urls]
+Homepage = "https://github.com/ApGa/platoon"
+Documentation = "https://github.com/ApGa/platoon/tree/main/docs"
+Source = "https://github.com/ApGa/platoon"
+Issues = "https://github.com/ApGa/platoon/issues"
+Changelog = "https://github.com/ApGa/platoon/blob/main/CHANGELOG.md"
+
+[project.scripts]
+platoon = "platoon.cli:main"
+
 [build-system]
-requires = ["hatchling"]
+# hatchling 1.27 writes PEP 639 license metadata (license and license-files).
+requires = ["hatchling>=1.27", "hatch-fancy-pypi-readme>=24.1"]
 build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["platoon"]
 
+# The sdist holds what builds the wheel: the package, the license files, README.md (the PyPI description) and the
+# release notes. Tests, docs, examples, the extensions and the recipes stay in the repository.
+[tool.hatch.build.targets.sdist]
+only-include = ["platoon", "LICENSE", "README.md", "CHANGELOG.md"]
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+# PyPI cannot resolve README.md's relative links and images: point them at the repository, at the tag of the release
+# being built ($HFPR_VERSION is the version; hatch-fancy-pypi-readme 24.1 added it), so that a release's description
+# keeps matching its code and docs after main moves on.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?![a-z][a-z0-9+.-]*:|#)([^)\s]+)\)'
+replacement = '](https://github.com/ApGa/platoon/blob/v$HFPR_VERSION/\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+# An in-page link (`#section`) points at the README's section on GitHub, at the release's tag: PyPI's page gives
+# headings no anchors to jump to.
+pattern = '\]\(#([^)\s]+)\)'
+replacement = '](https://github.com/ApGa/platoon/blob/v$HFPR_VERSION/README.md#\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '<img src="(?![a-z][a-z0-9+.-]*:)([^"]+)"'
+replacement = '<img src="https://raw.githubusercontent.com/ApGa/platoon/v$HFPR_VERSION/\1"'
+
+[tool.uv.workspace]
+# First-party extensions, one distribution each, built and tested with core and locked together (uv.lock). The
+# examples are not members: a member's components would register in every developer's environment.
+members = ["extensions/*"]
+
 [dependency-groups]
 dev = [
+    "litellm",  # drives the gateway as litellm-based harnesses do (tests/gateway/test_gateway_server.py)
+    "mcp>=1.30",  # MCP client for the tool-plane tests (tests/gateway/test_gateway_mcp.py)
     "mypy>=1.17.0",
+    "openai",  # the OpenAI SDK, in the gateway tests and examples/program-reward-shaping's judge
     "pre-commit>=4.2.0",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
+    "pytest-xdist>=3.8.0",  # runs the suite in parallel (pytest -n; CONTRIBUTING.md, "Run the tests")
     "ruff>=0.11.9",
 ]
 

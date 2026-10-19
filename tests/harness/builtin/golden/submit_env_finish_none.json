@@ -1,0 +1,226 @@
+{
+ "format": 1,
+ "scenario": "submit_env_finish_none",
+ "result": {
+  "status": "completed",
+  "final_message": null,
+  "error": null
+ },
+ "outcome": {
+  "status": "scored",
+  "rewards": {
+   "reward": 0.0
+  },
+  "primary": "reward",
+  "reason": null,
+  "failure_kind": null,
+  "metadata": {
+   "tool_calls": 1,
+   "terminal_tool": "submit"
+  }
+ },
+ "trajectories": {
+  "root": {
+   "parent": null,
+   "fork_step": null,
+   "depth": 0,
+   "task": {
+    "goal": null,
+    "id": "val:1",
+    "max_steps": null,
+    "misc": {
+     "ors": {
+      "split": "val",
+      "index": 1,
+      "name": "t1"
+     }
+    },
+    "fork_strategy": "subtask"
+   },
+   "reward": 0.0,
+   "finish_message": null,
+   "error_message": null,
+   "misc": {
+    "agent": {
+     "role": "policy"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 17,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     }
+    ],
+    "agent_result": {
+     "status": "completed",
+     "error": null
+    },
+    "outcome": {
+     "status": "scored",
+     "rewards": {
+      "reward": 0.0
+     },
+     "reason": null,
+     "reward_key": "reward"
+    },
+    "tool_calls": [
+     {
+      "name": "submit",
+      "arguments": {
+       "answer": null
+      },
+      "text": "Submitted.",
+      "is_error": false,
+      "finished": true,
+      "reward": 0.0,
+      "after_call": 0
+     }
+    ]
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "# Instructions",
+       "",
+       "You are a helpful agent that helps fulfill user tasks by reasoning and writing python code.",
+       "",
+       "You have access to a jupyter notebook. You can reason about what code to write and then execute",
+       "a block of code by outputting a python code block formatted as follows: ",
+       "<thought>Your step-by-step reasoning here</thought>\\n<python>\\ncode block\\n</python>.",
+       "In addition, you have access to many python functions that can help you interact with environment state,",
+       "described further below.<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Answer question 1.",
+       "Budget: You have a total budget of 10 steps to complete this task.",
+       "",
+       "# Action Space",
+       "",
+       "Available Actions (python functions):",
+       "",
+       "1. def echo(text: str, times: int = 1) -> str",
+       "   Echo the text.",
+       "",
+       "2. def submit(answer: str | None) -> str",
+       "   Submit your answer.",
+       "",
+       "3. def finish(message: str = '') -> str",
+       "   Submit your answer.",
+       "",
+       "",
+       "Now, please reason and then provide the next python cell that you would like to take. Think step-by-step before writing the jupyter code block. Output only one code block at a time formatted as follows <thought>Brief 1-3 sentence reasoning.</thought>\\n<python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<python>result = finish(None)",
+       "print(repr(result))</python><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 275,
+       "completion_tokens": 17,
+       "total_tokens": 292
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": {
+       "$lines": [
+        "<python>result = finish(None)",
+        "print(repr(result))</python>"
+       ]
+      }
+     },
+     "thought": "",
+     "code": {
+      "$lines": [
+       "result = finish(None)",
+       "print(repr(result))"
+      ]
+     },
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=submit",
+       "None",
+       ""
+      ]
+     },
+     "error": "",
+     "reward_misc": {
+      "reward/success": 0.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 291,
+      "sha256": "7e63a0a27c13448e"
+     },
+     "advantages": "0.0*291",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*274 -0.5*17",
+     "mask": "0.0*274 1.0*17",
+     "target_tokens": {
+      "length": 291,
+      "sha256": "163cec9b13774464"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "1.0*1"
+    }
+   ]
+  }
+ },
+ "unattributed_calls": [],
+ "train": {
+  "task_reward": 0.0,
+  "task_reward_valid": true,
+  "root_rewards_dict": {
+   "reward/success": 0.0,
+   "reward/subagent_launched": 0.0,
+   "reward/subagent_succeeded": 0.0
+  },
+  "num_datums": 1,
+  "num_policy_excluded_datums": 0,
+  "trajectories": {
+   "root": {
+    "reward": 0.0,
+    "rewards_dict": {
+     "reward/success": 0.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": true,
+    "num_steps": 1,
+    "num_datums": 1,
+    "num_input_tokens": 275,
+    "num_output_tokens": 17
+   }
+  }
+ }
+}

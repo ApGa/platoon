@@ -1,0 +1,27 @@
+version = "1.0"
+
+[task]
+name = "platoon/hello-file"
+
+[metadata]
+difficulty = "easy"
+
+[agent]
+timeout_sec = 120.0
+
+[verifier]
+timeout_sec = 30.0
+
+[verifier.env]
+EXPECTED = "hello"
+
+[environment]
+docker_image = "ubuntu:24.04"
+workdir = "/app"
+cpus = 1
+memory_mb = 512
+
+[environment.healthcheck]
+command = "test -d /app"
+interval_sec = 0.1
+retries = 2

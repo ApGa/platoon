@@ -1,0 +1,42 @@
+# Original TextCraft evaluation: the recursive CodeAct agent on the first 100 val tasks.
+#
+#   platoon eval extensions/textcraft/configs/textcraft_eval.yaml [inference.model_path=tinker://...] [key=value ...]
+#
+# stage: full collects rollouts and reports; rollouts only collects them (resume-friendly);
+# report only reports on rollouts already on disk.
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  model_path: null  # a Tinker sampler checkpoint; null samples the base model
+  resume: true
+  workflow:
+    num_rollouts_per_task: 1
+    num_concurrent_workers: 16
+    success_threshold: 1.0
+    fail_fast: false
+    use_subprocesses: false
+    subprocess_max_workers: null
+    rollout_config:
+      max_steps: 50
+      verbose: true
+      timeout: 900
+      step_timeout: 300
+      enable_subagent_verifiers: false
+      inference_params: {max_completion_tokens: 512}
+
+environments:
+  - env: textcraft@1
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder_options: {variant: recursive}
+      subagent_budget: argument
+      cell_timeout_s: 300
+    agents:
+      max_depth: null
+      budget: linear
+      child_grading: env
+    eval_dataset_kwargs: {limit: 100}
+
+split: eval
+stage: full

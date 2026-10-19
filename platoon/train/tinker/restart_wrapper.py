@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Wrapper script that restarts training on watchdog timeout.
+"""Deprecated: set ``watchdog.max_restarts`` in the training config instead, and ``platoon train`` restarts itself
+after any failure, not only the watchdog's (:mod:`platoon.train.supervise`).  Platoon 0.3.0 removes this module; until
+then it works as before, and says so with a :class:`~platoon.PlatoonDeprecationWarning`.
+
+Wrapper script that restarts training on watchdog timeout.
 
 This script runs a training command and automatically restarts it if:
 1. The process exits with the watchdog exit code (default: 2)
@@ -7,6 +11,17 @@ This script runs a training command and automatically restarts it if:
 
 The training script should be designed to resume from the last checkpoint
 when restarted (which the PlatoonTinkerRLTrainer already supports).
+
+Every time the training process exits, and before it is started again, the
+wrapper kills the rollout workers (``rollout_isolation: process``) whose trainer
+is gone.  Workers lead their own sessions, so a trainer that died without
+reaping them (a watchdog exit, a crash, SIGKILL) would otherwise leave them
+running next to the restarted trainer; trainers record each live worker on disk
+for exactly this (:mod:`platoon.train.tinker.workers.registry`).  Workers whose
+trainer still runs, such as another run's sharing the same ``$TMPDIR``, are
+never touched.  A SIGTERM to the wrapper itself still ends it at once; the
+workers then stop on their trainer's death (PDEATHSIG and their own termination
+deadline).
 
 Usage:
     python -m platoon.train.tinker.restart_wrapper \\
@@ -27,6 +42,17 @@ import sys
 import time
 from typing import Sequence
 
+from platoon import deprecations
+
+#: How long the wrapper's sweep gives a dead trainer's workers between SIGTERM and SIGKILL.
+WORKER_SWEEP_GRACE_SECONDS = 10.0
+#: What replaces this module, and the release that removes it.
+DEPRECATION = deprecations.Deprecation(
+    path="python -m platoon.train.tinker.restart_wrapper (run_with_restart)",
+    replacement="watchdog.max_restarts in the training config",
+    removed_in="0.3.0",
+)
+
 # Use a dedicated logger that doesn't affect the root logger
 # This prevents interference when restart_wrapper is imported by subprocess code
 logger = logging.getLogger("platoon.restart_wrapper")
@@ -45,11 +71,41 @@ def _configure_restart_wrapper_logging():
     logger.setLevel(logging.INFO)
 
 
+def stop_orphaned_workers(
+    *,
+    registry: str | None = None,
+    grace_seconds: float = WORKER_SWEEP_GRACE_SECONDS,
+) -> list[int]:
+    """Kill the rollout workers whose trainer is gone (the one that just exited, or any other); returns their
+    pids; never raises.
+
+    Not only the child's: the trainer may run under a shell or a launcher of its own.  ``registry`` is the
+    trainers' worker registry (default: the one under ``$TMPDIR``, where their supervisors keep it).
+    """
+
+    try:
+        from platoon.train.tinker.workers.registry import registry_dir, sweep_orphaned_workers
+
+        if registry is None:
+            from platoon.train.tinker.workers.protocol import ipc_dir
+
+            registry = registry_dir(ipc_dir())
+        stopped = sweep_orphaned_workers(registry, grace_seconds=grace_seconds)
+    except Exception as e:
+        logger.warning(f"Could not check for rollout workers the trainer left running: {e}")
+        return []
+    if stopped:
+        logger.warning(f"Stopped {len(stopped)} rollout worker(s) the trainer left running: {stopped}")
+    return stopped
+
+
 def run_with_restart(
     command: Sequence[str],
     max_restarts: int = 5,
     watchdog_exit_code: int = 2,
     restart_delay_seconds: float = 10.0,
+    worker_registry: str | None = None,
+    worker_sweep_grace_seconds: float = WORKER_SWEEP_GRACE_SECONDS,
 ) -> int:
     """Run a command and restart it on watchdog timeout.
 
@@ -58,10 +114,14 @@ def run_with_restart(
         max_restarts: Maximum number of restarts before giving up
         watchdog_exit_code: The exit code that triggers a restart
         restart_delay_seconds: Delay before restarting
+        worker_registry: Where trainers record their rollout workers (default: under ``$TMPDIR``); after every
+            exit, before any restart, the workers whose trainer is gone are killed
+        worker_sweep_grace_seconds: How long those workers get between SIGTERM and SIGKILL
 
     Returns:
         The final exit code of the process
     """
+    deprecations.warn([DEPRECATION])
     restart_count = 0
 
     while True:
@@ -92,8 +152,11 @@ def run_with_restart(
                         logger.info("Child still running, sending SIGKILL...")
                         process.kill()
                         exit_code = process.wait()
+                stop_orphaned_workers(registry=worker_registry, grace_seconds=worker_sweep_grace_seconds)
             return 130  # Standard exit code for SIGINT
 
+        # Whatever the exit, nothing the trainer started may run on, least of all next to the next trainer.
+        stop_orphaned_workers(registry=worker_registry, grace_seconds=worker_sweep_grace_seconds)
         elapsed = time.time() - start_time
 
         if exit_code == 0:

@@ -222,10 +222,11 @@ countdown*.md
 nohup*.out
 logs/
 
-slurm-scripts/
 .claude/
 inference_results/
-
 *.deb
-
-.*-wheels/
+slurm*.out
+external/
+# Run outputs of the tutorials and examples
+runs/
+wandb/

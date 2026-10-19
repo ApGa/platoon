@@ -1,0 +1,23 @@
+# Questions from a task table, answered by platoon-react (no tools: one reply) and graded by the
+# example-exact-match program against each row's `answer` column.
+#
+#   cd examples/gym-env
+#   PYTHONPATH=. uv run platoon train train_qa.yaml [key=value ...]
+
+extends: train_loop.yaml
+
+environments:
+  - name: qa
+    service: table
+    service_kwargs: {path: questions.jsonl}
+    harness: platoon-react
+    harness_options:
+      system_prompt: Answer with one word or number and nothing else.
+    program: example-exact-match
+    package: exact_match                  # registers @pt.program("example-exact-match")
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: test}
+
+stats:
+  experiment_name: qa
+  trial_name: exact-match

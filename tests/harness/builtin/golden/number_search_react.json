@@ -1,0 +1,1005 @@
+{
+ "format": 1,
+ "scenario": "number_search_react",
+ "result": {
+  "status": "completed",
+  "final_message": "You guessed the number 553 correctly!",
+  "error": null
+ },
+ "outcome": {
+  "status": "scored",
+  "rewards": {
+   "reward": 1.0
+  },
+  "primary": "reward",
+  "reason": null,
+  "failure_kind": null,
+  "metadata": {
+   "tool_calls": 7,
+   "terminal_tool": "guess"
+  }
+ },
+ "trajectories": {
+  "root": {
+   "parent": null,
+   "fork_step": null,
+   "depth": 0,
+   "task": {
+    "goal": null,
+    "id": "val:4",
+    "max_steps": null,
+    "misc": {
+     "ors": {
+      "split": "val",
+      "index": 4,
+      "name": "number_search.val.4"
+     }
+    },
+    "fork_strategy": "subtask"
+   },
+   "reward": 1.0,
+   "finish_message": "You guessed the number 553 correctly!",
+   "error_message": null,
+   "misc": {
+    "agent": {
+     "role": "policy"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 21,
+      "parse_success": true,
+      "parsed_tool_calls": 1,
+      "emitted_tool_calls": 1,
+      "finish_reason": "tool_calls"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 21,
+      "parse_success": true,
+      "parsed_tool_calls": 1,
+      "emitted_tool_calls": 1,
+      "finish_reason": "tool_calls"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 21,
+      "parse_success": true,
+      "parsed_tool_calls": 1,
+      "emitted_tool_calls": 1,
+      "finish_reason": "tool_calls"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 21,
+      "parse_success": true,
+      "parsed_tool_calls": 1,
+      "emitted_tool_calls": 1,
+      "finish_reason": "tool_calls"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 21,
+      "parse_success": true,
+      "parsed_tool_calls": 1,
+      "emitted_tool_calls": 1,
+      "finish_reason": "tool_calls"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 21,
+      "parse_success": true,
+      "parsed_tool_calls": 1,
+      "emitted_tool_calls": 1,
+      "finish_reason": "tool_calls"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 21,
+      "parse_success": true,
+      "parsed_tool_calls": 1,
+      "emitted_tool_calls": 1,
+      "finish_reason": "tool_calls"
+     }
+    ],
+    "agent_result": {
+     "status": "completed",
+     "error": null
+    },
+    "outcome": {
+     "status": "scored",
+     "rewards": {
+      "reward": 1.0
+     },
+     "reason": null,
+     "reward_key": "reward"
+    },
+    "tool_calls": [
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 750
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 0
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 650
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 1
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 600
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 2
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 575
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 3
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 562
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 4
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 556
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 5
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 553
+      },
+      "text": "You guessed the number 553 correctly!",
+      "is_error": false,
+      "finished": true,
+      "reward": 1.0,
+      "after_call": 6
+     }
+    ]
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Find the number with the guess tool.",
+       "",
+       "# Tools",
+       "",
+       "You may call one or more functions to assist with the user query.",
+       "",
+       "You are provided with function signatures within <tools></tools> XML tags:",
+       "<tools>",
+       "{\"type\": \"function\", \"function\": {\"name\": \"guess\", \"description\": \"Guess the hidden number; the reply says whether it is too low, too high or correct.\", \"parameters\": {\"properties\": {\"number\": {\"description\": \"The number to guess.\", \"type\": \"integer\"}}, \"required\": [\"number\"], \"type\": \"object\"}}}",
+       "</tools>",
+       "",
+       "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+       "<tool_call>",
+       "{\"name\": <function-name>, \"arguments\": <args-json-object>}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "Guess the correct number between 551 and 950.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 750}}",
+       "</tool_call><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       151645
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Find the number with the guess tool.",
+       "",
+       "# Tools",
+       "",
+       "You may call one or more functions to assist with the user query.",
+       "",
+       "You are provided with function signatures within <tools></tools> XML tags:",
+       "<tools>",
+       "{\"type\": \"function\", \"function\": {\"name\": \"guess\", \"description\": \"Guess the hidden number; the reply says whether it is too low, too high or correct.\", \"parameters\": {\"properties\": {\"number\": {\"description\": \"The number to guess.\", \"type\": \"integer\"}}, \"required\": [\"number\"], \"type\": \"object\"}}}",
+       "</tools>",
+       "",
+       "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+       "<tool_call>",
+       "{\"name\": <function-name>, \"arguments\": <args-json-object>}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "Guess the correct number between 551 and 950.<|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 750}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 650}}",
+       "</tool_call><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       151645
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Find the number with the guess tool.",
+       "",
+       "# Tools",
+       "",
+       "You may call one or more functions to assist with the user query.",
+       "",
+       "You are provided with function signatures within <tools></tools> XML tags:",
+       "<tools>",
+       "{\"type\": \"function\", \"function\": {\"name\": \"guess\", \"description\": \"Guess the hidden number; the reply says whether it is too low, too high or correct.\", \"parameters\": {\"properties\": {\"number\": {\"description\": \"The number to guess.\", \"type\": \"integer\"}}, \"required\": [\"number\"], \"type\": \"object\"}}}",
+       "</tools>",
+       "",
+       "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+       "<tool_call>",
+       "{\"name\": <function-name>, \"arguments\": <args-json-object>}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "Guess the correct number between 551 and 950.<|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 750}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 650}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 600}}",
+       "</tool_call><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       151645
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Find the number with the guess tool.",
+       "",
+       "# Tools",
+       "",
+       "You may call one or more functions to assist with the user query.",
+       "",
+       "You are provided with function signatures within <tools></tools> XML tags:",
+       "<tools>",
+       "{\"type\": \"function\", \"function\": {\"name\": \"guess\", \"description\": \"Guess the hidden number; the reply says whether it is too low, too high or correct.\", \"parameters\": {\"properties\": {\"number\": {\"description\": \"The number to guess.\", \"type\": \"integer\"}}, \"required\": [\"number\"], \"type\": \"object\"}}}",
+       "</tools>",
+       "",
+       "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+       "<tool_call>",
+       "{\"name\": <function-name>, \"arguments\": <args-json-object>}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "Guess the correct number between 551 and 950.<|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 750}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 650}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 600}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 575}}",
+       "</tool_call><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       151645
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Find the number with the guess tool.",
+       "",
+       "# Tools",
+       "",
+       "You may call one or more functions to assist with the user query.",
+       "",
+       "You are provided with function signatures within <tools></tools> XML tags:",
+       "<tools>",
+       "{\"type\": \"function\", \"function\": {\"name\": \"guess\", \"description\": \"Guess the hidden number; the reply says whether it is too low, too high or correct.\", \"parameters\": {\"properties\": {\"number\": {\"description\": \"The number to guess.\", \"type\": \"integer\"}}, \"required\": [\"number\"], \"type\": \"object\"}}}",
+       "</tools>",
+       "",
+       "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+       "<tool_call>",
+       "{\"name\": <function-name>, \"arguments\": <args-json-object>}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "Guess the correct number between 551 and 950.<|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 750}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 650}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 600}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 575}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 562}}",
+       "</tool_call><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       151645
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Find the number with the guess tool.",
+       "",
+       "# Tools",
+       "",
+       "You may call one or more functions to assist with the user query.",
+       "",
+       "You are provided with function signatures within <tools></tools> XML tags:",
+       "<tools>",
+       "{\"type\": \"function\", \"function\": {\"name\": \"guess\", \"description\": \"Guess the hidden number; the reply says whether it is too low, too high or correct.\", \"parameters\": {\"properties\": {\"number\": {\"description\": \"The number to guess.\", \"type\": \"integer\"}}, \"required\": [\"number\"], \"type\": \"object\"}}}",
+       "</tools>",
+       "",
+       "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+       "<tool_call>",
+       "{\"name\": <function-name>, \"arguments\": <args-json-object>}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "Guess the correct number between 551 and 950.<|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 750}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 650}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 600}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 575}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 562}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 556}}",
+       "</tool_call><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       151645
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Find the number with the guess tool.",
+       "",
+       "# Tools",
+       "",
+       "You may call one or more functions to assist with the user query.",
+       "",
+       "You are provided with function signatures within <tools></tools> XML tags:",
+       "<tools>",
+       "{\"type\": \"function\", \"function\": {\"name\": \"guess\", \"description\": \"Guess the hidden number; the reply says whether it is too low, too high or correct.\", \"parameters\": {\"properties\": {\"number\": {\"description\": \"The number to guess.\", \"type\": \"integer\"}}, \"required\": [\"number\"], \"type\": \"object\"}}}",
+       "</tools>",
+       "",
+       "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+       "<tool_call>",
+       "{\"name\": <function-name>, \"arguments\": <args-json-object>}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "Guess the correct number between 551 and 950.<|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 750}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 650}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 600}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 575}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 562}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       "",
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 556}}",
+       "</tool_call><|im_end|>",
+       "<|im_start|>user",
+       "<tool_response>",
+       "Too high, try again.",
+       "</tool_response><|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<tool_call>",
+       "{\"name\": \"guess\", \"arguments\": {\"number\": 553}}",
+       "</tool_call><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       151645
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 189,
+       "completion_tokens": 21,
+       "total_tokens": 210
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "<id>",
+        "type": "function",
+        "function": {
+         "name": "guess",
+         "arguments": "{\"number\": 750}"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 229,
+       "completion_tokens": 21,
+       "total_tokens": 250
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "<id>",
+        "type": "function",
+        "function": {
+         "name": "guess",
+         "arguments": "{\"number\": 650}"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 269,
+       "completion_tokens": 21,
+       "total_tokens": 290
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "<id>",
+        "type": "function",
+        "function": {
+         "name": "guess",
+         "arguments": "{\"number\": 600}"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 309,
+       "completion_tokens": 21,
+       "total_tokens": 330
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "<id>",
+        "type": "function",
+        "function": {
+         "name": "guess",
+         "arguments": "{\"number\": 575}"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 349,
+       "completion_tokens": 21,
+       "total_tokens": 370
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "<id>",
+        "type": "function",
+        "function": {
+         "name": "guess",
+         "arguments": "{\"number\": 562}"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 389,
+       "completion_tokens": 21,
+       "total_tokens": 410
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "<id>",
+        "type": "function",
+        "function": {
+         "name": "guess",
+         "arguments": "{\"number\": 556}"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 429,
+       "completion_tokens": 21,
+       "total_tokens": 450
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "<id>",
+        "type": "function",
+        "function": {
+         "name": "guess",
+         "arguments": "{\"number\": 553}"
+        }
+       }
+      ]
+     },
+     "reward_misc": {
+      "reward/success": 1.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 209,
+      "sha256": "bb6c2c3eed819c6b"
+     },
+     "advantages": "0.0*188 1.0*21",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*188 -0.5*21",
+     "mask": "0.0*188 1.0*21",
+     "target_tokens": {
+      "length": 209,
+      "sha256": "6abe22d5327e26f6"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "1.0*1"
+    },
+    {
+     "model_input": {
+      "length": 249,
+      "sha256": "c17475fb0d3ee1b6"
+     },
+     "advantages": "0.0*228 1.0*21",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*228 -0.5*21",
+     "mask": "0.0*228 1.0*21",
+     "target_tokens": {
+      "length": 249,
+      "sha256": "89d434b0428fbbeb"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "0.0*1"
+    },
+    {
+     "model_input": {
+      "length": 289,
+      "sha256": "24f4462b1530eed9"
+     },
+     "advantages": "0.0*268 1.0*21",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*268 -0.5*21",
+     "mask": "0.0*268 1.0*21",
+     "target_tokens": {
+      "length": 289,
+      "sha256": "2a946f99838cbada"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "0.0*1"
+    },
+    {
+     "model_input": {
+      "length": 329,
+      "sha256": "e8d02275abb8eaf7"
+     },
+     "advantages": "0.0*308 1.0*21",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*308 -0.5*21",
+     "mask": "0.0*308 1.0*21",
+     "target_tokens": {
+      "length": 329,
+      "sha256": "39c3755ab715ab36"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "0.0*1"
+    },
+    {
+     "model_input": {
+      "length": 369,
+      "sha256": "1bd0c755375211c9"
+     },
+     "advantages": "0.0*348 1.0*21",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*348 -0.5*21",
+     "mask": "0.0*348 1.0*21",
+     "target_tokens": {
+      "length": 369,
+      "sha256": "4d27cfee087f326c"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "0.0*1"
+    },
+    {
+     "model_input": {
+      "length": 409,
+      "sha256": "f6a61644363c320d"
+     },
+     "advantages": "0.0*388 1.0*21",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*388 -0.5*21",
+     "mask": "0.0*388 1.0*21",
+     "target_tokens": {
+      "length": 409,
+      "sha256": "f4b62eb88056b2bf"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "0.0*1"
+    },
+    {
+     "model_input": {
+      "length": 449,
+      "sha256": "a525fe955fc688b1"
+     },
+     "advantages": "0.0*428 1.0*21",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*428 -0.5*21",
+     "mask": "0.0*428 1.0*21",
+     "target_tokens": {
+      "length": 449,
+      "sha256": "76f85bb3bc1f41e3"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "0.0*1"
+    }
+   ]
+  }
+ },
+ "unattributed_calls": [],
+ "train": {
+  "task_reward": 1.0,
+  "task_reward_valid": true,
+  "root_rewards_dict": {
+   "reward/success": 1.0,
+   "reward/subagent_launched": 0.0,
+   "reward/subagent_succeeded": 0.0
+  },
+  "num_datums": 7,
+  "num_policy_excluded_datums": 0,
+  "trajectories": {
+   "root": {
+    "reward": 1.0,
+    "rewards_dict": {
+     "reward/success": 1.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": true,
+    "num_steps": 7,
+    "num_datums": 7,
+    "num_input_tokens": 2163,
+    "num_output_tokens": 147
+   }
+  }
+ }
+}

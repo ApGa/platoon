@@ -1,0 +1,135 @@
+name: Release
+
+# Builds platoon's sdist and wheel and the TextCraft extension's (extensions/textcraft), and checks them, on every pull
+# request. A pushed tag publishes one of them to PyPI with trusted publishing, from the `pypi` environment
+# (CONTRIBUTING.md, "Release a version"): a v* tag publishes platoon, and a platoon-textcraft-v* tag the extension,
+# which has a version of its own. A tag publishes only a commit on main, and only the version it names; a v* tag also
+# needs that version dated in CHANGELOG.md. Since this workflow can publish, its actions are pinned to commits (the
+# release in the comment next to each), it caches nothing, and the checkout keeps no credentials for the build backend
+# to read.
+on:
+  push:
+    tags: ["v*", "platoon-textcraft-v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Comparing main with the tagged commit gives identical or behind when the commit is main or one of its
+      # ancestors, and ahead or diverged when it is on another branch or was never pushed to one.
+      - name: Check that the tagged commit is on main
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status | grep -xE 'identical|behind'
+
+      # The pull request that releases a version dates it: a tag pushed before that merges stops here, instead of
+      # publishing notes that say "unreleased".
+      - name: Check that CHANGELOG.md dates the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: grep -q "^## ${GITHUB_REF_NAME#v} (2" CHANGELOG.md
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
+        with:
+          enable-cache: false
+
+      - name: Build the sdist and the wheel
+        run: uv build --no-sources
+
+      - name: Check the metadata and the PyPI description
+        run: uvx twine check --strict dist/*
+
+      - name: Run the wheel in a fresh environment
+        run: uvx --from dist/*.whl platoon --version
+
+      - name: Check that the wheel holds the package data
+        run: uvx --from dist/*.whl platoon harness list
+
+      - name: Check that the wheel alone resolves the built-in named environment
+        run: uvx --from dist/*.whl platoon env show platoon-number-search
+
+      - name: Build the TextCraft extension
+        run: uv build --no-sources --package platoon-textcraft --out-dir dist-extensions
+
+      - name: Check its metadata and its PyPI description
+        run: uvx twine check --strict dist-extensions/*
+
+      - name: Install the TextCraft extension's wheel alone
+        run: uv venv /tmp/textcraft && uv pip install --python /tmp/textcraft/bin/python dist-extensions/*.whl
+
+      - name: Run the TextCraft environments without platoon
+        run: /tmp/textcraft/bin/python -I -c "import sys, platoon_textcraft.env as e; assert len(e.TextCraftSynthEnvironment.list_tasks('train-medium')) == 852; assert not [m for m in sys.modules if m.split('.')[0] in ('platoon', 'IPython')]"
+
+      - name: Check that the tag names platoon's version in pyproject.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: test -f "dist/platoon-${GITHUB_REF_NAME#v}-py3-none-any.whl"
+
+      - name: Check that the tag names the extension's version in extensions/textcraft/pyproject.toml
+        if: startsWith(github.ref, 'refs/tags/platoon-textcraft-v')
+        run: test -f "dist-extensions/platoon_textcraft-${GITHUB_REF_NAME#platoon-textcraft-v}-py3-none-any.whl"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+      # The extension's sdist and wheel alone, which publish-textcraft uploads.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: dist-extensions
+          path: dist-extensions/
+          if-no-files-found: error
+
+  publish:
+    # Only a pushed v* tag publishes platoon; a manual run on a tag only builds.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    # PyPI's trusted publisher for platoon names this repository, this workflow file and this environment.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/platoon/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+
+  publish-textcraft:
+    # Only a pushed platoon-textcraft-v* tag publishes the extension, and nothing else; a manual run only builds.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/platoon-textcraft-v')
+    needs: build
+    runs-on: ubuntu-latest
+    # PyPI's trusted publisher for platoon-textcraft names the same repository, workflow file and environment.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/platoon-textcraft/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: dist-extensions
+          path: dist-extensions/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist-extensions/

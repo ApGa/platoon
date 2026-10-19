@@ -1,0 +1,44 @@
+# Train a LoRA on GuessTheNumber with the example-guesser harness.
+#
+#   cd examples/quickstart
+#   PYTHONPATH=. uv run platoon rollout train.yaml --task train:41    # one task, to check the wiring
+#   PYTHONPATH=. uv run platoon train train.yaml                      # needs TINKER_API_KEY
+#
+# Five optimizer steps of 8 tasks x 4 rollouts with leave-one-out baselines, then a checkpoint
+# and an evaluation on 20 test tasks.
+
+environments:
+  - name: guess
+    service: python://guess:GuessTheNumber   # the ORS environment class in guess.py
+    harness: example-guesser                 # or platoon-react, platoon-codeact, or {example-guesser: 1, platoon-react: 1}
+    package: guesser                         # imported first, so @pt.harness("example-guesser") registers
+    dataset_kwargs: {split_name: train, shuffle_seed: 0}
+    eval_dataset_kwargs: {split_name: test, limit: 20}
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 8
+  num_epochs: 1
+  max_training_steps: 5
+  workflow_config:
+    group_size: 4
+    leave_one_out_baseline: true
+    rollout_config:
+      max_steps: 10
+      timeout: 300
+      inference_params: {max_completion_tokens: 256}
+
+eval:
+  every: 5                    # one rollout per task, rolled out as training's are
+
+checkpoint:
+  every: 5
+
+log_path: ./runs
+
+stats:
+  experiment_name: quickstart
+  trial_name: guess-qwen3-4b-lora32
+  wandb:
+    mode: disabled

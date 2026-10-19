@@ -1,0 +1,246 @@
+"""``train.label_by``: the one column that labels a run's tasks, which group limits and straggler policies key on.
+
+It replaces ``train.rollout_group_key`` (a deprecated name of the same key) and ``workflow_config.straggler_policy_key``
+(deprecated: a workflow config that still sets it keys its straggler policies on that column), and a label is a
+column's value as text.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import warnings
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import yaml
+
+from platoon import cli
+from platoon.deprecations import Deprecation, PlatoonDeprecationWarning
+from platoon.train.components import ENVIRONMENT_COLUMN, task_ids_to_dataset
+from platoon.train.labels import check_labels, dataset_labels, label_text, task_label
+from platoon.train.tinker.config_defs import (
+    ENVIRONMENT_LABEL,
+    PlatoonTinkerRLTrainerConfig,
+    TrainConfig,
+    WorkflowConfig,
+)
+from platoon.train.tinker.rollout_queue import RolloutTaskQueue
+from platoon.utils.config import ConfigError, resolve_config
+
+
+def _config_file(tmp_path: Path, train: dict[str, Any], eval_section: dict[str, Any] | None = None) -> Path:
+    path = tmp_path / "train.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "train": {"model_name": "m", "renderer_name": "r", **train},
+                "eval": eval_section or {"every": 0},
+                "log_path": str(tmp_path / "logs"),
+            }
+        )
+    )
+    return path
+
+
+def _load(tmp_path: Path, train: dict[str, Any], eval_section: dict[str, Any] | None = None, **kwargs: Any):
+    return resolve_config(_config_file(tmp_path, train, eval_section), [], PlatoonTinkerRLTrainerConfig, **kwargs)
+
+
+def test_tasks_are_labelled_by_their_mixture_entry_by_default():
+    config = TrainConfig(model_name="m", renderer_name="r")
+
+    assert config.label_by == ENVIRONMENT_LABEL == ENVIRONMENT_COLUMN
+    assert config.rollout_group_key is None
+
+
+def test_label_by_names_the_column(tmp_path):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        resolved = _load(tmp_path, {"label_by": "source_dataset", "rollout_group_limits": {"slow": 2}})
+
+    assert resolved.deprecations == ()
+    assert (resolved.config.train.label_by, resolved.config.train.rollout_group_limits) == (
+        "source_dataset",
+        {"slow": 2},
+    )
+
+
+def test_rollout_group_key_is_a_deprecated_name_of_label_by(tmp_path):
+    with pytest.warns(PlatoonDeprecationWarning, match=r"^train\.rollout_group_key: deprecated; use train\.label_by"):
+        resolved = _load(tmp_path, {"rollout_group_key": "suite"})
+
+    assert resolved.deprecations == (Deprecation("train.rollout_group_key", "train.label_by", "0.3.0"),)
+    assert (resolved.config.train.label_by, resolved.config.train.rollout_group_key) == ("suite", None)
+
+
+def test_rollout_group_key_and_label_by_may_not_name_different_columns(tmp_path):
+    with pytest.warns(PlatoonDeprecationWarning):
+        assert _load(tmp_path, {"label_by": "suite", "rollout_group_key": "suite"}).config.train.label_by == "suite"
+    with pytest.raises(ValueError, match="train.label_by names 'suite' and train.rollout_group_key"):
+        TrainConfig(model_name="m", renderer_name="r", label_by="suite", rollout_group_key="kind")
+    with pytest.raises(ValueError, match="train.label_by must name a dataset column"):
+        TrainConfig(model_name="m", renderer_name="r", label_by="")
+
+
+def test_straggler_policy_key_is_deprecated_in_both_workflow_configs(tmp_path):
+    workflow = {"straggler_policy_key": "suite", "straggler_policies": {"slow": {"timeout_seconds": 60}}}
+
+    with pytest.warns(PlatoonDeprecationWarning) as warned:
+        resolved = _load(tmp_path, {"workflow_config": workflow}, {"every": 0, "workflow_config": workflow})
+
+    assert sorted(resolved.deprecations, key=lambda deprecation: deprecation.path) == [
+        Deprecation(f"{section}.workflow_config.straggler_policy_key", "train.label_by", "0.3.0")
+        for section in ("eval", "train")
+    ]
+    assert len([item for item in warned if item.category is PlatoonDeprecationWarning]) == 2
+    # Still read: each workflow config keys its policies on the column it names until 0.3.0 removes the key.
+    assert resolved.config.train.workflow_config.straggler_policy_key == "suite"
+    assert resolved.config.train.label_by == ENVIRONMENT_COLUMN
+
+
+def test_straggler_policies_need_no_column_of_their_own(tmp_path):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        resolved = _load(tmp_path, {"workflow_config": {"straggler_policies": {"slow": {"timeout_seconds": 60}}}})
+
+    assert resolved.config.train.workflow_config.straggler_policies["slow"].timeout_seconds == 60
+
+
+def test_config_validate_strict_fails_on_the_deprecated_names(tmp_path, capsys):
+    legacy = _config_file(tmp_path, {"rollout_group_key": "suite"})
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["config", "validate", "--strict", str(legacy)])
+
+    assert exited.value.code == cli.EXIT_CONFIG
+    assert "train.rollout_group_key: deprecated; use train.label_by instead (platoon 0.3.0 removes it)" in (
+        capsys.readouterr().out
+    )
+    current = tmp_path / "current"
+    current.mkdir()
+    cli.main(["config", "validate", "--strict", str(_config_file(current, {"label_by": "suite"}))])
+    assert capsys.readouterr().out.startswith("ok   ")
+
+
+def test_a_label_is_a_columns_value_as_text():
+    assert [label_text(value) for value in ("a", "", None, True, False, 3, 2.5, [1], {"a": 1})] == [
+        "a",
+        None,
+        None,
+        "true",
+        "false",
+        "3",
+        "2.5",
+        None,
+        None,
+    ]
+    assert task_label({"suite": 3}, "suite") == "3"
+    assert task_label({"task_id": "t"}, "suite") is None
+    rows = [{"task_id": "a", "suite": "x"}, {"task_id": "b"}]
+    assert dataset_labels(rows, "suite") == ["x", None]
+    assert dataset_labels(task_ids_to_dataset(["a", "b"]), "suite") == [None, None]
+
+
+def test_group_limits_apply_to_a_columns_values_as_labels():
+    async def run():
+        queue = RolloutTaskQueue(4, key="level", limits={"3": 1, "true": 1})
+        rows = [{"level": 3, "id": 0}, {"level": 3, "id": 1}, {"level": True, "id": 2}, {"level": True, "id": 3}]
+        for row in rows:
+            await queue.put(row)
+        assert [(await queue.get())["id"] for _ in range(2)] == [0, 2]  # one of each label at a time
+        waiter = asyncio.create_task(queue.get())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        await queue.release(rows[0])
+        assert (await asyncio.wait_for(waiter, 1))["id"] == 1
+
+    asyncio.run(run())
+
+
+def _config(label_by: str = ENVIRONMENT_COLUMN, *, limits=None, train_policies=None, eval_policies=None, key=None):
+    def workflow(policies):
+        return SimpleNamespace(straggler_policies=policies or {}, straggler_policy_key=key)
+
+    return SimpleNamespace(
+        train=SimpleNamespace(
+            label_by=label_by, rollout_group_limits=limits or {}, workflow_config=workflow(train_policies)
+        ),
+        eval=SimpleNamespace(workflow_config=workflow(eval_policies)),
+    )
+
+
+def test_a_label_column_no_training_task_has_stops_the_run():
+    tasks = [{"task_id": "a", "source_dataset": "x"}]
+
+    with pytest.raises(ConfigError, match=r"train.label_by: no training task has a 'sorce_dataset' value") as raised:
+        check_labels(_config("sorce_dataset"), tasks)
+
+    assert "their columns are task_id, source_dataset; did you mean source_dataset?" in str(raised.value)
+    check_labels(_config(), task_ids_to_dataset(["a", "b"]))  # a single environment: no entry column, no error
+
+
+def test_unlabelled_tasks_and_settings_for_labels_no_task_has_are_warned_of(caplog):
+    tasks = [{"task_id": "a", "suite": "x"}, {"task_id": "b", "suite": "y"}, {"task_id": "c"}]
+    evaluated = [{"task_id": "d", "suite": "x"}]
+    config = _config(
+        "suite",
+        limits={"x": 1, "z": 1},
+        train_policies={"y": {}, "w": {}},
+        eval_policies={"y": {}},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="platoon.train.labels"):
+        check_labels(config, tasks, evaluated)
+
+    assert caplog.messages == [
+        "train.label_by: 1 of the 3 training tasks have no 'suite' value, so no group limit or straggler policy "
+        "applies to them",
+        "train.rollout_group_limits: no training task has the 'suite' value z, so the setting applies to no task",
+        "train.workflow_config.straggler_policies: no training task has the 'suite' value w, so the setting applies "
+        "to no task",
+        "eval.workflow_config.straggler_policies: no evaluation task has the 'suite' value y, so the setting applies "
+        "to no task",
+    ]
+
+
+def test_a_deprecated_straggler_column_is_checked_for_the_policies_that_key_on_it(caplog):
+    tasks = [{"task_id": "a", "suite": "x", "kind": "slow"}]
+
+    with caplog.at_level(logging.WARNING, logger="platoon.train.labels"):
+        check_labels(_config("suite", train_policies={"slow": {}}, key="kind"), tasks)
+
+    assert caplog.messages == []
+
+
+def test_group_workflows_get_the_label_column():
+    from platoon.train.tinker.train import label_kwargs
+    from platoon.train.tinker.workflows import GroupRolloutWorkflow
+
+    config = SimpleNamespace(train=SimpleNamespace(label_by="suite"))
+    assert label_kwargs(GroupRolloutWorkflow, config) == {"label_by": "suite"}
+    assert label_kwargs(object, config) == {}  # a workflow of another kind gets none
+    assert WorkflowConfig().straggler_policy_key is None
+
+
+def test_metrics_are_named_by_the_column_and_label_and_capped_at_64_labels(caplog):
+    from platoon.train.labels import MAX_METRIC_LABELS, metric_labels, metric_prefix
+
+    assert metric_prefix(ENVIRONMENT_COLUMN, "math") == "environment/math"
+    assert metric_prefix("source_dataset", "Fine/Smol") == "source_dataset/Fine--Smol"
+    assert metric_prefix("a/b", "c") == "a--b/c"
+    rows = [{"task_id": "x", "kind": label} for label in ["b", "a", "b", None]]
+    assert metric_labels(rows, "kind") == ["b", "a"]  # the most frequent first, ties in label order
+    assert metric_labels(None, "kind") == [] and metric_labels(object(), "kind") == []
+
+    many = [{"kind": f"k{index:03d}"} for index in range(100)] + [{"kind": "k099"}]
+    with caplog.at_level(logging.WARNING, logger="platoon.train.labels"):
+        logged = metric_labels(many, "kind", split="evaluation")
+    assert len(logged) == MAX_METRIC_LABELS == 64
+    assert logged[:3] == ["k099", "k000", "k001"]
+    assert caplog.messages == [
+        "train.label_by: the evaluation tasks have 100 'kind' values; their metrics break down by the 64 most "
+        "frequent, which label 65 of the 101 labelled tasks (group limits and straggler policies apply to every value)"
+    ]

@@ -4,8 +4,6 @@
 [src]
 exclude = [
     "**/tui.py",
-    "**/compare_tui.py",
-    "**/error_tui.py",
 ]
 
 [rules]
@@ -18,62 +16,22 @@ possibly-missing-attribute = "warn"
 # Using inline table syntax for rules to support multiple overrides
 # ============================================================================
 
-# Training code with tinker/areal libraries
+# Training code with tinker libraries
 [[overrides]]
 include = ["platoon/train/**"]
 rules = { invalid-argument-type = "warn", invalid-assignment = "warn", unresolved-attribute = "warn", not-subscriptable = "warn", invalid-return-type = "warn" }
-
-# LLM client with OpenAI SDK TypedDict mutations
-[[overrides]]
-include = ["platoon/utils/llm_client.py"]
-rules = { invalid-assignment = "ignore", invalid-argument-type = "warn", not-subscriptable = "warn" }
-
-# Plugin training scripts and rollouts
-[[overrides]]
-include = ["plugins/**/train*.py", "plugins/**/rollout.py", "plugins/**/synth_rollout.py"]
-rules = { invalid-argument-type = "warn", invalid-assignment = "warn", unresolved-attribute = "warn" }
-
-# Plugin env files
-[[overrides]]
-include = ["plugins/**/env.py"]
-rules = { invalid-argument-type = "warn", unresolved-attribute = "warn" }
-
-# Analysis code with dynamic dict patterns
-[[overrides]]
-include = ["platoon/analysis/**"]
-rules = { invalid-argument-type = "warn", invalid-assignment = "warn", not-subscriptable = "warn" }
 
 # Utility files with complex patterns
 [[overrides]]
 include = ["platoon/utils/**"]
 rules = { invalid-argument-type = "warn", unresolved-attribute = "warn", invalid-return-type = "warn", not-subscriptable = "warn", invalid-assignment = "warn" }
 
-# Test files - more lenient
+# Test files - more lenient: core's tests, the first-party extensions' tests and the recipes' checks
 [[overrides]]
-include = ["tests/**"]
+include = ["tests/**", "extensions/*/tests/**", "recipes/**/test_*.py"]
 rules = { invalid-argument-type = "warn", not-subscriptable = "warn", unresolved-attribute = "warn", invalid-assignment = "warn" }
 
 # Visualization code
 [[overrides]]
 include = ["platoon/visualization/**"]
 rules = { invalid-argument-type = "warn", unresolved-attribute = "warn" }
-
-# CodeAct env with complex Callable types
-[[overrides]]
-include = ["platoon/envs/**"]
-rules = { invalid-parameter-default = "warn" }
-
-# Plugin task files
-[[overrides]]
-include = ["plugins/**/tasks.py"]
-rules = { unresolved-attribute = "warn", not-subscriptable = "warn" }
-
-# Number search plugin
-[[overrides]]
-include = ["plugins/number-search/**"]
-rules = { invalid-argument-type = "warn", invalid-return-type = "warn" }
-
-# CodeGrep plugin
-[[overrides]]
-include = ["plugins/codegrep/**"]
-rules = { invalid-argument-type = "warn", invalid-assignment = "warn", unresolved-attribute = "warn", not-subscriptable = "warn" }

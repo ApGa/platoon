@@ -1,0 +1,41 @@
+# Train a LoRA on the example extension's arithmetic tasks: five optimizer steps of 8 tasks x 4 rollouts, then a
+# checkpoint and an evaluation on the test split. With the package installed and TINKER_API_KEY set:
+#
+#   uv run platoon train examples/extension-package/train.yaml
+
+environments:
+  - name: arithmetic
+    service: example_extension.tasks:arithmetic
+    harness: example-self-check
+    program: example-exact-answer
+    reward_processor: example-partial-credit
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: test}
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 8
+  max_training_steps: 5
+  workflow_config:
+    group_size: 4
+    leave_one_out_baseline: true
+    rollout_config:
+      max_steps: 4
+      timeout: 120
+      verbose: false
+      inference_params: {max_completion_tokens: 256}
+
+eval:
+  every: 5                    # one rollout per task, rolled out as training's are
+
+checkpoint:
+  every: 5
+
+log_path: ./runs/extension-package-train
+
+stats:
+  experiment_name: extension-package
+  trial_name: self-check
+  wandb:
+    mode: disabled

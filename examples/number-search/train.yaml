@@ -1,0 +1,52 @@
+# First run: train a LoRA on number search with the platoon-codeact harness.
+#
+#   platoon rollout examples/number-search/train.yaml --task val:0     # one task, printed as a tree
+#   platoon train examples/number-search/train.yaml                    # five training steps
+#
+# Walkthrough: docs/getting-started/first-run.md.  Number search ships with platoon; the run needs a
+# Tinker-compatible training backend: hosted Tinker, or a self-hosted server such as miles-tinker
+# (https://github.com/neulab/miles-tinker).
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder: platoon.envs.number_search.prompts:NumberSearchPromptBuilder
+      include_reasoning: false
+      subagents: false                 # one agent per episode: no launch_subagent()
+    agents:
+      max_depth: 0
+    dataset_kwargs: {split_name: train, limit: 1000}
+    eval_dataset_kwargs: {split_name: val, limit: 20}
+    workflow_kwargs:
+      filter_errors: false
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 8                        # tasks per step
+  num_epochs: 1
+  max_training_steps: 5
+  max_staleness: 3
+  workflow_config:
+    group_size: 4                      # rollouts per task; advantages are centered within the group
+    leave_one_out_baseline: true
+    rollout_config:
+      max_steps: 10                    # model calls per episode
+      timeout: 300
+      inference_params: {max_completion_tokens: 512}
+
+eval:
+  every: 5
+  workflow_config:                     # one rollout per task, with training's rollout settings but its logging
+    rollout_config: {verbose: false}
+
+checkpoint:
+  every: 5
+
+log_path: ./runs
+stats:
+  experiment_name: number-search
+  trial_name: first-run
+  wandb:
+    mode: disabled

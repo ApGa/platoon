@@ -1,0 +1,176 @@
+{
+ "format": 1,
+ "scenario": "number_search_cell_timeout",
+ "result": {
+  "status": "timeout",
+  "final_message": null,
+  "error": "Cell did not finish within 0.3 seconds"
+ },
+ "outcome": {
+  "status": "scored",
+  "rewards": {
+   "reward": 0.0
+  },
+  "primary": "reward",
+  "reason": "no_submit",
+  "failure_kind": null,
+  "metadata": {
+   "tool_calls": 0
+  }
+ },
+ "trajectories": {
+  "root": {
+   "parent": null,
+   "fork_step": null,
+   "depth": 0,
+   "task": {
+    "goal": null,
+    "id": "val:3",
+    "max_steps": null,
+    "misc": {
+     "ors": {
+      "split": "val",
+      "index": 3,
+      "name": "number_search.val.3"
+     }
+    },
+    "fork_strategy": "subtask"
+   },
+   "reward": 0.0,
+   "finish_message": null,
+   "error_message": "Cell did not finish within 0.3 seconds",
+   "misc": {
+    "agent": {
+     "role": "policy"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 13,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     }
+    ],
+    "agent_result": {
+     "status": "timeout",
+     "error": "Cell did not finish within 0.3 seconds"
+    },
+    "outcome": {
+     "status": "scored",
+     "rewards": {
+      "reward": 0.0
+     },
+     "reason": "no_submit",
+     "reward_key": "reward"
+    }
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 215 and 822.",
+       "Budget: You have a total budget of 5 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>await asyncio.sleep(30)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 134,
+       "completion_tokens": 13,
+       "total_tokens": 147
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>await asyncio.sleep(30)</python>"
+     },
+     "thought": "",
+     "code": "await asyncio.sleep(30)",
+     "output": null,
+     "error": "Cell did not finish within 0.3 seconds",
+     "reward_misc": {
+      "reward/success": 0.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 146,
+      "sha256": "7f63eaa2d8e4189e"
+     },
+     "advantages": "0.0*146",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*133 -0.5*13",
+     "mask": "0.0*133 1.0*13",
+     "target_tokens": {
+      "length": 146,
+      "sha256": "189c6bc2606687ad"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "1.0*1"
+    }
+   ]
+  }
+ },
+ "unattributed_calls": [],
+ "train": {
+  "task_reward": 0.0,
+  "task_reward_valid": true,
+  "root_rewards_dict": {
+   "reward/success": 0.0,
+   "reward/subagent_launched": 0.0,
+   "reward/subagent_succeeded": 0.0
+  },
+  "num_datums": 1,
+  "num_policy_excluded_datums": 0,
+  "trajectories": {
+   "root": {
+    "reward": 0.0,
+    "rewards_dict": {
+     "reward/success": 0.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": true,
+    "num_steps": 1,
+    "num_datums": 1,
+    "num_input_tokens": 134,
+    "num_output_tokens": 13
+   }
+  }
+ }
+}

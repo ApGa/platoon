@@ -1,0 +1,12 @@
+{"id": "train-0", "goal": "Guess the number from 1 to 100.", "target": 37, "split": "train"}
+{"id": "train-1", "goal": "Guess the number from 1 to 100.", "target": 82, "split": "train"}
+{"id": "train-2", "goal": "Guess the number from 1 to 100.", "target": 5, "split": "train"}
+{"id": "train-3", "goal": "Guess the number from 1 to 100.", "target": 64, "split": "train"}
+{"id": "train-4", "goal": "Guess the number from 1 to 100.", "target": 91, "split": "train"}
+{"id": "train-5", "goal": "Guess the number from 1 to 100.", "target": 23, "split": "train"}
+{"id": "train-6", "goal": "Guess the number from 1 to 100.", "target": 50, "split": "train"}
+{"id": "train-7", "goal": "Guess the number from 1 to 100.", "target": 13, "split": "train"}
+{"id": "test-0", "goal": "Guess the number from 1 to 100.", "target": 44, "split": "test"}
+{"id": "test-1", "goal": "Guess the number from 1 to 100.", "target": 99, "split": "test"}
+{"id": "test-2", "goal": "Guess the number from 1 to 100.", "target": 1, "split": "test"}
+{"id": "test-3", "goal": "Guess the number from 1 to 100.", "target": 70, "split": "test"}

@@ -1,0 +1,72 @@
+# Train the recursive CodeAct agent on original TextCraft (Minecraft recipes): a Qwen3-4B-Instruct-2507 LoRA on
+# the first 1,000 training tasks, with up to 50 model calls per episode, and an evaluation on the first 100
+# validation tasks every 20 steps.
+#
+#   platoon train extensions/textcraft/configs/textcraft_train.yaml [key=value ...]
+#
+# Needs the TextCraft extension (uv sync --package platoon-textcraft --extra platoon, from a checkout) and a
+# Tinker-compatible training backend.  Set stats.wandb.mode=online to log to W&B.
+
+environments:
+  - env: textcraft@1                # the environment, the TextCraft prompts and the val split for evaluation
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder_options: {variant: recursive}
+      subagent_budget: argument
+      cell_timeout_s: 300
+    agents:
+      max_depth: null
+      budget: linear
+      child_grading: env
+    dataset_kwargs: {split_name: train, limit: 1000}
+    eval_dataset_kwargs: {limit: 100}
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 32
+  num_epochs: 30
+  max_training_steps: 100
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 3
+  lora_rank: 32
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 3.0e-5
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    grad_clip_norm: 1.0e+12
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: true
+    depth_level_weighting: true
+    rollout_config:
+      max_steps: 50
+      verbose: true
+      timeout: 900
+      inference_params: {max_completion_tokens: 512}
+  max_concurrent_rollouts: 256  # 32 groups of 8
+
+eval:
+  every: 20
+  max_concurrent_rollouts: 32
+  workflow_config:  # one rollout per task, with training's rollout settings but its logging
+    rollout_config: {verbose: false}
+
+checkpoint:
+  every: 5
+
+log_path: ./runs
+tinker_base_url: null
+
+stats:
+  experiment_name: textcraft
+  trial_name: recursive-qwen3-4b-instruct-2507-lora32
+  wandb:
+    mode: disabled
+    tags: [textcraft, tinker, recursive]

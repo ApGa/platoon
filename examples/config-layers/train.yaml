@@ -1,0 +1,32 @@
+# A full training config: the shared environments plus the model, the optimizer and the run's bookkeeping.
+#
+#   platoon train examples/config-layers/train.yaml [key=value ...]
+
+extends: environments.yaml
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 8
+  num_epochs: 1
+  max_training_steps: 50
+  workflow_config:
+    group_size: 4
+    leave_one_out_baseline: true
+    rollout_config:
+      max_steps: 12
+      timeout: 300
+      inference_params: {max_completion_tokens: 512}
+
+eval:
+  every: 10                       # rolled out with training's rollout settings, one rollout per task
+
+checkpoint:
+  every: 10
+
+log_path: ./runs
+stats:
+  experiment_name: number-search
+  trial_name: base
+  wandb:
+    mode: disabled

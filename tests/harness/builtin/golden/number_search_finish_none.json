@@ -1,0 +1,176 @@
+{
+ "format": 1,
+ "scenario": "number_search_finish_none",
+ "result": {
+  "status": "completed",
+  "final_message": null,
+  "error": null
+ },
+ "outcome": {
+  "status": "scored",
+  "rewards": {
+   "reward": 0.0
+  },
+  "primary": "reward",
+  "reason": "no_submit",
+  "failure_kind": null,
+  "metadata": {
+   "tool_calls": 0
+  }
+ },
+ "trajectories": {
+  "root": {
+   "parent": null,
+   "fork_step": null,
+   "depth": 0,
+   "task": {
+    "goal": null,
+    "id": "val:7",
+    "max_steps": null,
+    "misc": {
+     "ors": {
+      "split": "val",
+      "index": 7,
+      "name": "number_search.val.7"
+     }
+    },
+    "fork_strategy": "subtask"
+   },
+   "reward": 0.0,
+   "finish_message": null,
+   "error_message": null,
+   "misc": {
+    "agent": {
+     "role": "policy"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 9,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     }
+    ],
+    "agent_result": {
+     "status": "completed",
+     "error": null
+    },
+    "outcome": {
+     "status": "scored",
+     "rewards": {
+      "reward": 0.0
+     },
+     "reason": "no_submit",
+     "reward_key": "reward"
+    }
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 62 and 663.",
+       "Budget: You have a total budget of 5 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>finish(None)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 133,
+       "completion_tokens": 9,
+       "total_tokens": 142
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>finish(None)</python>"
+     },
+     "thought": "",
+     "code": "finish(None)",
+     "output": "",
+     "error": "",
+     "reward_misc": {
+      "reward/success": 0.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 141,
+      "sha256": "b7d295759920a40e"
+     },
+     "advantages": "0.0*141",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*132 -0.5*9",
+     "mask": "0.0*132 1.0*9",
+     "target_tokens": {
+      "length": 141,
+      "sha256": "bc329b3294df2a91"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "1.0*1"
+    }
+   ]
+  }
+ },
+ "unattributed_calls": [],
+ "train": {
+  "task_reward": 0.0,
+  "task_reward_valid": true,
+  "root_rewards_dict": {
+   "reward/success": 0.0,
+   "reward/subagent_launched": 0.0,
+   "reward/subagent_succeeded": 0.0
+  },
+  "num_datums": 1,
+  "num_policy_excluded_datums": 0,
+  "trajectories": {
+   "root": {
+    "reward": 0.0,
+    "rewards_dict": {
+     "reward/success": 0.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": true,
+    "num_steps": 1,
+    "num_datums": 1,
+    "num_input_tokens": 133,
+    "num_output_tokens": 9
+   }
+  }
+ }
+}

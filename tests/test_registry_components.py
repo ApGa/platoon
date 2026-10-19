@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from platoon.registry import Registry, import_from_string, resolve_component  # noqa: E402
+from platoon.train.auto import AutoDataset, AutoEnvironment, AutoRollout, AutoWorkflow  # noqa: E402
+from platoon.train.components import EnvironmentConfig  # noqa: E402
+
+
+def double(value):
+    return value * 2
+
+
+def test_registry_registers_resolves_and_rejects_duplicates():
+    registry = Registry("example")
+
+    registry.register("double", double)
+
+    assert registry.get("double")(3) == 6
+    assert registry.resolve("double")(4) == 8
+    assert registry.get_item("double").import_path == "test_registry_components.double"
+
+    with pytest.raises(ValueError, match="already has an entry"):
+        registry.register("double", double)
+
+
+def test_registry_resolves_import_paths():
+    sqrt = import_from_string("math.sqrt")
+    assert sqrt(9) == 3
+
+
+def test_import_strings_reach_nested_attributes(tmp_path, monkeypatch):
+    package = tmp_path / "platoon_test_nested"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "rewards.py").write_text(
+        "def score(trajectory):\n    return 1.0, {}\n\n\nclass Rewards:\n    score = staticmethod(score)\n"
+    )
+    (package / "other.py").write_text("def score(trajectory):\n    return 0.0, {}\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        nested = import_from_string("platoon_test_nested.rewards:Rewards.score")
+
+        assert nested({}) == (1.0, {})
+        assert resolve_component("reward_processor", "platoon_test_nested.rewards:Rewards.score") is nested
+        # package:module.attribute, with the module not imported yet, still reads as the dotted path it once meant.
+        assert "platoon_test_nested.other" not in sys.modules
+        assert import_from_string("platoon_test_nested:other.score")({}) == (0.0, {})
+    finally:
+        for name in [name for name in sys.modules if name.partition(".")[0] == "platoon_test_nested"]:
+            del sys.modules[name]
+
+
+def test_auto_dataset_loader_receives_split_kwargs():
+    dataset_registry = Registry("dataset_loader")
+    seen = {}
+
+    def loader(config, split, **kwargs):
+        seen["split"] = split
+        seen["kwargs"] = kwargs
+        return ("dataset", split)
+
+    dataset_registry.register("fake", loader)
+
+    config = type(
+        "Config",
+        (),
+        {
+            "environments": [
+                EnvironmentConfig(
+                    dataset_loader="fake",
+                    eval_dataset_loader="fake",
+                    dataset_kwargs={"difficulty": "train"},
+                    eval_dataset_kwargs={"difficulty": "eval"},
+                )
+            ]
+        },
+    )()
+
+    from platoon import registry as registry_module
+
+    original = registry_module._REGISTRIES.get("dataset_loader")
+    registry_module._REGISTRIES["dataset_loader"] = dataset_registry
+    try:
+        assert AutoDataset.from_config(config, "eval") == ("dataset", "eval")
+        assert seen == {"split": "eval", "kwargs": {"difficulty": "eval"}}
+    finally:
+        if original is None:
+            registry_module._REGISTRIES.pop("dataset_loader", None)
+        else:
+            registry_module._REGISTRIES["dataset_loader"] = original
+
+
+def test_auto_factories_import_packages_for_side_effects():
+    rollout_registry = Registry("rollout")
+
+    def rollout(task, config):
+        return {"task": task, "config": config}
+
+    rollout_registry.register("fake/rollout", rollout)
+
+    from platoon import registry as registry_module
+
+    original = registry_module._REGISTRIES.get("rollout")
+    registry_module._REGISTRIES["rollout"] = rollout_registry
+    try:
+        config = type("Config", (), {"environments": [EnvironmentConfig(rollout="fake/rollout")]})()
+        AutoEnvironment.load(config)
+        assert AutoRollout.from_config(config) is rollout
+    finally:
+        if original is None:
+            registry_module._REGISTRIES.pop("rollout", None)
+        else:
+            registry_module._REGISTRIES["rollout"] = original
+
+
+def test_auto_workflow_uses_default_group_rollout_name():
+    class DefaultWorkflow:
+        pass
+
+    config = type("Config", (), {"environments": [EnvironmentConfig(workflow="group_rollout")]})()
+    assert AutoWorkflow.from_config(config, default=DefaultWorkflow) is DefaultWorkflow
+
+
+def test_auto_environment_requires_names_in_a_mixture():
+    config = type(
+        "Config",
+        (),
+        {
+            "environments": [
+                EnvironmentConfig(rollout="fake/one"),
+                EnvironmentConfig(rollout="fake/two"),
+            ]
+        },
+    )()
+
+    with pytest.raises(ValueError, match="needs a `name`"):
+        AutoEnvironment.from_config(config)

@@ -1,0 +1,38 @@
+# Train the example-delegator harness on Vault tasks. From the repository root:
+#
+#   export PYTHONPATH=$PWD/examples/subagents
+#   uv run platoon rollout examples/subagents/subagents.yaml --task train:0     # one task, printed as a tree
+#   uv run platoon train examples/subagents/subagents.yaml                      # train with Tinker
+#
+# docs/tutorials/subagents.md walks through every setting below.
+
+environments:
+  - name: vault
+    service: python://vault_env:VaultEnvironment
+    harness: example-delegator
+    package: delegator            # imported first, so @pt.harness("example-delegator") registers
+    agents:
+      max_depth: 1                # the root (depth 0) may delegate; its subagents may not
+      child_max_steps: 6          # a subagent's budget when delegate names none
+      child_grading: env          # each subagent is graded by its own answer (VaultEnvironment.platoon_fork)
+      fork: shared                # subagents work on the parent's live environment
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 8
+  num_epochs: 1
+  workflow_config:
+    group_size: 4
+    rollout_config:
+      max_steps: 20               # the root's step budget
+      timeout: 600
+      inference_params:
+        max_completion_tokens: 1024
+
+log_path: ./runs/subagents
+stats:
+  experiment_name: subagents
+  trial_name: delegator
+  wandb:
+    mode: disabled                # online, with WANDB_API_KEY, logs to Weights & Biases

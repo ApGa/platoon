@@ -1,0 +1,78 @@
+# A frozen training config for the golden scenario textcraft_synth_recursive_rao_config (test_textcraft_goldens.py),
+# whose fixture was recorded with it: the recursive arm that recipes/rao/textcraft-synth/recursive.yaml was before it
+# became the RAO paper's depth-aware recursive arm, with the common.yaml it extended merged in, without W&B. Its
+# agent carves each child's budget from its own 200 steps (launch_subagent(targets, num_steps), budget: linear), and
+# every subagent takes the root's success. It is not one of the paper's arms.
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  context_window_length: 40000
+  lora_rank: 32
+  batch_size: 16
+  num_epochs: 10
+  num_minibatches: 1
+  num_microbatches: 2
+  max_staleness: 3
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 3.0e-5
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    grad_clip_norm: 1.0e+12
+  max_concurrent_rollouts: 128
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: true
+    depth_level_weighting: true
+    rollout_isolation: inprocess
+    rollout_config:
+      max_steps: 200
+      timeout: 7200
+      step_timeout: 7200
+      verbose: true
+      propagate_root_success: true
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 512
+
+eval:
+  every: 5
+  max_concurrent_rollouts: 32
+  workflow_config:
+    rollout_config:
+      verbose: false
+
+environments:
+  - env: textcraft-synth@1
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder_options: {variant: recursive}
+      subagent_budget: argument
+      cell_timeout_s: 7200
+    agents:
+      max_depth: null
+      budget: linear
+      child_grading: env
+    dataset_kwargs: {split_name: train-medium}
+    eval_dataset_kwargs: {limit: 100}
+
+checkpoint:
+  every: 25
+  recovery_every: 5
+
+log_path: ./logs/runs
+tinker_base_url: null
+
+watchdog:
+  timeout_seconds: 7200
+
+stats:
+  experiment_name: rao-textcraft-synth
+  trial_name: qwen3-4b-instruct-2507-recursive-lora32
+  wandb:
+    mode: disabled

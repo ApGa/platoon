@@ -1,0 +1,1552 @@
+"""Fetch Harbor datasets by name into a content-addressed cache, and pin them with a lock.
+
+    dataset: hf://org/harbor-dataset@f216b86ca1a18d44433d6cb45f70bec81f47c66e   # or a local directory
+    cache: /data/harbor-cache                    # deprecated; default: harbor in the site profile's cache
+    lock: locks/harbor-dataset-phase0.lock.json  # default: <cache>/locks/<hash of these settings>.lock.json
+    tasks: [splits/phase0-smoldata.json]         # allowlists of task ids: only these are downloaded
+    select: {source_dataset: [FineEnvs/SmolDataEnvs-harbor-train]}   # filters on the dataset index's fields
+    overlays: [overlays/smoldata-run-before-copy]
+    refuse: {sidecars: true, gpus: true, agent_user: true, per_task_build: false, uploads_over_mb: 100}
+    index: [{path: data/tasks.jsonl, fields: [split_group]}, {metadata: [kaggle_dataset_name]}]
+
+These are keys of a Harbor entry's ``service_kwargs`` (:func:`fetch_config`). A fetch config file that holds them at
+its top level (:func:`load_fetch_config`) is deprecated: ``platoon harbor`` warns of one, and platoon 0.3.0 removes
+them.
+
+A fetch resolves the source at its pinned revision, reads the dataset's index (``registry.json``, else
+``task-index.json``, else a scan for ``task.toml``), downloads only the selected tasks, applies overlays, and
+writes each task to ``<cache>/tasks/<content hash>/``: built in a temporary directory, then renamed, so a
+concurrent fetch never sees a partial task. An entry that is there already is hashed again before it is reused,
+and replaced when it no longer matches, so fetching again repairs a damaged cache. The fetch then records each
+task's flags, build plan and refusal in the lock: what the ``refuse`` policy refuses, and anything that keeps
+:meth:`HarborTask.load` from loading the task (``task_config``), which would fail every rollout of it.  It also
+records the digest of each of the task's input files (``input_files``, :mod:`platoon.envs.harbor.inputs`: a text
+file's is that of its text, line endings normalized), by which a hold-out keeps the tasks that share data on one
+side; a pinned dataset whose lock predates them is fetched again by ``platoon harbor fetch``, while the lock still
+answers its config for everything else.
+
+**Index fields** come from the dataset's index (``task-index.json``), from the extra index files ``index`` names
+(JSON or JSONL rows keyed by task id), and, with ``{metadata: [field, ...]}``, from each selected task's ``task.toml``
+``[metadata]`` table: those are read after selection (``select`` cannot name them), only scalars are recorded, and
+a field the dataset's index gives the same task with another value fails the fetch.  The lock records them with
+each task, where a hold-out (:mod:`platoon.envs.harbor.holdout`) and reward-contract hooks (``task.index``) read
+them.
+
+Task ids are the registry's names, else the keys of ``task-index.json``, else (a scan) each task's path relative to
+the dataset: its directory name when it sits directly in the dataset, ``group/name`` deeper, as ``dataset_dir``
+names them. A local directory that is itself one task is named by its ``[task].name``, else its directory name.
+Index paths must stay inside the dataset: an absolute path or one with ``..`` fails the fetch.
+
+**Hugging Face** (``hf://org/name@revision[#subdir]``, a dataset repository): the index files come from
+``hf_hub_download``; the selected tasks' files from listings of only their directories (``list_repo_tree``) and
+one ``hf_hub_download`` per distinct file content into a Hugging Face cache under ``<cache>/hf``. Only the files
+Harbor's content hash covers are downloaded: each task's ``.gitignore`` is read first, and what it (else Harbor's
+default ignores) leaves out is skipped, as for a local directory. Each download is checked against the listing (an
+LFS file's SHA-256, else its git blob id); one that does not match is downloaded once more, bypassing the local
+cache, and fails the fetch if it still does not. Files with the same content (inputs that many tasks share, common
+graders) are downloaded once and hard-linked into each task.
+The Hub keeps no file modes, so ``*.sh`` files and files that start with ``#!`` get their executable bit back.
+Moving references (a branch, no revision) resolve only with ``update=True`` (``platoon harbor fetch --update``).
+
+**Overlays** are directories with an ``overlay.toml`` that edit task files at fetch, for the tasks they match::
+
+    description = "Install math-verify before copying the inputs, so all SmolData tasks share one image"
+    [match]                            # index fields (one value or a list), and `name` globs; all must match
+    source_dataset = "FineEnvs/SmolDataEnvs-harbor-train"
+    [[edit]]                           # a regular-expression replacement (Python syntax, multiline mode)
+    file = "environment/Dockerfile"
+    pattern = '^(COPY input/ /data/input/\\n)(RUN pip install [^\\n]*\\n)'
+    replace = '\\2\\1'
+    count = 1                          # replacements expected (default 1); otherwise the task is refused
+    [[copy]]                           # a file of the overlay replaces (or adds) a task file
+    file = "tests/test.sh"
+    source = "files/test.sh"
+
+An overlay changes the cached task, so its digest is the overlaid content's; the lock keeps the upstream digest
+as ``upstream_digest`` and the overlays' own hash as ``overlay``.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import hashlib
+import importlib.metadata
+import json
+import logging
+import math
+import os
+import random
+import re
+import shutil
+import stat
+import threading
+import time
+import tomllib
+import uuid
+from collections import Counter, defaultdict
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+import yaml
+
+from platoon.envs.harbor.dataset import dataset_tasks
+from platoon.envs.harbor.dockerfile import BUILD_KEY_RULE, DockerfileError, plan_dockerfile
+from platoon.envs.harbor.hashing import (
+    DEFAULT_IGNORES,
+    GITIGNORE,
+    HASH_RULE,
+    TASK_DIRS,
+    TASK_FILES,
+    IgnoreMatcher,
+    file_sha256,
+    task_files,
+)
+from platoon.envs.harbor.inputs import input_digest, input_files
+from platoon.envs.harbor.lock import TASKS_DIR, DatasetLock, LockedTask, LockError, default_cache, read_lock, write_lock
+from platoon.envs.harbor.task import HarborTask, compose_file, is_trivial_compose
+
+logger = logging.getLogger(__name__)
+
+REGISTRY = "registry.json"
+TASK_INDEX = "task-index.json"
+OVERLAY_FILE = "overlay.toml"
+COMPOSE_FILENAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
+MODES_RULE = "executable bit restored on *.sh files and files starting with #!"
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_HF = re.compile(
+    r"^hf://(?:datasets/)?(?P<repo>[A-Za-z0-9][\w.-]*/[\w.-]+)(?:@(?P<revision>[^#]+))?(?:#(?P<subdir>.+))?$"
+)
+_PER_TASK_LISTING = 64  # list each task's directory below this many selected tasks per parent, else the parent
+_MAX_ATTEMPTS = 10
+MIB = 1 << 20  # refuse.uploads_over_mb counts MiB
+
+
+class FetchError(ValueError):
+    """A dataset that cannot be fetched as configured."""
+
+
+@dataclass(frozen=True)
+class RefusePolicy:
+    """What a fetch records as refused (``refuse:``), besides what :meth:`HarborTask.load` refuses, which a fetch
+    always records (``task_config``: multi-step and non-Linux tasks, collect hooks, a bad ``network_mode``, ...)."""
+
+    # Compose stacks with services beyond `main`, as `stack`. HarborTask.load refuses them too until stacks run, so
+    # with `sidecars: false` they are still refused, as `task_config`.
+    sidecars: bool = True
+    gpus: bool = True  # tasks that ask for GPUs
+    agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix
+    per_task_build: bool = False  # Dockerfiles whose build prefix no other task shares
+    # Tasks whose sessions would upload more than this many MiB into one of their sandboxes (flags.upload_bytes);
+    # None: no limit.
+    uploads_over_mb: float | None = None
+
+    _SWITCHES = ("sidecars", "gpus", "agent_user", "per_task_build")
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any] | None) -> RefusePolicy:
+        data = dict(data or {})
+        if "stack" in data:  # the design's spelling: stack: sidecars
+            data["sidecars"] = data.pop("stack") in ("sidecars", True)
+        known = (*cls._SWITCHES, "uploads_over_mb")
+        if unknown := sorted(set(data) - set(known)):
+            raise FetchError(f"refuse: unknown keys {unknown}; known: {', '.join(known)}")
+        for key in cls._SWITCHES:
+            if key in data and not isinstance(data[key], bool):
+                raise FetchError(f"refuse.{key} must be true or false, got {data[key]!r}")
+        limit = data.get("uploads_over_mb")
+        if limit is not None:
+            if (
+                isinstance(limit, bool)
+                or not isinstance(limit, int | float)
+                or not (math.isfinite(limit) and limit > 0)
+            ):
+                raise FetchError(f"refuse.uploads_over_mb must be a positive number of MiB, got {limit!r}")
+            data["uploads_over_mb"] = float(limit)
+        return cls(**data)
+
+    def inputs(self) -> dict[str, Any]:
+        """What the lock's inputs digest hashes: the switches, and the size limit only when it is set, so that a lock
+        written before the limit existed still answers a config that sets none."""
+
+        payload: dict[str, Any] = {key: getattr(self, key) for key in self._SWITCHES}
+        if self.uploads_over_mb is not None:
+            payload["uploads_over_mb"] = self.uploads_over_mb
+        return payload
+
+
+@dataclass(frozen=True)
+class IndexFile:
+    """An extra index file of the dataset whose rows add metadata to the lock (``index:``): a JSON object keyed by
+    task id, or JSON/JSONL rows naming the task in ``key``."""
+
+    path: str
+    key: str = "task_id"
+    fields: tuple[str, ...] | None = None  # keep only these fields
+
+    @classmethod
+    def parse(cls, value: str | Mapping[str, Any]) -> IndexFile:
+        if isinstance(value, str):
+            return cls(path=value)
+        fields = value.get("fields")
+        return cls(path=value["path"], key=value.get("key", "task_id"), fields=tuple(fields) if fields else None)
+
+
+@dataclass(frozen=True)
+class MetadataFields:
+    """An ``index`` entry ``{metadata: [field, ...]}``: these fields of each selected task's ``task.toml``
+    ``[metadata]`` table, recorded among its index fields.  Only scalars (strings, finite numbers, booleans) are
+    recorded; a task without a field records none for it."""
+
+    metadata: tuple[str, ...]
+
+    @classmethod
+    def parse(cls, value: Mapping[str, Any]) -> MetadataFields:
+        if unknown := sorted(set(value) - {"metadata"}):
+            raise FetchError(f"index: an entry with metadata takes no other key, got {unknown}")
+        names = [value["metadata"]] if isinstance(value["metadata"], str) else value["metadata"]
+        if not isinstance(names, list | tuple) or not names or not all(isinstance(n, str) and n for n in names):
+            raise FetchError(f"index: metadata must list field names, got {value['metadata']!r}")
+        return cls(metadata=tuple(names))
+
+
+def index_entry(value: str | Mapping[str, Any]) -> IndexFile | MetadataFields:
+    """An ``index`` item: an index file (a path, or ``{path, key, fields}``) or ``{metadata: [field, ...]}``."""
+
+    if isinstance(value, Mapping) and "metadata" in value:
+        return MetadataFields.parse(value)
+    return IndexFile.parse(value)
+
+
+@dataclass(frozen=True)
+class FetchConfig:
+    dataset: str
+    cache: Path
+    lock: Path | None = None
+    tasks: tuple[Path, ...] = ()
+    select: Mapping[str, tuple[Any, ...]] = field(default_factory=dict)
+    overlays: tuple[Path, ...] = ()
+    refuse: RefusePolicy = RefusePolicy()
+    index: tuple[IndexFile | MetadataFields, ...] = ()
+    workers: int = 8
+
+    @property
+    def metadata_fields(self) -> tuple[str, ...]:
+        """The ``task.toml`` ``[metadata]`` fields the ``index`` entries name, in order, each once."""
+
+        return tuple(
+            dict.fromkeys(name for entry in self.index if isinstance(entry, MetadataFields) for name in entry.metadata)
+        )
+
+    def lock_path(self) -> Path:
+        return self.lock if self.lock is not None else self.cache / "locks" / f"{self.inputs_digest()[:16]}.lock.json"
+
+    def inputs_digest(self) -> str:
+        """SHA-256 over what the fetch is asked for, so a lock can tell whether it answers this config."""
+
+        payload = {
+            "dataset": self.dataset,
+            "tasks": [_sha256_file(path) for path in self.tasks],
+            "select": {key: list(values) for key, values in sorted(self.select.items())},
+            "overlays": [Overlay.load(path).digest for path in self.overlays],
+            "refuse": self.refuse.inputs(),
+            "index": [index.__dict__ for index in self.index],
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=list).encode()).hexdigest()
+
+
+def fetch_config(
+    dataset: str,
+    *,
+    cache: str | Path | None = None,
+    lock: str | Path | None = None,
+    tasks: str | Path | Sequence[str | Path] = (),
+    select: Mapping[str, Any] | None = None,
+    overlays: str | Path | Sequence[str | Path] = (),
+    refuse: Mapping[str, Any] | None = None,
+    index: Sequence[str | Mapping[str, Any]] = (),
+    workers: int = 8,
+    base_dir: str | Path | None = None,
+) -> FetchConfig:
+    """A :class:`FetchConfig` from config values; relative paths resolve against ``base_dir`` (default: the
+    working directory), and a relative local ``dataset`` too."""
+
+    base = Path(base_dir) if base_dir is not None else Path.cwd()
+
+    def resolve(value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        return Path(os.path.normpath(path if path.is_absolute() else base / path))
+
+    def paths(value: str | Path | Sequence[str | Path]) -> tuple[Path, ...]:
+        return (resolve(value),) if isinstance(value, (str, Path)) else tuple(resolve(item) for item in value)
+
+    if not isinstance(dataset, str) or not dataset:
+        raise FetchError("dataset must name a source: hf://org/name@revision or a local directory")
+    if not dataset.startswith(("hf://", "harbor://", "git+")):
+        dataset = str(resolve(dataset))
+    selection: dict[str, tuple[Any, ...]] = {}
+    for key, values in (select or {}).items():
+        name = key.removeprefix("index.")
+        if name.startswith("flags."):
+            raise FetchError(f"select: {key} filters on flags, which a fetch computes; select on index fields")
+        selection[name] = tuple(values) if isinstance(values, (list, tuple)) else (values,)
+    if not isinstance(workers, int) or workers < 1:
+        raise FetchError(f"workers must be a positive integer, got {workers!r}")
+    return FetchConfig(
+        dataset=dataset,
+        cache=resolve(cache) if cache is not None else default_cache(),
+        lock=resolve(lock) if lock is not None else None,
+        tasks=paths(tasks),
+        select=selection,
+        overlays=paths(overlays),
+        refuse=RefusePolicy.from_mapping(refuse),
+        index=tuple(index_entry(item) for item in index),
+        workers=workers,
+    )
+
+
+def load_fetch_config(path: str | Path, **overrides: Any) -> FetchConfig:
+    """A fetch config file (YAML); its relative paths resolve against the file's directory.  Deprecated with the files:
+    a Harbor entry's ``service_kwargs`` say the same (:func:`fetch_config`)."""
+
+    path = Path(path)
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise FetchError(f"{path}: {exc}") from exc
+    if not isinstance(data, Mapping):
+        raise FetchError(f"{path}: expected a mapping")
+    known = {"dataset", "cache", "lock", "tasks", "select", "overlays", "refuse", "index", "workers"}
+    if unknown := sorted(set(data) - known):
+        raise FetchError(f"{path}: unknown keys {unknown}; known: {sorted(known)}")
+    if "dataset" not in data:
+        raise FetchError(f"{path}: dataset is required")
+    values = {**data, **{key: value for key, value in overrides.items() if value is not None}}
+    return fetch_config(**values, base_dir=path.parent)
+
+
+def is_pinned(dataset: str) -> bool:
+    """Whether ``dataset`` names immutable content: an hf:// commit, or a local directory."""
+
+    if dataset.startswith("hf://"):
+        match = _HF.match(dataset)
+        return bool(match and match.group("revision") and _COMMIT.match(match.group("revision")))
+    return not dataset.startswith(("harbor://", "git+"))
+
+
+def answering_lock(config: FetchConfig) -> DatasetLock | None:
+    """The lock at ``config.lock_path()`` when it answers ``config`` (it was written for these fetch settings), else
+    None."""
+
+    existing = _read_if_present(config.lock_path())
+    return existing if existing is not None and existing.inputs == config.inputs_digest() else None
+
+
+def current_lock(config: FetchConfig) -> DatasetLock | None:
+    """The lock that answers ``config`` when it records its tasks' input files and the cache holds a directory for
+    each of its tasks: a fetch would change nothing.  None when one is needed, as for a lock written before platoon
+    recorded input files.  The entries are not hashed; ``platoon harbor verify`` does that."""
+
+    existing = answering_lock(config)
+    if existing is None or not existing.records_input_files:
+        return None
+    if any(not (config.cache / task.path).is_dir() for task in existing.tasks):
+        return None
+    return existing
+
+
+def ensure_lock(config: FetchConfig, *, fetch_allowed: bool, log: Callable[[str], None] | None = None) -> DatasetLock:
+    """The lock for ``config``: read when it answers this config, else fetched (pinned references only, and only
+    where ``fetch_allowed``: the trainer, never a rollout worker)."""
+
+    path = config.lock_path()
+    inputs = config.inputs_digest()
+    existing = _read_if_present(path)
+    if existing is not None and existing.inputs == inputs:
+        missing = (
+            [task.name for task in existing.tasks if not (config.cache / task.path).is_dir()] if fetch_allowed else []
+        )
+        if not missing or not is_pinned(config.dataset):
+            return existing
+        logger.warning(
+            "The cache %s lacks %d task(s) of the lock %s; fetching them again", config.cache, len(missing), path
+        )
+    why = "does not exist" if existing is None else "was written for other fetch settings"
+    if not fetch_allowed:
+        raise LockError(
+            f"The Harbor lock {path} {why}: run `platoon prepare` on the run's config (or `platoon harbor fetch`), or "
+            "start `platoon train` or `platoon eval`, which fetch pinned references, before rollouts of "
+            f"{config.dataset}"
+        )
+    if not is_pinned(config.dataset):
+        raise LockError(
+            f"{config.dataset} is a moving reference and the lock {path} {why}: pin it with "
+            "`platoon harbor fetch CONFIG --update`, or name a commit"
+        )
+    with _flock(fetch_lock_file(config)):
+        existing = _read_if_present(path)  # another process may have fetched while this one waited
+        if existing is not None and existing.inputs == inputs:
+            if all((config.cache / task.path).is_dir() for task in existing.tasks):
+                return existing
+        (log or logger.info)(f"Fetching {config.dataset} into {config.cache} (lock {path})")
+        return fetch(config, log=log)
+
+
+def fetch_lock_file(config: FetchConfig) -> Path:
+    """The file lock on which the fetches of ``config``'s lock take turns, in its cache: processes that would write one
+    lock, on one node or on several that share the cache's filesystem, fetch it one at a time."""
+
+    digest = hashlib.sha256(str(config.lock_path()).encode()).hexdigest()[:16]
+    return config.cache / ".locks" / f"fetch-{digest}.lock"
+
+
+def fetch_if_needed(
+    config: FetchConfig, *, update: bool = False, repair: bool = False, log: Callable[[str], None] | None = None
+) -> tuple[DatasetLock, bool]:
+    """The lock for ``config``, and whether this call fetched it.
+
+    A dataset pinned to a commit whose lock is current (:func:`current_lock`: it answers the settings, records input
+    files, and the cache holds its tasks) is left alone, unless ``update`` or ``repair``; anything else is fetched, a
+    local directory every time, since its files may have changed under the same path.  The fetch takes turns with the
+    other fetches of the same lock (:func:`fetch_lock_file`), so of two at once, on one node or two, the second finds
+    the first's lock current and fetches nothing.
+    """
+
+    def current() -> DatasetLock | None:
+        pinned = config.dataset.startswith("hf://") and is_pinned(config.dataset)  # its files cannot change
+        return current_lock(config) if pinned and not (update or repair) else None
+
+    if (lock := current()) is not None:
+        return lock, False
+    with _flock(fetch_lock_file(config)):
+        if (lock := current()) is not None:  # fetched by another process while this one waited
+            return lock, False
+        return fetch(config, update=update, log=log), True
+
+
+def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], None] | None = None) -> DatasetLock:
+    """Resolve, download, overlay, hash, plan and lock ``config``'s tasks; write and return the lock."""
+
+    say = log or logger.info
+    started = time.monotonic()
+    source = _open_source(config, update=update, log=say)
+    overlays = [Overlay.load(path) for path in config.overlays]
+    candidates = source.candidates()
+    for index_file in config.index:
+        if isinstance(index_file, IndexFile):
+            _merge_index(candidates, source.read_json_rows(index_file), index_file)
+    selected = _select(candidates, config)
+    say(f"{len(selected)} of {len(candidates)} tasks selected from {config.dataset}")
+    hashes = _HashMemo()  # what checking the downloads hashed, caching the tasks does not hash again
+    files = source.materialize(selected, hashes)
+    tasks: list[LockedTask] = []
+    (config.cache / TASKS_DIR).mkdir(parents=True, exist_ok=True)
+    for count, candidate in enumerate(selected, 1):
+        tasks.append(_cache_task(candidate, files[candidate.name], config, overlays, hashes))
+        if count % 500 == 0:
+            say(f"cached {count}/{len(selected)} tasks")
+    tasks = _assign_image_kinds(tasks, config.refuse)
+    lock = DatasetLock(
+        dataset=config.dataset,
+        resolved=source.resolved,
+        fetched_with=source.fetched_with,
+        tasks=tuple(sorted(tasks, key=lambda task: task.name)),
+        hash_rule=HASH_RULE,
+        build_key_rule=BUILD_KEY_RULE,
+        overlay=_overlays_digest(overlays),
+        inputs=config.inputs_digest(),
+        selection={
+            "tasks": {str(path): _sha256_file(path) for path in config.tasks},
+            "select": {key: list(values) for key, values in config.select.items()},
+            "selected": len(selected),
+            "of": len(candidates),
+        },
+        modes=MODES_RULE,
+        created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    write_lock(lock, config.lock_path())
+    refused = Counter(task.refused.split(":")[0] for task in lock.tasks if task.refused)
+    say(
+        f"Locked {len(lock.tasks)} tasks ({len(lock.runnable())} runnable"
+        + (f"; refused: {dict(refused)}" if refused else "")
+        + f") in {config.lock_path()} after {time.monotonic() - started:.0f}s"
+    )
+    return lock
+
+
+# --- candidates and selection ------------------------------------------------------------------------------
+
+
+@dataclass
+class Candidate:
+    name: str
+    path: str  # relative to the dataset root
+    index: dict[str, Any] = field(default_factory=dict)
+
+
+def _select(candidates: Mapping[str, Candidate], config: FetchConfig) -> list[Candidate]:
+    chosen = list(candidates.values())
+    if config.tasks:
+        allowed: set[str] = set()
+        for path in config.tasks:
+            allowed |= _allowlist(path)
+        if unknown := sorted(allowed - set(candidates)):
+            raise FetchError(f"tasks: {len(unknown)} ids are not in {config.dataset}, e.g. {unknown[:3]}")
+        chosen = [candidate for candidate in chosen if candidate.name in allowed]
+    for key, values in config.select.items():
+        if key == "name":
+            chosen = [candidate for candidate in chosen if any(fnmatchcase(candidate.name, str(v)) for v in values)]
+            continue
+        if not any(key in candidate.index for candidate in candidates.values()):
+            hint = (
+                "; fields from task.toml [metadata] are read after selection, so select cannot name them"
+                if key in config.metadata_fields
+                else ""
+            )
+            raise FetchError(f"select: no task of {config.dataset} has the index field {key!r}{hint}")
+        chosen = [candidate for candidate in chosen if candidate.index.get(key) in values]
+    if not chosen:
+        raise FetchError(f"No task of {config.dataset} matches the selection")
+    return sorted(chosen, key=lambda candidate: candidate.name)
+
+
+def _allowlist(path: Path) -> set[str]:
+    """Task ids from an allowlist file: a JSON list, a JSON split manifest (``{split: [ids]}``), or lines."""
+
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise FetchError(f"tasks: cannot read {path}: {exc}") from exc
+    if path.suffix == ".json":
+        data = json.loads(text)
+        if isinstance(data, Mapping):
+            return {str(name) for names in data.values() for name in names}
+        return {str(name) for name in data}
+    if path.suffix == ".toml":
+        return {str(name) for names in tomllib.loads(text).values() for name in names}
+    return {line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")}
+
+
+def _candidates_from_index(registry: Any, task_index: Any, label: str) -> dict[str, Candidate]:
+    candidates: dict[str, Candidate] = {}
+    if registry is not None:
+        datasets = registry if isinstance(registry, list) else [registry]
+        for dataset in datasets:
+            for entry in dataset.get("tasks") or []:
+                if entry.get("git_url"):
+                    raise FetchError(f"{label}: registry task {entry.get('name')!r} lives in a git repository")
+                name = entry["name"]
+                path = _index_path(entry["path"], name, f"{label}: {REGISTRY}")
+                if name in candidates:
+                    raise FetchError(f"{label}: two registry tasks are named {name!r}")
+                candidates[name] = Candidate(name=name, path=path)
+    if isinstance(task_index, Mapping):
+        for name, row in task_index.items():
+            if not isinstance(row, Mapping):
+                continue
+            fields = {key: value for key, value in row.items() if key != "task_path"}
+            if name in candidates:
+                candidates[name].index.update(fields)
+            elif registry is None and row.get("task_path"):
+                path = _index_path(row["task_path"], name, f"{label}: {TASK_INDEX}")
+                candidates[name] = Candidate(name=name, path=path, index=dict(fields))
+    return candidates
+
+
+def _index_path(path: Any, name: str, where: str) -> str:
+    """A task's directory as a dataset index gives it, relative to the dataset root. An absolute path or one with
+    ``..`` would leave the dataset: ``FetchError``, as ``HarborDataset`` refuses them (``read_registry``)."""
+
+    posix = PurePosixPath(str(path))
+    if posix.is_absolute() or ".." in posix.parts:
+        raise FetchError(f"{where}: task {name!r} has a path outside the dataset: {path!r}")
+    return str(path).strip("/")
+
+
+def _merge_index(candidates: Mapping[str, Candidate], rows: Iterator[tuple[str, Mapping[str, Any]]], spec: IndexFile):
+    for name, row in rows:
+        candidate = candidates.get(name)
+        if candidate is None:
+            continue
+        candidate.index.update({key: value for key, value in row.items() if spec.fields is None or key in spec.fields})
+
+
+# --- sources ---------------------------------------------------------------------------------------------------
+
+
+@dataclass
+class _TaskFiles:
+    """A task's files before caching: task-relative path -> a local file, and whether it may be hard-linked."""
+
+    files: dict[str, Path]
+    link: bool  # hard-link (content-addressed downloads) or copy (a user's directory)
+
+
+class _Source:
+    resolved: str
+    fetched_with: str
+
+    def candidates(self) -> dict[str, Candidate]:
+        raise NotImplementedError
+
+    def read_json_rows(self, spec: IndexFile) -> Iterator[tuple[str, Mapping[str, Any]]]:
+        raise NotImplementedError
+
+    def materialize(self, selected: Sequence[Candidate], hashes: _HashMemo) -> dict[str, _TaskFiles]:
+        """The selected tasks' files; ``hashes`` keeps what checking downloads hashed, for caching the tasks."""
+
+        raise NotImplementedError
+
+
+def _open_source(config: FetchConfig, *, update: bool, log: Callable[[str], None]) -> _Source:
+    dataset = config.dataset
+    if dataset.startswith("hf://"):
+        return _HubSource(config, update=update, log=log)
+    if dataset.startswith(("harbor://", "git+")):
+        raise FetchError(f"{dataset}: harbor:// and git+ sources are not supported yet; use hf:// or a directory")
+    return _LocalSource(Path(dataset))
+
+
+def _json_rows(text: str, spec: IndexFile) -> Iterator[tuple[str, Mapping[str, Any]]]:
+    if spec.path.endswith(".jsonl"):
+        rows: Any = [json.loads(line) for line in text.splitlines() if line.strip()]
+    else:
+        rows = json.loads(text)
+    if isinstance(rows, Mapping):
+        for name, row in rows.items():
+            if isinstance(row, Mapping):
+                yield str(name), row
+        return
+    for row in rows:
+        if isinstance(row, Mapping) and spec.key in row:
+            yield str(row[spec.key]), row
+
+
+class _LocalSource(_Source):
+    """A directory of tasks: those its ``registry.json`` or ``task-index.json`` lists; else the directory itself when
+    it holds a ``task.toml``; else every directory below it that holds one, with the ids ``dataset_dir`` gives
+    (:func:`~platoon.envs.harbor.dataset.dataset_tasks`)."""
+
+    def __init__(self, root: Path) -> None:
+        if not root.is_dir():
+            raise FetchError(f"{root} is not a directory")
+        self.root = root.resolve()
+        self.resolved = str(self.root)
+        self.fetched_with = "platoon (local directory)"
+
+    def candidates(self) -> dict[str, Candidate]:
+        registry = _load_json(self.root / REGISTRY)
+        task_index = _load_json(self.root / TASK_INDEX)
+        if registry is not None or task_index is not None:
+            return _candidates_from_index(registry, task_index, str(self.root))
+        config = self.root / "task.toml"
+        if config.is_file():  # one task, which dataset_dir does not take: named by [task].name or its directory
+            name = _task_name(config) or self.root.name
+            return {name: Candidate(name=name, path=".")}
+        # A task directly below the directory keeps its directory's name, a deeper one its relative path.
+        candidates = {name: Candidate(name=name, path=name) for name, _ in dataset_tasks(self.root)}
+        if not candidates:
+            raise FetchError(f"{self.root} holds no Harbor task (no task.toml)")
+        return candidates
+
+    def read_json_rows(self, spec: IndexFile) -> Iterator[tuple[str, Mapping[str, Any]]]:
+        return _json_rows((self.root / spec.path).read_text(), spec)
+
+    def materialize(self, selected: Sequence[Candidate], hashes: _HashMemo) -> dict[str, _TaskFiles]:
+        out = {}
+        for candidate in selected:
+            task_dir = self.root / candidate.path
+            if not (task_dir / "task.toml").is_file():
+                raise FetchError(f"{task_dir} has no task.toml")
+            files = {relative: task_dir / relative for relative in _hashed_paths(task_dir)}
+            out[candidate.name] = _TaskFiles(files=files, link=False)
+        return out
+
+
+class _HubSource(_Source):
+    """A Hugging Face dataset repository at one commit."""
+
+    def __init__(self, config: FetchConfig, *, update: bool, log: Callable[[str], None]) -> None:
+        match = _HF.match(config.dataset)
+        if match is None:
+            raise FetchError(f"{config.dataset}: expected hf://org/name@revision[#subdir]")
+        from huggingface_hub import HfApi
+
+        self.repo = match.group("repo")
+        self.subdir = (match.group("subdir") or "").strip("/")
+        revision = match.group("revision")
+        self.api = HfApi()
+        self.cache_dir = config.cache / "hf"
+        self.workers = config.workers
+        self.log = log
+        if revision and _COMMIT.match(revision):
+            self.resolved = revision
+        elif not update:
+            raise FetchError(
+                f"{config.dataset} is a moving reference: pin a commit, or resolve it with "
+                "`platoon harbor fetch --update`"
+            )
+        else:
+            info = _retry(lambda: self.api.repo_info(self.repo, repo_type="dataset", revision=revision or "main"))
+            self.resolved = info.sha
+        self.fetched_with = f"huggingface_hub=={importlib.metadata.version('huggingface_hub')}"
+        self._listing_dir = config.cache / "hf-listings" / self.repo.replace("/", "--") / self.resolved
+
+    def _repo_path(self, relative: str) -> str:
+        return f"{self.subdir}/{relative}" if self.subdir else relative
+
+    def _download(self, repo_path: str, *, force: bool = False) -> Path:
+        """The local file of ``repo_path``; ``force`` downloads it again even when the local cache has it."""
+
+        from huggingface_hub import hf_hub_download
+
+        def call() -> str:
+            return hf_hub_download(
+                self.repo,
+                repo_path,
+                repo_type="dataset",
+                revision=self.resolved,
+                cache_dir=self.cache_dir,
+                force_download=force,
+            )
+
+        return Path(os.path.realpath(_retry(call)))
+
+    def _download_checked(self, repo_path: str, content: str, hashes: _HashMemo) -> Path:
+        """The local file of ``repo_path``, checked against its listed ``content``. One that does not match (a
+        damaged copy in the local cache, a bad transfer) is downloaded once more, bypassing the local cache, and
+        ``FetchError`` names it if it still does not match."""
+
+        local = self._download(repo_path)
+        if _has_content(local, content, hashes):
+            return local
+        where = f"hf://{self.repo}@{self.resolved}: {repo_path}"
+        logger.warning("%s does not match the repository's listing (%s); downloading it again", where, content)
+        try:
+            local = self._download(repo_path, force=True)
+        except Exception as exc:  # e.g. offline mode, which refuses forced downloads
+            raise FetchError(
+                f"{where} does not match the repository's listing ({content}), and downloading it again failed: {exc}"
+            ) from exc
+        if not _has_content(local, content, hashes):
+            raise FetchError(f"{where} does not match the repository's listing ({content}), downloaded again too")
+        return local
+
+    def _optional_json(self, relative: str) -> Any:
+        try:
+            return json.loads(self._download(self._repo_path(relative)).read_text())
+        except _remote_entry_not_found():
+            return None
+
+    def candidates(self) -> dict[str, Candidate]:
+        registry = self._optional_json(REGISTRY)
+        task_index = self._optional_json(TASK_INDEX)
+        if registry is not None or task_index is not None:
+            return _candidates_from_index(registry, task_index, f"hf://{self.repo}@{self.resolved}")
+        candidates: dict[str, Candidate] = {}
+        for entry in self._list(self.subdir):
+            path = entry["path"]
+            if not path.endswith("/task.toml"):
+                continue
+            relative = path.removeprefix(f"{self.subdir}/" if self.subdir else "").rsplit("/", 1)[0]
+            if relative in candidates:
+                continue
+            candidates[relative] = Candidate(name=relative, path=relative)
+        if not candidates:
+            raise FetchError(f"hf://{self.repo}@{self.resolved} holds no Harbor task (no task.toml)")
+        return candidates
+
+    def read_json_rows(self, spec: IndexFile) -> Iterator[tuple[str, Mapping[str, Any]]]:
+        return _json_rows(self._download(self._repo_path(spec.path)).read_text(), spec)
+
+    def _list(self, repo_dir: str) -> list[dict[str, Any]]:
+        """Files below ``repo_dir`` (recursively) with sizes and content ids, cached per commit."""
+
+        from huggingface_hub.hf_api import RepoFile
+
+        cached = self._listing_dir / (hashlib.sha256(repo_dir.encode()).hexdigest()[:24] + ".json")
+        if cached.is_file():
+            return json.loads(cached.read_text())
+
+        def call() -> list[dict[str, Any]]:
+            entries = self.api.list_repo_tree(
+                self.repo, path_in_repo=repo_dir or None, recursive=True, revision=self.resolved, repo_type="dataset"
+            )
+            return [
+                {
+                    "path": entry.path,
+                    "size": entry.size,
+                    "content": f"lfs:{entry.lfs.sha256}" if entry.lfs is not None else f"git:{entry.blob_id}",
+                    "sha256": entry.lfs.sha256 if entry.lfs is not None else None,
+                }
+                for entry in entries
+                if isinstance(entry, RepoFile)
+            ]
+
+        listing = _retry(call)
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cached.with_name(f".{cached.name}.{uuid.uuid4().hex}")
+        temporary.write_text(json.dumps(listing))
+        os.replace(temporary, cached)
+        return listing
+
+    def materialize(self, selected: Sequence[Candidate], hashes: _HashMemo) -> dict[str, _TaskFiles]:
+        roots = {self._repo_path(candidate.path): candidate for candidate in selected}
+        by_parent: dict[str, list[str]] = defaultdict(list)
+        for root in roots:
+            by_parent[root.rsplit("/", 1)[0] if "/" in root else ""].append(root)
+        listed: list[dict[str, Any]] = []
+        started = time.monotonic()
+        for parent, children in sorted(by_parent.items()):
+            if len(children) < _PER_TASK_LISTING:
+                for child in children:
+                    listed += self._list(child)
+            else:
+                listed += self._list(parent)
+        self.log(f"listed {len(listed)} files in {time.monotonic() - started:.0f}s")
+        per_task: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        for entry in listed:
+            parts = entry["path"].split("/")
+            for depth in range(len(parts) - 1, 0, -1):
+                root = "/".join(parts[:depth])
+                if root in roots:
+                    relative = "/".join(parts[depth:])
+                    if _is_hashed_path(relative):
+                        per_task[root][relative] = entry
+                    break
+        missing = sorted(root for root in roots if "task.toml" not in per_task.get(root, {}))
+        if missing:
+            raise FetchError(f"{len(missing)} selected tasks have no task.toml in the repository, e.g. {missing[:3]}")
+        # Harbor's hash leaves out what a task's .gitignore (else its default ignores) names, and a fetch of a local
+        # directory never copies those files (hashing.task_files): read the .gitignore files first, so that only
+        # files the hash covers are downloaded (and the .gitignore itself, which the hash of the cached task reads).
+        gitignores = [entries[GITIGNORE] for entries in per_task.values() if GITIGNORE in entries]
+        local = self._download_all(_one_path_per_content(gitignores), hashes) if gitignores else {}
+        hashed: dict[str, dict[str, dict[str, Any]]] = {}
+        for root, entries in per_task.items():
+            gitignore = entries.get(GITIGNORE)
+            matcher = IgnoreMatcher(
+                local[gitignore["content"]].read_text().splitlines() if gitignore is not None else DEFAULT_IGNORES
+            )
+            hashed[root] = {
+                relative: entry
+                for relative, entry in entries.items()
+                if relative == GITIGNORE or not matcher.ignored(relative)
+            }
+        remaining = [
+            entry for entries in hashed.values() for entry in entries.values() if entry["content"] not in local
+        ]
+        local.update(self._download_all(_one_path_per_content(remaining), hashes))
+        return {
+            roots[root].name: _TaskFiles(
+                files={relative: local[entry["content"]] for relative, entry in entries.items()}, link=True
+            )
+            for root, entries in hashed.items()
+        }
+
+    def _download_all(self, contents: Mapping[str, str], hashes: _HashMemo) -> dict[str, Path]:
+        """Download one repository path per distinct content, ``workers`` at a time, each checked against its
+        content id (:meth:`_download_checked`)."""
+
+        local: dict[str, Path] = {}
+        started = time.monotonic()
+        total = len(contents)
+        self.log(f"downloading {total} distinct files with {self.workers} workers")
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            futures = {
+                pool.submit(self._download_checked, path, content, hashes): content
+                for content, path in contents.items()
+            }
+            for done, future in enumerate(as_completed(futures), 1):
+                local[futures[future]] = future.result()
+                if done % 2000 == 0 or done == total:
+                    elapsed = time.monotonic() - started
+                    self.log(f"downloaded {done}/{total} files in {elapsed:.0f}s")
+        return local
+
+
+# --- caching one task ------------------------------------------------------------------------------------------
+
+
+class _HashMemo:
+    """File hashes by inode: hard-linked copies of one download are hashed once. The key holds the file's size and
+    modification time too, so a file rewritten since it was hashed is hashed again.
+
+    Removing a file's last link frees its inode, and a file created later may take it with the same size and
+    modification time: a copy keeps its source's, and timestamps are coarse.  A remembered hash would then answer for
+    that file's bytes, and a second fetch of a local directory, which removes each task's copies once it finds the
+    task cached, gave tasks the digests of others.  So while a task is cached (:meth:`watch`), the memo notes where
+    each file it hashes is, and :meth:`forget_moved` drops the hashes of those no longer there: after overlays
+    replace files, and once the task's staging directory is gone."""
+
+    def __init__(self) -> None:
+        self._sha256: dict[tuple[int, int, int, int], str] = {}
+        self._blob_ids: dict[tuple[int, int, int, int], str] = {}
+        self._inputs: dict[tuple[int, int, int, int], str] = {}  # input digests (inputs.input_digest)
+        self._lock = threading.Lock()
+        self._watched: dict[tuple[int, int, int, int], Path] | None = None  # key -> the path it was hashed at
+
+    def sha256(self, path: Path) -> str:
+        key = _file_key(path)
+        with self._lock:
+            known = self._sha256.get(key)
+        if known is None:
+            known = file_sha256(path)
+            with self._lock:
+                self._sha256[key] = known
+                if self._watched is not None:
+                    self._watched[key] = path
+        return known
+
+    def watch(self) -> None:
+        """Note where each file hashed from now on is, for :meth:`forget_moved`."""
+
+        self._watched = {}
+
+    def forget_moved(self, *, stop: bool = False) -> None:
+        """Forget the hashes of the files hashed since :meth:`watch` that are no longer where they were hashed (removed,
+        replaced or moved): their inodes may be another file's next.  ``stop`` ends the watch."""
+
+        with self._lock:
+            watched, self._watched = self._watched or {}, None if stop else {}
+        for key, path in watched.items():
+            try:
+                kept = _file_key(path) == key
+            except OSError:
+                kept = False
+            with self._lock:
+                if not kept:
+                    self._sha256.pop(key, None)
+                    self._blob_ids.pop(key, None)
+                    self._inputs.pop(key, None)
+                elif not stop and self._watched is not None:
+                    self._watched[key] = path
+
+    def git_blob_id(self, path: Path) -> str:
+        """The file's git blob id (SHA-1 over ``blob <size>\\0`` and its bytes), hashed in one read with its SHA-256."""
+
+        key = _file_key(path)
+        with self._lock:
+            known = self._blob_ids.get(key)
+        if known is None:
+            sha256, known = _sha256_and_blob_id(path)
+            with self._lock:
+                self._sha256[key] = sha256
+                self._blob_ids[key] = known
+        return known
+
+    def input_digest(self, path: Path) -> str:
+        """The digest by which a hold-out compares the input file at ``path``
+        (:func:`~platoon.envs.harbor.inputs.input_digest`): a binary file's is its SHA-256, which the task's digest
+        hashed already; a text file is read once more, to normalize its text.  Remembered by the key of
+        :meth:`sha256`, and forgotten with it."""
+
+        self.sha256(path)  # remembered, and watched while a task is cached, as for the task's digest
+        key = _file_key(path)
+        with self._lock:
+            known = self._inputs.get(key)
+        if known is None:
+            known = input_digest(path, sha256=self.sha256)
+            with self._lock:
+                self._inputs[key] = known
+        return known
+
+    def content_hash(self, task_dir: Path) -> str:
+        outer = hashlib.sha256()
+        for relative in task_files(task_dir):
+            outer.update(f"{relative}\0{self.sha256(task_dir / relative)}\n".encode())
+        return outer.hexdigest()
+
+
+def _file_key(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _sha256_and_blob_id(path: Path) -> tuple[str, str]:
+    sha256 = hashlib.sha256()
+    with path.open("rb") as handle:
+        blob = hashlib.sha1(b"blob %d\0" % os.fstat(handle.fileno()).st_size, usedforsecurity=False)
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            sha256.update(chunk)
+            blob.update(chunk)
+    return sha256.hexdigest(), blob.hexdigest()
+
+
+def _has_content(path: Path, content: str, hashes: _HashMemo) -> bool:
+    """Whether ``path`` holds a listing's ``content``: ``lfs:<SHA-256>`` or ``git:<blob id>``."""
+
+    kind, _, expected = content.partition(":")
+    return (hashes.sha256(path) if kind == "lfs" else hashes.git_blob_id(path)) == expected
+
+
+def _one_path_per_content(entries: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """Listing entries as content id -> the repository path to download for it (the first in sort order)."""
+
+    contents: dict[str, str] = {}
+    for entry in entries:
+        current = contents.get(entry["content"])
+        if current is None or entry["path"] < current:
+            contents[entry["content"]] = entry["path"]
+    return contents
+
+
+def _cache_task(
+    candidate: Candidate, files: _TaskFiles, config: FetchConfig, overlays: Sequence[Overlay], hashes: _HashMemo
+) -> LockedTask:
+    staging = config.cache / ".tmp" / uuid.uuid4().hex
+    staging.mkdir(parents=True)
+    hashes.watch()
+    try:
+        for relative, source in files.files.items():
+            target = staging / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if files.link:
+                try:
+                    os.link(source, target)
+                except OSError:
+                    shutil.copy2(source, target)
+            else:
+                shutil.copy2(source, target)
+            _restore_executable(target)
+        upstream = hashes.content_hash(staging)
+        applied: list[str] = []
+        refused: str | None = None
+        for overlay in overlays:
+            if overlay.matches(candidate.name, candidate.index):
+                problem = overlay.apply(staging)
+                applied.append(overlay.name)
+                if problem is not None:
+                    refused = f"overlay: {problem}"
+                    break
+        if applied:
+            hashes.forget_moved()  # the files the overlays replaced
+        digest = hashes.content_hash(staging) if applied else upstream
+        index = _with_metadata(candidate, staging, config.metadata_fields)
+        files_in = input_files(staging, digest=hashes.input_digest)  # binary files hashed already, for the digest
+        flags, image, verifier_image, problem = _inspect(staging, candidate.name, config.refuse)
+        refused = refused or problem
+        entry = config.cache / TASKS_DIR / digest
+        with _flock(config.cache / ".locks" / "tasks.lock"):
+            if _holds(entry, digest, hashes):
+                shutil.rmtree(staging, ignore_errors=True)
+            else:
+                _install(staging, entry)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        hashes.forget_moved(stop=True)  # the staging copies, gone or moved into the cache
+    return LockedTask(
+        name=candidate.name,
+        digest=f"sha256:{digest}",
+        path=f"{TASKS_DIR}/{digest}",
+        source_path=candidate.path,
+        upstream_digest=f"sha256:{upstream}" if upstream != digest else None,
+        index=index,
+        flags=flags,
+        image=image,
+        verifier_image=verifier_image,
+        overlays=tuple(applied),
+        refused=refused,
+        input_files=files_in,
+    )
+
+
+def _with_metadata(candidate: Candidate, task_dir: Path, fields: Sequence[str]) -> dict[str, Any]:
+    """The candidate's index fields, with ``fields`` of the ``[metadata]`` table of the ``task.toml`` in
+    ``task_dir`` (the task as cached, overlays applied) added.  A task.toml that cannot be read records none, as the
+    fetch refuses that task (``task_config``); a value that is not a scalar, or that differs from the one the
+    dataset's index gives, fails the fetch."""
+
+    index = dict(candidate.index)
+    if not fields:
+        return index
+    try:
+        config = tomllib.loads((task_dir / "task.toml").read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return index
+    table = config.get("metadata")
+    if not isinstance(table, dict):
+        return index
+    for name in fields:
+        if name not in table:
+            continue
+        value = table[name]
+        if not (isinstance(value, str | bool | int) or (isinstance(value, float) and math.isfinite(value))):
+            raise FetchError(
+                f"Harbor task {candidate.name!r}: task.toml [metadata] {name} is {value!r}; an index field must be a "
+                "string, a finite number or a boolean"
+            )
+        if name in index and index[name] != value:
+            raise FetchError(
+                f"Harbor task {candidate.name!r}: the index field {name!r} is {index[name]!r} in the dataset's index "
+                f"and {value!r} in task.toml [metadata]"
+            )
+        index[name] = value
+    return index
+
+
+def _holds(entry: Path, digest: str, hashes: _HashMemo) -> bool:
+    """Whether the cache entry ``entry`` holds the files of ``digest``. It is hashed again, since its files may have
+    changed after it was written; those hard-linked to this fetch's downloads were hashed already."""
+
+    try:
+        return entry.is_dir() and hashes.content_hash(entry) == digest
+    except OSError:
+        return False
+
+
+def _install(staging: Path, entry: Path) -> None:
+    """Rename ``staging`` to the cache entry ``entry``. A damaged entry there is renamed aside first and deleted
+    after the new one is in place, so the entry's path never holds a mix of both."""
+
+    if not os.path.lexists(entry):
+        os.replace(staging, entry)
+        return
+    logger.warning("The Harbor cache entry %s does not match its digest; replacing it", entry)
+    damaged = staging.with_name(f"damaged-{uuid.uuid4().hex}")
+    os.replace(entry, damaged)
+    os.replace(staging, entry)
+    if damaged.is_dir() and not damaged.is_symlink():
+        shutil.rmtree(damaged, ignore_errors=True)
+    else:
+        damaged.unlink(missing_ok=True)
+
+
+def _inspect(
+    task_dir: Path, name: str, refuse: RefusePolicy
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str | None]:
+    """A task's flags, build plans and refusal, from its ``task.toml`` and files in ``task_dir``, a temporary
+    directory that messages never name (they name ``name``, the task's id, and paths relative to the task).
+
+    The refusal is the first of: what ``refuse`` refuses (``stack``, ``gpus``, ``agent_user``); anything that keeps
+    :meth:`HarborTask.load` from loading the task (``task_config``), which every rollout of it would fail on; a
+    Dockerfile that cannot be planned (``image``); and uploads over ``refuse.uploads_over_mb``
+    (``uploads_over_mb``).  ``flags["upload_bytes"]`` records what a session copies into one of the task's
+    sandboxes (:func:`_upload_bytes`).
+    """
+
+    try:
+        config = tomllib.loads((task_dir / "task.toml").read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return {}, {"kind": "none"}, None, f"task_config: task.toml: {_without_paths(str(exc), task_dir, name)}"
+    environment = _table(config, "environment")
+    verifier = _table(config, "verifier")
+    agent = _table(config, "agent")
+    verifier_environment = verifier.get("environment") if isinstance(verifier.get("environment"), dict) else None
+    network = environment.get("network_mode") or (
+        "no-network" if environment.get("allow_internet") is False else "public"
+    )
+    artifacts = config.get("artifacts") or []
+    gpus = environment.get("gpus")
+    flags: dict[str, Any] = {
+        "verifier": "separate" if verifier.get("environment_mode") == "separate" or verifier_environment else "shared",
+        "artifacts": len(artifacts) if isinstance(artifacts, list) else 0,
+        "stack": _stack_kind(task_dir),
+        "network": network,
+        "gpus": gpus if isinstance(gpus, int) and not isinstance(gpus, bool) else 0,  # the loader refuses the others
+        "agent_user": agent.get("user"),
+        "verifier_user": verifier.get("user"),
+        "os": str(environment.get("os", "linux")).lower(),
+    }
+    if verifier_environment is not None and verifier_environment.get("network_mode"):
+        flags["verifier_network"] = verifier_environment["network_mode"]
+    image = _image_plan(task_dir, environment, "environment")
+    verifier_image = None
+    if flags["verifier"] == "separate":
+        if verifier_environment is not None and verifier_environment.get("docker_image"):
+            verifier_image = {"kind": "prebuilt", "ref": verifier_environment["docker_image"]}
+        elif (task_dir / "tests" / "Dockerfile").is_file():
+            verifier_image = _image_plan(task_dir, {}, "tests")
+    plans = [plan for plan in (image, verifier_image) if plan is not None]
+    for plan in plans:
+        if plan.get("error"):  # recorded in the lock, which must not name the temporary directory
+            plan["error"] = _without_paths(plan["error"], task_dir, name)
+    flags["upload_bytes"] = _upload_bytes(task_dir, image, verifier_image, separate=flags["verifier"] == "separate")
+    suffix_users = [plan["suffix_user"] for plan in plans if plan.get("suffix_user")]
+    errors = [plan["error"] for plan in plans if plan.get("error")]
+    if flags["stack"] == "sidecars" and refuse.sidecars:
+        problem = "stack: the compose file adds sidecar services, which platoon cannot run yet"
+    elif flags["gpus"] > 0 and refuse.gpus:
+        problem = f"gpus: the task asks for {flags['gpus']} GPU(s)"
+    elif (flags["agent_user"] or flags["verifier_user"]) and refuse.agent_user:
+        problem = "agent_user: the task sets [agent].user or [verifier].user, which rootless sandboxes cannot honor"
+    elif suffix_users and refuse.agent_user:
+        user = suffix_users[0]
+        problem = f"agent_user: the Dockerfile ends with USER {user}, which rootless sandboxes cannot honor"
+    else:
+        problem = _load_problem(task_dir, name) or (f"image: {errors[0]}" if errors else None)
+    limit = refuse.uploads_over_mb
+    if problem is None and limit is not None and flags["upload_bytes"] > limit * MIB:
+        problem = (
+            f"uploads_over_mb: a session uploads {flags['upload_bytes'] / MIB:,.1f} MiB into one of the task's "
+            f"sandboxes, over the limit of {limit:g} MiB"
+        )
+    return flags, image, verifier_image, problem
+
+
+def _upload_bytes(
+    task_dir: Path, image: Mapping[str, Any], verifier_image: Mapping[str, Any] | None, *, separate: bool
+) -> int:
+    """The bytes a session copies into one of the task's sandboxes when it opens: the sources of the deferred
+    ``COPY`` steps of its image's plan (or a prebuilt-image task's ``environment/``), and for a separate verifier
+    those of its own image's plan, or the task's again when it runs the task's image.  The larger of the agents'
+    sandbox and the verifier's, since each sandbox gets its own copy."""
+
+    agents = _plan_uploads(task_dir, "environment", image)
+    verifier = 0
+    if separate:
+        if verifier_image is None:  # the verifier runs the task's own image, with its deferred steps
+            verifier = agents
+        else:
+            verifier = _plan_uploads(task_dir, "tests", verifier_image)
+    return max(agents, verifier)
+
+
+def _plan_uploads(task_dir: Path, context: str, plan: Mapping[str, Any]) -> int:
+    root = task_dir / context
+    if plan.get("upload_environment"):
+        return _tree_bytes(root)
+    total = 0
+    for step in plan.get("deferred") or ():
+        if not step or step[0] != "COPY":
+            continue
+        for source in step[1:-1]:
+            relative = os.path.normpath(source.rstrip("/") or ".")
+            if os.path.isabs(relative) or relative == ".." or relative.startswith("../"):
+                continue  # outside the build context: nothing a session would upload
+            total += _tree_bytes(root / relative)
+    return total
+
+
+def _tree_bytes(path: Path) -> int:
+    """The size of the regular file at ``path``, or of the regular files below it; symlinks are not followed."""
+
+    try:
+        info = path.lstat()
+    except OSError:
+        return 0
+    if stat.S_ISREG(info.st_mode):
+        return info.st_size
+    if not stat.S_ISDIR(info.st_mode):
+        return 0
+    total = 0
+    for directory, _, files in os.walk(path):
+        for name in files:
+            try:
+                info = os.lstat(os.path.join(directory, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def _load_problem(task_dir: Path, name: str) -> str | None:
+    """Why :meth:`HarborTask.load` refuses the task, as a refusal (``task_config: ...``), or None when it loads.
+
+    Users to run as are let through (``agent_user="ignore"``): the refuse policy decides about them.
+    """
+
+    try:
+        HarborTask.load(task_dir, agent_user="ignore")
+    except (OSError, ValueError) as exc:  # HarborTaskError, and files that cannot be read or decoded
+        return f"task_config: {_without_paths(str(exc), task_dir, name)}"
+    return None
+
+
+def _without_paths(message: str, task_dir: Path, name: str) -> str:
+    """``message`` without the temporary ``task_dir``: its files relative to the task, and itself as ``name``."""
+
+    for root in sorted({str(task_dir), str(task_dir.resolve())}, key=len, reverse=True):
+        message = message.replace(f"{root}/", "").replace(root, name)
+    return message
+
+
+def _image_plan(task_dir: Path, environment: Mapping[str, Any], context: str) -> dict[str, Any]:
+    docker_image = environment.get("docker_image")
+    dockerfile = task_dir / context / "Dockerfile"
+    if docker_image:
+        plan: dict[str, Any] = {"kind": "prebuilt", "ref": docker_image}
+        directory = task_dir / context
+        compose = any((directory / name).is_file() for name in COMPOSE_FILENAMES)
+        if not dockerfile.is_file() and not compose and directory.is_dir() and any(directory.iterdir()):
+            plan["upload_environment"] = True  # Harbor uploads environment/ into the workdir of prebuilt tasks
+        return plan
+    if not dockerfile.is_file():
+        return {"kind": "none"}
+    try:
+        planned = plan_dockerfile(dockerfile, task_dir / context)
+    except (DockerfileError, OSError, ValueError) as exc:
+        return {"kind": "none", "error": f"{context}/Dockerfile: {exc}"}
+    data = {"kind": "per_task", **planned.to_json()}
+    if planned.notes:
+        data["notes"] = list(planned.notes)
+    return data
+
+
+def _assign_image_kinds(tasks: Sequence[LockedTask], refuse: RefusePolicy) -> list[LockedTask]:
+    """``shared`` for a build key two or more runnable tasks use, else ``per_task`` (refused if so configured)."""
+
+    counts: Counter[str] = Counter()
+    for task in tasks:
+        if task.refused is None:
+            for plan in (task.image, task.verifier_image):
+                if plan and plan.get("key"):
+                    counts[plan["key"]] += 1
+    out = []
+    for task in tasks:
+        image = _with_kind(task.image, counts)
+        verifier_image = _with_kind(task.verifier_image, counts) if task.verifier_image else None
+        refused = task.refused
+        if refused is None and refuse.per_task_build:
+            if any(plan and plan.get("kind") == "per_task" for plan in (image, verifier_image)):
+                refused = "per_task_build: no other task shares this task's image build"
+        out.append(replace(task, image=image, verifier_image=verifier_image, refused=refused))
+    return out
+
+
+def _with_kind(plan: Mapping[str, Any], counts: Counter[str]) -> dict[str, Any]:
+    plan = dict(plan)
+    if plan.get("key"):
+        plan["kind"] = "shared" if counts[plan["key"]] >= 2 else "per_task"
+    return plan
+
+
+def _stack_kind(task_dir: Path) -> str:
+    """``single`` (no compose file), ``trivial`` (one that only names ``main``) or ``sidecars``, as the loader
+    decides it."""
+
+    compose = compose_file(task_dir)
+    if compose is None:
+        return "single"
+    return "trivial" if is_trivial_compose(compose) else "sidecars"
+
+
+def _restore_executable(path: Path) -> None:
+    """The Hub keeps no file modes: give ``*.sh`` and ``#!`` files their executable bit back."""
+
+    try:
+        if path.suffix != ".sh":
+            with path.open("rb") as handle:
+                if handle.read(2) != b"#!":
+                    return
+        mode = path.stat().st_mode
+        wanted = mode | ((mode & 0o444) >> 2)
+        if wanted != mode:
+            path.chmod(stat.S_IMODE(wanted))
+    except OSError:
+        logger.debug("Cannot restore the executable bit of %s", path, exc_info=True)
+
+
+def _is_hashed_path(relative: str) -> bool:
+    """Whether Harbor's content hash can cover ``relative`` (a task-relative path), or it is the ``.gitignore``."""
+
+    top = relative.split("/", 1)[0]
+    return relative in TASK_FILES or relative == GITIGNORE or ("/" in relative and top in TASK_DIRS)
+
+
+def _hashed_paths(task_dir: Path) -> list[str]:
+    paths = set(task_files(task_dir))
+    if (task_dir / GITIGNORE).is_file():
+        paths.add(GITIGNORE)
+    return sorted(paths)
+
+
+# --- overlays --------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Overlay:
+    name: str
+    root: Path
+    match: Mapping[str, tuple[str, ...]]
+    edits: tuple[Mapping[str, Any], ...]
+    copies: tuple[Mapping[str, Any], ...]
+    digest: str
+
+    @classmethod
+    def load(cls, root: str | Path) -> Overlay:
+        root = Path(root)
+        path = root / OVERLAY_FILE
+        try:
+            raw = path.read_bytes()
+            data = tomllib.loads(raw.decode())
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+            raise FetchError(f"overlay {root}: cannot read {OVERLAY_FILE}: {exc}") from exc
+        unknown = sorted(set(data) - {"name", "description", "match", "edit", "copy"})
+        if unknown:
+            raise FetchError(f"overlay {path}: unknown keys {unknown}")
+        match = {
+            str(key): tuple(str(v) for v in (value if isinstance(value, list) else [value]))
+            for key, value in (data.get("match") or {}).items()
+        }
+        edits = tuple(data.get("edit") or ())
+        copies = tuple(data.get("copy") or ())
+        digest = hashlib.sha256(raw)
+        for edit in edits:
+            if not isinstance(edit.get("file"), str) or not isinstance(edit.get("pattern"), str):
+                raise FetchError(f"overlay {path}: each [[edit]] needs file and pattern")
+            try:
+                re.compile(edit["pattern"], re.MULTILINE)
+            except re.error as exc:
+                raise FetchError(f"overlay {path}: bad pattern {edit['pattern']!r}: {exc}") from exc
+        for copy in copies:
+            if not isinstance(copy.get("file"), str) or not isinstance(copy.get("source"), str):
+                raise FetchError(f"overlay {path}: each [[copy]] needs file and source")
+            source = root / copy["source"]
+            if not source.is_file():
+                raise FetchError(f"overlay {path}: {source} does not exist")
+            digest.update(f"\0{copy['source']}\0{file_sha256(source)}".encode())
+        if not edits and not copies:
+            raise FetchError(f"overlay {path} has no [[edit]] or [[copy]]")
+        return cls(
+            name=str(data.get("name") or root.name),
+            root=root,
+            match=match,
+            edits=edits,
+            copies=copies,
+            digest=digest.hexdigest(),
+        )
+
+    def matches(self, name: str, index: Mapping[str, Any]) -> bool:
+        for key, values in self.match.items():
+            if key == "name":
+                if not any(fnmatchcase(name, value) for value in values):
+                    return False
+            elif str(index.get(key)) not in values:
+                return False
+        return True
+
+    def apply(self, task_dir: Path) -> str | None:
+        """Edit ``task_dir`` (new files, never written in place: they may be hard links); a problem, or None."""
+
+        for edit in self.edits:
+            target = task_dir / edit["file"]
+            if not target.is_file():
+                return f"{self.name}: {edit['file']} does not exist"
+            text = target.read_text()
+            updated, count = re.subn(edit["pattern"], edit.get("replace", ""), text, flags=re.MULTILINE)
+            expected = int(edit.get("count", 1))
+            if count != expected:
+                return f"{self.name}: {edit['file']}: the pattern matched {count} time(s), expected {expected}"
+            _replace_file(target, updated.encode(), executable=os.access(target, os.X_OK) or None)
+        for copy in self.copies:
+            source = self.root / copy["source"]
+            target = task_dir / copy["file"]
+            _replace_file(target, source.read_bytes(), executable=copy.get("executable"))
+        return None
+
+
+def _overlays_digest(overlays: Sequence[Overlay]) -> str | None:
+    if not overlays:
+        return None
+    combined = hashlib.sha256("".join(f"{overlay.name}\0{overlay.digest}\n" for overlay in overlays).encode())
+    return f"sha256:{combined.hexdigest()}"
+
+
+def _replace_file(target: Path, data: bytes, *, executable: bool | None) -> None:
+    """Write ``target`` as a new file (it may be a hard link to a shared download); executable when asked, else
+    by the fetch's rule (``*.sh`` and ``#!`` files)."""
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}")
+    temporary.write_bytes(data)
+    if executable:
+        mode = temporary.stat().st_mode
+        temporary.chmod(stat.S_IMODE(mode | ((mode & 0o444) >> 2)))
+    os.replace(temporary, target)
+    if executable is None:
+        _restore_executable(target)
+
+
+# --- helpers ---------------------------------------------------------------------------------------------------
+
+
+def _retry(call: Callable[[], Any], attempts: int = _MAX_ATTEMPTS) -> Any:
+    """Call with exponential backoff on rate limits (429), server errors and transport failures; a missing
+    repository, revision or file fails at once, and so does anything in offline mode."""
+
+    from huggingface_hub import constants, errors
+
+    permanent = (errors.RepositoryNotFoundError, errors.RevisionNotFoundError, _remote_entry_not_found())
+    delay = 5.0
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except Exception as exc:
+            if isinstance(exc, permanent) or attempt == attempts or constants.HF_HUB_OFFLINE:
+                raise
+            wait = delay
+            if isinstance(exc, errors.HfHubHTTPError):
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
+                if status is not None and status < 500 and status != 429:
+                    raise
+                retry_after = (getattr(response, "headers", None) or {}).get("Retry-After")
+                if retry_after and str(retry_after).isdigit():
+                    wait = float(retry_after)
+            elif not isinstance(exc, OSError) and type(exc).__module__.split(".")[0] not in ("httpx", "httpcore"):
+                raise
+            logger.warning("Retrying after %s: %s", type(exc).__name__, exc)
+        time.sleep(wait + random.uniform(0, wait / 4))
+        delay = min(delay * 2, 300.0)
+    raise AssertionError("unreachable")
+
+
+def _remote_entry_not_found() -> type[Exception]:
+    """The error for a file the repository does not have (not one that could not be reached)."""
+
+    from huggingface_hub import errors
+
+    return getattr(errors, "RemoteEntryNotFoundError", errors.EntryNotFoundError)
+
+
+def _read_if_present(path: Path) -> DatasetLock | None:
+    if not path.is_file():
+        return None
+    try:
+        return read_lock(path)
+    except LockError as exc:
+        logger.warning("Ignoring the unreadable Harbor lock %s: %s", path, exc)
+        return None
+
+
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def _sha256_file(path: Path) -> str:
+    try:
+        return file_sha256(path)
+    except OSError as exc:
+        raise FetchError(f"cannot read {path}: {exc}") from exc
+
+
+def _task_name(config: Path) -> str | None:
+    try:
+        name = tomllib.loads(config.read_text()).get("task", {}).get("name")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    return name if isinstance(name, str) and name else None
+
+
+def _table(config: Mapping[str, Any], key: str) -> dict[str, Any]:
+    value = config.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+@contextlib.contextmanager
+def _flock(path: Path) -> Generator[None, None, None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)

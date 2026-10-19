@@ -1,0 +1,22 @@
+# Order packing on ORS env servers instead of in process (see docs/tutorials/remote-environments.md).
+#
+#   PYTHONPATH=. uv run python serve.py --port 8080 &
+#   export OPENREWARD_SESSION_URLS_ORDERPACKINGENV=http://127.0.0.1:8080
+#   PYTHONPATH=. uv run platoon train remote.yaml [key=value ...]
+
+extends: train.yaml
+
+environments:
+  - name: packing
+    # No hosts in the URI: the pool comes from OPENREWARD_SESSION_URLS_ORDERPACKINGENV.
+    service: ors+http:///OrderPackingEnv
+    service_kwargs:
+      terminal_tools: [done]     # class attributes do not cross the wire: name the hints here
+      read_only_tools: [look]
+      max_tool_calls: 40         # per session; the 41st call ends the episode
+    harness: platoon-react
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: test}
+
+stats:
+  trial_name: remote

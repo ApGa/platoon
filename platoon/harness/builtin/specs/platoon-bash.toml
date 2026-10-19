@@ -1,0 +1,34 @@
+# platoon-bash: the reference harness shipped in platoon/harness/builtin/platoon_bash.py.
+# A bash tool, executed with the harness's working directory as cwd, plus the env's tools over MCP when the
+# agent serves them. Needs only python3.
+name = "platoon-bash"
+version = "1"
+dialect = "openai_chat"
+timeout_s = 1800
+max_steps = 50  # used when the run sets no step budget; the run's max_steps wins
+
+[launch]
+argv = [
+    "python3", "{state_dir}/platoon_bash.py",
+    "--base-url", "{base_url}/v1",
+    "--model", "{model}",
+    "--instruction-file", "{state_dir}/instruction.md",
+    "--final-message-file", "{state_dir}/final_message.txt",
+    "--max-turns", "{max_steps}",
+]
+env = { PLATOON_API_KEY = "{api_key}" }
+files = { "instruction.md" = "{instruction}" }
+assets = { "platoon_bash.py" = "../platoon_bash.py" }
+
+[builtins]
+tools = ["bash"]
+
+[mcp]
+enabled = true
+args = ["--mcp-url", "{mcp_url}"]  # the Bearer token is PLATOON_API_KEY
+
+[final_message]
+file = "{state_dir}/final_message.txt"
+
+[exit_codes]
+3 = "completed"  # turn limit: the policy ran out of turns, which is a scored outcome
