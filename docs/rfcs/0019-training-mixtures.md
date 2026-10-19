@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | Status | Draft |
-| Created | 2026-10-19 |
+| Created | 2026-10-19; revised 2026-10-20 |
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0018](0018-configuration-only-projects.md), section 8 (the weighted fair order, `weight: tasks` and the sampling plan); [RFC 0016](0016-component-configuration.md) (component options, and the rollout settings of each phase, which section 2 of this RFC amends); [RFC 0013](0013-extension-model.md) (registration by name); [RFC 0017](0017-public-surface-and-conformance.md) (experimental API, conformance kits); [RFC 0003](0003-multi-policy-training.md) and [RFC 0001](0001-native-multi-agent.md), for what must stay compatible; the trainer (`platoon/train/tinker/rl.py`) and the group workflow (`platoon/train/tinker/workflows/group_rollout_workflow.py`) |
-| Discussion | The pull request that adds this RFC |
+| Discussion | The pull request that adds this RFC, which also records the decisions of 2026-10-20 (open questions 1 to 3 and 7 to 11) |
 | Implementation | M0b, M1 and M2 in the three pull requests that follow this one; none merged yet |
 
 ## Summary
@@ -76,9 +76,12 @@ next (`uniform`, today's seeded passes, or the adaptive `pass_rate`), and custom
 each slot to an entry, and the entry's sampler fills it.
 
 `train.task_order` is a deprecated alias until 0.4.0: it loads with a warning and is read as `task_sampler`;
-`lock.json` records it; `platoon config validate --strict` fails on it; a config that sets both names to different
-samplers does not load. `task_sampler` defaults to `null`, read as `auto`, so that loading can tell a value a config
-sets from the default.
+`lock.json` records it; `platoon config validate --strict` fails on it. A config may set both names when they agree,
+or when `task_order` is `auto`, its default before the rename, as a dump of 0.2.0's `config show --defaults` spells
+it: `task_sampler` decides, and when the two differ, the warning says that `task_order` was ignored.
+`task_order: weighted` beside another `task_sampler` is a conflict, and the config does not load (decided 2026-10-20,
+open question 10). `task_sampler` defaults to `null`, read as `auto`, so that loading can tell a value a config sets
+from the default.
 
 ### 2. Per-environment training settings
 
@@ -112,7 +115,8 @@ So the phase's section wins over an entry's settings, which are that phase's def
 a dataset's calibrated step budget can now travel with its entry, while a run-wide evaluation setting still decides
 for every entry that does not override it. A named environment may ship `workflow_config.rollout_config` only, as its
 entry's lowest layer: the rest of `workflow_config`, `eval_overrides.workflow_config` and `max_staleness` are the
-run's to choose.
+run's to choose. It ships no rollout settings for its evaluations alone either, which would need a layer beneath the
+phase's section (decided 2026-10-20, open question 9).
 
 **Staleness.** `train.max_staleness` stays the bound on how far rollouts run ahead of training, and the bound of each
 entry that sets none. An entry's own bound may only raise it, at the stale filter: a lower bound would have the
@@ -124,12 +128,18 @@ as they run, and enough of them slow every step to their pace.
 **Concurrency.** `max_concurrent_rollouts` counts rollouts. A group takes its entry's group size of them at once, first
 come first served, so groups of different sizes share the budget and never exceed it. Loading refuses a budget that
 holds no group of the largest entry, and warns of one that the capped labels' groups can fill: a larger group would
-wait, first in line, for a capped group to end.
+wait, first in line, for a capped group to end. That one stays a warning, not an error: it slows the run to the
+capped labels' pace but does not stop it (decided 2026-10-20, open question 7).
 
 **A capped label never stalls the others** (on today's producer and queue, until M3 replaces them): the rows of a label
 at its limit wait beside the batch's rows rather than among them, and do not count toward the staleness lookahead;
 past four batches of them, the label's new rows are skipped and counted, while another label can start a group. So a
 label whose limit cannot keep up with its share of the order trains less than its weight, and the metrics say so.
+These rules apply by default to every config that sets `rollout_group_limits`, those written before them included
+(decided 2026-10-20, open question 3). At the end of a run, the rows still waiting never train: the producer replaces
+them with rows past the run's planned batches, so that the last steps do not wait for the capped label, and a waiting
+row whose label frees before the run ends still runs, as a group no step consumes. Those extra groups are accepted
+until M3 (decided 2026-10-20, open question 11).
 
 **Applying them.** Inside a group, `GroupRolloutWorkflow.config` is the settings of the group's entry (a `ContextVar`
 set from the row), and `current_entry()` names it, so a subclass's `compute_baselines` reads its entry's settings
@@ -158,7 +168,8 @@ its environment scored, before any reward processor, reaches its entry's `succes
 Judged on the trained reward instead, a shaping processor that trains 0.98 for a correct rollout would make every
 group all-fail. Members without a valid result (errors, timeouts, cancelled stragglers, dead workers) are censored:
 neither passes nor failures, as the baseline leaves them out. Censoring leans optimistic, since a cut-off straggler is
-more likely a slow failure than a slow pass (open question 1).
+more likely a slow failure than a slow pass; it stays the rule, so that the statistics count the members the baseline
+counts (decided 2026-10-20, open question 1).
 
 #### 3.3 The record
 
@@ -167,7 +178,11 @@ attempts, passes, reward, the kinds of groups, the current runs of uniform group
 (three in a row flag a task without evidence: a broken grader or setup), decayed means of steps, tokens, seconds and
 reward, the newest eight groups' summaries, and what became of each draw (`consumed`, `stale`, `failed`, `skipped`,
 `lost`). Every settled group counts once, stale ones included: the work happened, and a uniform group is the most
-telling evidence about a task's difficulty. Its types are experimental (open question 2).
+telling evidence about a task's difficulty. The statistics have no switch: every training run keeps them, at under
+1 KB per task in each snapshot and about 270 bytes per group in the event log, since the metrics and every later
+milestone read them (decided 2026-10-20, open question 8). Their types (`MemberResult`, `GroupRecord`, `TaskStats`
+and the store) are experimental and stay out of `platoon`'s exports until M4's sampler API makes them public, in
+`platoon.experimental` (decided 2026-10-20, open question 2).
 
 **Evidence decays by policy version.** A group sampled `n` versions ago weighs `2^(-n/32)`; a step that updates no
 weights ages nothing. A task's pass rate is `Beta(a0 + s, b0 + f)` of its decayed passes `s` and failures `f`, with a
@@ -229,7 +244,8 @@ slot), with `state_dict` and `load_state_dict`, an optional `observe(group)`, ty
 so it can bind early and resume by position; an adaptive one reads the statistics of section 3 through a read-only
 view and decides when a group can start. Every decision is synchronous, deterministic (its randomness keyed by the
 seed, the sampler's name and the decision index), and returns nothing only when nothing is eligible.
-`platoon.testing` gains a conformance check. The types live in `platoon.experimental` once RFC 0017's surface exists.
+`platoon.testing` gains a conformance check. The types live in `platoon.experimental` once RFC 0017's surface exists,
+with the statistics' types of section 3.3, which become public with them (decided 2026-10-20, open question 2).
 
 `pass_rate` maximizes the chance that a task's next group mixes passes and failures, `E[informative_G]` under the
 posterior of section 3.3, by Thompson sampling, with a fifth of the draws going to the least recently drawn tasks
@@ -253,7 +269,8 @@ frees its slot at once, so the dispatcher refills while the trainer is busy, and
    pending queue nor use up the staleness lookahead, or the label paces the run. M1 parks them beside the queue, gates
    the producer on the rows that can run, skips past a full backlog only while a label of the run has room, and
    replaces the rows still waiting at the end of the run. The price is a smaller share for that label, which the
-   metrics show; M3 makes the horizon exact.
+   metrics show, and groups at the end of a run that never train, both accepted until M3 makes the horizon exact
+   (decided 2026-10-20, open questions 3 and 11).
 3. **Staleness per entry.** The lookahead must stay the run's, or a slow entry's bound would let every entry run far
    ahead; and no entry's bound may be below it. Pruning must use the largest bound, so a large bound costs storage
    until the pruner knows which checkpoints rollouts still sample (open question 5).
@@ -286,7 +303,7 @@ frees its slot at once, so the dispatcher refills while the trainer is busy, and
 
 | Milestone | Scope | Exit check | Pull requests |
 |---|---|---|---|
-| M0b the sampler's name | `train.task_sampler: auto \| weighted`; `task_order` a deprecated alias until 0.4.0 | a config that sets `task_order: weighted` loads with a warning and draws the same rows; `--strict` fails on it | |
+| M0b the sampler's name | `train.task_sampler: auto \| weighted`; `task_order` a deprecated alias until 0.4.0 | a config that sets `task_order: weighted` loads with a warning and draws the same rows; `--strict` fails on it; a dump of 0.2.0's `config show --defaults` loads beside `task_sampler: weighted` with a warning that `task_order` was ignored | |
 | M1 per-environment settings | section 2: entry `workflow_config`, `eval_overrides.workflow_config`, `max_staleness`; rollout permits; the capped-label rules on today's queue; `config show` per entry | a CPU run with fakes: two entries of different group sizes, step limits, minimum groups and baselines each run with their own, within the budget; a slow entry's groups train under its own bound; a capped slow label leaves the other's steps running, with and without a staleness bound | |
 | M2 per-task statistics | section 3: members and verdicts, the store, snapshots and resume, `events.jsonl`, the `tasks/` metrics, `platoon tasks` | every verdict site has a test; a shaping reward processor changes no pass count; a loaded snapshot saves byte for byte; a resume from a recovery checkpoint keeps the older row's snapshot until pruning deletes it alone; `platoon tasks show` matches golden output | |
 | M3 the dispatcher and exact resume | section 4; the run-level `uniform` | at `k = 0` every step trains exactly today's rows, and at `k >= 1` the pipeline never exceeds `(k + 1) × batch_size`; a capped slow label leaves the other label's step time within 10%; a run interrupted twice consumes every position exactly once; no draw while every label is at its limit | |
@@ -295,17 +312,39 @@ frees its slot at once, so the dispatcher refills while the trainer is busy, and
 
 ## Open questions
 
+Questions 1 to 3 are the draft's, and 7 to 11 came up in the review of M0b, M1 and M2; all of them were decided on
+2026-10-20. Questions 4 to 6 stay open for the milestones they concern.
+
 1. **Members without a valid result: censored or failures?** M2 censors them, as the baseline does, which leans
    optimistic when stragglers are slow failures. A `censored: failure` option, or counting a timeout the entry does
-   not grade as a failure, would lean the other way. Decide before M4, whose sampler acts on the estimate.
+   not grade as a failure, would lean the other way. Decide before M4, whose sampler acts on the estimate. *Decided
+   2026-10-20:* censored, as M2 does, not failures (section 3.2).
 2. **When the statistics types become public.** `MemberResult`, `GroupRecord`, `TaskStats` and the store are
    experimental in `platoon.train.task_stats` and not exported from `platoon`. They could move to
-   `platoon.experimental` with the sampler API (M4), or wait until a custom sampler has used them.
+   `platoon.experimental` with the sampler API (M4), or wait until a custom sampler has used them. *Decided
+   2026-10-20:* they become public with M4's sampler API, in `platoon.experimental` (sections 3.3 and 5).
 3. **The capped-label rules for configs that already set `rollout_group_limits`.** M1 applies them to every such config,
    so a capped label whose limit cannot keep up trains less than its weight instead of pacing the run. Should they be
-   opt-in until M3?
+   opt-in until M3? *Decided 2026-10-20:* they apply by default, to every config that sets limits (section 2).
 4. **Settled groups across restarts.** A resume reruns groups that had settled but were not yet consumed, which is
-   hours of work for a slow entry. Should full saves persist them?
+   hours of work for a slow entry. Should full saves persist them? Decide with M3.
 5. **Pruning under a large staleness bound.** Keeping every checkpoint within the largest bound costs storage. Should
-   the pruner learn which versions rollouts still sample?
-6. **When refill ships.** After its A/B test (M5), or opt-in with M4?
+   the pruner learn which versions rollouts still sample? Decide with M3.
+6. **When refill ships.** After its A/B test (M5), or opt-in with M4? Decide with M4.
+7. **A rollout budget that the capped labels' groups can fill: an error or a warning?** Such a budget makes a larger
+   group wait for a capped one to end, and every group after it with it. *Decided 2026-10-20:* a warning, at load and
+   once the tasks are listed: the run slows to the capped labels' pace, but goes on (section 2).
+8. **A switch to turn the statistics off.** *Decided 2026-10-20:* none; every training run keeps them, since they cost
+   little and the metrics and the later milestones read them (section 3.3).
+9. **Rollout settings that a named environment ships for its evaluations alone.** *Decided 2026-10-20:* none; a named
+   environment ships `workflow_config.rollout_config` only, as its entry's lowest layer, and the run's config decides
+   its evaluations, with the phase's section and the entry's `eval_overrides` (section 2).
+10. **A dump of 0.2.0's `config show --defaults` beside `task_sampler`.** The dump spells `task_order: auto`, 0.2.0's
+    default, so under the rule M0b first had, which refused both names set to different samplers, a config built on
+    it that sets `task_sampler: weighted` did not load. *Decided 2026-10-20:* `task_sampler` wins over
+    `task_order: auto`, with a warning that `task_order` was ignored; both set and equal load with the deprecation
+    warning; only `task_order: weighted` beside another `task_sampler` is a conflict, exit 78 (section 1).
+11. **The groups a capped label leaves at the end of a run.** The rows still waiting when the run ends never train,
+    and a waiting row whose label frees before then runs as a group that no step consumes, since rows past the run's
+    plan replaced it. *Decided 2026-10-20:* accepted until M3, whose dispatcher draws only rows that can start
+    (section 2).
