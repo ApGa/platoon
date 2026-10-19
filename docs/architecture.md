@@ -94,7 +94,8 @@ flowchart LR
 4. Still in the worker, the datum builder turns each trajectory's model calls into Tinker datums by prefix
    merging, with the trajectory's reward as its provisional advantage.
 5. Back in the workflow, the group's completed roots set the baseline (the group mean, or leave-one-out),
-   every datum is centered, and the group's datums are queued.
+   every datum is centered, and the group's datums are queued, with its verdict and what each rollout returned,
+   which the trainer records in the run's per-task statistics.
 6. The trainer drops rollouts older than their entry's staleness bound (its `max_staleness`, else
    `train.max_staleness`), applies batch transforms per microbatch (such as
    depth weighting), skips datums with zero advantage while keeping their share of the loss normalization,

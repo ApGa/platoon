@@ -36,7 +36,7 @@ from platoon.train.tinker.workers.telemetry import local_telemetry
 from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import get_train_data_for_trajectory_collection
-from platoon.utils.trajectory_status import outcome_status, trained_reward_key
+from platoon.utils.trajectory_status import outcome_status, scored_success, trained_reward_key
 from platoon.visualization.event_sinks import emit_rollout_events, rollout_events_path
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,18 @@ def _reward_key(collection: Any) -> str | None:
 
     root = _root_trajectory(collection)
     return trained_reward_key(root) if root is not None else None
+
+
+def _success_reward(collection: Any) -> float | None:
+    """The reward the rollout's root's environment scored, before any reward processor (its last step's
+    ``reward/success``, or a legacy rollout's own ``success`` flag), None without one.  Never raises."""
+
+    root = _root_trajectory(collection)
+    try:
+        return scored_success(root) if root is not None else None
+    except Exception:
+        logger.debug("Cannot read the scored reward of a rollout", exc_info=True)
+        return None
 
 
 def _root_trajectory(collection: Any) -> dict | None:
@@ -256,6 +268,7 @@ async def run_rollout_request(
             timing=timeline.summary(),
             outcome_status=_outcome_status(trajectory_collection, error),
             reward_key=_reward_key(trajectory_collection),
+            success_reward=_success_reward(trajectory_collection),
         )
 
     # ``isolated_rollout_python_environment`` mutates sys.path, sys.executable

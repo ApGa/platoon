@@ -17,6 +17,9 @@ What is never deleted (:func:`plan_deletions`):
 * anything that ``checkpoints.jsonl`` of this run does not list: another run's checkpoints, or the checkpoint
   ``load_checkpoint_path`` names.
 
+A deleted recovery checkpoint's snapshot of the run's per-task statistics goes with it: the file each of its own rows
+names (``tasks``), never one found by the checkpoint's name, which a later start may have saved again.
+
 Deletes run beside training, so a step never waits for one; each has :data:`DELETE_TIMEOUT_S` to answer. They go
 through a Tinker session of their own, never the training session: the Tinker SDK reports a failed delete as the end of
 the session it ran in, and a self-hosted service such as miles-tinker then releases that session's models. Each path
@@ -39,6 +42,7 @@ import os
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from platoon.utils.config import ConfigError
@@ -132,13 +136,14 @@ def check_recovery_pruning(config: Any) -> None:
 @dataclass(frozen=True)
 class RecordedCheckpoint:
     """One checkpoint ``checkpoints.jsonl`` lists: its newest record's name, its paths (state first), the policy
-    version it holds (``policy_version``, else ``batch``; None when it records neither) and the position of its
-    newest record in the file."""
+    version it holds (``policy_version``, else ``batch``; None when it records neither), the position of its
+    newest record in the file, and the snapshots of the run's per-task statistics its records name."""
 
     name: str
     paths: tuple[str, ...]
     version: int | None
     index: int
+    snapshots: tuple[str, ...] = ()
 
     @property
     def recovery(self) -> bool:
@@ -169,9 +174,18 @@ def recorded_checkpoints(records: Sequence[Mapping[str, Any]]) -> list[RecordedC
     checkpoints: dict[str, RecordedCheckpoint] = {}
     for index, record in enumerate(records):
         if paths := _record_paths(record):
-            checkpoints.pop(paths[0], None)
-            checkpoints[paths[0]] = RecordedCheckpoint(_record_name(record), paths, _version(record), index)
+            earlier = checkpoints.pop(paths[0], None)
+            snapshots = (*(earlier.snapshots if earlier is not None else ()), *_record_snapshot(record))
+            checkpoints[paths[0]] = RecordedCheckpoint(_record_name(record), paths, _version(record), index, snapshots)
     return list(checkpoints.values())
+
+
+def _record_snapshot(record: Mapping[str, Any]) -> tuple[str, ...]:
+    """The snapshot of the per-task statistics a record names (its ``tasks`` record's ``file``), if any."""
+
+    tasks = record.get("tasks")
+    name = tasks.get("file") if isinstance(tasks, Mapping) else None
+    return (name,) if isinstance(name, str) and name else ()
 
 
 def _record_paths(record: Mapping[str, Any]) -> tuple[str, ...]:
@@ -524,6 +538,22 @@ class RecoveryCheckpointPruner:
             append_jsonl_line(os.path.join(self.run_dir, DELETED_CHECKPOINTS_NAME), json.dumps(record))
         except OSError as exc:  # a later start asks the service once more, which answers that it is gone
             logger.warning("Could not record the deletion of %s in %s: %s", path, DELETED_CHECKPOINTS_NAME, exc)
+        if _is_state_path(path):  # no start resumes from it now: its statistics go with it
+            self._delete_snapshots(checkpoint)
+
+    def _delete_snapshots(self, checkpoint: RecordedCheckpoint) -> None:
+        """Delete the snapshots of the per-task statistics that ``checkpoint``'s own records name, in the run's
+        ``tasks`` directory; a file already gone, or one outside it, is left alone."""
+
+        tasks = (Path(self.run_dir) / "tasks").resolve()
+        for name in checkpoint.snapshots:
+            path = (Path(self.run_dir) / name).resolve()
+            if path.parent != tasks:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not delete %s, the statistics of a deleted checkpoint: %s", path, exc)
 
 
 def _describe(exc: BaseException) -> str:

@@ -91,6 +91,7 @@ from platoon.train.components import (
     row_entry,
 )
 from platoon.train.labels import straggler_column, task_label
+from platoon.train.task_stats import MAIN, MemberResult
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
@@ -173,6 +174,11 @@ class _SingleRolloutOutcome:
     disposition: str = "completed"
     outcome_status: str | None = None
     reward_key: str | None = None
+    # The reward the member's environment scored, before any reward processor
+    # (``RolloutWorkerResponse.success_reward``), and its rollout's seconds: for
+    # the per-task statistics, never trained on.
+    success_reward: float | None = None
+    seconds: float | None = None
 
 
 class _TaskRolloutOutput(list[tinker.Datum]):
@@ -187,7 +193,9 @@ class _TaskRolloutOutput(list[tinker.Datum]):
     ``train.label_by``; by default the mixture entry it belongs to, so None
     outside a mixture), by which the trainer's metrics break down, and
     ``entry`` the label of the environment entry whose settings the group ran
-    with (``current_entry``).
+    with (``current_entry``).  ``members`` say what each member returned and
+    ``verdict`` what the group trains, or why it trains nothing, for the per-task
+    statistics (``platoon.train.task_stats``).
     """
 
     def __init__(
@@ -203,6 +211,8 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         group_stats: DeferredStats | None = None,
         label: str | None = None,
         entry: str | None = None,
+        members: tuple[MemberResult, ...] = (),
+        verdict: str = "unknown",
     ) -> None:
         super().__init__(datums)
         self.workload = workload
@@ -214,6 +224,8 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         self.group_stats = group_stats if group_stats is not None else DeferredStats()
         self.label = label
         self.entry = entry
+        self.members = members
+        self.verdict = verdict
 
 
 def _summarize_outcomes(outcomes: list[_SingleRolloutOutcome]) -> RolloutStats:
@@ -239,6 +251,44 @@ def _summarize_outcomes(outcomes: list[_SingleRolloutOutcome]) -> RolloutStats:
     stats.counts.update(reward_key_counts(getattr(outcome, "reward_key", None) for outcome in outcomes))
     stats.counts[REWARD_KEY_MISMATCH] = int(len(_trained_keys(outcomes)) > 1)
     return stats
+
+
+def _member(outcome: _SingleRolloutOutcome) -> MemberResult:
+    """What one member returned, for the per-task statistics: its trained reward and the reward its environment
+    scored, as ``platoon eval`` judges success (None for an outcome that was not scored; the reward its environment
+    reported before any reward processor, else, for a rollout that records none, its trained reward; a rollout whose
+    trace records no outcome reports its own success flag, which counts as a pass at 1), its validity, outcome and
+    disposition, its root's steps and output tokens, and the policy versions its datums sampled."""
+
+    result = outcome.result
+    status = getattr(outcome, "outcome_status", None)
+    success = getattr(outcome, "success_reward", None)
+    valid = bool(result is not None and result.task_reward_valid)
+    if status is not None and status != "scored":
+        scored = None
+    elif success is not None:
+        scored = success
+    else:
+        scored = result.task_reward if valid else None
+    root = next((stats for stats in result.trajectory_stats if stats.is_root), None) if result is not None else None
+    versions = [
+        int(version.to_torch().reshape(-1)[0].item())
+        for datum in (result.datums if result is not None else ())
+        if (version := datum.loss_fn_inputs.get("checkpoint_version")) is not None
+    ]
+    return MemberResult(
+        reward=result.task_reward if result is not None else None,
+        scored=scored,
+        valid=valid,
+        outcome=status or "none",
+        disposition=getattr(outcome, "disposition", "completed"),
+        reward_key=getattr(outcome, "reward_key", None),
+        steps=root.num_steps if root is not None else None,
+        output_tokens=root.num_output_tokens if root is not None else None,
+        seconds=getattr(outcome, "seconds", None),
+        versions={MAIN: (min(versions), max(versions))} if versions else {},
+        flag=status is None and success is not None,
+    )
 
 
 def _trained_keys(outcomes: Sequence[_SingleRolloutOutcome]) -> set[str]:
@@ -541,8 +591,12 @@ class GroupRolloutWorkflow:
         *,
         outcomes: list[_SingleRolloutOutcome],
         trainable_rollouts: int,
+        verdict: str = "unknown",
+        members: tuple[MemberResult, ...] | None = None,
     ) -> _TaskRolloutOutput:
-        """Record unit distributions and attach exact totals to the queue item."""
+        """Record unit distributions and attach exact totals to the queue item, with what each member returned
+        (``members``, read from ``outcomes`` before any datum was filtered when not given) and the group's ``verdict``
+        (``platoon.train.task_stats.VERDICTS``)."""
 
         rollout_workloads = [outcome.workload for outcome in outcomes]
         task_workload = sum_rollout_workloads(rollout_workloads)
@@ -605,6 +659,8 @@ class GroupRolloutWorkflow:
             task_retained_datums=task_retained_datums,
             rollout_stats=rollout_stats,
             group_stats=group_stats if isinstance(group_stats, DeferredStats) else None,
+            members=members if members is not None else tuple(_member(outcome) for outcome in outcomes),
+            verdict=verdict,
         )
 
     def _group_stats(self) -> DeferredStats | StatsTracker:
@@ -662,6 +718,13 @@ class GroupRolloutWorkflow:
             for outcome in raw_outcomes
         ]
         valid_results = [outcome.result for outcome in outcomes if outcome.result is not None]
+        # What each member returned, read before any datum is filtered (the per-task statistics).
+        members = tuple(_member(outcome) for outcome in outcomes)
+
+        def output(datums: list[tinker.Datum], verdict: str, trainable_rollouts: int = 0) -> _TaskRolloutOutput:
+            return self._make_task_output(
+                datums, outcomes=outcomes, trainable_rollouts=trainable_rollouts, verdict=verdict, members=members
+            )
 
         # Filter out None results and collect data
         all_data: list[tinker.Datum] = []
@@ -682,11 +745,11 @@ class GroupRolloutWorkflow:
                 data["task_id"],
                 ", ".join(sorted(keys)),
             )
-            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+            return output([], "reward_key_mismatch")
 
         if not valid_results:
             logger.warning(f"No results found for task {data['task_id']}")
-            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+            return output([], "no_results")
 
         min_successful = getattr(self.config, "min_successful_group_size", 1)
         trainable_members = sum(1 for result in valid_results if result.task_reward_valid)
@@ -706,7 +769,7 @@ class GroupRolloutWorkflow:
                 min_successful,
             )
             self._group_stats().scalar(group_size_rejected=1.0)
-            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+            return output([], "below_min")
 
         # === Now compute advantages and filter ===
 
@@ -719,11 +782,11 @@ class GroupRolloutWorkflow:
                 "No completed root rewards available for task %s; retaining rollout stats but skipping training",
                 data["task_id"],
             )
-            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+            return output([], "no_completed_root")
 
         if not all_data:
             logger.warning(f"No train data found for task {data['task_id']}")
-            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+            return output([], "no_datums")
 
         self.assign_advantages(valid_results)
 
@@ -755,7 +818,7 @@ class GroupRolloutWorkflow:
         retained_action_advantages = [values for values in retained_action_advantages if values.numel() > 0]
         if not retained_action_advantages:
             logger.debug("No retained policy action tokens for task %s", data["task_id"])
-            return self._make_task_output([], outcomes=outcomes, trainable_rollouts=0)
+            return output([], "no_datums")
         flattened_advantages = torch.cat(retained_action_advantages)
         if getattr(self.config, "filter_zero_advantage_datums", True) and bool(torch.all(flattened_advantages == 0)):
             logger.debug(
@@ -780,11 +843,8 @@ class GroupRolloutWorkflow:
             )
             for result in valid_results
         )
-        return self._make_task_output(
-            all_data,
-            outcomes=outcomes,
-            trainable_rollouts=trainable_rollouts,
-        )
+        # Every retained advantage zero: the group trains nothing (a uniform group).
+        return output(all_data, "trained" if trainable_rollouts else "uniform", trainable_rollouts)
 
     def compute_baselines(self, results: list[TrajectoryCollectionResult]) -> list[float]:
         """Return one baseline per usable rollout of a task group.
@@ -1151,6 +1211,8 @@ class GroupRolloutWorkflow:
             disposition=disposition,
             outcome_status=response.outcome_status,
             reward_key=response.reward_key,
+            success_reward=getattr(response, "success_reward", None),
+            seconds=response.rollout_seconds,
         )
 
     def _record_worker_telemetry(self, outcome: WorkerOutcome) -> None:
