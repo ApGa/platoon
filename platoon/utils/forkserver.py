@@ -40,6 +40,16 @@ before the child can be reaped (so the pid it names cannot have been recycled) a
 the server is gone, its workers' exits are read from their pidfds, with no exit status.  The server is a plain
 ``subprocess.Popen``, not an asyncio one, whose transport would kill it when collected while workers still run.
 
+**The caller gives up on the server when the server is silent, not when its own event loop was late.**  On a node
+whose CPUs are all busy, the caller's loop can be held up for minutes, and a timer that fires when it runs again says
+nothing about the server, which may have answered meanwhile.  So before a deadline is judged, the caller reads what
+the server sent: an answer that came is used, however late, and the worker it names runs.  The server answers the
+requests one at a time, in the order they were sent, so a fork request fails only once the server has answered no
+request at all for :data:`SPAWN_TIMEOUT_S` (one that answers the requests before it is working through the queue), or
+at once when the server answers a later request (its answer was lost).  A server whose imports outlast their deadline
+(:meth:`ForkServer.ready`) is not killed for it: it serves once it has imported them, unless its caller closes it
+(:meth:`ForkServer.start` does).
+
 The control socket is a ``SOCK_SEQPACKET`` pair: one JSON object per message, a pidfd riding along with ``forked``.
 """
 
@@ -79,7 +89,9 @@ SERVER_MODULE = "platoon.utils.forkserver"
 #: libraries built with jemalloc start; jemalloc's fork handlers take its locks around a fork.
 FORK_SAFE_THREADS = frozenset({"jemalloc_bg_thd"})
 MAX_MESSAGE_BYTES = 4 << 20
-#: How long a request may wait for the server to fork its worker.
+#: How long a fork request waits while the server answers no request.  The server answers the requests one at a time,
+#: in the order they were sent, so one that keeps answering is working through the queue; the reports of its workers'
+#: exits do not count.
 SPAWN_TIMEOUT_S = 60.0
 #: How long the server waits for a forked child to lead its own session; one that has not is killed, and its
 #: request refused, so the server never waits on a child.
@@ -189,7 +201,7 @@ def serve(
     """Import ``preload`` and ``module``, call each ``prepare`` (``{"ref": "module:function", "kwargs": {...}}``,
     what the workers would otherwise each build: a failure is reported and their workers build it), say hello on
     the control socket, then fork one worker per request until the socket closes, and exit once the workers have
-    exited."""
+    exited.  It answers each request before it reads the next, which the caller relies on (:class:`ForkServer`)."""
 
     parent = os.getppid()
     _die_with(parent)
@@ -219,6 +231,8 @@ def serve(
             "the fork server runs other threads after its imports, and a child forked next to a running thread can "
             f"deadlock: {_describe_threads(unsafe)}"
         )
+    if error is not None:
+        print(f"fork server: {error}", file=sys.stderr)  # its log says why too, should nobody read its hello
     hello = {"op": "hello", "pid": os.getpid(), "seconds": round(time.monotonic() - began, 3), "error": error}
     _send(sock, {**hello, "prepare_errors": prepare_errors})
     if error is not None:
@@ -539,7 +553,8 @@ class ForkedWorker:
 
 
 class ForkServer:
-    """The caller's handle on one fork server (see the module docstring); built by :meth:`start`."""
+    """The caller's handle on one fork server (see the module docstring); built by :meth:`start`, or by
+    :meth:`launch` and :meth:`ready`."""
 
     def __init__(
         self,
@@ -555,17 +570,22 @@ class ForkServer:
         self.env = dict(env)
         self.cwd = cwd
         self.loop = loop
-        self.seconds = 0.0
+        self.seconds = 0.0  # what its imports took, once it said hello
         self.prepare_errors: list[str] = []  # what it could not build ahead (its workers build it)
+        self.error: str | None = None  # why it cannot serve, once it said so, whether or not someone still waited
         self.dead = False
         self._serving = False  # it said hello without an error
+        self._overdue = False  # a wait for its imports gave up, and nobody waits to hear that it died
         self._sock = sock
         self._closed = False
         self._tokens = itertools.count(1)
         self._send_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[ForkedWorker]] = {}
         self._workers: dict[int, ForkedWorker] = {}
+        self._launched = time.monotonic()
+        self._answered = self._launched  # when it last answered a fork request
         self._hello: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._hello.add_done_callback(_retrieve)  # whoever waited for a slow start may have given up
         loop.add_reader(sock.fileno(), self._on_readable)
         self._pidfd = os.pidfd_open(process.pid)
         loop.add_reader(self._pidfd, self._on_exit)
@@ -584,8 +604,41 @@ class ForkServer:
         log_path: str | None = None,
         timeout_s: float,
     ) -> ForkServer:
-        """Start a server and wait, at most ``timeout_s``, for its imports; :class:`ForkServerError` when it cannot
-        serve (a module did not import, it runs a thread, it exited)."""
+        """Start a server and wait for its imports (:meth:`ready`); :class:`ForkServerError`, and the server killed,
+        when it cannot serve (a module did not import, it runs a thread, it exited) or has not imported them in
+        ``timeout_s``."""
+
+        server = cls.launch(
+            python=python,
+            module=module,
+            preload=preload,
+            child_init=child_init,
+            prepare=prepare,
+            env=env,
+            cwd=cwd,
+            log_path=log_path,
+        )
+        try:
+            await server.ready(timeout_s)
+        except BaseException:
+            await server.kill()
+            raise
+        return server
+
+    @classmethod
+    def launch(
+        cls,
+        *,
+        python: str,
+        module: str,
+        preload: Sequence[str] = (),
+        child_init: Sequence[str] = (),
+        prepare: Sequence[Mapping[str, Any]] = (),
+        env: Mapping[str, str],
+        cwd: str | None = None,
+        log_path: str | None = None,
+    ) -> ForkServer:
+        """Start a server, for the running event loop; it imports its modules meanwhile (:meth:`ready`)."""
 
         loop = asyncio.get_running_loop()
         cwd = cwd or os.getcwd()
@@ -622,60 +675,116 @@ class ForkServer:
             theirs.close()
             if log is not None:
                 log.close()
-        server = cls(process, ours, env=env, cwd=cwd, loop=loop)
+        return cls(process, ours, env=env, cwd=cwd, loop=loop)
+
+    async def ready(self, timeout_s: float) -> None:
+        """Wait until the server has imported its modules, ``timeout_s`` after its launch at most.
+        :class:`ForkServerError` when it cannot serve (``permanent``: a module did not import, a thread runs in it),
+        it is gone, or it has not imported them by then: it then goes on importing, and serves once it has
+        (:attr:`serving`), or says why it cannot (:attr:`error`), unless it is closed.  A hello that came while this
+        loop was held up is used, however late."""
+
         try:
-            hello = await asyncio.wait_for(asyncio.shield(server._hello), timeout_s)
-        except asyncio.TimeoutError as exc:
-            await server.kill()
+            await self._answer(self._hello, self._launched, timeout_s)
+        except TimeoutError as exc:
+            self._overdue = True
             raise ForkServerError(f"the fork server did not import its modules in {timeout_s:.0f}s") from exc
-        except BaseException:
-            await server.kill()
-            raise
-        if hello.get("error"):
-            await server.kill()
-            raise ForkServerError(str(hello["error"]), permanent=True)
-        server.seconds = float(hello.get("seconds") or 0.0)
-        server.prepare_errors = list(hello.get("prepare_errors") or [])
-        server._serving = True
-        return server
+        if self.error is not None:
+            raise ForkServerError(self.error, permanent=True)
 
     @property
     def alive(self) -> bool:
         return not self.dead and not self._closed
 
+    @property
+    def serving(self) -> bool:
+        """It has imported its modules and forks workers."""
+
+        return self._serving and self.alive
+
     async def spawn(
         self, argv: Sequence[str], *, env: Mapping[str, str], cwd: str, log_path: str | None
     ) -> ForkedWorker:
         """Fork a worker that runs the server's module with ``argv``; :class:`ForkServerError` when the server did
-        not fork it.  A worker forked for a caller that was cancelled meanwhile is killed when the server says so."""
+        not fork it, its answer was lost, or it has answered no request for :data:`SPAWN_TIMEOUT_S`.  Its answer is
+        used whenever it came: the worker it names is killed only when the caller was cancelled, or gave up on a
+        silent server, before it came."""
 
         if not self.alive:
             raise ForkServerError("the fork server is gone")
+        if not self._serving:
+            raise ForkServerError("the fork server has not imported its modules")
         token = next(self._tokens)
         reply: asyncio.Future[ForkedWorker] = self.loop.create_future()
         self._pending[token] = reply
         message = {"op": "fork", "token": token, "argv": list(argv), "env": dict(env), "cwd": cwd, "log_path": log_path}
+        asked = time.monotonic()
         sent = False
         try:
-            async with asyncio.timeout(SPAWN_TIMEOUT_S):
-                # One send at a time: the loop keeps one writer per socket, so a second sock_sendall waiting for
-                # room would replace the first one's, which would then never complete.
-                async with self._send_lock:
-                    await self.loop.sock_sendall(self._sock, json.dumps(message).encode())
-                sent = True
-                worker = await asyncio.shield(reply)
+            # One send at a time: the loop keeps one writer per socket, so a second one waiting for room would
+            # replace the first one's, which would then never complete.  The lock lets the requests through in the
+            # order of their tokens, which is the order the server answers them in (_answered_up_to).
+            async with self._send_lock:
+                await self._send(json.dumps(message).encode(), asked)
+            sent = True  # nothing between the send and here yields to the loop, so no cancellation falls between
+            worker = await self._answer(reply, time.monotonic(), SPAWN_TIMEOUT_S)
         except BaseException as exc:
             if sent:
                 self._abandon(token)
             else:  # the server never got it
                 self._pending.pop(token, None)
             if isinstance(exc, TimeoutError):
-                raise ForkServerError(f"the fork server did not fork in {SPAWN_TIMEOUT_S:.0f}s") from exc
+                raise ForkServerError(f"the fork server has answered no request for {SPAWN_TIMEOUT_S:.0f}s") from exc
             if isinstance(exc, OSError):
                 raise ForkServerError(f"cannot reach the fork server: {exc}") from exc
             raise
         del self._pending[token]
         return worker
+
+    async def _send(self, payload: bytes, since: float) -> None:
+        """Hand a request to the server's socket, all of it (one message) or nothing.  While the socket has no room,
+        wait for the server to read; :class:`TimeoutError` once it has answered no request for :data:`SPAWN_TIMEOUT_S`
+        since ``since`` and the socket still has no room (the server never got the request)."""
+
+        fd = self._sock.fileno()
+        while True:
+            try:
+                self._sock.send(payload)
+                return
+            except (BlockingIOError, InterruptedError):
+                pass
+            silent = self._silence(since)
+            if silent >= SPAWN_TIMEOUT_S:
+                raise TimeoutError
+            room: asyncio.Future[None] = self.loop.create_future()
+            self.loop.add_writer(fd, _settle, room)
+            try:
+                await asyncio.wait([room], timeout=SPAWN_TIMEOUT_S - silent)
+            finally:
+                self.loop.remove_writer(fd)
+
+    async def _answer(self, future: asyncio.Future[Any], since: float, timeout_s: float) -> Any:
+        """``future``'s result, which a message from the server settles; :class:`TimeoutError` once the server has
+        answered no request for ``timeout_s`` since ``since`` (:meth:`_silence`)."""
+
+        while not future.done():
+            silent = self._silence(since)
+            if future.done():
+                break
+            if silent >= timeout_s:
+                raise TimeoutError
+            await asyncio.wait([future], timeout=timeout_s - silent)
+        return future.result()
+
+    def _silence(self, since: float) -> float:
+        """How long the server has answered no request, since ``since``.  What it sent is read first: this loop may
+        have been held up while the server answered, and its own lateness is not the server's silence.  The reports of
+        its workers' exits do not count: a server that sends them but answers no request is not working through the
+        queue."""
+
+        if not self.dead and not self._closed:
+            self._on_readable()
+        return time.monotonic() - max(since, self._answered)
 
     def _abandon(self, token: int) -> None:
         """Its caller gave up on a fork request: a worker forked for it is killed, now or when the answer comes
@@ -717,11 +826,30 @@ class ForkServer:
         op = message.get("op")
         if op == "hello":
             if not self._hello.done():
+                if message.get("error"):
+                    self.error = str(message["error"])
+                else:  # it serves from now on, whether or not someone still waits
+                    self.seconds = float(message.get("seconds") or 0.0)
+                    self.prepare_errors = list(message.get("prepare_errors") or [])
+                    self._serving = True
                 self._hello.set_result(message)
         elif op == "forked":
             token, pid = int(message["token"]), int(message["pid"])
-            (pidfd,) = fds
+            self._answered_up_to(token)
             future = self._pending.get(token)
+            if not fds:  # the kernel dropped its pidfd: this process had no descriptor free
+                _kill_group(pid, None)  # nothing could supervise this worker, so it ends now
+                if future is not None and not future.done():
+                    future.set_exception(
+                        ForkServerError(
+                            f"the fork server forked pid {pid}, but its pidfd did not reach this process, which may "
+                            "have no file descriptor free; that worker was killed"
+                        )
+                    )
+                else:
+                    self._pending.pop(token, None)
+                return
+            (pidfd,) = fds
             if future is not None and not future.done():
                 # Known from now on: its exit may be the very next message, before spawn() resumes.
                 worker = ForkedWorker(pid, pidfd, self.loop)
@@ -732,15 +860,27 @@ class ForkServer:
                 _kill_group(pid, pidfd)
                 os.close(pidfd)
         elif op == "refused":
-            future = self._pending.get(int(message["token"]))
+            token = int(message["token"])
+            self._answered_up_to(token)
+            future = self._pending.get(token)
             if future is not None and not future.done():
                 future.set_exception(ForkServerError(str(message.get("reason"))))
             elif future is not None:
-                self._pending.pop(int(message["token"]), None)
+                self._pending.pop(token, None)
         elif op == "exited":
             worker = self._workers.pop(int(message["pid"]), None)
             if worker is not None:
                 worker._finish(int(message["status"]))
+
+    def _answered_up_to(self, token: int) -> None:
+        """The server answered request ``token``.  It answers the requests one at a time, in the order they were sent,
+        which is the order of their tokens: an earlier one still waiting lost its answer (the server could not send
+        it, or this process could not read it), and fails now rather than waiting while the server goes on."""
+
+        self._answered = time.monotonic()
+        for earlier, future in self._pending.items():
+            if earlier < token and not future.done():
+                future.set_exception(ForkServerError("the fork server answered a later request, not this one"))
 
     def _on_exit(self) -> None:
         if not self.dead and not self._closed:
@@ -760,7 +900,7 @@ class ForkServer:
         self.dead = True
         with contextlib.suppress(Exception):
             self.loop.remove_reader(self._sock.fileno())
-        if self._serving and not self._closed:
+        if (self._serving or self._overdue) and not self._closed:
             logger.warning("Fork server %s is gone: %s", self.pid, reason)
         if not self._hello.done():
             self._hello.set_exception(ForkServerError(f"the fork server is gone: {reason}"))
@@ -774,7 +914,8 @@ class ForkServer:
         self._workers.clear()
 
     def close(self) -> None:
-        """Take no more workers; the server exits once the workers it forked have exited."""
+        """Take no more workers; the server exits once the workers it forked have exited.  One that has not said
+        hello yet forked none, and is killed: it would import its modules for nothing."""
 
         if self._closed:
             return
@@ -784,6 +925,8 @@ class ForkServer:
                 self.loop.remove_reader(self._sock.fileno())
         with contextlib.suppress(OSError):
             self._sock.close()
+        if not self._hello.done():
+            self.process.kill()  # reaped when its pidfd says it exited (_on_exit), or by kill()
         # Their exits are no longer reported: watch their pidfds instead.
         for worker in self._workers.values():
             worker._watch_pidfd()
@@ -799,11 +942,24 @@ class ForkServer:
             await asyncio.to_thread(self.process.wait)
 
 
-def _kill_group(pid: int, pidfd: int) -> None:
+def _kill_group(pid: int, pidfd: int | None) -> None:
     with contextlib.suppress(OSError):
         os.killpg(pid, signal.SIGKILL)  # it leads its own group before the server answers
-    with contextlib.suppress(OSError):
-        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+    if pidfd is not None:
+        with contextlib.suppress(OSError):
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+
+
+def _settle(future: asyncio.Future[None]) -> None:
+    if not future.done():
+        future.set_result(None)
+
+
+def _retrieve(future: asyncio.Future[Any]) -> None:
+    """Mark ``future``'s exception retrieved, so that asyncio does not report it when nobody waits for it any more."""
+
+    if not future.cancelled():
+        future.exception()
 
 
 if __name__ == "__main__":

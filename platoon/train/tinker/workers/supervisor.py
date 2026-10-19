@@ -48,10 +48,11 @@ starting at once on one node, then a few seconds of CPU building those.  A forke
 the process an exec'd one would be (its own session, ``/dev/null`` as stdin, its log file, this process's working
 directory and the environment :meth:`RolloutWorkerSupervisor._child_env` gives it, the worker invariants and the
 startup alarm), and is signalled, waited for and classified the same way.  The fork server dies with the trainer
-and stops the workers it forked when it dies; another starts when one died, or when this process's environment or
-working directory changed since it started (which its imports may have read).  A worker starts by exec whenever no
-fork server can fork it: one did not start (a module did not import, a thread runs in it), the supervisor started
-:data:`MAX_FORK_SERVER_STARTS` already, or a fork failed.
+and stops the workers it forked when it dies; another starts when one died (unless it said it cannot serve), or when
+this process's environment or working directory changed since it started (which its imports may have read).  A worker
+starts by exec whenever no fork server can fork it: one cannot serve (a module did not import, a thread runs in it),
+the supervisor started :data:`MAX_FORK_SERVER_STARTS` already, a fork failed, or the server is still importing after
+the worker's startup budget (it is not replaced: it forks the workers asked for after it has imported the stack).
 
 Neither the fork server nor a worker sees a GPU or starts the CUDA driver: their environment hides the GPUs and has
 torch ask NVML (``CUDA_VISIBLE_DEVICES=``, ``PYTORCH_NVML_BASED_CUDA_CHECK=1``, :data:`WORKER_ENV_OVERRIDES`), so
@@ -230,6 +231,10 @@ class RolloutWorkerSupervisor:
         self._fork_server: ForkServer | None = None
         self._fork_server_lock: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
         self._fork_server_starts = 0
+        self._fork_server_log = ""
+        # What this process logged of the current fork server: its imports outlasted their deadline; it serves.
+        self._fork_server_late = False
+        self._fork_server_announced = False
         self.scratch_dir = scratch_dir or ipc_dir()
         self.log_dir = log_dir
         # A job launcher may give the whole client 30 s between SIGTERM and SIGKILL,
@@ -380,71 +385,125 @@ class RolloutWorkerSupervisor:
 
         A server forks workers with the environment and working directory it started with, which its imports may
         have read: when this process's have changed since, another server starts, and the old one serves the workers
-        it forked to their end."""
+        it forked to their end.  Requests wait for a new server's imports until the worker's startup budget has
+        passed since it started.  A server still importing then is neither waited for nor killed: workers start by
+        exec meanwhile, and once it has imported the stack it forks the next ones.  Another server would import the
+        stack from the beginning, on a node busy enough to have made this one slow.  A server that says it cannot
+        serve (a module did not import, a thread runs in it), however late, turns forking off: so would another."""
 
         if self.start_method != "forkserver":
             return None
         env, cwd = self._child_env(), os.getcwd()
         loop = asyncio.get_running_loop()
         server = self._fork_server
-        if server is not None and server.alive and server.loop is loop and server.env == env and server.cwd == cwd:
-            return server
-        if self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
+        if server is not None and server.serving and server.loop is loop and server.env == env and server.cwd == cwd:
+            return self._use(server)
+        if server is None and self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
             return None
         if self._fork_server_lock is None or self._fork_server_lock[0] is not loop:
             self._fork_server_lock = (loop, asyncio.Lock())
         async with self._fork_server_lock[1]:
             server = self._fork_server
-            if server is not None and server.alive and server.loop is loop:
-                if server.env == env and server.cwd == cwd:
-                    return server
-                changed = sorted(
-                    name for name in env.keys() | server.env.keys() if env.get(name) != server.env.get(name)
-                )
-                logger.warning(
-                    "rollout worker fork server %s started with another %s; starting another",
-                    server.pid,
-                    f"environment ({', '.join(changed[:8])})" if changed else "working directory",
-                )
-            if server is not None:
-                server.close()  # dead, of another event loop or of another environment; it serves its workers out
+            if server is not None and not (
+                server.alive and server.loop is loop and server.env == env and server.cwd == cwd
+            ):
+                if server.error is None and server.alive and server.loop is loop:
+                    changed = sorted(
+                        name for name in env.keys() | server.env.keys() if env.get(name) != server.env.get(name)
+                    )
+                    if self._fork_server_starts < MAX_FORK_SERVER_STARTS:
+                        then = "starting another"
+                    else:
+                        then = (
+                            "rollout workers start by exec from now on: this supervisor has started "
+                            f"{self._fork_server_starts} fork server(s), the most it starts"
+                        )
+                    logger.warning(
+                        "rollout worker fork server %s started with another %s; %s",
+                        server.pid,
+                        f"environment ({', '.join(changed[:8])})" if changed else "working directory",
+                        then,
+                    )
+                # Dead, of another event loop or of another environment: it serves its workers out (one still
+                # importing has none, and is killed).
+                server.close()
                 self._fork_server = None
-            if self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
-                return None
-            self._fork_server_starts += 1
-            log_path = os.path.join(self.scratch_dir, f"forkserver-{os.getpid()}-{self._fork_server_starts}.log")
-            try:
-                server = await ForkServer.start(
-                    python=self.python_executable,
-                    module=self.module,
-                    preload=self._fork_server_preload(request),
-                    child_init=self._fork_server_child_init(),
-                    prepare=self._fork_server_prepare(request),
-                    env=env,
-                    cwd=cwd,
-                    log_path=log_path,
-                    timeout_s=request.startup_budget_seconds,
+                if server.error is not None:
+                    # It said it cannot serve after a request stopped waiting for it: another would import the same
+                    # stack, and fail the same way.
+                    self._fork_server_starts = MAX_FORK_SERVER_STARTS
+                    self._warn_exec(ForkServerError(server.error, permanent=True))
+                    return None
+                server = None
+            if server is None:
+                if self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
+                    return None
+                self._fork_server_starts += 1
+                self._fork_server_log = os.path.join(
+                    self.scratch_dir, f"forkserver-{os.getpid()}-{self._fork_server_starts}.log"
                 )
-            except Exception as exc:  # noqa: BLE001 - workers then start by exec
-                if isinstance(exc, ForkServerError) and exc.permanent:
-                    self._fork_server_starts = MAX_FORK_SERVER_STARTS  # starting another would not help
-                logger.warning(
-                    "rollout workers start by exec, each importing the worker's stack itself: the fork server did not "
-                    "start: %s (log %s)",
-                    exc,
-                    log_path,
-                )
-                return None
-            self._fork_server = server
+                self._fork_server_late = self._fork_server_announced = False
+                try:
+                    server = ForkServer.launch(
+                        python=self.python_executable,
+                        module=self.module,
+                        preload=self._fork_server_preload(request),
+                        child_init=self._fork_server_child_init(),
+                        prepare=self._fork_server_prepare(request),
+                        env=env,
+                        cwd=cwd,
+                        log_path=self._fork_server_log,
+                    )
+                except Exception as exc:  # noqa: BLE001 - workers then start by exec
+                    self._warn_exec(exc)
+                    return None
+                self._fork_server = server
+            if not server.serving:
+                try:
+                    await server.ready(request.startup_budget_seconds)
+                except ForkServerError as exc:
+                    if not exc.permanent and server.alive:  # still importing
+                        if not self._fork_server_late:
+                            self._fork_server_late = True
+                            logger.warning(
+                                "rollout worker fork server %s has not imported the worker's stack in %.0fs: rollout "
+                                "workers start by exec, each importing it itself, until it has (log %s)",
+                                server.pid,
+                                request.startup_budget_seconds,
+                                self._fork_server_log,
+                            )
+                        return None
+                    if exc.permanent:
+                        self._fork_server_starts = MAX_FORK_SERVER_STARTS  # starting another would not help
+                    server.close()
+                    self._fork_server = None
+                    self._warn_exec(exc)
+                    return None
+            return self._use(server)
+
+    def _use(self, server: ForkServer) -> ForkServer:
+        """``server``, which serves; the first time, say so, and what it could not build ahead."""
+
+        if not self._fork_server_announced:
+            self._fork_server_announced = True
             logger.info(
                 "rollout worker fork server %s imported the worker's stack in %.1fs", server.pid, server.seconds
             )
             for problem in server.prepare_errors:
                 logger.warning("the rollout worker fork server could not build ahead (workers build it): %s", problem)
-            return server
+        return server
+
+    def _warn_exec(self, exc: BaseException) -> None:
+        logger.warning(
+            "rollout workers start by exec, each importing the worker's stack itself: the fork server did not start: "
+            "%s (log %s)",
+            exc,
+            self._fork_server_log,
+        )
 
     def close(self) -> None:
-        """Stop the fork server taking workers; it exits once the workers it forked have exited."""
+        """Stop the fork server taking workers; it exits once the workers it forked have exited (at once when it is
+        still importing the worker's stack)."""
 
         if self._fork_server is not None:
             self._fork_server.close()

@@ -4,6 +4,22 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
 
+## 0.2.1 (unreleased)
+
+### Fixes
+
+- **A busy node no longer makes the trainer kill rollout workers that were already forked.** On a node whose CPUs are
+  all busy, the trainer's event loop could be held up for longer than the fork server's one-minute deadline. When it
+  ran again, it gave up on workers the fork server had forked meanwhile, killed them and started them again by exec,
+  each importing the worker's stack itself, which loaded the node further. The trainer now reads what the fork server
+  sent before it judges a deadline, so an answer, or the hello of a server that finished importing, is used however
+  late it is read, and a fork fails only once the server has answered no request for a minute (one that answers the
+  requests before it is working through them, in order). A fork server still importing the stack after the worker's
+  startup budget is no longer killed and replaced by another that imports it from the start while the workers wait for
+  that one: they start by exec meanwhile, and the server forks the next ones once it has imported the stack. If it
+  then finds that it cannot serve (a module did not import, a thread runs in it), the trainer logs why and starts no
+  other, as for a server that says so in time.
+
 ## 0.2.0 (2026-10-19)
 
 The first release on PyPI, numbered 0.2.0 because the original platoon gave its version as 0.1.0, so that the
