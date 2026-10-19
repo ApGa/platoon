@@ -27,7 +27,7 @@ from platoon_textcraft.harbor import export, game
 REPO = Path(__file__).resolve().parents[3]
 LIMIT = 3  # tasks per split
 LOG = "app/textcraft/actions.jsonl"
-# What the dataset published on the Hub (apurvaga/textcraft-synth, exported at platoon a924801) holds, which every
+# What the dataset published on the Hub (apurvaga/textcraft-synth, exported before platoon 0.2.0) holds, which every
 # export must keep reproducing: the content hashes of the first LIMIT tasks of each split (its task-index.json), the
 # game file every task carries, and the task files the card names, which the tasks are built from.
 PUBLISHED_DIGESTS = {

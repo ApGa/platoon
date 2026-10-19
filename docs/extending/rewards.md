@@ -94,7 +94,7 @@ environments:
 ```
 
 The example extension package ships this processor; [Publish an extension package](publish-a-package.md) runs it
-end to end. Since the next release, an installed package can also name a processor with a
+end to end. Since 0.2.0, an installed package can also name a processor with a
 `platoon.reward_processors` entry point: the example package names it `example-partial-credit`, and its configs
 write `reward_processor: example-partial-credit`. Platoon ships one for recursive agents, `platoon-delegation`
 (`platoon.rewards:delegation_capped`): the trajectory's success, with the delegation counts reported as

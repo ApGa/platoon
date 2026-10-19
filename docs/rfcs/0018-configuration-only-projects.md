@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0010](0010-harbor-registry-and-multi-container-tasks.md) (Harbor datasets, images and grading), [RFC 0016](0016-component-configuration.md) (component configuration), [RFC 0008](0008-config-and-cli.md) (config and CLI: site profiles, run directories and exit codes, in part) |
 | Discussion | The pull request that adds this RFC |
-| Implementation | Milestone M1 in the pull request that adds this RFC (#27); M2 in the pull request that adds `train.label_by`; M3 in the pull request that lays `eval.workflow_config` over `train.workflow_config`; M4 in the pull request that adds `platoon prepare` (#38); M5 in the pull request that adds the site profile; M6 in the pull request that restarts training after failures (#36) |
+| Implementation | Milestone M1 in the pull request that adds this RFC; M2 in the pull request that adds `train.label_by`; M3 in the pull request that lays `eval.workflow_config` over `train.workflow_config`; M4 in the pull request that adds `platoon prepare`; M5 in the pull request that adds the site profile; M6 in the pull request that restarts training after failures |
 
 ## Summary
 
@@ -703,12 +703,12 @@ CHANGELOG lists each with its migration.
 
 | Milestone | Scope | Exit check | Pull request |
 |---|---|---|---|
-| M1 one environment per dataset | list `primary`; metadata index fields; `uploads_over_mb`; `holdout`, joined by shared input files, and its report; `identity.json`; the evaluation-overlap warning; `platoon harbor fetch\|verify` on run configs; step-0 evaluation | one entry scores a `reward.txt` and a `reward.json {correctness, submission}` task; mutation and forgery checks pass under a list contract; the phase-0 lock gives section 1.3's split, with no held-out task sharing an input file or a Kaggle dataset with training for seeds 0-4; a resume with a changed `holdout.seed` exits 78; a lock written by `dd060f08` still answers its config | the pull request that adds this RFC |
+| M1 one environment per dataset | list `primary`; metadata index fields; `uploads_over_mb`; `holdout`, joined by shared input files, and its report; `identity.json`; the evaluation-overlap warning; `platoon harbor fetch\|verify` on run configs; step-0 evaluation | one entry scores a `reward.txt` and a `reward.json {correctness, submission}` task; mutation and forgery checks pass under a list contract; the phase-0 lock gives section 1.3's split, with no held-out task sharing an input file or a Kaggle dataset with training for seeds 0-4; a resume with a changed `holdout.seed` exits 78; a lock written before this milestone still answers its config | the pull request that adds this RFC |
 | M2 per-source metrics | index columns; metrics by the label column in training and evaluation; one key per group; key counts | a CPU run of a two-source fixture logs both sources' metrics every step and in evaluation; a mixed-key group does not train | the pull request that adds `train.label_by` |
 | M3 evaluation inherits | section 2, point 2; `every` in steps and concurrency in rollouts (point 1) | a training config whose `eval` names only `every` evaluates with training's rollout and worker settings | the pull request that lays `eval.workflow_config` over `train.workflow_config` |
 | M4 preparing a config | section 3; service options checked when a config loads (RFC 0016, section 4) | `platoon prepare` of the downstream project's config builds into an empty site, and a second run does nothing; a missing image exits 78 at start; `dataset_dir` entries without `image_map` run as before | the pull request that adds `platoon prepare` |
 | M5 sites and paths | sections 4, 5 | the downstream project's configs name no site path and run from any directory with a cluster's profile; the profile refuses `process`; an explicit relative `log_path` keeps its base | the pull request that adds the site profile |
-| M6 supervision | section 6 | a stalled fake service restarts the trainer, which resumes; older recovery checkpoints go, never within `max_staleness`; no labelled sandbox outlives a run; `sandbox reap` refuses a live run | the pull request that restarts training after failures (#36) |
+| M6 supervision | section 6 | a stalled fake service restarts the trainer, which resumes; older recovery checkpoints go, never within `max_staleness`; no labelled sandbox outlives a run; `sandbox reap` refuses a live run | the pull request that restarts training after failures |
 | M7 the rest | `platoon eval` of training configs; entries by name; harnesses without model calls; lock-row reuse | per item | later |
 
 ## Open questions

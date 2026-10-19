@@ -976,9 +976,9 @@ def test_the_size_limit_is_an_input_of_the_lock_only_when_set(tmp_path: Path):
     )  # 100 and 100.0 are one limit
 
 
-# The inputs digests that platoon dd060f08, before the size limit and metadata entries, computed for these configs
-# (tests/envs fixture values only, so the digests do not depend on the checkout's path): a lock that release wrote
-# still answers the same config.
+# The inputs digests that platoon computed for these configs before the size limit and the metadata entries existed
+# (tests/envs fixture values only, so the digests do not depend on the checkout's path): a lock written then still
+# answers the same config.
 GOLDEN_FULL = "cdd5eb84b2e7f78ec1413f98d8cd8be0d18fa290e574a9dd41ee2f4f52c7cc0f"
 GOLDEN_PLAIN = "22cc32a399cec05db28dbe3fab09d5a417356971c3702245343ebf58e27463e0"
 

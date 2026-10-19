@@ -805,7 +805,7 @@ def test_the_lock_records_the_commit_of_each_distribution_installed_from_git(mon
     assert lock["versions"]["hpc_sandbox"] == "0.1.0"
 
 
-PLATOON_COMMIT = "a92480114ec24fd5182cce75615a749832ff10b7"
+PLATOON_COMMIT = "ca0d3adea65a731660c609e969e9a7900c1b2a4f"  # archive/v0.1, the original platoon
 
 
 class _InstalledPlatoon(_Installed):

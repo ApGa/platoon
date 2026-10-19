@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The harness registry (`platoon/harness/registry/`), episode programs (`platoon/programs.py`), the component registry (`platoon/registry.py`), the config loader (`platoon/utils/config.py`), [RFC 0008](0008-config-and-cli.md) (config and CLI), [RFC 0010](0010-harbor-registry-and-multi-container-tasks.md) (Harbor datasets by name) |
 | Discussion | The pull request that adds this RFC. The number is assigned when that pull request opens; 0012 is tool-call parsing, so this draft takes 0013 |
-| Implementation | Milestones M1 (the model), M2 (the testing kit) and M3 (the docs) merged in #6 and #9; M4 (stage 2, the layout of section 11) with the pull requests that retire `plugins/` |
+| Implementation | In 0.2.0: milestones M1 (the model), M2 (the testing kit) and M3 (the docs), and M4 (stage 2, the layout of section 11), which retired `plugins/` |
 
 ## Summary
 

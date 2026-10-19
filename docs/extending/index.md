@@ -18,11 +18,11 @@ links the guide that walks through it.
 | A step environment | an object with async `reset(task)` and `step(action)` | `pt.gym.loop` (a harness) or `pt.gym.as_environment` (an ORS class) | `harness:` with `program: gym`, or `service: python://...` | [Gym adapters and task tables](../tutorials/gym-and-task-tables.md) |
 | Tasks without tools | JSONL rows, or a function that returns `task_table(rows)` | `service: table`, or `module:function` | `service_kwargs: {path: ...}`, and an episode program that grades | [Gym adapters and task tables](../tutorials/gym-and-task-tables.md#step-4-train-on-a-task-table) |
 | Harbor tasks | Harbor task directories | `service: harbor` | `service_kwargs:` `dataset_dir` or `task_dirs`, `splits`, `provider` | [Sandboxes and Harbor tasks](../how-to/sandboxes-and-harbor.md) |
-| A named environment (since the next release) | `pt.EnvironmentEntry(name, version=..., **keys)`: an environment entry's keys, with the options each harness needs | a `platoon.environments` entry point, or `module:attr` | `env: name@version` | [Named environments](#named-environments) |
+| A named environment (since 0.2.0) | `pt.EnvironmentEntry(name, version=..., **keys)`: an environment entry's keys, with the options each harness needs | a `platoon.environments` entry point, or `module:attr` | `env: name@version` | [Named environments](#named-environments) |
 | An environment service | classes that follow `EnvironmentService` and `EnvSession` | `module:Class`, or a function that returns a service | `service:` and `service_kwargs:` | [Write an environment service](environment-services.md) |
-| An episode program | `@pt.program(name)` on `async def fn(ep: pt.EpisodeContext) -> pt.Outcome` | `package:`, `module:function`, or a `platoon.programs` entry point (since the next release) | `program:`; its settings in the rollout config's `extra` | [Episode programs](../tutorials/programs.md) |
+| An episode program | `@pt.program(name)` on `async def fn(ep: pt.EpisodeContext) -> pt.Outcome` | `package:`, `module:function`, or a `platoon.programs` entry point (since 0.2.0) | `program:`; its settings in the rollout config's `extra` | [Episode programs](../tutorials/programs.md) |
 | A finalizer | `fn(collection: pt.TrajectoryCollection)`, sync or async | added by an episode program: `ep.add_finalizer(fn)` | the program | [Reward processors and finalizers](rewards.md#write-a-finalizer) |
-| A reward processor | `fn(trajectory: dict) -> (reward, {component: value})` | `module:function`, or a `platoon.reward_processors` entry point (since the next release) | `reward_processor:` | [Reward processors and finalizers](rewards.md#write-a-reward-processor) |
+| A reward processor | `fn(trajectory: dict) -> (reward, {component: value})` | `module:function`, or a `platoon.reward_processors` entry point (since 0.2.0) | `reward_processor:` | [Reward processors and finalizers](rewards.md#write-a-reward-processor) |
 | Verifier agents | nothing new: your harness runs with a verifier's goal | built in | `agents.child_grading: verifier` and `agents.verifier` | [Judges and verifiers](judges-and-verifiers.md#verifier-agents) |
 | A behavior or parent-usage judge | an object with async `judge(...)` or `judge_parent_usage(...)` | set by an episode program: `ep.behavior_judge`, or the `apply_subagent_parent_usage_gates` finalizer | the program | [Judges and verifiers](judges-and-verifiers.md) |
 | A sandbox provider | classes that follow `SandboxProvider` and `Sandbox` | a built-in name or `module:Class` | the Harbor service's `provider` and `provider_options` | [Write a sandbox provider](sandbox-providers.md) |
@@ -61,11 +61,10 @@ An import string names a module and an object in it, `module:attr`, and the obje
 `my_pkg.envs:Mazes.small` is the attribute `small` of the class `Mazes`.
 
 Entry points are how an installed package provides components by name. There is one group per kind of component:
-`platoon.harnesses`, and since the next release `platoon.programs`, `platoon.environments` and
+`platoon.harnesses`, and since 0.2.0 `platoon.programs`, `platoon.environments` and
 `platoon.reward_processors`. Each entry point is named exactly as configs name its component. Platoon reads the
 groups from the installed metadata, and imports an entry point only when a config (or code, through
-`ctx.agents.spawn(harness=...)` or `ep.run(harness=...)`) names its component; before the next release, a process's
-first harness lookup imported every installed `platoon.harnesses` entry point. [Publish an extension
+`ctx.agents.spawn(harness=...)` or `ep.run(harness=...)`) names its component. [Publish an extension
 package](publish-a-package.md) declares all four.
 
 The module must be importable in every process that uses it: install your package (`uv pip install -e .` while
@@ -76,7 +75,7 @@ the process boundary.
 
 ## Names and versions
 
-*Since the next release.* Every component a config selects by name (a harness, a program, a named environment, a
+*Since 0.2.0.* Every component a config selects by name (a harness, a program, a named environment, a
 reward processor) has a name of the form `<owner>-<name>`: lower-case words of letters and digits joined by `-`,
 `_` or `.`, whose first word is its owner. A distribution keeps to one owner, and `platoon extensions check` warns
 when it does not. Platoon's own components take the `platoon` owner (`platoon-codeact`, `platoon-number-search`),
@@ -98,7 +97,7 @@ is a configuration error (exit code 78) that lists what is registered, what is i
 
 ## Named environments
 
-*Since the next release.* A named environment says once how to run an environment: its service and options, the
+*Since 0.2.0.* A named environment says once how to run an environment: its service and options, the
 options each harness needs on it, its program, its reward processor and its default splits. A package registers one
 in the `platoon.environments` group:
 
@@ -149,7 +148,7 @@ from the first-party extension `platoon-textcraft` (`extensions/textcraft`).
 
 ## See what is installed
 
-*Since the next release.* Listing reads the installed metadata and imports nothing of an extension:
+*Since 0.2.0.* Listing reads the installed metadata and imports nothing of an extension:
 
 | Command | Shows |
 |---|---|
@@ -162,7 +161,7 @@ from the first-party extension `platoon-textcraft` (`extensions/textcraft`).
 
 ## Compatibility and provenance
 
-*Since the next release.* An extension states the versions of platoon it works with in its requirements
+*Since 0.2.0.* An extension states the versions of platoon it works with in its requirements
 (`platoon >= 0.2, < 0.3`: below 1.0, a minor release may break extensions). Before platoon imports any of its
 components, it checks that range against the running platoon from the installed metadata, and refuses an extension
 whose range excludes it, with an error that names both versions. Set `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` to load
