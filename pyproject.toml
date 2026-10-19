@@ -2,7 +2,7 @@
 name = "platoon"
 # The release version, set here and nowhere else: platoon.__version__, `platoon --version` and lock.json read it from
 # this file in a checkout and from the installed metadata otherwise (CONTRIBUTING.md, "Release a version").
-version = "0.2.0"
+version = "0.2.1"
 description = "Build and train systems of agents."
 authors = [
     {name = "Apurva Gandhi", email = "apurvag@cs.cmu.edu"}
