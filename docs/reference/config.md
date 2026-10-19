@@ -21,12 +21,14 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 - [`WatchdogConfig`](#watchdogconfig)
 - [`AdamParams`](#adamparams)
 - [`WorkflowConfig`](#workflowconfig)
+- [`EntryWorkflowSettings`](#entryworkflowsettings)
 - [`HarnessExitPolicy`](#harnessexitpolicy)
 - [`EvalOverrides`](#evaloverrides)
 - [`AgentTreeConfig`](#agenttreeconfig)
 - [`WandBConfig`](#wandbconfig)
 - [`RolloutConfig`](#rolloutconfig)
 - [`StragglerPolicy`](#stragglerpolicy)
+- [`EntryRolloutSettings`](#entryrolloutsettings)
 - [`VerifierConfig`](#verifierconfig)
 - [`InferenceParams`](#inferenceparams)
 - [`PlatoonEvalConfig`](#platoonevalconfig)
@@ -78,7 +80,7 @@ The `train:` section: the model, the batch, the loss, the optimizer and the roll
 | `max_training_steps` | int \| None | `null` | Training batches to run. With num_epochs as well, training runs the shorter of the two. |
 | `num_minibatches` | int | `1` | Number of minibatches per batch. Batch must be divisible by num_minibatches. Results in num_minibatches weight updates per batch. |
 | `num_microbatches` | int | `1` | Number of microbatches per minibatch. Minibatch must be divisible by num_microbatches. Used for gradient accumulation --> A single weight update per microbatch. With tinker, gradient accumulation is less important, but this may still be useful for streaming to overlap rollout sampling with forward backward computation within the same batch. |
-| `max_staleness` | int \| None | `null` | How many training steps the rollouts of a batch may run ahead of the trained policy (None: no limit). |
+| `max_staleness` | int \| None | `null` | How many training steps the rollouts of a batch may run ahead of the trained policy, and how many policy versions old a group may be and still train (None: no limit). An environment entry may raise its own groups' bound (`environments[].max_staleness`); the run's stays the bound on how far rollouts run ahead. |
 | `optimizer` | [AdamParams](#adamparams) | `AdamParams()` |  |
 | `loss_fn` | str | `"cispo"` | Tinker loss function, for example `cispo` or `importance_sampling`. |
 | `loss_fn_config` | dict | `{"clip_low_threshold": 0.0, "clip_high_threshold": 5.0}` | Keyword arguments of the loss function. A config's loss_fn_config replaces this default whole, so it names every key its loss takes (cispo: both thresholds); the Tinker service fills a missing one with its own default. |
@@ -152,6 +154,8 @@ entry's `package` registers.
 | `eval_workflow_kwargs` | dict[str, Any] | `{}` | Keyword arguments of the evaluation workflow. |
 | `name` | str \| None | `null` | The entry's name, required and unique in a mixture; a mixture's task ids are `<name>::<task id>`. |
 | `weight` | float \| "tasks" | `"tasks"` | The entry's share of a mixture's training tasks: `tasks`, its number of training tasks (once selection, `exclude_tasks` and a hold-out have taken theirs), which draws every task of the mixture equally often; or a positive number, the entries' shares in proportion to their numbers. A mixture's weights are all numbers or all `tasks`. |
+| `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's own training settings, laid over `train.workflow_config` for its training groups: the keys that act on one group or one rollout (EntryWorkflowSettings), such as `group_size`, `min_successful_group_size`, `leave_one_out_baseline` and `rollout_config.max_steps`. A key it leaves out keeps the run's; `null` unsets it. Its rollout settings are also its evaluation's defaults, below the phase's section (eval.workflow_config, inference.workflow), and `eval_overrides.workflow_config` sets what its evaluation rollouts change. `platoon config show` prints each entry's effective settings and where each came from. |
+| `max_staleness` | int \| None | `null` | How many policy versions old the entry's training groups may be and still train (null: the run's, `train.max_staleness`): the stale filter's bound for its groups. At least the run's, which stays the bound on how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning keeps the checkpoints within the largest bound of the run and its entries. |
 | `service` | str \| None | `null` | The environment service: `harbor`, `table`, `python://pkg.module:EnvClass` (an ORS environment run in process), `ors+http://host:port/EnvName` (ORS environment servers) or `module:Class`. |
 | `service_kwargs` | dict[str, Any] | `{}` | Keyword arguments of the service. |
 | `harness` | str \| dict[str, float] \| None | `null` | The harness that plays each task, by reference (`name[@version]`, a `.toml` spec path or `module:function`), or a `{harness: weight}` mapping drawn per task with `seed`. |
@@ -186,7 +190,7 @@ weights and optimizer state.
 | `strategy` | "epoch" \| "step" \| "none" \| None | `null` | **Deprecated:** use every alone, which counts training steps (0: never) instead; platoon 0.3.0 removes it. The unit `every` had before it counted training steps: `epoch` (a pass over the training tasks), `step`, or `none`, which never triggers the event whatever `every` is. A config that still sets it keeps that meaning. |
 | `load_checkpoint_path` | str \| None | `null` | A Tinker checkpoint (`tinker://...`) whose weights a new run starts from, with a fresh optimizer. |
 | `recovery_every` | int \| None | `null` | Recovery cadence. `every` selects the *permanent* checkpoints (named `<batch>`, kept forever); `every: 0` writes none, leaving the launch, recovery and final checkpoints. When `recovery_every` is set, every `recovery_every` steps that is not already a permanent save writes a full weights+optimizer checkpoint named `recovery-<batch>` instead of the weights-only update, so a crash loses at most that many steps. Recovery checkpoints are disposable: `keep_recovery` deletes all but the newest few. `None` disables the recovery cadence. |
-| `keep_recovery` | int \| None | `null` | Recovery checkpoints to keep (None: every one). After each recovery save, platoon deletes the run's recovery checkpoints beyond the newest `keep_recovery` through the training service, beside training: never a permanent checkpoint, the one a resume starts from, or one this start saved within `train.max_staleness` policy versions, which rollouts may still sample from. It needs `train.max_staleness`; with `recovery_every`, `keep_recovery × recovery_every` must exceed it. |
+| `keep_recovery` | int \| None | `null` | Recovery checkpoints to keep (None: every one). After each recovery save, platoon deletes the run's recovery checkpoints beyond the newest `keep_recovery` through the training service, beside training: never a permanent checkpoint, the one a resume starts from, or one this start saved within the run's largest staleness bound (`train.max_staleness`, or an environment's `max_staleness` above it) of policy versions, which rollouts may still sample from. It needs `train.max_staleness`; with `recovery_every`, `keep_recovery × recovery_every` must exceed that largest bound. |
 
 <a id="statsconfig"></a>
 
@@ -284,6 +288,35 @@ Each task is rolled out `group_size` times; a rollout's advantage is its reward 
 | `worker_unbounded_rollout_budget_seconds` | float | `86400.0` | Child budget of a rollout that no time limit bounds: rollout_config.timeout is null, and its harness has no limit of its own (neither its spec's timeout_s nor the task's own agent time limit), or the rollout is a function, or a function harness's episode program, of the environment's own, whose limits platoon cannot know, or its environment service does not say what it needs beyond the harness (rollout_overhead_s). |
 | `worker_python_env_isolation` | bool | `false` | Wrap the rollout in isolated_rollout_python_environment(). |
 
+<a id="entryworkflowsettings"></a>
+
+## EntryWorkflowSettings
+
+`platoon.train.components.EntryWorkflowSettings`
+
+In a training config: `environments.<i>.workflow_config`, `environments.<i>.eval_overrides.workflow_config`. In an evaluation config: `environments.<i>.workflow_config`, `environments.<i>.eval_overrides.workflow_config`.
+
+The training settings an environment entry may set for its own groups (`environments[].workflow_config`),
+laid over `train.workflow_config` for its training groups, and for its evaluation rollouts what its
+`eval_overrides.workflow_config` sets, laid over the evaluation's settings for the entry.  Each key acts as
+`WorkflowConfig`'s key of the same name, on the entry's groups only, and a key the entry leaves out keeps the
+value of the settings it is laid over.  They are the keys that act on one group or one rollout: the rest of a
+workflow config acts on microbatches, which mix entries' groups, or on the run's one pool of rollout workers, and
+stays the run's.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `group_size` | int | `inherited` | Rollouts per task, for each of the entry's groups. |
+| `leave_one_out_baseline` | bool | `inherited` | Center each rollout's reward on the mean of the other members of its group rather than the whole group. |
+| `min_successful_group_size` | int | `inherited` | Fewest trainable rollouts one of the entry's groups needs to train. |
+| `straggler_timeout_seconds` | float \| None | `inherited` | The entry's straggler policy: once `straggler_quorum` members of a group have settled, wait at most this many more seconds for the rest (null: no cutoff). A label's `train.workflow_config.straggler_policies` entry wins. |
+| `straggler_quorum` | int \| None | `inherited` | Settled members that start the straggler timeout (null: group_size - 1). |
+| `filter_errors` | bool | `inherited` | Suppress error tokens that would get positive credit, in the entry's rollouts. |
+| `filter_message_actions` | bool | `inherited` | Retain agent messages as context, with no policy loss for either sign. |
+| `subagent_datum_keep_probability` | float | `inherited` | Keep each subagent datum of the entry's rollouts with this probability. |
+| `subagent_datum_sampling_seed` | int | `inherited` | Seed of the subagent datum sampling. |
+| `rollout_config` | [EntryRolloutSettings](#entryrolloutsettings) | `inherited` | The entry's rollout settings, laid over the rollout config its settings are laid over, key by key. |
+
 <a id="harnessexitpolicy"></a>
 
 ## HarnessExitPolicy
@@ -324,6 +357,7 @@ key merges over the entry's own key of the same name, key by key, and is checked
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `harness_options` | dict[str, Any] | `{}` | Harness options of evaluation rollouts, merged over the entry's `harness_options`. |
+| `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's settings for its evaluation rollouts, laid over the evaluation's settings for the entry: the keys of its own workflow_config (EntryWorkflowSettings), such as `group_size` and `rollout_config.max_steps`. They win over the phase's section (eval.workflow_config; platoon eval applies only their rollout_config, over inference.workflow.rollout_config). |
 
 <a id="agenttreeconfig"></a>
 
@@ -395,7 +429,7 @@ writes its files, and the default sampling of its model calls.
 | `skip_subagent_reward_computation` | bool | `false` | Score every subagent 0 (the `single` program adds the finalizer, before root-success propagation). |
 | `enable_subagent_verifiers` | bool | `true` | Master switch for verifier subagents and behavior judges on completed children, across the whole agent tree; a child they would grade shares the episode's outcome instead. `judges` turns off every judge, these included (an evaluation sets it with inference.judges). |
 | `inference_params` | [InferenceParams](#inferenceparams) | `InferenceParams()` | Default sampling of every model call in the rollout; a call's own parameters override it, unless `sampling_precedence` is `config`. |
-| `sampling_precedence` | "request" \| "config" | `"request"` | Which wins when a policy call sets its own sampling parameters. `request` (the default): the call's own. `config`: a policy call samples with inference_params' temperature, top_p and top_k, never with its own (the gateway's defaults stand in for those inference_params leaves unset); with inference_params' max_completion_tokens when set, else its own; and with its own seed and its own stop sequences, by which its harness parses the reply. `aux` and `judge` calls keep their own parameters either way. |
+| `sampling_precedence` | "request" \| "config" | `"request"` | Which wins when a policy call sets its own sampling parameters. `request` (the default): the call's own. `config`: a policy call samples with inference_params' temperature, top_p and top_k, never with its own (the gateway's defaults stand in for those inference_params leaves unset); with inference_params' max_completion_tokens when set, else its own; and with its own seed and its own stop sequences, by which its harness parses the reply. `aux` and `judge` calls keep their own parameters either way, except the `aux` calls of a harness in a task sandbox, which sample as its policy calls. |
 | `extra` | dict[str, Any] | `{}` | Free-form settings for custom rollouts and harnesses. |
 | `judges` | bool | `true` | Run the model calls that judge agents rather than solve the task: verifier agents and the behavior judges beside them, parent-usage judges, and judge agents and calls. With false none run: a child its environment grades by verifier shares the episode's outcome instead, and a judge agent or call is refused. `platoon eval` sets it from `inference.judges`; a training config may not turn it off. |
 
@@ -413,6 +447,32 @@ A complete straggler policy for the groups of one label (`WorkflowConfig.straggl
 |---|---|---|---|
 | `timeout_seconds` | float \| None | `null` | Seconds to wait for the rest of a group once `quorum` members have settled (None: no cutoff). |
 | `quorum` | int \| None | `null` | Settled members that start the timeout (None: `group_size - 1`). Requires `timeout_seconds`. |
+
+<a id="entryrolloutsettings"></a>
+
+## EntryRolloutSettings
+
+`platoon.train.components.EntryRolloutSettings`
+
+In a training config: `environments.<i>.workflow_config.rollout_config`, `environments.<i>.eval_overrides.workflow_config.rollout_config`. In an evaluation config: `environments.<i>.workflow_config.rollout_config`, `environments.<i>.eval_overrides.workflow_config.rollout_config`.
+
+The rollout settings an environment entry may set for its own rollouts: its `workflow_config.rollout_config`,
+and that of its `eval_overrides.workflow_config`.  Each key acts as `RolloutConfig`'s key of the same name, and
+a key the entry leaves out keeps the value of the rollout config it is laid over.  `inference_params` merges
+key by key, and `extra` replaces the value it is laid over whole; `null` sets a key to null, which unsets the
+value it is laid over (`max_steps: null` takes the task's own step budget).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_steps` | int \| None | `inherited` | Step budget of the root agent of each of the entry's rollouts (null: the task's own, else the harness's). |
+| `timeout` | int \| None | `inherited` | Time limit of the root agent of each of the entry's rollouts, in seconds (null: none of the rollout's own). |
+| `step_timeout` | int | `inherited` | Per-step deadline in seconds, for harnesses that read one from the rollout config. |
+| `inference_params` | [InferenceParams](#inferenceparams) | `inherited` | Default sampling of the entry's model calls, merged key by key over the sampling it is laid over. |
+| `sampling_precedence` | "request" \| "config" | `inherited` | Which wins when a policy call sets its own sampling parameters: `request` or `config`. |
+| `extra` | dict[str, Any] | `inherited` | Free-form settings for custom rollouts and harnesses; replaces the mapping it is laid over whole. |
+| `propagate_root_success` | bool \| None | `inherited` | Give every trajectory of a rollout the root's success. |
+| `skip_subagent_reward_computation` | bool | `inherited` | Score every subagent 0. |
+| `enable_subagent_verifiers` | bool | `inherited` | Run verifier subagents and behavior judges on completed children. |
 
 <a id="verifierconfig"></a>
 
@@ -439,7 +499,7 @@ of helpers (`platoon.harness.budget`).
 
 `platoon.config_defs.InferenceParams`
 
-In a training config: `train.workflow_config.rollout_config.inference_params`, `eval.workflow_config.rollout_config.inference_params`. In an evaluation config: `inference.workflow.rollout_config.inference_params`.
+In a training config: `train.workflow_config.rollout_config.inference_params`, `eval.workflow_config.rollout_config.inference_params`, `environments.<i>.workflow_config.rollout_config.inference_params`, `environments.<i>.eval_overrides.workflow_config.rollout_config.inference_params`. In an evaluation config: `inference.workflow.rollout_config.inference_params`, `environments.<i>.workflow_config.rollout_config.inference_params`, `environments.<i>.eval_overrides.workflow_config.rollout_config.inference_params`.
 
 Inference parameters for rollout-time model calls (`RolloutConfig.inference_params`): every agent's default
 sampling, which a call's own parameters override unless the rollout's `sampling_precedence` is `config`.

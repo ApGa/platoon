@@ -794,7 +794,7 @@ class HostedGateway(ModelGateway):
 
     def _admit(self, agent: AgentSession, kind: str) -> None:
         """Refuse what ``ModelGateway.chat`` refuses before it samples: an unknown call kind, a kind the agent may
-        not make (``AgentSession.policy_only``), a judge call while judges are off, a gateway that is shut down, a
+        not make (``AgentSession.check_kind``), a judge call while judges are off, a gateway that is shut down, a
         closed agent."""
 
         check_call_kind(kind)
@@ -837,11 +837,12 @@ class HostedGateway(ModelGateway):
         self, dialect: str, body: Mapping[str, Any], agent: AgentSession, kind: str = "policy"
     ) -> dict[str, Any]:
         defaults = agent.sampling_defaults
-        if defaults is not None and defaults.precedence == "config" and kind == "policy":
+        if defaults is not None and defaults.precedence == "config" and agent.sampling_kind(kind) == "policy":
             # sampling_precedence: config, as SamplingOverrides.for_call applies it with Tinker: the rollout's
-            # sampling decides a policy call's, never the harness's own.  The call's temperature, top_p and top_k
-            # go, and so does its completion budget when the rollout sets one; the dialect then adds the rollout's
-            # (top_k never reaches a hosted model), and the server's defaults stand for what the rollout leaves unset.
+            # sampling decides a policy call's, never the harness's own (an aux call of an agent with policy_only
+            # samples as a policy call: AgentSession.sampling_kind).  The call's temperature, top_p and top_k go, and
+            # so does its completion budget when the rollout sets one; the dialect then adds the rollout's (top_k never
+            # reaches a hosted model), and the server's defaults stand for what the rollout leaves unset.
             dropped = {"temperature", "top_p", "top_k"}
             if defaults.max_tokens is not None:
                 dropped.update(_COMPLETION_BUDGETS.get(dialect, ()))

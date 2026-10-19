@@ -170,7 +170,12 @@ load:
 uv run platoon config show smoke.yaml train.batch_size=4
 uv run platoon config show smoke.yaml --defaults        # also print every field's default
 uv run platoon config show smoke.yaml --kind train      # force a schema instead of picking it by section
+uv run platoon config show mix.yaml --entry slow-tasks  # what one environment entry runs with
 ```
+
+When environment entries set training settings of their own (`workflow_config`, `max_staleness`), `config show` then
+prints, as comments, what each of them runs with: every key's value and the layer it came from
+([Settings per environment](train-and-eval.md#settings-per-environment)).
 
 `platoon config validate` checks one or more files and reports every problem at once:
 
@@ -300,7 +305,9 @@ Two files go there, replacing any older copies:
   parsed: with the `chat_template` renderer, the tool-call parser chosen for the model's template ([Models and tool
   calling](models-and-tool-calling.md#set-the-parser)). When an environment entry sets `exclude_tasks`, `train` and
   `eval` add `excluded_tasks` once they have listed the tasks: the ids left out of each list
-  ([Leave tasks out](train-and-eval.md#leave-tasks-out)).
+  ([Leave tasks out](train-and-eval.md#leave-tasks-out)). When entries set training settings of their own, `train`
+  adds `entry_settings`: what each entry's settings change from the run's
+  ([Settings per environment](train-and-eval.md#settings-per-environment)).
 
 To repeat a run, pass its record back as the config: `platoon train <run dir>/config.resolved.yaml`. Use a new
 `stats.trial_name` for a fresh run; reusing the same run directory resumes it (see [Checkpoints and

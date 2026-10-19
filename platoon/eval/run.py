@@ -54,6 +54,7 @@ from platoon.eval.runner import EvalRunner, check_provenance
 from platoon.eval.workflow import DefaultEvalGroupWorkflow
 from platoon.registry import import_from_string, resolve_component
 from platoon.site import site_profile
+from platoon.train import entry_settings
 from platoon.train.auto import (
     AutoDataset,
     AutoEnvironment,
@@ -156,6 +157,11 @@ async def arun_eval(args: list[str] | None = None) -> dict[str, Any]:
         reward_processor=AutoRewardProcessor.from_config(config),
         packages=AutoEnvironment.packages(config),
     )
+    # Each entry's rollouts run with its own rollout settings, below inference.workflow's and above its
+    # eval_overrides'; the rest of an entry's training settings are training's, which an evaluation does not apply.
+    workflow.entry_rollout_configs = entry_settings.evaluation_rollout_configs(config)
+    for line in entry_settings.evaluation_unapplied(config):
+        logger.warning("%s", line)
     runner = EvalRunner(workflow=workflow, output_dir=output_dir)
     return await runner.arun(
         dataset=dataset,

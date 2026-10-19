@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, cast, get_args, runtime_checkable
 
+from platoon.config_defs import InferenceParams
 from platoon.task import Task
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,142 @@ class AgentTreeConfig:
         raise ValueError(f"agents must be a mapping, got {value!r}")
 
 
+class _Inherited:
+    """The default of every key of an entry's ``workflow_config``: the value of the settings it is laid over."""
+
+    def __repr__(self) -> str:
+        return "inherited"
+
+
+# A key an entry's ``workflow_config`` leaves out keeps the value of the settings it is laid over.
+INHERITED: Any = _Inherited()
+
+# Why an entry's ``workflow_config`` may not set the rest of a workflow config, and where it goes instead.
+_RUN_SETTING = "set it in train.workflow_config, or eval.workflow_config for evaluation"
+_ENTRY_REFUSED_KEYS = {
+    "depth_level_weighting": "an entry does not set it: depth weights are normalized across the tasks of a "
+    f"microbatch, which mixes entries' groups; {_RUN_SETTING}",
+    "depth_level_discount_gamma": "an entry does not set it: depth weights are normalized across the tasks of a "
+    f"microbatch, which mixes entries' groups; {_RUN_SETTING}",
+    "filter_zero_advantage_datums": "an entry does not set it: it filters microbatches, which mix entries' groups; "
+    f"{_RUN_SETTING}",
+    "straggler_policies": "an entry does not set it: straggler policies by label are the run's, in "
+    "train.workflow_config.straggler_policies; an entry sets straggler_timeout_seconds and straggler_quorum for its "
+    "own groups",
+    "straggler_policy_key": "an entry does not set it: straggler policies by label are the run's (train.label_by)",
+    **{
+        name: f"an entry does not set it: one pool of rollout workers runs every entry's rollouts; {_RUN_SETTING}"
+        for name in (
+            "rollout_isolation",
+            "worker_start_method",
+            "worker_startup_budget_seconds",
+            "worker_finalize_grace_seconds",
+            "worker_parent_grace_seconds",
+            "worker_termination_grace_seconds",
+            "worker_launch_concurrent_groups",
+            "worker_rss_soft_limit_bytes",
+            "worker_mem_available_floor_bytes",
+            "worker_binding_poll_seconds",
+            "worker_unbounded_rollout_budget_seconds",
+            "worker_python_env_isolation",
+        )
+    },
+}
+_TRAINER_SETS = "an entry does not set it: platoon sets it for every rollout"
+_ENTRY_REFUSED_ROLLOUT_KEYS = {
+    "judges": "an entry does not set it: training runs its judges, and platoon eval sets it from inference.judges; "
+    "switch an entry's verifiers off with its agents.verifier.enabled: false",
+    "model_name": _TRAINER_SETS,
+    "train": _TRAINER_SETS,
+    "output_dir": _TRAINER_SETS,
+    "return_dict": _TRAINER_SETS,
+    "verbose": "an entry does not set it: it is the run's logging, in train.workflow_config.rollout_config",
+    "propogate_root_success": "use propagate_root_success",
+}
+
+
+@dataclass
+class EntryRolloutSettings:
+    """The rollout settings an environment entry may set for its own rollouts: its ``workflow_config.rollout_config``,
+    and that of its ``eval_overrides.workflow_config``.  Each key acts as ``RolloutConfig``'s key of the same name, and
+    a key the entry leaves out keeps the value of the rollout config it is laid over.  ``inference_params`` merges
+    key by key, and ``extra`` replaces the value it is laid over whole; ``null`` sets a key to null, which unsets the
+    value it is laid over (``max_steps: null`` takes the task's own step budget)."""
+
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = _ENTRY_REFUSED_ROLLOUT_KEYS
+
+    # Step budget of the root agent of each of the entry's rollouts (null: the task's own, else the harness's).
+    max_steps: int | None = INHERITED
+    # Time limit of the root agent of each of the entry's rollouts, in seconds (null: none of the rollout's own).
+    timeout: int | None = INHERITED
+    # Per-step deadline in seconds, for harnesses that read one from the rollout config.
+    step_timeout: int = INHERITED
+    # Default sampling of the entry's model calls, merged key by key over the sampling it is laid over.
+    inference_params: InferenceParams = INHERITED
+    # Which wins when a policy call sets its own sampling parameters: ``request`` or ``config``.
+    sampling_precedence: Literal["request", "config"] = INHERITED
+    # Free-form settings for custom rollouts and harnesses; replaces the mapping it is laid over whole.
+    extra: dict[str, Any] = INHERITED
+    # Give every trajectory of a rollout the root's success.
+    propagate_root_success: bool | None = INHERITED
+    # Score every subagent 0.
+    skip_subagent_reward_computation: bool = INHERITED
+    # Run verifier subagents and behavior judges on completed children.
+    enable_subagent_verifiers: bool = INHERITED
+
+
+@dataclass
+class EntryWorkflowSettings:
+    """The training settings an environment entry may set for its own groups (``environments[].workflow_config``),
+    laid over ``train.workflow_config`` for its training groups, and for its evaluation rollouts what its
+    ``eval_overrides.workflow_config`` sets, laid over the evaluation's settings for the entry.  Each key acts as
+    ``WorkflowConfig``'s key of the same name, on the entry's groups only, and a key the entry leaves out keeps the
+    value of the settings it is laid over.  They are the keys that act on one group or one rollout: the rest of a
+    workflow config acts on microbatches, which mix entries' groups, or on the run's one pool of rollout workers, and
+    stays the run's."""
+
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = _ENTRY_REFUSED_KEYS
+
+    # Rollouts per task, for each of the entry's groups.
+    group_size: int = INHERITED
+    # Center each rollout's reward on the mean of the other members of its group rather than the whole group.
+    leave_one_out_baseline: bool = INHERITED
+    # Fewest trainable rollouts one of the entry's groups needs to train.
+    min_successful_group_size: int = INHERITED
+    # The entry's straggler policy: once ``straggler_quorum`` members of a group have settled, wait at most this many
+    # more seconds for the rest (null: no cutoff). A label's ``train.workflow_config.straggler_policies`` entry wins.
+    straggler_timeout_seconds: float | None = INHERITED
+    # Settled members that start the straggler timeout (null: group_size - 1).
+    straggler_quorum: int | None = INHERITED
+    # Suppress error tokens that would get positive credit, in the entry's rollouts.
+    filter_errors: bool = INHERITED
+    # Retain agent messages as context, with no policy loss for either sign.
+    filter_message_actions: bool = INHERITED
+    # Keep each subagent datum of the entry's rollouts with this probability.
+    subagent_datum_keep_probability: float = INHERITED
+    # Seed of the subagent datum sampling.
+    subagent_datum_sampling_seed: int = INHERITED
+    # The entry's rollout settings, laid over the rollout config its settings are laid over, key by key.
+    rollout_config: EntryRolloutSettings = INHERITED
+
+
+# The keys an entry's ``workflow_config`` may set, and those of its ``rollout_config``.
+ENTRY_WORKFLOW_KEYS: tuple[str, ...] = tuple(item.name for item in fields(EntryWorkflowSettings))
+ENTRY_ROLLOUT_KEYS: tuple[str, ...] = tuple(item.name for item in fields(EntryRolloutSettings))
+
+
+def entry_workflow_problems(value: Any, path: str) -> list[str]:
+    """What is wrong with ``value`` as an entry's ``workflow_config`` (or its ``eval_overrides.workflow_config``) at
+    the dotted ``path``, one problem each: a key it may not set, with why and where it goes, and a value of the wrong
+    type."""
+
+    from platoon.utils.config import validate_config
+
+    if not isinstance(value, Mapping):
+        return [f"{path}: expected a mapping (EntryWorkflowSettings), got {value!r}"]
+    return validate_config(dict(value), EntryWorkflowSettings, path=path)
+
+
 @dataclass
 class EvalOverrides:
     """What an ``environments`` entry changes for its evaluation rollouts (``eval_overrides``): those of every split
@@ -232,20 +369,33 @@ class EvalOverrides:
 
     # Keys people reach for here that are not options, with where they go instead (``platoon.utils.config``).
     UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
-        "max_steps": "the step limit is the phase's rollout setting: eval.workflow_config.rollout_config.max_steps "
-        "(platoon train) or inference.workflow.rollout_config.max_steps (platoon eval)",
-        "inference_params": "sampling is the phase's rollout setting: eval.workflow_config.rollout_config."
-        "inference_params (platoon train) or inference.workflow.rollout_config.inference_params (platoon eval)",
+        "max_steps": "an entry's step limit for its evaluation rollouts is eval_overrides.workflow_config."
+        "rollout_config.max_steps; every entry's is eval.workflow_config.rollout_config.max_steps (platoon train) or "
+        "inference.workflow.rollout_config.max_steps (platoon eval)",
+        "inference_params": "an entry's sampling for its evaluation rollouts is eval_overrides.workflow_config."
+        "rollout_config.inference_params; every entry's is eval.workflow_config.rollout_config.inference_params "
+        "(platoon train) or inference.workflow.rollout_config.inference_params (platoon eval)",
+        "group_size": "an entry's rollouts per task in evaluation are eval_overrides.workflow_config.group_size",
         "dataset_kwargs": "the evaluation tasks come from the entry's eval_dataset_kwargs",
     }
+    # ``workflow_config`` is a mapping as given, checked as the settings an entry may set (platoon.utils.config).
+    FIELD_SCHEMAS: ClassVar[dict[str, Any]] = {"workflow_config": EntryWorkflowSettings}
 
     # Harness options of evaluation rollouts, merged over the entry's ``harness_options``.
     harness_options: dict[str, Any] = field(default_factory=dict)
+    # The entry's settings for its evaluation rollouts, laid over the evaluation's settings for the entry: the keys of
+    # its own workflow_config (EntryWorkflowSettings), such as ``group_size`` and ``rollout_config.max_steps``. They
+    # win over the phase's section (eval.workflow_config; platoon eval applies only their rollout_config, over
+    # inference.workflow.rollout_config).
+    workflow_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.harness_options, Mapping):
             raise ValueError(f"eval_overrides.harness_options must be a mapping, got {self.harness_options!r}")
         self.harness_options = dict(self.harness_options)
+        if problems := entry_workflow_problems(self.workflow_config, "eval_overrides.workflow_config"):
+            raise ValueError("; ".join(problems))
+        self.workflow_config = copy.deepcopy(dict(self.workflow_config))
 
     @classmethod
     def coerce(cls, value: EvalOverrides | Mapping[str, Any] | None) -> EvalOverrides:
@@ -278,6 +428,8 @@ class EnvironmentConfig:
     DEPRECATED_OPTIONS: ClassVar[dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]]] = {
         "service_kwargs": lambda entry: _service_deprecated_options(entry.get("service"))
     }
+    # ``workflow_config`` is a mapping as given, checked as the settings an entry may set (platoon.utils.config).
+    FIELD_SCHEMAS: ClassVar[dict[str, Any]] = {"workflow_config": EntryWorkflowSettings}
 
     # A named environment, ``name[@version]`` (or ``module:attr``): a partial entry that an installed extension
     # registers in the ``platoon.environments`` entry-point group, laid under this entry's own keys when the
@@ -327,6 +479,18 @@ class EnvironmentConfig:
     # positive number, the entries' shares in proportion to their numbers. A mixture's weights are all numbers or
     # all ``tasks``.
     weight: float | Literal["tasks"] = "tasks"
+    # The entry's own training settings, laid over ``train.workflow_config`` for its training groups: the keys that act
+    # on one group or one rollout (EntryWorkflowSettings), such as ``group_size``, ``min_successful_group_size``,
+    # ``leave_one_out_baseline`` and ``rollout_config.max_steps``. A key it leaves out keeps the run's; ``null`` unsets
+    # it. Its rollout settings are also its evaluation's defaults, below the phase's section (eval.workflow_config,
+    # inference.workflow), and ``eval_overrides.workflow_config`` sets what its evaluation rollouts change. ``platoon
+    # config show`` prints each entry's effective settings and where each came from.
+    workflow_config: dict[str, Any] = field(default_factory=dict)
+    # How many policy versions old the entry's training groups may be and still train (null: the run's,
+    # ``train.max_staleness``): the stale filter's bound for its groups. At least the run's, which stays the bound on
+    # how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning
+    # keeps the checkpoints within the largest bound of the run and its entries.
+    max_staleness: int | None = None
     # The environment service: ``harbor``, ``table``, ``python://pkg.module:EnvClass`` (an ORS environment run
     # in process), ``ors+http://host:port/EnvName`` (ORS environment servers) or ``module:Class``.
     service: str | None = None
@@ -371,6 +535,15 @@ class EnvironmentConfig:
             self.eval_overrides = EvalOverrides.coerce(self.eval_overrides)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{where}: {exc}") from exc
+        if problems := entry_workflow_problems(self.workflow_config, "workflow_config"):
+            raise ValueError(f"{where}: " + "; ".join(problems))
+        self.workflow_config = copy.deepcopy(dict(self.workflow_config))
+        staleness = self.max_staleness
+        if staleness is not None and (isinstance(staleness, bool) or not isinstance(staleness, int) or staleness < 0):
+            raise ValueError(
+                f"{where}: max_staleness must be a whole number of policy versions, 0 or more, or null for the run's "
+                f"(train.max_staleness), got {staleness!r}"
+            )
         try:
             self.agents = AgentTreeConfig.coerce(self.agents)
         except (TypeError, ValueError) as exc:
@@ -543,6 +716,17 @@ _FIELD_DEFAULTS = {
     item.name: item.default_factory() if callable(item.default_factory) else item.default
     for item in fields(EnvironmentConfig)
 }
+
+
+def row_entry(row: Any, labels: Sequence[str]) -> str | None:
+    """The label of the environment entry whose task a dataset row holds: its :data:`ENVIRONMENT_COLUMN`, which every
+    row of a mixture has, else the one entry of a run of a single environment (``labels``, the run's entries); None
+    for a row of no entry of the run."""
+
+    label = row.get(ENVIRONMENT_COLUMN) if isinstance(row, Mapping) else None
+    if isinstance(label, str) and label in labels:
+        return label
+    return labels[0] if len(labels) == 1 and label is None else None
 
 
 def platoon_column(name: str) -> bool:

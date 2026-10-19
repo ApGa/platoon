@@ -299,6 +299,8 @@ def config_fields(cls: type) -> list[ConfigField]:
             found.append(ConfigField(info.alias or name, info.annotation, default, doc))
         return found
     hints = typing.get_type_hints(cls)
+    # A free-form mapping that the loader checks against a schema of its own is documented as that schema.
+    schemas = getattr(cls, "FIELD_SCHEMAS", None) or {}
     found = []
     for item in dataclasses.fields(typing.cast(Any, cls)):
         if not item.init:
@@ -310,7 +312,7 @@ def config_fields(cls: type) -> list[ConfigField]:
         else:
             default = "required"
         doc = _with_deprecation(cls, item.name, docs.get(item.name, ""))
-        found.append(ConfigField(item.name, hints.get(item.name, Any), default, doc))
+        found.append(ConfigField(item.name, schemas.get(item.name, hints.get(item.name, Any)), default, doc))
     return found
 
 

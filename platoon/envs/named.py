@@ -35,6 +35,13 @@ mapping, so a mixture that includes a harness with defaults is a config error un
 itself (then no defaults apply).  The loaded config keeps ``env: name@version`` with the version the name
 resolved to, so ``config.resolved.yaml`` pins it.
 
+**Training settings.**  A named environment may ship the rollout settings its tasks were measured with, such as a
+calibrated step budget (``workflow_config: {rollout_config: {max_steps: 30}}``), as the lowest layer of its entry's
+own, which its evaluations inherit beneath the phase's section; the rest of an entry's ``workflow_config`` (the group
+size, the baseline, the minimum group size, the straggler defaults), its ``max_staleness`` and its ``weight`` are
+training strategy, which a run chooses (:data:`FORBIDDEN_KEYS`), and it ships no ``eval_overrides.workflow_config``,
+whose values would win over the run's evaluation settings.
+
 **Tasks left out.**  An entry that selects a named environment sets ``exclude_tasks`` like any entry: its items
 name that environment's tasks, and they leave each list before the named environment's ``limit`` takes its share.
 A named environment may not set ``exclude_tasks`` (:data:`FORBIDDEN_KEYS`): an entry's own list would replace the
@@ -71,10 +78,20 @@ from platoon.train.components import RUN_LEVEL_FIELDS
 logger = logging.getLogger(__name__)
 
 # Keys a named environment may not set: what identifies or weighs an entry in a run (``env``, ``name``,
-# ``weight``), the options of one harness (``harness_options``: use ``harness_defaults``, keyed by harness), the tasks
-# a run leaves out (``exclude_tasks``: an entry's own list would replace the environment's, not add to it, and bring
-# its tasks back unnoticed), and the run-level settings, which are the run's to choose.
-FORBIDDEN_KEYS = frozenset({"env", "name", "weight", "harness_options", "exclude_tasks", *RUN_LEVEL_FIELDS})
+# ``weight``), its staleness bound (``max_staleness``, training strategy too), the options of one harness
+# (``harness_options``: use ``harness_defaults``, keyed by harness), the tasks a run leaves out (``exclude_tasks``: an
+# entry's own list would replace the environment's, not add to it, and bring its tasks back unnoticed), and the
+# run-level settings, which are the run's to choose.  Of ``workflow_config`` it may set ``rollout_config`` only
+# (:data:`SHIPPED_SETTINGS`).
+FORBIDDEN_KEYS = frozenset(
+    {"env", "name", "weight", "max_staleness", "harness_options", "exclude_tasks", *RUN_LEVEL_FIELDS}
+)
+# The keys of an entry's ``workflow_config`` a named environment may ship: the rollout settings its tasks were measured
+# with, which its evaluations inherit beneath the phase's own section. The rest is training strategy, which a run
+# chooses, and a named environment's value would beat the run's train.workflow_config for its entry alone. It ships no
+# ``eval_overrides.workflow_config``: an entry's evaluation overrides win over the phase's section, which a run's
+# eval.workflow_config and an evaluation's inference.workflow must win over.
+SHIPPED_SETTINGS = frozenset({"rollout_config"})
 
 
 @dataclass(frozen=True, init=False)
@@ -84,10 +101,11 @@ class EnvironmentEntry:
     ``EnvironmentEntry(name, version="1", *, description="", harness_defaults=None, **keys)``, where ``keys`` are
     keys of an ``environments`` entry (``service``, ``service_kwargs``, ``harness``, ``program``,
     ``reward_processor``, ``agents``, ``dataset_kwargs``, ...), checked against the config schema when the entry
-    is built.  A run chooses the rest (:data:`FORBIDDEN_KEYS`): ``env``, ``name``, ``weight``, the run-level
-    settings, the tasks it leaves out (``exclude_tasks``; an environment that should not offer a task leaves it out
-    of its own task lists, in a new version), and ``harness_options``, for which ``harness_defaults`` maps a harness
-    name to the options the environment needs from that harness.
+    is built.  A run chooses the rest (:data:`FORBIDDEN_KEYS`): ``env``, ``name``, ``weight``, ``max_staleness``, the
+    run-level settings, the tasks it leaves out (``exclude_tasks``; an environment that should not offer a task leaves
+    it out of its own task lists, in a new version), ``harness_options``, for which ``harness_defaults`` maps a
+    harness name to the options the environment needs from that harness, of ``workflow_config`` all but the
+    rollout settings (``rollout_config``) its tasks were measured with, and ``eval_overrides.workflow_config``.
     """
 
     # The environment's name, ``<owner>-<name>``.
@@ -129,6 +147,20 @@ class EnvironmentEntry:
                 f"{what} sets eval_overrides.harness_options, which a named environment may not set: harness options "
                 "go in harness_defaults, keyed by harness, and the entry that selects the environment sets its own "
                 "eval_overrides"
+            )
+        settings = keys.get("workflow_config")
+        if isinstance(settings, Mapping) and (strategy := sorted(set(settings) - SHIPPED_SETTINGS)):
+            raise ValueError(
+                f"{what} sets workflow_config {strategy}, which a named environment may not set: they are training "
+                "strategy, which a run chooses; a named environment ships the rollout settings its tasks were measured "
+                "with only (workflow_config.rollout_config)"
+            )
+        if isinstance(overrides, Mapping) and "workflow_config" in overrides:
+            raise ValueError(
+                f"{what} sets eval_overrides.workflow_config, which a named environment may not set: an entry's "
+                "evaluation overrides win over the run's eval.workflow_config and an evaluation's inference.workflow; "
+                "ship the rollout settings its tasks were measured with in workflow_config.rollout_config, which its "
+                "evaluations inherit beneath them"
             )
         defaults: dict[str, dict[str, Any]] = {}
         for harness, options in dict(harness_defaults or {}).items():
@@ -391,6 +423,7 @@ __all__ = [
     "BUILTIN_ENVIRONMENTS",
     "EnvironmentEntry",
     "FORBIDDEN_KEYS",
+    "SHIPPED_SETTINGS",
     "accept_entry_point",
     "builtin_environments",
     "environment_source",

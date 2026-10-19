@@ -83,14 +83,14 @@ for the tests.
    Expected output (with your checkout's version of platoon):
 
    ```text
-   harness               kind      distribution   source
-   mini-swe-agent@2.4.6  spec      platoon 0.2.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-   openhands@1.54.0      spec      platoon 0.2.0  platoon/harness/builtin/specs/openhands.toml
-   platoon-bash@1        spec      platoon 0.2.0  platoon/harness/builtin/specs/platoon-bash.toml
-   platoon-codeact@1     function  platoon 0.2.0  platoon.harness.builtin.codeact.harness:codeact
-   platoon-noop@1        function  platoon 0.2.0  platoon.harness.builtin.oracle:noop
-   platoon-oracle@1      function  platoon 0.2.0  platoon.harness.builtin.oracle:oracle
-   platoon-react@1       function  platoon 0.2.0  platoon.harness.builtin.react:react
+   harness                 kind      distribution   source
+   mini-swe-agent@2.4.6    spec      platoon 0.2.0  platoon/harness/builtin/specs/mini-swe-agent.toml
+   openhands@1.54.0.post1  spec      platoon 0.2.0  platoon/harness/builtin/specs/openhands.toml
+   platoon-bash@1          spec      platoon 0.2.0  platoon/harness/builtin/specs/platoon-bash.toml
+   platoon-codeact@1       function  platoon 0.2.0  platoon.harness.builtin.codeact.harness:codeact
+   platoon-noop@1          function  platoon 0.2.0  platoon.harness.builtin.oracle:noop
+   platoon-oracle@1        function  platoon 0.2.0  platoon.harness.builtin.oracle:oracle
+   platoon-react@1         function  platoon 0.2.0  platoon.harness.builtin.react:react
    ```
 
 **Next:** [run the tests](#run-the-tests).

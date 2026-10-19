@@ -1,0 +1,92 @@
+# The effective settings of each environment entry that sets its own: each key's value, where it came
+# from, and the value that layer replaced (platoon config show CONFIG --entry NAME prints one entry's).
+# environments[quick-tasks], training groups:
+#   group_size: 8                                                train.workflow_config
+#   leave_one_out_baseline: false                                default
+#   min_successful_group_size: 4                                 train.workflow_config    (default: 1)
+#   straggler_timeout_seconds: null                              default
+#   straggler_quorum: null                                       default
+#   filter_errors: true                                          default
+#   filter_message_actions: false                                default
+#   subagent_datum_keep_probability: 1.0                         default
+#   subagent_datum_sampling_seed: 0                              default
+#   rollout_config.max_steps: 30                                 entry                    (train.workflow_config: 200)
+#   rollout_config.timeout: 3600                                 train.workflow_config    (default: null)
+#   rollout_config.step_timeout: 300                             default
+#   rollout_config.inference_params.temperature: 1.0             train.workflow_config    (default: null)
+#   rollout_config.inference_params.top_p: null                  default
+#   rollout_config.inference_params.top_k: null                  default
+#   rollout_config.inference_params.max_completion_tokens: 49152 train.workflow_config    (default: null)
+#   rollout_config.sampling_precedence: request                  default
+#   rollout_config.extra: {}                                     default
+#   rollout_config.propagate_root_success: false                 default
+#   rollout_config.skip_subagent_reward_computation: false       default
+#   rollout_config.enable_subagent_verifiers: true               default
+#   max_staleness: 3                                             train.max_staleness
+# environments[quick-tasks], evaluation during training:
+#   group_size: 4                                                eval.workflow_config     (default: 1)
+#   leave_one_out_baseline: false                                default
+#   min_successful_group_size: 1                                 default
+#   straggler_timeout_seconds: null                              default
+#   straggler_quorum: null                                       default
+#   filter_errors: false                                         default
+#   filter_message_actions: false                                default
+#   subagent_datum_keep_probability: 1.0                         default
+#   subagent_datum_sampling_seed: 0                              default
+#   rollout_config.max_steps: 30                                 entry, inherited
+#   rollout_config.timeout: 3600                                 train.workflow_config, inherited
+#   rollout_config.step_timeout: 300                             default
+#   rollout_config.inference_params.temperature: 1.0             train.workflow_config, inherited
+#   rollout_config.inference_params.top_p: null                  default
+#   rollout_config.inference_params.top_k: null                  default
+#   rollout_config.inference_params.max_completion_tokens: 49152 train.workflow_config, inherited
+#   rollout_config.sampling_precedence: request                  default
+#   rollout_config.extra: {}                                     default
+#   rollout_config.propagate_root_success: false                 default
+#   rollout_config.skip_subagent_reward_computation: false       default
+#   rollout_config.enable_subagent_verifiers: true               default
+# environments[slow-tasks], training groups:
+#   group_size: 4                                                entry                    (train.workflow_config: 8)
+#   leave_one_out_baseline: true                                 entry                    (default: false)
+#   min_successful_group_size: 3                                 entry                    (train.workflow_config: 4)
+#   straggler_timeout_seconds: null                              entry
+#   straggler_quorum: null                                       default
+#   filter_errors: true                                          default
+#   filter_message_actions: false                                default
+#   subagent_datum_keep_probability: 1.0                         default
+#   subagent_datum_sampling_seed: 0                              default
+#   rollout_config.max_steps: null                               entry                    (train.workflow_config: 200)
+#   rollout_config.timeout: null                                 entry                    (train.workflow_config: 3600)
+#   rollout_config.step_timeout: 300                             default
+#   rollout_config.inference_params.temperature: 1.0             train.workflow_config    (default: null)
+#   rollout_config.inference_params.top_p: null                  default
+#   rollout_config.inference_params.top_k: null                  default
+#   rollout_config.inference_params.max_completion_tokens: 49152 train.workflow_config    (default: null)
+#   rollout_config.sampling_precedence: request                  default
+#   rollout_config.extra: {}                                     default
+#   rollout_config.propagate_root_success: false                 default
+#   rollout_config.skip_subagent_reward_computation: false       default
+#   rollout_config.enable_subagent_verifiers: true               default
+#   max_staleness: 48                                            entry                    (train.max_staleness: 3, which bounds how far rollouts run ahead)
+# environments[slow-tasks], evaluation during training:
+#   group_size: 1                                                eval_overrides           (eval.workflow_config: 4)
+#   leave_one_out_baseline: false                                default
+#   min_successful_group_size: 1                                 default
+#   straggler_timeout_seconds: null                              default
+#   straggler_quorum: null                                       default
+#   filter_errors: false                                         default
+#   filter_message_actions: false                                default
+#   subagent_datum_keep_probability: 1.0                         default
+#   subagent_datum_sampling_seed: 0                              default
+#   rollout_config.max_steps: null                               entry, inherited
+#   rollout_config.timeout: null                                 entry, inherited
+#   rollout_config.step_timeout: 300                             default
+#   rollout_config.inference_params.temperature: 1.0             train.workflow_config, inherited
+#   rollout_config.inference_params.top_p: null                  default
+#   rollout_config.inference_params.top_k: null                  default
+#   rollout_config.inference_params.max_completion_tokens: 49152 train.workflow_config, inherited
+#   rollout_config.sampling_precedence: request                  default
+#   rollout_config.extra: {}                                     default
+#   rollout_config.propagate_root_success: false                 default
+#   rollout_config.skip_subagent_reward_computation: false       default
+#   rollout_config.enable_subagent_verifiers: true               default

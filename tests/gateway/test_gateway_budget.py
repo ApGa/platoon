@@ -1,7 +1,8 @@
 """The gateway step budget and agent limits: an agent with a call cap gets a final message instead of a sample past
 it (nothing recorded, so nothing trains), a harness that ignores the stop is refused, a rollout mints a bounded
-number of agents over HTTP, whose policy calls all count against the minting agent's cap, and an agent limited to
-policy calls (a harness in a task sandbox) is refused the aux and judge calls the cap does not count."""
+number of agents over HTTP, whose policy calls all count against the minting agent's cap, and an agent whose key
+code the policy runs can read (``policy_only``, a harness in a task sandbox) is refused its judge calls, and its aux
+calls while a cap counts its policy calls, since the cap does not count them."""
 
 from __future__ import annotations
 
@@ -231,7 +232,9 @@ async def test_a_minted_agents_call_in_flight_counts_against_its_parents_cap(gat
 
 
 @pytest.mark.asyncio
-async def test_a_policy_only_agent_and_the_agents_it_mints_are_refused_aux_and_judge_calls(gateway, sampler, server):
+async def test_a_capped_policy_only_agent_and_the_agents_it_mints_are_refused_aux_and_judge_calls(
+    gateway, sampler, server
+):
     sampler.script = [Completion("policy")]
     root = open_root(gateway, call_cap=5)
     root.policy_only = True
@@ -256,6 +259,44 @@ async def test_a_policy_only_agent_and_the_agents_it_mints_are_refused_aux_and_j
 
 
 @pytest.mark.asyncio
+async def test_a_policy_only_agent_without_a_cap_and_the_agents_it_mints_make_aux_calls_but_no_judge_calls(
+    gateway, sampler, server
+):
+    """Without a call cap nothing counts the agent's calls, so an aux call gets it nothing a policy call would not: it
+    is sampled (as a policy call: ``test_gateway_sampling_precedence``) and recorded as an aux call, outside the
+    agent's policy calls.  A judge call is still refused."""
+
+    sampler.script = [Completion("root summary"), Completion("child summary"), Completion("in process")]
+    root = open_root(gateway)
+    root.policy_only = True
+    _, minted = await post(f"{server.base_url}/v1/platoon/agents", {"role": "helper"}, root.api_key)
+    child = gateway.authenticate(minted["api_key"])
+
+    summaries = []
+    for agent in (root, child):
+        async with client(f"{server.base_url}/v1", agent.api_key) as openai_client:
+            summaries.append(
+                await openai_client.chat.completions.create(
+                    model="policy", messages=[USER], extra_headers={CALL_KIND_HEADER: "aux"}
+                )
+            )
+            with pytest.raises(openai.PermissionDeniedError, match="only policy and aux calls.*its judge calls"):
+                await openai_client.chat.completions.create(
+                    model="policy", messages=[USER], extra_headers={CALL_KIND_HEADER: "judge"}
+                )
+    in_process = await gateway.chat(child, ChatRequest.from_params([USER], {}), kind="aux")
+    with pytest.raises(CallKindRefusedError, match="its judge calls are refused"):
+        await gateway.chat(child, ChatRequest.from_params([USER], {}), kind="judge")
+
+    assert [summary.choices[0].message.content for summary in summaries] == ["root summary", "child summary"]
+    assert root.call_kinds == {summaries[0].id: "aux"} and root.call_ids == [summaries[0].id]
+    assert child.call_kinds == {summaries[1].id: "aux", in_process.call_id: "aux"} and child.policy_only
+    assert summaries[0].id in root.interactions and summaries[1].id in child.interactions  # recorded to train
+    assert (root.policy_calls, child.policy_calls, root.call_tally.recorded) == (0, 0, 0)  # no policy call counted
+    assert len(sampler.calls) == 3 and (root.gateway_errors, child.gateway_errors) == (0, 0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "body"),
     [
@@ -275,7 +316,8 @@ async def test_the_refusal_is_the_dialects_permission_error_before_any_stream(ga
             status, content_type, payload = response.status, response.content_type, await response.json()
 
     assert (status, content_type) == (403, "application/json")
-    assert payload["error"]["type"] == "permission_error" and "only policy calls" in payload["error"]["message"]
+    assert payload["error"]["type"] == "permission_error"
+    assert "its judge calls are refused" in payload["error"]["message"]
     if path == "/v1/messages":
         assert payload["type"] == "error"  # Anthropic's error envelope
     assert sampler.calls == [] and agent.calls == []
@@ -295,14 +337,29 @@ async def test_a_policy_only_agent_s_judge_call_is_refused_for_its_kind_not_by_t
     assert sampler.calls == [] and agent.calls == [] and "judges_refused" not in agent.misc
 
 
-def test_an_agent_not_limited_to_policy_calls_keeps_aux_and_judge(gateway):
-    agent = open_root(gateway)
+@pytest.mark.parametrize(
+    ("policy_only", "call_cap", "allowed"),
+    [
+        (False, None, {"policy", "aux", "judge"}),
+        (False, 3, {"policy", "aux", "judge"}),  # a harness on the rollout host: the cap counts its policy calls
+        (True, None, {"policy", "aux"}),  # no cap: nothing counts its policy calls either
+        (True, 3, {"policy"}),  # the cap would not count an aux call
+        (True, 0, {"policy"}),
+    ],
+)
+def test_the_kinds_an_agent_may_make(gateway, policy_only, call_cap, allowed):
+    agent = open_root(gateway, call_cap=call_cap)
+    agent.policy_only = policy_only
+
     for kind in ("policy", "aux", "judge"):
-        agent.check_kind(kind)
-    agent.policy_only = True
-    agent.check_kind("policy")
-    with pytest.raises(CallKindRefusedError, match="its aux calls are refused"):
-        agent.check_kind("aux")
+        if kind in allowed:
+            agent.check_kind(kind)
+        else:
+            with pytest.raises(CallKindRefusedError, match=f"its {kind} calls are refused"):
+                agent.check_kind(kind)
+    # The aux calls an agent with policy_only makes sample as its policy calls (sampling_precedence: config).
+    sampled_as = {kind: agent.sampling_kind(kind) for kind in ("policy", "aux", "judge")}
+    assert sampled_as == {"policy": "policy", "aux": "policy" if policy_only else "aux", "judge": "judge"}
 
 
 def test_the_mint_limit_defaults_from_the_environment(make_gateway, monkeypatch):

@@ -104,7 +104,7 @@ def run_batches(
         stats_logger=SimpleNamespace(log=lambda *, step, stats: logged.append(stats)),
     )
 
-    async def produce(_shared, _workflow, _queue, results):
+    async def produce(_shared, _workflow, _queue, results, rows=None):
         for output in outputs:
             results.put_nowait(output)
 

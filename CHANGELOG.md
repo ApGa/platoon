@@ -50,6 +50,60 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
 - **The `hpc` extra takes hpc-sandbox 0.4** (`hpc-sandbox>=0.4.0,<0.5`), whose singularity provider has the
   `fakeroot` option that verifiers that run as root need (above), so pip upgrades an hpc-sandbox 0.3 it finds.
   Sandboxes started without `fakeroot` behave as with 0.3.
+- **The `openhands` harness condenses at a token count.** Its new option `condenser_max_tokens` gives its summarizing
+  condenser a token trigger, and runs that condenser whatever `condenser` says: before each model call, it condenses
+  once the prompt the agent would send is longer than that many tokens, summarizing the oldest turns after the system
+  prompt and the task until the rest fits in half the trigger. `condenser_max_tokens: 104857` condenses at 80% of a
+  131072-token context window; a trigger that a prompt passes with nothing left to forget, such as one below the
+  agent's first prompt, can never be met, and is set aside with a line in the harness log. The runner asks the
+  gateway for each count (`POST /v1/messages/count_tokens`), so it is the length of the prompt the gateway renders
+  with the policy's renderer; where a hosted model's provider gives no count, the SDK's estimate counts, and a prompt
+  that still overflows the window condenses as before. The summaries are the agent's `aux` calls (below), trained
+  with the rollout's advantage. The default, 0, sets no trigger and counts no tokens
+  ([`openhands`](docs/tutorials/builtin-harnesses.md#openhands)).
+- **The `openhands` harness's condenser keeps the task and shows its summary call what happened.** The spec is now
+  `openhands@1.54.0.post1`, from the same toolchain, and a config that names `openhands@1.54.0` gets it. With
+  `condenser: llm_summarizing` or a token trigger, the summary call reads each forgotten turn whole: the commands it
+  ran, their whole output and an earlier summary entire, where the SDK's condenser showed it 500 characters of each
+  and no tool call's arguments. A condensation that resets the whole context keeps the system prompt and the task,
+  which the SDK's summarized away with the rest, and one for the token trigger forgets only what it takes to get
+  under half the trigger. A summary call answered without text (a tool call, or a completion cut short in its
+  reasoning) still condenses, with a notice in the summary's place that the earlier turns were dropped, where the
+  SDK's condenser dropped them and said nothing.
+- **The `openhands` condenser's summary calls are `aux` calls.** The runner marks each summary call with
+  `X-Platoon-Call-Kind: aux`, and the agent's own turns stay `policy` calls. A summary's trajectory step now says
+  `kind: aux` in its `action_misc`, and an evaluation report counts the summaries under `usage.aux` rather than
+  `usage.policy`. They train as before, with the rollout's advantage, each condensation still takes one of the
+  agent's steps (`max_steps`), and the step counts in training and evaluation metrics still count each summary as a
+  step. For this the gateway now takes `aux` calls from a harness in a task sandbox, where code the policy runs can
+  read the agent's key, unless a gateway step budget (`[budget] enforce = "gateway"`) counts its calls: that budget
+  does not count `aux` calls, so under it they are still refused (403). Without one the gateway counts none of the
+  harness's calls, and it samples the harness's `aux` calls as its policy calls, also under
+  `sampling_precedence: config`, where an `aux` call elsewhere keeps its own parameters; so an `aux` call gets that
+  code nothing that a policy call would not. Its `judge` calls are still refused in every case
+  ([how a run ends](docs/how-to/sandboxes-and-harbor.md#3-how-a-run-ends)).
+- **Each environment of a mixture sets the training settings of its own groups.** An entry's `workflow_config` is laid
+  over `train.workflow_config` for its groups: its `group_size`, its baseline (`leave_one_out_baseline`), its
+  `min_successful_group_size`, its straggler defaults, its error filters and subagent datum sampling, and its rollout
+  settings (`rollout_config`: `max_steps`, `timeout`, sampling and the rest), so a dataset's calibrated step budget and
+  a slow environment's fewer, longer rollouts sit beside the run's. Its rollout settings are its evaluations'
+  defaults, below `eval.workflow_config` (and in `platoon eval`, below `inference.workflow`), and
+  `eval_overrides.workflow_config` sets what its evaluation rollouts change. An entry's `max_staleness` raises the
+  staleness bound of its own groups, while `train.max_staleness` stays the bound on how far rollouts run ahead, and
+  recovery pruning keeps the checkpoints within the largest bound. Loading refuses a key that acts on microbatches or
+  on the run's rollout workers with where to set it, an entry bound below the run's, and an entry's settings beside a
+  workflow class that does not apply them (exit 78). Named environments may ship rollout settings
+  (`workflow_config.rollout_config`) only. `platoon config show` prints each entry's effective settings with the
+  layer each came from (`--entry NAME` for one), `platoon config validate` and `platoon train` say what each entry
+  changes, and `lock.json` records it (`entry_settings`). `max_concurrent_rollouts` counts rollouts that groups of
+  different sizes share. A label at its `rollout_group_limits` no longer stalls the others, in every config that sets
+  limits: its waiting rows neither fill the pending batch nor count toward the batches `train.max_staleness` lets the
+  run draw ahead, and past four batches of them its new rows are skipped and counted (`train/batch/skipped_rows`). So
+  a capped label whose limit cannot keep up with its share trains less than its weight, and the rows still waiting
+  when a run ends never train (`train/batch/parked_rows` counts them each step); `platoon train` and `platoon config
+  validate` warn of a `max_concurrent_rollouts` that the capped labels' groups can fill. Each step also logs each
+  label's `stale_groups` and `num_steps`
+  ([Settings per environment](docs/how-to/train-and-eval.md#settings-per-environment)).
 
 ## 0.2.1 (2026-10-19)
 

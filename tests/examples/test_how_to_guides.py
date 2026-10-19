@@ -131,7 +131,7 @@ def test_links_and_anchors_resolve(guide):
         ("platoon/train/tinker/checkpoint_pruning.py", '"checkpoint.keep_recovery needs train.max_staleness: '),
         (
             "platoon/train/tinker/checkpoint_pruning.py",
-            "{keep_recovery * recovery_every} must exceed train.max_staleness: ",
+            "{keep_recovery * recovery_every} must exceed {bound}: {max_staleness}{largest}: a recovery checkpoint ",
         ),
         ("platoon/train/tinker/checkpoint_pruning.py", '"Could not delete recovery checkpoint %s: %s'),
         (

@@ -861,10 +861,11 @@ def test_a_judge_call_is_refused_while_judges_are_off_and_sends_nothing(provider
     assert provider.requests == [] and agent.misc["judges_refused"]["count"] == 2
 
 
-def test_a_policy_only_agent_s_aux_and_judge_calls_are_refused_and_send_nothing(provider):
+def test_a_capped_policy_only_agent_s_aux_and_judge_calls_are_refused_and_send_nothing(provider):
     gateway = make_gateway(provider)
     agent = open_agent(gateway)
     agent.policy_only = True  # a harness in a task sandbox, where the policy's code can read the agent's key
+    agent.call_cap = 5  # under a gateway step budget, which counts only its policy calls
     agent.judges = False
 
     for kind in ("aux", "judge"):
@@ -875,6 +876,22 @@ def test_a_policy_only_agent_s_aux_and_judge_calls_are_refused_and_send_nothing(
 
     assert provider.requests == [] and agent.calls == []
     assert "judges_refused" not in agent.misc  # a kind the agent may never make is no judge the switch refused
+
+
+def test_a_policy_only_agent_without_a_cap_forwards_its_aux_calls_and_none_of_its_judge_calls(provider):
+    gateway = make_gateway(provider)
+    agent = open_agent(gateway)
+    agent.policy_only = True  # no call cap: its harness keeps its own step limit
+    agent.judges = False
+
+    with pytest.raises(CallKindRefusedError, match="its judge calls are refused"):
+        forward(gateway, agent, "openai_chat", CHAT_BODY, kind="judge")
+    relay = forward(gateway, agent, "openai_chat", CHAT_BODY, kind="aux")
+
+    assert relay.status == 200 and len(provider.calls(CHAT)) == 1
+    (call,) = agent.calls
+    assert agent.call_kind(call.call_id) == "aux" and agent.policy_calls == 0
+    assert "judges_refused" not in agent.misc
 
 
 def test_a_hosted_policy_call_counts_against_the_call_cap_while_it_is_in_flight(provider):
@@ -945,7 +962,8 @@ def test_a_call_the_backend_failed_counts_as_a_gateway_error(provider, fault, er
 def test_sampling_precedence_config_decides_a_hosted_policy_call_s_sampling(provider, dialect, path, body, budget):
     """With sampling_precedence: config, a policy call samples as the rollout says, never as its harness asks: the
     rollout's temperature and completion budget take the place of the call's own, and its top_p and top_k go (the
-    rollout sets neither, so the server's defaults stand).  An aux call keeps its own."""
+    rollout sets neither, so the server's defaults stand).  An aux call keeps its own, but one of an agent whose key
+    code the policy runs can read (``policy_only``) is sent as its policy calls are."""
 
     gateway = make_gateway(provider)
     defaults = SamplingOverrides(max_tokens=300, temperature=0.3, precedence="config")
@@ -954,8 +972,11 @@ def test_sampling_precedence_config_decides_a_hosted_policy_call_s_sampling(prov
 
     forward(gateway, agent, dialect, {**body, **own})
     forward(gateway, agent, dialect, {**body, **own}, kind="aux")
+    agent.policy_only = True  # a harness in a task sandbox, without a call cap
+    forward(gateway, agent, dialect, {**body, **own}, kind="aux")
 
-    policy, aux = (call["body"] for call in provider.calls(path))
+    policy, aux, sandboxed_aux = (call["body"] for call in provider.calls(path))
+    assert sandboxed_aux == policy
     budgets = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
     assert (policy["temperature"], policy[budget]) == (0.3, 300)
     assert not ({"top_p", "top_k"} | (budgets - {budget})) & set(policy)

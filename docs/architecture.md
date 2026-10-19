@@ -82,8 +82,10 @@ flowchart LR
 ### One training step
 
 1. The trainer's dataloader admits tasks while the train step is within `train.max_staleness` of the batch
-   being collected.
-2. For each task, `GroupRolloutWorkflow` runs `group_size` rollouts. With
+   being collected; with `train.rollout_group_limits`, the rows of a label at its limit wait beside the batch and
+   do not count toward it.
+2. For each task, `GroupRolloutWorkflow` runs `group_size` rollouts, with the settings of the task's environment
+   entry (its own `workflow_config` laid over `train.workflow_config`). With
    `train.workflow_config.rollout_isolation: process`, each rollout runs in its own worker process, which
    follows the trainer's latest sampling weights.
 3. In the worker, `harness_rollout` opens an env session for the task, starts the gateway, runs the
@@ -93,7 +95,8 @@ flowchart LR
    merging, with the trajectory's reward as its provisional advantage.
 5. Back in the workflow, the group's completed roots set the baseline (the group mean, or leave-one-out),
    every datum is centered, and the group's datums are queued.
-6. The trainer drops rollouts older than `max_staleness`, applies batch transforms per microbatch (such as
+6. The trainer drops rollouts older than their entry's staleness bound (its `max_staleness`, else
+   `train.max_staleness`), applies batch transforms per microbatch (such as
    depth weighting), skips datums with zero advantage while keeping their share of the loss normalization,
    runs `forward_backward` and `optim_step`, saves weights and publishes the new sampler to the workers.
 
@@ -417,16 +420,19 @@ sandbox reaches through its route.
 | `judge` | no | no; kept for audit under the trajectory's `judge_calls` |
 
 A gateway step budget (`AgentSession.call_cap`) counts the policy calls of the capped agent and of every agent
-minted under it over HTTP together. A harness in a task sandbox, where code the policy runs can read its key, may
-make only policy calls: the server answers its `aux` and `judge` calls with a permission error (403).
+minted under it over HTTP together. A harness in a task sandbox, where code the policy runs can read its key
+(`AgentSession.policy_only`), makes no `judge` calls, and no `aux` calls under a gateway step budget, which would
+not count them: the server answers those with a permission error (403). Without a gateway step budget its `aux`
+calls are sampled, recorded and trained as its policy calls are (`AgentSession.sampling_kind`), and the gateway
+counts neither.
 
 **Sampling.** A rollout's `inference_params` (`temperature`, `top_p`, `top_k`, `max_completion_tokens`) are the
 default sampling of every agent in its tree. A parameter the call sets wins, then the rollout's default, then the
 gateway's own (temperature 1, top_p 1, no top-k cutoff, 4096 completion tokens). With the rollout's
 `sampling_precedence: config`, a policy call samples with the rollout's temperature, top_p and top_k (or the
-gateway's), never its own. The completion budget is clamped to the context
-the prompt leaves, and a prompt that overflows the context window gets the dialect's native context-length
-error, so a harness can condense its context instead of retrying.
+gateway's), never its own, and so does an `aux` call of a harness in a task sandbox. The completion budget is
+clamped to the context the prompt leaves, and a prompt that overflows the context window gets the dialect's native
+context-length error, so a harness can condense its context instead of retrying.
 
 **Hosted models.** For evaluation, a `HostedGateway` (`platoon/gateway/hosted.py`) puts a hosted model behind
 the same agents, call kinds, budgets and records (`inference.hosted`). Each call goes to one base URL in the
