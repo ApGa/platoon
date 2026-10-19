@@ -1,0 +1,36 @@
+# Train a LoRA on a Harbor dataset with the platoon-bash agent, and evaluate it on held-out tasks as it trains.
+#
+#   platoon prepare examples/harbor-dataset/train.yaml   # once, and after any change to the environment entry
+#   platoon train examples/harbor-dataset/train.yaml
+#
+# In Harbor's words: the environment entry is a dataset, the harness is the agent, and the sandbox provider (the site
+# profile's, else docker) is the environment. examples/harbor-dataset/README.md walks through it.
+
+environments:
+  - name: data-questions
+    service: harbor
+    service_kwargs:
+      dataset: ./dataset                          # a directory of Harbor tasks; or hf://<org>/<name>@<commit>
+      index: [{metadata: [topic]}]                # record each task.toml's [metadata] topic
+      holdout: {fraction: 0.25, group_by: topic}  # whole topics held out: the eval split; train gets the rest
+    harness: platoon-bash
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 6                                   # tasks per step: all six training tasks
+  max_training_steps: 10
+  workflow_config:
+    group_size: 4                                 # rollouts per task; rewards are centered within the group
+    rollout_config:
+      max_steps: 10                               # model calls per episode
+      inference_params: {max_completion_tokens: 1024}
+
+eval:
+  every: 5                                        # the held-out tasks every 5 steps,
+  at_start: true                                  # and at step 0, before the first update: the base model
+
+stats:
+  experiment_name: harbor-dataset                 # the run directory: <runs>/harbor-dataset/qwen3-4b
+  trial_name: qwen3-4b
+  wandb: {mode: disabled}                         # or mode online, to log to Weights & Biases (needs WANDB_API_KEY)

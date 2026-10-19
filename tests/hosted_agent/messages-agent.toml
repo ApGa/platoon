@@ -1,0 +1,32 @@
+# dialect-agent speaking anthropic_messages, streamed, for the hosted-model tests (tests/test_eval_hosted.py): the
+# environment's tools over MCP, the model through the gateway in its own dialect.
+name = "hostedtest-messages-agent"
+version = "1"
+dialect = "anthropic_messages"
+timeout_s = 600
+max_steps = 30
+
+[launch]
+argv = [
+    "python3", "{state_dir}/dialect_agent.py",
+    "--dialect", "anthropic_messages",
+    "--base-url", "{base_url}/v1",
+    "--model", "{model}",
+    "--instruction-file", "{state_dir}/instruction.md",
+    "--final-message-file", "{state_dir}/final_message.txt",
+    "--max-turns", "{max_steps}",
+    "--stream",
+]
+env = { PLATOON_API_KEY = "{api_key}" }
+files = { "instruction.md" = "{instruction}" }
+assets = { "dialect_agent.py" = "dialect_agent.py", "platoon_bash.py" = "../../platoon/harness/builtin/platoon_bash.py" }
+
+[mcp]
+enabled = true
+args = ["--mcp-url", "{mcp_url}"]
+
+[final_message]
+file = "{state_dir}/final_message.txt"
+
+[exit_codes]
+3 = "completed"  # turn limit: the policy ran out of turns, a scored outcome

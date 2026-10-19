@@ -1,0 +1,1 @@
+The file `sales.csv` in the working directory lists the units sold each month and their unit price. Write the month in which the most units were sold, as it is written in the file, to a file named `answer.txt` in the working directory.

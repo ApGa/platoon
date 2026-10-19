@@ -1,0 +1,19 @@
+version = "1.0"
+
+[verifier]
+timeout_sec = 30.0
+
+[environment]
+docker_image = "python:3.12-slim"
+network_mode = "no-network"
+
+[[environment.mcp_servers]]
+name = "calculator"
+transport = "stdio"
+command = "python"
+args = ["-m", "calculator_server"]
+
+[[environment.mcp_servers]]
+name = "docs"
+transport = "http"
+url = "http://localhost:8000/mcp"

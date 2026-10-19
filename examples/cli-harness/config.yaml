@@ -1,0 +1,23 @@
+# Evaluate a policy with tiny-agent, a command-line agent wrapped by a TOML harness spec, on number search.
+#
+# From the repository root:
+#
+#   uv run platoon rollout examples/cli-harness/config.yaml --task val:0
+#   uv run platoon eval examples/cli-harness/config.yaml
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  output_dir: ./runs/cli-harness
+  workflow:
+    num_concurrent_workers: 8
+    rollout_config:
+      max_steps: 12          # rendered as {max_steps}: tiny-agent's --max-turns
+      timeout: 300           # seconds; the spec's timeout_s also applies, the earlier wins
+      verbose: false
+      inference_params: {max_completion_tokens: 512}
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: tiny-agent.toml   # a spec path, relative to this file
+    eval_dataset_kwargs: {split_name: val, limit: 20}

@@ -1,0 +1,621 @@
+{
+ "format": 1,
+ "scenario": "textcraft_synth_timeout_during_launch",
+ "result": {
+  "status": "timeout",
+  "final_message": null,
+  "error": "Cell did not finish within 2 seconds"
+ },
+ "outcome": {
+  "status": "scored",
+  "rewards": {
+   "reward": 0.0
+  },
+  "primary": "reward",
+  "reason": "no_submit",
+  "failure_kind": null,
+  "metadata": {
+   "tool_calls": 0
+  }
+ },
+ "trajectories": {
+  "root": {
+   "parent": null,
+   "fork_step": null,
+   "depth": 0,
+   "task": {
+    "goal": null,
+    "id": "train-medium:0",
+    "max_steps": null,
+    "misc": {
+     "ors": {
+      "split": "train-medium",
+      "index": 0,
+      "name": "textcraft_synth.train.0"
+     }
+    },
+    "fork_strategy": "subtask"
+   },
+   "reward": 0.0,
+   "finish_message": null,
+   "error_message": "Cell did not finish within 2 seconds",
+   "misc": {
+    "agent": {
+     "role": "policy"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 24,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     }
+    ],
+    "agent_result": {
+     "status": "timeout",
+     "error": "Cell did not finish within 2 seconds"
+    },
+    "outcome": {
+     "status": "scored",
+     "rewards": {
+      "reward": 0.0
+     },
+     "reason": "no_submit",
+     "reward_key": "reward"
+    }
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "You are an agent in a crafting game. Your goal is to craft items by combining ingredients.",
+       "You have access to an inventory of existing ingredients, which are sufficient to craft the target items; though, you may need to craft intermediate ingredients first.",
+       "",
+       "Note: If you already have one of the target items in your inventory, you should craft the requested number of the target on top of what you already have.",
+       "For example, if you already have 2 wooden_pickaxes but your goal is to craft 3, your inventory should end up with 5 wooden_pickaxes.",
+       "",
+       "<TIPS>",
+       "CRAFTING STRATEGY:",
+       "- Recipes produce fixed quantities per execution - you cannot craft arbitrary amounts",
+       "  Example: If a recipe produces 2 items, you can only craft in multiples of 2 (2, 4, 6...)",
+       "- Recipe ingredients scale with the number of times you execute it",
+       "  Example: Recipe \"2 ore → 2 items\" means 2 ore for 1 execution, 4 ore for 2 executions",
+       "- Always verify what you have before claiming something is impossible",
+       "- Check your inventory and recipe information to confirm ingredient availability",
+       "- Calculate carefully: if a recipe uses 2 ingredients to make 2 items, you need exactly 2 ingredients for 2 items",
+       "",
+       "DELEGATION STRATEGY:",
+       "- It is **highly recommended** to delegate crafting of intermediate ingredients",
+       "- Break complex tasks into INDEPENDENT subtasks that can be solved separately",
+       "- For tasks that are sufficiently complex, it is recommended to recursively delegate; i.e., subagents can further delegate to other subagents.",
+       "- Delegate one group of related items at a time, not everything at once",
+       "- Use crafting depth from get_info() to estimate budget requirements:",
+       "  * crafting_depth indicates complexity (0=base item, 1=direct craft, 2+=needs intermediates)",
+       "  * Budget heuristic: depth × 8-10 steps (depth=4 needs ~32-40 steps, depth=8 needs ~64-80 steps)",
+       "  * Always check crafting_depth before delegating to avoid under-budgeting",
+       "- Items can be delegated in parallel if they don't depend on each other",
+       "- Reserve budget for yourself to do final assembly after subtasks complete",
+       "- Delegated tasks share your inventory - results are immediately available",
+       "- **IMPORTANT**: `launch_subagent` is an async function, you MUST use `await`:",
+       "  * CORRECT: `await launch_subagent({\"item\": 1}, 20)`",
+       "  * CORRECT: `await asyncio.gather(launch_subagent(...), launch_subagent(...))`",
+       "  * WRONG: `launch_subagent({\"item\": 1}, 20)` -- missing await, will error",
+       "</TIPS>",
+       "",
+       "You can perform an action by writing a block of code. You will get multiple steps to complete the task.",
+       "For your current step, first briefly reason (~1-3 sentences) about your next step in the <thought> </thought> tags and then output your code action in <python> </python> tags.",
+       "Your code cell will be executed inside a jupyter notebook and the output will be shown to you.<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Craft the following items: 3x a1_i5",
+       "Budget: You have a total budget of 40 steps to complete this task.",
+       "",
+       "# Action Space",
+       "",
+       "Available Actions (python functions):",
+       "",
+       "1. def craft(ingredients: dict, target: tuple[str, int]) -> str",
+       "   Craft items using ingredients from your inventory.",
+       "   - ingredients: Dict of {item_name: count} to consume",
+       "   - target: (item_name, total_count) where total_count must be divisible by recipe result_count",
+       "   - Example: craft({\"m0_i1\": 2, \"m1_i1\": 1}, (\"m2_i2\", 2))",
+       "",
+       "2. def get_info(items: list) -> list[dict]",
+       "   Get recipe information for items.",
+       "   - Returns: List with {\"item\": str, \"can_craft\": bool, \"is_base\": bool,",
+       "                         \"in_inventory\": int, \"crafting_depth\": int, \"recipes\": [...]}",
+       "   - crafting_depth indicates complexity: 0=base item, 1=direct craft, 2+=needs intermediate steps",
+       "   - Each recipe shows {\"ingredients\": {...}, \"result_count\": int}",
+       "   - Example: get_info([\"m2_i2\", \"raw_m0\"])",
+       "",
+       "3. def view_inventory() -> dict",
+       "   View your current inventory.",
+       "   - Returns: Dict of {item_name: count}",
+       "   - Example: inv = view_inventory()",
+       "",
+       "4. def finish(message: str) -> str",
+       "   Complete the task.",
+       "   - Example: finish(\"Successfully crafted all required items\")",
+       "",
+       "5. async def launch_subagent(targets: dict, num_steps: int, context: str = \"\") -> str",
+       "   Launch a subagent to craft specific targets (shares your inventory).",
+       "   - targets: Dict of {item_name: count} to craft",
+       "   - num_steps: Budget for subagent",
+       "     * Use crafting_depth from get_info() to estimate: depth × 8-10 steps",
+       "     * Example: depth=4 needs ~32-40 steps, depth=8 needs ~64-80 steps",
+       "   - context: Optional context string for the subagent",
+       "   - Sequential: await launch_subagent({\"m0_i2\": 4}, 20)",
+       "   - Parallel: results = await asyncio.gather(",
+       "                 launch_subagent({\"m0_i2\": 4}, 20),",
+       "                 launch_subagent({\"c1_i2\": 3}, 15)",
+       "               )",
+       "   - Returns: Subagent's finish message (or list if using gather)",
+       "",
+       "Note: `asyncio` is already imported. Use `await asyncio.gather(...)` to run subtasks in parallel",
+       "or `await launch_subagent()` for a single subtask. **Do not forget to await** the results.",
+       "",
+       "",
+       "Now, please reason and then provide the next python cell that you would like to take. Think step-by-step before writing the jupyter code block. Output only one code block at a time formatted as follows <thought>Brief 1-3 sentence reasoning.</thought>\\n<python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>print(await launch_subagent({'a9_i1': 1}, 5))</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 1314,
+       "completion_tokens": 24,
+       "total_tokens": 1338
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>print(await launch_subagent({'a9_i1': 1}, 5))</python>"
+     },
+     "thought": "",
+     "code": "print(await launch_subagent({'a9_i1': 1}, 5))",
+     "output": null,
+     "error": "Cell did not finish within 2 seconds",
+     "reward_misc": {
+      "reward/success": 0.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 1337,
+      "sha256": "fbaeb4b3bf8fe809"
+     },
+     "advantages": "0.0*1337",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*1313 -0.5*24",
+     "mask": "0.0*1313 1.0*24",
+     "target_tokens": {
+      "length": 1337,
+      "sha256": "cc316c8939b3fe49"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "1.0*1"
+    }
+   ]
+  },
+  "root > Craft the following items: 1x a9_i1": {
+   "parent": "root",
+   "fork_step": 1,
+   "depth": 1,
+   "task": {
+    "goal": "Craft the following items: 1x a9_i1",
+    "id": "<uuid>",
+    "max_steps": 5,
+    "misc": {
+     "ors": {
+      "split": "train-medium",
+      "index": 0,
+      "name": "textcraft_synth.train.0"
+     },
+     "target_items": {
+      "a9_i1": 1
+     }
+    },
+    "fork_strategy": "subtask",
+    "parent_tasks": [
+     null
+    ]
+   },
+   "reward": 0.0,
+   "finish_message": null,
+   "error_message": "The agent was cancelled",
+   "misc": {
+    "agent": {
+     "role": "subagent"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 19,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 13,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     }
+    ],
+    "agent_result": {
+     "status": "cancelled",
+     "error": "The agent was cancelled"
+    },
+    "trajectory_cancelled": true
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "You are an agent in a crafting game. Your goal is to craft items by combining ingredients.",
+       "You have access to an inventory of existing ingredients, which are sufficient to craft the target items; though, you may need to craft intermediate ingredients first.",
+       "",
+       "Note: If you already have one of the target items in your inventory, you should craft the requested number of the target on top of what you already have.",
+       "For example, if you already have 2 wooden_pickaxes but your goal is to craft 3, your inventory should end up with 5 wooden_pickaxes.",
+       "",
+       "<TIPS>",
+       "CRAFTING STRATEGY:",
+       "- Recipes produce fixed quantities per execution - you cannot craft arbitrary amounts",
+       "  Example: If a recipe produces 2 items, you can only craft in multiples of 2 (2, 4, 6...)",
+       "- Recipe ingredients scale with the number of times you execute it",
+       "  Example: Recipe \"2 ore → 2 items\" means 2 ore for 1 execution, 4 ore for 2 executions",
+       "- Always verify what you have before claiming something is impossible",
+       "- Check your inventory and recipe information to confirm ingredient availability",
+       "- Calculate carefully: if a recipe uses 2 ingredients to make 2 items, you need exactly 2 ingredients for 2 items",
+       "",
+       "DELEGATION STRATEGY:",
+       "- It is **highly recommended** to delegate crafting of intermediate ingredients",
+       "- Break complex tasks into INDEPENDENT subtasks that can be solved separately",
+       "- For tasks that are sufficiently complex, it is recommended to recursively delegate; i.e., subagents can further delegate to other subagents.",
+       "- Delegate one group of related items at a time, not everything at once",
+       "- Use crafting depth from get_info() to estimate budget requirements:",
+       "  * crafting_depth indicates complexity (0=base item, 1=direct craft, 2+=needs intermediates)",
+       "  * Budget heuristic: depth × 8-10 steps (depth=4 needs ~32-40 steps, depth=8 needs ~64-80 steps)",
+       "  * Always check crafting_depth before delegating to avoid under-budgeting",
+       "- Items can be delegated in parallel if they don't depend on each other",
+       "- Reserve budget for yourself to do final assembly after subtasks complete",
+       "- Delegated tasks share your inventory - results are immediately available",
+       "- **IMPORTANT**: `launch_subagent` is an async function, you MUST use `await`:",
+       "  * CORRECT: `await launch_subagent({\"item\": 1}, 20)`",
+       "  * CORRECT: `await asyncio.gather(launch_subagent(...), launch_subagent(...))`",
+       "  * WRONG: `launch_subagent({\"item\": 1}, 20)` -- missing await, will error",
+       "</TIPS>",
+       "",
+       "You can perform an action by writing a block of code. You will get multiple steps to complete the task.",
+       "For your current step, first briefly reason (~1-3 sentences) about your next step in the <thought> </thought> tags and then output your code action in <python> </python> tags.",
+       "Your code cell will be executed inside a jupyter notebook and the output will be shown to you.<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Craft the following items: 1x a9_i1",
+       "Budget: You have a total budget of 5 steps to complete this task.",
+       "",
+       "# Action Space",
+       "",
+       "Available Actions (python functions):",
+       "",
+       "1. def craft(ingredients: dict, target: tuple[str, int]) -> str",
+       "   Craft items using ingredients from your inventory.",
+       "   - ingredients: Dict of {item_name: count} to consume",
+       "   - target: (item_name, total_count) where total_count must be divisible by recipe result_count",
+       "   - Example: craft({\"m0_i1\": 2, \"m1_i1\": 1}, (\"m2_i2\", 2))",
+       "",
+       "2. def get_info(items: list) -> list[dict]",
+       "   Get recipe information for items.",
+       "   - Returns: List with {\"item\": str, \"can_craft\": bool, \"is_base\": bool,",
+       "                         \"in_inventory\": int, \"crafting_depth\": int, \"recipes\": [...]}",
+       "   - crafting_depth indicates complexity: 0=base item, 1=direct craft, 2+=needs intermediate steps",
+       "   - Each recipe shows {\"ingredients\": {...}, \"result_count\": int}",
+       "   - Example: get_info([\"m2_i2\", \"raw_m0\"])",
+       "",
+       "3. def view_inventory() -> dict",
+       "   View your current inventory.",
+       "   - Returns: Dict of {item_name: count}",
+       "   - Example: inv = view_inventory()",
+       "",
+       "4. def finish(message: str) -> str",
+       "   Complete the task.",
+       "   - Example: finish(\"Successfully crafted all required items\")",
+       "",
+       "5. async def launch_subagent(targets: dict, num_steps: int, context: str = \"\") -> str",
+       "   Launch a subagent to craft specific targets (shares your inventory).",
+       "   - targets: Dict of {item_name: count} to craft",
+       "   - num_steps: Budget for subagent",
+       "     * Use crafting_depth from get_info() to estimate: depth × 8-10 steps",
+       "     * Example: depth=4 needs ~32-40 steps, depth=8 needs ~64-80 steps",
+       "   - context: Optional context string for the subagent",
+       "   - Sequential: await launch_subagent({\"m0_i2\": 4}, 20)",
+       "   - Parallel: results = await asyncio.gather(",
+       "                 launch_subagent({\"m0_i2\": 4}, 20),",
+       "                 launch_subagent({\"c1_i2\": 3}, 15)",
+       "               )",
+       "   - Returns: Subagent's finish message (or list if using gather)",
+       "",
+       "Note: `asyncio` is already imported. Use `await asyncio.gather(...)` to run subtasks in parallel",
+       "or `await launch_subagent()` for a single subtask. **Do not forget to await** the results.",
+       "",
+       "",
+       "Now, please reason and then provide the next python cell that you would like to take. Think step-by-step before writing the jupyter code block. Output only one code block at a time formatted as follows <thought>Brief 1-3 sentence reasoning.</thought>\\n<python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": {
+      "$lines": [
+       "<python>await asyncio.sleep(1.0)",
+       "print('first cell')</python><|im_end|>"
+      ]
+     },
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "You are an agent in a crafting game. Your goal is to craft items by combining ingredients.",
+       "You have access to an inventory of existing ingredients, which are sufficient to craft the target items; though, you may need to craft intermediate ingredients first.",
+       "",
+       "Note: If you already have one of the target items in your inventory, you should craft the requested number of the target on top of what you already have.",
+       "For example, if you already have 2 wooden_pickaxes but your goal is to craft 3, your inventory should end up with 5 wooden_pickaxes.",
+       "",
+       "<TIPS>",
+       "CRAFTING STRATEGY:",
+       "- Recipes produce fixed quantities per execution - you cannot craft arbitrary amounts",
+       "  Example: If a recipe produces 2 items, you can only craft in multiples of 2 (2, 4, 6...)",
+       "- Recipe ingredients scale with the number of times you execute it",
+       "  Example: Recipe \"2 ore → 2 items\" means 2 ore for 1 execution, 4 ore for 2 executions",
+       "- Always verify what you have before claiming something is impossible",
+       "- Check your inventory and recipe information to confirm ingredient availability",
+       "- Calculate carefully: if a recipe uses 2 ingredients to make 2 items, you need exactly 2 ingredients for 2 items",
+       "",
+       "DELEGATION STRATEGY:",
+       "- It is **highly recommended** to delegate crafting of intermediate ingredients",
+       "- Break complex tasks into INDEPENDENT subtasks that can be solved separately",
+       "- For tasks that are sufficiently complex, it is recommended to recursively delegate; i.e., subagents can further delegate to other subagents.",
+       "- Delegate one group of related items at a time, not everything at once",
+       "- Use crafting depth from get_info() to estimate budget requirements:",
+       "  * crafting_depth indicates complexity (0=base item, 1=direct craft, 2+=needs intermediates)",
+       "  * Budget heuristic: depth × 8-10 steps (depth=4 needs ~32-40 steps, depth=8 needs ~64-80 steps)",
+       "  * Always check crafting_depth before delegating to avoid under-budgeting",
+       "- Items can be delegated in parallel if they don't depend on each other",
+       "- Reserve budget for yourself to do final assembly after subtasks complete",
+       "- Delegated tasks share your inventory - results are immediately available",
+       "- **IMPORTANT**: `launch_subagent` is an async function, you MUST use `await`:",
+       "  * CORRECT: `await launch_subagent({\"item\": 1}, 20)`",
+       "  * CORRECT: `await asyncio.gather(launch_subagent(...), launch_subagent(...))`",
+       "  * WRONG: `launch_subagent({\"item\": 1}, 20)` -- missing await, will error",
+       "</TIPS>",
+       "",
+       "You can perform an action by writing a block of code. You will get multiple steps to complete the task.",
+       "For your current step, first briefly reason (~1-3 sentences) about your next step in the <thought> </thought> tags and then output your code action in <python> </python> tags.",
+       "Your code cell will be executed inside a jupyter notebook and the output will be shown to you.<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Craft the following items: 1x a9_i1",
+       "Budget: You have a total budget of 5 steps to complete this task.",
+       "",
+       "# Action Space",
+       "",
+       "Available Actions (python functions):",
+       "",
+       "1. def craft(ingredients: dict, target: tuple[str, int]) -> str",
+       "   Craft items using ingredients from your inventory.",
+       "   - ingredients: Dict of {item_name: count} to consume",
+       "   - target: (item_name, total_count) where total_count must be divisible by recipe result_count",
+       "   - Example: craft({\"m0_i1\": 2, \"m1_i1\": 1}, (\"m2_i2\", 2))",
+       "",
+       "2. def get_info(items: list) -> list[dict]",
+       "   Get recipe information for items.",
+       "   - Returns: List with {\"item\": str, \"can_craft\": bool, \"is_base\": bool,",
+       "                         \"in_inventory\": int, \"crafting_depth\": int, \"recipes\": [...]}",
+       "   - crafting_depth indicates complexity: 0=base item, 1=direct craft, 2+=needs intermediate steps",
+       "   - Each recipe shows {\"ingredients\": {...}, \"result_count\": int}",
+       "   - Example: get_info([\"m2_i2\", \"raw_m0\"])",
+       "",
+       "3. def view_inventory() -> dict",
+       "   View your current inventory.",
+       "   - Returns: Dict of {item_name: count}",
+       "   - Example: inv = view_inventory()",
+       "",
+       "4. def finish(message: str) -> str",
+       "   Complete the task.",
+       "   - Example: finish(\"Successfully crafted all required items\")",
+       "",
+       "5. async def launch_subagent(targets: dict, num_steps: int, context: str = \"\") -> str",
+       "   Launch a subagent to craft specific targets (shares your inventory).",
+       "   - targets: Dict of {item_name: count} to craft",
+       "   - num_steps: Budget for subagent",
+       "     * Use crafting_depth from get_info() to estimate: depth × 8-10 steps",
+       "     * Example: depth=4 needs ~32-40 steps, depth=8 needs ~64-80 steps",
+       "   - context: Optional context string for the subagent",
+       "   - Sequential: await launch_subagent({\"m0_i2\": 4}, 20)",
+       "   - Parallel: results = await asyncio.gather(",
+       "                 launch_subagent({\"m0_i2\": 4}, 20),",
+       "                 launch_subagent({\"c1_i2\": 3}, 15)",
+       "               )",
+       "   - Returns: Subagent's finish message (or list if using gather)",
+       "",
+       "Note: `asyncio` is already imported. Use `await asyncio.gather(...)` to run subtasks in parallel",
+       "or `await launch_subagent()` for a single subtask. **Do not forget to await** the results.",
+       "",
+       "",
+       "Now, please reason and then provide the next python cell that you would like to take. Think step-by-step before writing the jupyter code block. Output only one code block at a time formatted as follows <thought>Brief 1-3 sentence reasoning.</thought>\\n<python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>await asyncio.sleep(1.0)",
+       "print('first cell')</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "first cell",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>await asyncio.sleep(30)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 1313,
+       "completion_tokens": 19,
+       "total_tokens": 1332
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": {
+       "$lines": [
+        "<python>await asyncio.sleep(1.0)",
+        "print('first cell')</python>"
+       ]
+      }
+     },
+     "thought": "",
+     "code": {
+      "$lines": [
+       "await asyncio.sleep(1.0)",
+       "print('first cell')"
+      ]
+     },
+     "output": {
+      "$lines": [
+       "first cell",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 1355,
+       "completion_tokens": 13,
+       "total_tokens": 1368
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>await asyncio.sleep(30)</python>"
+     },
+     "reward_misc": {
+      "reward/success": 0.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 1367,
+      "sha256": "2cdb8edb5edd1476"
+     },
+     "advantages": "0.0*1367",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*1312 -0.5*19 0.0*23 -0.5*13",
+     "mask": "0.0*1312 1.0*19 0.0*23 1.0*13",
+     "target_tokens": {
+      "length": 1367,
+      "sha256": "e942b2cd38185327"
+     },
+     "traj_depth": "1*1",
+     "traj_start": "1.0*1"
+    }
+   ]
+  }
+ },
+ "unattributed_calls": [],
+ "train": {
+  "task_reward": 0.0,
+  "task_reward_valid": true,
+  "root_rewards_dict": {
+   "reward/success": 0.0,
+   "reward/subagent_launched": 0.0,
+   "reward/subagent_succeeded": 0.0
+  },
+  "num_datums": 1,
+  "num_policy_excluded_datums": 1,
+  "trajectories": {
+   "root": {
+    "reward": 0.0,
+    "rewards_dict": {
+     "reward/success": 0.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": true,
+    "num_steps": 1,
+    "num_datums": 1,
+    "num_input_tokens": 1314,
+    "num_output_tokens": 24
+   },
+   "root > Craft the following items: 1x a9_i1": {
+    "reward": 0.0,
+    "rewards_dict": {
+     "reward/success": 0.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": false,
+    "num_steps": 2,
+    "num_datums": 1,
+    "num_input_tokens": 2668,
+    "num_output_tokens": 32
+   }
+  }
+ }
+}

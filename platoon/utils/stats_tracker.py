@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from threading import Lock
+from typing import Any
 
 import torch
 
@@ -215,6 +216,49 @@ class StatsTracker:
                 result[key] = max(maxs)
 
         return result
+
+
+class DeferredStats:
+    """Statistics recorded now and added to a tracker later.
+
+    It takes the same ``scalar``, ``denominator`` and ``stat`` calls as :class:`StatsTracker`, checks them the same
+    way, keeps them in order, and :meth:`record` makes them on a tracker, in its scope.  A rollout group records what
+    it measured about itself here and the trainer records it in the training step that consumes the group: recorded
+    when the group completed, it would land in whichever step was running then, which with prefetching is often an
+    earlier one.
+    """
+
+    def __init__(self) -> None:
+        self._calls: list[tuple[str, dict[str, Any]]] = []
+        self._denominators: set[str] = set()
+
+    def __len__(self) -> int:
+        return len(self._calls)
+
+    def scalar(self, **kwargs: float) -> None:
+        self._calls.append(("scalar", {key: float(value) for key, value in kwargs.items()}))
+
+    def denominator(self, **kwargs: torch.Tensor) -> None:
+        for key, value in kwargs.items():
+            if not isinstance(value, torch.Tensor) or value.dtype != torch.bool:
+                raise ValueError(f"`{key}` must be a pytorch bool tensor")
+        self._denominators.update(kwargs)
+        self._calls.append(("denominator", {key: value.detach().clone() for key, value in kwargs.items()}))
+
+    def stat(self, denominator: str, reduce_type: ReduceType | None = None, **kwargs: torch.Tensor) -> None:
+        if denominator not in self._denominators:
+            raise ValueError(f"Denominator `{denominator}` not registered")
+        for key, value in kwargs.items():
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(f"`{key}` must be a pytorch tensor")
+        values = {key: value.detach().clone() for key, value in kwargs.items()}
+        self._calls.append(("stat", {"denominator": denominator, "reduce_type": reduce_type, **values}))
+
+    def record(self, tracker: Any) -> None:
+        """Make every call, in order, on ``tracker`` (a :class:`StatsTracker` or anything with its methods)."""
+
+        for method, kwargs in self._calls:
+            getattr(tracker, method)(**kwargs)
 
 
 # Global trackers registry

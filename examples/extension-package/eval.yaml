@@ -1,0 +1,25 @@
+# Evaluate a policy on the example extension's arithmetic tasks. With the package installed
+# (uv pip install -e examples/extension-package) and TINKER_API_KEY set, from the repository root:
+#
+#   uv run platoon rollout examples/extension-package/eval.yaml --task test-0
+#   uv run platoon eval examples/extension-package/eval.yaml
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  output_dir: ./runs/extension-package
+  workflow:
+    num_concurrent_workers: 8
+    rollout_config:
+      max_steps: 4           # the self-check harness makes 1 + checks model calls
+      timeout: 120
+      verbose: false
+      inference_params: {max_completion_tokens: 256}
+
+environments:
+  - name: arithmetic
+    service: example_extension.tasks:arithmetic   # a function that returns the package's task table
+    harness: example-self-check                   # the components, by the names their entry points give
+    program: example-exact-answer
+    reward_processor: example-partial-credit
+    eval_dataset_kwargs: {split_name: test}

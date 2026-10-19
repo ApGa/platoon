@@ -1,0 +1,1108 @@
+{
+ "format": 1,
+ "scenario": "number_search_bisection",
+ "result": {
+  "status": "completed",
+  "final_message": "You guessed the number 447 correctly!",
+  "error": null
+ },
+ "outcome": {
+  "status": "scored",
+  "rewards": {
+   "reward": 1.0
+  },
+  "primary": "reward",
+  "reason": null,
+  "failure_kind": null,
+  "metadata": {
+   "tool_calls": 9,
+   "terminal_tool": "guess"
+  }
+ },
+ "trajectories": {
+  "root": {
+   "parent": null,
+   "fork_step": null,
+   "depth": 0,
+   "task": {
+    "goal": null,
+    "id": "val:0",
+    "max_steps": null,
+    "misc": {
+     "ors": {
+      "split": "val",
+      "index": 0,
+      "name": "number_search.val.0"
+     }
+    },
+    "fork_strategy": "subtask"
+   },
+   "reward": 1.0,
+   "finish_message": "You guessed the number 447 correctly!",
+   "error_message": null,
+   "misc": {
+    "agent": {
+     "role": "policy"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 12,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     }
+    ],
+    "agent_result": {
+     "status": "completed",
+     "error": null
+    },
+    "outcome": {
+     "status": "scored",
+     "rewards": {
+      "reward": 1.0
+     },
+     "reason": null,
+     "reward_key": "reward"
+    },
+    "tool_calls": [
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 542
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 0
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 330
+      },
+      "text": "Too low, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 1
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 436
+      },
+      "text": "Too low, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 2
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 489
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 3
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 462
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 4
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 449
+      },
+      "text": "Too high, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 5
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 442
+      },
+      "text": "Too low, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 6
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 445
+      },
+      "text": "Too low, try again.",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 7
+     },
+     {
+      "name": "guess",
+      "arguments": {
+       "number": 447
+      },
+      "text": "You guessed the number 447 correctly!",
+      "is_error": false,
+      "finished": true,
+      "reward": 1.0,
+      "after_call": 8
+     }
+    ]
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(542)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(330)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(330)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(436)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(330)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(436)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 2 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(489)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(330)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(436)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 2 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(489)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 3 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(462)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(330)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(436)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 2 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(489)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 3 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(462)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 4 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(449)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(330)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(436)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 2 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(489)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 3 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(462)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 4 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(449)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 5 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(442)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(330)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(436)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 2 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(489)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 3 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(462)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 4 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(449)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 5 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(442)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 6 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(445)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "Solve the problem step by step. Write your action in <python> </python> tags.",
+       "Your answer must call guess(number: int) with the guessed number as an integer.",
+       "",
+       "Example:",
+       "<python>",
+       "guess(42)",
+       "</python>",
+       "<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Guess the correct number between 119 and 965.",
+       "Budget: You have a total budget of 12 steps to complete this task.",
+       "",
+       "Now, please provide the next python cell that you would like to execute. Output only one code block at a time formatted as follows <python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(542)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(330)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(436)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 2 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(489)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 3 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(462)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 4 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(449)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 5 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(442)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 6 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>guess(445)</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 7 Output]",
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>guess(447)</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 135,
+       "completion_tokens": 12,
+       "total_tokens": 147
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(542)</python>"
+     },
+     "thought": "",
+     "code": "guess(542)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 188,
+       "completion_tokens": 12,
+       "total_tokens": 200
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(330)</python>"
+     },
+     "thought": "",
+     "code": "guess(330)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 241,
+       "completion_tokens": 12,
+       "total_tokens": 253
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(436)</python>"
+     },
+     "thought": "",
+     "code": "guess(436)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 294,
+       "completion_tokens": 12,
+       "total_tokens": 306
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(489)</python>"
+     },
+     "thought": "",
+     "code": "guess(489)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 347,
+       "completion_tokens": 12,
+       "total_tokens": 359
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(462)</python>"
+     },
+     "thought": "",
+     "code": "guess(462)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 400,
+       "completion_tokens": 12,
+       "total_tokens": 412
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(449)</python>"
+     },
+     "thought": "",
+     "code": "guess(449)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too high, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 453,
+       "completion_tokens": 12,
+       "total_tokens": 465
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(442)</python>"
+     },
+     "thought": "",
+     "code": "guess(442)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 506,
+       "completion_tokens": 12,
+       "total_tokens": 518
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(445)</python>"
+     },
+     "thought": "",
+     "code": "guess(445)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'Too low, try again.'",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 559,
+       "completion_tokens": 12,
+       "total_tokens": 571
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>guess(447)</python>"
+     },
+     "thought": "",
+     "code": "guess(447)",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=guess",
+       "Out[0]: 'You guessed the number 447 correctly!'",
+       ""
+      ]
+     },
+     "error": "",
+     "reward_misc": {
+      "reward/success": 1.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 570,
+      "sha256": "51f4733c2665b620"
+     },
+     "advantages": "0.0*134 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*134 -0.5*12 0.0*41 -0.5*12 0.0*41 -0.5*12 0.0*41 -0.5*12 0.0*41 -0.5*12 0.0*41 -0.5*12 0.0*41 -0.5*12 0.0*41 -0.5*12 0.0*41 -0.5*12",
+     "mask": "0.0*134 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12 0.0*41 1.0*12",
+     "target_tokens": {
+      "length": 570,
+      "sha256": "54138b7d4f056961"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "1.0*1"
+    }
+   ]
+  }
+ },
+ "unattributed_calls": [],
+ "train": {
+  "task_reward": 1.0,
+  "task_reward_valid": true,
+  "root_rewards_dict": {
+   "reward/success": 1.0,
+   "reward/subagent_launched": 0.0,
+   "reward/subagent_succeeded": 0.0
+  },
+  "num_datums": 1,
+  "num_policy_excluded_datums": 0,
+  "trajectories": {
+   "root": {
+    "reward": 1.0,
+    "rewards_dict": {
+     "reward/success": 1.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": true,
+    "num_steps": 9,
+    "num_datums": 1,
+    "num_input_tokens": 3123,
+    "num_output_tokens": 108
+   }
+  }
+ }
+}

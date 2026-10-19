@@ -1,22 +1,33 @@
+default_install_hook_types: [pre-commit, commit-msg]
+# Hooks without stages of their own run before a commit (and in CI's `pre-commit run --all-files`), not again when
+# the commit message is checked.
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.9
+    rev: v0.14.5
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 
   - repo: https://github.com/compilerla/conventional-pre-commit
+    # Keep v4.0.0 (see CONTRIBUTING.md): later releases accept any message that starts with "Merge", and a type in
+    # any case ("Feat:"), which the pull request title check rejects.
     rev: v4.0.0
     hooks:
       - id: conventional-pre-commit
+        args: [--verbose]  # a rejection lists the accepted types and what the message is missing
         stages: [commit-msg]
 
   - repo: local
     hooks:
       - id: ty
         name: ty type checker
-        entry: uvx ty check
+        entry: uvx ty@0.0.87 check
         language: system
         pass_filenames: false
         types: [python]
+        # Not a gate yet: ty still reports errors in the existing code (see CONTRIBUTING.md). Run it with
+        # uvx pre-commit run ty --hook-stage manual --all-files
+        stages: [manual]

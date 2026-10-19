@@ -1,0 +1,44 @@
+# Number search with the example-efficient-search program: rewards shaped toward fewer guesses. From the repository root:
+#
+#   export PYTHONPATH=$PWD/examples/program-reward-shaping
+#   uv run platoon rollout examples/program-reward-shaping/efficient_search.yaml --task train:0
+#   uv run platoon train examples/program-reward-shaping/efficient_search.yaml
+#
+# docs/tutorials/programs.md explains the program and its finalizer.
+
+environments:
+  - name: number-search
+    service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: platoon-react
+    harness_options:
+      system_prompt: >-
+        Find the hidden number. Call the guess tool with one integer per turn; it tells you whether
+        your guess is too low, too high or correct.
+    program: example-efficient-search
+    package: efficient_search     # imported first, so @pt.program("example-efficient-search") registers
+    reward_processor: efficient_search:reward_parts   # train on the shaped reward, report its parts
+    agents:
+      max_depth: 0                # one agent per episode
+    dataset_kwargs: {split_name: train, limit: 1000}
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 8
+  num_epochs: 1
+  workflow_config:
+    group_size: 4
+    leave_one_out_baseline: true
+    rollout_config:
+      max_steps: 12
+      timeout: 300
+      inference_params: {max_completion_tokens: 512}
+      extra:
+        guess_penalty: 0.1        # read by the program: reward lost per guess beyond binary search's
+
+log_path: ./runs/efficient-search
+stats:
+  experiment_name: number-search
+  trial_name: efficient-search
+  wandb:
+    mode: disabled                # online, with WANDB_API_KEY, logs to Weights & Biases

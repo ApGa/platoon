@@ -1,0 +1,26 @@
+# Evaluate a policy on the Harbor tasks in ./tasks, with the platoon-bash harness running inside each task's
+# sandbox and each task graded by its own tests/test.sh.
+#
+#   cd examples/harbor-local && platoon eval eval.yaml [key=value ...]
+#
+# The sandbox provider is the site profile's (~/.config/platoon/site.yaml), else docker. On a cluster without Docker
+# name singularity or enroot there (the hpc extra: uv sync --extra tinker --extra ors --extra hpc), or override it:
+# environments.0.service_kwargs.provider=singularity.
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  output_dir: ./runs/harbor-local
+  workflow:
+    num_concurrent_workers: 2
+    rollout_config:
+      max_steps: 20
+      timeout: 900
+      inference_params: {max_completion_tokens: 1024}
+
+environments:
+  - name: harbor-local
+    service: harbor
+    service_kwargs:
+      dataset_dir: ./tasks   # relative to this file, wherever platoon runs from
+    harness: platoon-bash

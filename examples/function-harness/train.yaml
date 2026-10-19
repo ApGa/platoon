@@ -1,0 +1,45 @@
+# Train a LoRA on number search with the example-tool-loop harness: five optimizer steps of 8 tasks x 4 rollouts,
+# then a checkpoint and an evaluation on 20 val tasks. Needs TINKER_API_KEY; no W&B account.
+#
+# From the repository root:
+#
+#   PYTHONPATH=examples/function-harness uv run platoon train examples/function-harness/train.yaml
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: example-tool-loop
+    package: tool_loop
+    harness_options:
+      system_prompt: >-
+        Find the hidden number. Call the guess tool with one integer per turn; it says whether
+        your guess is too low, too high or correct.
+    dataset_kwargs: {split_name: train, limit: 1000}
+    eval_dataset_kwargs: {split_name: val, limit: 20}
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 8
+  max_training_steps: 5
+  workflow_config:
+    group_size: 4
+    leave_one_out_baseline: true
+    rollout_config:
+      max_steps: 12
+      timeout: 300
+      verbose: false
+      inference_params: {max_completion_tokens: 512}
+
+eval:
+  every: 5                    # one rollout per task, rolled out as training's are
+
+checkpoint:
+  every: 5
+
+log_path: ./runs/function-harness-train
+
+stats:
+  experiment_name: function-harness
+  trial_name: tool-loop
+  wandb:
+    mode: disabled

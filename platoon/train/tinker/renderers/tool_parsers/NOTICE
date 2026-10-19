@@ -1,0 +1,24 @@
+platoon.train.tinker.renderers.tool_parsers: third-party notices
+
+Platoon is licensed under the MIT License (the LICENSE file at the root of the repository).  The tool-call
+parsers in this directory are written for platoon, but some of their formats and rules follow SGLang's
+function-call detectors and reasoning parser, which are licensed under the Apache License, Version 2.0:
+
+  SGLang (https://github.com/sgl-project/sglang)
+  Copyright 2023-2024 SGLang Team
+  Licensed under the Apache License, Version 2.0; a copy of the License is in LICENSE-APACHE-2.0 in this
+  directory, and at http://www.apache.org/licenses/LICENSE-2.0.  Unless required by applicable law or agreed to
+  in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+  CONDITIONS OF ANY KIND, either express or implied.
+
+What follows SGLang (python/sglang/srt/function_call/ and python/sglang/srt/parser/), changed to read complete
+responses only and to report what it cannot parse:
+
+  base.py          a reasoning block that never closes ends where a tool call starts (reasoning_parser.py)
+  qwen3_coder.py   the qwen3_coder format and its value conversion by tool schema (qwen3_coder_detector.py)
+  kimi_k2.py       the shape of Kimi K2's call ids, functions.NAME:N (kimik2_detector.py)
+  arguments.py     typing text values by the tool's JSON schema, as qwen3_coder_detector.py and
+                   glm4_moe_detector.py do
+
+Each of these modules says so in its docstring.  The parser names and aliases are SGLang's and vLLM's
+--tool-call-parser names.

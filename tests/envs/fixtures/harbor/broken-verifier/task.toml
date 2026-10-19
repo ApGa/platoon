@@ -1,0 +1,7 @@
+version = "1.0"
+
+[verifier]
+timeout_sec = 30.0
+
+[environment]
+docker_image = "python:3.12-slim"

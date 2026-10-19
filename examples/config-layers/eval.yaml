@@ -1,0 +1,17 @@
+# An evaluation config that reuses the same environments. Point inference.model_path at a sampler
+# checkpoint to evaluate a trained policy instead of the base model.
+#
+#   platoon eval examples/config-layers/eval.yaml [key=value ...]
+
+extends: environments.yaml
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  workflow:
+    num_rollouts_per_task: 2
+    num_concurrent_workers: 8
+    rollout_config:
+      max_steps: 12
+      timeout: 300
+      inference_params: {max_completion_tokens: 512}

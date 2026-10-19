@@ -1,0 +1,43 @@
+# The RAO paper's recursive agent on TextCraft-Synth, on Tinker: the CodeAct agent delegates crafting subgoals to
+# subagents with launch_subagent(targets). Every agent, root or subagent, gets 25 steps of its own, delegation goes at
+# most 6 levels deep, and each subagent is rewarded for crafting its own targets (the paper's Dense rewards). The
+# "Recursive" rows of the paper's Table 1(b), whose agents trained with a 40k context, and the "Dense, Weighted" arm
+# of its ablation (Fig. 8, after 100 steps).
+#
+#   platoon train recipes/rao/textcraft-synth/recursive.yaml [key=value ...]
+#
+# The shared settings are in common.yaml, and README.md gives every setting's source. ablation_sparse.yaml is this
+# arm with the paper's Sparse rewards.
+
+extends: common.yaml
+
+environments:
+  - env: textcraft-synth@1          # the environment, its prompts, the val split and platoon-delegation, version 1
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder_options: {variant: depth_aware}
+      subagent_budget: fixed          # launch_subagent(targets): the agent never sizes a child's budget
+      cell_timeout_s: 7200
+    agents:
+      max_depth: 6
+      budget: depth_aware
+      child_max_steps: 25
+      child_grading: env              # each subagent graded on its own targets
+    dataset_kwargs: {split_name: train-medium}
+    eval_dataset_kwargs: {limit: 100}
+
+train:
+  max_concurrent_rollouts: 64  # 8 groups of 8 at once, as the paper's recursive run
+  workflow_config:
+    # Every trajectory of a rollout is centered on the mean of the other rollouts' root rewards, and depth levels
+    # are weighted inversely to their trajectory counts in the batch.
+    leave_one_out_baseline: true
+    depth_level_weighting: true
+    rollout_config:
+      max_steps: 25                   # the root's budget; every subagent gets agents.child_max_steps
+      propagate_root_success: false   # Dense: each subagent keeps its own grade (ablation_sparse.yaml sets true)
+
+stats:
+  trial_name: qwen3-4b-instruct-2507-recursive-dense-lora32
+  wandb:
+    tags: [rao, textcraft-synth, tinker, recursive, dense]

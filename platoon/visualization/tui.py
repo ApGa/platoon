@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import queue
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +30,795 @@ from rich.text import Text
 from textual.binding import Binding
 from textual.events import MouseDown, MouseMove, MouseUp
 
+BRIDGE_EVENT_TYPES = {
+    "session_started",
+    "task_requested",
+    "tool_call",
+    "tool_result",
+    "max_tool_calls_exceeded",
+    "session_closing",
+}
+
+VISUALIZATION_MODES = {"auto", "codeact", "openhands"}
+OPENREWARD_TASK_REFERENCE_PREFIX = "openreward:v1:"
+
+MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
+MOUSE_CAPTURE_DISABLE = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
+
+
+def _shorten_text(value: Any, max_chars: int = 240) -> str:
+    text = str(value).replace("\n", " ").strip()
+    text = " ".join(text.split())
+    if max_chars > 0 and len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _panel(renderable: Any, *, title: str | Text | None = None, **kwargs: Any) -> Panel:
+    """A Rich ``Panel`` whose ``str`` title is literal text, like the tree's labels: titles carry node labels, tool
+    names and tool output, which are data, not Rich markup or emoji codes."""
+
+    return Panel(renderable, title=Text(title) if isinstance(title, str) else title, **kwargs)
+
+
+def _normalize_visualization_mode(mode: str | None) -> str:
+    if mode in VISUALIZATION_MODES:
+        return str(mode)
+    return "auto"
+
+
+@dataclass(frozen=True)
+class _TaskDisplayMetadata:
+    environment: str | None = None
+    task_name: str | None = None
+    task_index: str | None = None
+    split: str | None = None
+    raw_task_id: str | None = None
+
+    @property
+    def display_id(self) -> str | None:
+        return self.task_name or self.task_index or self.raw_task_id
+
+
+@dataclass(frozen=True)
+class _TrajectorySubtreeCounts:
+    solver: int = 0
+    verifier: int = 0
+
+    def __add__(self, other: "_TrajectorySubtreeCounts") -> "_TrajectorySubtreeCounts":
+        return _TrajectorySubtreeCounts(
+            solver=self.solver + other.solver,
+            verifier=self.verifier + other.verifier,
+        )
+
+
+def _nonempty_text(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def _short_identifier(value: Any, max_chars: int = 8) -> str:
+    text = str(value).strip()
+    return text[:max_chars] if max_chars > 0 else text
+
+
+def _decode_openreward_task_id(task_id: str | None) -> Dict[str, Any]:
+    if not task_id or not task_id.startswith(OPENREWARD_TASK_REFERENCE_PREFIX):
+        return {}
+    token = task_id.removeprefix(OPENREWARD_TASK_REFERENCE_PREFIX)
+    try:
+        raw = base64.b64decode(
+            token + "=" * (-len(token) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw)
+    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _task_display_metadata(task: Any) -> _TaskDisplayMetadata:
+    if not isinstance(task, dict):
+        return _TaskDisplayMetadata()
+
+    raw_task_id = None
+    for key in ("id", "task_id", "name"):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            raw_task_id = value.strip()
+            break
+
+    decoded = _decode_openreward_task_id(raw_task_id)
+    misc = task.get("misc")
+    if not isinstance(misc, dict):
+        misc = {}
+
+    environment = (
+        _nonempty_text(misc.get("openreward_environment_label"))
+        or _nonempty_text(decoded.get("environment"))
+        or _nonempty_text(task.get("environment"))
+        or _nonempty_text(misc.get("environment"))
+    )
+    task_name = _nonempty_text(misc.get("openreward_task_name")) or _nonempty_text(decoded.get("name"))
+    task_index = (
+        _nonempty_text(misc.get("openreward_task_index"))
+        or _nonempty_text(decoded.get("index"))
+        or _nonempty_text(task.get("task_index"))
+    )
+    split = (
+        _nonempty_text(misc.get("openreward_task_split"))
+        or _nonempty_text(decoded.get("split"))
+        or _nonempty_text(task.get("split"))
+    )
+    return _TaskDisplayMetadata(
+        environment=environment,
+        task_name=task_name,
+        task_index=task_index,
+        split=split,
+        raw_task_id=raw_task_id,
+    )
+
+
+def _merge_task_display_metadata(
+    existing: _TaskDisplayMetadata | None,
+    candidate: _TaskDisplayMetadata,
+    *,
+    prefer_candidate: bool = False,
+) -> _TaskDisplayMetadata:
+    if existing is None:
+        return candidate
+    if prefer_candidate:
+        return _TaskDisplayMetadata(
+            environment=candidate.environment or existing.environment,
+            task_name=candidate.task_name or existing.task_name,
+            task_index=candidate.task_index or existing.task_index,
+            split=candidate.split or existing.split,
+            raw_task_id=candidate.raw_task_id or existing.raw_task_id,
+        )
+    # The first root task normally supplies these fields. Recursive child and
+    # verifier task-set events may carry opaque UUIDs, so only fill missing
+    # collection metadata rather than replacing already meaningful values.
+    return _TaskDisplayMetadata(
+        environment=existing.environment or candidate.environment,
+        task_name=existing.task_name or candidate.task_name,
+        task_index=existing.task_index or candidate.task_index,
+        split=existing.split or candidate.split,
+        raw_task_id=existing.raw_task_id or candidate.raw_task_id,
+    )
+
+
+def _task_display_id(task: Any) -> str | None:
+    return _task_display_metadata(task).display_id
+
+
+def _collection_display_label(
+    collection_id: Any,
+    task_id: str | None = None,
+    *,
+    environment: str | None = None,
+    task_name: str | None = None,
+    task_index: str | None = None,
+    split: str | None = None,
+    trajectory_counts: _TrajectorySubtreeCounts | None = None,
+) -> str:
+    parts = []
+    collection_id_text = str(collection_id).strip() if collection_id is not None else ""
+    is_bridge_collection = collection_id_text == "bridge" or collection_id_text.startswith("bridge:")
+    if environment:
+        parts.append(environment)
+    elif is_bridge_collection:
+        parts.append(collection_id_text)
+    if task_name:
+        parts.append(f"task:{task_name}")
+    elif task_id:
+        task_descriptor = f"{split}#{task_id}" if split else task_id
+        parts.append(f"task:{task_descriptor}")
+    if task_index and task_name:
+        index_descriptor = f"{split}#{task_index}" if split else task_index
+        parts.append(f"index:{index_descriptor}")
+    elif task_index and task_index != task_id:
+        parts.append(f"index:{task_index}")
+    if split and task_name and not task_index:
+        parts.append(f"split:{split}")
+    elif split and not task_id and not task_name:
+        parts.append(f"split:{split}")
+    counts = trajectory_counts or _TrajectorySubtreeCounts()
+    parts.append(f"trajs:solver={counts.solver},verifier={counts.verifier}")
+    if collection_id and not is_bridge_collection:
+        parts.append(f"id:{_short_identifier(collection_id)}")
+    return "collection: " + " · ".join(parts)
+
+
+def _collection_label_from_metadata(
+    collection_id: Any,
+    metadata: _TaskDisplayMetadata | None,
+    trajectory_counts: _TrajectorySubtreeCounts | None = None,
+) -> str:
+    metadata = metadata or _TaskDisplayMetadata()
+    return _collection_display_label(
+        collection_id,
+        metadata.display_id,
+        environment=metadata.environment,
+        task_name=metadata.task_name,
+        task_index=metadata.task_index,
+        split=metadata.split,
+        trajectory_counts=trajectory_counts,
+    )
+
+
+def _collection_payload(
+    collection_id: Any,
+    metadata: _TaskDisplayMetadata | None,
+    trajectory_counts: _TrajectorySubtreeCounts | None = None,
+) -> Dict[str, Any]:
+    metadata = metadata or _TaskDisplayMetadata()
+    counts = trajectory_counts or _TrajectorySubtreeCounts()
+    return {
+        "collection_id": collection_id,
+        "environment": metadata.environment,
+        "task_id": metadata.display_id,
+        "task_name": metadata.task_name,
+        "task_index": metadata.task_index,
+        "task_split": metadata.split,
+        "raw_task_id": metadata.raw_task_id,
+        "solver_trajectory_count": counts.solver,
+        "verifier_trajectory_count": counts.verifier,
+    }
+
+
+def _is_verifier_misc(misc: Any) -> bool:
+    return isinstance(misc, dict) and (
+        misc.get("subagent_reward_verifier_task") is True
+        or bool(misc.get("subagent_reward_verifies_trajectory_id"))
+        or bool(misc.get("platoon_subagent_verifies_trajectory_id"))
+    )
+
+
+# Step fields the viewer renders specially.  Harnesses on the gateway annotate them onto a step's misc
+# (``ctx.annotate_step``: CodeAct's thought, code, output and error; OpenHands' action and observation events),
+# where legacy steps carried them at the top level.
+_STEP_DISPLAY_KEYS = ("thought", "code", "output", "error", "action_events", "observation_events")
+
+
+def _display_step(step: Any) -> Any:
+    """``step`` with its misc-borne display fields lifted to the top level, as legacy steps had them."""
+    if not isinstance(step, dict) or not isinstance(step.get("misc"), dict):
+        return step
+    misc = step["misc"]
+    lifted = {key: misc[key] for key in _STEP_DISPLAY_KEYS if key in misc and key not in step}
+    if not lifted:
+        return step
+    rest = {key: value for key, value in step.items() if key != "misc"}
+    return {**lifted, **rest, "misc": {key: value for key, value in misc.items() if key not in lifted}}
+
+
+def _is_openhands_step_payload(data: Any) -> bool:
+    return isinstance(data, dict) and ("action_events" in data or "observation_events" in data)
+
+
+def _should_render_openhands(mode: str, data: Any) -> bool:
+    if mode == "openhands":
+        return _is_openhands_step_payload(data)
+    return mode == "auto" and _is_openhands_step_payload(data)
+
+
+def _as_dict_list(value: Any, nested_key: str | None = None) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        if nested_key and isinstance(value.get(nested_key), list):
+            return [item for item in value[nested_key] if isinstance(item, dict)]
+        if isinstance(value.get("action_events"), list):
+            return [item for item in value["action_events"] if isinstance(item, dict)]
+        if isinstance(value.get("observation_events"), list):
+            return [item for item in value["observation_events"] if isinstance(item, dict)]
+        if "kind" in value:
+            return [value]
+    return []
+
+
+def _step_action_events(step: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _as_dict_list(step.get("action_events"), "action_events")
+
+
+def _step_observation_events(step: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _as_dict_list(step.get("observation_events"), "observation_events")
+
+
+def _text_block_value(block: Any) -> str | None:
+    if isinstance(block, dict):
+        text = block.get("text")
+        if isinstance(text, str):
+            return text
+        if isinstance(block.get("content"), str):
+            return block["content"]
+    elif isinstance(block, str):
+        return block
+    return None
+
+
+def _parse_json_string(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _format_inline_value(value: Any, max_chars: int = 80) -> str:
+    parsed = _parse_json_string(value)
+    if isinstance(parsed, str):
+        return _shorten_text(parsed)
+    if isinstance(parsed, (int, float, bool)) or parsed is None:
+        return str(parsed)
+    if isinstance(parsed, list):
+        inner = ", ".join(_format_inline_value(item) for item in parsed)
+        return f"[{inner}]"
+    if isinstance(parsed, dict):
+        return _format_args_inline(parsed)
+    return _shorten_text(parsed)
+
+
+def _format_args_inline(value: Any, max_items: int = 4, max_chars: int = 180) -> str:
+    parsed = _parse_json_string(value)
+    if parsed in (None, "", {}):
+        return ""
+    if not isinstance(parsed, dict):
+        return _format_inline_value(parsed)
+
+    parts: List[str] = []
+    for index, (key, item) in enumerate(parsed.items()):
+        if index >= max_items:
+            parts.append("...")
+            break
+        parts.append(f"{key}={_format_inline_value(item, 56)}")
+    return _shorten_text(", ".join(parts), max_chars)
+
+
+def _pretty_json(value: Any) -> str:
+    return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _tool_call_display(event: Dict[str, Any]) -> tuple[str | None, Any]:
+    action = event.get("action")
+    action_data = action.get("data") if isinstance(action, dict) else None
+    if isinstance(action_data, dict) and action_data:
+        tool_name = action_data.get("name") or event.get("tool_name")
+        arguments = action_data.get("arguments") if "arguments" in action_data else action_data
+    else:
+        tool_name = event.get("tool_name")
+        arguments = None
+        tool_call = event.get("tool_call")
+        if isinstance(tool_call, dict):
+            tool_name = tool_call.get("name") or tool_name
+            arguments = tool_call.get("arguments")
+
+    arguments = _parse_json_string(arguments)
+    if tool_name == "call_tool" and isinstance(arguments, dict):
+        catalog_name = arguments.get("name")
+        if isinstance(catalog_name, str) and catalog_name:
+            return catalog_name, arguments.get("arguments") or {}
+    return tool_name if isinstance(tool_name, str) else None, arguments
+
+
+def _observation_payload(event: Dict[str, Any]) -> Any:
+    if event.get("kind") == "AgentErrorEvent":
+        error = event.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+
+    observation = event.get("observation")
+    if not isinstance(observation, dict):
+        return None
+    content = observation.get("content")
+    if isinstance(content, str):
+        return _parse_json_string(content)
+    if not isinstance(content, list):
+        return None
+
+    payloads: List[Any] = []
+    for block in content:
+        text = _text_block_value(block)
+        if not text or text.startswith("[Tool "):
+            continue
+        parsed = _parse_json_string(text)
+        if isinstance(parsed, dict) and "text" in parsed:
+            payloads.append(_parse_json_string(parsed.get("text")))
+        elif isinstance(parsed, dict) and "blocks" in parsed:
+            payloads.append(parsed.get("blocks"))
+        else:
+            payloads.append(parsed)
+    if not payloads:
+        return None
+    if len(payloads) == 1:
+        return payloads[0]
+    return payloads
+
+
+def _observation_preview(event: Dict[str, Any]) -> str | None:
+    payload = _observation_payload(event)
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return _shorten_text(payload)
+    return _shorten_text(_pretty_json(payload))
+
+
+def _condensation_summary_text(event: Dict[str, Any]) -> str | None:
+    if event.get("kind") != "Condensation":
+        return None
+    summary = event.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    return None
+
+
+def _condensation_reasoning_text(step: Dict[str, Any]) -> str | None:
+    """Return diagnostic reasoning that is kept outside retained agent context."""
+
+    for event in _step_observation_events(step):
+        if event.get("kind") == "Condensation":
+            reasoning = _reasoning_text(event)
+            if reasoning:
+                return reasoning
+
+    misc = step.get("misc")
+    if isinstance(misc, dict):
+        reasoning = misc.get("condensation_reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+    return None
+
+
+def _message_text(event: Dict[str, Any]) -> str | None:
+    message = event.get("llm_message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [_text_block_value(block) for block in content]
+        text = " ".join(part for part in parts if part)
+        return text or None
+    return None
+
+
+def _thought_text(event: Dict[str, Any]) -> str | None:
+    thought = event.get("thought")
+    if isinstance(thought, str):
+        return thought
+    if isinstance(thought, list):
+        parts = [_text_block_value(block) for block in thought]
+        text = " ".join(part for part in parts if part)
+        return text or None
+    return None
+
+
+def _reasoning_text(event: Dict[str, Any]) -> str | None:
+    reasoning = event.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning
+    return None
+
+
+def _observation_text(event: Dict[str, Any]) -> str | None:
+    condensation_summary = _condensation_summary_text(event)
+    if condensation_summary:
+        return condensation_summary
+
+    payload = _observation_payload(event)
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload
+    return _pretty_json(payload)
+
+
+def _find_nested_value(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            found = _find_nested_value(item, key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_nested_value(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _event_has_error(event: Dict[str, Any]) -> bool:
+    if event.get("kind") == "AgentErrorEvent":
+        return True
+    payload = _observation_payload(event)
+    preview = _observation_preview(event) or ""
+    lowered = preview.lower()
+    if any(token in lowered for token in ("error", "traceback", "exception", "failed")):
+        return True
+    if isinstance(payload, dict):
+        for key in ("error", "exception", "traceback"):
+            value = _find_nested_value(payload, key)
+            if value:
+                return True
+    return False
+
+
+def _observation_error_summary(events: List[Dict[str, Any]]) -> str | None:
+    for event in events:
+        if _event_has_error(event):
+            return _openhands_event_summary(event)
+    return None
+
+
+def _first_condensation_summary(events: List[Dict[str, Any]]) -> str | None:
+    for event in events:
+        summary = _condensation_summary_text(event)
+        if summary:
+            return f"condensation: {_shorten_text(summary)}"
+    return None
+
+
+def _task_discovery_summary(events: List[Dict[str, Any]]) -> str | None:
+    for event in events:
+        raw_tool_name = event.get("tool_name")
+        payload = _observation_payload(event)
+        task_name = _find_nested_value(payload, "task_name")
+        if not task_name and raw_tool_name == "get_task":
+            task_name = _find_nested_value(payload, "name")
+        prompt = _find_nested_value(payload, "prompt")
+        if raw_tool_name == "get_task" or task_name or prompt:
+            if isinstance(task_name, str) and task_name:
+                return f"get_task -> {task_name}"
+            if isinstance(prompt, str) and prompt:
+                return f"get_task -> {_shorten_text(prompt, 160)}"
+            return "get_task"
+    return None
+
+
+def _event_tool_names(events: List[Dict[str, Any]]) -> List[str]:
+    names: List[str] = []
+    for event in events:
+        tool_name, _ = _tool_call_display(event)
+        if tool_name:
+            names.append(tool_name)
+    return names
+
+
+def _tool_batch_summary(events: List[Dict[str, Any]]) -> str | None:
+    if not events:
+        return None
+    names = _event_tool_names(events)
+    if not names:
+        return _openhands_event_summary(events[0])
+    if len(names) == 1:
+        return _openhands_event_summary(events[0])
+
+    counts: Dict[str, int] = {}
+    order: List[str] = []
+    for name in names:
+        if name not in counts:
+            order.append(name)
+            counts[name] = 0
+        counts[name] += 1
+    parts = [f"{name} x{counts[name]}" if counts[name] > 1 else name for name in order]
+    return "tools: " + _shorten_text(", ".join(parts), 180)
+
+
+def _reward_misc(step: Dict[str, Any]) -> Dict[str, Any]:
+    misc = step.get("misc")
+    if not isinstance(misc, dict):
+        return {}
+    reward_misc = misc.get("reward_misc")
+    return reward_misc if isinstance(reward_misc, dict) else {}
+
+
+def _final_payload(step: Dict[str, Any]) -> Any:
+    reward_misc = _reward_misc(step)
+    payload = reward_misc.get("openreward/final_payload")
+    return _parse_json_string(payload)
+
+
+def _final_evaluation_summary(step: Dict[str, Any]) -> str | None:
+    payload = _final_payload(step)
+    if not payload:
+        return None
+
+    status: str | None = None
+    reward = None
+    text = None
+    if isinstance(payload, dict):
+        reward = payload.get("reward")
+        text = payload.get("text")
+        if isinstance(text, str):
+            first = text.strip().splitlines()[0].strip()
+            if first:
+                status = first
+        if status is None and payload.get("finished") is True:
+            status = "finished"
+    elif isinstance(payload, str):
+        text = payload
+        first = payload.strip().splitlines()[0].strip()
+        if first:
+            status = first
+
+    parts = ["claim_done"]
+    if status:
+        parts.append(str(status))
+    if reward is not None:
+        parts.append(f"reward={reward}")
+    return " -> ".join(parts[:2]) + (f" ({parts[2]})" if len(parts) > 2 else "")
+
+
+def _openhands_event_summary(event: Dict[str, Any]) -> str:
+    kind = event.get("kind")
+    condensation_summary = _condensation_summary_text(event)
+    if condensation_summary:
+        return f"condensation: {_shorten_text(condensation_summary)}"
+
+    if kind == "AgentErrorEvent":
+        error = _observation_preview(event)
+        tool_name = event.get("tool_name")
+        if error and isinstance(tool_name, str) and tool_name:
+            return f"{tool_name} error: {error}"
+        if error:
+            return f"agent error: {error}"
+
+    if kind == "ObservationEvent":
+        observation = _observation_preview(event)
+        if observation:
+            raw_tool_name = event.get("tool_name")
+            if isinstance(raw_tool_name, str) and raw_tool_name:
+                return f"{raw_tool_name}: {observation}"
+            return f"observation: {observation}"
+
+    tool_name, arguments = _tool_call_display(event)
+    if isinstance(tool_name, str) and tool_name:
+        args_text = _format_args_inline(arguments)
+        return f"{tool_name}: {args_text}" if args_text else tool_name
+
+    observation = _observation_preview(event)
+    if observation:
+        return f"observation: {observation}"
+
+    thought = _thought_text(event)
+    if thought:
+        return f"thought: {_shorten_text(thought)}"
+
+    reasoning = _reasoning_text(event)
+    if reasoning:
+        return f"reasoning: {_shorten_text(reasoning)}"
+
+    message = _message_text(event)
+    if message:
+        return f"message: {_shorten_text(message)}"
+
+    if isinstance(kind, str) and kind:
+        return kind
+    return _shorten_text(event)
+
+
+def _openhands_step_summary(step: Dict[str, Any]) -> str | None:
+    action_events = _step_action_events(step)
+    observation_events = _step_observation_events(step)
+    non_system_observations = [event for event in observation_events if event.get("kind") != "SystemPromptEvent"]
+    observation_summaries = [_openhands_event_summary(event) for event in non_system_observations or observation_events]
+
+    final_summary = _final_evaluation_summary(step)
+    if final_summary:
+        return final_summary
+
+    if not action_events:
+        setup_messages = [
+            event
+            for event in observation_events
+            if event.get("kind") == "MessageEvent" and (_message_text(event) or "").strip()
+        ]
+        has_system = any(event.get("kind") == "SystemPromptEvent" for event in observation_events)
+        if has_system and setup_messages:
+            return "setup: system prompt + user message"
+        if has_system:
+            return "setup: system prompt"
+
+    task_summary = _task_discovery_summary(non_system_observations or observation_events)
+    if task_summary:
+        return task_summary
+
+    parts: List[str] = []
+    action_summary = _tool_batch_summary(action_events)
+    if action_summary:
+        parts.append(action_summary)
+
+    # Surface tool failures directly in the tree label. Successful observation text
+    # is usually redundant with the action summary and can be very large.
+    error_summary = _observation_error_summary(non_system_observations or observation_events)
+    if error_summary:
+        parts.append(f"-> {error_summary}")
+
+    condensation_summary = _first_condensation_summary(non_system_observations or observation_events)
+    if condensation_summary:
+        parts.append(condensation_summary)
+
+    if not parts and observation_summaries:
+        parts.append(observation_summaries[0])
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
+def _openhands_search_text(step: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    summary = _openhands_step_summary(step)
+    if summary:
+        parts.append(summary)
+    condensation_reasoning = _condensation_reasoning_text(step)
+    if condensation_reasoning:
+        parts.append(condensation_reasoning)
+    for event in _step_action_events(step):
+        parts.append(_openhands_event_summary(event))
+        tool_name, arguments = _tool_call_display(event)
+        if tool_name:
+            parts.append(tool_name)
+        if arguments:
+            parts.append(_format_args_inline(arguments, max_items=8, max_chars=400))
+        for text in (_thought_text(event), _reasoning_text(event), _message_text(event)):
+            if text:
+                parts.append(text)
+    for event in _step_observation_events(step):
+        parts.append(_openhands_event_summary(event))
+        text = _observation_text(event)
+        if text:
+            parts.append(text)
+        message = _message_text(event)
+        if message:
+            parts.append(message)
+    return " ".join(part for part in parts if part)
+
+
+def _bridge_collection_id(record: Dict[str, Any]) -> str:
+    task_name = record.get("task_name")
+    if isinstance(task_name, str) and task_name:
+        return f"bridge:{task_name}"
+    env = record.get("env")
+    if isinstance(env, str) and env:
+        return f"bridge:{env}"
+    return "bridge"
+
+
+def _bridge_record_summary(record: Dict[str, Any]) -> str:
+    record_type = record.get("type", "bridge")
+    if record_type == "tool_call":
+        args_text = _format_args_inline(record.get("arguments"))
+        suffix = f": {args_text}" if args_text else ""
+        return f"call {record.get('tool_name', 'tool')}{suffix}"
+    if record_type == "tool_result":
+        result = record.get("result")
+        text = result.get("text") if isinstance(result, dict) else result
+        return f"result {record.get('tool_name', 'tool')}: {_shorten_text(text)}"
+    if record_type == "task_requested":
+        return f"task requested · {record.get('prompt_chars', '?')} prompt chars"
+    if record_type == "session_started":
+        return f"session · {record.get('env', '?')} · {record.get('split', '?')}"
+    if record_type == "session_closing":
+        return f"session closing · finished:{record.get('finished')}"
+    return _shorten_text(record)
+
+
+def _record_sort_key(record: Dict[str, Any]) -> float:
+    value = record.get("ts", record.get("time", 0.0))
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
 
 class PlayPauseFriendlyTree(Tree):
     """A Tree widget that doesn't capture space key, allowing it to bubble up for play/pause."""
@@ -43,6 +835,13 @@ class PlayPauseFriendlyTree(Tree):
         """Do nothing - let the key bubble up to the app."""
         pass
 
+    def process_label(self, label: str | Text) -> Text:
+        """A ``str`` label is literal text, never Rich markup or emoji codes: task ids, goals and step text show as
+        written (``task:train:41`` is not the ``:train:`` emoji, and ``[/tmp/out]`` is not a closing tag).  Styled
+        labels are ``Text`` already and pass through."""
+
+        return super().process_label(Text(label) if isinstance(label, str) else label)
+
 
 class ClickableResult(Static):
     """A clickable search result item with enhanced styling."""
@@ -50,9 +849,9 @@ class ClickableResult(Static):
     def __init__(
         self, text: str, index: int, search_panel: "SearchPanel", result_type: str = "unknown", context: str = ""
     ) -> None:
-        # Create rich content with icons and colors
+        # Create rich content with icons and colors; the label and context are data, so not markup
         content = self._create_rich_content(text, result_type, context)
-        super().__init__(content)
+        super().__init__(content, markup=False)
         self.index = index
         self.search_panel = search_panel
         self.result_type = result_type
@@ -176,7 +975,8 @@ class SearchPanel(Static):
             yield self.search_input
 
             # Results count label
-            self.results_label = Label("No search results", id="search_results_label")
+            # It echoes the query, which is literal text, not markup
+            self.results_label = Label("No search results", id="search_results_label", markup=False)
             try:
                 self.results_label.styles.height = 1
                 self.results_label.styles.color = "cyan"
@@ -384,6 +1184,10 @@ class SearchPanel(Static):
             if isinstance(data, dict):
                 payload = data.get("payload", {})
                 if isinstance(payload, dict):
+                    if _is_openhands_step_payload(payload):
+                        context = _openhands_search_text(payload)
+                        if context:
+                            return _shorten_text(context, 120)
                     # Extract relevant context based on type
                     if "code" in payload:
                         code = payload["code"]
@@ -487,12 +1291,29 @@ class SearchPanel(Static):
 
 
 class TrajectoryTree(Static):
-    def __init__(self) -> None:
+    def __init__(self, *, mode: str = "auto") -> None:
         super().__init__()
+        self.mode = _normalize_visualization_mode(mode)
         self.tree_widget: Optional[PlayPauseFriendlyTree[str]] = None
         self.traj_nodes: Dict[str, TreeNode[str]] = {}
+        self.trajectory_ids_by_node: Dict[int, str] = {}
         # Map grouping label -> group node to avoid duplicate "unlabeled" nodes
         self.group_nodes: Dict[str, TreeNode[str]] = {}
+        self.collection_group_keys_by_node: Dict[int, str] = {}
+        # Map collection_id -> semantic task metadata once trajectory_task_set
+        # arrives. Group nodes are created first and upgraded in place later.
+        self.collection_task_metadata: Dict[str, _TaskDisplayMetadata] = {}
+        # Cache metadata per trajectory so a root task can become authoritative
+        # even when task-set and trajectory-created events arrive out of order.
+        self.trajectory_task_metadata: Dict[str, _TaskDisplayMetadata] = {}
+        # Root task metadata is authoritative for a collection. Child and
+        # verifier task IDs are often ephemeral UUIDs.
+        self.root_trajectories: set[str] = set()
+        # Disjoint solver/verifier counts include each trajectory node itself
+        # and all trajectory descendants in its visible tree branch.
+        self.trajectory_subtree_counts: Dict[str, _TrajectorySubtreeCounts] = {}
+        self.collection_subtree_counts: Dict[str, _TrajectorySubtreeCounts] = {}
+        self.dirty_subtree_count_groups: set[str] = set()
         # Remember which group label a trajectory belongs to so later events are
         # attached consistently even if they don't repeat collection/process/task.
         self.traj_to_group_label: Dict[str, str] = {}
@@ -501,10 +1322,15 @@ class TrajectoryTree(Static):
         # Maintain a single "steps" container per trajectory to avoid duplicates
         # Map (trajectory_id, step_index) -> step node to enable focusing/scrolling
         self.step_nodes: Dict[tuple[str, int], TreeNode[str]] = {}
+        # Map (bridge collection, turn) -> node for raw OpenReward bridge JSONL files.
+        self.bridge_turn_nodes: Dict[tuple[str, int], TreeNode[str]] = {}
+        self.active_bridge_collection_id: str | None = None
         # Track the latest known reward per trajectory for quick label updates
         self.traj_rewards: Dict[str, float] = {}
         # Track whether a trajectory has reached a terminal state.
         self.traj_finished: Dict[str, bool] = {}
+        # Verifier trajectories are bookkeeping/judgment runs, not rewarded workers.
+        self.verifier_trajs: set[str] = set()
         # Track which trajectories are currently expanded (for efficient collapse_all_except)
         self.expanded_trajs: set[str] = set()
         # Bulk loading mode - when True, don't expand new trajectory nodes
@@ -528,12 +1354,23 @@ class TrajectoryTree(Static):
             pass
         # Clear internal maps
         self.traj_nodes.clear()
+        self.trajectory_ids_by_node.clear()
         self.group_nodes.clear()
+        self.collection_group_keys_by_node.clear()
+        self.collection_task_metadata.clear()
+        self.trajectory_task_metadata.clear()
+        self.root_trajectories.clear()
+        self.trajectory_subtree_counts.clear()
+        self.collection_subtree_counts.clear()
+        self.dirty_subtree_count_groups.clear()
         self.traj_to_group_label.clear()
         self.traj_steps_nodes.clear()
         self.step_nodes.clear()
+        self.bridge_turn_nodes.clear()
+        self.active_bridge_collection_id = None
         self.traj_rewards.clear()
         self.traj_finished.clear()
+        self.verifier_trajs.clear()
         self.expanded_trajs.clear()
         self.bulk_loading = False
         self.search_results.clear()
@@ -583,6 +1420,8 @@ class TrajectoryTree(Static):
             # Extract payload content
             payload = data.get("payload", {})
             if isinstance(payload, dict):
+                if _is_openhands_step_payload(payload):
+                    content_parts.append(_openhands_search_text(payload))
                 for key, value in payload.items():
                     if isinstance(value, str):
                         content_parts.append(value)
@@ -797,8 +1636,59 @@ class SplitDivider(Static):
                 node.expand()
                 self.expanded_trajs.add(traj_id)
             self.traj_nodes[traj_id] = node
+        elif parent is not None and (
+            not self._is_collection_node(parent)
+            or (
+                self.traj_nodes[traj_id].parent is not parent
+                and self.traj_nodes[traj_id].parent is not None
+                and self._is_collection_node(self.traj_nodes[traj_id].parent)
+            )
+        ):
+            node = self.traj_nodes[traj_id]
+            self._reparent_traj_node(node, parent)
 
+        self.trajectory_ids_by_node[id(self.traj_nodes[traj_id])] = traj_id
         return self.traj_nodes[traj_id]
+
+    def _is_collection_node(self, node: TreeNode[str]) -> bool:
+        return isinstance(node.data, dict) and node.data.get("type") == "collection"
+
+    def _collection_group_key_for_node(self, node: TreeNode[str] | None) -> str | None:
+        cursor = node
+        while cursor is not None:
+            group_key = self.collection_group_keys_by_node.get(id(cursor))
+            if group_key is not None:
+                return group_key
+            cursor = cursor.parent
+        return None
+
+    def _reparent_traj_node(self, node: TreeNode[str], parent: TreeNode[str]) -> None:
+        if node.parent is parent or node is parent:
+            return
+        cursor: Optional[TreeNode[str]] = parent
+        while cursor is not None:
+            if cursor is node:
+                return
+            cursor = cursor.parent
+
+        old_group_key = self._collection_group_key_for_node(node)
+        new_group_key = self._collection_group_key_for_node(parent)
+        old_parent = node.parent
+        old_children = getattr(old_parent, "_children", None)
+        if old_children is not None and node in old_children:
+            old_children.remove(node)
+        parent_children = getattr(parent, "_children", None)
+        if parent_children is not None and node not in parent_children:
+            parent_children.append(node)
+        setattr(node, "_parent", parent)
+        self.dirty_subtree_count_groups.update(
+            key for key in (old_group_key, new_group_key) if isinstance(key, str) and key
+        )
+        try:
+            parent.expand()
+            self.tree_widget._invalidate()
+        except Exception:
+            pass
 
     def _reward_color(self, reward: Optional[float]) -> Optional[str]:
         if reward is None:
@@ -813,10 +1703,86 @@ class SplitDivider(Static):
             return "green"
         return "yellow"
 
+    def _refresh_subtree_counts(self, group_keys: set[str] | None = None) -> None:
+        """Refresh disjoint solver/verifier counts and all affected labels."""
+
+        if self.tree_widget is None:
+            return
+
+        node_to_trajectory = self.trajectory_ids_by_node
+        memo: Dict[str, _TrajectorySubtreeCounts] = {}
+        visiting: set[str] = set()
+
+        def count_trajectory_node(node: TreeNode[str]) -> _TrajectorySubtreeCounts:
+            traj_id = node_to_trajectory.get(id(node))
+            if traj_id is None:
+                return _TrajectorySubtreeCounts()
+            if traj_id in memo:
+                return memo[traj_id]
+            # _reparent_traj_node already prevents cycles, but keep malformed
+            # partial logs from recursing indefinitely.
+            if traj_id in visiting:
+                return _TrajectorySubtreeCounts()
+            visiting.add(traj_id)
+            counts = (
+                _TrajectorySubtreeCounts(verifier=1)
+                if traj_id in self.verifier_trajs
+                else _TrajectorySubtreeCounts(solver=1)
+            )
+            for child in node.children:
+                if id(child) in node_to_trajectory:
+                    counts += count_trajectory_node(child)
+            visiting.discard(traj_id)
+            memo[traj_id] = counts
+            return counts
+
+        target_groups = (
+            self.group_nodes.items()
+            if group_keys is None
+            else ((group_key, self.group_nodes[group_key]) for group_key in group_keys if group_key in self.group_nodes)
+        )
+        for group_key, group_node in target_groups:
+            counts = _TrajectorySubtreeCounts()
+            for child in group_node.children:
+                if id(child) in node_to_trajectory:
+                    counts += count_trajectory_node(child)
+            self.collection_subtree_counts[group_key] = counts
+
+            payload = (
+                group_node.data.get("payload")
+                if isinstance(group_node.data, dict) and isinstance(group_node.data.get("payload"), dict)
+                else {}
+            )
+            collection_id = payload.get("collection_id")
+            metadata = self.collection_task_metadata.get(str(collection_id)) if collection_id is not None else None
+            self._set_node_label(
+                group_node,
+                _collection_label_from_metadata(collection_id, metadata, counts),
+            )
+            group_node.data = {
+                "type": "collection",
+                "payload": _collection_payload(collection_id, metadata, counts),
+            }
+
+        self.trajectory_subtree_counts.update(memo)
+        for traj_id in memo:
+            node = self.traj_nodes.get(traj_id)
+            if node is not None:
+                self._set_node_label(node, self._format_traj_label(traj_id))
+
     def _format_traj_label(self, traj_id: str) -> Text | str:
         reward = self.traj_rewards.get(traj_id)
-        base = f"traj:{traj_id}"
-        label = f"{base} · reward:{reward:.3f}" if reward is not None else base
+        is_verifier = traj_id in self.verifier_trajs
+        base = f"verifier:{traj_id}" if is_verifier else f"traj:{traj_id}"
+        counts = self.trajectory_subtree_counts.get(
+            traj_id,
+            _TrajectorySubtreeCounts(verifier=1) if is_verifier else _TrajectorySubtreeCounts(solver=1),
+        )
+        label = f"{base} · subtree:solver={counts.solver},verifier={counts.verifier}"
+        if reward is not None:
+            label = f"{label} · reward:{reward:.3f}"
+        if is_verifier:
+            return Text(label, style="dim")
         # Color only when finished
         if self.traj_finished.get(traj_id):
             color = self._reward_color(reward)
@@ -838,10 +1804,35 @@ class SplitDivider(Static):
             # Best-effort: if neither works, leave existing label
             pass
 
+    def _parent_node_for_trajectory(
+        self,
+        trajectory: Dict[str, Any],
+        parent_info: Any,
+        group_node: Optional[TreeNode[str]],
+    ) -> Optional[TreeNode[str]]:
+        misc = trajectory.get("misc")
+        if isinstance(misc, dict):
+            verifier_parent_id = misc.get("subagent_reward_verifies_trajectory_id") or misc.get(
+                "platoon_subagent_verifies_trajectory_id"
+            )
+            if isinstance(verifier_parent_id, str) and verifier_parent_id:
+                return self.ensure_traj_node(verifier_parent_id, parent=group_node, expand=not self.bulk_loading)
+        if not isinstance(parent_info, dict):
+            return group_node
+        parent_id = parent_info.get("id")
+        if not isinstance(parent_id, str) or not parent_id:
+            return group_node
+        return self.ensure_traj_node(parent_id, parent=group_node, expand=not self.bulk_loading)
+
     def ingest(self, event: Event) -> None:
         # Group strictly by collection_id to ensure all trajectories from the same
         # dump or live session appear under a single root node.
         collection_id = event.data.get("collection_id")
+        if not collection_id and event.type in BRIDGE_EVENT_TYPES:
+            inferred_bridge_collection = _bridge_collection_id(event.data)
+            if event.type == "session_started":
+                self.active_bridge_collection_id = inferred_bridge_collection
+            collection_id = self.active_bridge_collection_id or inferred_bridge_collection
 
         # Extract trajectory id (if present) for stable grouping between events
         traj_id_for_group: Optional[str] = None
@@ -853,22 +1844,55 @@ class SplitDivider(Static):
             traj_id_for_group = event.data.get("trajectory_id")
 
         group_node: Optional[TreeNode[str]] = None
+        group_key: str | None = None
+        previous_group_key = self.traj_to_group_label.get(traj_id_for_group) if traj_id_for_group else None
         if self.tree_widget is not None:
-            label = f"collection:{collection_id}" if collection_id else "unlabeled"
+            # Later events often omit collection_id. Reuse the trajectory's
+            # established collection rather than spawning a stale "unlabeled"
+            # group that can never receive semantic task metadata.
+            if collection_id is None and previous_group_key is not None:
+                group_key = previous_group_key
+                group_node = self.group_nodes.get(group_key)
+                if group_node is not None and isinstance(group_node.data, dict):
+                    payload = group_node.data.get("payload")
+                    if isinstance(payload, dict):
+                        collection_id = payload.get("collection_id")
+
+            group_key = group_key or (f"collection:{collection_id}" if collection_id else "unlabeled")
             # find or create grouping node via our map to avoid duplicates
-            group_node = self.group_nodes.get(label)
+            group_node = group_node or self.group_nodes.get(group_key)
             if group_node is None:
-                group_node = self.tree_widget.root.add(label)
+                metadata = self.collection_task_metadata.get(str(collection_id)) if collection_id else None
+                counts = self.collection_subtree_counts.get(group_key, _TrajectorySubtreeCounts())
+                group_node = self.tree_widget.root.add(_collection_label_from_metadata(collection_id, metadata, counts))
                 group_node.expand()
-                self.group_nodes[label] = group_node
+                group_node.data = {
+                    "type": "collection",
+                    "payload": _collection_payload(collection_id, metadata, counts),
+                }
+                self.group_nodes[group_key] = group_node
+                self.collection_group_keys_by_node[id(group_node)] = group_key
             # Remember association of this trajectory to the chosen group label
             if traj_id_for_group is not None:
-                self.traj_to_group_label[traj_id_for_group] = label
+                self.traj_to_group_label[traj_id_for_group] = group_key
 
         if event.type == "trajectory_created":
             traj = event.data["trajectory"]
             traj_id = traj["id"]
             parent_info = traj.get("parent_info")
+            if _is_verifier_misc(traj.get("misc")):
+                self.verifier_trajs.add(traj_id)
+                self.root_trajectories.discard(traj_id)
+            elif not parent_info:
+                self.root_trajectories.add(traj_id)
+                cached_metadata = self.trajectory_task_metadata.get(traj_id)
+                if collection_id is not None and cached_metadata is not None:
+                    collection_key = str(collection_id)
+                    self.collection_task_metadata[collection_key] = _merge_task_display_metadata(
+                        self.collection_task_metadata.get(collection_key),
+                        cached_metadata,
+                        prefer_candidate=True,
+                    )
             # Initialize known reward (if present) and label accordingly
             try:
                 self.traj_rewards[traj_id] = float(traj.get("reward", 0.0))
@@ -882,7 +1906,8 @@ class SplitDivider(Static):
             except Exception:
                 self.traj_finished[traj_id] = False
             label = self._format_traj_label(traj_id)
-            node = self.ensure_traj_node(traj_id, label=label, parent=group_node, expand=not self.bulk_loading)
+            parent_node = self._parent_node_for_trajectory(traj, parent_info, group_node)
+            node = self.ensure_traj_node(traj_id, label=label, parent=parent_node, expand=not self.bulk_loading)
             node.data = {"type": "trajectory", "payload": traj}
             # Render forks as a dedicated child under the child trajectory for clarity
             if parent_info:
@@ -900,15 +1925,59 @@ class SplitDivider(Static):
         elif event.type == "trajectory_task_set":
             traj_id = event.data["trajectory_id"]
             task = event.data.get("task")
-            node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
-            task_label = f"task: {task.get('goal')}" if task else "task: None"
+            task_misc = task.get("misc") if isinstance(task, dict) else None
+            parent_node = self._parent_node_for_trajectory(
+                {"misc": task_misc} if isinstance(task_misc, dict) else {},
+                None,
+                group_node,
+            )
+            task_metadata = _task_display_metadata(task)
+            self.trajectory_task_metadata[traj_id] = task_metadata
+            task_id = task_metadata.display_id
+            if _is_verifier_misc(task_misc):
+                self.verifier_trajs.add(traj_id)
+                self.root_trajectories.discard(traj_id)
+            if collection_id and group_node is not None:
+                collection_key = str(collection_id)
+                collection_metadata = _merge_task_display_metadata(
+                    self.collection_task_metadata.get(collection_key),
+                    task_metadata,
+                    prefer_candidate=traj_id in self.root_trajectories,
+                )
+                self.collection_task_metadata[collection_key] = collection_metadata
+                self._set_node_label(
+                    group_node,
+                    _collection_label_from_metadata(collection_id, collection_metadata),
+                )
+                group_node.data = {
+                    "type": "collection",
+                    "payload": _collection_payload(collection_id, collection_metadata),
+                }
+            node = self.ensure_traj_node(traj_id, parent=parent_node, expand=not self.bulk_loading)
+            self._set_node_label(node, self._format_traj_label(traj_id))
+            if task:
+                task_goal = task.get("goal")
+                task_label_parts = []
+                if task_metadata.environment:
+                    task_label_parts.append(f"env:{task_metadata.environment}")
+                if task_id:
+                    task_label_parts.append(f"task:{task_id}")
+                if task_metadata.task_index and task_metadata.task_index != task_id:
+                    task_label_parts.append(f"index:{task_metadata.task_index}")
+                if task_metadata.split:
+                    task_label_parts.append(f"split:{task_metadata.split}")
+                task_label = " · ".join(task_label_parts) if task_label_parts else "task"
+                if isinstance(task_goal, str) and task_goal.strip():
+                    task_label = f"{task_label} · {_shorten_text(task_goal, 160)}"
+            else:
+                task_label = "task: None"
             task_node = node.add(task_label)
             task_node.data = {"type": "task", "payload": task} if task else None
 
         elif event.type == "trajectory_step_added":
             traj_id = event.data["trajectory_id"]
             step_index = event.data.get("step_index")
-            step = event.data.get("step")
+            step = _display_step(event.data.get("step"))
             node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
             # Update cached reward from event if available; fallback to existing value
             new_reward = event.data.get("reward")
@@ -951,22 +2020,31 @@ class SplitDivider(Static):
             # Build a concise summary label for the step
             summary_parts: List[str] = []
             if isinstance(step, dict):
-                if "code" in step and isinstance(step["code"], str):
-                    code_lines = step["code"].splitlines()
-                    if code_lines:
-                        code_line = code_lines[0].strip()
-                        # Do not truncate; let the UI scroll horizontally
-                        summary_parts.append(f"code: {code_line}")
-                if "thought" in step and isinstance(step["thought"], str):
-                    thought_lines = step["thought"].splitlines()
-                    if thought_lines:
-                        thought_line = thought_lines[0].strip()
-                        if thought_line:
-                            summary_parts.append(f"thought: {thought_line}")
-                for k in ("output", "error"):
-                    v = step.get(k)
-                    if v:
-                        summary_parts.append(k)
+                if _should_render_openhands(getattr(self, "mode", "auto"), step):
+                    openhands_summary = _openhands_step_summary(step)
+                    if openhands_summary:
+                        summary_parts.append(openhands_summary)
+                if not summary_parts:
+                    if "code" in step and isinstance(step["code"], str):
+                        code_lines = step["code"].splitlines()
+                        if code_lines:
+                            code_line = code_lines[0].strip()
+                            # Do not truncate; let the UI scroll horizontally
+                            summary_parts.append(f"code: {code_line}")
+                    if "thought" in step and isinstance(step["thought"], str):
+                        thought_lines = step["thought"].splitlines()
+                        if thought_lines:
+                            thought_line = thought_lines[0].strip()
+                            if thought_line:
+                                summary_parts.append(f"thought: {thought_line}")
+                    for k in ("output", "error"):
+                        v = step.get(k)
+                        if v:
+                            summary_parts.append(k)
+                if not summary_parts:
+                    openhands_summary = _openhands_step_summary(step)
+                    if openhands_summary:
+                        summary_parts.append(openhands_summary)
             step_summary = "; ".join(summary_parts) if summary_parts else "(details)"
             step_node = steps_group.add(f"step {step_index}: {step_summary}")
             step_node.data = {"type": "step", "payload": step}
@@ -978,7 +2056,16 @@ class SplitDivider(Static):
 
         elif event.type == "trajectory_finished":
             traj_id = event.data["trajectory_id"]
-            node = self.ensure_traj_node(traj_id, parent=group_node, expand=not self.bulk_loading)
+            misc = event.data.get("misc")
+            if _is_verifier_misc(misc):
+                self.verifier_trajs.add(traj_id)
+                self.root_trajectories.discard(traj_id)
+            parent_node = self._parent_node_for_trajectory(
+                {"misc": misc} if isinstance(misc, dict) else {},
+                None,
+                group_node,
+            )
+            node = self.ensure_traj_node(traj_id, parent=parent_node, expand=not self.bulk_loading)
             # Update cached reward and terminal status
             try:
                 new_reward = event.data.get("reward")
@@ -992,6 +2079,9 @@ class SplitDivider(Static):
                 if isinstance(node.data, dict):
                     payload = node.data.get("payload") if isinstance(node.data.get("payload"), dict) else None
                     if isinstance(payload, dict):
+                        payload["reward"] = self.traj_rewards.get(traj_id, payload.get("reward", 0.0))
+                        if isinstance(misc, dict):
+                            payload["misc"] = misc
                         if finish_msg is not None:
                             payload["finish_message"] = finish_msg
                         if error_msg is not None:
@@ -1002,6 +2092,40 @@ class SplitDivider(Static):
                 pass
             # Refresh label to reflect final reward and status
             self._set_node_label(node, self._format_traj_label(traj_id))
+
+        elif event.type in BRIDGE_EVENT_TYPES:
+            if group_node is None:
+                return
+            turn = event.data.get("turn")
+            if isinstance(turn, int):
+                turn_key = (str(collection_id), turn)
+                turn_node = self.bridge_turn_nodes.get(turn_key)
+                if turn_node is None:
+                    turn_node = group_node.add(f"turn {turn}")
+                    turn_node.data = {"type": "bridge_turn", "payload": {"turn": turn}}
+                    self.bridge_turn_nodes[turn_key] = turn_node
+                bridge_node = turn_node.add(_bridge_record_summary(event.data))
+            else:
+                bridge_node = group_node.add(_bridge_record_summary(event.data))
+            bridge_node.data = {"type": "bridge_event", "payload": event.data}
+            if event.type == "session_closing":
+                self.active_bridge_collection_id = None
+
+        if event.type in {"trajectory_created", "trajectory_task_set", "trajectory_finished"}:
+            affected_groups = {key for key in (previous_group_key, group_key) if isinstance(key, str) and key}
+            affected_groups.update(self.dirty_subtree_count_groups)
+            self.dirty_subtree_count_groups.clear()
+            self._refresh_subtree_counts(affected_groups)
+            for affected_group_key in affected_groups:
+                affected_group = self.group_nodes.get(affected_group_key)
+                if affected_group is not None and not affected_group.children:
+                    try:
+                        affected_group.remove()
+                    except Exception:
+                        pass
+                    self.collection_group_keys_by_node.pop(id(affected_group), None)
+                    self.group_nodes.pop(affected_group_key, None)
+                    self.collection_subtree_counts.pop(affected_group_key, None)
 
     def focus_step(self, traj_id: str, step_index: int) -> None:
         if self.tree_widget is None:
@@ -1139,9 +2263,14 @@ class SplitDivider(Static):
 # Bind methods accidentally nested under SplitDivider back onto TrajectoryTree
 try:
     TrajectoryTree.ensure_traj_node = SplitDivider.ensure_traj_node  # type: ignore[attr-defined]
+    TrajectoryTree._is_collection_node = SplitDivider._is_collection_node  # type: ignore[attr-defined]
+    TrajectoryTree._collection_group_key_for_node = SplitDivider._collection_group_key_for_node  # type: ignore[attr-defined]
+    TrajectoryTree._reparent_traj_node = SplitDivider._reparent_traj_node  # type: ignore[attr-defined]
     TrajectoryTree._reward_color = SplitDivider._reward_color  # type: ignore[attr-defined]
+    TrajectoryTree._refresh_subtree_counts = SplitDivider._refresh_subtree_counts  # type: ignore[attr-defined]
     TrajectoryTree._format_traj_label = SplitDivider._format_traj_label  # type: ignore[attr-defined]
     TrajectoryTree._set_node_label = SplitDivider._set_node_label  # type: ignore[attr-defined]
+    TrajectoryTree._parent_node_for_trajectory = SplitDivider._parent_node_for_trajectory  # type: ignore[attr-defined]
     TrajectoryTree.ingest = SplitDivider.ingest  # type: ignore[attr-defined]
     TrajectoryTree.focus_step = SplitDivider.focus_step  # type: ignore[attr-defined]
     TrajectoryTree.highlight_step = SplitDivider.highlight_step  # type: ignore[attr-defined]
@@ -1160,6 +2289,8 @@ class TrajectoryViewer(App):
         Binding("n", "step", show=False),
         Binding("r", "restart", "Restart"),
         Binding("ctrl+f", "toggle_search", "Search"),
+        Binding("m", "toggle_mouse_capture", "Mouse/Select"),
+        Binding("d", "toggle_details_only", "Details Only"),
         Binding("f3", "next_search", "Next Result"),
         Binding("shift+f3", "prev_search", "Prev Result"),
         Binding("escape", "close_search", "Close Search"),
@@ -1178,13 +2309,18 @@ class TrajectoryViewer(App):
         # (seconds). When set, files are read from the beginning and stop at EOF
         # rather than tailing indefinitely.
         replay_delay: Optional[float] = None,
+        mode: str = "auto",
+        selectable_text: bool = False,
     ) -> None:
         super().__init__()
+        self.mode = _normalize_visualization_mode(mode)
+        self.selectable_text = selectable_text
+        self.mouse_capture_enabled = not selectable_text
         self.event_queue = event_queue
         self.jsonl_path = Path(jsonl_path) if jsonl_path else None
         self.jsonl_paths = [Path(p) for p in jsonl_paths] if jsonl_paths else None
-        self.tree_widget = TrajectoryTree()
-        self.details_panel = DetailsPanel()
+        self.tree_widget = TrajectoryTree(mode=self.mode)
+        self.details_panel = DetailsPanel(mode=self.mode)
         self.search_panel = SearchPanel(self)
         self.start_at_end = start_at_end
         self.replay_delay = replay_delay
@@ -1196,7 +2332,9 @@ class TrajectoryViewer(App):
         self._replay_running: bool = False
         # Split view state
         self._split_pct: int = 60
+        self._details_only: bool = False
         self._left_container: Optional[HorizontalScroll] = None
+        self._right_outer_container: Optional[HorizontalScroll] = None
         self._right_container: Optional[VerticalScroll] = None
         self._divider: Optional[Static] = None
 
@@ -1237,6 +2375,7 @@ class TrajectoryViewer(App):
 
             # Right pane: Details with vertical + horizontal scrolling
             outer_h = HorizontalScroll()
+            self._right_outer_container = outer_h
             try:
                 outer_h.styles.flex = 1
                 # Allow vertical scrolling to propagate to the inner VerticalScroll
@@ -1260,6 +2399,8 @@ class TrajectoryViewer(App):
         yield Footer()
 
     def set_split(self, pct: int) -> None:
+        if self._details_only:
+            return
         pct = max(10, min(90, int(pct)))
         self._split_pct = pct
         if self._left_container is not None:
@@ -1326,6 +2467,55 @@ class TrajectoryViewer(App):
         if hasattr(self.tree_widget, "current_search_index"):
             self.search_panel.highlight_result(self.tree_widget.current_search_index)
 
+    def action_toggle_mouse_capture(self) -> None:
+        """Toggle terminal mouse capture so text can be selected with the mouse."""
+        self.mouse_capture_enabled = not self.mouse_capture_enabled
+        self._apply_mouse_capture()
+        try:
+            if self.mouse_capture_enabled:
+                self.notify("Mouse capture enabled")
+            else:
+                self.notify("Mouse capture disabled; drag-select text in your terminal")
+        except Exception:
+            pass
+
+    def action_toggle_details_only(self) -> None:
+        """Expand details to full width so terminal selection stays within details."""
+        self._details_only = not self._details_only
+        self._apply_details_only_layout()
+        try:
+            if self._details_only:
+                self.notify("Details-only view enabled")
+            else:
+                self.notify("Split view enabled")
+        except Exception:
+            pass
+
+    def _apply_details_only_layout(self) -> None:
+        try:
+            if self._left_container is not None:
+                self._left_container.styles.width = 0 if self._details_only else f"{self._split_pct}%"
+                self._left_container.styles.min_width = 0 if self._details_only else 20
+            if self._divider is not None:
+                self._divider.styles.width = 0 if self._details_only else 2
+                self._divider.styles.min_width = 0 if self._details_only else 2
+            if self._right_outer_container is not None:
+                self._right_outer_container.styles.flex = 1
+        except Exception:
+            pass
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+    def _apply_mouse_capture(self) -> None:
+        sequence = MOUSE_CAPTURE_ENABLE if self.mouse_capture_enabled else MOUSE_CAPTURE_DISABLE
+        try:
+            sys.__stdout__.write(sequence)
+            sys.__stdout__.flush()
+        except Exception:
+            pass
+
     def perform_search(self, query: str) -> None:
         """Perform search in tree widget and update search panel."""
         if query:
@@ -1346,6 +2536,7 @@ class TrajectoryViewer(App):
         self.search_panel.highlight_result(index)
 
     async def on_mount(self) -> None:  # type: ignore[override]
+        self._apply_mouse_capture()
         if self.event_queue is not None:
             self._polling_task = asyncio.create_task(self._poll_queue())
         elif self.jsonl_path is not None:
@@ -1521,7 +2712,7 @@ class TrajectoryViewer(App):
                     records.append(record)
                 except Exception:
                     continue
-        records.sort(key=lambda r: r.get("ts", 0.0))
+        records.sort(key=_record_sort_key)
         self._replay_records = records
         self._replay_index = 0
         # If running auto-play, loop until done; otherwise, render first frame if any
@@ -1545,7 +2736,7 @@ class TrajectoryViewer(App):
                     records.append(record)
                 except Exception:
                     continue
-        records.sort(key=lambda r: r.get("ts", 0.0))
+        records.sort(key=_record_sort_key)
         for record in records:
             await self._handle_record(record)
 
@@ -1562,7 +2753,7 @@ class TrajectoryViewer(App):
                     records.append(record)
                 except Exception:
                     continue
-        records.sort(key=lambda r: r.get("ts", 0.0))
+        records.sort(key=_record_sort_key)
         # For multi-file replay we can just stream sorted records
         for record in records:
             await self._handle_record(record)
@@ -1585,7 +2776,7 @@ class TrajectoryViewer(App):
                             continue
             except Exception:
                 continue
-        all_records.sort(key=lambda r: r.get("ts", 0.0))
+        all_records.sort(key=_record_sort_key)
         self._replay_records = all_records
         self._replay_index = 0
         # Start paused
@@ -1611,7 +2802,7 @@ class TrajectoryViewer(App):
                             continue
             except Exception:
                 continue
-        all_records.sort(key=lambda r: r.get("ts", 0.0))
+        all_records.sort(key=_record_sort_key)
         # Bulk load without per-record refresh
         if self.tree_widget is not None:
             self.tree_widget.bulk_loading = True
@@ -1700,12 +2891,14 @@ class TrajectoryViewer(App):
         self.details_panel.show(label, payload)
 
 
-def run_viewer_from_queue(event_queue: queue.Queue) -> None:
-    app = TrajectoryViewer(event_queue=event_queue)
+def run_viewer_from_queue(event_queue: queue.Queue, *, mode: str = "auto", selectable_text: bool = False) -> None:
+    app = TrajectoryViewer(event_queue=event_queue, mode=mode, selectable_text=selectable_text)
     app.run()
 
 
-def run_viewer_from_jsonl(path: str | Path, *, start_at_end: bool = False) -> None:
+def run_viewer_from_jsonl(
+    path: str | Path, *, start_at_end: bool = False, mode: str = "auto", selectable_text: bool = False
+) -> None:
     """Launch a TrajectoryViewer for a single JSONL file.
 
     By default, the viewer starts reading from the **beginning** of the file so that
@@ -1713,23 +2906,41 @@ def run_viewer_from_jsonl(path: str | Path, *, start_at_end: bool = False) -> No
     a *tail -f* style live view that ignores existing lines and only shows new
     events appended after the viewer starts.
     """
-    app = TrajectoryViewer(jsonl_path=path, start_at_end=start_at_end)
+    app = TrajectoryViewer(jsonl_path=path, start_at_end=start_at_end, mode=mode, selectable_text=selectable_text)
     app.run()
 
 
-def run_viewer_from_jsonls(paths: List[str | Path], *, start_at_end: bool = False) -> None:
+def run_viewer_from_jsonls(
+    paths: List[str | Path], *, start_at_end: bool = False, mode: str = "auto", selectable_text: bool = False
+) -> None:
     """Launch a TrajectoryViewer that tails multiple JSONL files in parallel."""
-    app = TrajectoryViewer(jsonl_paths=paths, start_at_end=start_at_end)
+    app = TrajectoryViewer(jsonl_paths=paths, start_at_end=start_at_end, mode=mode, selectable_text=selectable_text)
     app.run()
 
 
-def run_replay_from_jsonl(path: str | Path, *, delay: float = 0.5) -> None:
-    app = TrajectoryViewer(jsonl_path=path, start_at_end=False, replay_delay=delay)
+def run_replay_from_jsonl(
+    path: str | Path, *, delay: float = 0.5, mode: str = "auto", selectable_text: bool = False
+) -> None:
+    app = TrajectoryViewer(
+        jsonl_path=path,
+        start_at_end=False,
+        replay_delay=delay,
+        mode=mode,
+        selectable_text=selectable_text,
+    )
     app.run()
 
 
-def run_replay_from_jsonls(paths: List[str | Path], *, delay: float = 0.5) -> None:
-    app = TrajectoryViewer(jsonl_paths=paths, start_at_end=False, replay_delay=delay)
+def run_replay_from_jsonls(
+    paths: List[str | Path], *, delay: float = 0.5, mode: str = "auto", selectable_text: bool = False
+) -> None:
+    app = TrajectoryViewer(
+        jsonl_paths=paths,
+        start_at_end=False,
+        replay_delay=delay,
+        mode=mode,
+        selectable_text=selectable_text,
+    )
     app.run()
 
 
@@ -1740,8 +2951,9 @@ class DetailsPanel(Static):
     - For other payloads, pretty-prints JSON when possible.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, mode: str = "auto") -> None:
         super().__init__()
+        self.mode = _normalize_visualization_mode(mode)
         self.current_content: str = ""
         self.search_query: str = ""
 
@@ -1760,7 +2972,7 @@ class DetailsPanel(Static):
     def show(self, label: str, payload: Any) -> None:
         if not payload:
             self.current_content = ""
-            self.update(Panel(Text("No details"), title=label))
+            self.update(_panel(Text("No details"), title=label))
             return
 
         payload_type = payload.get("type") if isinstance(payload, dict) else None
@@ -1771,7 +2983,7 @@ class DetailsPanel(Static):
 
         renderable = self._render_data(data)
         title = f"{label}" if payload_type is None else f"{label} · {payload_type}"
-        self.update(Panel(renderable, title=title, border_style="cyan"))
+        self.update(_panel(renderable, title=title, border_style="cyan"))
 
     def _extract_content_text(self, data: Any) -> str:
         """Extract all text content for searching."""
@@ -1806,8 +3018,261 @@ class DetailsPanel(Static):
             return False
         return query.lower() in self.current_content.lower()
 
+    def _is_openhands_step(self, data: Dict[str, Any]) -> bool:
+        return _should_render_openhands(self.mode, data)
+
+    def _render_openhands_step(self, data: Dict[str, Any]) -> Any:
+        panels: List[Any] = []
+        summary = _openhands_step_summary(data) or "OpenHands step"
+        panels.append(_panel(Text(summary, no_wrap=False, overflow="fold"), title="summary"))
+
+        action_events = _step_action_events(data)
+        observation_events = _step_observation_events(data)
+        condensation_reasoning = _condensation_reasoning_text(data)
+        if condensation_reasoning:
+            panels.append(
+                _panel(
+                    Text(condensation_reasoning, no_wrap=False, overflow="fold"),
+                    title="condensation reasoning",
+                )
+            )
+        system_events = [event for event in observation_events if event.get("kind") == "SystemPromptEvent"]
+        visible_observations = [event for event in observation_events if event.get("kind") != "SystemPromptEvent"]
+
+        if system_events:
+            panels.append(self._render_openhands_setup(system_events))
+
+        if action_events:
+            panels.append(self._render_openhands_action_observation_pairs(action_events, visible_observations))
+        elif visible_observations:
+            panels.append(self._render_openhands_events("observations", visible_observations))
+
+        for key, value in data.items():
+            if key in {"action_events", "observation_events"}:
+                continue
+            if key == "misc" and condensation_reasoning and isinstance(value, dict):
+                value = dict(value)
+                value.pop("condensation_reasoning", None)
+                if not value:
+                    continue
+            panels.append(self._render_key_value(key, value))
+        return Group(*panels) if panels else Text("<empty>")
+
+    def _render_openhands_setup(self, events: List[Dict[str, Any]]) -> Panel:
+        lines = Text()
+        for event in events:
+            system_prompt = event.get("system_prompt")
+            if isinstance(system_prompt, dict):
+                text = system_prompt.get("text")
+                tools = event.get("tools")
+                if isinstance(text, str):
+                    lines.append(f"system prompt: {len(text)} chars\n")
+                if isinstance(tools, list):
+                    lines.append(f"tools advertised: {len(tools)}\n")
+                continue
+            lines.append(_openhands_event_summary(event) + "\n")
+        return _panel(lines or Text("setup event"), title="setup")
+
+    def _render_openhands_action_observation_pairs(
+        self, action_events: List[Dict[str, Any]], observation_events: List[Dict[str, Any]]
+    ) -> Panel:
+        cards: List[Any] = []
+        matched_observation_ids: set[int] = set()
+
+        for index, action in enumerate(action_events, start=1):
+            tool_name, arguments = _tool_call_display(action)
+            title = f"{index}. {tool_name or _openhands_event_summary(action)}"
+            sections: List[Any] = []
+
+            metadata = Text()
+            event_id = action.get("id")
+            timestamp = action.get("timestamp")
+            if event_id or timestamp:
+                metadata.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+            security_risk = action.get("security_risk")
+            if security_risk:
+                metadata.append(f"security: {security_risk}\n", style="dim")
+            summary = action.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                metadata.append(f"summary: {_shorten_text(summary, 300)}\n")
+            if metadata.plain:
+                sections.append(metadata)
+
+            thought = _thought_text(action)
+            if thought:
+                sections.append(_panel(Text(thought, no_wrap=False, overflow="fold"), title="thought"))
+
+            reasoning = _reasoning_text(action)
+            if reasoning and reasoning != thought:
+                sections.append(_panel(Text(reasoning, no_wrap=False, overflow="fold"), title="reasoning"))
+
+            if arguments not in (None, "", {}):
+                sections.extend(self._render_openhands_argument_panels(tool_name, arguments))
+
+            matched = self._matching_observations(action, observation_events)
+            for observation in matched:
+                matched_observation_ids.add(id(observation))
+                sections.append(self._render_openhands_observation_card(observation))
+
+            cards.append(_panel(Group(*sections) if sections else Text("<empty>"), title=title))
+
+        unmatched = [event for event in observation_events if id(event) not in matched_observation_ids]
+        if unmatched:
+            cards.append(self._render_openhands_events("unmatched observations", unmatched))
+        return (
+            _panel(Group(*cards), title="actions and observations")
+            if cards
+            else _panel(Text("<empty>"), title="actions")
+        )
+
+    def _render_openhands_argument_panels(self, tool_name: str | None, arguments: Any) -> List[Panel]:
+        parsed = _parse_json_string(arguments)
+        panels: List[Panel] = []
+
+        if isinstance(parsed, dict):
+            remaining = dict(parsed)
+            for key in ("code", "python", "script"):
+                value = remaining.pop(key, None)
+                if isinstance(value, str) and value.strip():
+                    panels.append(
+                        _panel(
+                            Syntax(value, "python", word_wrap=True, line_numbers=True),
+                            title=f"{tool_name or 'tool'} {key}",
+                        )
+                    )
+
+            command = remaining.pop("command", None)
+            if isinstance(command, str) and command.strip():
+                lang = "python" if tool_name == "python_execute" else "bash"
+                panels.append(
+                    _panel(
+                        Syntax(command, lang, word_wrap=True, line_numbers=True),
+                        title=f"{tool_name or 'tool'} command",
+                    )
+                )
+
+            if remaining:
+                panels.append(_panel(Syntax(_pretty_json(remaining), "json", word_wrap=True), title="arguments"))
+            return panels or [_panel(Text("<empty>"), title="arguments")]
+
+        if isinstance(parsed, str) and tool_name == "python_execute":
+            return [_panel(Syntax(parsed, "python", word_wrap=True, line_numbers=True), title="python_execute code")]
+
+        try:
+            argument_view: Any = Syntax(_pretty_json(parsed), "json", word_wrap=True)
+        except Exception:
+            argument_view = Text(str(arguments), no_wrap=False, overflow="fold")
+        return [_panel(argument_view, title="arguments")]
+
+    def _matching_observations(
+        self, action: Dict[str, Any], observation_events: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        action_id = action.get("id")
+        tool_call_id = action.get("tool_call_id")
+        matches: List[Dict[str, Any]] = []
+        for observation in observation_events:
+            if tool_call_id and observation.get("tool_call_id") == tool_call_id:
+                matches.append(observation)
+            elif action_id and observation.get("action_id") == action_id:
+                matches.append(observation)
+        return matches
+
+    def _render_openhands_condensation_summary(self, event: Dict[str, Any], title: str) -> Panel:
+        summary = _condensation_summary_text(event)
+        if summary is None:
+            return _panel(Text("<empty>"), title=title)
+
+        metadata = Text()
+        event_id = event.get("id")
+        timestamp = event.get("timestamp")
+        if event_id or timestamp:
+            metadata.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+        forgotten_event_ids = event.get("forgotten_event_ids")
+        if isinstance(forgotten_event_ids, list):
+            metadata.append(f"forgotten events: {len(forgotten_event_ids)}\n", style="dim")
+        summary_offset = event.get("summary_offset")
+        if summary_offset is not None:
+            metadata.append(f"summary offset: {summary_offset}\n", style="dim")
+
+        body: Any = Markdown(summary)
+        if metadata.plain:
+            body = Group(metadata, body)
+        return _panel(body, title=title)
+
+    def _render_openhands_observation_card(self, event: Dict[str, Any]) -> Panel:
+        condensation_summary = _condensation_summary_text(event)
+        if condensation_summary:
+            return self._render_openhands_condensation_summary(event, "condensation summary")
+
+        payload = _observation_payload(event)
+        title = _openhands_event_summary(event)
+        if payload is not None:
+            if isinstance(payload, str):
+                payload_view: Any = Text(payload, no_wrap=False, overflow="fold")
+            else:
+                payload_view = Syntax(_pretty_json(payload), "json", word_wrap=True)
+            return _panel(payload_view, title=title)
+
+        lines = Text()
+        event_id = event.get("id")
+        timestamp = event.get("timestamp")
+        if event_id or timestamp:
+            lines.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+        message = _message_text(event)
+        if message:
+            lines.append(f"message: {_shorten_text(message, 800)}\n")
+        return _panel(lines or Text("<empty>"), title=title)
+
+    def _render_openhands_events(self, title: str, events: List[Dict[str, Any]]) -> Panel:
+        cards: List[Any] = []
+        for index, event in enumerate(events, start=1):
+            lines = Text()
+
+            event_id = event.get("id")
+            timestamp = event.get("timestamp")
+            if event_id or timestamp:
+                lines.append(f"{event_id or ''} {timestamp or ''}\n", style="dim")
+
+            condensation_summary = _condensation_summary_text(event)
+            if condensation_summary:
+                cards.append(self._render_openhands_condensation_summary(event, f"{index}. condensation summary"))
+                continue
+
+            thought = _thought_text(event)
+            if thought:
+                lines.append(f"thought: {thought}\n")
+
+            reasoning = _reasoning_text(event)
+            if reasoning and reasoning != thought:
+                lines.append(f"reasoning: {reasoning}\n", style="dim")
+
+            message = _message_text(event)
+            if message:
+                lines.append(f"message: {_shorten_text(message, 800)}\n")
+
+            tool_name, arguments = _tool_call_display(event)
+            if tool_name and arguments not in (None, "", {}):
+                argument_panels = self._render_openhands_argument_panels(tool_name, arguments)
+                body = Group(lines, *argument_panels) if lines.plain else Group(*argument_panels)
+                cards.append(_panel(body, title=f"{index}. {tool_name}"))
+                continue
+
+            payload = _observation_payload(event)
+            if payload is not None:
+                if isinstance(payload, str):
+                    payload_view: Any = Text(payload, no_wrap=False, overflow="fold")
+                else:
+                    payload_view = Syntax(_pretty_json(payload), "json", word_wrap=True)
+                cards.append(_panel(payload_view, title=f"{index}. {_openhands_event_summary(event)}"))
+                continue
+
+            cards.append(_panel(lines or Text("<empty>"), title=f"{index}. {_openhands_event_summary(event)}"))
+        return _panel(Group(*cards), title=title) if cards else _panel(Text("<empty>"), title=title)
+
     def _render_data(self, data: Any) -> Any:
         if isinstance(data, dict):
+            if self._is_openhands_step(data):
+                return self._render_openhands_step(data)
             # Render as a set of panels for each field to keep things readable
             panels: List[Any] = []
             for key, value in data.items():
@@ -1839,7 +3304,7 @@ class DetailsPanel(Static):
         if isinstance(value, str) and key in self.CODE_KEYS_TO_LANG:
             lang = self.CODE_KEYS_TO_LANG[key]
             syn = Syntax(value, lang, word_wrap=True, line_numbers=False)
-            return Panel(syn, title=key)
+            return _panel(syn, title=key)
         # Structured data: pretty JSON with wrapping and syntax highlight
         if isinstance(value, (dict, list)):
             try:
@@ -1849,11 +3314,11 @@ class DetailsPanel(Static):
                 json_view = Syntax(dumped, "json", word_wrap=True, line_numbers=False)
             except Exception:
                 json_view = Text(str(value), no_wrap=False, overflow="fold")
-            return Panel(json_view, title=key)
+            return _panel(json_view, title=key)
         # Plain scalars or non-code strings: render Markdown when string
         if isinstance(value, str):
             try:
-                return Panel(Markdown(value), title=key)
+                return _panel(Markdown(value), title=key)
             except Exception:
-                return Panel(Text(value, no_wrap=False, overflow="fold"), title=key)
-        return Panel(Text(str(value), no_wrap=False, overflow="fold"), title=key)
+                return _panel(Text(value, no_wrap=False, overflow="fold"), title=key)
+        return _panel(Text(str(value), no_wrap=False, overflow="fold"), title=key)

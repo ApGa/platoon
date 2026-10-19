@@ -1,0 +1,54 @@
+# tiny-agent as a platoon harness: how to install it, launch it against the gateway, turn its built-in tool
+# off, hand it the environment's tools over MCP, and read its final answer.
+#
+#   platoon harness show examples/cli-harness/tiny-agent.toml
+
+name = "example-tiny-agent"
+version = "0.1.0"
+dialect = "openai_chat"   # the API it speaks: openai_chat, openai_responses or anthropic_messages
+timeout_s = 600           # wall clock for one run; the rollout's own timeout applies too, the earlier wins
+max_steps = 20            # {max_steps} when the run sets no step budget; the run's max_steps wins
+
+[install]
+# Shell commands run where the agent runs (host or task sandbox) before each launch. A packaged agent would
+# install itself here (see the mini-swe-agent spec); tiny-agent only needs python3.
+commands = ["python3 --version"]
+
+[launch]
+# {state_dir} is a per-agent scratch directory; the agent runs in {workdir}.
+argv = [
+    "python3", "{state_dir}/tiny_agent.py",
+    "--model", "{model}",
+    "--task-file", "{state_dir}/task.md",
+    "--max-turns", "{max_steps}",
+]
+files = { "task.md" = "{instruction}" }        # written into {state_dir} before the launch
+assets = { "tiny_agent.py" = "tiny_agent.py" }  # copied from next to this spec into {state_dir}
+
+[launch.env]
+# The agent key may only appear here and in [mcp.env], never in argv or files.
+OPENAI_BASE_URL = "{base_url}/v1"
+OPENAI_API_KEY = "{api_key}"
+PLATOON_API_KEY = "{api_key}"   # the MCP config below reads it as ${PLATOON_API_KEY}
+
+[builtins]
+tools = ["shell"]
+
+[builtins.disable]
+# Appended to argv when the built-ins are off: by default, whenever the agent runs outside a task sandbox.
+args = ["--no-shell"]
+
+[mcp]
+# The environment's tools over MCP. tiny-agent reads MCP servers from a config file, so platoon writes one
+# into {state_dir} and passes its path. {mcp_url} has no key in it; the client sends the agent key as a
+# Bearer token.
+config_template = '{"mcpServers": {"env": {"url": "{mcp_url}", "headers": {"Authorization": "Bearer ${PLATOON_API_KEY}"}}}}'
+config_file = "mcp.json"
+args = ["--mcp-config", "{mcp_config_path}"]
+
+[final_message]
+stdout_regex = "^FINAL ANSWER: (.*)$"   # the last match; group 1 when the regex has a group
+
+[exit_codes]
+# 0 is completed and any other code an error, unless mapped here.
+3 = "completed"   # turn limit: the policy ran out of turns, a scored outcome rather than a crash

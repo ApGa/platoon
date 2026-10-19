@@ -1,0 +1,123 @@
+"""Deprecations: the warning platoon gives for a form that a later release removes, and the config keys going away.
+
+A deprecated form keeps working for one minor release, with a :class:`PlatoonDeprecationWarning` that names what
+replaces it and the release that removes it; the next minor release removes it, so a form that first warns in 0.3 is
+gone in 0.4 (RFC 0016, section 10).
+
+A config class names the keys it still takes but that are going away in a class attribute, ``DEPRECATED_KEYS``::
+
+    @dataclass
+    class RolloutConfig:
+        DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
+            "propogate_root_success": DeprecatedKey(removed_in="0.3.0", renamed_to="propagate_root_success"),
+        }
+
+The config loader (:func:`platoon.utils.config.resolve_config`) finds every such key a config sets, wherever it sits,
+and reports each as a :class:`Deprecation` with its dotted path: as a warning, in ``platoon config validate``'s report
+(a failure with ``--strict``) and in the run's ``lock.json`` (``deprecations``).
+
+The keys of a free-form mapping belong to whatever it configures, so a config class names how to find the deprecated
+ones in a second class attribute, ``DEPRECATED_OPTIONS``: ``{field: function}``, the function taking the section that
+holds the field and returning its ``{key: DeprecatedKey}``.  An environment entry's ``service_kwargs`` are found so,
+from the ``DEPRECATED_KEYS`` of the service class the entry names.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+import warnings
+from collections.abc import Iterable, Mapping
+from typing import Any
+
+__all__ = [
+    "DEPRECATED_KEYS",
+    "DEPRECATED_OPTIONS",
+    "DeprecatedKey",
+    "Deprecation",
+    "PlatoonDeprecationWarning",
+    "deprecated_keys",
+    "warn",
+]
+
+# The class attribute in which a config class names its deprecated keys: ``{key: DeprecatedKey(...)}``.
+DEPRECATED_KEYS = "DEPRECATED_KEYS"
+# The class attribute in which a config class names how to find the deprecated keys of its free-form mapping fields:
+# ``{field: function}``, the function taking the section (a mapping) and returning ``{key: DeprecatedKey(...)}``.
+DEPRECATED_OPTIONS = "DEPRECATED_OPTIONS"
+# Frames in platoon's own package are skipped when a warning names where it came from.
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
+
+
+class PlatoonDeprecationWarning(FutureWarning):
+    """A form platoon still accepts, such as a config key, that a later release removes.
+
+    Each warning names what replaces the form and the release that removes it. It is a ``FutureWarning``, which
+    Python shows by default, unlike a ``DeprecationWarning`` outside ``__main__``. ``platoon config validate
+    --strict`` fails on a config that uses a deprecated key, and in Python
+    ``warnings.simplefilter("error", pt.PlatoonDeprecationWarning)`` (or pytest's
+    ``-W error::platoon.PlatoonDeprecationWarning``) turns the warnings into errors.
+    """
+
+
+@dataclasses.dataclass(frozen=True)
+class DeprecatedKey:
+    """How a config key is going away: the release that removes it (``removed_in``, the minor release after the first
+    one that warns about it), and what replaces it, either a key of the same section (``renamed_to``) or what to do
+    instead, said in a few words (``instead``)."""
+
+    removed_in: str
+    renamed_to: str | None = None
+    instead: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.renamed_to is None) == (self.instead is None):
+            raise ValueError("a deprecated key names what replaces it: give one of renamed_to and instead")
+
+    def at(self, path: str) -> Deprecation:
+        """The deprecation of a config that sets this key at the dotted ``path``."""
+
+        if self.renamed_to is not None:
+            parent = path.rpartition(".")[0]
+            replacement = f"{parent}.{self.renamed_to}" if parent else self.renamed_to
+        else:
+            replacement = str(self.instead)
+        return Deprecation(path=path, replacement=replacement, removed_in=self.removed_in)
+
+
+def deprecated_keys(schema: Any) -> Mapping[str, DeprecatedKey]:
+    """The deprecated keys a config class names in its ``DEPRECATED_KEYS`` attribute; none for anything else."""
+
+    found = getattr(schema, DEPRECATED_KEYS, None)
+    return found if isinstance(found, Mapping) else {}
+
+
+@dataclasses.dataclass(frozen=True)
+class Deprecation:
+    """A deprecated form that a config uses: the key's dotted ``path``, what replaces it and the release that
+    removes it."""
+
+    path: str
+    replacement: str
+    removed_in: str
+
+    @property
+    def message(self) -> str:
+        """One line, as a warning, ``platoon config validate`` and the command line give it."""
+
+        return f"{self.path}: deprecated; use {self.replacement} instead (platoon {self.removed_in} removes it)"
+
+    def to_dict(self) -> dict[str, str]:
+        """The record ``lock.json`` keeps under ``deprecations``."""
+
+        return {"path": self.path, "replacement": self.replacement, "removed_in": self.removed_in}
+
+
+def warn(deprecations: Iterable[Deprecation]) -> None:
+    """Warn of each deprecation, as a :class:`PlatoonDeprecationWarning` from the first caller outside platoon.
+
+    Python's warning filters apply: an ``error`` filter raises the first one.
+    """
+
+    for deprecation in deprecations:
+        warnings.warn(deprecation.message, PlatoonDeprecationWarning, skip_file_prefixes=(_PACKAGE_DIR,))

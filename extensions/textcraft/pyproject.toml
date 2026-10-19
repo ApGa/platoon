@@ -1,0 +1,80 @@
+[project]
+name = "platoon-textcraft"
+version = "0.1.0"
+description = "TextCraft and TextCraft-Synth: crafting environments for LLM agents (ORS), with platoon's named environments and a Harbor export."
+# PyPI shows README.md with its relative links pointed at the repository (fancy-pypi-readme, below).
+dynamic = ["readme"]
+requires-python = ">=3.12"
+# MIT covers the code and the data, the Minecraft recipes in data/recipes/ included (README.md, "License").
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Apurva Gandhi", email = "apurvag@cs.cmu.edu"}
+]
+# The environments alone, for any ORS client: platoon_textcraft.env imports neither platoon nor IPython.
+dependencies = [
+    "openreward>=0.1.125",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+# The prompt builders, the named environments and the task generators import platoon; platoon reads this range
+# before it loads the named environments.
+platoon = [
+    "platoon[ors]>=0.2,<0.3",
+]
+
+[project.entry-points."platoon.environments"]
+# Named environments, imported only when a config names one (env: textcraft@1, env: textcraft-synth@1).
+textcraft = "platoon_textcraft.entries:TEXTCRAFT"
+textcraft-synth = "platoon_textcraft.entries:TEXTCRAFT_SYNTH"
+
+[project.urls]
+Source = "https://github.com/ApGa/platoon/tree/main/extensions/textcraft"
+
+[dependency-groups]
+dev = [
+    "platoon[tinker,ors]",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "pytest-xdist>=3.8.0",
+]
+
+[tool.uv.sources]
+# Development only: the workspace's platoon. The published metadata keeps the range above.
+platoon = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27", "hatch-fancy-pypi-readme>=24.1"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/platoon_textcraft"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "README.md", "LICENSE"]
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+# PyPI cannot resolve README.md's relative links: point them at the repository, at the tag the extension's release is
+# published from (platoon-textcraft-v and the version, $HFPR_VERSION), as platoon's own README is. A link that climbs
+# to the repository's root (../../) goes there; any other is relative to extensions/textcraft.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\(\.\./\.\./([^)\s]+)\)'
+replacement = '](https://github.com/ApGa/platoon/blob/platoon-textcraft-v$HFPR_VERSION/\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?![a-z][a-z0-9+.-]*:|#)([^)\s]+)\)'
+replacement = '](https://github.com/ApGa/platoon/blob/platoon-textcraft-v$HFPR_VERSION/extensions/textcraft/\1)'
+
+[tool.ruff]
+line-length = 120
+# platoon_textcraft sorts as first-party, as in examples/extension-package.
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

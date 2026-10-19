@@ -1,0 +1,4 @@
+{
+  "train": ["hello-file", "failing-check", "broken-verifier"],
+  "eval": ["invalid-grade"]
+}

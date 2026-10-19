@@ -1,0 +1,36 @@
+# Train a LoRA on the order-packing environment with the platoon-react harness.
+#
+#   cd examples/custom-environment
+#   PYTHONPATH=. uv run platoon train train.yaml [key=value ...]
+#
+# Needs TINKER_API_KEY. The environment runs in process (python://); platoon-react shows the
+# model the env's tools, and its final answer goes to the terminal tool `done`, which grades the box.
+
+environments:
+  - name: packing
+    service: python://order_packing:OrderPackingEnv
+    harness: platoon-react
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: test}
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 4
+  max_training_steps: 10
+  workflow_config:
+    group_size: 4
+    rollout_config:
+      max_steps: 12
+      timeout: 300
+      inference_params: {max_completion_tokens: 512}
+
+eval:                            # evaluate on the test split every 5 steps, one rollout per task, as training rolls out
+  every: 5
+
+log_path: ./runs/packing
+stats:
+  experiment_name: order-packing
+  trial_name: react
+  wandb:
+    mode: disabled

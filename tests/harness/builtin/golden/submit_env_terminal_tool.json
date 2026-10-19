@@ -1,0 +1,422 @@
+{
+ "format": 1,
+ "scenario": "submit_env_terminal_tool",
+ "result": {
+  "status": "completed",
+  "final_message": "41",
+  "error": null
+ },
+ "outcome": {
+  "status": "scored",
+  "rewards": {
+   "reward": 0.0
+  },
+  "primary": "reward",
+  "reason": null,
+  "failure_kind": null,
+  "metadata": {
+   "tool_calls": 3,
+   "terminal_tool": "submit"
+  }
+ },
+ "trajectories": {
+  "root": {
+   "parent": null,
+   "fork_step": null,
+   "depth": 0,
+   "task": {
+    "goal": null,
+    "id": "val:0",
+    "max_steps": null,
+    "misc": {
+     "ors": {
+      "split": "val",
+      "index": 0,
+      "name": "t0"
+     }
+    },
+    "fork_strategy": "subtask"
+   },
+   "reward": 0.0,
+   "finish_message": "41",
+   "error_message": null,
+   "misc": {
+    "agent": {
+     "role": "policy"
+    },
+    "model_generations": [
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 13,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 18,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     },
+     {
+      "stop_reason": "stop",
+      "generated_tokens": 11,
+      "parse_success": true,
+      "parsed_tool_calls": 0,
+      "emitted_tool_calls": 0,
+      "finish_reason": "stop"
+     }
+    ],
+    "agent_result": {
+     "status": "completed",
+     "error": null
+    },
+    "outcome": {
+     "status": "scored",
+     "rewards": {
+      "reward": 0.0
+     },
+     "reason": null,
+     "reward_key": "reward"
+    },
+    "tool_calls": [
+     {
+      "name": "echo",
+      "arguments": {
+       "text": "a"
+      },
+      "text": "a",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 0
+     },
+     {
+      "name": "echo",
+      "arguments": {
+       "times": 2,
+       "text": "b"
+      },
+      "text": "bb",
+      "is_error": false,
+      "finished": false,
+      "reward": null,
+      "after_call": 1
+     },
+     {
+      "name": "submit",
+      "arguments": {
+       "answer": "41"
+      },
+      "text": "Submitted.",
+      "is_error": false,
+      "finished": true,
+      "reward": 0.0,
+      "after_call": 2
+     }
+    ]
+   },
+   "calls": [
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "# Instructions",
+       "",
+       "You are a helpful agent that helps fulfill user tasks by reasoning and writing python code.",
+       "",
+       "You have access to a jupyter notebook. You can reason about what code to write and then execute",
+       "a block of code by outputting a python code block formatted as follows: ",
+       "<thought>Your step-by-step reasoning here</thought>\\n<python>\\ncode block\\n</python>.",
+       "In addition, you have access to many python functions that can help you interact with environment state,",
+       "described further below.<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Answer question 0.",
+       "Budget: You have a total budget of 10 steps to complete this task.",
+       "",
+       "# Action Space",
+       "",
+       "Available Actions (python functions):",
+       "",
+       "1. def echo(text: str, times: int = 1) -> str",
+       "   Echo the text.",
+       "",
+       "2. def submit(answer: str | None) -> str",
+       "   Submit your answer.",
+       "",
+       "3. def finish(message: str = '') -> str",
+       "   Submit your answer.",
+       "",
+       "",
+       "Now, please reason and then provide the next python cell that you would like to take. Think step-by-step before writing the jupyter code block. Output only one code block at a time formatted as follows <thought>Brief 1-3 sentence reasoning.</thought>\\n<python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>print(echo('a'))</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "# Instructions",
+       "",
+       "You are a helpful agent that helps fulfill user tasks by reasoning and writing python code.",
+       "",
+       "You have access to a jupyter notebook. You can reason about what code to write and then execute",
+       "a block of code by outputting a python code block formatted as follows: ",
+       "<thought>Your step-by-step reasoning here</thought>\\n<python>\\ncode block\\n</python>.",
+       "In addition, you have access to many python functions that can help you interact with environment state,",
+       "described further below.<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Answer question 0.",
+       "Budget: You have a total budget of 10 steps to complete this task.",
+       "",
+       "# Action Space",
+       "",
+       "Available Actions (python functions):",
+       "",
+       "1. def echo(text: str, times: int = 1) -> str",
+       "   Echo the text.",
+       "",
+       "2. def submit(answer: str | None) -> str",
+       "   Submit your answer.",
+       "",
+       "3. def finish(message: str = '') -> str",
+       "   Submit your answer.",
+       "",
+       "",
+       "Now, please reason and then provide the next python cell that you would like to take. Think step-by-step before writing the jupyter code block. Output only one code block at a time formatted as follows <thought>Brief 1-3 sentence reasoning.</thought>\\n<python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>print(echo('a'))</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=echo",
+       "a",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>print(echo(times=2, text='b'))</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    },
+    {
+     "prompt": {
+      "$lines": [
+       "<|im_start|>system",
+       "# Instructions",
+       "",
+       "You are a helpful agent that helps fulfill user tasks by reasoning and writing python code.",
+       "",
+       "You have access to a jupyter notebook. You can reason about what code to write and then execute",
+       "a block of code by outputting a python code block formatted as follows: ",
+       "<thought>Your step-by-step reasoning here</thought>\\n<python>\\ncode block\\n</python>.",
+       "In addition, you have access to many python functions that can help you interact with environment state,",
+       "described further below.<|im_end|>",
+       "<|im_start|>user",
+       "# Task",
+       "",
+       "Your Goal: Answer question 0.",
+       "Budget: You have a total budget of 10 steps to complete this task.",
+       "",
+       "# Action Space",
+       "",
+       "Available Actions (python functions):",
+       "",
+       "1. def echo(text: str, times: int = 1) -> str",
+       "   Echo the text.",
+       "",
+       "2. def submit(answer: str | None) -> str",
+       "   Submit your answer.",
+       "",
+       "3. def finish(message: str = '') -> str",
+       "   Submit your answer.",
+       "",
+       "",
+       "Now, please reason and then provide the next python cell that you would like to take. Think step-by-step before writing the jupyter code block. Output only one code block at a time formatted as follows <thought>Brief 1-3 sentence reasoning.</thought>\\n<python>Code Block</python>.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>print(echo('a'))</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 0 Output]",
+       "[info] tool_call_completed tool=echo",
+       "a",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       "<python>print(echo(times=2, text='b'))</python><|im_end|>",
+       "<|im_start|>user",
+       "[Cell 1 Output]",
+       "[info] tool_call_completed tool=echo",
+       "bb",
+       "",
+       "Provide your next action.<|im_end|>",
+       "<|im_start|>assistant",
+       ""
+      ]
+     },
+     "completion": "<python>finish('41')</python><|im_end|>",
+     "sampling": {
+      "max_tokens": 4096,
+      "temperature": 1.0,
+      "top_k": -1,
+      "top_p": 1.0,
+      "seed": null,
+      "stop": [
+       "</python>"
+      ]
+     }
+    }
+   ],
+   "steps": [
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 275,
+       "completion_tokens": 13,
+       "total_tokens": 288
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>print(echo('a'))</python>"
+     },
+     "thought": "",
+     "code": "print(echo('a'))",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=echo",
+       "a",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 320,
+       "completion_tokens": 18,
+       "total_tokens": 338
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>print(echo(times=2, text='b'))</python>"
+     },
+     "thought": "",
+     "code": "print(echo(times=2, text='b'))",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=echo",
+       "bb",
+       ""
+      ]
+     },
+     "error": ""
+    },
+    {
+     "action_misc": {
+      "model": "Qwen/Qwen3-4B-Instruct-2507",
+      "usage": {
+       "prompt_tokens": 370,
+       "completion_tokens": 11,
+       "total_tokens": 381
+      }
+     },
+     "message": {
+      "role": "assistant",
+      "content": "<python>finish('41')</python>"
+     },
+     "thought": "",
+     "code": "finish('41')",
+     "output": {
+      "$lines": [
+       "[info] tool_call_completed tool=submit",
+       "Out[0]: '41'",
+       ""
+      ]
+     },
+     "error": "",
+     "reward_misc": {
+      "reward/success": 0.0
+     }
+    }
+   ],
+   "datums": [
+    {
+     "model_input": {
+      "length": 380,
+      "sha256": "9049953fb3b0fd5e"
+     },
+     "advantages": "0.0*380",
+     "checkpoint_version": "0*1",
+     "logprobs": "0.0*274 -0.5*13 0.0*32 -0.5*18 0.0*32 -0.5*11",
+     "mask": "0.0*274 1.0*13 0.0*32 1.0*18 0.0*32 1.0*11",
+     "target_tokens": {
+      "length": 380,
+      "sha256": "936637210c89974b"
+     },
+     "traj_depth": "0*1",
+     "traj_start": "1.0*1"
+    }
+   ]
+  }
+ },
+ "unattributed_calls": [],
+ "train": {
+  "task_reward": 0.0,
+  "task_reward_valid": true,
+  "root_rewards_dict": {
+   "reward/success": 0.0,
+   "reward/subagent_launched": 0.0,
+   "reward/subagent_succeeded": 0.0
+  },
+  "num_datums": 1,
+  "num_policy_excluded_datums": 0,
+  "trajectories": {
+   "root": {
+    "reward": 0.0,
+    "rewards_dict": {
+     "reward/success": 0.0,
+     "reward/subagent_launched": 0.0,
+     "reward/subagent_succeeded": 0.0
+    },
+    "is_root": true,
+    "num_steps": 3,
+    "num_datums": 1,
+    "num_input_tokens": 965,
+    "num_output_tokens": 42
+   }
+  }
+ }
+}

@@ -1,0 +1,1 @@
+The file `towns.csv` in the working directory lists towns with their regions and populations. Write the total population of all the towns, as a whole number, to a file named `answer.txt` in the working directory.

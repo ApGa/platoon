@@ -15,9 +15,59 @@ import tinker
 import torch
 from tinker import TensorData
 
-from platoon.train.tinker.proxy import TinkerLLMInteraction
+from platoon.gateway.core import TinkerLLMInteraction
+from platoon.utils.generation import MODEL_GENERATIONS_KEY
+from platoon.utils.subagent_sampling import SubagentDatumSampler
+from platoon.utils.trajectory_error_filtering import (
+    ERROR_ACTION_MASK_KEY,
+    completion_id_for_step,
+    detected_error_completion_ids,
+    detected_message_completion_ids,
+)
+from platoon.utils.trajectory_status import (
+    EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY,
+    EXCLUDE_FROM_TRAINING_MISC_KEY,
+    SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
+    trajectory_was_interrupted,
+)
 
 logger = logging.getLogger(__name__)
+
+# loss_fn_inputs key carrying the server's routing handle (rollout routing replay, R3).
+ROUTING_HANDLE_KEY = "routing_handle"
+
+
+def _interaction_routing_id(interaction: TinkerLLMInteraction) -> int | None:
+    """Return the sampled sequence's gateway routing id, if the proxy captured one."""
+
+    routing_id = getattr(interaction, "routing_id", None)
+    if routing_id is None or isinstance(routing_id, bool):
+        return None
+    return int(routing_id)
+
+
+def _exclude_from_training(trajectory: dict) -> bool:
+    misc = trajectory.get("misc", {})
+    if isinstance(misc, dict) and bool(misc.get(EXCLUDE_FROM_TRAINING_MISC_KEY)):
+        return True
+    task = trajectory.get("task")
+    task_misc = task.get("misc", {}) if isinstance(task, dict) else {}
+    return isinstance(task_misc, dict) and bool(task_misc.get(SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY))
+
+
+def _step_excluded_from_training(step: dict) -> bool:
+    """A step annotated ``exclude_from_training`` (``ctx.annotate_step``): it stays in the trajectory for viewers,
+    but its call contributes no tokens to any datum, e.g. a rejected condensation summary."""
+
+    misc = step.get("misc") if isinstance(step, dict) else None
+    return isinstance(misc, dict) and bool(misc.get(EXCLUDE_FROM_TRAINING_MISC_KEY))
+
+
+def _exclude_from_policy_training(trajectory: dict) -> bool:
+    """Return whether policy datums should be dropped while retaining stats."""
+
+    misc = trajectory.get("misc", {})
+    return isinstance(misc, dict) and bool(misc.get(EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY))
 
 
 def create_rightshifted_model_input_and_leftshifted_targets(
@@ -69,6 +119,74 @@ class TrajectoryStats:
     num_datums: int
     rewards_dict: dict[str, float] = field(default_factory=dict)
     is_root: bool = False
+    # Tool-call blocks in the trajectory's model calls, from their generation records: parsed, parsed only by a
+    # lenient rule (a missing close tag, say), and not parsed (left in the content).
+    num_tool_calls: int = 0
+    num_recovered_tool_calls: int = 0
+    num_unparsed_tool_calls: int = 0
+
+
+_SAMPLING_COUNT_FIELDS = (
+    "eligible_datums",
+    "retained_datums",
+    "eligible_attention_tokens",
+    "retained_attention_tokens",
+    "eligible_loss_tokens",
+    "retained_loss_tokens",
+)
+
+
+@dataclass
+class DatumSamplingCounts:
+    """Post-merge datum and token counts for one depth level."""
+
+    eligible_datums: int = 0
+    retained_datums: int = 0
+    eligible_attention_tokens: int = 0
+    retained_attention_tokens: int = 0
+    eligible_loss_tokens: int = 0
+    retained_loss_tokens: int = 0
+
+    def merge(self, other: "DatumSamplingCounts") -> None:
+        for field_name in _SAMPLING_COUNT_FIELDS:
+            setattr(self, field_name, getattr(self, field_name) + getattr(other, field_name))
+
+
+@dataclass
+class SubagentDatumSamplingStats:
+    """Sampling counters retained with a Tinker rollout collection result."""
+
+    by_depth: dict[int, DatumSamplingCounts] = field(default_factory=dict)
+
+    def record(self, datum: tinker.Datum, *, depth: int, retained: bool) -> None:
+        counts = self.by_depth.setdefault(depth, DatumSamplingCounts())
+        attention_tokens = int(datum.model_input.length)
+        loss_tokens = int(datum.loss_fn_inputs["mask"].to_torch().sum().item())
+        counts.eligible_datums += 1
+        counts.eligible_attention_tokens += attention_tokens
+        counts.eligible_loss_tokens += loss_tokens
+        if retained:
+            counts.retained_datums += 1
+            counts.retained_attention_tokens += attention_tokens
+            counts.retained_loss_tokens += loss_tokens
+
+    def merge(self, other: "SubagentDatumSamplingStats") -> None:
+        for depth, other_counts in other.by_depth.items():
+            self.by_depth.setdefault(depth, DatumSamplingCounts()).merge(other_counts)
+
+    def to_metrics(self) -> dict[str, float]:
+        """Render backend-aligned overall and per-depth sampling metrics."""
+
+        total = DatumSamplingCounts()
+        metrics: dict[str, float] = {}
+        for depth, counts in sorted(self.by_depth.items()):
+            total.merge(counts)
+            prefix = f"subagent_sampling/depth_{depth}"
+            for field_name in _SAMPLING_COUNT_FIELDS:
+                metrics[f"{prefix}/{field_name}"] = float(getattr(counts, field_name))
+        for field_name in _SAMPLING_COUNT_FIELDS:
+            metrics[f"subagent_sampling/{field_name}"] = float(getattr(total, field_name))
+        return metrics
 
 
 @dataclass
@@ -79,6 +197,11 @@ class TrajectoryCollectionResult:
     task_reward: float  # Reward of the root trajectory
     trajectory_stats: list[TrajectoryStats]
     root_rewards_dict: dict[str, float]  # Reward components from root trajectory
+    subagent_sampling_stats: SubagentDatumSamplingStats = field(default_factory=SubagentDatumSamplingStats)
+    num_policy_excluded_datums: int = 0
+    # Interrupted roots may carry a partial reward which is useful for metrics,
+    # but must not participate in group advantage centering.
+    task_reward_valid: bool = True
 
 
 FlatObElem = int | tinker.ModelInputChunk
@@ -140,12 +263,21 @@ class SequenceAccumulator:
     sampled_logprobs: list[float] = field(default_factory=list)
     advantages: list[float] = field(default_factory=list)
     mask: list[float] = field(default_factory=list)
+    error_action_mask: list[bool] | None = None
+    # Gateway routing id (rollout routing replay) of the LAST interaction merged
+    # into this sequence. Because merged interactions are prefix extensions, the
+    # accumulated tokens equal that call's prompt + generated tokens, so its
+    # captured expert routing covers the whole datum.
+    last_routing_id: int | None = None
 
     def clear(self):
         self.full_sequence = []
         self.sampled_logprobs = []
         self.advantages = []
         self.mask = []
+        if self.error_action_mask is not None:
+            self.error_action_mask = []
+        self.last_routing_id = None
 
 
 def make_datum_from_accumulator(
@@ -178,9 +310,25 @@ def make_datum_from_accumulator(
         # Store checkpoint_version for staleness checking (will be stripped before forward_backward)
         "checkpoint_version": TensorData.from_torch(torch.tensor([checkpoint_version])),
     }
+    if accumulator.error_action_mask is not None:
+        if len(accumulator.error_action_mask) != len(accumulator.full_sequence):
+            raise ValueError(
+                "error-action mask/token alignment mismatch: "
+                f"tokens={len(accumulator.full_sequence)}, mask={len(accumulator.error_action_mask)}"
+            )
+        loss_fn_inputs[ERROR_ACTION_MASK_KEY] = TensorData.from_torch(
+            torch.tensor(accumulator.error_action_mask[1:], dtype=torch.bool)
+        )
     if traj_depth is not None:
         loss_fn_inputs["traj_depth"] = TensorData.from_torch(torch.tensor([traj_depth], dtype=torch.long))
         loss_fn_inputs["traj_start"] = TensorData.from_torch(torch.tensor([1.0 if traj_start else 0.0]))
+    if accumulator.last_routing_id is not None:
+        # R3: int64 [1] handle of the last merged sample call. A server with
+        # rollout routing replay materializes the sampled expert routing for
+        # the datum from it; never stripped by the trainer.
+        loss_fn_inputs[ROUTING_HANDLE_KEY] = TensorData.from_torch(
+            torch.tensor([int(accumulator.last_routing_id)], dtype=torch.int64)
+        )
 
     return tinker.Datum(
         model_input=input_tokens_T,
@@ -198,6 +346,21 @@ class TrajectoryDataResult:
     num_output_tokens: int
 
 
+def tool_call_counts(trajectory: dict) -> dict[str, int]:
+    """The ``num_*tool_calls`` fields of :class:`TrajectoryStats` from the trajectory's per-call generation records
+    (``MODEL_GENERATIONS_KEY``): the parsed, recovered and unparsed tool-call blocks of its model calls."""
+
+    misc = trajectory.get("misc") if isinstance(trajectory, dict) else None
+    generations = misc.get(MODEL_GENERATIONS_KEY) if isinstance(misc, dict) else None
+    counts = {"num_tool_calls": 0, "num_recovered_tool_calls": 0, "num_unparsed_tool_calls": 0}
+    for record in (generations or {}).values() if isinstance(generations, dict) else ():
+        if isinstance(record, dict):
+            counts["num_tool_calls"] += int(record.get("parsed_tool_calls") or 0)
+            counts["num_recovered_tool_calls"] += int(record.get("recovered_tool_calls") or 0)
+            counts["num_unparsed_tool_calls"] += int(record.get("unparsed_tool_calls") or 0)
+    return counts
+
+
 def trajectory_to_data(
     trajectory: dict,
     interactions: dict[str, TinkerLLMInteraction],
@@ -208,6 +371,7 @@ def trajectory_to_data(
     filter_errors: bool = False,
     trajectory_reward: float = 0.0,
     traj_depth: int | None = None,
+    filter_message_actions: bool = False,
 ) -> TrajectoryDataResult:
     """Convert a trajectory to training data, merging sequences when possible.
 
@@ -221,37 +385,46 @@ def trajectory_to_data(
         trajectory_id: Trajectory identifier for logging.
         trajectory_advantage: The advantage for this trajectory (reward - mean_reward).
         checkpoint_version: The checkpoint version for staleness checking.
-        filter_errors: Whether to filter out error steps.
-        trajectory_reward: The reward for the trajectory (used for error filtering).
+        filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
+        filter_message_actions: Exclude agent-message tokens from policy loss while retaining context.
+        trajectory_reward: Retained for call-site compatibility. Error
+            filtering is deferred until centered advantages are available.
 
     Returns:
         TrajectoryDataResult with datums and statistics.
     """
     data: list[tinker.Datum] = []
-    accumulator = SequenceAccumulator()
+    accumulator = SequenceAccumulator(error_action_mask=[] if filter_errors else None)
     count_found = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    seen_completion_ids: set[str] = set()
+    deferred_error_completion_ids = (
+        detected_error_completion_ids(trajectory.get("steps", ())) if filter_errors else set()
+    )
+    message_completion_ids = (
+        detected_message_completion_ids(trajectory.get("steps", ())) if filter_message_actions else set()
+    )
 
     for i, step in enumerate(trajectory["steps"]):
         # Check if we should skip this step
-        if "action_misc" not in step.get("misc", {}) or "completion_id" not in step["misc"]["action_misc"]:
+        if _step_excluded_from_training(step):
+            continue
+        completion_id = completion_id_for_step(step)
+        if completion_id is None:
             continue
 
-        # Filter error steps from successful trajectories
-        if filter_errors and trajectory_reward >= 1:
-            has_error = ("error" in step and step["error"]) or (
-                "output" in step and step["output"] and "traceback" in step["output"].lower()
-            )
-            if has_error:
-                continue
+        if completion_id in seen_completion_ids:
+            continue
 
-        completion_id = step["misc"]["action_misc"]["completion_id"]
         if completion_id not in interactions:
             logger.warning(f"Completion ID {completion_id} not found in interactions for task {task_id}")
             continue
 
         interaction = interactions[completion_id]
+        # OpenHands can serialize one parallel LLM response over several
+        # environment steps. Its sampled tokens belong in the batch once.
+        seen_completion_ids.add(completion_id)
         count_found += 1
 
         # Get observation and action
@@ -291,12 +464,23 @@ def trajectory_to_data(
         accumulator.sampled_logprobs.extend([0.0] * delta_ob_len)
         accumulator.advantages.extend([0.0] * delta_ob_len)
         accumulator.mask.extend([0.0] * delta_ob_len)
+        if accumulator.error_action_mask is not None:
+            accumulator.error_action_mask.extend([False] * delta_ob_len)
 
         # Add action tokens (with actual logprobs and advantages)
         accumulator.full_sequence.extend(ac_tokens)
         accumulator.sampled_logprobs.extend(ac_logprobs)
-        accumulator.advantages.extend([trajectory_advantage] * len(ac_tokens))
-        accumulator.mask.extend([1.0] * len(ac_tokens))
+        # Keep messages in the model's context and routing sequence, but give
+        # them no gradient for either advantage sign. Masked positions stay
+        # zero during group centering; Tinker ultimately receives advantages.
+        trainable = completion_id not in message_completion_ids
+        accumulator.advantages.extend([trajectory_advantage if trainable else 0.0] * len(ac_tokens))
+        accumulator.mask.extend([float(trainable)] * len(ac_tokens))
+        if accumulator.error_action_mask is not None:
+            accumulator.error_action_mask.extend([completion_id in deferred_error_completion_ids] * len(ac_tokens))
+        # The accumulated sequence now equals this interaction's prompt +
+        # completion, so its routing capture (if any) covers the datum.
+        accumulator.last_routing_id = _interaction_routing_id(interaction)
 
     # Flush remaining accumulated data
     if accumulator.full_sequence:
@@ -308,6 +492,16 @@ def trajectory_to_data(
                 traj_start=len(data) == 0,
             )
         )
+
+    if filter_message_actions and traj_depth is not None:
+        # Empty datums survive until group centering so completed message-only
+        # rollouts still contribute their rewards to the baseline. Mark the
+        # first trainable datum for depth weighting after those are removed.
+        started = False
+        for datum in data:
+            trainable = bool(datum.loss_fn_inputs["mask"].to_torch().any())
+            datum.loss_fn_inputs["traj_start"] = TensorData.from_torch(torch.tensor([float(trainable and not started)]))
+            started = started or trainable
 
     logger.debug(
         f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}"
@@ -330,6 +524,8 @@ def get_train_data_for_trajectory_collection(
     reward_processor: Callable[[dict], tuple[float, dict]] = lambda traj: (traj["reward"], {}),
     include_traj_depth: bool = False,
     include_traj_start: bool = False,
+    subagent_datum_sampler: SubagentDatumSampler | None = None,
+    filter_message_actions: bool = False,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -342,8 +538,11 @@ def get_train_data_for_trajectory_collection(
         interactions: Dict mapping completion_id to TinkerLLMInteraction.
         task_id: Task identifier for logging.
         checkpoint_version: The checkpoint version for staleness checking.
-        filter_errors: Whether to filter out error steps.
+        filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
+        filter_message_actions: Exclude agent-message tokens from policy loss while retaining context.
         reward_processor: Function to process trajectory rewards.
+        subagent_datum_sampler: Optional deterministic sampler applied to each
+            non-root trajectory after its steps have been merged into datums.
 
     Returns:
         TrajectoryCollectionResult with datums and per-trajectory statistics.
@@ -352,17 +551,50 @@ def get_train_data_for_trajectory_collection(
     trajectory_stats: list[TrajectoryStats] = []
     task_reward = 0.0
     root_rewards_dict: dict[str, float] = {}
-    is_first = True
-    depth_map = _compute_trajectory_depths(trajectory_collection) if include_traj_depth else {}
+    sampling_stats = SubagentDatumSamplingStats()
+    num_policy_excluded_datums = 0
+    trajectories = trajectory_collection["trajectories"]
+    root_trajectory_id = next(iter(trajectories), None)
+    task_reward_valid = True
+    if root_trajectory_id is not None:
+        task_reward_valid = not trajectory_was_interrupted(trajectories[root_trajectory_id])
+    need_depths = include_traj_depth or subagent_datum_sampler is not None
+    depth_map = _compute_trajectory_depths(trajectory_collection) if need_depths else {}
 
-    for trajectory_id, trajectory in trajectory_collection["trajectories"].items():
+    # Process every trainable trajectory's reward before sampling any datums.
+    # Recursive reward processors may depend on child outcomes attached to the
+    # complete tree, and reward/stat records must not depend on which child
+    # datums happen to survive the Bernoulli draw.
+    processed_trajectories: list[tuple[str, dict, float, dict[str, float], bool, int, bool]] = []
+    for trajectory_id, trajectory in trajectories.items():
+        if _exclude_from_training(trajectory):
+            continue
         trajectory_reward, rewards_dict = reward_processor(trajectory)
+        is_root = trajectory_id == root_trajectory_id
+        depth = depth_map.get(trajectory_id, 0)
+        # Roots are mandatory policy data. The source marker is child-only,
+        # but keep that invariant explicit at the converter boundary.
+        policy_ineligible = trajectory_was_interrupted(trajectory) or (
+            not is_root and _exclude_from_policy_training(trajectory)
+        )
+        processed_trajectories.append(
+            (trajectory_id, trajectory, trajectory_reward, rewards_dict, is_root, depth, policy_ineligible)
+        )
 
-        # Store the root (first) trajectory's reward as the task reward
-        if is_first:
-            task_reward = trajectory_reward
-            root_rewards_dict = rewards_dict
+    if processed_trajectories:
+        root_entry = next((entry for entry in processed_trajectories if entry[4]), processed_trajectories[0])
+        task_reward = root_entry[2]
+        root_rewards_dict = root_entry[3]
 
+    for (
+        trajectory_id,
+        trajectory,
+        trajectory_reward,
+        rewards_dict,
+        is_root,
+        depth,
+        policy_ineligible,
+    ) in processed_trajectories:
         # Advantage will be set later after all rollouts complete
         result = trajectory_to_data(
             trajectory=trajectory,
@@ -372,15 +604,54 @@ def get_train_data_for_trajectory_collection(
             trajectory_advantage=trajectory_reward,  # Will be further processed later.
             checkpoint_version=checkpoint_version,
             filter_errors=filter_errors,
+            filter_message_actions=filter_message_actions,
             trajectory_reward=trajectory_reward,
-            traj_depth=depth_map.get(trajectory_id) if include_traj_depth else None,
+            traj_depth=depth if include_traj_depth else None,
         )
 
-        if not include_traj_start:
-            for datum in result.datums:
+        if policy_ineligible:
+            # Keep reward processing and full TrajectoryStats above/below, but
+            # never train policy tokens from a child whose verifier failed or
+            # did not finish. These datums are outside Bernoulli eligibility.
+            keep_mask = [False] * len(result.datums)
+            num_policy_excluded_datums += len(result.datums)
+        elif subagent_datum_sampler is None:
+            keep_mask = [True] * len(result.datums)
+        else:
+            keep_mask = subagent_datum_sampler.sample_mask(
+                task_id=task_id,
+                trajectory_id=trajectory_id,
+                depth=depth,
+                num_datums=len(result.datums),
+            )
+            if len(keep_mask) != len(result.datums):
+                raise ValueError(
+                    "subagent datum sampler returned a mask with the wrong length: "
+                    f"trajectory={trajectory_id}, datums={len(result.datums)}, mask={len(keep_mask)}"
+                )
+
+        retained_datums: list[tinker.Datum] = []
+        for datum, retained in zip(result.datums, keep_mask, strict=True):
+            if subagent_datum_sampler is not None and not policy_ineligible:
+                sampling_stats.record(datum, depth=depth, retained=retained)
+            if retained:
+                retained_datums.append(datum)
+
+        # Sampling may remove the datum which originally carried traj_start.
+        # Mark the first *retained* datum so depth weighting counts only
+        # trajectories represented in the actual training batch.
+        trajectory_started = False
+        for datum in retained_datums:
+            if include_traj_start:
+                trainable = bool(datum.loss_fn_inputs["mask"].to_torch().any())
+                datum.loss_fn_inputs["traj_start"] = TensorData.from_torch(
+                    torch.tensor([float(trainable and not trajectory_started)])
+                )
+                trajectory_started = trajectory_started or trainable
+            else:
                 datum.loss_fn_inputs.pop("traj_start", None)
 
-        train_data.extend(result.datums)
+        train_data.extend(retained_datums)
 
         # Record per-trajectory stats
         trajectory_stats.append(
@@ -390,13 +661,14 @@ def get_train_data_for_trajectory_collection(
                 num_steps=result.num_steps,
                 num_input_tokens=result.num_input_tokens,
                 num_output_tokens=result.num_output_tokens,
+                # Keep trajectory stats sampling-independent. Dedicated
+                # sampling metrics expose the retained datum count.
                 num_datums=len(result.datums),
                 rewards_dict=rewards_dict,
-                is_root=is_first,
+                is_root=is_root,
+                **tool_call_counts(trajectory),
             )
         )
-
-        is_first = False
 
     if not train_data:
         logger.warning(f"No train data found for any trajectory for task {task_id}")
@@ -406,6 +678,9 @@ def get_train_data_for_trajectory_collection(
         task_reward=task_reward,
         trajectory_stats=trajectory_stats,
         root_rewards_dict=root_rewards_dict,
+        subagent_sampling_stats=sampling_stats,
+        num_policy_excluded_datums=num_policy_excluded_datums,
+        task_reward_valid=task_reward_valid,
     )
 
 

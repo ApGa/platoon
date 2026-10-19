@@ -1,0 +1,87 @@
+# openhands: one OpenHands SDK agent (openhands-sdk and openhands-tools 1.54.0), run by platoon's thin runner
+# (../openhands/run_openhands.py) from a read-only toolchain inside the task sandbox. Its tools are those of Harbor's
+# openhands-sdk adapter (terminal, file_editor, task_tracker, plus the SDK's finish and think); it runs without
+# skills or delegation and stops at {max_steps} model calls. Its options (`platoon harness show openhands`) choose
+# the rest; the defaults are its training settings: reasoning replay, so each prompt extends the last, a one-hour
+# request timeout, no retries and no condenser. An evaluation that should score as Harbor's adapter does sets
+# reasoning_replay false, request_timeout_s 300 and num_retries 5, and a max_steps of 500 (eval_overrides in a
+# training config). Options change how the agent runs, never what is installed, so one toolchain serves every
+# setting. Build it once per site:
+#
+#   platoon toolchain build openhands --root /path/to/toolchains
+#
+# The version is the SDK's; a change to the runner alone bumps a .postN suffix, and so does an option whose new
+# default changes the launch.
+name = "openhands"
+version = "1.54.0"
+dialect = "openai_chat"
+timeout_s = 3600
+max_steps = 30  # used when the run sets no step budget; the run's max_steps wins
+
+[install]
+toolchain = "openhands-1.54.0"  # a name under the toolchain root (toolchains in the site cache); one per site
+
+[install.recipe]
+python = "3.12.14"  # pinned to the patch version, so every site builds the same interpreter
+lock = "openhands-1.54.0.txt"  # openhands-sdk==1.54.0, openhands-tools==1.54.0 and their closure
+cache = ["tiktoken"]
+
+[options.reasoning_replay]
+type = "bool"
+default = true
+description = "Send each assistant turn back with its reasoning, so that each call extends the last"
+
+[options.request_timeout_s]
+type = "int"
+default = 3600
+min = 1
+description = "Seconds one model call may take"
+
+[options.num_retries]
+type = "int"
+default = 0
+min = 0
+max = 10
+description = "Most attempts the SDK makes at a model call that fails transiently (0 and 1 make one); a retry may record a call twice"
+
+[options.condenser]
+type = "str"
+default = "none"
+allowed = ["none", "llm_summarizing"]
+description = "The SDK's context condenser; its summaries are the agent's model calls, recorded and trained on"
+
+[resources]
+memory_mb = 2048  # the SDK and its terminal, on top of the task's own memory
+
+[launch]
+argv = [
+    "{toolchain}/bin/python3", "-I", "{state_dir}/run_openhands.py",
+    "--instruction-file", "{state_dir}/instruction.md",
+    "--max-iterations", "{max_steps}",
+    "--final-message-file", "{state_dir}/final_message.txt",
+    "--reasoning-replay", "{options.reasoning_replay}",
+    "--llm-timeout", "{options.request_timeout_s}",
+    "--num-retries", "{options.num_retries}",
+    "--condenser", "{options.condenser}",
+]
+files = { "instruction.md" = "{instruction}" }
+assets = { "run_openhands.py" = "../openhands/run_openhands.py" }
+
+[launch.env]
+LLM_MODEL = "openai/{model}"
+LLM_BASE_URL = "{base_url}/v1"
+LLM_API_KEY = "{api_key}"
+HOME = "{state_dir}"
+LITELLM_LOCAL_MODEL_COST_MAP = "True"  # no download of litellm's model cost map from a sandbox without network
+TIKTOKEN_CACHE_DIR = "{toolchain}/share/tiktoken"
+OPENHANDS_SUPPRESS_BANNER = "1"
+
+[builtins]
+tools = ["terminal", "file_editor", "task_tracker", "finish", "think"]
+
+[final_message]
+file = "{state_dir}/final_message.txt"
+
+[exit_codes]
+3 = "completed"  # the step limit: the policy ran out of turns, a graded outcome
+4 = "completed"  # the SDK found the agent stuck in a loop: a policy failure, graded

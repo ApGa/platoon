@@ -1,0 +1,37 @@
+# Hi-lo with pt.gym.loop: the game runs inside the example-hilo-loop harness and the gym program scores
+# the return. Tasks come from the task table in tasks.jsonl.
+#
+#   cd examples/gym-env
+#   PYTHONPATH=. uv run platoon train train_loop.yaml [key=value ...]
+
+environments:
+  - name: hilo
+    service: table
+    service_kwargs: {path: tasks.jsonl}   # relative to this file
+    harness: example-hilo-loop
+    program: gym
+    package: guess_game                   # registers @pt.harness("example-hilo-loop")
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: test}
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  batch_size: 4
+  max_training_steps: 10
+  workflow_config:
+    group_size: 4
+    rollout_config:
+      max_steps: 8
+      timeout: 120
+      inference_params: {max_completion_tokens: 16}
+
+eval:
+  every: 5                    # one rollout per task, rolled out as training's are
+
+log_path: ./runs/hilo
+stats:
+  experiment_name: hilo
+  trial_name: gym-loop
+  wandb:
+    mode: disabled

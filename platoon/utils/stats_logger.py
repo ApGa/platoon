@@ -17,16 +17,24 @@ logger = logging.getLogger(__name__)
 class WandBConfig:
     """Configuration for Weights & Biases logging."""
 
-    mode: str = "online"  # "online", "offline", "disabled"
+    # "online", "offline" or "disabled".
+    mode: str = "online"
+    # W&B project (None: ``stats.experiment_name``).
     project: str | None = None
+    # W&B team or user that owns the run.
     entity: str | None = None
+    # Display name of the run (None: ``stats.trial_name``).
     name: str | None = None
+    # Group that collects related runs (None: ``<experiment_name>_<trial_name>``).
     group: str | None = None
     tags: list[str] = field(default_factory=list)
     notes: str | None = None
+    # API key (None: ``WANDB_API_KEY``).
     api_key: str | None = None
+    # URL of a self-hosted W&B server.
     base_url: str | None = None
-    resume_run_id: str | None = None  # WandB run ID to resume
+    # W&B run id to resume.
+    resume_run_id: str | None = None
 
 
 @dataclass

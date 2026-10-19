@@ -1,0 +1,10 @@
+# eval.yaml through the package's named environment: env: example-arithmetic@1 brings the task table, the harness
+# and its options, the program, the reward processor and the splits. With the package installed:
+#
+#   uv run platoon rollout examples/extension-package/named.yaml --task test-0
+
+extends: eval.yaml
+
+environments:
+  - name: arithmetic
+    env: example-arithmetic@1

@@ -1,0 +1,6 @@
+{"id": "q0", "goal": "What is the capital of France? Answer with one word or number.", "answer": "Paris", "split": "train"}
+{"id": "q1", "goal": "How many legs does a spider have? Answer with one word or number.", "answer": "8", "split": "train"}
+{"id": "q2", "goal": "What is the chemical symbol for gold? Answer with one word or number.", "answer": "Au", "split": "train"}
+{"id": "q3", "goal": "Which planet is closest to the sun? Answer with one word or number.", "answer": "Mercury", "split": "train"}
+{"id": "q4", "goal": "What is 12 times 12? Answer with one word or number.", "answer": "144", "split": "test"}
+{"id": "q5", "goal": "What is the largest ocean on Earth? Answer with one word or number.", "answer": "Pacific", "split": "test"}

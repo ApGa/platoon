@@ -1,0 +1,219 @@
+# platoon's public API: every name the public modules export, with its signature (scripts/public_api.py).
+# tests/test_public_api.py fails while this file differs from the code. After a change to the public API on
+# purpose, run `python scripts/public_api.py` and commit this file with the change.
+platoon.AgentAPI: class AgentAPI(Protocol)
+platoon.AgentAPI.keep_children: def keep_children() -> None
+platoon.AgentAPI.spawn: async def spawn(goal: str, *, harness: str | None = None, max_steps: int | None = None, fork: ForkMode | None = None, access: ToolAccess | None = None, role: str = "subagent", options: Mapping[str, Any] | None = None, task_misc: Mapping[str, Any] | None = None) -> SubagentResult
+platoon.AgentContext: class AgentContext(Protocol)
+platoon.AgentContext.access: attribute ToolAccess
+platoon.AgentContext.agent_id: attribute str
+platoon.AgentContext.agents: attribute AgentAPI
+platoon.AgentContext.annotate: def annotate(**misc: Any) -> None
+platoon.AgentContext.annotate_step: def annotate_step(**misc: Any) -> None
+platoon.AgentContext.budget: attribute Budget
+platoon.AgentContext.call_tool: async def call_tool(name: str, arguments: Mapping[str, Any]) -> ToolResult
+platoon.AgentContext.chat: async def chat(messages: Sequence[Mapping[str, Any]], *, tools: Sequence[Mapping[str, Any]] | None = None, kind: str = "policy", **sampling: Any) -> ChatReply
+platoon.AgentContext.depth: attribute int
+platoon.AgentContext.endpoint: attribute ModelEndpoint
+platoon.AgentContext.instruction: attribute str
+platoon.AgentContext.list_tools: async def list_tools() -> list[ToolSpec]
+platoon.AgentContext.max_steps: attribute int | None
+platoon.AgentContext.mcp: attribute McpEndpoint | None
+platoon.AgentContext.options: attribute Mapping[str, Any]
+platoon.AgentContext.parent_agent_id: attribute str | None
+platoon.AgentContext.role: attribute str
+platoon.AgentContext.session: attribute EnvSession
+platoon.AgentContext.task: attribute Task
+platoon.AgentContext.trajectory_id: attribute str
+platoon.AgentFn: alias Callable[..., Awaitable[platoon.harness.agent.AgentResult]]
+platoon.AgentResult: @dataclass(frozen=True) class AgentResult
+platoon.AgentResult.error: field str | None = None
+platoon.AgentResult.final_message: field str | None = None
+platoon.AgentResult.status: field AgentStatus = "completed"
+platoon.AgentStatus: alias Literal['completed', 'limit', 'timeout', 'error', 'cancelled']
+platoon.Budget: class Budget(Protocol)
+platoon.Budget.remaining: def remaining() -> float
+platoon.Budget.used: def used() -> float
+platoon.CallKind: alias Literal['policy', 'aux', 'judge']
+platoon.ChatReply: @dataclass(frozen=True) class ChatReply
+platoon.ChatReply.call_id: field str
+platoon.ChatReply.finish_reason: field str
+platoon.ChatReply.message: field Mapping[str, Any]
+platoon.ChatReply.reasoning: property str | None
+platoon.ChatReply.text: property str
+platoon.ChatReply.tool_calls: property Sequence[Mapping[str, Any]]
+platoon.EnvSession: class EnvSession(Protocol)
+platoon.EnvSession.call_tool: async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult
+platoon.EnvSession.close: async def close() -> None
+platoon.EnvSession.fork: async def fork(mode: ForkMode = "shared", *, task: Task | None = None) -> EnvSession
+platoon.EnvSession.grade: async def grade() -> Outcome
+platoon.EnvSession.instruction: attribute str
+platoon.EnvSession.sandbox: attribute Sandbox | None
+platoon.EnvSession.task: attribute Task
+platoon.EnvSession.tools: async def tools() -> list[ToolSpec]
+platoon.EnvironmentEntry: @dataclass(init=False, frozen=True) class EnvironmentEntry
+platoon.EnvironmentEntry.__init__: def __init__(name: str, version: str = "1", *, description: str = "", harness_defaults: Mapping[str, Mapping[str, Any]] | None = None, **keys: Any) -> None
+platoon.EnvironmentEntry.defaults_for: def defaults_for(harness: Any) -> dict[str, Any]
+platoon.EnvironmentEntry.description: field str = ""
+platoon.EnvironmentEntry.entry: def entry() -> dict[str, Any]
+platoon.EnvironmentEntry.harness_defaults: field Mapping[str, Mapping[str, Any]] = <factory dict>
+platoon.EnvironmentEntry.keys: field Mapping[str, Any] = <factory dict>
+platoon.EnvironmentEntry.name: field str
+platoon.EnvironmentEntry.ref: property str
+platoon.EnvironmentEntry.version: field str = "1"
+platoon.EnvironmentService: class EnvironmentService(Protocol)
+platoon.EnvironmentService.get_task: async def get_task(task_id: str) -> Task
+platoon.EnvironmentService.list_tasks: async def list_tasks(split: str) -> list[str]
+platoon.EnvironmentService.name: attribute str
+platoon.EnvironmentService.open: async def open(task: Task, *, rollout_id: str) -> EnvSession
+platoon.EpisodeContext: class EpisodeContext(Protocol)
+platoon.EpisodeContext.add_finalizer: def add_finalizer(fn: Finalizer) -> None
+platoon.EpisodeContext.behavior_judge: attribute SubagentBehaviorJudge | None
+platoon.EpisodeContext.config: attribute RolloutConfig
+platoon.EpisodeContext.grade: async def grade() -> Outcome
+platoon.EpisodeContext.judge_endpoint: def judge_endpoint() -> ModelEndpoint
+platoon.EpisodeContext.judges: attribute bool
+platoon.EpisodeContext.root: attribute AgentSession
+platoon.EpisodeContext.route: attribute EnvironmentRoute
+platoon.EpisodeContext.run: async def run(harness: str | None = None, *, goal: str | None = None, options: Mapping[str, Any] | None = None) -> AgentResult
+platoon.EpisodeContext.session: attribute EnvSession
+platoon.EpisodeContext.snapshot: def snapshot() -> TrajectoryCollection
+platoon.EpisodeContext.task: attribute Task
+platoon.EpisodeContext.tool_transform: attribute Callable[..., Any] | None
+platoon.EpisodeProgram: alias Callable[[platoon.programs.EpisodeContext], Awaitable['Outcome']]
+platoon.ForkMode: alias Literal['shared', 'copy', 'fresh']
+platoon.FunctionHarness: @dataclass(frozen=True) class FunctionHarness
+platoon.FunctionHarness.executes_model_code: field bool
+platoon.FunctionHarness.fn: field AgentFn
+platoon.FunctionHarness.name: field str
+platoon.FunctionHarness.ref: property str
+platoon.FunctionHarness.runtime: field Runtime
+platoon.FunctionHarness.source: property str
+platoon.FunctionHarness.version: field str
+platoon.McpEndpoint: @dataclass(frozen=True) class McpEndpoint
+platoon.McpEndpoint.headers: field Mapping[str, str] = <factory dict>
+platoon.McpEndpoint.url: field str
+platoon.ModelEndpoint: @dataclass(frozen=True) class ModelEndpoint
+platoon.ModelEndpoint.api_key: field str
+platoon.ModelEndpoint.base_url: field str
+platoon.ModelEndpoint.headers: def headers(kind: str = "policy") -> dict[str, str]
+platoon.ModelEndpoint.model: field str
+platoon.Outcome: @dataclass class Outcome
+platoon.Outcome.failure_kind: field str | None = None
+platoon.Outcome.infra: classmethod def infra(failure_kind: str, *, status: OutcomeStatus = "error", reason: str | None = None, metadata: dict[str, Any] | None = None) -> Outcome
+platoon.Outcome.metadata: field dict[str, Any] = <factory dict>
+platoon.Outcome.primary: field str = "reward"
+platoon.Outcome.reason: field str | None = None
+platoon.Outcome.reward: property float | None
+platoon.Outcome.rewards: field dict[str, float] = <factory dict>
+platoon.Outcome.status: field OutcomeStatus
+platoon.Outcome.trainable: property bool
+platoon.PlatoonDeprecationWarning: class PlatoonDeprecationWarning(FutureWarning)
+platoon.SessionNeeds: @dataclass(frozen=True) class SessionNeeds
+platoon.SessionNeeds.apply: def apply(spec: SandboxSpec) -> SandboxSpec
+platoon.SessionNeeds.extra_memory_mb: field int = 0
+platoon.SessionNeeds.mounts: field tuple[Mount, ...] = ()
+platoon.SessionNeeds.upstreams: field Mapping[str, str] = <factory dict>
+platoon.SubagentResult: @dataclass(frozen=True) class SubagentResult
+platoon.SubagentResult.agent_id: field str
+platoon.SubagentResult.goal: field str
+platoon.SubagentResult.launched: property bool
+platoon.SubagentResult.message: field str
+platoon.SubagentResult.ok: property bool
+platoon.SubagentResult.outcome: field Outcome | None
+platoon.SubagentResult.result: field AgentResult
+platoon.SubagentResult.trajectory_id: field str
+platoon.Task: @dataclass class Task
+platoon.Task.fork: def fork(goal: str, max_steps: int | None = None, task_misc: dict | None = None) -> Task | SubTask
+platoon.Task.fork_strategy: field Literal['task', 'subtask'] = "subtask"
+platoon.Task.from_dict: classmethod def from_dict(task_dict: dict) -> Task
+platoon.Task.goal: field str | None = None
+platoon.Task.id: field str | None = None
+platoon.Task.max_steps: field int | None = None
+platoon.Task.misc: field dict[str, Any] = <factory dict>
+platoon.ToolAccess: alias Literal['full', 'no_terminal', 'read_only']
+platoon.ToolResult: @dataclass class ToolResult
+platoon.ToolResult.as_text: def as_text() -> str
+platoon.ToolResult.content: field list[dict[str, Any]]
+platoon.ToolResult.finished: field bool = False
+platoon.ToolResult.is_error: field bool = False
+platoon.ToolResult.metadata: field dict[str, Any] = <factory dict>
+platoon.ToolResult.reward: field float | None = None
+platoon.ToolResult.text: classmethod def text(text: str, *, is_error: bool = False) -> ToolResult
+platoon.ToolSpec: @dataclass class ToolSpec
+platoon.ToolSpec.description: field str
+platoon.ToolSpec.input_schema: field dict[str, Any]
+platoon.ToolSpec.meta: field Mapping[str, Any] | None = None
+platoon.ToolSpec.name: field str
+platoon.ToolSpec.read_only: field bool = False
+platoon.ToolSpec.terminal: field bool = False
+platoon.Trajectory: @dataclass class Trajectory
+platoon.Trajectory.error_message: field str | None = None
+platoon.Trajectory.finish_message: field str | None = None
+platoon.Trajectory.id: field str
+platoon.Trajectory.misc: field dict[str, Any] = <factory dict>
+platoon.Trajectory.parent_info: field ParentInfo | None = None
+platoon.Trajectory.reward: field float = 0.0
+platoon.Trajectory.steps: field list[TrajectoryStep] = <factory list>
+platoon.Trajectory.task: field Task | None = None
+platoon.TrajectoryCollection: @dataclass class TrajectoryCollection
+platoon.TrajectoryCollection.id: field str = <factory platoon.trajectory.TrajectoryCollection.<lambda>>
+platoon.TrajectoryCollection.to_dict: def to_dict() -> dict[str, Any]
+platoon.TrajectoryCollection.trajectories: field dict[str, Trajectory] = <factory dict>
+platoon.get_harness: def get_harness(ref: str) -> Harness
+platoon.gym: module platoon.gym
+platoon.gym.GYM_RETURN_MISC_KEY: constant str = "gym_return"
+platoon.gym.StepEnv: class StepEnv(Protocol)
+platoon.gym.StepEnv.reset: async def reset(task: Task) -> str
+platoon.gym.StepEnv.step: async def step(action: str) -> tuple[str, float, bool]
+platoon.gym.as_environment: def as_environment(env_factory: Callable[[], StepEnv], *, name: str, tasks: Mapping[str, Sequence[Mapping[str, Any]]] | None = None) -> type
+platoon.gym.gym_program: async def gym_program(ep: EpisodeContext) -> Outcome
+platoon.gym.loop: def loop(env_factory: Callable[[], StepEnv], *, max_turns: int | None = None, system: str | None = None) -> AgentFn
+platoon.harness: def harness(name: str, *, version: str = "1", runtime: Runtime = "inline", executes_model_code: bool = False) -> Callable[[AgentFn], AgentFn]
+platoon.program: def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], EpisodeProgram]
+platoon.testing.Completion: @dataclass(frozen=True) class Completion
+platoon.testing.Completion.delay: field float = 0.0
+platoon.testing.Completion.logprob: field float | None = None
+platoon.testing.Completion.routing_id: field int | None = None
+platoon.testing.Completion.stop_reason: field StopReason = "stop"
+platoon.testing.Completion.text: field str
+platoon.testing.EpisodeRun: @dataclass class EpisodeRun
+platoon.testing.EpisodeRun.children: property list[Trajectory]
+platoon.testing.EpisodeRun.collection: field TrajectoryCollection
+platoon.testing.EpisodeRun.gateway: field ModelGateway
+platoon.testing.EpisodeRun.interactions: field dict[str, TinkerLLMInteraction]
+platoon.testing.EpisodeRun.outcome: property dict[str, Any]
+platoon.testing.EpisodeRun.output_dir: field Path
+platoon.testing.EpisodeRun.policy: property ScriptedPolicy
+platoon.testing.EpisodeRun.reward: property float
+platoon.testing.EpisodeRun.root: property Trajectory
+platoon.testing.EpisodeRun.trajectories: property list[Trajectory]
+platoon.testing.PolicyCall: @dataclass(frozen=True) class PolicyCall
+platoon.testing.PolicyCall.completion: field Completion
+platoon.testing.PolicyCall.last_user_message: property str
+platoon.testing.PolicyCall.prompt: field tinker.ModelInput
+platoon.testing.PolicyCall.sampling_params: field Any
+platoon.testing.PolicyCall.text: field str
+platoon.testing.PolicyCall.tokens: field list[int]
+platoon.testing.ScriptExhaustedError: class ScriptExhaustedError(AssertionError)
+platoon.testing.ScriptedPolicy: class ScriptedPolicy
+platoon.testing.ScriptedPolicy.__init__: def __init__(script: Script = (), *, tokenizer: Tokenizer | None = None, stop_token: str | None = None, logprob: float = -0.25) -> None
+platoon.testing.ScriptedPolicy.answer: def answer(prompt_text: str) -> Completion
+platoon.testing.ScriptedPolicy.prompts: property list[str]
+platoon.testing.ScriptedPolicy.remaining: property list[Reply] | None
+platoon.testing.ScriptedPolicy.sample: def sample(*, prompt: Any, sampling_params: Any, num_samples: int = 1) -> Any
+platoon.testing.ScriptedPolicy.sample_async: async def sample_async(*, prompt: Any, sampling_params: Any, num_samples: int = 1) -> Any
+platoon.testing.ScriptedPolicy.script: property Script
+platoon.testing.ScriptedPolicy.tokens: def tokens(completion: Completion) -> list[int]
+platoon.testing.TOY_MODEL_NAME: constant str = "platoon/toy"
+platoon.testing.TOY_RENDERER_NAME: constant str = "qwen3_instruct"
+platoon.testing.TOY_TOKENIZER_DIR: constant Path
+platoon.testing.last_user_message: def last_user_message(prompt: str) -> str
+platoon.testing.make_gateway: def make_gateway(policy: ScriptedPolicy | Script = (), *, tokenizer: Tokenizer | None = None, renderer: Renderer | str | None = None, renderer_kwargs: Mapping[str, Any] | None = None, model_name: str = "platoon/toy", **settings: Any) -> ModelGateway
+platoon.testing.rules: def rules(table: Mapping[str, Reply], *, default: Reply | None = None) -> Callable[[str], Reply]
+platoon.testing.run_episode: async def run_episode(task: Task | str, *, service: str, harness: str, policy: ScriptedPolicy | Script | ModelGateway = (), service_kwargs: Mapping[str, Any] | None = None, harness_options: Mapping[str, Any] | None = None, program: str = "single", agents: Mapping[str, Any] | None = None, max_steps: int | None = None, rollout: RolloutConfig | Mapping[str, Any] | None = None, output_dir: str | Path | None = None) -> EpisodeRun
+platoon.testing.sample_response: def sample_response(tokens: Sequence[int], *, stop_reason: StopReason = "stop", routing_id: int | None = None, logprob: float = -0.25) -> tinker.types.SampleResponse
+platoon.testing.serve_policy: def serve_policy(policy: ScriptedPolicy | Script = (), *, tokenizer: Tokenizer | None = None, renderer: Renderer | str | None = None, **settings: Any) -> Generator[ScriptedPolicy]
+platoon.testing.tool_call: def tool_call(name: str, arguments: Mapping[str, Any] | None = None, /, **kwargs: Any) -> str
+platoon.testing.toy_renderer: def toy_renderer(name: str = "qwen3_instruct") -> Renderer
+platoon.testing.toy_tokenizer: def toy_tokenizer() -> Tokenizer

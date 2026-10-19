@@ -1,0 +1,21 @@
+# The Sparse ablation of the RAO paper on TextCraft-Synth, on Tinker: the recursive arm (recursive.yaml) with every
+# subagent given the root's success instead of a reward for its own targets, trained for the ablation's 100 steps.
+# The "Sparse, Weighted" arm of the paper's ablation (§5.0.1, Fig. 8); its "Dense, Weighted" arm is recursive.yaml at
+# step 100.
+#
+#   platoon train recipes/rao/textcraft-synth/ablation_sparse.yaml [key=value ...]
+#
+# It differs from recursive.yaml only in propagate_root_success, the length of training and the run's name.
+
+extends: recursive.yaml
+
+train:
+  max_training_steps: 100
+  workflow_config:
+    rollout_config:
+      propagate_root_success: true    # Sparse: every subagent takes the root's success (the single program applies it)
+
+stats:
+  trial_name: qwen3-4b-instruct-2507-recursive-sparse-lora32
+  wandb:
+    tags: [rao, textcraft-synth, tinker, recursive, sparse, ablation]

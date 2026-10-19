@@ -3,19 +3,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened]
   push:
     branches: [main]
 
 jobs:
-  pr-title:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: amannn/action-semantic-pull-request@v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -30,7 +21,58 @@ jobs:
       - name: Run pre-commit hooks
         run: uvx pre-commit run --all-files --show-diff-on-failure
 
+  # Core's suite on every Python platoon supports (pyproject.toml's classifiers). UV_PYTHON has uv sync and uv run
+  # use the job's Python.
   test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: uv sync --dev --extra tinker --extra ors
+
+      - name: Run tests
+        run: uv run pytest tests/ -v -n auto --dist loadfile -m "not serial"
+
+      - name: Run the serial tests
+        run: uv run pytest tests/ -v -m serial
+
+  # Each first-party extension (extensions/<name>, distribution platoon-<name>) in an environment of its own: the
+  # extension, platoon from the workspace and the extension's dev group. A core change runs every extension's tests.
+  extensions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extension: [textcraft]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install the extension and platoon
+        run: uv sync --package platoon-${{ matrix.extension }} --extra platoon
+
+      - name: Run the extension's tests
+        run: uv run --package platoon-${{ matrix.extension }} pytest extensions/${{ matrix.extension }}/tests -v -n auto --dist loadfile
+
+  # The recipes (recipes/<name>): every config resolves and validates, with every first-party extension installed.
+  recipes:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,8 +83,8 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv sync --dev
+      - name: Install platoon and the first-party extensions
+        run: uv sync --all-packages --dev --extra tinker --extra ors --extra platoon
 
-      - name: Run tests
-        run: uv run pytest tests/ -v
+      - name: Check the recipes
+        run: uv run --no-sync pytest recipes/ -v

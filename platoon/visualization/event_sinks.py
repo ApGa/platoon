@@ -1,178 +1,83 @@
+"""Rollout event files: the JSONL records the trajectory viewer tails and replays.
+
+A rollout's trajectories are built from its gateway records once it finishes, so
+rollouts write their events afterwards: :func:`emit_rollout_events` turns a
+finished ``TrajectoryCollection`` (or its ``to_dict`` dump) into one file under
+``<output_dir>/events/`` (:func:`rollout_events_path`). Each line is one event,
+``{"type", "collection_id", "process_id", "ts", ...}``, of the types
+``trajectory_created``, ``trajectory_task_set``, ``trajectory_step_added`` and
+``trajectory_finished``, in that order per trajectory, root first.
+"""
+
 from __future__ import annotations
 
+import contextlib
 import json
-import queue
+import os
+import re
 import time
-from dataclasses import asdict, is_dataclass
+from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
-from pydantic import BaseModel  # TODO: Add pydantic as explicit dependency?
+from pydantic import BaseModel
 
-from platoon.envs.base import Task
-from platoon.episode.trajectory import Trajectory, TrajectoryEventHandler
+if TYPE_CHECKING:
+    from platoon.trajectory import TrajectoryCollection
+
+# Rollout ids and mixture task ids may hold path separators and colons.
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def _to_jsonable(obj: Any) -> Any:
-    if is_dataclass(obj):
-        return _to_jsonable(asdict(obj))
-    if isinstance(obj, BaseModel):
-        return obj.model_dump(mode="json")
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj
+    if isinstance(obj, BaseModel):
+        try:
+            return obj.model_dump(mode="json")
+        except Exception:
+            return str(obj)
+    # Walk dataclass fields WITHOUT dataclasses.asdict(): asdict() deep-copies
+    # every leaf value, and trajectory steps embed live SDK objects (e.g.
+    # OpenHands events holding a threading.Lock / asyncio.Future) that cannot be
+    # copied/pickled. Recursing via _to_jsonable routes those through
+    # model_dump()/str() instead of copy.deepcopy.
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: _to_jsonable(getattr(obj, f.name)) for f in fields(obj)}
     if isinstance(obj, dict):
-        return {k: _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
         return [_to_jsonable(x) for x in obj]
     # Fallback to string
     return str(obj)
 
 
-class JsonlFileSink(TrajectoryEventHandler):
-    """Writes trajectory events as JSONL records for offline or live tailing.
-
-    Each line is a dict with at least keys: {"type": str, ...}.
-    """
-
-    def __init__(
-        self,
-        filepath: str | Path,
-        create_parents: bool = True,
-        *,
-        collection_id: str | None = None,
-        process_id: str | int | None = None,
-    ) -> None:
-        self.filepath = Path(filepath)
-        if self.filepath.exists():
-            self.filepath.unlink()
-        if create_parents:
-            self.filepath.parent.mkdir(parents=True, exist_ok=True)
-        self.collection_id = collection_id
-        self.process_id = process_id
-
-    def _write(self, record: dict[str, Any]) -> None:
-        if self.collection_id is not None and "collection_id" not in record:
-            record["collection_id"] = self.collection_id
-        if self.process_id is not None and "process_id" not in record:
-            record["process_id"] = self.process_id
-        # Attach wall-clock timestamp for ordering and replay
-        record.setdefault("ts", time.time())
-        with self.filepath.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-
-    def on_trajectory_created(self, trajectory: Trajectory) -> None:  # type: ignore[override]
-        self._write(
-            {
-                "type": "trajectory_created",
-                "trajectory": _to_jsonable(trajectory),
-            }
-        )
-
-    def on_trajectory_task_set(self, trajectory: Trajectory, task: Task | None) -> None:  # type: ignore[override]
-        self._write(
-            {
-                "type": "trajectory_task_set",
-                "trajectory_id": trajectory.id,
-                "task": _to_jsonable(task),
-            }
-        )
-
-    def on_trajectory_step_added(self, trajectory: Trajectory, step: Any) -> None:  # type: ignore[override]
-        self._write(
-            {
-                "type": "trajectory_step_added",
-                "trajectory_id": trajectory.id,
-                # zero-based index for steps in UI/consumers
-                "step_index": len(trajectory.steps) - 1,
-                "step": _to_jsonable(step),
-                "reward": trajectory.reward,
-                # propagate fields that may update when a step is added
-                "finish_message": trajectory.finish_message,
-                "error_message": trajectory.error_message,
-            }
-        )
-
-    def on_trajectory_finished(self, trajectory: Trajectory) -> None:  # type: ignore[override]
-        self._write(
-            {
-                "type": "trajectory_finished",
-                "trajectory_id": trajectory.id,
-                "reward": trajectory.reward,
-                "finish_message": trajectory.finish_message,
-                "error_message": trajectory.error_message,
-            }
-        )
+# The misc keys the viewer reads when a trajectory is created, to place verifier trajectories under the
+# trajectory they verify; the finished record carries the whole misc.
+_CREATED_MISC_KEYS = (
+    "subagent_reward_verifier_task",
+    "subagent_reward_verifies_trajectory_id",
+    "platoon_subagent_verifies_trajectory_id",
+)
 
 
-class QueueSink(TrajectoryEventHandler):
-    """Pushes events into a thread-safe queue for consumption by a UI thread/process."""
+def _created_trajectory(traj: Dict[str, Any]) -> Dict[str, Any]:
+    """A trajectory as its ``trajectory_created`` record carries it: no steps, task or misc beyond the viewer's
+    keys, which the task, step and finished records that follow carry (writing them twice doubled every file)."""
 
-    def __init__(self, q: queue.Queue, *, collection_id: str | None = None, process_id: str | int | None = None):
-        self.q = q
-        self.collection_id = collection_id
-        self.process_id = process_id
-
-    def _put(self, record: dict[str, Any]) -> None:
-        if self.collection_id is not None and "collection_id" not in record:
-            record["collection_id"] = self.collection_id
-        if self.process_id is not None and "process_id" not in record:
-            record["process_id"] = self.process_id
-        # Attach wall-clock timestamp for ordering and replay
-        record.setdefault("ts", time.time())
-        try:
-            self.q.put_nowait(record)
-        except queue.Full:
-            # Drop on full to avoid blocking rollout
-            pass
-
-    def on_trajectory_created(self, trajectory: Trajectory) -> None:  # type: ignore[override]
-        self._put(
-            {
-                "type": "trajectory_created",
-                "trajectory": _to_jsonable(trajectory),
-            }
-        )
-
-    def on_trajectory_task_set(self, trajectory: Trajectory, task: Task | None) -> None:  # type: ignore[override]
-        self._put(
-            {
-                "type": "trajectory_task_set",
-                "trajectory_id": trajectory.id,
-                "task": _to_jsonable(task),
-            }
-        )
-
-    def on_trajectory_step_added(self, trajectory: Trajectory, step: Any) -> None:  # type: ignore[override]
-        self._put(
-            {
-                "type": "trajectory_step_added",
-                "trajectory_id": trajectory.id,
-                # zero-based index for steps in UI/consumers
-                "step_index": len(trajectory.steps) - 1,
-                "step": _to_jsonable(step),
-                "reward": trajectory.reward,
-                # propagate fields that may update when a step is added
-                "finish_message": trajectory.finish_message,
-                "error_message": trajectory.error_message,
-            }
-        )
-
-    def on_trajectory_finished(self, trajectory: Trajectory) -> None:  # type: ignore[override]
-        self._put(
-            {
-                "type": "trajectory_finished",
-                "trajectory_id": trajectory.id,
-                "reward": trajectory.reward,
-                "finish_message": trajectory.finish_message,
-                "error_message": trajectory.error_message,
-            }
-        )
+    created = {**traj, "steps": [], "task": None}
+    misc = traj.get("misc")
+    if isinstance(misc, dict):
+        created["misc"] = {key: misc[key] for key in _CREATED_MISC_KEYS if key in misc}
+    return created
 
 
 def trajectory_collection_dump_to_events(traj_collection_dump: Dict[str, Any]) -> list[dict[str, Any]]:
     """Convert a serialized TrajectoryCollection dump (as produced by asdict) to event records.
 
-    This enables offline visualization of previously saved rollouts.
+    This enables offline visualization of previously saved rollouts.  Each part of a trajectory is written
+    once: its ``trajectory_created`` record holds no steps or task (see :func:`_created_trajectory`).
     """
     events: list[dict[str, Any]] = []
     now = time.time()
@@ -183,7 +88,7 @@ def trajectory_collection_dump_to_events(traj_collection_dump: Dict[str, Any]) -
         events.append(
             {
                 "type": "trajectory_created",
-                "trajectory": traj,
+                "trajectory": _created_trajectory(traj),
                 "collection_id": collection_id,
                 "ts": now + (seq * 1e-6),
             }
@@ -224,6 +129,7 @@ def trajectory_collection_dump_to_events(traj_collection_dump: Dict[str, Any]) -
                 "reward": traj.get("reward", 0.0),
                 "finish_message": traj.get("finish_message"),
                 "error_message": traj.get("error_message"),
+                "misc": traj.get("misc", {}),
                 "collection_id": collection_id,
                 "ts": now + (seq * 1e-6),
             }
@@ -241,44 +147,62 @@ def write_events_from_dump_to_jsonl(traj_collection_dump: Dict[str, Any], filepa
             f.write(json.dumps(r) + "\n")
 
 
-def enqueue_events_from_dump(traj_collection_dump: Dict[str, Any], q: queue.Queue) -> None:
-    for r in trajectory_collection_dump_to_events(traj_collection_dump):
-        try:
-            q.put_nowait(r)
-        except queue.Full:
-            break
+def rollout_events_path(output_dir: str | Path, task_id: str | None, collection_id: str) -> Path:
+    """Where a rollout's event file goes: ``<output_dir>/events/events_<task id>_<collection id>.jsonl``."""
+
+    task_part = _UNSAFE_FILENAME_CHARS.sub("_", str(task_id))[-120:]
+    return Path(output_dir) / "events" / f"events_{task_part}_{_UNSAFE_FILENAME_CHARS.sub('_', collection_id)}.jsonl"
 
 
-class MarkdownFileSink(TrajectoryEventHandler):
-    """Replicates the original human-readable markdown logging behavior.
+def emit_rollout_events(
+    collection: TrajectoryCollection | Mapping[str, Any],
+    path: str | Path,
+    *,
+    process_id: int | None = None,
+) -> Path:
+    """Write a finished rollout's events to ``path`` for the trajectory viewer, replacing any earlier file.
 
-    Deprecated behavior existed on TrajectoryCollection.output_file; use this sink instead.
+    ``collection`` is the ``TrajectoryCollection`` a rollout returned or its ``to_dict`` dump.  Every record
+    also carries ``process_id`` (default: this process's), like the records live event sinks used to write.
     """
 
-    def __init__(self, filepath: str | Path, create_parents: bool = True) -> None:
-        self.filepath = Path(filepath)
-        if self.filepath.exists():
-            self.filepath.unlink()
-        if create_parents:
-            self.filepath.parent.mkdir(parents=True, exist_ok=True)
-        # initialize file
-        with self.filepath.open("w", encoding="utf-8") as f:
-            f.write("## Trajectory Collection\n")
+    dump = collection if isinstance(collection, Mapping) else collection.to_dict()
+    process_id = os.getpid() if process_id is None else process_id
+    lines = []
+    for record in trajectory_collection_dump_to_events(_to_jsonable(dump)):
+        record["process_id"] = process_id
+        lines.append(json.dumps(record) + "\n")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = temporary_events_path(path, process_id)
+    try:
+        with temporary.open("w", encoding="utf-8") as f:
+            f.writelines(lines)
+        # Viewers tailing the directory see the whole file or none of it.
+        temporary.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+    return path
 
-    def on_trajectory_created(self, trajectory: Trajectory) -> None:  # type: ignore[override]
-        with self.filepath.open("a", encoding="utf-8") as f:
-            f.write(f"## Created new trajectory: {trajectory.id}\n")
-            if trajectory.parent_info is not None:
-                f.write(f"Forked from {trajectory.parent_info.id} at step {trajectory.parent_info.fork_step}\n")
 
-    def on_trajectory_task_set(self, trajectory: Trajectory, task: Task | None) -> None:  # type: ignore[override]
-        # no-op for markdown sink until first step; goal printed per step
-        return
+def temporary_events_path(path: str | Path, process_id: int) -> Path:
+    """Where process ``process_id`` writes the event file ``path`` before renaming it into place: a hidden
+    ``.<name>.<pid>.tmp`` beside it."""
 
-    def on_trajectory_step_added(self, trajectory: Trajectory, step: Any) -> None:  # type: ignore[override]
-        with self.filepath.open("a", encoding="utf-8") as f:
-            f.write(f"## Step {len(trajectory.steps)} for trajectory {trajectory.id}:\n")
-            goal = getattr(trajectory.task, "goal", None) if trajectory.task is not None else None
-            f.write(f"### Goal: {goal}\n")
-            f.write(str(step) + "\n")
-            f.write("--------------------------------\n")
+    path = Path(path)
+    return path.with_name(f".{path.name}.{process_id}.tmp")
+
+
+def remove_temporary_events(output_dir: str | Path, process_id: int) -> int:
+    """Delete the temporary event files process ``process_id`` left under ``<output_dir>/events/`` and return
+    how many there were.  A writer removes its own unless it is killed (``SIGKILL``, ``os._exit``) mid-write, so
+    the rollout-worker supervisor calls this for a worker that ended without a response."""
+
+    removed = 0
+    for path in (Path(output_dir) / "events").glob(f".events_*.{process_id}.tmp"):
+        with contextlib.suppress(OSError):
+            path.unlink()
+            removed += 1
+    return removed

@@ -1,0 +1,28 @@
+# Evaluate a policy with the example-tool-loop function harness on number search.
+#
+# From the repository root:
+#
+#   PYTHONPATH=examples/function-harness uv run platoon rollout examples/function-harness/config.yaml --task val:0
+#   PYTHONPATH=examples/function-harness uv run platoon eval examples/function-harness/config.yaml
+
+inference:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  output_dir: ./runs/function-harness
+  workflow:
+    num_concurrent_workers: 8
+    rollout_config:
+      max_steps: 12          # the root agent's step budget: 12 policy calls
+      timeout: 300           # seconds for the whole rollout
+      verbose: false
+      inference_params: {max_completion_tokens: 512}
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: example-tool-loop  # or tool_loop:tool_loop, without `package`
+    package: tool_loop          # imported in every rollout process, so @pt.harness("example-tool-loop") registers
+    harness_options:
+      system_prompt: >-
+        Find the hidden number. Call the guess tool with one integer per turn; it says whether
+        your guess is too low, too high or correct.
+    eval_dataset_kwargs: {split_name: val, limit: 20}

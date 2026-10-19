@@ -1,0 +1,22 @@
+# Hi-lo with pt.gym.as_environment: the game is an ORS environment with one `act` tool, played by
+# the built-in platoon-react harness and graded by the call that ends the episode.
+#
+#   cd examples/gym-env
+#   PYTHONPATH=. uv run platoon train train_tool.yaml [key=value ...]
+
+extends: train_loop.yaml
+
+environments:
+  - name: hilo
+    service: python://guess_game:HiLoEnvironment
+    harness: platoon-react
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: test}
+
+train:
+  workflow_config:
+    rollout_config:
+      inference_params: {max_completion_tokens: 64}   # room for a tool call
+
+stats:
+  trial_name: act-tool

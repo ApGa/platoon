@@ -1,55 +1,46 @@
 # Adapted and modified from: https://github.com/microsoft/agent-lightning/blob/main/examples/tinker/agl_tinker/llm.py
+"""The policy handle shared by the trainer, rollout workers and inference: a model gateway and its version.
+
+``TinkerLLM`` owns this process's :class:`platoon.gateway.core.ModelGateway` (renderer, tokenizer, sampling
+client and sampling defaults) and the checkpoint version the trainer advances. ``set_as_default`` makes that
+gateway the one harness rollouts serve (``platoon.gateway.default_gateway``), and ``TinkerLLMProxySession``
+binds the interaction map and timeline that one rollout's model calls are recorded into, which the rollout
+worker converts into training data.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
-import uuid
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Literal,
-    Type,
-    TypeGuard,
-    TypeVar,
-    cast,
-    get_origin,
-)
+from dataclasses import dataclass, field
+from typing import Any
 
-import litellm
 import tinker
-from litellm.llms.custom_llm import CustomLLM
-from litellm.types.utils import (
-    ChatCompletionMessageToolCall,
-    ChatCompletionTokenLogprob,
-    Choices,
-    ModelResponse,
-    Usage,
-)
-from litellm.types.utils import ChoiceLogprobs as LitellmChoiceLogprobs
-from litellm.types.utils import Message as LitellmMessage
-from litellm.types.utils import TopLogprob as LitellmTopLogprob
-from litellm.utils import custom_llm_setup
-from tinker.types import ModelInput, SampleResponse, SamplingParams
-from tinker_cookbook.completers import TokensWithLogprobs
-from tinker_cookbook.renderers import Message as TinkerMessage
 from tinker_cookbook.renderers import Renderer, get_renderer
-from tinker_cookbook.renderers import ToolCall as TinkerToolCall
-from tinker_cookbook.tokenizer_utils import get_tokenizer
+from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from transformers import AutoProcessor, PreTrainedTokenizer
+
+from platoon.gateway.core import (
+    ModelGateway,
+    Sampler,
+    TinkerLLMInteraction,
+    set_default_gateway,
+    to_cookbook_tool_specs,  # noqa: F401  (re-exported: callers import it from here)
+)
+from platoon.gateway.core import (  # noqa: F401  (re-exported: callers import it from here)
+    patch_tinker_sample_response_extra_allow as _patch_tinker_sample_response_extra_allow,
+)
+from platoon.train.tinker.key_refusal import key_refusals
+from platoon.train.tinker.renderers import RENDERER_FACTORIES, tool_call_parsing
+from platoon.train.tinker.renderers import register as register_platoon_renderers
+from platoon.train.tinker.rollout_metrics import RolloutTimeline, timeline_scope
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
-
-
-@dataclass
-class TinkerLLMInteraction:
-    obs: tinker.ModelInput
-    action: TokensWithLogprobs
+# ``train.renderer_name: qwen3_6_preserve_thinking`` must resolve in every process that calls
+# ``get_renderer`` (the trainer, and anything that unpickles a renderer); registration is idempotent.
+register_platoon_renderers()
 
 
 proxy_interactions: ContextVar[dict[str, TinkerLLMInteraction]] = ContextVar("proxy_interactions")
@@ -57,12 +48,21 @@ proxy_interactions: ContextVar[dict[str, TinkerLLMInteraction]] = ContextVar("pr
 
 class TinkerLLMProxySession:
     _token: object | None = None
+    _timeline_scope: object | None = None
 
     def __enter__(self) -> TinkerLLMProxySession:
         self._token = proxy_interactions.set({})
+        # A rollout tree also gets a timeline, bound the same way and with the
+        # same context propagation, so subagents and judges record into their
+        # root rollout's timing.
+        self._timeline_scope = timeline_scope(RolloutTimeline())
+        self.timeline = self._timeline_scope.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if self._timeline_scope is not None:
+            self._timeline_scope.__exit__(exc_type, exc_value, traceback)
+            self._timeline_scope = None
         if self._token is not None:
             proxy_interactions.reset(self._token)
             self._token = None
@@ -78,31 +78,14 @@ class TinkerLLMProxySession:
         return proxy_interactions.get()
 
 
-def generate_id(prefix: str) -> str:
-    """Generate a unique ID with the given prefix.
-
-    Args:
-        prefix: String prefix for the generated ID.
-
-    Returns:
-        A unique identifier string.
-    """
-    return prefix + str(uuid.uuid4())
-
-
-class TinkerLLM(CustomLLM):
-    """LiteLLM provider that proxies Tinker's sampling client.
+class TinkerLLM:
+    """The policy: a model gateway over a Tinker sampling client, and the checkpoint version it samples.
 
     Attributes:
-        model_name: The HuggingFace model identifier.
-        renderer: Prompt renderer for formatting messages.
-        tokenizer: Tokenizer for the model.
-        sampling_client: Tinker sampling client for generation.
-        max_tokens: Maximum number of tokens to generate.
-        temperature: Sampling temperature.
-        top_k: Top-k sampling parameter.
-        top_p: Nucleus sampling parameter.
-        seed: Random seed for reproducibility.
+        gateway: Renders, samples and parses every call.  The model name, renderer, tokenizer, sampling client,
+            sampling defaults and sample timeout below read through to it; see :class:`ModelGateway` for the
+            semantics of ``seed`` and of the sample timeout (``sample_timeout_seconds``, else
+            ``TINKER_SAMPLE_TIMEOUT_SECONDS``).
     """
 
     def __init__(
@@ -116,21 +99,69 @@ class TinkerLLM(CustomLLM):
         temperature: float = 1.0,
         top_k: int = -1,
         top_p: float = 1.0,
-        seed: int = 42,
+        seed: int | None = None,
         context_window_length: int | None = None,
+        sample_timeout_seconds: float | None = None,
     ) -> None:
         """Initialize the TinkerLLM."""
-        self.model_name = model_name
-        self.renderer = renderer
-        self.tokenizer = tokenizer
-        self.sampling_client = sampling_client
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.top_k = top_k
-        self.top_p = top_p
-        self.seed = seed
-        self.context_window_length = context_window_length
+        self.gateway = ModelGateway(
+            sampler=sampling_client,
+            renderer=renderer,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            seed=seed,
+            context_window_length=context_window_length,
+            sample_timeout_seconds=sample_timeout_seconds,
+        )
         self._version: int = 0
+
+    @property
+    def model_name(self) -> str:
+        return self.gateway.model_name
+
+    @property
+    def renderer(self) -> Renderer:
+        return self.gateway.renderer
+
+    @property
+    def tokenizer(self) -> Tokenizer:
+        return self.gateway.tokenizer
+
+    @property
+    def sampling_client(self) -> Sampler:
+        return self.gateway.sampler
+
+    @property
+    def max_tokens(self) -> int:
+        return self.gateway.max_tokens
+
+    @property
+    def temperature(self) -> float:
+        return self.gateway.temperature
+
+    @property
+    def top_k(self) -> int:
+        return self.gateway.top_k
+
+    @property
+    def top_p(self) -> float:
+        return self.gateway.top_p
+
+    @property
+    def seed(self) -> int | None:
+        return self.gateway.seed
+
+    @property
+    def context_window_length(self) -> int | None:
+        return self.gateway.context_window_length
+
+    @property
+    def sample_timeout_seconds(self) -> float:
+        return self.gateway.sample_timeout_seconds
 
     @property
     def version(self) -> int:
@@ -161,305 +192,20 @@ class TinkerLLM(CustomLLM):
             sampling_client: New Tinker sampling client to use.
             increment_version: Whether to increment the version after update.
         """
-        self.sampling_client = sampling_client
+        self.gateway.sampler = sampling_client
         if increment_version:
             self.increment_version()
 
-    def _canonicalize_messages(self, messages: Any) -> List[TinkerMessage]:
-        # Note: We avoid using TypeAdapter for strict validation because TinkerMessage
-        # contains ImagePart which has PIL.Image.Image that Pydantic can't handle.
-        # Instead, we cast directly since we expect the messages to already be in
-        # the correct format (coming from LiteLLM or manually constructed).
-        if not isinstance(messages, list):
-            raise ValueError(f"Expected list of messages, got {type(messages)}")
-        return cast(List[TinkerMessage], messages)
+    def set_as_default(self) -> TinkerLLM:
+        """Make this policy's gateway the process default, which ``harness_rollout`` serves to harnesses.
 
-    def _validate_role(self, role: str) -> TypeGuard[Literal["assistant", "user", "system", "tool", "function"]]:
-        if role not in ["assistant", "user", "system", "tool", "function"]:
-            raise ValueError(f"Invalid role: {role}")
-        return True
-
-    def _parse_tool_call(self, tool_call: TinkerToolCall) -> ChatCompletionMessageToolCall:
-        return ChatCompletionMessageToolCall(
-            id=tool_call.id or generate_id("tinker-tool-call-"),
-            function={
-                "name": tool_call.function.name,
-                "arguments": tool_call.function.arguments,
-            },
-            type="function",
-        )
-
-    def _normalize_message_content(self, content: Any) -> str:
-        """Convert tinker-cookbook structured content parts to plain text for LiteLLM."""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for part in content:
-                if isinstance(part, dict):
-                    part_type = part.get("type")
-                    if part_type == "text":
-                        parts.append(str(part.get("text", "")))
-                    elif part_type == "thinking":
-                        parts.append(str(part.get("thinking", "")))
-                    elif part_type == "image":
-                        # LiteLLM's Message model expects plain string content on this path.
-                        # Drop image payloads but keep a marker so content is not silently empty.
-                        parts.append("[image]")
-                    else:
-                        parts.append(str(part))
-                else:
-                    parts.append(str(part))
-            return "".join(parts)
-        return str(content)
-
-    def _get_optional_params(
-        self,
-        kwargs: Dict[str, Any],
-        keys: List[str],
-        expected_type: Type[T],
-        validate_fn: Callable[[T], bool],
-        default_value: T,
-    ) -> T:
-        optional_params = cast(Dict[str, Any], kwargs.get("optional_params", {}))
-        if not isinstance(optional_params, dict):  # type: ignore
-            raise ValueError(f"Invalid optional params type: {type(optional_params)}")
-        for key in keys:
-            if key in optional_params:
-                value = optional_params[key]
-                # Handle parameterized generics like list[str] by extracting the origin type
-                origin = get_origin(expected_type)
-                check_type = origin if origin is not None else expected_type
-                # Allow int for float params (e.g., top_p=1 instead of top_p=1.0)
-                if check_type is float:
-                    if not isinstance(value, (int, float)):
-                        raise ValueError(f"Invalid {key} type: {type(value)}")
-                    value = float(value)  # Convert int to float
-                elif not isinstance(value, check_type):
-                    raise ValueError(f"Invalid {key} type: {type(value)}")
-                if not validate_fn(value):
-                    raise ValueError(f"Invalid {key}. Did not pass validation: {value}")
-                return value
-        return default_value
-
-    def _prepare_model_input(self, **kwargs: Any) -> ModelInput:
-        """LiteLLM messages -> Tinker ModelInput."""
-        messages = kwargs.pop("messages", None)
-        canonical_messages = self._canonicalize_messages(messages)
-        # TODO: Needs to be updated for latest tinker cookbook version.
-        return self.renderer.build_generation_prompt(canonical_messages)
-
-    def _parse_response(self, model_input: ModelInput, response: SampleResponse) -> ModelResponse:
-        """Tinker Response -> LiteLLM Response.
-
-        Extract log probabilities as well.
-        """
-        choices: List[Choices] = []
-        completion_token_count = 0
-        for seq in response.sequences:
-            completion_token_count += len(seq.tokens)
-            if seq.logprobs is not None:
-                token_strings: List[str] = self.tokenizer.batch_decode([[token] for token in seq.tokens])  # type: ignore
-                # FIXME: This might not be accurate for some corner cases.
-                # But it's not actually used in most cases.
-                bytes_list: List[List[int]] = [list(token.encode("utf-8")) for token in token_strings]
-                logprobs = LitellmChoiceLogprobs(
-                    content=[
-                        ChatCompletionTokenLogprob(
-                            token=token,
-                            bytes=bytes,
-                            logprob=logprob,
-                            # NOTE: This top logprob is fake. It's just used to fool the LiteLLM type validator.
-                            top_logprobs=[LitellmTopLogprob(token=token, bytes=bytes, logprob=logprob)],
-                        )
-                        for token, bytes, logprob in zip(token_strings, bytes_list, seq.logprobs)
-                    ]
-                )
-            else:
-                logprobs = None
-
-            parsed_response, parse_success = self.renderer.parse_response(seq.tokens)
-            if parse_success:
-                role = parsed_response["role"]
-                if not self._validate_role(role):
-                    assert False, "This should never happen"
-                # FIXME: The content should not be still there if tool call has been parsed.
-                content = self._normalize_message_content(parsed_response["content"])
-                # NOTE(yuge): I thought about adding this to make it more robust to empty responses,
-                # but later I found it's a configuration error in my renderer. So I think it's better
-                # to just log a warning and go with the default path.
-                # if not content:
-                #     raise ValueError("Parsed content is empty. Original response: " + str(response))
-                if not content:
-                    logger.warning("Parsed content is empty. Original response: " + str(response))
-                tool_calls = parsed_response.get("tool_calls", None)
-                if tool_calls:
-                    tool_calls = [self._parse_tool_call(tool_call) for tool_call in tool_calls]
-                choices.append(
-                    Choices(
-                        message=LitellmMessage(role=role, content=content, tool_calls=tool_calls),
-                        finish_reason=seq.stop_reason,
-                        logprobs=logprobs,
-                        token_ids=seq.tokens,
-                    )
-                )
-            else:
-                # logger.warning(f"Failed to parse response: {parsed_response}")
-                # Go with the default path
-                choices.append(
-                    Choices(
-                        message=LitellmMessage(
-                            role="assistant",
-                            content=self._normalize_message_content(parsed_response["content"]),
-                        ),
-                        finish_reason=seq.stop_reason,
-                        logprobs=logprobs,
-                        token_ids=seq.tokens,
-                    )
-                )
-        prompt_token_count = model_input.length
-        return ModelResponse(
-            id=generate_id("tinker-sampling-"),
-            model=self.model_name,
-            choices=choices,
-            prompt_token_ids=model_input.to_ints(),
-            usage=Usage(
-                prompt_tokens=prompt_token_count,
-                completion_tokens=completion_token_count,
-                total_tokens=prompt_token_count + completion_token_count,
-            ),
-        )
-
-    def _record_interaction(self, model_input: ModelInput, model_response: ModelResponse) -> None:
-        assert len(model_response.choices) == 1
-
-        logprobs_content = model_response.choices[0].logprobs.content
-        interaction = TinkerLLMInteraction(
-            obs=model_input,
-            action=TokensWithLogprobs(
-                tokens=model_response.choices[0].token_ids,
-                maybe_logprobs=[c.logprob for c in logprobs_content] if logprobs_content else [],
-            ),
-        )
-        proxy_interactions.get()[model_response.id] = interaction
-
-    def _check_context_window_length(self, model_input: ModelInput, max_completion_tokens: int) -> None:
-        prompt_length = model_input.length
-        total_sequence_length = prompt_length + max_completion_tokens
-        if self.context_window_length is not None and total_sequence_length > self.context_window_length:
-            raise ValueError(
-                f"Prompt length plus max_tokens exceeds the model's context window: "
-                f"{prompt_length} prompt tokens + {max_completion_tokens} max_tokens > "
-                f"{self.context_window_length} context window length."
-            )
-
-    async def acompletion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
-        """Main entrypoint for LiteLLM to call."""
-        import asyncio
-        import time
-
-        max_tokens = self._get_optional_params(
-            kwargs, ["max_completion_tokens", "max_tokens"], int, lambda x: x >= 0, self.max_tokens
-        )
-        temperature = self._get_optional_params(
-            kwargs, ["temperature"], float, lambda x: 0.0 <= x <= 2.0, self.temperature
-        )
-        top_k = self._get_optional_params(kwargs, ["top_k"], int, lambda x: True, self.top_k)
-        top_p = self._get_optional_params(kwargs, ["top_p"], float, lambda x: 0.0 <= x <= 1.0, self.top_p)
-        seed = self._get_optional_params(kwargs, ["seed"], int, lambda _: True, self.seed)
-        stop_sequences = self._get_optional_params(
-            kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
-        )
-        model_input = self._prepare_model_input(**kwargs)
-        self._check_context_window_length(model_input, max_tokens)
-        params = SamplingParams(
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            seed=seed,
-            stop=stop_sequences,
-        )
-        start_time = time.perf_counter()
-
-        # Timeout for sample_async to prevent infinite hangs (10 minutes)
-        SAMPLE_TIMEOUT_SECONDS = 600
-        try:
-            result = await asyncio.wait_for(
-                self.sampling_client.sample_async(prompt=model_input, sampling_params=params, num_samples=1),
-                timeout=SAMPLE_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            elapsed = time.perf_counter() - start_time
-            logger.error(f"sample_async timed out after {elapsed:.1f}s (timeout={SAMPLE_TIMEOUT_SECONDS}s)")
-            raise TimeoutError(f"Tinker sample_async timed out after {SAMPLE_TIMEOUT_SECONDS}s")
-        except Exception as e:
-            elapsed = time.perf_counter() - start_time
-            logger.exception(f"sample_async failed after {elapsed:.1f}s: {e}")
-            raise
-        elapsed = time.perf_counter() - start_time
-        if elapsed > 30.0:
-            logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
-        final_response = self._parse_response(model_input, result)
-        self._record_interaction(model_input, final_response)
-        return final_response
-
-    def completion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
-        """Main entrypoint for LiteLLM to call."""
-        max_tokens = self._get_optional_params(
-            kwargs, ["max_completion_tokens", "max_tokens"], int, lambda x: x >= 0, self.max_tokens
-        )
-        temperature = self._get_optional_params(
-            kwargs, ["temperature"], float, lambda x: 0.0 <= x <= 2.0, self.temperature
-        )
-        top_k = self._get_optional_params(kwargs, ["top_k"], int, lambda x: True, self.top_k)
-        top_p = self._get_optional_params(kwargs, ["top_p"], float, lambda x: 0.0 <= x <= 1.0, self.top_p)
-        seed = self._get_optional_params(kwargs, ["seed"], int, lambda _: True, self.seed)
-        stop_sequences = self._get_optional_params(
-            kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
-        )
-        model_input = self._prepare_model_input(**kwargs)
-        self._check_context_window_length(model_input, max_tokens)
-        params = SamplingParams(
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            seed=seed,
-            stop=stop_sequences,
-        )
-        result = self.sampling_client.sample(prompt=model_input, sampling_params=params, num_samples=1)
-        final_response = self._parse_response(model_input, result)
-        self._record_interaction(model_input, final_response)
-        return final_response
-
-    def as_model_list(self) -> list[dict]:
-        """Generate model configuration for LiteLLM proxy.
-
-        Returns:
-            List containing model configuration dict for LiteLLM.
-        """
-        return [
-            {
-                "model_name": self.model_name,
-                "litellm_params": {
-                    "model": f"platoon-tinker/{self.model_name}",
-                },
-            }
-        ]
-
-    def rewrite_litellm_custom_providers(self) -> TinkerLLM:
-        """Register this TinkerLLM as a custom provider in LiteLLM.
-
-        !!! warning
-            This method modifies the global LiteLLM state, which could interfere with other tests in the
-            same process.
+        This sets process-global state (``platoon.gateway.default_gateway``); tests that call it should
+        reset it with ``platoon.gateway.set_default_gateway(None)``.
 
         Returns:
             Self for method chaining.
         """
-        litellm.custom_provider_map = [{"provider": "platoon-tinker", "custom_handler": self}]
-        custom_llm_setup()
+        set_default_gateway(self.gateway)
         return self
 
 
@@ -467,28 +213,87 @@ class TinkerLLM(CustomLLM):
 class ModelInfo:
     llm: TinkerLLM
     model_name: str
-    base_url: str
-    api_key: str
+    # Carried so a rollout host that is not the trainer can rebuild an
+    # equivalent renderer without reaching into trainer config.  Defaulted so
+    # every existing construction keeps working.
+    renderer_name: str = ""
+    renderer_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
-def register_tinker_llm(
+def build_tinker_llm(
+    *,
     model_name: str,
     renderer_name: str,
+    sampling_client: tinker.SamplingClient,
     context_window_length: int | None = None,
     renderer_kwargs: dict[str, Any] | None = None,
-) -> ModelInfo:
-    """
-    Register the TinkerLLMProxy as a custom provider in LiteLLM.
+    sample_timeout_seconds: float | None = None,
+    **sampling_defaults: Any,
+) -> TinkerLLM:
+    """Tokenizer + AutoProcessor + renderer + TinkerLLM, and nothing else.
 
-    Args:
-        model_name: HuggingFace model identifier (e.g., "Qwen/Qwen3-30B-A3B-Instruct-2507").
-        renderer_name: Renderer type for prompt formatting (e.g., "qwen3", "qwen3_instruct").
-        context_window_length: Context window length for the model. Defaults to None.
-        renderer_kwargs: Optional renderer attribute overrides applied after construction.
-    """
-    service_client = tinker.ServiceClient()
-    sampling_client = service_client.create_sampling_client(base_model=model_name)
+    Deliberately constructs **no** ``ServiceClient`` and sets **no** default
+    gateway, so a rollout worker can build its own policy without opening a
+    second gateway session (a ``ServiceClient`` per worker would mean a session
+    per rollout).  ``register_tinker_llm`` is this plus those two side effects.
 
+    The renderer is rebuilt here rather than shipped: ``Renderer.__reduce__``
+    carries only ``(renderer_name, model_name, has_image_processor)`` and drops
+    the ``renderer_kwargs`` applied below by ``setattr``, so pickling one is a
+    latent silent-drift bug.  A chat-template renderer chooses its tool-call
+    parser here, so a template that no parser reads fails at start
+    (``ToolCallParserError``) rather than at the first tool call.
+    """
+
+    tokenizer, renderer = build_renderer(model_name, renderer_name, renderer_kwargs)
+    return TinkerLLM(
+        model_name=model_name,
+        sampling_client=sampling_client,
+        renderer=renderer,
+        tokenizer=tokenizer,
+        context_window_length=context_window_length,
+        sample_timeout_seconds=sample_timeout_seconds,
+        **sampling_defaults,
+    )
+
+
+#: Tokenizers and renderers built ahead by :func:`prepare_renderer`, by what they were built from; each is taken
+#: once, by the first :func:`build_renderer` that asks for the same.
+_prepared: dict[tuple[str, str, str], tuple[Tokenizer, Renderer]] = {}
+
+
+def prepare_renderer(model_name: str, renderer_name: str, renderer_kwargs: dict[str, Any] | None = None) -> None:
+    """Build a tokenizer and renderer ahead, for the next :func:`build_renderer` asking for the same to take.
+
+    A rollout worker fork server (``worker_start_method: forkserver``, :mod:`platoon.utils.forkserver`) calls it
+    once, so that each worker it forks takes its own copy of them (copy-on-write) instead of spending seconds of CPU
+    building the very same objects from the same files; the server itself never uses them."""
+
+    key = _renderer_key(model_name, renderer_name, renderer_kwargs)
+    _prepared[key] = _build_renderer(model_name, renderer_name, renderer_kwargs)
+
+
+def build_renderer(
+    model_name: str, renderer_name: str, renderer_kwargs: dict[str, Any] | None = None
+) -> tuple[Tokenizer, Renderer]:
+    """The tokenizer and the renderer :func:`build_tinker_llm` uses: AutoProcessor's tokenizer and image processor
+    when it loads, the renderer built by name with ``renderer_kwargs`` set as attributes, and a chat-template
+    renderer's tool-call parser chosen.  The ones :func:`prepare_renderer` built ahead for the same arguments, in
+    this process or the one it was forked from, are taken instead, once."""
+
+    prepared = _prepared.pop(_renderer_key(model_name, renderer_name, renderer_kwargs), None)
+    if prepared is not None:
+        return prepared
+    return _build_renderer(model_name, renderer_name, renderer_kwargs)
+
+
+def _renderer_key(model_name: str, renderer_name: str, renderer_kwargs: dict[str, Any] | None) -> tuple[str, str, str]:
+    return model_name, renderer_name, json.dumps(renderer_kwargs or {}, sort_keys=True, default=repr)
+
+
+def _build_renderer(
+    model_name: str, renderer_name: str, renderer_kwargs: dict[str, Any] | None
+) -> tuple[Tokenizer, Renderer]:
     tokenizer = get_tokenizer(model_name)
     image_processor = None
     try:
@@ -501,21 +306,75 @@ def register_tinker_llm(
             tokenizer = processor_tokenizer
         image_processor = getattr(processor, "image_processor", None)
 
+    register_platoon_renderers()  # idempotent; makes qwen3_6_preserve_thinking resolvable by get_renderer
     renderer = get_renderer(renderer_name, tokenizer, image_processor=image_processor, model_name=model_name)
     for key, value in (renderer_kwargs or {}).items():
         if not hasattr(renderer, key):
             raise ValueError(f"Renderer '{renderer_name}' does not support renderer_kwargs['{key}']")
         setattr(renderer, key, value)
+    tool_call_parsing(renderer)
+    return tokenizer, renderer
 
-    tinker_llm = TinkerLLM(
+
+def tool_call_parsing_record(
+    model_name: str, renderer_name: str, renderer_kwargs: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """How the policy's responses are parsed, as ``lock.json`` records it: the model and renderer, and for a
+    chat-template renderer the tool-call parser it chose and why (``ParserChoice.record()``).  Builds the renderer
+    as :func:`build_tinker_llm` does, so it raises the same errors."""
+
+    record: dict[str, Any] = {"model_name": model_name, "renderer_name": renderer_name}
+    if renderer_name not in RENDERER_FACTORIES:
+        return {**record, "parser": None, "reason": "the renderer parses tool calls itself"}
+    _, renderer = build_renderer(model_name, renderer_name, renderer_kwargs)
+    choice = tool_call_parsing(renderer)
+    return {**record, **(choice.record() if choice is not None else {})}
+
+
+def register_tinker_llm(
+    model_name: str,
+    renderer_name: str,
+    context_window_length: int | None = None,
+    renderer_kwargs: dict[str, Any] | None = None,
+    *,
+    model_path: str | None = None,
+    base_url: str | None = None,
+    sample_timeout_seconds: float | None = None,
+) -> ModelInfo:
+    """Sample ``model_name`` (or the Tinker checkpoint ``model_path``) and make it this process's default gateway.
+
+    Args:
+        model_name: HuggingFace model identifier (e.g., "Qwen/Qwen3-30B-A3B-Instruct-2507").
+        renderer_name: Renderer type for prompt formatting (e.g., "qwen3", "qwen3_instruct").
+        context_window_length: Context window length for the model. Defaults to None.
+        renderer_kwargs: Optional renderer attribute overrides applied after construction.
+        model_path: Optional ``tinker://`` sampler checkpoint to sample instead of the base model.
+        base_url: The Tinker server to sample from (a training config's ``tinker_base_url``). None leaves it to
+            ``tinker.ServiceClient``: ``TINKER_BASE_URL``, else the hosted service.
+        sample_timeout_seconds: The bound on one sampling call (a config's ``sample_timeout_seconds``). None leaves
+            it to the gateway: ``TINKER_SAMPLE_TIMEOUT_SECONDS``, else 600.
+
+    A ``TINKER_API_KEY`` that the server refuses raises :class:`~platoon.eval.config_defs.TinkerKeyRefusedError`, a
+    configuration error that names the key and the server (:mod:`platoon.train.tinker.key_refusal`).
+    """
+    # The client opens its session as it is built, so the server must be known here.
+    with key_refusals():
+        service_client = tinker.ServiceClient(base_url=base_url) if base_url is not None else tinker.ServiceClient()
+    with key_refusals(asked=f"a sampling client of {model_path or model_name}"):
+        sampling_client = service_client.create_sampling_client(base_model=model_name, model_path=model_path)
+
+    tinker_llm = build_tinker_llm(
         model_name=model_name,
+        renderer_name=renderer_name,
         sampling_client=sampling_client,
-        renderer=renderer,
-        tokenizer=tokenizer,
         context_window_length=context_window_length,
+        renderer_kwargs=renderer_kwargs,
+        sample_timeout_seconds=sample_timeout_seconds,
     )
-    tinker_llm.rewrite_litellm_custom_providers()
-    base_url = "None"
-    api_key = "None"
-    model_name = "platoon-tinker/" + model_name
-    return ModelInfo(llm=tinker_llm, model_name=model_name, base_url=base_url, api_key=api_key)
+    tinker_llm.set_as_default()
+    return ModelInfo(
+        llm=tinker_llm,
+        model_name=model_name,
+        renderer_name=renderer_name,
+        renderer_kwargs=dict(renderer_kwargs or {}),
+    )

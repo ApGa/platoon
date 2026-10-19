@@ -1,0 +1,22 @@
+# A frozen layered training config for tests/test_config.py: the RAO recipe's linear arm when the arms spelled out
+# their environment (recipes/rao/textcraft-synth/linear.yaml), on number search, which ships with platoon.
+
+extends: common.yaml
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder: platoon.envs.number_search.prompts:NumberSearchPromptBuilder
+      include_reasoning: false
+      subagents: false
+      cell_timeout_s: 7200
+    agents:
+      max_depth: 0
+    dataset_kwargs: {split_name: train}
+    eval_dataset_kwargs: {split_name: val, limit: 100}
+
+stats:
+  trial_name: linear
+  wandb:
+    tags: [layered, linear]

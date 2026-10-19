@@ -1,0 +1,45 @@
+# Train number search on another model family: an NVIDIA Nemotron 3 Nano LoRA, with the platoon-codeact harness.
+#
+#   platoon train examples/number-search/train_nemotron.yaml [key=value ...]
+#
+# The first 1,000 train tasks for 5 epochs, batches of 32 tasks with 8 episodes each (the defaults), an evaluation on
+# the first 100 val tasks every 10 steps.  The backend must serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.
+
+environments:
+  - service: python://platoon.envs.number_search.env:NumberSearchEnvironment
+    harness: platoon-codeact
+    harness_options:
+      prompt_builder: platoon.envs.number_search.prompts:NumberSearchPromptBuilder
+      include_reasoning: false
+      subagents: false
+    agents:
+      max_depth: 0
+    dataset_kwargs: {split_name: train, limit: 1000}
+    eval_dataset_kwargs: {split_name: val, limit: 100}
+
+train:
+  model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  renderer_name: nemotron3_disable_thinking
+  num_epochs: 5
+  max_staleness: 3
+  workflow_config:
+    rollout_config:
+      max_steps: 10
+      timeout: 300
+      inference_params: {max_completion_tokens: 512}
+
+eval:
+  every: 10
+  max_concurrent_rollouts: 50
+  workflow_config:                # one rollout per task, with training's rollout settings but its logging
+    rollout_config: {verbose: false}
+
+checkpoint:
+  every: 155                      # 5 epochs: 1,000 tasks make 31 whole batches of 32
+
+log_path: ./runs
+stats:
+  experiment_name: number-search
+  trial_name: nemotron-3-nano
+  wandb:
+    mode: disabled
