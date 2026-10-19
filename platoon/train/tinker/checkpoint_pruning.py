@@ -11,9 +11,9 @@ What is never deleted (:func:`plan_deletions`):
 
 * a permanent checkpoint (``<batch>``, ``<batch>_interrupted``, ``final``), or anything a permanent record names;
 * the resume point: the newest record with a ``state_path``, which a start resumes from;
-* a recovery checkpoint a sampling client of this start may still use: one this start saved within
-  ``train.max_staleness`` policy versions of the policy, or whose version is unknown. A checkpoint an earlier start
-  saved serves no sampling client of this one;
+* a recovery checkpoint a sampling client of this start may still use: one this start saved within the run's largest
+  staleness bound of the policy (``train.max_staleness``, or an environment entry's ``max_staleness`` above it), or
+  whose version is unknown. A checkpoint an earlier start saved serves no sampling client of this one;
 * anything that ``checkpoints.jsonl`` of this run does not list: another run's checkpoints, or the checkpoint
   ``load_checkpoint_path`` names.
 
@@ -67,14 +67,19 @@ _CHECKPOINT_KINDS = ("weights", "sampler_weights")
 
 
 def recovery_pruning_problems(
-    keep_recovery: int | None, recovery_every: int | None, max_staleness: int | None
+    keep_recovery: int | None,
+    recovery_every: int | None,
+    max_staleness: int | None,
+    *,
+    bound: str = "train.max_staleness",
 ) -> list[str]:
     """What stops ``checkpoint.keep_recovery`` from keeping its promise, one entry each, with the keys' dotted paths;
     checked when a training config loads.
 
-    Pruning never deletes a recovery checkpoint that rollouts may still sample from: one within
-    ``train.max_staleness`` versions of the policy. So it needs that limit, and with a recovery cadence the newest
-    ``keep_recovery`` recovery checkpoints must span more than it (``keep_recovery × recovery_every >
+    Pruning never deletes a recovery checkpoint that rollouts may still sample from: one within ``max_staleness``
+    versions of the policy, the run's largest staleness bound, which the key ``bound`` sets (``train.max_staleness``,
+    or an environment entry's ``max_staleness`` above it). So it needs that limit, and with a recovery cadence the
+    newest ``keep_recovery`` recovery checkpoints must span more than it (``keep_recovery × recovery_every >
     max_staleness``): otherwise the checkpoints within reach of rollouts outnumber ``keep_recovery``, and more stay
     than it keeps. Without ``recovery_every`` the only recovery checkpoints are the ones each start writes.
     """
@@ -89,26 +94,38 @@ def recovery_pruning_problems(
         ]
     if recovery_every is None or keep_recovery * recovery_every > max_staleness:
         return []
+    largest = "" if bound == "train.max_staleness" else ", the run's largest staleness bound"
     return [
         f"checkpoint.keep_recovery: {keep_recovery} × checkpoint.recovery_every: {recovery_every} = "
-        f"{keep_recovery * recovery_every} must exceed train.max_staleness: {max_staleness}: a recovery checkpoint "
+        f"{keep_recovery * recovery_every} must exceed {bound}: {max_staleness}{largest}: a recovery checkpoint "
         f"within {max_staleness} policy versions may still serve rollouts and is never deleted, so more would stay "
         f"than keep_recovery keeps; raise checkpoint.keep_recovery to {max_staleness // recovery_every + 1} or "
-        f"checkpoint.recovery_every to {max_staleness // keep_recovery + 1}, or lower train.max_staleness"
+        f"checkpoint.recovery_every to {max_staleness // keep_recovery + 1}, or lower {bound}"
     ]
 
 
+def config_pruning_problems(config: Any) -> list[str]:
+    """The :func:`recovery_pruning_problems` of a training config, against the largest staleness bound of the run and
+    its environment entries (:func:`platoon.train.entry_settings.largest_staleness`): a slow entry's group may still
+    sample from an old checkpoint."""
+
+    from platoon.train.entry_settings import largest_staleness
+
+    checkpoint = getattr(config, "checkpoint", None)
+    if getattr(config, "train", None) is None:
+        return []
+    largest, bound = largest_staleness(config)
+    return recovery_pruning_problems(
+        getattr(checkpoint, "keep_recovery", None), getattr(checkpoint, "recovery_every", None), largest, bound=bound
+    )
+
+
 def check_recovery_pruning(config: Any) -> None:
-    """Raise :class:`~platoon.utils.config.ConfigError` (exit 78) with the :func:`recovery_pruning_problems` of a
+    """Raise :class:`~platoon.utils.config.ConfigError` (exit 78) with the :func:`config_pruning_problems` of a
     training config. The trainer checks again before it opens the training service, for a config class whose own
     checks skip the training config's."""
 
-    checkpoint, train = getattr(config, "checkpoint", None), getattr(config, "train", None)
-    if problems := recovery_pruning_problems(
-        getattr(checkpoint, "keep_recovery", None),
-        getattr(checkpoint, "recovery_every", None),
-        getattr(train, "max_staleness", None),
-    ):
+    if problems := config_pruning_problems(config):
         raise ConfigError(problems)
 
 

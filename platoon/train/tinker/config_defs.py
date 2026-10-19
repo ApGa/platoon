@@ -7,8 +7,10 @@ from typing import Any, ClassVar, Literal
 
 from platoon.config_defs import RolloutConfig
 from platoon.deprecations import DeprecatedKey, deprecated_keys
+from platoon.train import entry_settings
 from platoon.train.components import TASK_SAMPLERS, EnvironmentConfig, TaskSampler, normalize_environment_configs
-from platoon.train.tinker.checkpoint_pruning import recovery_pruning_problems
+from platoon.train.tinker.checkpoint_pruning import config_pruning_problems
+from platoon.utils.config import ConfigError
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
 
@@ -380,7 +382,9 @@ class TrainConfig:
     # With tinker, gradient accumulation is less important, but this may still be useful for streaming
     # to overlap rollout sampling with forward backward computation within the same batch.
     num_microbatches: int = 1
-    # How many training steps the rollouts of a batch may run ahead of the trained policy (None: no limit).
+    # How many training steps the rollouts of a batch may run ahead of the trained policy, and how many policy
+    # versions old a group may be and still train (None: no limit). An environment entry may raise its own groups'
+    # bound (``environments[].max_staleness``); the run's stays the bound on how far rollouts run ahead.
     max_staleness: int | None = None
     optimizer: AdamParams = field(default_factory=AdamParams)
     # Tinker loss function, for example ``cispo`` or ``importance_sampling``.
@@ -549,9 +553,10 @@ class CheckpointConfig(TrainEventTriggerConfig):
     recovery_every: int | None = None
     # Recovery checkpoints to keep (None: every one). After each recovery save, platoon deletes the run's recovery
     # checkpoints beyond the newest ``keep_recovery`` through the training service, beside training: never a
-    # permanent checkpoint, the one a resume starts from, or one this start saved within ``train.max_staleness``
-    # policy versions, which rollouts may still sample from. It needs ``train.max_staleness``; with
-    # ``recovery_every``, ``keep_recovery × recovery_every`` must exceed it.
+    # permanent checkpoint, the one a resume starts from, or one this start saved within the run's largest staleness
+    # bound (``train.max_staleness``, or an environment's ``max_staleness`` above it) of policy versions, which
+    # rollouts may still sample from. It needs ``train.max_staleness``; with ``recovery_every``,
+    # ``keep_recovery × recovery_every`` must exceed that largest bound.
     keep_recovery: int | None = None
 
     def __post_init__(self) -> None:
@@ -705,14 +710,9 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
             "full batch exists; lower train.batch_size, or set train.task_sampler: weighted to repeat tasks into "
             "whole batches"
         )
-    # Loading checks keep_recovery too, but a config class whose __post_init__ skips this class's loads without it.
-    problems.extend(
-        recovery_pruning_problems(
-            getattr(config.checkpoint, "keep_recovery", None),
-            getattr(config.checkpoint, "recovery_every", None),
-            getattr(config.train, "max_staleness", None),
-        )
-    )
+    # Loading checks these too, but a config class whose __post_init__ skips this class's loads without them.
+    problems.extend(entry_settings.problems(config))
+    problems.extend(config_pruning_problems(config))
     return problems
 
 
@@ -750,9 +750,7 @@ class PlatoonTinkerRLTrainerConfig:
 
     def __post_init__(self):
         self.environments = normalize_environment_configs(self.environments)
-        if problems := recovery_pruning_problems(
-            getattr(self.checkpoint, "keep_recovery", None),
-            getattr(self.checkpoint, "recovery_every", None),
-            getattr(self.train, "max_staleness", None),
-        ):
-            raise ValueError("; ".join(problems))
+        # Each entry's own training settings, laid over the run's (platoon.train.entry_settings), and recovery
+        # pruning, which keeps the checkpoints within the largest staleness bound of the run and its entries.
+        if problems := [*entry_settings.problems(self), *config_pruning_problems(self)]:
+            raise ConfigError(problems)

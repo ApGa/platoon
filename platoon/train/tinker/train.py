@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from platoon.train import entry_settings
 from platoon.train.auto import (
     AutoDataset,
     AutoEnvironment,
@@ -26,7 +27,7 @@ from platoon.train.sampling import log_sampling_plan
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, evaluates, training_problems
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.utils.config import ConfigError, load_config
+from platoon.utils.config import ConfigError, load_config, update_run_lock
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,11 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
     :class:`ConfigError` before any environment package is imported, task listed or Tinker session opened; an
     environment whose harness settings cannot run or could never train (``check_environment_routes``), before any
     task is listed; an ``exclude_tasks`` item that names no task, while the tasks are listed, before Tinker is
-    opened; a label column (``train.label_by``) that no training task has, and a resume that would change the run's
-    model or held-out tasks (:mod:`platoon.train.identity`), once they are listed.  What the exclusions left out goes
-    into the run directory's ``lock.json``.
+    opened; a label column (``train.label_by``) that no training task has, a label's straggler quorum above the group
+    size of an entry whose tasks carry it, and a resume that would change the run's model or held-out tasks
+    (:mod:`platoon.train.identity`), once they are listed; and an entry's own training settings beside a workflow
+    class that does not apply them, before the trainer is built.  What the exclusions left out, and what each entry's
+    own settings change from the run's (``entry_settings``), go into the run directory's ``lock.json``.
     """
 
     config, _ = load_config(
@@ -58,6 +61,9 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
     # The bound on each sampling call and where it came from, in the log; a variable it falls back to that is not a
     # positive number stops the run here.
     logger.info(sample_timeout_note("train.sample_timeout_seconds", config.train.sample_timeout_seconds))
+    # Each entry's own training settings, laid over the run's (checked when the config loaded).
+    settings = entry_settings.entry_settings(config)
+    entry_settings.log_warnings(config, settings)
     AutoEnvironment.load(config)
     environment = AutoEnvironment.from_config(config)
     check_mixture_pools(AutoEnvironment.environments(config))  # before any env server is contacted
@@ -76,6 +82,10 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
     # A label column no training task has stops here (exit 78); every task training draws from counts, those a
     # weighted order's first epoch leaves out included.
     check_labels(config, training.tasks, eval_dataset)
+    if problems := entry_settings.listed_straggler_problems(config, settings, training.tasks, eval_dataset):
+        raise ConfigError(problems)  # a label's quorum above the group size of an entry whose tasks carry it
+    for line in entry_settings.listed_permit_warnings(config, settings, training.tasks):
+        logger.warning("%s", line)  # rollout permits that the groups of the labels with a limit can fill
     # One run per run directory: a resume with another model or other held-out tasks stops here (exit 78).
     check_training_run(
         config,
@@ -84,13 +94,19 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
         eval_dataset,
     )
     # The run directory platoon train wrote lock.json into (PlatoonTinkerRLTrainer.run_log_path).
-    record_exclusions(Path(config.log_path, config.stats.experiment_name, config.stats.trial_name), exclusions)
+    run_dir = Path(config.log_path, config.stats.experiment_name, config.stats.trial_name)
+    record_exclusions(run_dir, exclusions)
+    if differences := entry_settings.lock_record(config, settings):
+        update_run_lock(run_dir, {"entry_settings": differences})
     rollout_fn = AutoRollout.from_config(config, "train")
     eval_rollout_fn = AutoRollout.from_config(config, "eval")
     get_task_fn = AutoTaskLoader.from_config(config, "train")
     eval_get_task_fn = AutoTaskLoader.from_config(config, "eval")  # its routes carry the entries' eval_overrides
     reward_processor = AutoRewardProcessor.from_config(config)
     workflow_cls = AutoWorkflow.from_config(config, default=GroupRolloutWorkflow)
+    # A workflow class that does not apply an entry's own settings would ignore them without a word (exit 78).
+    if problems := entry_settings.workflow_problems(config.environments, workflow_cls, environment.workflow):
+        raise ConfigError(problems)
 
     trainer = PlatoonTinkerRLTrainer(
         config=config, train_dataset=train_dataset, eval_dataset=eval_dataset, train_order=training.order
@@ -122,6 +138,10 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
             reward_processor=reward_processor,
             **eval_workflow_kwargs,
         )
+        if entry_settings.sets_settings(config.environments):
+            # Each group runs with its entry's settings (GroupRolloutWorkflow.config inside the group).
+            train_workflow.entry_configs = {label: own.train for label, own in settings.items()}
+            eval_workflow.entry_configs = {label: own.eval for label, own in settings.items() if own.eval is not None}
 
         await trainer.train(train_workflow=train_workflow, eval_workflow=eval_workflow)
 

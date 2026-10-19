@@ -90,7 +90,7 @@ The settings you will change most:
 | `train.lora_rank` | 32 | Rank of the LoRA training client platoon asks the service for |
 | `train.optimizer.learning_rate` | 3e-5 | Adam learning rate (`beta1`, `beta2`, `eps`, `weight_decay`, `grad_clip_norm` sit beside it) |
 | `train.loss_fn`, `train.loss_fn_config` | `cispo`, clip thresholds 0.0 and 5.0 | The loss the service computes in `forward_backward`; a `loss_fn_config` replaces the default whole, so it names every key its loss takes |
-| `train.max_staleness` | none | How many steps rollouts may run ahead of training, and how many policy versions old their data may be before it is dropped; none sets no limit |
+| `train.max_staleness` | none | How many steps rollouts may run ahead of training, and how many policy versions old their data may be before it is dropped; none sets no limit. An environment may raise its own groups' bound ([Settings per environment](#settings-per-environment)) |
 | `train.max_concurrent_rollouts` | `batch_size × group_size` | Rollouts in flight at once, started a whole group at a time (`eval.max_concurrent_rollouts`, 256 by default, for an evaluation) |
 | `train.workflow_config.rollout_config.max_steps`, `.timeout` | none | Step budget per agent, and time limit of each rollout's root agent in seconds; without one, a harness stops at its own limits (its spec's `timeout_s`, a Harbor task's `[agent] timeout_sec`), which also set a Harbor rollout's deadline ([Harness timeouts](sandboxes-and-harbor.md#harness-timeouts-and-crashes)) |
 | `train.workflow_config.rollout_isolation` | `inprocess` | `process` runs each rollout in its own killable worker process, which sees no GPU (its sandboxes get theirs from their provider) |
@@ -340,6 +340,153 @@ ok   train.yaml (PlatoonTinkerRLTrainerConfig)
   warning: environments[math]'s 22 training tasks are each drawn about 21.6 times as often as environments[code]'s 475 (about 116.4 and 5.4 times each over the run's 160 steps, at weights 1 and 1); weight: tasks on every entry draws every task of the mixture equally often
 ```
 
+## Settings per environment
+
+The environments of a mixture rarely want the same training settings: a dataset calibrated with a 30-step budget,
+another whose rollouts take hours and want fewer of them per group and an older policy than the rest. Each entry may
+set the training settings that act on its own groups, laid over the run's:
+
+```yaml
+train:
+  batch_size: 20
+  max_staleness: 3                          # the run's bound: how far rollouts run ahead of training
+  rollout_group_limits: {slow-tasks: 1}     # one slow group at a time
+  workflow_config:
+    group_size: 8
+    min_successful_group_size: 4
+    rollout_config:
+      max_steps: 200
+      timeout: 3600
+      inference_params: {temperature: 1.0, max_completion_tokens: 49152}
+checkpoint: {recovery_every: 10, keep_recovery: 5}   # 5 × 10 = 50 > 48, the largest staleness bound
+eval:
+  every: 10
+  workflow_config: {group_size: 4}
+environments:
+  - name: quick-tasks
+    service: harbor
+    service_kwargs: {dataset: hf://my-org/quick-tasks@3f1c0e9b6d2a4c8e9f0a1b2c3d4e5f6a7b8c9d0e}
+    harness: openhands
+    workflow_config:
+      rollout_config: {max_steps: 30}       # its calibrated budget, in training and in its evaluations
+  - name: slow-tasks
+    service: harbor
+    service_kwargs: {dataset: hf://my-org/slow-tasks@0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4e3d2c1b}
+    harness: openhands
+    max_staleness: 48                       # its groups take hours: they train up to 48 versions old
+    workflow_config:
+      group_size: 4                         # four long rollouts per task, not eight
+      min_successful_group_size: 3          # one may be lost
+      leave_one_out_baseline: true
+      rollout_config: {max_steps: null, timeout: null}   # the task's own limits, not the run's
+    eval_overrides:
+      workflow_config: {group_size: 1}      # one evaluation rollout per task
+```
+
+| An entry's key | What it sets | Default |
+|---|---|---|
+| `workflow_config` | Its training groups' settings, laid over `train.workflow_config`: `group_size`, `leave_one_out_baseline`, `min_successful_group_size`, `straggler_timeout_seconds`, `straggler_quorum`, `filter_errors`, `filter_message_actions`, `subagent_datum_keep_probability`, `subagent_datum_sampling_seed`, and in `rollout_config` `max_steps`, `timeout`, `step_timeout`, `inference_params`, `sampling_precedence`, `extra`, `propagate_root_success`, `skip_subagent_reward_computation` and `enable_subagent_verifiers` ([`EntryWorkflowSettings`](../reference/config.md#entryworkflowsettings)) | the run's |
+| `eval_overrides.workflow_config` | The same keys, for its evaluation rollouts | none |
+| `max_staleness` | How many policy versions old its training groups may be and still train, at least `train.max_staleness` | the run's |
+
+**How they merge.** A key an entry sets replaces the run's, `null` included (`max_steps: null` takes the task's own
+step budget, else the harness's), a section (`rollout_config`, its `inference_params`) merges key by key, and a
+free-form mapping (`extra`) replaces the run's whole, as an `eval.workflow_config` merges over training's. Lowest
+first:
+
+| An entry's training groups | Its evaluation rollouts during training | Its rollouts in `platoon eval` |
+|---|---|---|
+| The defaults | Evaluation's defaults: one rollout per task, the filters off | The defaults |
+| `train.workflow_config` | The entry's training settings, for the keys evaluation takes from training: the rollout and rollout-worker settings | The entry's `workflow_config.rollout_config` |
+| A named environment's `workflow_config.rollout_config`, then the entry's `workflow_config` | The keys `eval.workflow_config` sets | The keys `inference.workflow.rollout_config` sets |
+| | The entry's `eval_overrides.workflow_config` | The entry's `eval_overrides.workflow_config.rollout_config` |
+
+- **The phase's section wins over an entry.** With `eval.workflow_config.rollout_config.max_steps: 100`, the quick
+  entry's evaluations run 100 steps, not 30, and `platoon train` warns of it; its
+  `eval_overrides.workflow_config.rollout_config.max_steps: 30` keeps its budget.
+- **Group keys stay out of evaluation.** An entry's `group_size` and the other keys that shape groups and their
+  baselines are its training's; its evaluation takes them from `eval.workflow_config` and its `eval_overrides`.
+- **`platoon eval` applies an entry's rollout settings only,** and warns of the rest of an entry's training
+  settings, which it does not apply.
+- **The train split takes no `eval_overrides`.** `platoon eval` of `split: train` (and `platoon rollout --split
+  train`) applies an entry's `workflow_config.rollout_config` beneath `inference.workflow`, but not its
+  `eval_overrides`, as for the entry's other evaluation overrides.
+- **A named environment** may ship the rollout settings its tasks were measured with
+  (`workflow_config.rollout_config`) as its entry's lowest layer, which its evaluations inherit beneath the phase's
+  section. The rest of `workflow_config`, `eval_overrides.workflow_config` and `max_staleness` are the run's to
+  choose: a shipped evaluation override would win over the run's evaluation settings.
+- **Overrides** reach an entry by its index, as `environments.1.max_staleness=40` or
+  `environments.1.workflow_config.group_size=4`.
+
+**What stays the run's.** An entry that sets one of these does not load (exit 78), and the message says where it goes:
+depth weighting and the zero-advantage filter, which act on microbatches that mix entries' groups; straggler policies
+by label (`straggler_policies`, which win over an entry's `straggler_timeout_seconds` and `straggler_quorum` for the
+groups of their label); the rollout-worker settings (`rollout_isolation`, `worker_*`), since one pool of workers runs
+every entry's rollouts; and `rollout_config.judges`, `model_name`, `train`, `output_dir`, `return_dict` and
+`verbose`. The batch, the loss, the optimizer, `max_concurrent_rollouts`, `label_by`, `rollout_group_limits` and the
+workflow class are the run's too.
+
+**Staleness.** `train.max_staleness` stays the bound on how far rollouts run ahead of training, and the bound of each
+entry that sets none. An entry's own bound may only raise it, for its own groups, as the stale filter reads it: a
+lower one would have its groups drawn as far ahead as every other entry's and then dropped as stale, so loading refuses
+it. Recovery pruning keeps the checkpoints within the largest bound of the run and its entries, so
+`checkpoint.keep_recovery × checkpoint.recovery_every` must exceed that bound. Give a slow entry a limit on its label
+too (`rollout_group_limits`): its groups count toward the rollouts in flight for as long as they run, and enough of
+them slow every step to their pace; `platoon train` warns of an entry that raises its bound without one.
+
+**Concurrency.** `train.max_concurrent_rollouts` counts rollouts: a group takes its entry's group size of them at once,
+first come first served, so groups of different sizes share it and it is never exceeded. It must hold a group of the
+largest entry, in training and in evaluation (`eval.max_concurrent_rollouts`). With `rollout_group_limits`, it should
+also hold the capped labels' groups at their limits and a group of the largest other entry: otherwise a larger group
+waits for a capped one to end, and every group behind it waits too, which `platoon config validate` and `platoon
+train` warn of.
+
+**A capped label never stalls the others.** The rows of a label at its `rollout_group_limits` wait beside the batch's
+other rows rather than among them, so they never hold another label's rows back, and they do not count toward the
+batches `train.max_staleness` lets the run draw ahead: it draws other rows to keep its workers busy. Each step logs
+how many rows wait (`train/batch/parked_rows` and `train/batch/<column>/<label>/parked_rows`). When more than four
+batches of them wait, the label's new rows are skipped, counted (`train/batch/skipped_rows` and
+`train/batch/<column>/<label>/skipped_rows`) and warned of once, while a row of another label can start: its share of
+the order asks for more groups than its limit runs, and the other labels' rows fill the steps. Lower its weight or
+raise its limit to train them all. So a capped label trains a smaller share than its weight while its limit cannot
+keep up, also before any row is skipped, and the rows still waiting when the run ends never train: the run replaces
+them with rows of the batches after its last, so that its last steps do not wait for the label's groups. This applies
+to every config that sets `rollout_group_limits`, with or without settings per environment.
+
+**Custom workflows.** A `GroupRolloutWorkflow` subclass applies an entry's settings without changes: inside a group,
+`self.config` holds the group's entry's settings, and
+`platoon.train.tinker.workflows.group_rollout_workflow.current_entry()` names the entry. Code that reads
+`self.config` from a thread of `loop.run_in_executor` gets the run's. A workflow class that is no `GroupRolloutWorkflow`
+must apply them itself and declare `applies_entry_settings = True`: otherwise a config whose entries set any does not
+load into `platoon train` (exit 78), rather than ignore them.
+
+**See what each entry runs with.** `platoon config show CONFIG` prints, after the config and as comments, each entry
+that sets its own settings with the value of every key, where it came from and the value that layer replaced;
+`--entry NAME` prints one entry's. `platoon config validate CONFIG` adds one line per such entry with what differs
+from the run, and the warnings. `platoon train` logs both, and `lock.json` records the differences
+(`entry_settings`). For the config above (abridged):
+
+```console
+$ uv run platoon config show train.yaml --entry slow-tasks
+environments[slow-tasks], training groups:
+  group_size: 4                                                entry                    (train.workflow_config: 8)
+  leave_one_out_baseline: true                                 entry                    (default: false)
+  min_successful_group_size: 3                                 entry                    (train.workflow_config: 4)
+  ...
+  rollout_config.max_steps: null                               entry                    (train.workflow_config: 200)
+  rollout_config.timeout: null                                 entry                    (train.workflow_config: 3600)
+  ...
+  rollout_config.inference_params.temperature: 1.0             train.workflow_config    (default: null)
+  ...
+  max_staleness: 48                                            entry                    (train.max_staleness: 3, which bounds how far rollouts run ahead)
+environments[slow-tasks], evaluation during training:
+  group_size: 1                                                eval_overrides           (eval.workflow_config: 4)
+  ...
+  rollout_config.max_steps: null                               entry, inherited
+  rollout_config.timeout: null                                 entry, inherited
+  ...
+```
+
 ## Label tasks by a column
 
 Each task of a run is a dataset row: its `task_id` and the columns its environment gives it. A mixture gives each
@@ -350,8 +497,8 @@ value of the column as text (`true` or `false` for a boolean), and a task withou
 
 | What | Per label |
 |---|---|
-| Metrics | Each training step logs each label's groups, reward and counts, `train/batch/<column>/<label>/{groups, task_reward, outcome/<status>, reward_key/<name>, reward_key_mismatch}`, also at zero, and each evaluation during training logs them as `eval/<column>/<label>/...` ([Metrics to watch](#metrics-to-watch)). The default column logs as `environment`, so a mixture's metrics read `train/batch/environment/<name>/...`, and a single environment, whose tasks have no entry column, logs none. A `/` in a column's name or a label is written `--` |
-| `train.rollout_group_limits` | The most rollout groups of that label that run at once, for example to cap a slow entry of a mixture; its groups wait for a slot before they take a rollout worker |
+| Metrics | Each training step logs each label's groups, reward, steps and counts, `train/batch/<column>/<label>/{groups, task_reward, num_steps, outcome/<status>, reward_key/<name>, reward_key_mismatch, stale_groups}`, also at zero, and each evaluation during training logs them as `eval/<column>/<label>/...` ([Metrics to watch](#metrics-to-watch)). The default column logs as `environment`, so a mixture's metrics read `train/batch/environment/<name>/...`, and a single environment, whose tasks have no entry column, logs none. A `/` in a column's name or a label is written `--` |
+| `train.rollout_group_limits` | The most rollout groups of that label that run at once, for example to cap a slow entry of a mixture; its groups wait for a slot before they take a rollout worker, beside the other labels' rows, which they never hold back, and past four batches of waiting rows its new rows are skipped and counted ([Settings per environment](#settings-per-environment)) |
 | `straggler_policies` of `train.workflow_config`, and of `eval.workflow_config` for evaluation during training | The label's own straggler policy, `{timeout_seconds, quorum}`, in place of `straggler_timeout_seconds` and `straggler_quorum`; a null `timeout_seconds` waits for every rollout |
 
 ```yaml
@@ -600,8 +747,9 @@ weights and sampler weights, through the training service's checkpoint deletion 
 
 - a permanent checkpoint (`000010`, `000007_interrupted`, `final`);
 - the checkpoint a resume would start from;
-- a recovery checkpoint this start saved within `train.max_staleness` policy versions of the policy, which rollouts
-  may still sample from (one an earlier start saved serves none of this start's rollouts);
+- a recovery checkpoint this start saved within the run's largest staleness bound of the policy (`train.max_staleness`,
+  or an environment's `max_staleness` above it), which rollouts may still sample from (one an earlier start saved
+  serves none of this start's rollouts);
 - anything the run's own `checkpoints.jsonl` does not list, such as another run's checkpoints or the one
   `load_checkpoint_path` names.
 
@@ -610,11 +758,12 @@ train: {max_staleness: 3}
 checkpoint: {every: 50, recovery_every: 5, keep_recovery: 2}
 ```
 
-`keep_recovery` needs `train.max_staleness`, and `keep_recovery × recovery_every` must exceed it: otherwise more
-recovery checkpoints than it keeps are within reach of rollouts. A config that breaks either rule does not load
-(exit 78). Without `recovery_every`, the only recovery checkpoints are the ones each launch saves, and it deletes
-those of earlier launches. Size the service's disk for `keep_recovery + 1` recovery checkpoints, since a save
-completes before the oldest goes, besides the permanent ones; the newest `keep_recovery` stay when the run ends.
+`keep_recovery` needs `train.max_staleness`, and `keep_recovery × recovery_every` must exceed the largest staleness
+bound, of the run and of its entries: otherwise more recovery checkpoints than it keeps are within reach of rollouts.
+A config that breaks either rule does not load (exit 78). Without `recovery_every`, the only recovery checkpoints are
+the ones each launch saves, and it deletes those of earlier launches. Size the service's disk for `keep_recovery + 1`
+recovery checkpoints, since a save completes before the oldest goes, besides the permanent ones; the newest
+`keep_recovery` stay when the run ends.
 
 Deletes run beside training: a step never waits for one. They go through a Tinker session of their own, since the
 SDK reports a failed delete as the end of the session it ran in, which a self-hosted service may answer by releasing
@@ -762,13 +911,15 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/optim/kl_sample_train_v1`, `train/optim/importance_weight_mean` | KL near 0, weight near 1 | Sampling and training disagree: renderer mismatch, or rollouts too stale (`max_staleness`) |
 | `train/optim/clip_frac_total` | Small | Most tokens clipped: the update is too large for the loss's thresholds |
 | `train/batch/skipped_optimizer` | 0 | 1 means the step took no optimizer update and the policy kept its version: its objective was zero (every advantage exactly zero, say every group's rollouts scored alike) or it had no datums. `filter_zero_advantage_datums` does not change this; it only drops zero-advantage datums from microbatches that also hold nonzero ones |
-| `train/stale_rollouts` | 0 or rare | Rollouts older than `max_staleness` were dropped |
+| `train/stale_rollouts`, `train/batch/<column>/<label>/stale_groups` | 0 or rare | Rollouts older than `max_staleness` were dropped; by label, which one's groups grow too old: raise its entry's bound ([Settings per environment](#settings-per-environment)) |
+| `train/batch/skipped_rows`, `train/batch/<column>/<label>/skipped_rows` | 0 | Rows of a label at its `rollout_group_limits` were skipped, four batches of them waiting already: lower its weight or raise its limit |
+| `train/batch/parked_rows`, `train/batch/<column>/<label>/parked_rows` | Small, steady | Rows of a label at its `rollout_group_limits` that wait for a slot: a count that grows, step after step, is a label whose share of the order its limit cannot serve, so it trains less than its weight; those still waiting when the run ends never train |
 | `rollout_client/trainer_queue_wait_seconds_total` | Small next to `timing/batch_total` | The trainer waits on rollouts: raise rollout concurrency or speed up the environment |
 | `rollout_client/cpu_saturation` | Below 1 | The client machine is out of CPU: use fewer concurrent rollouts or a bigger node |
 | `rollout_client/agent_step_tool_fraction` | Depends on the environment | Most of each step is spent in tools and the environment, not the model |
 
 A step's `batch/*` metrics, each label's `batch/<column>/<label>/*` included, cover the groups the step trained on,
-leaving out groups dropped as stale (`max_staleness`). A step's rollout and credit metrics
+leaving out groups dropped as stale (`max_staleness`), which `stale_groups` counts. A step's rollout and credit metrics
 (`rollout_completion/*`, `credit/*`, `workload/*`) cover every group that step consumed. With rollouts running
 ahead of training, groups of the next step finish while a step trains; their statistics are logged with the step
 that consumes them. The exceptions are

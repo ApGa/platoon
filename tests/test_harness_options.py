@@ -181,7 +181,11 @@ def test_a_token_trigger_set_on_the_command_line_reaches_the_record(tmp_path):
 def test_eval_overrides_take_options_and_say_where_the_rest_goes(tmp_path):
     path = train_config(tmp_path, openhands(eval_overrides={"max_steps": 500}))
 
-    with pytest.raises(ConfigError, match=r"environments.0.eval_overrides.max_steps: unknown key; the step limit is"):
+    with pytest.raises(
+        ConfigError,
+        match=r"environments.0.eval_overrides.max_steps: unknown key; an entry's step limit for its evaluation "
+        r"rollouts is eval_overrides.workflow_config.rollout_config.max_steps",
+    ):
         load(path)
 
 

@@ -46,6 +46,28 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   `sampling_precedence: config`, where an `aux` call elsewhere keeps its own parameters; so an `aux` call gets that
   code nothing that a policy call would not. Its `judge` calls are still refused in every case
   ([how a run ends](docs/how-to/sandboxes-and-harbor.md#3-how-a-run-ends)).
+- **Each environment of a mixture sets the training settings of its own groups.** An entry's `workflow_config` is laid
+  over `train.workflow_config` for its groups: its `group_size`, its baseline (`leave_one_out_baseline`), its
+  `min_successful_group_size`, its straggler defaults, its error filters and subagent datum sampling, and its rollout
+  settings (`rollout_config`: `max_steps`, `timeout`, sampling and the rest), so a dataset's calibrated step budget and
+  a slow environment's fewer, longer rollouts sit beside the run's. Its rollout settings are its evaluations'
+  defaults, below `eval.workflow_config` (and in `platoon eval`, below `inference.workflow`), and
+  `eval_overrides.workflow_config` sets what its evaluation rollouts change. An entry's `max_staleness` raises the
+  staleness bound of its own groups, while `train.max_staleness` stays the bound on how far rollouts run ahead, and
+  recovery pruning keeps the checkpoints within the largest bound. Loading refuses a key that acts on microbatches or
+  on the run's rollout workers with where to set it, an entry bound below the run's, and an entry's settings beside a
+  workflow class that does not apply them (exit 78). Named environments may ship rollout settings
+  (`workflow_config.rollout_config`) only. `platoon config show` prints each entry's effective settings with the
+  layer each came from (`--entry NAME` for one), `platoon config validate` and `platoon train` say what each entry
+  changes, and `lock.json` records it (`entry_settings`). `max_concurrent_rollouts` counts rollouts that groups of
+  different sizes share. A label at its `rollout_group_limits` no longer stalls the others, in every config that sets
+  limits: its waiting rows neither fill the pending batch nor count toward the batches `train.max_staleness` lets the
+  run draw ahead, and past four batches of them its new rows are skipped and counted (`train/batch/skipped_rows`). So
+  a capped label whose limit cannot keep up with its share trains less than its weight, and the rows still waiting
+  when a run ends never train (`train/batch/parked_rows` counts them each step); `platoon train` and `platoon config
+  validate` warn of a `max_concurrent_rollouts` that the capped labels' groups can fill. Each step also logs each
+  label's `stale_groups` and `num_steps`
+  ([Settings per environment](docs/how-to/train-and-eval.md#settings-per-environment)).
 
 ## 0.2.1 (2026-10-19)
 

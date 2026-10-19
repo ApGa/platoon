@@ -82,8 +82,10 @@ flowchart LR
 ### One training step
 
 1. The trainer's dataloader admits tasks while the train step is within `train.max_staleness` of the batch
-   being collected.
-2. For each task, `GroupRolloutWorkflow` runs `group_size` rollouts. With
+   being collected; with `train.rollout_group_limits`, the rows of a label at its limit wait beside the batch and
+   do not count toward it.
+2. For each task, `GroupRolloutWorkflow` runs `group_size` rollouts, with the settings of the task's environment
+   entry (its own `workflow_config` laid over `train.workflow_config`). With
    `train.workflow_config.rollout_isolation: process`, each rollout runs in its own worker process, which
    follows the trainer's latest sampling weights.
 3. In the worker, `harness_rollout` opens an env session for the task, starts the gateway, runs the
@@ -93,7 +95,8 @@ flowchart LR
    merging, with the trajectory's reward as its provisional advantage.
 5. Back in the workflow, the group's completed roots set the baseline (the group mean, or leave-one-out),
    every datum is centered, and the group's datums are queued.
-6. The trainer drops rollouts older than `max_staleness`, applies batch transforms per microbatch (such as
+6. The trainer drops rollouts older than their entry's staleness bound (its `max_staleness`, else
+   `train.max_staleness`), applies batch transforms per microbatch (such as
    depth weighting), skips datums with zero advantage while keeping their share of the loss normalization,
    runs `forward_backward` and `optim_step`, saves weights and publishes the new sampler to the workers.
 

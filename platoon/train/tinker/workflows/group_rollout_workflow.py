@@ -49,23 +49,33 @@ the group completed, it would land in whichever step was running then: with
 prefetching, groups of the next step complete during this one. Per-member events
 (worker dispositions, straggler cancellations) are recorded as they happen.
 
+Each group runs with the settings of its environment entry: an entry's own
+``workflow_config`` (``platoon.train.entry_settings``) laid over the run's,
+which the trainer hands the workflow as ``entry_configs``. Inside a group,
+``self.config`` is the group's entry's settings, and ``current_entry()`` names
+that entry; outside one, ``self.config`` is the run's. Member tasks copy the
+group's context, so they see its settings too; code that reads ``self.config``
+from a thread of ``loop.run_in_executor`` gets the run's.
+
 Extension point: to change how advantages are estimated, subclass
 ``GroupRolloutWorkflow`` and override ``compute_baselines`` (a different
 baseline) or ``assign_advantages`` (for example to also rescale), then select
 the subclass with ``environments[0].workflow: "package.module.MyWorkflow"`` or
 construct it in a train script. Advantages are always computed in the trainer
-process, so an override never crosses the rollout-worker boundary.
+process, so an override never crosses the rollout-worker boundary. An override
+reads its group's settings through ``self.config``.
 """
 
 import asyncio
 import logging
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from typing import Callable
+from types import MappingProxyType
+from typing import Callable, ClassVar
 
 import tinker
 import torch
@@ -78,6 +88,7 @@ from platoon.train.components import (
     harness_time_limit_s,
     known_rollout_overhead_s,
     rollout_overhead_s,
+    row_entry,
 )
 from platoon.train.labels import straggler_column, task_label
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
@@ -126,6 +137,17 @@ logger = logging.getLogger(__name__)
 _group_ready_callback: ContextVar = ContextVar("platoon_group_ready_callback", default=None)
 # Set by ``arun_episode`` for the group it runs: where the group's own statistics go (see the module docstring).
 _group_stats: ContextVar[DeferredStats | None] = ContextVar("platoon_group_stats", default=None)
+# Set by ``arun_episode`` for the group it runs: the settings of the group's environment entry, which
+# ``GroupRolloutWorkflow.config`` reads inside the group, and the entry's label (``current_entry``).
+_group_config: ContextVar[WorkflowConfig | None] = ContextVar("platoon_group_config", default=None)
+_group_entry: ContextVar[str | None] = ContextVar("platoon_group_entry", default=None)
+
+
+def current_entry() -> str | None:
+    """The label of the environment entry whose group runs in this context (inside ``arun_episode``), such as a
+    mixture entry's name; None outside a group, and for a row that names no entry of the run."""
+
+    return _group_entry.get()
 
 
 @dataclass(frozen=True)
@@ -163,7 +185,9 @@ class _TaskRolloutOutput(list[tinker.Datum]):
     about the group, for the trainer to record in the step that consumes it.
     ``label`` is the task's label (its value of the run's label column,
     ``train.label_by``; by default the mixture entry it belongs to, so None
-    outside a mixture), by which the trainer's metrics break down.
+    outside a mixture), by which the trainer's metrics break down, and
+    ``entry`` the label of the environment entry whose settings the group ran
+    with (``current_entry``).
     """
 
     def __init__(
@@ -178,6 +202,7 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         rollout_stats: RolloutStats | None = None,
         group_stats: DeferredStats | None = None,
         label: str | None = None,
+        entry: str | None = None,
     ) -> None:
         super().__init__(datums)
         self.workload = workload
@@ -188,6 +213,7 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         self.rollout_stats = rollout_stats
         self.group_stats = group_stats if group_stats is not None else DeferredStats()
         self.label = label
+        self.entry = entry
 
 
 def _summarize_outcomes(outcomes: list[_SingleRolloutOutcome]) -> RolloutStats:
@@ -351,7 +377,17 @@ class GroupRolloutWorkflow:
     3. Centers advantages on a per-rollout group baseline (``compute_baselines``,
        broadcast by ``assign_advantages``; see the module docstring)
     4. Returns training data in tinker.Datum format
+
+    Each group runs with its environment entry's settings, ``entry_configs``
+    (see the module docstring).
     """
+
+    # It applies an environment entry's own settings to the entry's groups (``entry_configs``); loading refuses an
+    # entry's settings beside a workflow class that does not declare this (``platoon.train.entry_settings``).
+    applies_entry_settings: ClassVar[bool] = True
+    # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
+    # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
+    entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})
 
     def __init__(
         self,
@@ -388,7 +424,7 @@ class GroupRolloutWorkflow:
         """
         self.rollout_fn = rollout_fn
         self.get_task_fn = get_task_fn
-        self.config = config
+        self.config = config  # the run's; inside a group, ``config`` is the group's entry's
         self.model_info = model_info
         self.log_path = log_path
         self.stats_scope = stats_scope
@@ -422,6 +458,54 @@ class GroupRolloutWorkflow:
         self._supervisor = None
         self._admission: asyncio.Semaphore | None = None
         self._admission_limit = 0
+
+    @property
+    def config(self) -> WorkflowConfig:
+        """The workflow config: inside a group (``arun_episode``), the settings of the group's environment entry
+        (``entry_configs``); outside one, the run's, as constructed or assigned."""
+
+        group = _group_config.get()
+        return group if group is not None else self._run_config
+
+    @config.setter
+    def config(self, value: WorkflowConfig) -> None:
+        self._run_config = value
+
+    def _filter_errors(self) -> bool:
+        """Whether this group's rollouts suppress positive-credit error tokens: its entry's ``filter_errors`` when the
+        entry sets one of its own, else the workflow's (``filter_errors``, which a run-level ``workflow_kwargs`` may
+        set; loading refuses both at once)."""
+
+        group = _group_config.get()
+        run = getattr(self, "_run_config", None)
+        if group is not None and run is not None and group.filter_errors != run.filter_errors:
+            return group.filter_errors
+        return self.filter_errors
+
+    def _subagent_datum_sampler(self) -> DeterministicSubagentDatumSampler | None:
+        """The subagent datum sampler of this group's settings: the workflow's own (``subagent_datum_sampler``, as
+        built or as a subclass replaced it) for the run's keep probability and seed, else one per pair an entry sets,
+        built once."""
+
+        config = self.config
+        key = (
+            getattr(config, "subagent_datum_keep_probability", 1.0),
+            getattr(config, "subagent_datum_sampling_seed", 0),
+        )
+        run = getattr(self, "_run_config", None)
+        run_key = (
+            getattr(run, "subagent_datum_keep_probability", 1.0),
+            getattr(run, "subagent_datum_sampling_seed", 0),
+        )
+        if run is None or key == run_key:
+            return getattr(self, "subagent_datum_sampler", None)
+        keep = key[0]
+        if keep >= 1.0:
+            return None
+        samplers = self.__dict__.setdefault("_entry_subagent_samplers", {})
+        if key not in samplers:
+            samplers[key] = DeterministicSubagentDatumSampler(keep_probability=key[0], seed=key[1])
+        return samplers[key]
 
     def _build_ref(self, obj, *, what: str) -> str | None:
         """Name a callable for a worker, strictly when a worker will need it."""
@@ -543,13 +627,23 @@ class GroupRolloutWorkflow:
             ``group_stats``, the group's own statistics, for the consumer to
             record in the step that consumes it (see the module docstring).
         """
+        entries = getattr(self, "entry_configs", None) or {}
+        if entries:
+            entry = row_entry(data, tuple(entries))
+        else:
+            entry = data.get(ENVIRONMENT_COLUMN) if isinstance(data, Mapping) else None
         token = _group_stats.set(DeferredStats())
+        config_token = _group_config.set(entries.get(entry) if entry is not None else None)
+        entry_token = _group_entry.set(entry)
         try:
             output = await self._run_group(data)
         finally:
+            _group_entry.reset(entry_token)
+            _group_config.reset(config_token)
             _group_stats.reset(token)
         if isinstance(output, _TaskRolloutOutput):
             output.label = task_label(data, getattr(self, "label_by", ENVIRONMENT_COLUMN))
+            output.entry = entry
         return output
 
     async def _run_group(self, data: dict) -> list[tinker.Datum]:
@@ -577,7 +671,7 @@ class GroupRolloutWorkflow:
             all_data.extend(result.datums)
             subagent_sampling_stats.merge(result.subagent_sampling_stats)
 
-        if self.subagent_datum_sampler is not None:
+        if self._subagent_datum_sampler() is not None:
             self._group_stats().scalar(**subagent_sampling_stats.to_metrics())
 
         if len(keys := _trained_keys(outcomes)) > 1:
@@ -940,13 +1034,13 @@ class GroupRolloutWorkflow:
             rollout_fn_ref=self.rollout_fn_ref or "",
             model=self._model_binding(checkpoint_version),
             conversion=ConversionPolicy(
-                filter_errors=self.filter_errors,
+                filter_errors=self._filter_errors(),
                 filter_message_actions=getattr(self.config, "filter_message_actions", False),
                 include_traj_depth=depth_level_weighting or depth_discount,
                 include_traj_start=depth_level_weighting,
                 reward_processor_is_default=self._reward_processor_is_default,
                 reward_processor_ref=self.reward_processor_ref,
-                subagent_datum_sampler=self.subagent_datum_sampler,
+                subagent_datum_sampler=self._subagent_datum_sampler(),
             ),
             response_path=response_path,
             ready_path=ready_path,

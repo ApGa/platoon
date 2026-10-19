@@ -163,7 +163,7 @@ def _train_and_evaluate(
     evaluated: list[int] = []
     logged: list[tuple[int, dict]] = []
 
-    async def worker(shared_state, workflow, queue, results, tracker=None):
+    async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
         if tracker is None:  # a training worker: every step's group is ready at once, with no training signal
             for _ in range(steps - start):
                 while paced and shared_state.eval_handled_step != shared_state.train_step:
@@ -349,7 +349,7 @@ def _first_update(
     evaluated: list[int] = []
     first_update: list[tuple[int | None, list[int]]] = []
 
-    async def worker(shared_state, workflow, queue, results, tracker=None):
+    async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
         if tracker is None:  # a training worker: the first step's group is ready at once, with a training signal
             results.put_nowait([_datum(advantage=1.0)])
             return
