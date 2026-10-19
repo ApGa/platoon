@@ -309,9 +309,9 @@ def _published_hpc_sandbox():
 
 
 def test_one_block_builds_both_published_providers(tmp_path: Path):
-    """Against the hpc-sandbox a checkout locks (0.3.0): its EnrootProvider takes every option its
+    """Against the hpc-sandbox a checkout locks (0.4.0): its EnrootProvider takes every option its
     SingularityProvider takes, so one provider_options block builds both providers and means the same on both, with
-    platoon's capabilities only (not 0.3's pods); root, which the SingularityProvider refuses, builds the
+    platoon's capabilities only (not its pods); root, which the SingularityProvider refuses, builds the
     EnrootProvider too."""
 
     hpc_sandbox = _published_hpc_sandbox()
@@ -325,6 +325,7 @@ def test_one_block_builds_both_published_providers(tmp_path: Path):
         "bind_resolv_conf": False,
         "stop_grace_s": 5.0,
         "cgroup_limits": False,
+        "fakeroot": False,
     }
 
     singularity, enroot = get_provider("singularity", **block), get_provider("enroot", **block)
@@ -366,6 +367,7 @@ def test_the_refusal_said_before_any_sandbox_starts_matches_the_published_provid
         ({"gpu": "rocm"}, "NVIDIA GPUs only"),
         ({"gpu": "nv", "gpus": "all"}, "not both"),
         ({"cgroup_limits": True}, "cannot apply cgroup limits"),
+        ({"fakeroot": True}, "maps only your uid"),  # 0.4 on: root there could not switch users
     ],
 )
 def test_the_published_enroot_provider_refuses_what_enroot_cannot_honor(tmp_path: Path, options: dict, message: str):

@@ -31,6 +31,7 @@ from platoon.envs.harbor.images import (
     default_image_map,
     docker_image_reference,
     has_image,
+    withholds_modes,
 )
 from platoon.envs.harbor.lock import LockError
 from platoon.envs.harbor.locked import LockedTasks, TaskImages
@@ -38,12 +39,17 @@ from platoon.envs.harbor.session import DEFAULT_CLOSE_TIMEOUT_S, LOG_DIRS, Harbo
 from platoon.envs.harbor.task import (
     AGENT_USER_POLICIES,
     HARBOR_MISC_KEY,
+    VERIFIER_USER_POLICIES,
     AgentUserPolicy,
     HarborTask,
+    HarborTaskError,
     Healthcheck,
+    VerifierUserPolicy,
+    is_root,
     resolve_env,
 )
 from platoon.envs.harbor.tools import DEFAULT_COMMAND_TIMEOUT_S, TOOL_SPECS
+from platoon.envs.harbor.users import DOCKER_UMASK, nobody_problem, root_problem
 from platoon.envs.service import EnvNotPrepared, EnvSetupError, Outcome, PathOption, SessionNeeds
 from platoon.sandbox import (
     Mount,
@@ -52,6 +58,7 @@ from platoon.sandbox import (
     SandboxSpec,
     get_provider,
     network_none_refusal,
+    root_refusal,
     rootfs_layout_refusal,
 )
 from platoon.sandbox.routes import RouteError
@@ -100,7 +107,10 @@ class HarborEnvironmentService:
     verifier is graded in a sandbox of its own (:mod:`platoon.envs.harbor.session`), from artifacts of at most
     ``max_artifact_bytes`` each (1 GiB by default; a larger one is left out).  ``agent_timeout_multiplier``
     scales each task's ``[agent].timeout_sec``, which harness rollouts cap the harness with.  ``agent_user``
-    (``refuse`` or ``ignore``) decides what a task naming a user to run as gets.
+    (``refuse`` or ``ignore``) decides what a task naming a user to run as gets, and ``verifier_user`` decides for
+    ``[verifier].user`` instead when it is set: ``honor`` runs a separate verifier whose user is root as root
+    (:mod:`platoon.envs.harbor.users`).  Separate verifiers' sandboxes start with ``verifier_provider_options`` laid
+    over ``provider_options``, such as Singularity's ``fakeroot`` for verifiers that run as root.
 
     Agents sharing a sandbox take turns on it: its tools run one at a time,
     except those named in ``concurrent_tools`` (``bash`` and ``view`` may
@@ -173,6 +183,8 @@ class HarborEnvironmentService:
         verifier_classifiers: Any = None,
         agent_timeout_multiplier: float = 1.0,
         agent_user: AgentUserPolicy = "refuse",
+        verifier_user: VerifierUserPolicy | None = None,
+        verifier_provider_options: Mapping[str, Any] | None = None,
         toolchain_root: str | Path | None = None,
         name: str = "harbor",
         dataset: str | None = None,
@@ -215,6 +227,15 @@ class HarborEnvironmentService:
                 raise ValueError(f"{option} must be a positive number, got {value!r}")
         if agent_user not in AGENT_USER_POLICIES:
             raise ValueError(f"agent_user must be one of {AGENT_USER_POLICIES}, got {agent_user!r}")
+        if verifier_user is not None and verifier_user not in VERIFIER_USER_POLICIES:
+            raise ValueError(f"verifier_user must be one of {VERIFIER_USER_POLICIES}, got {verifier_user!r}")
+        if verifier_provider_options is not None and not isinstance(verifier_provider_options, Mapping):
+            raise ValueError(f"verifier_provider_options must be a mapping, got {verifier_provider_options!r}")
+        if verifier_provider_options is not None and not isinstance(provider, str):
+            raise ValueError(
+                "verifier_provider_options need a provider named by its name (singularity, docker, module:Class): a "
+                "provider object starts every sandbox with its own options"
+            )
         self.reward = RewardContract.coerce(reward)
         self.holdout = HoldoutRule.coerce(holdout) if holdout is not None else None
         if self.holdout is not None and splits is not None:
@@ -223,6 +244,7 @@ class HarborEnvironmentService:
         self.verifier_classifiers = classifier_list(verifier_classifiers)
         self.agent_timeout_multiplier = float(agent_timeout_multiplier)
         self.agent_user: AgentUserPolicy = agent_user
+        self.verifier_user: VerifierUserPolicy | None = verifier_user
         self.concurrent_tools = concurrent
         self.queue_timeout_s = check_queue_timeout(queue_timeout_s)
         self.close_timeout_s = float(close_timeout_s)
@@ -239,7 +261,12 @@ class HarborEnvironmentService:
         self._splits = splits
         self._provider = provider
         self._provider_options = dict(provider_options or {})
+        # The options of separate verifiers' sandboxes; None: the agents' provider starts them too.
+        self._verifier_options = (
+            None if verifier_provider_options is None else {**self._provider_options, **verifier_provider_options}
+        )
         self._locked: LockedTasks | None = None
+        self._warned_of_fetch = False
         if dataset is not None or lock is not None:
             if dataset_dir is not None or task_dirs is not None:
                 raise ValueError("Pass dataset or lock, or dataset_dir or task_dirs, not both")
@@ -288,9 +315,30 @@ class HarborEnvironmentService:
         return self._provider
 
     @cached_property
+    def verifier_provider(self) -> SandboxProvider:
+        """The provider of separate verifiers' sandboxes: the agents' provider built with ``verifier_provider_options``
+        laid over ``provider_options``, else the agents' provider itself.  Built on first use."""
+
+        if self._verifier_options is None or not isinstance(self._provider, str):
+            return self.provider
+        return get_provider(self._provider, **self._verifier_options)
+
+    @property
+    def _phase_options(self) -> dict[str, dict[str, Any]]:
+        """The provider options of the agents' sandboxes and of separate verifiers' (the agents' when no
+        ``verifier_provider_options`` are given)."""
+
+        verifier = self._provider_options if self._verifier_options is None else self._verifier_options
+        return {"agents": self._provider_options, "verifier": verifier}
+
+    @cached_property
     def dataset(self) -> HarborDataset:
         return HarborDataset(
-            self._dataset_dir, task_dirs=self._task_dirs, splits=self._splits, agent_user=self.agent_user
+            self._dataset_dir,
+            task_dirs=self._task_dirs,
+            splits=self._splits,
+            agent_user=self.agent_user,
+            verifier_user=self.verifier_user,
         )
 
     async def list_tasks(self, split: str) -> list[str]:
@@ -346,14 +394,26 @@ class HarborEnvironmentService:
 
     async def check_tasks(self, split: str, task_ids: Sequence[str]) -> None:
         """Refuse, with an ``env_config`` ``EnvSetupError``, the tasks of ``split`` a run keeps (``task_ids``, what
-        ``exclude_tasks`` left of the listing) that the sandbox provider would refuse to start, so that the run stops
-        when it lists its tasks rather than lose every rollout of theirs; and, with :class:`EnvNotPrepared`, tasks of
-        a fetched dataset whose images the image map lacks (:meth:`_check_images`)."""
+        ``exclude_tasks`` left of the listing) that the sandbox provider would refuse to start, or whose verifier
+        could not run as their ``[verifier].user`` asks (:meth:`_check_users`), or whose verifier would run as root
+        on an image that may keep its files from other users (:meth:`_check_root_images`), so that the run stops when
+        it lists its tasks rather than lose every rollout of theirs; and, with :class:`EnvNotPrepared`, tasks of a
+        fetched dataset whose images the image map lacks (:meth:`_check_images`)."""
 
         if task_ids and (refusal := rootfs_layout_refusal(self._provider, self._provider_options)):
             raise EnvSetupError("env_config", f"the {self._provider_name()} provider would start no sandbox: {refusal}")
+        if task_ids and self._verifier_options is not None:
+            refusal = rootfs_layout_refusal(self._provider, self._verifier_options)
+            if refusal and any(self._separate(name) for name in task_ids):
+                raise EnvSetupError(
+                    "env_config",
+                    f"the {self._provider_name()} provider would start no separate verifier's sandbox with the "
+                    f"verifier_provider_options: {refusal}",
+                )
         self._check_networks(task_ids, split)
+        self._check_users(task_ids, split)
         self._check_images(task_ids, split)
+        self._check_root_images(task_ids, split)
 
     def _check_images(self, names: Sequence[str], split: str) -> None:
         """Refuse tasks of a fetched dataset that build their image, or their separate verifier's, from a Dockerfile
@@ -408,26 +468,157 @@ class HarborEnvironmentService:
     def _check_networks(self, names: Sequence[str], split: str) -> None:
         """Refuse tasks that run without a network (``network_mode = "no-network"``, for their agents or their
         separate verifier) on a provider that would refuse every such sandbox, such as ``singularity`` without
-        ``allow_network_none``."""
+        ``allow_network_none``, with the options of the sandbox concerned."""
 
-        refusal = network_none_refusal(self._provider, self._provider_options)
-        if refusal is None:
+        refusals = self._network_refusals()
+        if not any(refusals.values()):
             return
-        offline = [name for name in names if self._runs_offline(name)]
+        offline: dict[str, str] = {}  # task -> the refusal of a sandbox of its that runs without a network
+        for name in names:
+            try:
+                harbor_task = self._peek(name)
+            except (KeyError, ValueError):  # a refused or unknown task fails on its own when it is opened
+                continue
+            if (refusal := _network_refusal(harbor_task, refusals)) is not None:
+                offline[name] = refusal
         if offline:
-            shown = ", ".join(offline[:3]) + (f" and {len(offline) - 3} more" if len(offline) > 3 else "")
+            shown = ", ".join(list(offline)[:3]) + (f" and {len(offline) - 3} more" if len(offline) > 3 else "")
             raise EnvSetupError(
                 "env_config",
                 f"{len(offline)} of the {len(names)} tasks of split {split!r} run without a network ({shown}), and "
-                f"{refusal}; set it where the site allows it, or leave those tasks out (exclude_tasks)",
+                f"{next(iter(offline.values()))}; set it where the site allows it, or leave those tasks out "
+                "(exclude_tasks)",
             )
 
-    def _runs_offline(self, name: str) -> bool:
+    def _network_refusals(self) -> dict[str, str | None]:
+        """Why the agents' sandboxes, and separate verifiers', would be refused without a network (by phase)."""
+
+        return {phase: network_none_refusal(self._provider, options) for phase, options in self._phase_options.items()}
+
+    def _check_users(self, names: Sequence[str], split: str) -> None:
+        """With ``verifier_user: honor``, refuse the tasks whose ``[verifier].user`` it cannot honor (another user
+        than root, or a root verifier of a task graded in its agents' sandbox, which :meth:`HarborTask.load` refuses),
+        and the tasks whose verifier runs as root where the verifiers' sandboxes cannot give it root and other users
+        (:func:`platoon.sandbox.root_refusal`): every rollout of theirs would fail, or score 0 when their tests cannot
+        run the agent's code as another user."""
+
+        if self.verifier_user != "honor" or not names:
+            return
+        self._warn_of_fetch_refusals()
+        cannot_give_root = root_refusal(self._provider, self._phase_options["verifier"])
+        refused: dict[str, str] = {}  # task -> why
+        for name in names:
+            try:
+                harbor_task = self._peek(name)
+            except HarborTaskError as exc:  # its users, which a fetch lets through for the service to decide about
+                refused[name] = str(exc)
+                continue
+            except (KeyError, ValueError):  # unknown, or not readable: it fails on its own when it is opened
+                continue
+            if harbor_task.verifier_root and cannot_give_root is not None:
+                refused[name] = (
+                    f"its verifier runs as root, and the verifiers' sandboxes cannot give it root: {cannot_give_root}"
+                )
+        if refused:
+            shown = ", ".join(list(refused)[:3]) + (f" and {len(refused) - 3} more" if len(refused) > 3 else "")
+            name, why = next(iter(refused.items()))
+            root = any(reason.startswith("its verifier runs as root") for reason in refused.values())
+            raise EnvSetupError(
+                "env_config",
+                f"{len(refused)} of the {len(names)} tasks of split {split!r} cannot run their verifier as their "
+                f"[verifier].user asks ({shown}); {name}: {why}. "
+                + ("Give the verifiers' sandboxes root (verifier_provider_options), set " if root else "Set ")
+                + "verifier_user: ignore to run them as the sandbox's own user, or leave those tasks out "
+                "(exclude_tasks)",
+            )
+
+    def _warn_of_fetch_refusals(self) -> None:
+        """Warn, once, of the tasks whose ``[verifier].user`` is root that the fetch of the service's dataset left out:
+        its ``refuse.agent_user``, on by default, refuses every task that names a user, so ``verifier_user: honor``
+        never sees them."""
+
+        if self._locked is None or self._warned_of_fetch:
+            return
+        self._warned_of_fetch = True
+        lock = self._locked.dataset(fetch_allowed=False).lock
+        left_out = [
+            task.name
+            for task in lock.tasks
+            if (task.refused or "").startswith("agent_user:")
+            and task.flags.get("verifier_user") is not None
+            and is_root(str(task.flags["verifier_user"]))
+        ]
+        if left_out:
+            shown = ", ".join(left_out[:3]) + (f" and {len(left_out) - 3} more" if len(left_out) > 3 else "")
+            logger.warning(
+                "verifier_user: honor runs none of the %d task(s) of %s whose [verifier].user is root (%s): the fetch "
+                "left them out, since its refuse.agent_user, on by default, refuses every task that names a user. Set "
+                "refuse: {agent_user: false} to fetch them, with agent_user: ignore for those that also set "
+                "[agent].user",
+                len(left_out),
+                lock.dataset,
+                shown,
+            )
+
+    def root_images_closed(self, names: Sequence[str] | None = None) -> dict[str, list[str]]:
+        """With ``verifier_user: honor``, the images of the image map that tasks of a fetched dataset (``names``, else
+        every runnable task of its lock) run their verifier as root on and that may keep their files from the users
+        the tests switch to, since the ``oci`` builder of platoon before 0.3.0 built them
+        (:func:`~platoon.envs.harbor.images.withholds_modes`): by build key, with the tasks that run each.  Empty
+        otherwise, and for images the map lacks, which :meth:`_check_images` reports."""
+
+        if self.verifier_user != "honor" or self._locked is None:
+            return {}
         try:
-            harbor_task = self._peek(name)
-        except (KeyError, ValueError):  # a refused or unknown task fails on its own when it is opened
+            image_map = self._images.load()
+        except ImageMapError:
+            return {}
+        if image_map is None:
+            return {}
+        lock = self._locked.dataset(fetch_allowed=False).lock
+        closed: dict[str, list[str]] = {}
+        for name in names if names is not None else [task.name for task in lock.runnable()]:
+            try:
+                harbor_task = self._peek(name)
+            except (KeyError, ValueError):  # refused or unknown: reported, or failing, on its own
+                continue
+            environment = harbor_task.verifier_environment
+            if not harbor_task.verifier_root or environment is None:
+                continue
+            row = lock.get(name)
+            plan = {"task": row.image, "tests": row.verifier_image}.get(environment.image_source) or {}
+            entry = image_map.get(key) if (key := plan.get("key")) else None
+            if entry is not None and withholds_modes(entry):
+                closed.setdefault(key, []).append(name)
+        return closed
+
+    def _check_root_images(self, names: Sequence[str], split: str) -> None:
+        """Refuse tasks whose verifier runs as root on an image the ``oci`` builder of platoon before 0.3.0 built
+        (:meth:`root_images_closed`): on a host whose umask is 027, the users its tests switch to cannot run its
+        programs, and every grade would fail or score 0.  A run never builds images; the message names the build."""
+
+        if not names or not (closed := self.root_images_closed(names)):
+            return
+        tasks = sorted({name for needing in closed.values() for name in needing})
+        shown = ", ".join(tasks[:3]) + (f" and {len(tasks) - 3} more" if len(tasks) > 3 else "")
+        keys = " ".join(f"--key {key}" for key in closed)
+        raise EnvSetupError(
+            "env_config",
+            f"{len(tasks)} of the {len(names)} tasks of split {split!r} run their verifier as root ({shown}) on "
+            f"{len(closed)} image(s) that the oci builder of platoon before 0.3.0 built, which unpacked them under the "
+            "host's umask: under one such as 027, their files keep out the users the tests switch to. Build them again "
+            f"with `platoon harbor images build CONFIG {keys}`, or set verifier_user: ignore, or leave those tasks out "
+            "(exclude_tasks)",
+        )
+
+    def _separate(self, name: str) -> bool:
+        """Whether a task grades in a separate verifier's sandbox; False for one that cannot be read, which fails on
+        its own when it is opened."""
+
+        try:
+            return self._peek(name).verifier_mode == "separate"
+        except (KeyError, ValueError):
             return False
-        return _offline(harbor_task)
 
     def _peek(self, task_id: str) -> HarborTask:
         """The task, read without checking a locked task's cache entry against its digest, which a session's
@@ -436,7 +627,7 @@ class HarborEnvironmentService:
         if self._locked is not None:
             dataset = self._locked.dataset(fetch_allowed=False)
             row = dataset.row(task_id)
-            return HarborTask.load(dataset.cache / row.path, agent_user=self.agent_user, index=row.index)
+            return self._load(dataset.cache / row.path, index=row.index)
         return self._lookup(task_id)
 
     async def list_splits(self) -> list[str]:
@@ -553,7 +744,7 @@ class HarborEnvironmentService:
 
         misc = task.misc.get(HARBOR_MISC_KEY, {})
         if misc.get("task_dir") is not None:
-            return HarborTask.load(misc["task_dir"], agent_user=self.agent_user, index=misc.get("index"))
+            return self._load(misc["task_dir"], index=misc.get("index"))
         if task.id is None:
             raise ValueError("A Harbor task needs an id or a task directory in misc")
         return self._lookup(task.id)
@@ -573,8 +764,14 @@ class HarborEnvironmentService:
                 self._sandbox_spec(harbor_task, rollout_id, verifier=True)  # refused now, not after the agent ran
         except (KeyError, ValueError) as exc:  # a bad task directory (HarborTaskError), unknown id or unset variable
             raise EnvSetupError("env_config", str(exc)) from exc
-        if _offline(harbor_task) and (refusal := network_none_refusal(self._provider, self._provider_options)):
+        if (refusal := _network_refusal(harbor_task, self._network_refusals())) is not None:
             raise EnvSetupError("env_config", f"Harbor task {harbor_task.name!r} runs without a network, and {refusal}")
+        if harbor_task.verifier_root and (refusal := root_refusal(self._provider, self._phase_options["verifier"])):
+            raise EnvSetupError(  # refused now, not after the agent ran
+                "env_config",
+                f"Harbor task {harbor_task.name!r} runs its verifier as root, and the verifiers' sandboxes cannot give "
+                f"it root: {refusal}",
+            )
         if needs is not None:  # the harness's gateway route, toolchain and memory; never the verifier's
             spec = needs.apply(spec)
         sandbox = await self._start(spec, harbor_task)
@@ -598,7 +795,7 @@ class HarborEnvironmentService:
         stopped again and an ``EnvSetupError`` says why."""
 
         try:
-            sandbox = await self.provider.start(spec)
+            sandbox = await (self.verifier_provider if verifier else self.provider).start(spec)
         except RouteError as exc:  # no Python in the image for the route forwarder: the harness cannot run here
             raise EnvSetupError("harness_setup", str(exc)) from exc
         except Exception as exc:
@@ -612,20 +809,23 @@ class HarborEnvironmentService:
             raise EnvSetupError("env_setup", f"{type(exc).__name__}: {exc}") from exc
         return sandbox
 
+    def _load(self, task_dir: str | Path, *, index: Mapping[str, Any] | None = None) -> HarborTask:
+        """A task directory, read with the service's ``agent_user`` and ``verifier_user`` policies."""
+
+        return HarborTask.load(task_dir, agent_user=self.agent_user, verifier_user=self.verifier_user, index=index)
+
     def _lookup(self, task_id: str) -> HarborTask:
         if self._locked is not None:  # workers read the lock: no fetch, no scan
-            return HarborTask.load(
-                self._locked.task_dir(task_id), agent_user=self.agent_user, index=self._locked.index(task_id)
-            )
+            return self._load(self._locked.task_dir(task_id), index=self._locked.index(task_id))
         # Workers build a service per rollout, so an id finds its directory without indexing the dataset: through the
         # dataset's registry when it has one, else as a path below the dataset directory.
         if Path(task_id).is_absolute():
-            return HarborTask.load(task_id, agent_user=self.agent_user)
+            return self._load(task_id)
         if self._dataset_dir is not None:
             task_dir = task_dir_of(self._dataset_dir, task_id, registry=self._registry)
             if task_dir is None:
                 raise KeyError(f"Unknown Harbor task {task_id!r}")
-            return HarborTask.load(task_dir, agent_user=self.agent_user, index=self._task_index.get(task_id))
+            return self._load(task_dir, index=self._task_index.get(task_id))
         return self.dataset.get(task_id)
 
     @cached_property
@@ -670,10 +870,10 @@ class HarborEnvironmentService:
         if verifier and environment is None:
             raise ValueError(f"Harbor task {harbor_task.name!r} has no separate verifier")
         gpus = environment.gpus if environment is not None else harbor_task.gpus
-        if gpus > 0 and "gpu" not in self.provider.capabilities:
+        if gpus > 0 and "gpu" not in (provider := self.verifier_provider if verifier else self.provider).capabilities:
             role = "its verifier needs" if verifier else "it needs"
             raise ValueError(
-                f"Harbor task {harbor_task.name!r} is refused: {role} {gpus} GPU(s), and the {self.provider.name!r} "
+                f"Harbor task {harbor_task.name!r} is refused: {role} {gpus} GPU(s), and the {provider.name!r} "
                 "sandbox provider cannot give a sandbox GPUs"
             )
         if environment is None:
@@ -723,21 +923,50 @@ class HarborEnvironmentService:
     async def _prepare(
         self, sandbox: Sandbox, harbor_task: HarborTask, spec: SandboxSpec, *, verifier: bool = False
     ) -> None:
-        result = await sandbox.exec(["mkdir", "-p", *LOG_DIRS, spec.workdir], cwd="/")
+        root = verifier and harbor_task.verifier_root
+        built = self._verifier_image(harbor_task) if verifier else self._session_image(harbor_task)
+        if root:
+            problem = await root_problem(sandbox)
+            if problem is None and (problem := await nobody_problem(sandbox)) is not None:
+                if built is not None and built.key:  # an image of the map: platoon's oci builder may have made it so
+                    problem += (
+                        ", as the oci builder of platoon before 0.3.0 left the images it built under a umask such as "
+                        f"027: build it again (platoon harbor images build CONFIG --key {built.key})"
+                    )
+                else:
+                    problem += ": give the verifier an image whose programs other users may run"
+            if problem is not None:
+                raise EnvSetupError(
+                    "env_config",
+                    f"Harbor task {harbor_task.name!r} runs its verifier as root, and its sandbox {problem}",
+                )
+        mkdir = ["mkdir", "-p", *LOG_DIRS, spec.workdir]
+        if root:
+            # What is missing gets Docker's modes (its WORKDIR, Harbor's directories), so that the users the tests
+            # switch to may enter it; what the image has keeps its mode, as in Docker, which may keep them out on
+            # purpose.  The sandbox's start made a missing workdir already, with these modes in hpc-sandbox's --fakeroot
+            # sandboxes.
+            mkdir = ["/bin/sh", "-c", f'umask {DOCKER_UMASK} && mkdir -p -- "$@"', "platoon-mkdir", *mkdir[2:]]
+        result = await sandbox.exec(mkdir, cwd="/")
         if result.exit_code != 0:
             raise EnvSetupError("env_setup", f"Cannot create the task directories: {result.stderr.strip()}")
-        built = self._verifier_image(harbor_task) if verifier else self._session_image(harbor_task)
         if built is not None and built.files:  # the deferred Dockerfile steps: WORKDIR directories, COPY uploads
-            await apply_image_files(sandbox, built, workdir=spec.workdir)
+            await apply_image_files(sandbox, built, workdir=spec.workdir, umask=DOCKER_UMASK if root else None)
         if harbor_task.healthcheck is not None and not verifier:  # as in Harbor, none runs in a verifier's sandbox
             await _wait_until_healthy(sandbox, harbor_task.healthcheck)
 
 
-def _offline(harbor_task: HarborTask) -> bool:
-    """Whether the task's agents, or its separate verifier, run without a network (``network_mode = "no-network"``)."""
+def _network_refusal(harbor_task: HarborTask, refusals: Mapping[str, str | None]) -> str | None:
+    """Of the phases' ``refusals`` (:meth:`HarborEnvironmentService._network_refusals`), the one that refuses the task:
+    its agents', when they run without a network (``network_mode = "no-network"``), else its separate verifier's,
+    when that runs without one; None when neither applies."""
 
+    if harbor_task.network == "none" and refusals["agents"] is not None:
+        return refusals["agents"]
     verifier = harbor_task.verifier_environment
-    return harbor_task.network == "none" or (verifier is not None and verifier.network == "none")
+    if verifier is not None and verifier.network == "none":
+        return refusals["verifier"]
+    return None
 
 
 async def _wait_until_healthy(sandbox: Sandbox, check: Healthcheck) -> None:

@@ -186,6 +186,14 @@ they are each runtime's own executable and start flags, so a config that needs t
 an entry's `service_kwargs`, never in a block both sites use. See [Sandboxes and Harbor
 tasks](sandboxes-and-harbor.md#sandbox-providers).
 
+Harbor tasks whose verifier runs as root ([Verifiers that run as
+root](sandboxes-and-harbor.md#verifiers-that-run-as-root), since the next release) need Singularity's `--fakeroot` for
+their verifiers, which works where the site gives your user subordinate ids. Check on a compute node that
+`getsubids $USER` lists a range, and that `singularity exec --fakeroot IMAGE cat /proc/self/uid_map` shows a range
+that reaches uid 65534 (a line `1 <first subordinate id> 65536`, say), or that
+`singularity exec --fakeroot IMAGE setpriv --reuid=65534 --regid=65534 --clear-groups id -u` prints 65534. `id -u`
+alone prints 0 in a namespace that maps no other user too. enroot cannot run them.
+
 Pull the images in the job, before the run, with the run's runtime and image cache, and name the record of what was
 pulled in `PLATOON_IMAGE_PULLS`:
 

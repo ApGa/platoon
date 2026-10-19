@@ -41,6 +41,10 @@ from typing import Any
 from platoon.envs.harbor.dockerfile import expand
 
 IMAGE_MAP_VERSION = 1
+# What a receipt records as ``builder_revision`` when the ``oci`` builder built the image: 1 since it unpacks the image
+# under umask 0, so that its files keep the read and execute bits the image gives other users.  The receipts of the
+# builder before (platoon before 0.3.0) record none (:func:`withholds_modes`).
+OCI_BUILDER_REVISION = 1
 ENVIRONMENT_DIR = "environment"
 IMAGES_DIR = "images"  # where a Harbor cache keeps its default image maps and their images
 _LOCAL_IMAGE_SUFFIXES = (".sif", ".sqsh", ".squashfs", ".img")
@@ -95,6 +99,15 @@ class ImageEntry:
             "cmd": list(self.cmd) if self.cmd else None,
             "receipt": dict(self.receipt),
         }
+
+
+def withholds_modes(entry: ImageEntry) -> bool:
+    """Whether the image of ``entry`` may keep its files from other users: the ``oci`` builder of platoon before 0.3.0
+    built it (its receipt records no ``builder_revision``), and unpacked it under the host's umask, which on a host
+    whose umask is 027 took from its files the read and execute bits the image gives other users.  A sandbox whose
+    commands switch users, such as a verifier that runs as root, needs them: build such an image again."""
+
+    return entry.builder == "oci" and not entry.receipt.get("builder_revision")
 
 
 class ImageMap:
@@ -333,15 +346,18 @@ def deferred_effects(
     return environment, workdir, tuple(files)
 
 
-async def apply_image_files(sandbox: Any, image: SessionImage, *, workdir: str) -> None:
-    """Perform the image's deferred file operations in a running sandbox: create ``WORKDIR`` directories and
-    upload ``COPY`` sources from the task's build context (``workdir`` is the session's working directory, where
-    a prebuilt task's ``environment/`` goes)."""
+async def apply_image_files(sandbox: Any, image: SessionImage, *, workdir: str, umask: str | None = None) -> None:
+    """Perform the image's deferred file operations in a running sandbox: create ``WORKDIR`` directories (with
+    ``umask``, when given, as a build's are: Docker's is 022) and upload ``COPY`` sources from the task's build context
+    (``workdir`` is the session's working directory, where a prebuilt task's ``environment/`` goes)."""
 
     for op in image.files:
         _check_contained(sandbox, op.target or workdir)
         if op.kind == "mkdir":
-            result = await sandbox.exec(["mkdir", "-p", op.target])
+            mkdir = ["mkdir", "-p", op.target]
+            if umask is not None:
+                mkdir = ["/bin/sh", "-c", f'umask {umask} && mkdir -p -- "$1"', "platoon-mkdir", op.target]
+            result = await sandbox.exec(mkdir)
             if result.exit_code != 0:
                 raise RuntimeError(f"Cannot create {op.target}: {result.stderr.strip()}")
             continue

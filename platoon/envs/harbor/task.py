@@ -7,7 +7,10 @@ in ``artifacts`` (``[verifier] environment_mode = "separate"``, or a ``[verifier
 Refused: multi-step and non-Linux tasks; multi-container environments (a compose file with sidecar services; one
 that only names ``main`` is a single container); verifier collect hooks and artifacts of other services; a
 compose file in ``tests/``; and ``[agent].user`` or ``[verifier].user`` unless the caller ignores them, since
-rootless sandboxes run every process as one user.
+rootless sandboxes run every process as one user.  A caller may instead honor a ``[verifier].user`` of root
+(``verifier_user="honor"``): the task's tests then run as root in its separate verifier's sandbox, where they may run
+the agent's code as another user (:attr:`HarborTask.verifier_root`).  It honors no other user, and no root verifier
+of a task graded in its agents' own sandbox, whose agents would run as root too: those tasks are refused.
 """
 
 from __future__ import annotations
@@ -47,6 +50,13 @@ VerifierImageSource = Literal["verifier_image", "tests", "task"]
 # as the sandbox's single uid (rootless providers cannot switch users).
 AgentUserPolicy = Literal["refuse", "ignore"]
 AGENT_USER_POLICIES: tuple[str, ...] = get_args(AgentUserPolicy)
+# What a task's ``[verifier].user`` does, when it is not what ``[agent].user`` gets: ``refuse`` or ``ignore`` it as
+# above, or ``honor`` it: a separate verifier whose user is root runs as root, in a sandbox that gives it root and
+# other users to run the agent's code as; any other user is refused.
+VerifierUserPolicy = Literal["refuse", "ignore", "honor"]
+VERIFIER_USER_POLICIES: tuple[str, ...] = get_args(VerifierUserPolicy)
+# How a task names root: Docker's ``--user`` forms, a name or a uid, optionally with a group.
+_ROOT_NAMES = ("root", "0")
 Network = Literal["host", "none"]
 
 # Leading canary comments are data-provenance markers that agents should not see.
@@ -151,6 +161,9 @@ class HarborTask:
     metadata: dict[str, Any] = field(default_factory=dict)
     # The [agent].user and [verifier].user that a loader with agent_user="ignore" let through, by phase.
     ignored_users: dict[str, str] = field(default_factory=dict)
+    # The [verifier].user is root and the loader honors it (verifier_user="honor"): the tests run as root in the
+    # separate verifier's sandbox.
+    verifier_root: bool = False
     # The task's row in its dataset's own index files (task-index.json, a lock), e.g. {"source_dataset": ...}.
     index: dict[str, Any] = field(default_factory=dict)
 
@@ -164,16 +177,26 @@ class HarborTask:
 
     @classmethod
     def load(
-        cls, task_dir: str | Path, *, agent_user: AgentUserPolicy = "refuse", index: Mapping[str, Any] | None = None
+        cls,
+        task_dir: str | Path,
+        *,
+        agent_user: AgentUserPolicy = "refuse",
+        verifier_user: VerifierUserPolicy | None = None,
+        index: Mapping[str, Any] | None = None,
     ) -> HarborTask:
         """Read a task directory; ``HarborTaskError`` says why platoon cannot run it.
 
         ``agent_user="ignore"`` accepts a task that names a user to run as, and records it in ``ignored_users``.
-        ``index`` is the task's row in its dataset's index, kept as ``HarborTask.index``.
+        ``verifier_user`` decides for ``[verifier].user`` instead, when given: ``honor`` accepts a separate verifier
+        whose user is root and sets ``verifier_root``, and refuses any other user, and a root verifier of a task
+        graded in its agents' sandbox.  ``index`` is the task's row in its dataset's index, kept as
+        ``HarborTask.index``.
         """
 
         if agent_user not in AGENT_USER_POLICIES:
             raise ValueError(f"agent_user must be one of {AGENT_USER_POLICIES}, got {agent_user!r}")
+        if verifier_user is not None and verifier_user not in VERIFIER_USER_POLICIES:
+            raise ValueError(f"verifier_user must be one of {VERIFIER_USER_POLICIES}, got {verifier_user!r}")
         task_dir = Path(task_dir).resolve()
         config_path = task_dir / CONFIG_FILENAME
         try:
@@ -207,13 +230,35 @@ class HarborTask:
             for phase, table in (("agent", agent), ("verifier", verifier))
             if (user := _value(table, "user", (str, int), f"[{phase}]")) is not None
         }
-        if users and agent_user == "refuse":
-            named = ", ".join(f"[{phase}].user = {user!r}" for phase, user in users.items())
+        policies = {"agent": agent_user, "verifier": agent_user if verifier_user is None else verifier_user}
+        if refused := {phase: user for phase, user in users.items() if policies[phase] == "refuse"}:
+            named = ", ".join(f"[{phase}].user = {user!r}" for phase, user in refused.items())
+            root = "verifier" in refused and is_root(refused["verifier"])
+            if "agent" in refused or verifier_user is None:
+                fix = "agent_user: ignore"
+                if root and "agent" not in refused:
+                    fix += ", or verifier_user: honor to run its tests as root"
+            else:
+                fix = "verifier_user: ignore" + (", or honor to run its tests as root" if root else "")
             raise HarborTaskError(
                 f"{config_path}: {named}, but rootless sandboxes run every process as one user; the task is refused "
-                "unless the environment sets agent_user: ignore"
+                f"unless the environment sets {fix}"
             )
         verifier_environment = _verifier_environment(task_dir, environment, verifier)
+        verifier_root = policies["verifier"] == "honor" and "verifier" in users
+        if verifier_root and not is_root(user := users["verifier"]):
+            raise HarborTaskError(
+                f"{config_path}: [verifier].user = {user!r}, but platoon runs a verifier as root or as its sandbox's "
+                "own user, so verifier_user: honor honors only root; the task is refused unless the environment sets "
+                "verifier_user: ignore"
+            )
+        if verifier_root and verifier_environment is None:
+            raise HarborTaskError(
+                f"{config_path}: [verifier].user = {users['verifier']!r}, but the task is graded in its agents' "
+                "sandbox (Harbor's shared verifier mode), and platoon runs a verifier as root only in a separate "
+                "verifier's sandbox: its agents would run as root too; the task is refused unless the environment "
+                "sets verifier_user: ignore"
+            )
         artifacts = _artifacts(config)
         instruction_path = task_dir / INSTRUCTION_FILENAME
         if not instruction_path.is_file():
@@ -247,7 +292,8 @@ class HarborTask:
             ),
             healthcheck=_healthcheck(healthcheck) if healthcheck is not None else None,
             metadata=_value(config, "metadata", dict, "task.toml") or {},
-            ignored_users=users,
+            ignored_users={phase: user for phase, user in users.items() if policies[phase] == "ignore"},
+            verifier_root=verifier_root,
             index=dict(index or {}),
         )
 
@@ -262,6 +308,14 @@ class HarborTask:
         if self.index:
             misc["index"] = dict(self.index)
         return Task(id=task_id, goal=self.instruction, misc={HARBOR_MISC_KEY: misc})
+
+
+def is_root(user: str) -> bool:
+    """Whether a task's ``user`` (``[agent].user``, ``[verifier].user``) is root, in any of the forms Docker's
+    ``--user`` takes: ``root`` or ``0``, optionally with the group ``root`` or ``0`` (``0:0``, ``root:root``)."""
+
+    name, _, group = user.partition(":")
+    return name in _ROOT_NAMES and group in ("", *_ROOT_NAMES)
 
 
 def compose_file(task_dir: Path) -> Path | None:

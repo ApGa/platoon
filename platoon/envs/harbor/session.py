@@ -11,7 +11,10 @@ their sandbox (``main``), collects the task's artifacts from it as directories a
 there, and stops it on every path.  The agents never touch the grader's files, and no symlink of theirs reaches
 it.  When nothing else holds ``main`` (no shared fork, no call in flight), grading releases it as soon as the
 artifacts are collected, as Harbor stops it before verifying: the session then takes no more tool calls or forks,
-and grading it again reuses the collected artifacts.
+and grading it again reuses the collected artifacts.  A verifier that runs as root (``verifier_user: honor``) gets a
+sandbox that was checked to give it root and other users (:mod:`platoon.envs.harbor.users`); its commands run with
+Docker's umask, and its artifacts are readable by every user, since its tests may run the agent's code as another
+user, as they would in Docker.
 
 Grading takes the sandbox the tests run in away from the agents.  In the agents' own sandbox (Harbor's ``shared``
 verifier mode) it first kills every process they left running (``Sandbox.kill_processes``) and makes ``/tests`` and
@@ -45,6 +48,7 @@ from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, EnvBusy, GateClosed, Tool
 from platoon.envs.harbor.artifacts import ArtifactError, CollectedArtifact, collect_artifacts, materialize_artifacts
 from platoon.envs.harbor.task import HarborTask, McpServer, resolve_env
 from platoon.envs.harbor.tools import TOOL_SPECS, SandboxTools
+from platoon.envs.harbor.users import DOCKER_UMASK
 from platoon.envs.harbor.verifier import TEST_STDOUT, collect, output_tail, suspect_outcome, write_local
 from platoon.envs.service import EnvSetupError, ForkMode, Outcome, ToolResult, ToolSpec
 from platoon.sandbox.base import CWD_ERROR_EXIT_CODE, ExecResult, Sandbox, SandboxSpec, cwd_error
@@ -204,6 +208,13 @@ class HarborSession:
             return None
         return self.harbor_task.agent_timeout_s * self._service.agent_timeout_multiplier
 
+    @property
+    def _umask(self) -> str:
+        """What the verifier's shell commands start with: a root verifier's set Docker's umask, so that what its tests
+        write as root is readable by the users they switch to (:mod:`platoon.envs.harbor.users`)."""
+
+        return f"umask {DOCKER_UMASK}; " if self.harbor_task.verifier_root else ""
+
     async def tools(self) -> list[ToolSpec]:
         return list(TOOL_SPECS)
 
@@ -284,6 +295,8 @@ class HarborSession:
         outcome.metadata["verifier_mode"] = self.harbor_task.verifier_mode
         if self.harbor_task.ignored_users:
             outcome.metadata["ignored_users"] = dict(self.harbor_task.ignored_users)  # ran as the sandbox's uid
+        if self.harbor_task.verifier_root:
+            outcome.metadata["verifier_user"] = "root"
         return outcome
 
     async def run_solution(self) -> ExecResult:
@@ -446,12 +459,14 @@ class HarborSession:
                 and self.harbor_task.verifier_environment.bundled_tests
             )
             directories = [VERIFIER_DIR] if bundled else [TESTS_DIR, VERIFIER_DIR]
-            reset = f"rm -rf {' '.join(directories)} && mkdir -p {' '.join(directories)}"
+            reset = f"{self._umask}rm -rf {' '.join(directories)} && mkdir -p {' '.join(directories)}"
             result = await verifier.exec(["/bin/sh", "-c", reset], cwd="/")
             if result.exit_code != 0:
                 return Outcome.infra("verifier_setup", reason=result.stderr.strip())
             try:
-                await materialize_artifacts(verifier, collected, workdir=spec.workdir)
+                await materialize_artifacts(
+                    verifier, collected, workdir=spec.workdir, readable=self.harbor_task.verifier_root
+                )
             except ArtifactError as exc:
                 return Outcome.infra("verifier_setup", reason=str(exc))
             if not bundled:  # a verifier image built for the task holds its own /tests
@@ -475,7 +490,7 @@ class HarborSession:
         timeout_s = self.harbor_task.verifier_timeout_s * self._service.verifier_timeout_multiplier
         started = time.monotonic()
         result = await sandbox.exec(
-            f"bash {TESTS_DIR}/test.sh > {VERIFIER_DIR}/{TEST_STDOUT} 2>&1", timeout_s=timeout_s, env=env
+            f"{self._umask}bash {TESTS_DIR}/test.sh > {VERIFIER_DIR}/{TEST_STDOUT} 2>&1", timeout_s=timeout_s, env=env
         )
         metadata: dict[str, Any] = {
             "verifier_exit_code": result.exit_code,

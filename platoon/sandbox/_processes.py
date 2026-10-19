@@ -12,8 +12,9 @@ left, and lets the sandbox's own processes continue.
 
 The scripts run in the image's own ``/bin/sh`` (dash, busybox ash or bash) and use only shell builtins while they
 look at ``/proc``.  They refuse to act on a ``/proc`` that does not list their own shell, as one mounted over by a
-command would not.  A command run as another user that the sandbox's commands may not signal survives, which no
-built-in provider allows: every command runs as the same user.
+command would not.  A command run as another user that the sandbox's commands may not signal survives, and the kill
+fails, which no built-in provider allows: every command runs as the same user, or as the root of the sandbox's user
+namespace (``singularity`` with ``--fakeroot``), which may signal every other user's process there.
 
 A runtime may give a sandbox no PID namespace of its own (Singularity does not where the site's configuration says
 ``allow pid ns = no``), and there ``kill -1`` would reach every process of the user on the host.  So

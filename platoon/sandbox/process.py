@@ -297,6 +297,13 @@ class ProcessProvider:
         # In node-local scratch, which a node's users may share: a directory of this user's own.
         self.root = Path(root) if root is not None else node_scratch() / f"platoon-sandboxes-{os.getuid()}"
 
+    @classmethod
+    def root_refusal(cls, options: Mapping[str, object]) -> str | None:
+        """Commands run on the host as this process's user, never as a sandbox's root
+        (:func:`platoon.sandbox.root_refusal`)."""
+
+        return "the process provider runs commands on the host as this process's user, not as a sandbox's root"
+
     async def start(self, spec: SandboxSpec) -> ProcessSandbox:
         return await self._open(spec)
 
