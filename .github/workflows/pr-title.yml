@@ -3,11 +3,12 @@ name: PR title
 # A workflow of its own, so that editing a pull request's title or description re-runs only this check.
 on:
   pull_request:
-    branches: [main]
     types: [opened, edited, synchronize, reopened]
 
 jobs:
   pr-title:
+    # As in ci.yml, not in a private copy of the repository.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
