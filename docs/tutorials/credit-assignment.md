@@ -226,9 +226,17 @@ group is kept.
 | `train.workflow_config.filter_zero_advantage_datums` | `true` | Skip the model pass for all-zero-advantage datums. A step whose every advantage is zero takes no optimizer update either way, under the `cispo`, `ppo` and `importance_sampling` losses with no `loss_fn_config` keys but their clip thresholds |
 | `train.workflow_config.min_successful_group_size` | `1` | Fewest trainable rollouts (completed, `scored` roots) a group needs to train |
 
+The keys that act on one group (`group_size`, `leave_one_out_baseline`, `min_successful_group_size`, `filter_errors`,
+`filter_message_actions` and the subagent datum sampling) may differ by environment: an entry's own `workflow_config`
+sets them for its groups, laid over `train.workflow_config`
+([Settings per environment](../how-to/train-and-eval.md#settings-per-environment)). Depth weighting and the
+zero-advantage filter act on microbatches, which mix entries' groups, so they stay the run's.
+
 To estimate advantages another way, subclass
 `platoon.train.tinker.workflows.group_rollout_workflow.GroupRolloutWorkflow`, override `compute_baselines` or
-`assign_advantages`, and select the class with `environments[0].workflow: package.module.MyWorkflow`.
+`assign_advantages`, and select the class with `environments[0].workflow: package.module.MyWorkflow`. Inside an
+override, `self.config` holds the settings of the group's environment entry, and
+`platoon.train.tinker.workflows.group_rollout_workflow.current_entry()` names that entry.
 
 ## Next steps
 

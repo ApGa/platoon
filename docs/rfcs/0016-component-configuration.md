@@ -317,6 +317,17 @@ eval:
     rollout_config: {max_steps: 500, inference_params: {temperature: 0.6}}
 ```
 
+(Amended with per-environment training settings, in platoon 0.3.0.) An entry may also set rollout settings of its
+own, beneath the phase's: `workflow_config.rollout_config` for its training groups, which its evaluation rollouts
+inherit, and `eval_overrides.workflow_config.rollout_config` for its evaluation rollouts alone (of every split but
+`train`, as its other evaluation overrides). The phase's section still wins over the entry's `workflow_config`
+(`eval.workflow_config` in `platoon train`, `inference.workflow` in `platoon eval`), so an entry's rollout settings
+are the defaults of the phase's for that entry, and the entry's `eval_overrides` win over both: a dataset's
+calibrated step budget can travel with its entry, while a run-wide evaluation setting still decides for every entry
+that does not override it ([Settings per environment](../how-to/train-and-eval.md#settings-per-environment)). A
+named environment ships rollout settings in `workflow_config.rollout_config` only, never in `eval_overrides`, so it
+cannot outvote the run's evaluation settings.
+
 ### 3. Checks across an entry
 
 Some rules relate a component's options to the rest of its entry: a judge that needs verifier grading, a harness

@@ -143,7 +143,7 @@ def _run_batches(
             stats_logger=SimpleNamespace(log=lambda *, step, stats: logged.append(stats)),
         )
 
-        async def finish_all_groups(shared_state, workflow, task_queue, result_queue):
+        async def finish_all_groups(shared_state, workflow, task_queue, result_queue, rows=None):
             # No yield: all groups finish before the first batch is trained.
             for output in outputs:
                 result_queue.put_nowait(output)

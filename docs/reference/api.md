@@ -814,10 +814,11 @@ A named environment: `name@version` and the partial `environments` entry it stan
 `EnvironmentEntry(name, version="1", *, description="", harness_defaults=None, **keys)`, where `keys` are
 keys of an `environments` entry (`service`, `service_kwargs`, `harness`, `program`,
 `reward_processor`, `agents`, `dataset_kwargs`, ...), checked against the config schema when the entry
-is built.  A run chooses the rest (`FORBIDDEN_KEYS`): `env`, `name`, `weight`, the run-level
-settings, the tasks it leaves out (`exclude_tasks`; an environment that should not offer a task leaves it out
-of its own task lists, in a new version), and `harness_options`, for which `harness_defaults` maps a harness
-name to the options the environment needs from that harness.
+is built.  A run chooses the rest (`FORBIDDEN_KEYS`): `env`, `name`, `weight`, `max_staleness`, the
+run-level settings, the tasks it leaves out (`exclude_tasks`; an environment that should not offer a task leaves
+it out of its own task lists, in a new version), `harness_options`, for which `harness_defaults` maps a
+harness name to the options the environment needs from that harness, of `workflow_config` all but the
+rollout settings (`rollout_config`) its tasks were measured with, and `eval_overrides.workflow_config`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

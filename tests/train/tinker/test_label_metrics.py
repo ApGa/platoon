@@ -69,7 +69,7 @@ def test_an_evaluation_logs_every_label_of_its_tasks_also_at_zero():
     trainer.eval_dataset = tasks
     logged: list[dict] = []
 
-    async def worker(shared_state, workflow, queue, results, tracker=None):
+    async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
         while True:
             data = await queue.get()
             results.put_nowait(outputs[data["task_id"]])
