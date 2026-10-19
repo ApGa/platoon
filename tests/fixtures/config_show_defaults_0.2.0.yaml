@@ -1,0 +1,199 @@
+# A frozen dump for tests/test_cli.py: what platoon 0.2.0's `platoon config show --defaults` printed for a minimal
+# training config on that file's loaders (the released wheel, platoon[tinker]==0.2.0). It spells every key at 0.2.0's
+# default, `train.task_order: auto` among them, as a config copied from such a dump does.
+train:
+  model_name: Qwen/Qwen3-4B
+  renderer_name: qwen3
+  renderer_kwargs: {}
+  sample_timeout_seconds: null
+  context_window_length: null
+  batch_size: 16
+  num_epochs: null
+  max_training_steps: null
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: null
+  optimizer:
+    learning_rate: 3.0e-05
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-08
+    weight_decay: 0.0
+    grad_clip_norm: 0.0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  lora_rank: 32
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      model_name: null
+      train: false
+      max_steps: null
+      output_dir: rollout_results
+      verbose: true
+      timeout: null
+      step_timeout: 300
+      return_dict: false
+      propagate_root_success: false
+      skip_subagent_reward_computation: false
+      enable_subagent_verifiers: true
+      inference_params:
+        temperature: null
+        top_p: null
+        top_k: null
+        max_completion_tokens: null
+      sampling_precedence: request
+      extra: {}
+      judges: true
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    depth_level_discount_gamma: null
+    subagent_datum_keep_probability: 1.0
+    subagent_datum_sampling_seed: 0
+    filter_errors: true
+    filter_message_actions: false
+    filter_zero_advantage_datums: true
+    straggler_timeout_seconds: null
+    straggler_quorum: null
+    straggler_policies: {}
+    min_successful_group_size: 1
+    rollout_isolation: inprocess
+    worker_start_method: forkserver
+    worker_startup_budget_seconds: 300.0
+    worker_finalize_grace_seconds: 120.0
+    worker_parent_grace_seconds: 60.0
+    worker_termination_grace_seconds: 10.0
+    worker_launch_concurrent_groups: 2
+    worker_rss_soft_limit_bytes: 25769803776
+    worker_mem_available_floor_bytes: 0
+    worker_binding_poll_seconds: 5.0
+    worker_unbounded_rollout_budget_seconds: 86400.0
+    worker_python_env_isolation: false
+  max_concurrent_rollouts: 128
+  label_by: _platoon_environment
+  rollout_group_limits: {}
+  task_order: auto
+  forward_backward_timeout_seconds: 5400.0
+  optim_step_timeout_seconds: 300.0
+eval:
+  every: 0
+  at_start: false
+  max_concurrent_rollouts: 256
+  workflow_config:
+    group_size: 1
+    rollout_config:
+      model_name: null
+      train: false
+      max_steps: null
+      output_dir: rollout_results
+      verbose: true
+      timeout: null
+      step_timeout: 300
+      return_dict: false
+      propagate_root_success: false
+      skip_subagent_reward_computation: false
+      enable_subagent_verifiers: true
+      inference_params:
+        temperature: null
+        top_p: null
+        top_k: null
+        max_completion_tokens: null
+      sampling_precedence: request
+      extra: {}
+      judges: true
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    depth_level_discount_gamma: null
+    subagent_datum_keep_probability: 1.0
+    subagent_datum_sampling_seed: 0
+    filter_errors: false
+    filter_message_actions: false
+    filter_zero_advantage_datums: false
+    straggler_timeout_seconds: null
+    straggler_quorum: null
+    straggler_policies: {}
+    min_successful_group_size: 1
+    rollout_isolation: inprocess
+    worker_start_method: forkserver
+    worker_startup_budget_seconds: 300.0
+    worker_finalize_grace_seconds: 120.0
+    worker_parent_grace_seconds: 60.0
+    worker_termination_grace_seconds: 10.0
+    worker_launch_concurrent_groups: 2
+    worker_rss_soft_limit_bytes: 25769803776
+    worker_mem_available_floor_bytes: 0
+    worker_binding_poll_seconds: 5.0
+    worker_unbounded_rollout_budget_seconds: 86400.0
+    worker_python_env_isolation: false
+log_path: logs
+tinker_base_url: null
+environments:
+- env: null
+  package: null
+  trainer_config: null
+  dataset_loader: test_cli:load_tasks
+  eval_dataset_loader: null
+  task_loader: test_cli:load_task
+  rollout: test_cli:tree
+  eval_rollout: null
+  reward_processor: null
+  workflow: group_rollout
+  dataset_kwargs: {}
+  eval_dataset_kwargs: {}
+  exclude_tasks: []
+  workflow_kwargs: {}
+  eval_workflow_kwargs: {}
+  name: null
+  weight: tasks
+  service: null
+  service_kwargs: {}
+  harness: null
+  placement: auto
+  builtins: default
+  on_context_overflow: grade
+  on_harness_exit:
+    timeout: exclude
+    crash: exclude
+  seed: 0
+  program: single
+  harness_options: {}
+  eval_overrides:
+    harness_options: {}
+  agents:
+    max_depth: null
+    budget: linear
+    child_max_steps: 15
+    child_grading: none
+    child_access: full
+    verifier:
+      enabled: true
+      max_steps: 20
+      access: read_only
+    fork: null
+    child_timeout_s: null
+checkpoint:
+  every: 0
+  load_checkpoint_path: null
+  recovery_every: null
+  keep_recovery: null
+stats:
+  experiment_name: exp
+  trial_name: trial
+  wandb:
+    mode: online
+    project: null
+    entity: null
+    name: null
+    group: null
+    tags: []
+    notes: null
+    api_key: null
+    base_url: null
+    resume_run_id: null
+watchdog:
+  enabled: true
+  timeout_seconds: 600
+  exit_code: 2
+  max_restarts: 0

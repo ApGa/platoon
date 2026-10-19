@@ -92,7 +92,7 @@ async def test_remote_task_names_let_an_entry_leave_tasks_out_by_name(server):
         service=f"ors+http://{server.hostport}/CounterEnv",
         exclude_tasks=["train-1", "test-2"],  # test-2: another split
     )
-    config = SimpleNamespace(environments=[entry], train=SimpleNamespace(batch_size=None, task_order="auto"))
+    config = SimpleNamespace(environments=[entry], train=SimpleNamespace(batch_size=None, task_sampler="auto"))
     assert list(AutoDataset.from_config(config, "train")["task_id"]) == ["train:0", "train:2"]
 
 

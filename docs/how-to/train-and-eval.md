@@ -84,7 +84,7 @@ The settings you will change most:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `train.batch_size` | 32 | Tasks per step; at most the training tasks of one environment under the default `train.task_order: auto` |
+| `train.batch_size` | 32 | Tasks per step; at most the training tasks of one environment under the default `train.task_sampler: auto` |
 | `train.num_epochs`, `train.max_training_steps` | none | Run length; set at least one, or `platoon train` exits 78 (with both, the shorter wins) |
 | `train.workflow_config.group_size` | 8 | Rollouts per task |
 | `train.lora_rank` | 32 | Rank of the LoRA training client platoon asks the service for |
@@ -301,8 +301,22 @@ each epoch goes on with the order where the one before it stopped:
   batches that the run it resumes would have drawn.
 
 A single environment's tasks are drawn in shuffled passes too (seed 42): an epoch is the whole batches they fill,
-and the tasks left over start the next epoch. `train.task_order: weighted` draws them as a mixture of one instead,
+and the tasks left over start the next epoch. `train.task_sampler: weighted` draws them as a mixture of one instead,
 with the entry's `seed` and the last batch filled from the next pass.
+
+`train.task_sampler` chooses how a run draws its training tasks:
+
+| `train.task_sampler` | A mixture | A single environment |
+|---|---|---|
+| `auto` (default) | The weighted fair order above | Shuffled passes by the dataloader (seed 42), each epoch the whole batches they fill |
+| `weighted` | The weighted fair order above | The weighted order, as a mixture of one |
+
+It was called `train.task_order` before platoon 0.3.0. That name still loads, with the same values, until platoon 0.4.0
+removes it: the commands name it once on stderr with a deprecation warning, `lock.json` records it, and
+`platoon config validate --strict` fails on it. A config may set both names when they agree, or when `task_order` is
+`auto`, its default before 0.3.0, as a dump of platoon 0.2.0's `config show --defaults` spells it: `task_sampler` then
+decides, and when the two differ, the warning says that `task_order` was ignored. A config that sets
+`task_order: weighted` beside another `task_sampler` does not load (exit 78).
 
 **Check the mix before a run.** Once `platoon train` lists the tasks, it logs how it draws them: each entry's tasks,
 weight and share of the slots, and how often each of its tasks is drawn over the planned steps (`num_epochs`,

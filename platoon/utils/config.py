@@ -357,6 +357,16 @@ def _without_none(annotation: Any) -> list[Any]:
     return [member for member in typing.get_args(annotation) if member is not type(None)]
 
 
+def _optional_choice(members: Sequence[Any]) -> Any | None:
+    """The choices of an optional choice (``Literal[...] | None``, whose null is its default) from its union's members
+    other than None, which a wrong value is told as the choices alone are: ``'random' is not one of 'auto',
+    'weighted'``; None for another union."""
+
+    if len(members) == 1 and typing.get_origin(_strip(members[0])) is Literal:
+        return members[0]
+    return None
+
+
 def _is_pydantic(annotation: Any) -> bool:
     return (
         isinstance(annotation, type) and hasattr(annotation, "model_fields") and hasattr(annotation, "model_validate")
@@ -492,6 +502,8 @@ def _problems(value: Any, annotation: Any, path: str) -> list[str]:
         return [] if _admits_none(annotation) else [f"{where}: null is not allowed (expected {_type_name(annotation)})"]
     if _is_union(annotation):
         members = _without_none(annotation)
+        if (choice := _optional_choice(members)) is not None:
+            return _problems(value, choice, path)
         if any(not _problems(value, member, path) for member in members):
             return []
         # Report the member whose shape matches (a mapping for a model, say); otherwise the union as a whole.
@@ -614,7 +626,8 @@ def normalize_config(data: Any, schema: Any) -> Any:
 def find_deprecations(data: Any, schema: Any) -> list[Deprecation]:
     """The deprecated keys that ``data``, a value of ``schema``, sets, in the order they appear, each with its full
     dotted path.  A key counts wherever the config gives it, even as ``null``: the release that removes it refuses
-    it as an unknown key."""
+    it as an unknown key.  A renamed key at its former default beside its new name set to another value is ignored,
+    and its deprecation says so (:meth:`~platoon.deprecations.DeprecatedKey.ignored_beside`)."""
 
     return _deprecations(data, schema, "")
 
@@ -637,8 +650,9 @@ def _deprecations(value: Any, annotation: Any, path: str) -> list[Deprecation]:
             if entry is None:
                 continue
             where = _join(path, key)
-            if entry.deprecated is not None:
-                found.append(entry.deprecated.at(where))
+            if entry.deprecated is not None:  # with the value of its new name, which may make it ignored
+                renamed = entry.deprecated.renamed_to
+                found.append(entry.deprecated.at(where, item, value.get(renamed) if renamed is not None else None))
             found.extend(_deprecations(item, entry.annotation, where))
             if key in options and isinstance(item, Mapping):  # a free-form mapping's keys, by the section's values
                 going = options[key](value)
@@ -981,6 +995,8 @@ def _parse_value(text: str, annotation: Any, path: str, override: Override) -> A
         return None
     if _is_union(annotation):
         members = _without_none(annotation)
+        if (choice := _optional_choice(members)) is not None:
+            return _parse_value(text, choice, path, override)
         # Typed members first; a plain string member takes whatever none of them accepts.
         for member in sorted(members, key=lambda member: _strip(member) is str):
             try:

@@ -50,7 +50,7 @@ class SamplingPlan:
     # Tasks per training batch (None: not a training config's order).
     batch_size: int | None
     # Tasks per epoch: a mixture's as many as it holds, filled to whole batches; a single environment's (without
-    # task_order: weighted) the whole batches its tasks fill.
+    # task_sampler: weighted) the whole batches its tasks fill.
     epoch_size: int
     # Training steps the run plans (num_epochs and max_training_steps, as the trainer counts them); None without either.
     steps: int | None

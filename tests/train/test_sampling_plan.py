@@ -42,7 +42,7 @@ def _plan(
 ) -> SamplingPlan:
     """The plan AutoDataset.training builds for a mixture of entries of the given sizes."""
 
-    train = SimpleNamespace(batch_size=batch_size, task_order="auto", num_epochs=epochs, max_training_steps=steps)
+    train = SimpleNamespace(batch_size=batch_size, task_sampler="auto", num_epochs=epochs, max_training_steps=steps)
     plan = AutoDataset.training(SimpleNamespace(environments=_entries(*sizes, weight=weight), train=train)).plan
     assert plan is not None
     return plan
@@ -123,7 +123,7 @@ def test_without_a_planned_length_the_plan_counts_per_epoch():
 
 
 def test_a_single_environment_is_described_and_warns_of_nothing():
-    train = SimpleNamespace(batch_size=32, task_order="auto", num_epochs=2, max_training_steps=None)
+    train = SimpleNamespace(batch_size=32, task_sampler="auto", num_epochs=2, max_training_steps=None)
     plan = AutoDataset.training(SimpleNamespace(environments=_entries(("solo", 475))[:1], train=train)).plan
 
     assert plan is not None

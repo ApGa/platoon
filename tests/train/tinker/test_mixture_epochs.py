@@ -52,7 +52,7 @@ def _training(batch_size: int):
 
     config = SimpleNamespace(
         environments=[environment("a", 6), environment("b", 2)],
-        train=SimpleNamespace(batch_size=batch_size, task_order="auto"),
+        train=SimpleNamespace(batch_size=batch_size, task_sampler="auto"),
     )
     return AutoDataset.training(config)
 
@@ -200,7 +200,7 @@ def test_each_steps_metrics_break_down_by_the_labels_of_tasks_the_first_epoch_le
             )
             for name, count in (("a", 6), ("b", 2))
         ],
-        train=SimpleNamespace(batch_size=2, task_order="auto"),
+        train=SimpleNamespace(batch_size=2, task_sampler="auto"),
     )
     training = AutoDataset.training(config)
     kinds = sorted(row["kind"] for row in training.tasks)

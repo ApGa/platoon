@@ -113,14 +113,14 @@ def test_a_list_index_out_of_range_is_a_configuration_error(capsys):
 
 def test_validate_reports_every_problem_of_a_broken_layer(tmp_path, capsys):
     broken = tmp_path / "broken.yaml"
-    broken.write_text(f"extends: {EXAMPLE / 'smoke.yaml'}\ntrain:\n  learning_rate: 1.0e-5\n  task_order: random\n")
+    broken.write_text(f"extends: {EXAMPLE / 'smoke.yaml'}\ntrain:\n  learning_rate: 1.0e-5\n  task_sampler: random\n")
 
     assert _exit_code(["config", "validate", str(broken)]) == cli.EXIT_CONFIG
 
     out = capsys.readouterr().out
     assert f"FAIL {broken}" in out
     assert "  train.learning_rate: unknown key" in out
-    assert "  train.task_order: 'random' is not one of 'auto', 'weighted'" in out
+    assert "  train.task_sampler: 'random' is not one of 'auto', 'weighted'" in out
 
 
 # --- platoon rollout with a scripted policy ----------------------------------------------------------------------

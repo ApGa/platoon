@@ -190,4 +190,4 @@ def test_a_batch_the_training_set_fills_reaches_the_trainer(train_config):
 
 def test_the_weighted_order_fills_a_batch_larger_than_the_training_set(train_config):
     with pytest.raises(ReachedTrainer):
-        _train(train_config({"batch_size": 8, "max_training_steps": 1, "task_order": "weighted"}))
+        _train(train_config({"batch_size": 8, "max_training_steps": 1, "task_sampler": "weighted"}))

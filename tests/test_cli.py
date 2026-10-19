@@ -434,7 +434,7 @@ def test_config_validate_reports_each_file_and_exits_78_when_any_fails(tmp_path,
     good = _train_config(tmp_path)
     bad = tmp_path / "bad.yaml"
     bad.write_text(
-        yaml.safe_dump({"extends": good.name, "train": {"task_order": "random"}, "stats": {"trail_name": "x"}})
+        yaml.safe_dump({"extends": good.name, "train": {"task_sampler": "random"}, "stats": {"trail_name": "x"}})
     )
 
     assert _exit_code(["config", "validate", str(good), str(bad)]) == cli.EXIT_CONFIG
@@ -442,7 +442,7 @@ def test_config_validate_reports_each_file_and_exits_78_when_any_fails(tmp_path,
     out = capsys.readouterr().out
     assert f"ok   {good} (PlatoonTinkerRLTrainerConfig)" in out
     assert f"FAIL {bad}" in out
-    assert "  train.task_order: 'random' is not one of 'auto', 'weighted'" in out
+    assert "  train.task_sampler: 'random' is not one of 'auto', 'weighted'" in out
     assert "  stats.trail_name: unknown key; did you mean stats.trial_name?" in out
 
 
@@ -558,6 +558,122 @@ def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, 
     lock = json.loads((tmp_path / "logs/exp/trial/lock.json").read_text())
     replacement = "train.workflow_config.rollout_config.propagate_root_success"
     assert lock["deprecations"] == [{"path": LEGACY, "replacement": replacement, "removed_in": "0.3.0"}]
+
+
+def test_task_order_is_listed_flagged_by_strict_and_recorded_as_task_samplers_former_name(
+    tmp_path, monkeypatch, capsys
+):
+    """``train.task_order``, ``train.task_sampler``'s name before platoon 0.3.0, still loads: ``config validate`` lists
+    it under the config and ``--strict`` fails on it, and ``platoon train`` names it once and records it in
+    ``lock.json``, with the sampler it names in force."""
+
+    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.utils.config import load_config
+
+    config = _train_config(tmp_path)
+    data = yaml.safe_load(config.read_text())
+    data["train"]["task_order"] = "weighted"
+    config.write_text(yaml.safe_dump(data))
+    line = "train.task_order: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)"
+
+    cli.main(["config", "validate", str(config)])
+    assert capsys.readouterr().out == f"ok   {config} (PlatoonTinkerRLTrainerConfig)\n  {line}\n"
+    assert _exit_code(["config", "validate", "--strict", str(config)]) == cli.EXIT_CONFIG
+    assert capsys.readouterr().out == f"FAIL {config}\n  {line}\n"
+
+    loaded = []
+    monkeypatch.setattr(
+        "platoon.train.tinker.train.run_tinker_training",
+        lambda args: loaded.append(load_config(args, PlatoonTinkerRLTrainerConfig)[0]),
+    )
+    cli.main(["train", str(config)])
+    assert capsys.readouterr().err.count(f"platoon: {line}\n") == 1
+    assert (loaded[0].train.task_sampler, loaded[0].train.task_order) == ("weighted", None)
+    lock = json.loads((tmp_path / "logs/exp/trial/lock.json").read_text())
+    assert lock["deprecations"] == [
+        {"path": "train.task_order", "replacement": "train.task_sampler", "removed_in": "0.4.0"}
+    ]
+
+
+# What platoon 0.2.0's `config show --defaults` printed for a training config on this file's loaders: every key at its
+# 0.2.0 default, `train.task_order: auto` among them.
+DEFAULTS_0_2_0 = Path(__file__).parent / "fixtures" / "config_show_defaults_0.2.0.yaml"
+TASK_ORDER_LINE = "train.task_order: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)"
+
+
+def _defaults_0_2_0(directory: Path) -> Path:
+    """The 0.2.0 dump in ``directory``, its loaders named by this module's name."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    dump = directory / "defaults.yaml"
+    dump.write_text(DEFAULTS_0_2_0.read_text().replace("test_cli:", f"{__name__}:"))
+    assert yaml.safe_load(dump.read_text())["train"]["task_order"] == "auto"
+    return dump
+
+
+def test_a_0_2_0_defaults_dump_beside_task_sampler_loads_and_says_that_task_order_is_ignored(
+    tmp_path, monkeypatch, capsys
+):
+    """A config copied from 0.2.0's ``config show --defaults`` spells ``train.task_order: auto``, its default then.
+    Beside it ``train.task_sampler`` wins, and the deprecation says that ``task_order`` was ignored: ``config
+    validate`` lists it and ``--strict`` fails on it, and ``platoon train`` names it once, trains with
+    ``task_sampler``'s sampler and records the deprecation in ``lock.json``, for a config that extends the dump and
+    for an override of the dump alike."""
+
+    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.utils.config import load_config
+
+    dump = _defaults_0_2_0(tmp_path / "dump")
+    child = tmp_path / "dump" / "child.yaml"
+    child.write_text(yaml.safe_dump({"extends": dump.name, "train": {"task_sampler": "weighted"}}))
+    line = f"{TASK_ORDER_LINE}; its value 'auto' is ignored, since train.task_sampler is 'weighted'"
+
+    cli.main(["config", "validate", str(child)])
+    assert capsys.readouterr().out == f"ok   {child} (PlatoonTinkerRLTrainerConfig)\n  {line}\n"
+    assert _exit_code(["config", "validate", "--strict", str(child)]) == cli.EXIT_CONFIG
+    assert capsys.readouterr().out == f"FAIL {child}\n  {line}\n"
+
+    loaded = []
+    monkeypatch.setattr(
+        "platoon.train.tinker.train.run_tinker_training",
+        lambda args: loaded.append(load_config(args, PlatoonTinkerRLTrainerConfig)[0]),
+    )
+    override = [str(_defaults_0_2_0(tmp_path / "override")), "train.task_sampler=weighted"]
+    for argv in ([str(child)], override):
+        directory = Path(argv[0]).parent
+        monkeypatch.chdir(directory)  # the dump's log_path, logs, is relative to the working directory
+        cli.main(["train", *argv])
+        assert capsys.readouterr().err.count(f"platoon: {line}\n") == 1
+        lock = json.loads((directory / "logs/exp/trial/lock.json").read_text())
+        assert lock["deprecations"] == [
+            {"path": "train.task_order", "replacement": "train.task_sampler", "removed_in": "0.4.0"}
+        ]
+    assert [(config.train.task_sampler, config.train.task_order) for config in loaded] == [("weighted", None)] * 2
+
+
+def test_a_0_2_0_defaults_dump_loads_with_task_sampler_alone_unless_task_order_weighted_contradicts_it(
+    tmp_path, monkeypatch, capsys
+):
+    """The 0.2.0 dump alone loads with ``task_order``'s ``auto``, and beside the same ``task_sampler`` too, each with
+    the plain deprecation.  ``task_order: weighted`` beside another ``task_sampler`` is a conflict that neither
+    ``config validate`` nor ``platoon train`` loads (exit 78)."""
+
+    monkeypatch.chdir(tmp_path)
+    dump = _defaults_0_2_0(tmp_path)
+
+    for overrides in ([], ["train.task_sampler=auto"], ["train.task_order=weighted", "train.task_sampler=weighted"]):
+        cli.main(["config", "validate", str(dump), *overrides])
+        assert capsys.readouterr().out == f"ok   {dump} (PlatoonTinkerRLTrainerConfig)\n  {TASK_ORDER_LINE}\n"
+    conflict = ["train.task_order=weighted", "train.task_sampler=auto"]
+    problem = (
+        "train.task_sampler is 'auto' and train.task_order, its deprecated name, is 'weighted'; set task_sampler alone"
+    )
+    assert _exit_code(["config", "validate", str(dump), *conflict]) == cli.EXIT_CONFIG
+    out = capsys.readouterr().out
+    assert out.startswith(f"FAIL {dump}\n") and problem in out
+    assert _exit_code(["train", str(dump), *conflict]) == cli.EXIT_CONFIG
+    assert problem in capsys.readouterr().err
+    assert not (tmp_path / "logs").exists()  # refused before the run directory is made
 
 
 def test_eval_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, capsys):

@@ -109,7 +109,7 @@ def test_a_value_the_service_refuses_when_it_is_built_is_a_configuration_error(t
     entry = EnvironmentConfig(
         service="harbor", service_kwargs={"dataset_dir": str(tmp_path), "concurrent_tools": ["x"]}
     )
-    config = SimpleNamespace(environments=[entry], train=SimpleNamespace(batch_size=None, task_order="auto"))
+    config = SimpleNamespace(environments=[entry], train=SimpleNamespace(batch_size=None, task_sampler="auto"))
 
     with pytest.raises(ConfigError, match=r"environments\[default\]\.service: service_kwargs: concurrent_tools names"):
         AutoDataset.from_config(config, "train")

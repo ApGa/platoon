@@ -179,7 +179,7 @@ $ uv run platoon config validate train.yaml broken.yaml
 ok   train.yaml (PlatoonTinkerRLTrainerConfig)
 FAIL broken.yaml
   train.learning_rate: unknown key
-  train.task_order: 'random' is not one of 'auto', 'weighted'
+  train.task_sampler: 'random' is not one of 'auto', 'weighted'
   stats.trail_name: unknown key; did you mean stats.trial_name?
 ```
 

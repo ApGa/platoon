@@ -656,7 +656,7 @@ def test_through_autodataset_train_and_eval_are_disjoint_and_cover_the_runnable_
         service_kwargs={"dataset": str(root), "cache": str(tmp_path / "cache"), "holdout": HOLDOUT},
         exclude_tasks=["smol-0", "mco-1"],
     )
-    config = SimpleNamespace(environments=[entry], train=SimpleNamespace(batch_size=None, task_order="auto"))
+    config = SimpleNamespace(environments=[entry], train=SimpleNamespace(batch_size=None, task_sampler="auto"))
     _prepare_images(root, tmp_path / "cache")  # listing refuses tasks whose images are not built
 
     train = list(AutoDataset.from_config(config, "train")["task_id"])
