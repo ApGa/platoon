@@ -237,9 +237,12 @@ def test_a_rollout_through_the_named_environment(installed, serve_policy, tmp_pa
 
 
 def test_installed_the_extension_lists_and_checks_clean(installed, capsys) -> None:
-    def platoon_and_example(table: str) -> list[str]:  # other installed extensions may list programs too
-        lines = table.splitlines()
-        return lines[:1] + [line for line in lines[1:] if line.split()[2] in ("platoon", PROJECT["name"])]
+    def platoon_and_example(table: str) -> list[list[str]]:
+        """The header and the rows of platoon and of the example (other installed extensions may list programs too),
+        as columns, without platoon's own version: the docs show the release they were written with."""
+        header, *rows = (line.split() for line in table.splitlines())
+        kept = [row for row in rows if row[2] in ("platoon", PROJECT["name"])]
+        return [header] + [row[:3] + row[4:] if row[2] == "platoon" else row for row in kept]
 
     cli.main(["extensions", "list", "--kind", "program"])
     assert platoon_and_example(capsys.readouterr().out) == platoon_and_example(shown_block("kind "))

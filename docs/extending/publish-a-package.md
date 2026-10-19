@@ -407,8 +407,8 @@ uv run platoon extensions list --kind program
 
 ```text
 kind     name                  distribution       version  status  source
-program  gym@1                 platoon            0.2.0    ok      platoon.gym:gym_program
-program  single@1              platoon            0.2.0    ok      platoon.programs:single
+program  gym@1                 platoon            0.2.1    ok      platoon.gym:gym_program
+program  single@1              platoon            0.2.1    ok      platoon.programs:single
 program  example-exact-answer  example-extension  0.1.0    ok      example_extension.program:exact_answer
 ```
 

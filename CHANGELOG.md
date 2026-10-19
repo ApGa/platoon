@@ -4,7 +4,7 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
 
-## 0.2.1 (unreleased)
+## 0.2.1 (2026-10-19)
 
 ### Fixes
 
