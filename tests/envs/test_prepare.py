@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from site_cache import use_site_cache
 from test_harbor_fetch import COMMIT, FakeHub, _overlay
 from test_harbor_fetch import hub as fake_hub  # noqa: F401 - a fixture: the fake hub, serving the dataset
 
@@ -62,7 +63,8 @@ def _exit_code(argv: list[str]) -> int:
 
 @pytest.fixture
 def site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
-    """A fake uv on the PATH and image builds that write a file, with what each was asked to do."""
+    """A site cache of the test's own, ``site/`` (the Harbor cache ``site/harbor``, the toolchains
+    ``site/toolchains``), a fake uv on the PATH and image builds that write a file, with what each was asked to do."""
 
     uv = tmp_path / "bin" / "uv"
     uv.parent.mkdir()
@@ -70,7 +72,7 @@ def site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     uv.chmod(0o755)
     monkeypatch.setenv("PATH", f"{uv.parent}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_UV_LOG", str(tmp_path / "uv.log"))
-    monkeypatch.setenv("PLATOON_TOOLCHAINS", str(tmp_path / "toolchains"))
+    use_site_cache(monkeypatch, tmp_path / "site")
     builds: list = []
 
     def build_image(task_dir: Path, key: str, *, builder: str, out_dir: Path, **_: object) -> ImageEntry:
@@ -121,7 +123,6 @@ def _config(tmp_path: Path, **service_kwargs) -> Path:
         "service": "harbor",
         "service_kwargs": {
             "dataset": f"hf://org/harbor-dataset@{COMMIT}",
-            "cache": str(tmp_path / "cache"),
             "select": {
                 "source_dataset": ["FineEnvs/SmolDataEnvs-harbor-train", "amphora/MathConstructOptimize-Envs-harbor"]
             },
@@ -161,14 +162,16 @@ def test_prepare_fetches_builds_and_a_second_run_does_nothing(fake_hub: FakeHub,
         ("images", "done"),
         ("toolchain agent-1.0", "done"),
     ]
-    (lock_path,) = (tmp_path / "cache" / "locks").iterdir()
+    (lock_path,) = (tmp_path / "site" / "harbor" / "locks").iterdir()
     lock = read_lock(lock_path)
-    default = tmp_path / "cache" / "images" / "singularity.json"
+    default = tmp_path / "site" / "harbor" / "images" / "singularity.json"
     assert [builder for _, builder in site["builds"]] == ["oci", "oci"]  # SmolData's shared image, and MCO's
     entries = ImageMap.load(default).entries
     assert sorted(entries) == sorted(key for key, _ in site["builds"])
-    assert {Path(entry.image).parent for entry in entries.values()} == {tmp_path / "cache" / "images" / "singularity"}
-    assert read_manifest(tmp_path / "toolchains" / "agent-1.0") is not None
+    assert {Path(entry.image).parent for entry in entries.values()} == {
+        tmp_path / "site" / "harbor" / "images" / "singularity"
+    }
+    assert read_manifest(tmp_path / "site" / "toolchains" / "agent-1.0") is not None
     assert lines[0].startswith(f"environments[harbor-dataset] dataset: fetched hf://org/harbor-dataset@{COMMIT} into")
     assert lines[1].startswith("environments[harbor-dataset] hold-out: 50% of each source_dataset")  # its report
     assert f"built 2 with the oci builder into the image map {default}" in lines[-3]
@@ -205,7 +208,11 @@ def test_a_dry_run_says_what_is_missing_and_changes_nothing(fake_hub: FakeHub, s
     assert "not planned: the dataset is not fetched yet" in lines[1]
     assert "would build it at" in lines[2] and "it is not built there" in lines[2]
     assert lines[-1] == "not ready: 3 step(s) would make something (a dry run changes nothing)"
-    assert not (tmp_path / "cache").exists() and not (tmp_path / "toolchains").exists() and not site["builds"]
+    assert (
+        not (tmp_path / "site" / "harbor").exists()
+        and not (tmp_path / "site" / "toolchains").exists()
+        and not site["builds"]
+    )
     assert sum(fake_hub.downloads.values()) == 0
 
     _run(config)
@@ -261,7 +268,7 @@ def test_a_truncated_image_is_built_again(fake_hub: FakeHub, site, tmp_path: Pat
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(builders, "build_image", build_image)
         assert _run(config)[2] == 0
-        default = tmp_path / "cache" / "images" / "singularity.json"
+        default = tmp_path / "site" / "harbor" / "images" / "singularity.json"
         key, entry = sorted(ImageMap.load(default).entries.items())[0]
         Path(entry.image).write_bytes(b"a whole")  # truncated
         assert not has_image(ImageMap.load(default), key)
@@ -291,7 +298,7 @@ def test_prepare_never_replaces_a_toolchain_built_from_another_recipe(site, tmp_
     entry = {"service": "table", "service_kwargs": {"path": str(tasks)}, "harness": str(spec)}
     config.write_text(yaml.safe_dump({"environments": [entry]}))
     assert _run(config)[2] == 0
-    toolchain = tmp_path / "toolchains" / "agent-1.0"
+    toolchain = tmp_path / "site" / "toolchains" / "agent-1.0"
     built = read_manifest(toolchain)
     calls = len(_uv_calls(tmp_path))
     (spec.parent / "agent.txt").write_text("pkg==2.0 --hash=sha256:11\n")  # another recipe for the same name
@@ -300,11 +307,11 @@ def test_prepare_never_replaces_a_toolchain_built_from_another_recipe(site, tmp_
         steps, lines, code = _run(config, dry_run=dry_run)
         assert code == 1 and [step.status for step in steps] == ["failed"]
         assert "was built from another recipe (lock sha256" in lines[0]
-        force = f"platoon toolchain build {spec} --root {tmp_path / 'toolchains'} --force"
+        force = f"platoon toolchain build {spec} --root {tmp_path / 'site' / 'toolchains'} --force"
         assert lines[0].endswith(f"rebuild it in place, while no job uses it, with: {force}")
     assert read_manifest(toolchain) == built and len(_uv_calls(tmp_path)) == calls  # left as it was
 
-    cli.main(["toolchain", "build", str(spec), "--root", str(tmp_path / "toolchains"), "--force"])
+    cli.main(["toolchain", "build", str(spec), "--root", str(tmp_path / "site" / "toolchains"), "--force"])
     capsys.readouterr()
     steps, lines, code = _run(config)
     assert code == 0 and [step.status for step in steps] == ["current"]
@@ -316,7 +323,7 @@ def test_the_process_provider_records_its_images_as_local(fake_hub: FakeHub, sit
     steps, lines, code = _run(config)
 
     assert code == 0 and steps[1].status == "done" and not site["builds"]
-    process = ImageMap.load(tmp_path / "cache" / "images" / "process.json")
+    process = ImageMap.load(tmp_path / "site" / "harbor" / "images" / "process.json")
     assert {entry.image for entry in process.entries.values()} == {"local"} and len(process.entries) == 2
     assert "recorded 2 of the 2 image(s) the runnable tasks build as local" in lines[-3]
 
@@ -392,7 +399,6 @@ def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_
         "service": "harbor",
         "service_kwargs": {
             "dataset": str(tmp_path / "dataset"),
-            "cache": str(tmp_path / "cache"),
             "refuse": {"agent_user": False},
             "agent_user": "ignore",
             "verifier_user": "honor",
@@ -405,7 +411,7 @@ def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_
 
     steps, lines, code = _run(config)
 
-    (lock_path,) = (tmp_path / "cache" / "locks").iterdir()
+    (lock_path,) = (tmp_path / "site" / "harbor" / "locks").iterdir()
     verifier_key = read_lock(lock_path).get("rooted").verifier_image["key"]
     (images,) = [step for step in steps if step.step == "images"]
     assert code == 1 and images.status == "failed" and len(site["builds"]) == 2, images.detail
@@ -413,7 +419,7 @@ def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_
     assert f"build them again with `platoon harbor images build CONFIG --key {verifier_key}`" in images.detail
     assert lines[-1] == "not ready: 1 step(s) failed (environments[rooted] images)"
 
-    default = tmp_path / "cache" / "images" / "singularity.json"
+    default = tmp_path / "site" / "harbor" / "images" / "singularity.json"
     built = ImageMap.load(default).entries[verifier_key]
     again = ImageEntry(image=built.image, builder="oci", receipt={"builder_revision": 1})  # built since
     update_image_map(default, {verifier_key: again})
@@ -444,7 +450,7 @@ def test_configuration_problems_exit_78(fake_hub: FakeHub, site, tmp_path: Path,
     assert "holdout.fraction must be a number between 0 and 1" in capsys.readouterr().err
     assert _exit_code(["prepare", str(config), "environments.0.harness=nope"]) == 78
     assert _exit_code(["prepare", str(config), 'environments.0.service_kwargs.image_map={"images": {}}']) == 78
-    assert "inline image map, which cannot record built images" in capsys.readouterr().err
+    assert "environments.0.service_kwargs.image_map: unknown key; platoon 0.3.0 removed it" in capsys.readouterr().err
     (tmp_path / "configs" / "empty.yaml").write_text("train: {model_name: m}\n")
     assert _exit_code(["prepare", str(tmp_path / "configs" / "empty.yaml")]) == 78
     assert "lists no environments" in capsys.readouterr().err
@@ -573,7 +579,7 @@ def test_train_and_eval_refuse_what_prepare_has_not_made_with_the_prepare_comman
 
     cli.main(["prepare", str(train)])
     capsys.readouterr()
-    default = tmp_path / "cache" / "images" / "process.json"
+    default = tmp_path / "site" / "harbor" / "images" / "process.json"
     images = json.loads(default.read_text())
     key = sorted(images["images"])[0]
     del images["images"][key]  # one image of the two missing again
@@ -733,8 +739,8 @@ def test_train_with_prepare_prepares_then_trains_and_a_second_run_prepares_nothi
     ]
     assert lines[0].startswith(f"environments[harbor-dataset] dataset: fetched hf://org/harbor-dataset@{COMMIT} into")
     assert lines[-1] == "ready: 4 made now, 0 already current"
-    default = tmp_path / "cache" / "images" / "process.json"
-    assert len(ImageMap.load(default).entries) == 2 and read_manifest(tmp_path / "toolchains" / "agent-1.0")
+    default = tmp_path / "site" / "harbor" / "images" / "process.json"
+    assert len(ImageMap.load(default).entries) == 2 and read_manifest(tmp_path / "site" / "toolchains" / "agent-1.0")
     assert len(opened["train"]) == 1 and opened["train"][0] > 0  # the run listed its tasks and reached the trainer
 
     cli.main(["prepare", str(config), log_path])
@@ -768,11 +774,10 @@ def test_the_overrides_of_a_run_with_prepare_reach_its_prepare_and_the_run(
     run, which finds it there (its checks would refuse it anywhere else) and records them."""
 
     config = _run_config(tmp_path, "train")
-    elsewhere = tmp_path / "elsewhere"
+    lock = tmp_path / "elsewhere" / "dataset.lock.json"
     overrides = [
         f"log_path={tmp_path / 'runs'}",
-        f"environments.0.service_kwargs.cache={elsewhere / 'harbor'}",
-        f"environments.0.service_kwargs.toolchain_root={elsewhere / 'toolchains'}",
+        f"environments.0.service_kwargs.lock={lock}",
         "stats.trial_name=prepared",
     ]
 
@@ -780,13 +785,10 @@ def test_the_overrides_of_a_run_with_prepare_reach_its_prepare_and_the_run(
         cli.main(["train", str(config), "--prepare", *overrides])
 
     assert _prepare_lines(capsys.readouterr().err)[-1] == "ready: 4 made now, 0 already current"
-    assert len(ImageMap.load(elsewhere / "harbor" / "images" / "process.json").entries) == 2
-    assert read_manifest(elsewhere / "toolchains" / "agent-1.0") is not None
-    assert not (tmp_path / "cache").exists() and not (tmp_path / "toolchains").exists()  # the config's, the site's
+    assert len(read_lock(lock).tasks) == 6  # where the override says, which the run read
+    assert not list((tmp_path / "site" / "harbor" / "locks").glob("*.lock.json"))  # not the entry's default lock
     snapshot = yaml.safe_load((tmp_path / "runs" / "exp" / "prepared" / "config.resolved.yaml").read_text())
-    service_kwargs = snapshot["environments"][0]["service_kwargs"]
-    assert service_kwargs["cache"] == str(elsewhere / "harbor")
-    assert service_kwargs["toolchain_root"] == str(elsewhere / "toolchains")
+    assert snapshot["environments"][0]["service_kwargs"]["lock"] == str(lock)
     assert len(opened["train"]) == 1
 
 

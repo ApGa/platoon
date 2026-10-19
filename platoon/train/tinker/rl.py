@@ -635,8 +635,7 @@ class TrainLoopSharedState:
 
     def _get_event_frequency(self, config: TrainEventTriggerConfig) -> int | None:
         """Training steps between the events ``config`` triggers (``every``), or ``None`` for ``every: 0``, which
-        never triggers the event; the deprecated ``strategy: epoch`` counts ``every`` in passes over the training
-        tasks."""
+        never triggers the event; ``strategy: epoch`` counts ``every`` in passes over the training tasks."""
 
         if getattr(config, "strategy", None) == "epoch":
             return event_interval(config, self.num_train_batches_per_epoch)
@@ -675,9 +674,12 @@ def _evaluation_plan(state: TrainLoopSharedState, *, resumed: bool, end: int) ->
                 f"Evaluating the starting policy at step 0, before the first update (eval.at_start), {then}"
             )
         if first > end:
+            setting = f"eval.every is {every}"
+            if getattr(state.config.eval, "strategy", None) == "epoch":  # every counts epochs: say both
+                setting = f"eval.every is {state.config.eval.every} epoch(s) (strategy: epoch), {every} steps"
             return logging.WARNING, (
-                f"No evaluation runs: eval.every is {every}, past the run's last step, {end}; eval.at_start: true "
-                "would evaluate the starting policy at step 0"
+                f"No evaluation runs: {setting}, past the run's last step, {end}; eval.at_start: true would evaluate "
+                "the starting policy at step 0"
             )
         return logging.INFO, (
             f"Evaluating every {every} steps, the first at step {every}; eval.at_start: true would evaluate the "
@@ -2198,10 +2200,9 @@ class PlatoonTinkerRLTrainer:
         # config's own checks loads without them (platoon train checks them first, in training_problems).
         check_recovery_pruning(self.config)
         if getattr(self.config.eval, "at_start", False) and not evaluates(self.config):
-            strategy_none = getattr(self.config.eval, "strategy", None) == "none"
             logger.warning(
-                "eval.at_start is ignored: %s, which turns evaluation during training off, the starting policy's too",
-                "eval.strategy is none" if strategy_none else "eval.every is 0",
+                "eval.at_start is ignored: eval.every is 0, which turns evaluation during training off, the starting "
+                "policy's too"
             )
         shutdown_event = asyncio.Event()
 

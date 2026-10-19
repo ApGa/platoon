@@ -623,13 +623,12 @@ def evaluation_unapplied(config: Any, split: str | None = None) -> list[str]:
 
 def _flat(mapping: Any, prefix: str = "") -> dict[str, Any]:
     """A settings mapping as ``{dotted path: value}``, nested sections (``rollout_config``, ``inference_params``)
-    walked, ``extra`` and other free-form mappings kept whole; a deprecated name counts as the key it was renamed to."""
+    walked, ``extra`` and other free-form mappings kept whole."""
 
     if not isinstance(mapping, Mapping):
         return {}
     flat: dict[str, Any] = {}
     for key, value in mapping.items():
-        key = "propagate_root_success" if key == "propogate_root_success" else str(key)
         path = f"{prefix}{key}"
         if isinstance(value, Mapping) and key in ("rollout_config", "inference_params"):
             flat.update(_flat(value, f"{path}."))

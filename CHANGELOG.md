@@ -117,6 +117,35 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   under `tasks_state_lost`), recovery pruning deletes a pruned checkpoint's file, and `tasks/events.jsonl` logs every
   draw, settle and fate. The statistics never fail training. `platoon tasks show` and `platoon tasks export` read
   them ([Per-task statistics](docs/how-to/train-and-eval.md#per-task-statistics)).
+- **Breaking: the forms that platoon 0.2.0 deprecated are gone.** A config, an override or a command that still uses
+  one fails as a configuration error (exit 78), with a message that names what replaces it and says that platoon 0.3.0
+  removed it, such as `train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by`
+  ([Write and override configs](docs/how-to/configs.md#4-check-the-result-before-you-run-it)). Each form, with what
+  replaces it:
+  - `rollout_config.propogate_root_success`, the misspelling: `propagate_root_success`;
+  - `train.rollout_group_key`: `train.label_by`;
+  - `workflow_config.straggler_policy_key` of `train` and `eval`: `train.label_by`, whose labels straggler policies
+    key on;
+  - `num_concurrent_rollout_workflow_workers` of `train` and `eval`, which counted rollout groups:
+    `max_concurrent_rollouts`, which counts rollouts (the old value times the section's `workflow_config.group_size`);
+  - `strategy: none` of `eval` and `checkpoint`: `every: 0` (`strategy: step` and `epoch` stay, below);
+  - a Harbor entry's `cache`, `image_map` and `toolchain_root`, and the variables `PLATOON_HARBOR_CACHE` and
+    `PLATOON_TOOLCHAINS`: the site profile's `cache`, whose `harbor` directory holds the Harbor cache with each fetched
+    dataset's image map (`images/<provider>.json`), and whose `toolchains` directory holds the harness toolchains.
+    A command that loads a config, or takes the cache from the site, refuses to run while one of the variables is
+    set. An entry that serves a dataset directory has no image map: its tasks run their `docker_image` or
+    `default_image`, and naming the directory as a `dataset` to fetch has `platoon prepare` build their images;
+  - fetch config files of `platoon harbor`, and `platoon harbor fetch`'s `--lock` and `--cache`, which applied to them
+    alone: a Harbor entry of a training or evaluation config, and `--workers` for their `workers`;
+  - `python -m platoon.train.tinker.restart_wrapper` and `run_with_restart`: `watchdog.max_restarts` in the training
+    config, with which `platoon train` restarts training after any failure.
+- **`strategy` stays, as the unit of `every`.** Platoon 0.2.0 deprecated the `strategy` of `eval` and `checkpoint`
+  for removal in 0.3.0; it stays instead, and loads without a deprecation warning. `every` counts in its units:
+  `step`, what a section that leaves it out counts, or `epoch`, a pass over the training tasks, so `eval: {strategy:
+  epoch, every: 1}` evaluates at the end of each epoch. A config that sets it keeps the meaning it has had: a section
+  that sets `strategy` and leaves `every` out triggers its event every 1 of its units, and one that sets neither never
+  does. `strategy: none`, which `every: 0` duplicates, is gone (above)
+  ([Cadences in steps or epochs](docs/how-to/train-and-eval.md#cadences-in-steps-or-epochs)).
 
 ## 0.2.1 (2026-10-19)
 

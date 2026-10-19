@@ -374,19 +374,18 @@ class HarnessSetup:
     async def prepare(
         cls, spec: HarnessSpec, *, route: EnvironmentRoute, service: EnvironmentService, gateway: Any
     ) -> HarnessSetup:
-        """Stage a named toolchain (from the service's ``toolchain_root``, else the toolchain root that
-        :func:`platoon.harness.toolchains.toolchain_root` finds) and, unless the harness runs on the rollout host,
-        work out the session's needs: the gateway's Unix socket as an upstream (when the gateway can serve one and
-        the service takes needs), the toolchain's mount and the spec's memory."""
+        """Stage a named toolchain (from the toolchain root, :func:`platoon.harness.toolchains.toolchain_root`) and,
+        unless the harness runs on the rollout host, work out the session's needs: the gateway's Unix socket as an
+        upstream (when the gateway can serve one and the service takes needs), the toolchain's mount and the spec's
+        memory."""
 
         setup = cls()
         name = spec.install.toolchain
         if name is not None and is_named(name):
-            root = getattr(service, "toolchain_root", None)
             try:
-                setup.toolchain = await asyncio.to_thread(prepare_toolchain, name, root=root)
+                setup.toolchain = await asyncio.to_thread(prepare_toolchain, name)
             except ToolchainError as exc:  # with the command that builds it, when it is not built
-                setup.error = f"harness {spec.ref}: {toolchain_problem(spec, root=root) or exc}"
+                setup.error = f"harness {spec.ref}: {toolchain_problem(spec) or exc}"
         if route.placement == "local":
             return setup
         upstreams = {}

@@ -1,5 +1,5 @@
-"""The Harbor service's view of a fetched dataset: task ids from a lock, task directories from the cache, and the
-images sessions run (the site's image map plus each task's deferred Dockerfile steps).
+"""The Harbor service's view of a fetched dataset: task ids from a lock, task directories from the Harbor cache, and the
+images sessions run (the dataset's default image map plus each task's deferred Dockerfile steps).
 
 A service configured with ``dataset`` (a source to fetch) or ``lock`` (a lock to read) lists and finds its tasks
 here instead of scanning a directory. The trainer, which lists the tasks, fetches a pinned ``dataset`` whose lock
@@ -19,7 +19,7 @@ from typing import Any
 from platoon.envs.harbor.dockerfile import DockerfileError, plan_dockerfile
 from platoon.envs.harbor.fetch import FetchConfig, ensure_lock, fetch_config
 from platoon.envs.harbor.holdout import HoldoutRow
-from platoon.envs.harbor.images import ImageMap, SessionImage, session_image
+from platoon.envs.harbor.images import ImageMap, ImageMapError, SessionImage, default_image_map, session_image
 from platoon.envs.harbor.lock import DatasetLock, LockedDataset, LockError, default_cache, read_lock
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,6 @@ class LockedTasks:
         *,
         dataset: str | None = None,
         lock: str | Path | None = None,
-        cache: str | Path | None = None,
         tasks: str | Path | Sequence[str | Path] = (),
         select: Mapping[str, Any] | None = None,
         overlays: str | Path | Sequence[str | Path] = (),
@@ -50,7 +49,6 @@ class LockedTasks:
         self.fetch: FetchConfig | None = (
             fetch_config(
                 dataset,
-                cache=cache,
                 lock=lock,
                 tasks=tasks,
                 select=select,
@@ -68,7 +66,7 @@ class LockedTasks:
         else:
             assert lock is not None  # checked above: a dataset or a lock
             self.lock_path = Path(lock).expanduser()
-        self.cache = self.fetch.cache if self.fetch is not None else (Path(cache) if cache else default_cache())
+        self.cache = self.fetch.cache if self.fetch is not None else default_cache()
         self._splits = splits
         self._dataset: LockedDataset | None = None
         self._rows_by_dir: dict[Path, Any] | None = None
@@ -148,55 +146,28 @@ class LockedTasks:
 class TaskImages:
     """Session images: the image map's entry for a task's build key, and its deferred steps.
 
-    The build plan comes from the task's lock row when it has one, else from its ``environment/Dockerfile``,
-    planned when its first session opens (only with an image map the entry names: without one, tasks outside a lock
-    keep running on their ``docker_image`` or the service's ``default_image``).
-
-    The map is the one the entry names (``image_map``), else ``default``, the default image map of a lock-backed
-    entry (:func:`~platoon.envs.harbor.images.default_image_map`), when that file exists; a missing default file means
-    no map.  It is read when the first session opens.
+    The build plan comes from the task's lock row.  The map is the fetched dataset's default image map,
+    ``images/<provider>.json`` in its Harbor cache (:func:`~platoon.envs.harbor.images.default_image_map`), when that
+    file exists; a missing file means no map.  It is read when the first session opens.  A dataset directory
+    (``locked`` None) has no image map: its tasks run their ``docker_image`` or the service's ``default_image``.
     """
 
-    def __init__(
-        self,
-        image_map: str | Path | Mapping[str, Any] | None,
-        locked: LockedTasks | None,
-        *,
-        default: Path | None = None,
-    ) -> None:
-        self._source = image_map
+    def __init__(self, locked: LockedTasks | None, provider: str) -> None:
         self._locked = locked
-        self._default = default if image_map is None and locked is not None else None
+        self._path = default_image_map(locked.cache, provider) if locked is not None else None
 
     @property
     def path(self) -> Path | None:
-        """The image map file: the one the entry names, else the default map (which may not exist yet); None for an
-        inline map, or none at all."""
+        """The image map file, which may not exist yet; None for a dataset directory."""
 
-        if isinstance(self._source, (str, Path)):
-            return Path(self._source)
-        return self._default if self._source is None else None
-
-    @property
-    def inline(self) -> Mapping[str, Any] | None:
-        """The image map the entry gives inline, as a mapping; None for a map in a file, or none."""
-
-        return self._source if isinstance(self._source, Mapping) else None
-
-    @property
-    def is_default(self) -> bool:
-        """Whether the map is the entry's default image map, not one it names."""
-
-        return self._default is not None
+        return self._path
 
     def load(self) -> ImageMap | None:
-        """The image map as it is now (``ImageMapError`` when the entry's own map cannot be read); None without one,
-        or when the default map's file does not exist yet."""
+        """The image map as it is now (``ImageMapError`` when its file cannot be read); None for a dataset directory,
+        or when the file does not exist yet."""
 
-        if self._source is not None:
-            return ImageMap.load(self._source)
-        if self._default is not None and self._default.is_file():
-            return ImageMap.load(self._default)
+        if self._path is not None and self._path.is_file():
+            return ImageMap.load(self._path)
         return None
 
     @cached_property
@@ -206,22 +177,22 @@ class TaskImages:
         return self.load()
 
     def for_task(self, task_dir: Path, *, docker_image: str | None, default_image: str | None) -> SessionImage | None:
-        plan = None
         row = self._locked.row_for(task_dir) if self._locked is not None else None
-        if row is not None:
-            plan = dict(row.image)
-        elif self._source is not None and not docker_image:
-            plan = _plan_at_open(task_dir)
-        if plan is None:
+        if row is None:
             return None
         return session_image(
-            task_dir, plan=plan, image_map=self.image_map, docker_image=docker_image, default_image=default_image
+            task_dir,
+            plan=dict(row.image),
+            image_map=self.image_map,
+            docker_image=docker_image,
+            default_image=default_image,
         )
 
     def for_verifier(self, task_dir: Path, *, docker_image: str | None = None) -> SessionImage | None:
         """The image of a separate verifier built from ``tests/Dockerfile`` (the lock row's ``verifier_image``,
         else planned now), with its deferred steps read from ``tests/``; None for a verifier without one (it runs
-        ``[verifier.environment].docker_image``, else the task's own image: :meth:`for_task`)."""
+        ``[verifier.environment].docker_image``, else the task's own image: :meth:`for_task`).  An ``ImageMapError``
+        for one that a dataset directory's task builds, which no image map has."""
 
         plan = None
         row = self._locked.row_for(task_dir) if self._locked is not None else None
@@ -231,10 +202,16 @@ class TaskImages:
             plan = _plan_at_open(task_dir, "tests")
         if plan is None or not plan.get("key"):
             return None
+        if self._path is None:
+            raise ImageMapError(
+                f"Harbor task {Path(task_dir).name} builds from tests/Dockerfile (build key {plan['key']}) for its "
+                "verifier, and a dataset directory has no image map: serve the directory as a dataset to fetch "
+                "(service_kwargs.dataset), whose images platoon prepare builds into its image map"
+            )
         return session_image(task_dir, plan=plan, image_map=self.image_map, context="tests")
 
 
-def _plan_at_open(task_dir: Path, context: str = "environment") -> dict[str, Any] | None:
+def _plan_at_open(task_dir: Path, context: str) -> dict[str, Any] | None:
     task_dir = Path(task_dir).resolve()
     with _PLANS_LOCK:
         if (task_dir, context) in _PLANS:

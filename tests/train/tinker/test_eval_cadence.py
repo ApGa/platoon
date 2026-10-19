@@ -1,7 +1,7 @@
-"""When the trainer evaluates: every ``eval.every`` training steps, ``0`` for never (the deprecated ``eval.strategy``
-keeps its old units), the starting policy at step 0 only with ``eval.at_start``, the step a start resumes at unless an
-earlier start completed its evaluation (the run's ``evaluations.jsonl``), and an evaluation due at the last step before
-the run ends.  ``test_eval_resume.py`` runs whole starts of a run, crashes and restarts among them.
+"""When the trainer evaluates: every ``eval.every`` training steps, ``0`` for never (``eval.strategy: epoch`` counts it
+in passes over the training tasks), the starting policy at step 0 only with ``eval.at_start``, the step a start resumes
+at unless an earlier start completed its evaluation (the run's ``evaluations.jsonl``), and an evaluation due at the last
+step before the run ends.  ``test_eval_resume.py`` runs whole starts of a run, crashes and restarts among them.
 
 ``checkpoint`` takes the same two settings; ``test_checkpoint_cadence.py`` covers what a step saves.
 
@@ -57,10 +57,12 @@ def test_every_counts_training_steps(every, steps):
     assert state.save_every == steps
 
 
-@pytest.mark.parametrize(("strategy", "every", "steps"), [("none", 1, None), ("step", 3, 3), ("epoch", 2, 8)])
-def test_a_deprecated_strategy_keeps_its_units(strategy, every, steps):
-    """Until platoon 0.3.0 removes ``strategy``, a config that sets it counts ``every`` as it did: ``epoch`` in passes
-    over the training tasks (4 steps here), ``step`` in steps, and ``none`` never."""
+@pytest.mark.parametrize(
+    ("strategy", "every", "steps"), [(None, 3, 3), ("step", 3, 3), ("epoch", 2, 8), ("epoch", 0, None)]
+)
+def test_a_strategy_sets_the_unit_of_every(strategy, every, steps):
+    """``strategy: epoch`` counts ``every`` in passes over the training tasks (4 steps here), and ``step``, as a
+    config that leaves it out does, in steps."""
 
     state = _shared_state(EvalConfig(strategy=strategy, every=every), CheckpointConfig(strategy=strategy, every=every))
 
@@ -74,8 +76,9 @@ def test_a_deprecated_strategy_keeps_its_units(strategy, every, steps):
         (EvalConfig(), False),
         (EvalConfig(every=0), False),
         (EvalConfig(every=5), True),
-        (EvalConfig(strategy="none", every=5), False),
+        (EvalConfig(strategy="step"), True),  # every left out: 1
         (EvalConfig(strategy="epoch", every=1), True),
+        (EvalConfig(strategy="epoch", every=0), False),
     ],
 )
 def test_only_an_eval_setting_that_triggers_starts_the_eval_loop(eval_config, evaluates):

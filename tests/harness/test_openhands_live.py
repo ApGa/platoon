@@ -26,13 +26,13 @@ from openhands_live import (
     HARNESS,
     SDK_SCRIPT,
     SNAPSHOT,
-    TOOLCHAINS,
     extends,
     harbor_adapter_spec,
     run_episode,
     run_specific,
     settings,
     toolchain_ready,
+    toolchain_site,
     turn,
 )
 
@@ -519,7 +519,7 @@ async def test_a_scripted_openhands_episode_through_the_gateway_with_platoon_tes
 
     FakeService.root = tmp_path / "sandboxes"
     FakeService.sessions.clear()
-    monkeypatch.setenv("PLATOON_TOOLCHAINS", str(TOOLCHAINS))  # the named toolchain's root, as a site sets it
+    monkeypatch.setenv("PLATOON_SITE", str(toolchain_site(tmp_path)))  # the named toolchain's root, as a site's
     policy = ScriptedPolicy(
         [tool_call("terminal", command="echo 42 > answer.txt"), tool_call("finish", message="Wrote 42.")]
     )

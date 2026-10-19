@@ -7,14 +7,27 @@ gone in 0.4 (RFC 0016, section 10).
 A config class names the keys it still takes but that are going away in a class attribute, ``DEPRECATED_KEYS``::
 
     @dataclass
-    class RolloutConfig:
+    class TrainConfig:
         DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-            "propogate_root_success": DeprecatedKey(removed_in="0.3.0", renamed_to="propagate_root_success"),
+            "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
         }
 
 The config loader (:func:`platoon.utils.config.resolve_config`) finds every such key a config sets, wherever it sits,
 and reports each as a :class:`Deprecation` with its dotted path: as a warning, in ``platoon config validate``'s report
 (a failure with ``--strict``) and in the run's ``lock.json`` (``deprecations``).
+
+The release named removes the key: the config class drops its field and names it in its ``UNKNOWN_KEY_HINTS``
+(:mod:`platoon.utils.config`) with :func:`removed_hint`, so a config that still sets it does not load (exit 78), and
+says what replaces it and the release that removed it::
+
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+        "propogate_root_success": removed_hint("0.3.0", "propagate_root_success"),
+    }
+
+A service's removed options go in its class's ``UNKNOWN_KEY_HINTS`` alike: a config whose entry's ``service_kwargs``
+give one does not load either (:func:`platoon.envs.service.service_option_hints`), and the check of an entry's options
+against what its service takes says the same (:func:`platoon.envs.service.service_option_problems`).  A removed
+command or variable fails with the same words.
 
 A config that sets a renamed key and its new name to different values is a conflict that the config class refuses,
 with one exception: the renamed key at the default it had before the rename (``former_default``), which a dump of an
@@ -42,6 +55,7 @@ __all__ = [
     "Deprecation",
     "PlatoonDeprecationWarning",
     "deprecated_keys",
+    "removed_hint",
     "warn",
 ]
 
@@ -150,3 +164,11 @@ def warn(deprecations: Iterable[Deprecation]) -> None:
 
     for deprecation in deprecations:
         warnings.warn(deprecation.message, PlatoonDeprecationWarning, skip_file_prefixes=(_PACKAGE_DIR,))
+
+
+def removed_hint(removed_in: str, replacement: str) -> str:
+    """What platoon says of a form that release ``removed_in`` removed, and what replaces it (``replacement``, as its
+    deprecation named it): the hint of a removed key in a config class's ``UNKNOWN_KEY_HINTS``, quoted after its path
+    and ``unknown key``, and the words of a removed command or variable."""
+
+    return f"platoon {removed_in} removed it; use {replacement}"

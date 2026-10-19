@@ -80,8 +80,6 @@ def site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     profile = tmp_path / "site.yaml"
     profile.write_text(f"cache: {tmp_path / 'cache'}\nruns: {tmp_path / 'runs'}\n")
     monkeypatch.setenv("PLATOON_SITE", str(profile))
-    for variable in ("PLATOON_HARBOR_CACHE", "PLATOON_TOOLCHAINS"):
-        monkeypatch.delenv(variable, raising=False)
     monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
 
     def build_renderer(model: str, *args: object) -> None:

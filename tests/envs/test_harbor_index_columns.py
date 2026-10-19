@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from site_cache import use_site_cache
 
 from platoon.envs.harbor import HarborEnvironmentService
 from platoon.train.auto import AutoDataset
@@ -50,13 +51,22 @@ FIELDS = {
 }
 
 
-def _locked(tmp_path: Path, fields: dict[str, dict[str, Any]] = FIELDS) -> dict[str, Any]:
-    """A fetched dataset's service options, its tasks' images prepared: a run lists a fetched dataset's tasks only once
-    the images they build are (``check_tasks``)."""
+@pytest.fixture(autouse=True)
+def harbor_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test's Harbor cache, in a site cache of its own (``tests/site_cache.py``)."""
 
-    dataset, cache = _dataset(tmp_path / "dataset", fields), tmp_path / "cache"
-    _prepare_images(dataset, cache)
-    return {"dataset": str(dataset), "cache": str(cache)}
+    return use_site_cache(monkeypatch, tmp_path / "cache")
+
+
+def _locked(tmp_path: Path, fields: dict[str, dict[str, Any]] = FIELDS) -> dict[str, Any]:
+    """A fetched dataset's service options, its tasks' images prepared in the site's Harbor cache: a run lists a
+    fetched dataset's tasks only once the images they build are (``check_tasks``)."""
+
+    from platoon.envs.harbor.lock import default_cache
+
+    dataset = _dataset(tmp_path / "dataset", fields)
+    _prepare_images(dataset, default_cache())
+    return {"dataset": str(dataset)}
 
 
 def _prepare_images(dataset: Path, cache: Path, provider: str = "docker") -> None:
@@ -80,10 +90,10 @@ def _config(*entries: EnvironmentConfig, label_by: str = ENVIRONMENT_COLUMN, **t
             task_sampler="auto",
             label_by=label_by,
             rollout_group_limits={},
-            workflow_config=SimpleNamespace(straggler_policies={}, straggler_policy_key=None),
+            workflow_config=SimpleNamespace(straggler_policies={}),
             **train,
         ),
-        eval=SimpleNamespace(workflow_config=SimpleNamespace(straggler_policies={}, straggler_policy_key=None)),
+        eval=SimpleNamespace(workflow_config=SimpleNamespace(straggler_policies={})),
     )
 
 
@@ -155,8 +165,3 @@ def test_an_index_field_named_like_platoons_own_column_is_left_out_and_an_error_
         "field) whose name is that of one of platoon's own columns, which the dataset keeps instead, so the key "
         "would not read the task's: name another column"
     ]
-
-    straggler = _config(entry)
-    straggler.eval.workflow_config.straggler_policy_key = "task_id"  # deprecated, and a column key too
-    with pytest.raises(ConfigError, match=r"eval\.workflow_config\.straggler_policy_key names 'task_id'"):
-        AutoDataset.from_config(straggler, "train")

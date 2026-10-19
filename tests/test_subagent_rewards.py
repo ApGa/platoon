@@ -134,17 +134,15 @@ def test_delegation_bonus_rejects_negative_coefficients():
 
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
-    [
-        ({}, False),
-        ({"propagate_root_success": True}, True),
-        ({"propogate_root_success": True}, True),
-        ({"propagate_root_success": False, "propogate_root_success": False}, False),
-    ],
+    [({}, False), ({"propagate_root_success": True}, True), ({"propagate_root_success": None}, False)],
 )
 def test_rollout_config_resolves_root_propagation(kwargs, expected):
     assert RolloutConfig(**kwargs).propagate_root_success is expected
 
 
-def test_rollout_config_rejects_conflicting_root_propagation_spellings():
-    with pytest.raises(ValueError, match="Conflicting"):
-        RolloutConfig(propagate_root_success=True, propogate_root_success=False)
+def test_rollout_config_takes_no_misspelled_root_propagation():
+    """platoon 0.3.0 removed ``propogate_root_success``, which 0.2.0 read as ``propagate_root_success`` with a
+    warning; a config that sets it is refused with what replaces it (``tests/test_removed_forms.py``)."""
+
+    with pytest.raises(TypeError, match="propogate_root_success"):
+        RolloutConfig(propogate_root_success=True)  # type: ignore[call-arg]

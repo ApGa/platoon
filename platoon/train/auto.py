@@ -666,8 +666,7 @@ def environment_route(
 def check_harness_toolchains(environments: Sequence[EnvironmentConfig]) -> None:
     """Refuse a run, before any rollout, whose TOML harness specs run from a named toolchain that is not built where
     the run finds it: under the toolchain root, ``toolchains`` in the site profile's cache, else
-    ``~/.cache/platoon/toolchains`` (:func:`platoon.harness.toolchains.toolchain_root`; the deprecated
-    ``service_kwargs.toolchain_root`` and ``$PLATOON_TOOLCHAINS`` name another until platoon 0.3.0).
+    ``~/.cache/platoon/toolchains`` (:func:`platoon.harness.toolchains.toolchain_root`).
 
     A run never builds a toolchain.  Building one needs uv and network access to PyPI, takes minutes, and writes a
     directory that every sandbox of a site mounts read-only, so it is a step of its own, once per site (``platoon
@@ -696,16 +695,14 @@ def check_harness_toolchains(environments: Sequence[EnvironmentConfig]) -> None:
                 continue  # refused where the route is built, with its own error
             if not isinstance(harness, HarnessSpec):
                 continue
-            root = environment.service_kwargs.get("toolchain_root")
-            root = None if root is None else str(root)
-            state = toolchain_state(harness, root=root)
+            state = toolchain_state(harness)
             if state is None:
                 continue
             where = f"environments[{environment.label}].harness"
             if state.buildable and not state.needs_force:
                 unbuilt.append(f"{where}: {state.describe()}")
             else:
-                elsewhere.append(f"{where}: {toolchain_problem(harness, ref=ref, root=root)}")
+                elsewhere.append(f"{where}: {toolchain_problem(harness, ref=ref)}")
     if elsewhere:
         raise ConfigError(list(dict.fromkeys([*elsewhere, *unbuilt])))
     if unbuilt:

@@ -117,27 +117,12 @@ def metric_prefix(column: str, label: str) -> str:
 
 
 def column_keys(config: Any) -> dict[str, str]:
-    """The columns a run's keys read, each with the first key that names it: ``train.label_by`` (its default, the
-    mixture entry, is platoon's own column) and the deprecated ``straggler_policy_key`` of ``train.workflow_config``
-    and ``eval.workflow_config``.  Empty for a config without a ``train`` section, such as an evaluation's."""
+    """The columns a run's keys read, each with the key that names it: ``train.label_by``, unless it names its
+    default, the mixture entry, which is platoon's own column.  Empty for a config without a ``train`` section, such as
+    an evaluation's."""
 
-    keys: dict[str, str] = {}
-    train = getattr(config, "train", None)
-    label_by = getattr(train, "label_by", None)
-    if isinstance(label_by, str) and label_by != ENVIRONMENT_COLUMN:
-        keys[label_by] = "train.label_by"
-    for section in ("train", "eval"):
-        column = getattr(getattr(getattr(config, section, None), "workflow_config", None), "straggler_policy_key", None)
-        if isinstance(column, str) and column:
-            keys.setdefault(column, f"{section}.workflow_config.straggler_policy_key")
-    return keys
-
-
-def straggler_column(workflow_config: Any, label_by: str) -> str:
-    """The column a workflow config's ``straggler_policies`` key on: the run's label column, unless the config sets
-    the deprecated ``straggler_policy_key``, which keeps its own column until platoon 0.3.0 removes it."""
-
-    return getattr(workflow_config, "straggler_policy_key", None) or label_by
+    label_by = getattr(getattr(config, "train", None), "label_by", None)
+    return {label_by: "train.label_by"} if isinstance(label_by, str) and label_by != ENVIRONMENT_COLUMN else {}
 
 
 def check_labels(config: Any, train_dataset: Any, eval_dataset: Any = None) -> None:
@@ -175,10 +160,7 @@ def check_labels(config: Any, train_dataset: Any, eval_dataset: Any = None) -> N
     _warn_of_unknown("train.rollout_group_limits", getattr(train, "rollout_group_limits", None), train_dataset, column)
     workflow = getattr(train, "workflow_config", None)
     _warn_of_unknown(
-        "train.workflow_config.straggler_policies",
-        getattr(workflow, "straggler_policies", None),
-        train_dataset,
-        straggler_column(workflow, column),
+        "train.workflow_config.straggler_policies", getattr(workflow, "straggler_policies", None), train_dataset, column
     )
     if eval_dataset is not None:
         workflow = getattr(getattr(config, "eval", None), "workflow_config", None)
@@ -186,7 +168,7 @@ def check_labels(config: Any, train_dataset: Any, eval_dataset: Any = None) -> N
             "eval.workflow_config.straggler_policies",
             getattr(workflow, "straggler_policies", None),
             eval_dataset,
-            straggler_column(workflow, column),
+            column,
             split="evaluation",
         )
 

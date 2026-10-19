@@ -17,9 +17,9 @@ serve a group, and a variable that is not set is an error; a relative path is re
 
 * ``cache``: the cache root (:func:`cache_root`), under which ``platoon prepare`` makes what runs read: the Harbor
   cache, with its locks and image maps, in ``<cache>/harbor``, and harness toolchains in ``<cache>/toolchains``.
-  Without it the cache root is ``~/.cache/platoon``.  It replaces the deprecated ``$PLATOON_HARBOR_CACHE`` and
-  ``$PLATOON_TOOLCHAINS``, which still name the two directories until platoon 0.3.0, and must agree with it when both
-  are set (:func:`variable_problems`).
+  Without it the cache root is ``~/.cache/platoon``.  It replaced ``$PLATOON_HARBOR_CACHE`` and
+  ``$PLATOON_TOOLCHAINS``, which platoon 0.3.0 removed: a command that loads a config, or takes the cache from
+  the site, refuses to run while one is set (:func:`removed_variable_problems`).
 * ``runs``: where the run directories of configs that name none go.  A training config without ``log_path`` writes
   under ``<runs>/<stats.experiment_name>/<stats.trial_name>``, its experiment named after the config file unless it
   names one, so that two configs never share a run directory by default; an evaluation config without
@@ -57,13 +57,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from platoon.deprecations import removed_hint
 from platoon.utils.config import ConfigError
 
 __all__ = [
-    "CACHE_VARIABLES",
     "DEFAULT_CACHE_ROOT",
     "KEYS",
     "PROVIDER_OPTIONS",
+    "REMOVED_VARIABLES",
     "SITE_ENV",
     "ProviderChoice",
     "SiteProfile",
@@ -73,9 +74,8 @@ __all__ = [
     "check_run_directory",
     "load_profile",
     "profile_path",
+    "removed_variable_problems",
     "site_profile",
-    "variable_deprecations",
-    "variable_problems",
 ]
 
 #: The variable that names the site profile's file.
@@ -91,10 +91,9 @@ _BOOLEAN_OPTIONS = ("allow_network_none", "stage_images")
 _TEXT_OPTIONS = ("rootfs_layout", "gpu")
 #: The cache root without a profile's ``cache``.
 DEFAULT_CACHE_ROOT = "~/.cache/platoon"
-#: The deprecated variables that name a directory under the cache root, with that directory's name, and the release
-#: that removes them.
-CACHE_VARIABLES = {"PLATOON_HARBOR_CACHE": "harbor", "PLATOON_TOOLCHAINS": "toolchains"}
-_VARIABLES_REMOVED_IN = "0.3.0"
+#: The variables that named a directory under the cache root until platoon 0.3.0 removed them, with that directory's
+#: name: the site profile's ``cache`` replaced them.
+REMOVED_VARIABLES = {"PLATOON_HARBOR_CACHE": "harbor", "PLATOON_TOOLCHAINS": "toolchains"}
 #: The provider of a Harbor entry that names none, without a profile's (``HarborEnvironmentService``'s default).
 DEFAULT_PROVIDER = "docker"
 _VARIABLE = re.compile(r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))")
@@ -356,46 +355,24 @@ def cache_root(profile: SiteProfile | None = None) -> Path:
     return profile.cache if profile.cache is not None else Path(DEFAULT_CACHE_ROOT).expanduser()
 
 
-# --- the deprecated variables ---------------------------------------------------------------------------------
+# --- the removed variables ------------------------------------------------------------------------------------
 
 
-def variable_deprecations() -> list[Any]:
-    """A :class:`~platoon.deprecations.Deprecation` for each deprecated cache variable that is set
-    (:data:`CACHE_VARIABLES`): the site profile's ``cache`` replaces them."""
-
-    from platoon.deprecations import Deprecation
+def removed_variable_problems() -> list[str]:
+    """A problem for each removed cache variable that is set (:data:`REMOVED_VARIABLES`): platoon 0.3.0 no longer reads
+    it, so a job that sets it would find its files elsewhere than it means to; the site profile's ``cache`` names the
+    directory instead.  The config loader, and the commands that take the cache from the site, refuse to run then."""
 
     return [
-        Deprecation(
-            path=f"${name}",
-            replacement=f"the site profile's cache, whose {directory} directory it names (~/.config/platoon/site.yaml "
-            f"or ${SITE_ENV})",
-            removed_in=_VARIABLES_REMOVED_IN,
+        f"${name}: "
+        + removed_hint(
+            "0.3.0",
+            f"the site profile's cache, whose {directory} directory it named (~/.config/platoon/site.yaml, or the "
+            f"file ${SITE_ENV} names), and unset ${name}",
         )
-        for name, directory in CACHE_VARIABLES.items()
+        for name, directory in REMOVED_VARIABLES.items()
         if os.environ.get(name)
     ]
-
-
-def variable_problems(profile: SiteProfile | None = None) -> list[str]:
-    """A problem for each deprecated cache variable that names another directory than the site profile's ``cache``
-    gives it: which one a run used would depend on which part of platoon looked."""
-
-    profile = site_profile() if profile is None else profile
-    if profile.cache is None:
-        return []
-    problems = []
-    for name, directory in CACHE_VARIABLES.items():
-        value = os.environ.get(name)
-        if not value:
-            continue
-        given = profile.cache / directory
-        if os.path.realpath(os.path.expanduser(value)) != os.path.realpath(given):
-            problems.append(
-                f"${name} names {value}, but the site profile {profile.path} gives {given} (its cache, "
-                f"{profile.cache}, holds {directory}): unset ${name}, which is deprecated"
-            )
-    return problems
 
 
 # --- applying it to a config ------------------------------------------------------------------------------------

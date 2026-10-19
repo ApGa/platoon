@@ -1,9 +1,10 @@
 """A dead trainer's rollout workers are killed before the next trainer starts, and live trainers' never are.
 
 Workers lead their own sessions, so nothing in a trainer's exit reaches them but PDEATHSIG.  These tests cover the
-backstops for a worker that outlives its trainer anyway: the on-disk registry and its sweep, the restart wrapper's
-sweep before every restart, the new supervisor's sweep before its first launch, and the SIGTERM the trainer sends
-its live workers on the exits that run no cleanup (the watchdog's ``os._exit``).  The "workers" are stand-ins that
+backstops for a worker that outlives its trainer anyway: the on-disk registry and its sweep, the new supervisor's
+sweep before its first launch, and the SIGTERM the trainer sends its live workers on the exits that run no cleanup
+(the watchdog's ``os._exit``).  ``platoon train``'s sweep before each restart (``watchdog.max_restarts``) is
+``tests/train/test_supervise.py``'s.  The "workers" are stand-ins that
 import nothing (``sleep``, or the dependency-free stub entrypoint) unless a test needs the real supervisor.
 """
 
@@ -11,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import pickle
 import signal
 import subprocess
 import sys
@@ -23,10 +23,8 @@ import pytest
 
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
-from platoon.deprecations import PlatoonDeprecationWarning
 from platoon.task import Task
 from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.restart_wrapper import run_with_restart
 from platoon.train.tinker.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
@@ -251,78 +249,6 @@ def test_the_watchdog_tells_the_workers_to_stop_before_it_exits(monkeypatch):
     watchdog.stop()
 
     assert events[:2] == ["stop workers", ("exit", 2)]
-
-
-TRAINER = """
-import asyncio, os, sys
-from pathlib import Path
-
-marker, scratch, logs, result, stub_dir = (Path(arg) for arg in sys.argv[1:6])
-if marker.exists():
-    # The restart: is the first trainer's worker still running?
-    pid = int(marker.read_text())
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_bytes()
-        alive = stat[stat.rindex(b")") + 2 : stat.rindex(b")") + 3] not in (b"Z", b"X", b"x")
-    except OSError:
-        alive = False
-    result.write_text("alive" if alive else "gone")
-    sys.exit(0)
-
-import platoon.train.tinker  # noqa: F401
-from platoon.train.tinker.workers.protocol import load_request
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
-
-request = load_request(str(scratch / "request.pkl"))
-env = {"STUB_MODE": "trap_sigterm", "STUB_READY_PATH": request.ready_path, "PYTHONPATH": str(stub_dir)}
-supervisor = RolloutWorkerSupervisor(
-    module="worker_stub_entrypoint", scratch_dir=str(scratch), log_dir=str(logs), env_overrides=env
-)
-
-
-async def main():
-    pids = []
-    running = asyncio.ensure_future(supervisor.run(request, on_launch=pids.append))
-    while not os.path.exists(request.ready_path):
-        await asyncio.sleep(0.05)
-    await asyncio.sleep(0.5)  # the stub traps SIGTERM: it outlives this trainer, as a stuck worker would
-    marker.write_text(str(pids[0]))
-    os._exit(2)  # the watchdog's exit: no cleanup, a restart
-
-
-asyncio.run(main())
-"""
-
-
-def test_the_restart_wrapper_stops_a_dead_trainers_workers_before_restarting(tmp_path):
-    scratch = tmp_path / "ipc"
-    scratch.mkdir()
-    request = _request(scratch, rollout_budget_seconds=3600.0)
-    with open(scratch / "request.pkl", "wb") as handle:
-        pickle.dump(request, handle, protocol=5)
-    marker, result = tmp_path / "first-worker.pid", tmp_path / "restart-saw"
-    command = [sys.executable, "-c", TRAINER, str(marker), str(scratch), str(tmp_path / "logs"), str(result)]
-    command.append(STUB_DIR)
-
-    with pytest.warns(PlatoonDeprecationWarning, match="use watchdog.max_restarts in the training config instead"):
-        exit_code = run_with_restart(
-            command,
-            max_restarts=1,
-            watchdog_exit_code=2,
-            restart_delay_seconds=0,
-            worker_registry=registry_dir(str(scratch)),
-            worker_sweep_grace_seconds=1.0,
-        )
-
-    worker_pid = int(marker.read_text())
-    try:
-        assert exit_code == 0
-        assert result.read_text() == "gone"  # the restarted trainer never ran next to it
-        assert not _running(worker_pid)
-        assert os.listdir(registry_dir(str(scratch))) == []
-    finally:
-        if _running(worker_pid):
-            os.killpg(worker_pid, signal.SIGKILL)
 
 
 def test_registry_files_are_private(tmp_path, workers):

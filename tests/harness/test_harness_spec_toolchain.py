@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from harness_fakes import FakeAgent, FakeSession, ProcessSandbox
+from site_cache import use_site_cache
 from test_harness_spec import CONTEXT, minimal
 
 from platoon.harness.registry import get_harness_spec
@@ -21,7 +22,6 @@ from platoon.harness.spec import (
     parse_spec,
     resolve_toolchain,
 )
-from platoon.harness.toolchains import TOOLCHAIN_ROOT_ENV
 from platoon.task import Task
 
 SPECS = Path(__file__).resolve().parents[2] / "platoon" / "harness" / "builtin" / "specs"
@@ -59,11 +59,10 @@ def test_a_toolchain_is_an_absolute_path_or_a_name():
 def test_a_named_toolchain_resolves_under_its_root(monkeypatch, tmp_path):
     assert resolve_toolchain("/opt/agent", "/ignored") == "/opt/agent"
     assert resolve_toolchain("my-agent-1.0", "/sites/toolchains") == "/sites/toolchains/my-agent-1.0"
-    monkeypatch.setenv(TOOLCHAIN_ROOT_ENV, "/env/toolchains")
-    assert resolve_toolchain("my-agent-1.0") == "/env/toolchains/my-agent-1.0"
-    monkeypatch.delenv(TOOLCHAIN_ROOT_ENV)
     monkeypatch.setenv("HOME", str(tmp_path))
     assert resolve_toolchain("my-agent-1.0") == f"{tmp_path}/.cache/platoon/toolchains/my-agent-1.0"
+    use_site_cache(monkeypatch, tmp_path / "site")
+    assert resolve_toolchain("my-agent-1.0") == f"{tmp_path}/site/toolchains/my-agent-1.0"
 
 
 def test_a_recipe_resolves_its_files_next_to_the_spec(tmp_path):

@@ -1,6 +1,6 @@
-"""Separate verifiers of fetched tasks (process provider): the verifier runs the image the site's image map gives it,
-with that image's deferred Dockerfile steps, and the task's index row from the lock reaches the reward contract's
-check hook."""
+"""Separate verifiers of fetched tasks (process provider): the verifier runs the image the dataset's image map (in the
+site's Harbor cache) gives it, with that image's deferred Dockerfile steps, and the task's index row from the lock
+reaches the reward contract's check hook."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+from site_cache import use_site_cache
 
 from platoon.envs.harbor import HarborEnvironmentService
 from platoon.envs.harbor.images import ImageEntry, update_image_map
@@ -83,10 +84,14 @@ def _dataset(root: Path, *, verifier_dockerfile: bool) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def _harbor_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return use_site_cache(monkeypatch, tmp_path / "cache")
+
+
 def _service(tmp_path: Path, provider, **kwargs) -> HarborEnvironmentService:
     return HarborEnvironmentService(
         dataset=str(tmp_path / "dataset"),
-        cache=str(tmp_path / "cache"),
         lock=str(tmp_path / "dataset.lock.json"),
         provider=provider,
         **kwargs,
@@ -107,13 +112,13 @@ async def test_a_verifier_on_the_tasks_image_gets_its_mapped_image_deferred_step
     provider = RecordingProvider(tmp_path / "sandboxes")
     await _service(tmp_path, provider).list_tasks("train")  # the trainer fetches and locks
     key = read_lock(tmp_path / "dataset.lock.json").get("d--answer").image["key"]
-    image_map = tmp_path / "images.json"
+    image_map = _service(tmp_path, provider).task_images.path  # the dataset's default image map
+    assert image_map is not None
     update_image_map(image_map, {key: ImageEntry(image="local", env={"FROM_MAP": "task"})})
     SEEN.clear()
     service = _service(
         tmp_path,
         provider,
-        image_map=str(image_map),
         env={"EXPECTED_IMAGE": "task"},
         reward={"primary": "reward", "check": f"{__name__}:record_index"},
     )
@@ -133,17 +138,16 @@ async def test_a_verifier_built_from_tests_dockerfile_runs_its_own_mapped_image(
     row = read_lock(tmp_path / "dataset.lock.json").get("d--answer")
     task_key, verifier_key = row.image["key"], row.verifier_image["key"]
     assert task_key != verifier_key
-    image_map = tmp_path / "images.json"
+    image_map = _service(tmp_path, provider).task_images.path
+    assert image_map is not None
     update_image_map(image_map, {task_key: ImageEntry(image="local", env={"FROM_MAP": "task"})})
-    service = _service(tmp_path, provider, image_map=str(image_map), env={"EXPECTED_IMAGE": "tests"})
+    service = _service(tmp_path, provider, env={"EXPECTED_IMAGE": "tests"})
     with pytest.raises(EnvSetupError, match="builds from tests/Dockerfile") as refused:
         await service.open(await service.get_task("d--answer"), rollout_id="r0")  # before the agent runs
     assert refused.value.failure_kind == "env_config"
 
     update_image_map(image_map, {verifier_key: ImageEntry(image="local", env={"FROM_MAP": "tests"})})
-    outcome = await _grade_an_answer(
-        _service(tmp_path, provider, image_map=str(image_map), env={"EXPECTED_IMAGE": "tests"})
-    )
+    outcome = await _grade_an_answer(_service(tmp_path, provider, env={"EXPECTED_IMAGE": "tests"}))
 
     assert (outcome.status, outcome.reward) == ("scored", 1.0), outcome
     verifier = provider.verifier_specs()[-1]

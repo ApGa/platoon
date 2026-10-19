@@ -10,7 +10,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
 
-from platoon.deprecations import DeprecatedKey
+from platoon.deprecations import removed_hint
 from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, check_queue_timeout
 from platoon.envs.harbor.artifacts import DEFAULT_MAX_ARTIFACT_BYTES
 from platoon.envs.harbor.dataset import (
@@ -28,7 +28,6 @@ from platoon.envs.harbor.images import (
     ImageMapError,
     SessionImage,
     apply_image_files,
-    default_image_map,
     docker_image_reference,
     has_image,
     withholds_modes,
@@ -88,14 +87,15 @@ class HarborEnvironmentService:
 
     A fetched dataset (:mod:`platoon.envs.harbor.fetch`) is named by ``dataset`` (``hf://org/name@revision`` or
     a directory; ``tasks``, ``select``, ``overlays``, ``refuse`` and ``index`` choose and edit what is fetched) or
-    by its ``lock`` alone, with ``cache`` holding the files. Its ids come from the lock, and the trainer, which
-    lists the tasks, fetches a pinned ``dataset`` that no lock lists yet; rollout workers only read the lock. With
-    an image map (:mod:`platoon.envs.harbor.images`), a task that builds from a Dockerfile runs the map's image
-    for its build key, and its deferred Dockerfile steps are applied when its session opens; one the map lacks is
-    refused, never run on the default image.  A separate verifier gets its image the same way: the map's image of
-    ``tests/Dockerfile``, else the task's own image with its deferred steps.  The map is ``image_map``, else, for a
-    fetched dataset, its default image map, ``images/<provider>.json`` in the cache, when that file exists (what
-    ``platoon prepare`` builds); a dataset directory has no default map.
+    by its ``lock`` alone, with the Harbor cache (``harbor`` in the site profile's cache) holding the files. Its ids
+    come from the lock, and the trainer, which lists the tasks, fetches a pinned ``dataset`` that no lock lists yet;
+    rollout workers only read the lock. A task of a fetched dataset that builds from a Dockerfile runs the image map's
+    image for its build key, and its deferred Dockerfile steps are applied when its session opens; one the map lacks
+    is refused, never run on the default image.  A separate verifier gets its image the same way: the map's image of
+    ``tests/Dockerfile``, else the task's own image with its deferred steps.  The map is the dataset's default image
+    map, ``images/<provider>.json`` in the Harbor cache, when that file exists (what ``platoon prepare`` builds;
+    :mod:`platoon.envs.harbor.images`); a dataset directory has none, so its tasks run their ``docker_image`` or
+    ``default_image``.
 
     With ``holdout`` (:mod:`platoon.envs.harbor.holdout`), the service lists two splits, ``eval`` (whole groups of
     the selected tasks, held out, tasks that share an input file always in one group) and ``train`` (the rest),
@@ -135,17 +135,16 @@ class HarborEnvironmentService:
     sets no ``timeout``.
     """
 
-    # Options that are going away (platoon.deprecations): the site profile's cache says where the Harbor cache, the
-    # image maps and the toolchains live (platoon.site).  Until 0.3.0 removes them they work as before, a relative
-    # path against the working directory.
-    DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-        "cache": DeprecatedKey(removed_in="0.3.0", instead="the site profile's cache (its harbor directory)"),
-        "image_map": DeprecatedKey(
-            removed_in="0.3.0",
-            instead="the default image map that platoon prepare builds (images/<provider>.json in the Harbor cache)",
+    # Options a release removed, with what replaces them (platoon.deprecations): the site profile's cache says where
+    # the Harbor cache, the image maps and the toolchains live (platoon.site).  A config whose entry's service_kwargs
+    # give one does not load (platoon.envs.service.service_option_hints, service_option_problems).
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+        "cache": removed_hint("0.3.0", "the site profile's cache, whose harbor directory is the Harbor cache"),
+        "image_map": removed_hint(
+            "0.3.0", "the default image map that platoon prepare builds, images/<provider>.json in the Harbor cache"
         ),
-        "toolchain_root": DeprecatedKey(
-            removed_in="0.3.0", instead="the site profile's cache (its toolchains directory)"
+        "toolchain_root": removed_hint(
+            "0.3.0", "the site profile's cache, whose toolchains directory holds the harness toolchains"
         ),
     }
     # The options that name files platoon reads: a config file may give each relative to itself (RFC 0018, section 5;
@@ -185,17 +184,14 @@ class HarborEnvironmentService:
         agent_user: AgentUserPolicy = "refuse",
         verifier_user: VerifierUserPolicy | None = None,
         verifier_provider_options: Mapping[str, Any] | None = None,
-        toolchain_root: str | Path | None = None,
         name: str = "harbor",
         dataset: str | None = None,
         lock: str | Path | None = None,
-        cache: str | Path | None = None,
         tasks: str | Path | Sequence[str | Path] = (),
         select: Mapping[str, Any] | None = None,
         overlays: str | Path | Sequence[str | Path] = (),
         refuse: Mapping[str, Any] | None = None,
         index: Sequence[str | Mapping[str, Any]] = (),
-        image_map: str | Path | Mapping[str, Any] | None = None,
         max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
         sandbox_start_budget_s: float = DEFAULT_SANDBOX_START_BUDGET_S,
         holdout: HoldoutRule | Mapping[str, Any] | None = None,
@@ -255,7 +251,6 @@ class HarborEnvironmentService:
         self.mounts = [mount if isinstance(mount, Mount) else Mount(**mount) for mount in mounts]
         self.tool_timeout_s = float(tool_timeout_s)
         self.verifier_timeout_multiplier = float(verifier_timeout_multiplier)
-        self.toolchain_root = toolchain_root  # where named harness toolchains live (platoon.harness.toolchains)
         self._dataset_dir = dataset_dir
         self._task_dirs = task_dirs
         self._splits = splits
@@ -274,7 +269,6 @@ class HarborEnvironmentService:
             self._locked = LockedTasks(
                 dataset=dataset,
                 lock=lock,
-                cache=cache,
                 tasks=tasks,
                 select=select,
                 overlays=overlays,
@@ -282,10 +276,8 @@ class HarborEnvironmentService:
                 index=index,
                 splits=manifest,
             )
-        default_map = None
-        if self._locked is not None:  # a dataset directory keeps running its tasks' own images (no default map)
-            default_map = default_image_map(self._locked.cache, self._provider_name())
-        self._images = TaskImages(image_map, self._locked, default=default_map)
+        # A fetched dataset's default image map; a dataset directory runs its tasks' own images.
+        self._images = TaskImages(self._locked, self._provider_name())
 
     @property
     def locked(self) -> LockedTasks | None:
@@ -301,8 +293,7 @@ class HarborEnvironmentService:
 
     @property
     def task_images(self) -> TaskImages:
-        """The images its sessions run: the image map (``image_map``, else a fetched dataset's default image map) and
-        each task's build plan."""
+        """The images its sessions run: a fetched dataset's default image map, and each task's build plan."""
 
         return self._images
 
@@ -422,13 +413,13 @@ class HarborEnvironmentService:
         builds them.  Tasks of a dataset directory plan their images when a session opens, and are not checked; nor
         are tasks that run a prebuilt image.  Each image is looked at once, however many tasks share it."""
 
-        if self._locked is None or not names:
-            return
         path = self._images.path
+        if self._locked is None or path is None or not names:
+            return
         try:
-            image_map = None if path is not None and not path.exists() else self._images.load()
+            image_map = self._images.load()
         except ImageMapError as exc:
-            raise EnvSetupError("env_config", f"image_map: {exc}") from exc
+            raise EnvSetupError("env_config", str(exc)) from exc  # the map's file names itself
         dataset = self._locked.dataset(fetch_allowed=False)
         present: dict[str, bool] = {}  # build key -> whether the map has its image
         missing: dict[str, list[str]] = {}  # build key -> the tasks that need its image
@@ -446,13 +437,10 @@ class HarborEnvironmentService:
             return
         tasks = {name for needing in missing.values() for name in needing}
         key, needing = max(missing.items(), key=lambda item: len(item[1]))
-        if path is None:
-            where = "the entry's inline image map lacks"
-        elif path.exists():
+        if path.exists():
             where = f"the image map {path} lacks"
         else:
-            default = "default " if self._images.is_default else ""
-            where = f"no image map holds (the {default}image map {path} does not exist)"
+            where = f"no image map holds (the image map {path} does not exist)"
         if image_map is not None and any(image_map.get(each) is not None for each in missing):
             where += ", or names by a file that is gone or truncated"  # an entry whose file is not whole
         more = f" and {len(missing) - 1} more" if len(missing) > 1 else ""
@@ -837,8 +825,8 @@ class HarborEnvironmentService:
         return read_task_index(self._dataset_dir) if self._dataset_dir is not None else {}
 
     def _session_image(self, harbor_task: HarborTask) -> SessionImage | None:
-        """The image of a locked task, or of any task when there is an image map; None: the task's own
-        ``docker_image`` or the default image, as before. Raises ``ValueError`` for a missing image."""
+        """The image of a task of a fetched dataset; None: the task's own ``docker_image`` or the default image, as a
+        dataset directory's tasks run. Raises ``ValueError`` for a missing image."""
 
         return self._images.for_task(
             harbor_task.task_dir, docker_image=harbor_task.docker_image, default_image=self.default_image
@@ -858,7 +846,7 @@ class HarborEnvironmentService:
         if built is None or not built.image:
             raise ValueError(
                 f"Harbor task {harbor_task.name!r} builds its verifier's image from tests/Dockerfile, and no "
-                "image is known for it; build it and give the service an image map"
+                "image is known for it; build it with platoon prepare, which builds it into the image map"
             )
         return built
 

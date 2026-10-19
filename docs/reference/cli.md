@@ -391,8 +391,8 @@ platoon harbor images plan [OPTIONS] CONFIG [ARGS...]
 
 List the images the tasks need: one per build key, with its task count, base images and whether the image map has it.
 
-CONFIG is a training or evaluation config: each Harbor entry's lock, with the entry's image map (its image_map,
-else `images/<provider>.json` in its cache); or a lock file, with --image-map.
+CONFIG is a training or evaluation config: each Harbor entry's lock, with the entry's image map,
+`images/<provider>.json` in the Harbor cache; or a lock file, with --image-map.
 
 **Arguments**:
 
@@ -412,8 +412,8 @@ platoon harbor images build [OPTIONS] CONFIG [ARGS...]
 
 Build the images the image map lacks and add each to the map, with a receipt (builder, version, time, log, size, SHA-256). Exits 1 if any build failed.
 
-CONFIG is a training or evaluation config: each Harbor entry's lock, into the entry's image map (its image_map,
-else `images/<provider>.json` in its cache, with the images in `images/<provider>/`), with the builder of the
+CONFIG is a training or evaluation config: each Harbor entry's lock, into the entry's image map,
+`images/<provider>.json` in the Harbor cache, with the images in `images/<provider>/`, with the builder of the
 entry's sandbox provider; or a lock file, with --image-map.  Builds of one map that run at once, also on several
 nodes, build each image once.
 
@@ -488,24 +488,22 @@ platoon harbor fetch [OPTIONS] CONFIG [ARGS...]
 
 Fetch the Harbor datasets a config names into the cache, and lock them.
 
-CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched (a fetch config file,
-deprecated, is fetched too). A dataset pinned to a commit whose lock answers the config, with a cache that holds
-its tasks, is left as it is: nothing is downloaded or hashed, unless the lock was written before platoon recorded
-the tasks' input files. A local directory is fetched again, since its files may have changed. Fetches of one lock
-take turns, also on several nodes, so a second one finds the first's lock current. Each entry with a hold-out
-prints the hold-out's report. Prints one JSON line per lock.
+CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched. A dataset pinned to a
+commit whose lock answers the config, with a cache that holds its tasks, is left as it is: nothing is downloaded
+or hashed, unless the lock was written before platoon recorded the tasks' input files. A local directory is fetched
+again, since its files may have changed. Fetches of one lock take turns, also on several nodes, so a second one
+finds the first's lock current. Each entry with a hold-out prints the hold-out's report. Prints one JSON line per
+lock.
 
 **Arguments**:
 
-* `CONFIG`: A training or evaluation config (or a fetch config file, deprecated). **[required]**
+* `CONFIG`: A training or evaluation config. **[required]**
 * `OVERRIDES`: key=value overrides of a training or evaluation config, as platoon train takes them.
 
 **Parameters**:
 
 * `--update, --no-update`: Resolve a moving reference (a branch, a tag, no revision) to its current commit, and fetch it. *[default: False]*
 * `--repair, --no-repair`: Fetch a pinned dataset even when its lock answers: hash every cache entry again, and replace a damaged one. *[default: False]*
-* `--lock PATH`: A fetch config file's lock: write it here instead.
-* `--cache PATH`: A fetch config file's cache: use this one instead.
 * `--workers INT`: Parallel downloads (default 8).
 
 #### platoon harbor verify
@@ -517,8 +515,8 @@ platoon harbor verify [OPTIONS] CONFIG [ARGS...]
 Check the cache entries of a lock: every task's files must hash to its digest. Exits 1 on a mismatch.
 
 CONFIG is a training or evaluation config: the lock of each Harbor entry that names a dataset (the lock that
-answers it) or a lock; or a lock file (or a fetch config file, deprecated). An entry with a hold-out whose lock
-records no input files (one written before platoon recorded them) exits 78, as before a fetch.
+answers it) or a lock; or a lock file. An entry with a hold-out whose lock records no input files (one written
+before platoon recorded them) exits 78, as before a fetch.
 
 **Arguments**:
 
@@ -527,7 +525,7 @@ records no input files (one written before platoon recorded them) exits 78, as b
 
 **Parameters**:
 
-* `--cache PATH`: The cache a lock file's or fetch config's entries are in.
+* `--cache PATH`: The cache a lock file's entries are in (default: the Harbor cache).
 * `--task STR..., --empty-task`: Check only these task ids.
 
 ### platoon train

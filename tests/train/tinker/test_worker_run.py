@@ -548,7 +548,7 @@ def test_rollout_config_round_trips_through_the_request(tmp_path, monkeypatch):
         output_dir=str(tmp_path),
         timeout=1800,
         step_timeout=250,
-        propogate_root_success=True,
+        propagate_root_success=True,
         extra={"environment": {"a": 1}},
     )
     request = _request(tmp_path, rollout_config=asdict(original))

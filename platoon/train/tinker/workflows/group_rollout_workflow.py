@@ -90,7 +90,7 @@ from platoon.train.components import (
     rollout_overhead_s,
     row_entry,
 )
-from platoon.train.labels import straggler_column, task_label
+from platoon.train.labels import task_label
 from platoon.train.task_stats import MAIN, MemberResult
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo
@@ -951,8 +951,8 @@ class GroupRolloutWorkflow:
         group_size = self.config.group_size
         straggler_timeout = getattr(self.config, "straggler_timeout_seconds", None)
         quorum = getattr(self.config, "straggler_quorum", None)
-        # The policy of the task's label (train.label_by), or of its value of a deprecated straggler_policy_key.
-        column = straggler_column(self.config, getattr(self, "label_by", ENVIRONMENT_COLUMN))
+        # The policy of the task's label (train.label_by).
+        column = getattr(self, "label_by", ENVIRONMENT_COLUMN)
         policy = getattr(self.config, "straggler_policies", {}).get(task_label(data, column))
         if policy is not None:
             straggler_timeout, quorum = policy.timeout_seconds, policy.quorum

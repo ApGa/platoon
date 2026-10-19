@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from site_cache import use_site_cache
 from test_harness_spec import CONTEXT
 from test_toolchain_build import PYTHON, fake_uv, uv_calls  # noqa: F401 - fake_uv is a fixture
 
@@ -22,7 +23,6 @@ from platoon.harness.registry import get_harness_spec
 from platoon.harness.spec import load_spec
 from platoon.harness.toolchains import (
     MANIFEST,
-    TOOLCHAIN_ROOT_ENV,
     build_command,
     build_toolchain,
     read_manifest,
@@ -76,16 +76,17 @@ def entries(harness: str, **entry) -> list:
 
 
 def test_a_toolchain_that_is_not_built_is_refused_with_what_builds_it(tmp_path, monkeypatch):
-    monkeypatch.setenv(TOOLCHAIN_ROOT_ENV, str(tmp_path / "toolchains"))
+    use_site_cache(monkeypatch, tmp_path / "site")
+    root = tmp_path / "site" / "toolchains"
     spec = get_harness_spec("openhands")
-    command = OPENHANDS.format(root=tmp_path / "toolchains")
+    command = OPENHANDS.format(root=root)
 
     problem = toolchain_problem(spec, ref="openhands")
 
     described = (
         "harness openhands@1.54.0.post1 runs from the toolchain openhands-1.54.0, which a run never builds, and it is "
         "not "
-        f"built there (toolchain root {tmp_path / 'toolchains'})"
+        f"built there (toolchain root {root})"
     )
     assert (
         problem == f"{described}: build it once per site with `platoon prepare` on the run's config, or with: {command}"
@@ -96,17 +97,16 @@ def test_a_toolchain_that_is_not_built_is_refused_with_what_builds_it(tmp_path, 
     assert str(error.value).endswith("prepare it with: platoon prepare CONFIG")
 
 
-def test_the_entrys_toolchain_root_wins_over_the_variable(tmp_path, monkeypatch):
-    monkeypatch.setenv(TOOLCHAIN_ROOT_ENV, str(tmp_path / "elsewhere"))
-    root = tmp_path / "shared toolchains"
+def test_the_run_looks_under_the_site_profiles_cache_and_the_command_quotes_it(tmp_path, monkeypatch):
+    use_site_cache(monkeypatch, tmp_path / "shared site")
+    root = tmp_path / "shared site" / "toolchains"
 
     with pytest.raises(NotPrepared, match=f"it is not built there \\(toolchain root {root}\\)"):
-        check_harness_toolchains(entries("openhands@1.54.0", service_kwargs={"toolchain_root": str(root)}))
+        check_harness_toolchains(entries("openhands@1.54.0"))
     assert build_command("openhands@1.54.0", root) == f"platoon toolchain build openhands@1.54.0 --root '{root}'"
 
 
-def test_without_a_toolchain_root_the_run_looks_under_the_cache_root(tmp_path, monkeypatch):
-    monkeypatch.delenv(TOOLCHAIN_ROOT_ENV, raising=False)
+def test_without_a_site_profile_the_run_looks_under_the_cache_root(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     root = tmp_path / ".cache" / "platoon" / "toolchains"
 
@@ -116,16 +116,17 @@ def test_without_a_toolchain_root_the_run_looks_under_the_cache_root(tmp_path, m
     assert problem.endswith(OPENHANDS.format(root=root))
 
 
-def test_a_missing_toolchain_without_a_recipe_is_a_configuration_error(tmp_path):
+def test_a_missing_toolchain_without_a_recipe_is_a_configuration_error(tmp_path, monkeypatch):
     """platoon prepare cannot build a toolchain that its spec gives no recipe for, so a run that misses one is told to
     put it there, as a plain configuration error, not to prepare."""
 
+    use_site_cache(monkeypatch, tmp_path / "site")
     spec = tmp_path / "plain.toml"
     spec.write_text('name = "plain"\nversion = "1"\n[install]\ntoolchain = "plain-1"\n[launch]\nargv = ["true"]\n')
     with pytest.raises(ConfigError) as error:
-        check_harness_toolchains(entries(str(spec), service_kwargs={"toolchain_root": str(tmp_path / "root")}))
+        check_harness_toolchains(entries(str(spec)))
     assert not isinstance(error.value, NotPrepared)
-    assert error.value.problems[0].endswith(f"put it at {tmp_path / 'root' / 'plain-1'}")
+    assert error.value.problems[0].endswith(f"put it at {tmp_path / 'site' / 'toolchains' / 'plain-1'}")
 
 
 def test_an_unfinished_build_is_not_a_toolchain(tmp_path):
@@ -163,12 +164,13 @@ def test_the_toolchain_is_built_once_and_serves_every_setting(tmp_path, fake_uv)
     assert read_manifest(root / "agent-1.0") == manifest
 
 
-def test_a_toolchain_built_from_another_recipe_must_be_rebuilt_by_force(tmp_path, fake_uv):  # noqa: F811
+def test_a_toolchain_built_from_another_recipe_must_be_rebuilt_by_force(tmp_path, fake_uv, monkeypatch):  # noqa: F811
     """A toolchain built from another recipe may be what a live run of another config, or of another platoon, stages
     its rollouts from, so neither platoon prepare nor a run replaces it: the run stops with a plain configuration error
     that names the forced build, not with the platoon prepare command."""
 
-    root = tmp_path / "toolchains"
+    use_site_cache(monkeypatch, tmp_path / "site")
+    root = tmp_path / "site" / "toolchains"
     build_toolchain(load_spec(agent_spec(tmp_path)), root=root, uv=str(fake_uv), log=lambda line: None)
     changed_path = agent_spec(tmp_path, lock="pkg==2.0 --hash=sha256:11\n")
     changed = load_spec(changed_path)
@@ -182,7 +184,7 @@ def test_a_toolchain_built_from_another_recipe_must_be_rebuilt_by_force(tmp_path
     state = toolchain_state(changed, root=root)
     assert state is not None and state.reason == "stale" and state.buildable and state.needs_force
     with pytest.raises(ConfigError) as error:
-        check_harness_toolchains(entries(str(changed_path), service_kwargs={"toolchain_root": str(root)}))
+        check_harness_toolchains(entries(str(changed_path)))
     assert not isinstance(error.value, NotPrepared)
     assert error.value.problems == [
         f"environments[default].harness: {toolchain_problem(changed, ref=str(changed_path), root=root)}"
@@ -211,7 +213,7 @@ INSTALLED: list[FakePolicy] = []
 
 
 def test_platoon_rollout_refuses_before_any_rollout(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv(TOOLCHAIN_ROOT_ENV, str(tmp_path / "toolchains"))
+    use_site_cache(monkeypatch, tmp_path / "site")
     monkeypatch.setattr(sys.modules[cli._evaluation().__package__], "EvalPolicy", FakePolicy, raising=False)
     INSTALLED.clear()
     config = tmp_path / "train.yaml"
@@ -233,7 +235,7 @@ def test_platoon_rollout_refuses_before_any_rollout(tmp_path, monkeypatch, capsy
 
     assert exit_info.value.code == cli.EXIT_CONFIG
     err = capsys.readouterr().err
-    assert f"it is not built there (toolchain root {tmp_path / 'toolchains'})" in err
+    assert f"it is not built there (toolchain root {tmp_path / 'site' / 'toolchains'})" in err
     assert err.rstrip().endswith(f"prepare it with: platoon prepare {config}")  # the config the command ran
     assert INSTALLED == []  # refused before the policy was served, so before any rollout
     lock = json.loads((tmp_path / "run" / "lock.json").read_text())
@@ -255,7 +257,7 @@ def test_platoon_rollout_records_the_options_of_the_split_it_runs(tmp_path, monk
     """``--split test`` runs an evaluation rollout, with the entry's ``eval_overrides``, though the training config
     itself never evaluates: lock.json records those options, not training's."""
 
-    monkeypatch.setenv(TOOLCHAIN_ROOT_ENV, str(tmp_path / "toolchains"))
+    use_site_cache(monkeypatch, tmp_path / "site")
     monkeypatch.setattr(sys.modules[cli._evaluation().__package__], "EvalPolicy", FakePolicy, raising=False)
     config = tmp_path / "train.yaml"
     entry = {

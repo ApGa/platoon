@@ -235,7 +235,6 @@ def test_values_that_are_no_local_paths_stay_as_they_are(tmp_path, monkeypatch):
                 {"service": "harbor", "service_kwargs": {"dataset": "harbor://org/name@1.0"}},
                 {"service": "no.such.module:Service", "service_kwargs": {"dataset_dir": "anything"}},
                 {"service": "harbor", "service_kwargs": {"dataset_dir": "~/datasets/ds"}, "harness": "platoon-bash"},
-                {"service": "harbor", "service_kwargs": {"image_map": "maps/m.json", "cache": "c"}},
             ]
         },
     )
@@ -248,8 +247,6 @@ def test_values_that_are_no_local_paths_stay_as_they_are(tmp_path, monkeypatch):
     assert _kwargs(data, 2)["dataset_dir"] == "anything"  # a service that does not import: its own error later
     assert _kwargs(data, 3)["dataset_dir"] == os.path.expanduser("~/datasets/ds")
     assert data["environments"][3]["harness"] == "platoon-bash"
-    # The deprecated location keys keep their meaning until 0.3.0 removes them: relative to the working directory.
-    assert _kwargs(data, 4) == {"image_map": "maps/m.json", "cache": "c"}
 
 
 def test_harness_spec_paths_resolve_in_a_reference_and_in_a_weighted_mapping(tmp_path, monkeypatch):

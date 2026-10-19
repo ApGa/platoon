@@ -13,7 +13,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, cast, get_args, runtime_checkable
 
-from platoon.config_defs import InferenceParams
+from platoon.config_defs import InferenceParams, RolloutConfig
+from platoon.deprecations import removed_hint
 from platoon.task import Task
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,8 @@ class _Inherited:
 # A key an entry's ``workflow_config`` leaves out keeps the value of the settings it is laid over.
 INHERITED: Any = _Inherited()
 
+# What replaces a workflow config's straggler_policy_key, which platoon 0.3.0 removed (``WorkflowConfig`` says it too).
+STRAGGLER_POLICY_KEY_REMOVED = removed_hint("0.3.0", "train.label_by, whose labels straggler_policies key on")
 # Why an entry's ``workflow_config`` may not set the rest of a workflow config, and where it goes instead.
 _RUN_SETTING = "set it in train.workflow_config, or eval.workflow_config for evaluation"
 _ENTRY_REFUSED_KEYS = {
@@ -247,7 +250,7 @@ _ENTRY_REFUSED_KEYS = {
     "straggler_policies": "an entry does not set it: straggler policies by label are the run's, in "
     "train.workflow_config.straggler_policies; an entry sets straggler_timeout_seconds and straggler_quorum for its "
     "own groups",
-    "straggler_policy_key": "an entry does not set it: straggler policies by label are the run's (train.label_by)",
+    "straggler_policy_key": STRAGGLER_POLICY_KEY_REMOVED,
     **{
         name: f"an entry does not set it: one pool of rollout workers runs every entry's rollouts; {_RUN_SETTING}"
         for name in (
@@ -275,7 +278,7 @@ _ENTRY_REFUSED_ROLLOUT_KEYS = {
     "output_dir": _TRAINER_SETS,
     "return_dict": _TRAINER_SETS,
     "verbose": "an entry does not set it: it is the run's logging, in train.workflow_config.rollout_config",
-    "propogate_root_success": "use propagate_root_success",
+    **RolloutConfig.UNKNOWN_KEY_HINTS,
 }
 
 
@@ -427,6 +430,12 @@ class EnvironmentConfig:
     # DEPRECATED_KEYS), which the config loader reports as it reports deprecated keys (platoon.deprecations).
     DEPRECATED_OPTIONS: ClassVar[dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]]] = {
         "service_kwargs": lambda entry: _service_deprecated_options(entry.get("service"))
+    }
+    # The service options the service the entry names does not take but says what to do instead of (its class's
+    # UNKNOWN_KEY_HINTS), such as an option a release removed: the config loader refuses them with that hint
+    # (platoon.utils.config), before the service resolves, which checks the rest.
+    UNKNOWN_OPTION_HINTS: ClassVar[dict[str, Callable[[Mapping[str, Any]], Mapping[str, str]]]] = {
+        "service_kwargs": lambda entry: _service_option_hints(entry.get("service"))
     }
     # ``workflow_config`` is a mapping as given, checked as the settings an entry may set (platoon.utils.config).
     FIELD_SCHEMAS: ClassVar[dict[str, Any]] = {"workflow_config": EntryWorkflowSettings}
@@ -618,6 +627,17 @@ def _service_deprecated_options(service: Any) -> Mapping[str, Any]:
     from platoon.envs.service import service_deprecated_options
 
     return service_deprecated_options(service)
+
+
+def _service_option_hints(service: Any) -> Mapping[str, str]:
+    """The options the service an entry names refuses with a hint (:func:`platoon.envs.service.service_option_hints`);
+    none for an entry without one."""
+
+    if not isinstance(service, str) or not service:
+        return {}
+    from platoon.envs.service import service_option_hints
+
+    return service_option_hints(service)
 
 
 def _positive(value: float) -> bool:

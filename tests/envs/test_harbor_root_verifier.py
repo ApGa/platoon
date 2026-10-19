@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from site_cache import use_site_cache
 
 import platoon.sandbox
 from platoon.envs.harbor import HarborEnvironmentService
@@ -648,7 +649,8 @@ VERIFIER_DOCKERFILE = "FROM python:3.12-slim\nRUN echo grader > /grader.txt\n"
 
 def _fetched(tmp_path: Path, rootful: str, verifier_user: str = "honor", **options: Any) -> HarborEnvironmentService:
     """A service on a fetched dataset of two tasks: ``root``, whose separate verifier, built from tests/Dockerfile,
-    runs as root, and ``plain``; both build their image from environment/Dockerfile."""
+    runs as root, and ``plain``; both build their image from environment/Dockerfile.  The Harbor cache, with the
+    dataset's default image map, is the site's (``use_site_cache``)."""
 
     dataset = tmp_path / "dataset"
     for name, toml in (("root", ROOT_VERIFIER), ("plain", SEPARATE_PLAIN)):
@@ -665,7 +667,6 @@ def _fetched(tmp_path: Path, rootful: str, verifier_user: str = "honor", **optio
             (dataset / name / relative).write_text(text)
     return HarborEnvironmentService(
         dataset=str(dataset),
-        cache=str(tmp_path / "cache"),
         lock=str(tmp_path / "dataset.lock.json"),
         provider=rootful,
         provider_options={"root": str(tmp_path / "sandboxes")},
@@ -684,8 +685,10 @@ async def test_root_verifiers_on_images_of_the_oci_builder_before_0_3_0_are_refu
     does not matter, nor does an image another builder made."""
 
     monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "node"))
-    image_map = tmp_path / "images.json"
-    service = _fetched(tmp_path, rootful, refuse={"agent_user": False}, image_map=str(image_map))
+    use_site_cache(monkeypatch, tmp_path / "cache")
+    service = _fetched(tmp_path, rootful, refuse={"agent_user": False})
+    image_map = service.task_images.path
+    assert image_map is not None
     listed = await service.list_tasks("train")
     lock = read_lock(tmp_path / "dataset.lock.json")
     verifier_key, task_key = lock.get("root").verifier_image["key"], lock.get("root").image["key"]
@@ -708,7 +711,7 @@ async def test_root_verifiers_on_images_of_the_oci_builder_before_0_3_0_are_refu
     mapped(ImageEntry(image="local", builder="def"))
     await service.check_tasks("train", listed)
     mapped(ImageEntry(image="local", builder="oci"))
-    ignored = _fetched(tmp_path, rootful, "ignore", refuse={"agent_user": False}, image_map=str(image_map))
+    ignored = _fetched(tmp_path, rootful, "ignore", refuse={"agent_user": False})
     assert ignored.root_images_closed() == {}
     await ignored.check_tasks("train", await ignored.list_tasks("train"))
 
@@ -719,8 +722,10 @@ async def test_honor_warns_of_root_verifiers_the_fetch_left_out(tmp_path, rootfu
     tasks, and says so."""
 
     monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "node"))
-    image_map = tmp_path / "images.json"
-    service = _fetched(tmp_path, rootful, image_map=str(image_map))
+    use_site_cache(monkeypatch, tmp_path / "cache")
+    service = _fetched(tmp_path, rootful)
+    image_map = service.task_images.path
+    assert image_map is not None
     assert await service.list_tasks("train") == ["plain"]
     lock = read_lock(tmp_path / "dataset.lock.json")
     assert lock.get("root").refused.startswith("agent_user:")

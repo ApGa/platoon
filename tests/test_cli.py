@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from platoon import cli
-from platoon.deprecations import PlatoonDeprecationWarning
+from platoon.deprecations import DeprecatedKey, PlatoonDeprecationWarning
 from platoon.harness import registry
 from platoon.task import Task
 
@@ -424,10 +424,9 @@ def test_config_show_with_defaults_prints_every_field(tmp_path, capsys):
     shown = yaml.safe_load(capsys.readouterr().out)
     assert shown["train"]["workflow_config"]["group_size"] == 8
     assert shown["checkpoint"]["every"] == 0
+    assert shown["checkpoint"]["strategy"] is None and shown["eval"]["strategy"] is None  # every counts steps
     # But a deprecated key left unset: a config copied from the output would set a key that is going away.
-    rollout_config = shown["train"]["workflow_config"]["rollout_config"]
-    assert rollout_config["propagate_root_success"] is False and "propogate_root_success" not in rollout_config
-    assert "strategy" not in shown["checkpoint"] and "strategy" not in shown["eval"]
+    assert shown["train"]["task_sampler"] == "auto" and "task_order" not in shown["train"]
 
 
 def test_config_validate_reports_each_file_and_exits_78_when_any_fails(tmp_path, capsys):
@@ -496,21 +495,15 @@ def test_config_validate_checks_a_file_of_environments_against_the_entry_schema(
 
 # --- deprecated keys ---------------------------------------------------------------------------------------------
 
-LEGACY = "train.workflow_config.rollout_config.propogate_root_success"
-LEGACY_LINE = (
-    f"{LEGACY}: deprecated; use train.workflow_config.rollout_config.propagate_root_success instead "
-    "(platoon 0.3.0 removes it)"
-)
+LEGACY = "train.task_order"
+LEGACY_LINE = f"{LEGACY}: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)"
 
 
-def _with_legacy_key(path: Path, section: tuple[str, ...]) -> Path:
-    """The config at ``path`` with ``propogate_root_success: true`` in the rollout config under ``section``."""
+def _with_legacy_key(path: Path) -> Path:
+    """The training config at ``path`` with ``train.task_order: weighted``, ``task_sampler``'s deprecated name."""
 
     data = yaml.safe_load(path.read_text())
-    node = data
-    for key in section:
-        node = node.setdefault(key, {})
-    node["rollout_config"] = {"propogate_root_success": True}
+    data["train"]["task_order"] = "weighted"
     path.write_text(yaml.safe_dump(data))
     return path
 
@@ -520,7 +513,7 @@ def _platoon_deprecations(caught: list[warnings.WarningMessage]) -> list[str]:
 
 
 def test_config_validate_lists_a_deprecated_key_once_and_fails_on_it_with_strict(tmp_path, capsys):
-    config = _with_legacy_key(_train_config(tmp_path), ("train", "workflow_config"))
+    config = _with_legacy_key(_train_config(tmp_path))
 
     cli.main(["config", "validate", str(config)])
 
@@ -545,19 +538,18 @@ def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, 
         loaded.append(load_config(args, PlatoonTinkerRLTrainerConfig)[0])
 
     monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", run_tinker_training)
-    config = _with_legacy_key(_train_config(tmp_path), ("train", "workflow_config"))
+    config = _with_legacy_key(_train_config(tmp_path))
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         cli.main(["train", str(config)])
 
     err = capsys.readouterr().err
-    assert f"platoon: {LEGACY_LINE}\n" in err and err.count("propogate_root_success") == 1
+    assert err.count(f"platoon: {LEGACY_LINE}\n") == 1
     assert _platoon_deprecations(caught) == []  # the reload of the snapshot does not warn again
-    assert loaded[0].train.workflow_config.rollout_config.propagate_root_success is True  # the key still works
+    assert loaded[0].train.task_sampler == "weighted"  # the key still works
     lock = json.loads((tmp_path / "logs/exp/trial/lock.json").read_text())
-    replacement = "train.workflow_config.rollout_config.propagate_root_success"
-    assert lock["deprecations"] == [{"path": LEGACY, "replacement": replacement, "removed_in": "0.3.0"}]
+    assert lock["deprecations"] == [{"path": LEGACY, "replacement": "train.task_sampler", "removed_in": "0.4.0"}]
 
 
 def test_task_order_is_listed_flagged_by_strict_and_recorded_as_task_samplers_former_name(
@@ -676,20 +668,25 @@ def test_a_0_2_0_defaults_dump_loads_with_task_sampler_alone_unless_task_order_w
     assert not (tmp_path / "logs").exists()  # refused before the run directory is made
 
 
-def test_eval_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, capsys):
-    config = _with_legacy_key(_eval_config(tmp_path), ("inference", "workflow"))
-    key = "inference.workflow.rollout_config.propogate_root_success"
+def test_eval_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, monkeypatch, capsys):
+    from platoon.config_defs import RolloutConfig
+
+    # No key of an evaluation config is deprecated now, so this test deprecates the rollout config's step_timeout.
+    retiring = {"step_timeout": DeprecatedKey(removed_in="9.0.0", instead="a harness option")}
+    monkeypatch.setattr(RolloutConfig, "DEPRECATED_KEYS", retiring, raising=False)
+    config = _eval_config(tmp_path, workflow={"rollout_config": {"step_timeout": 60}})
+    key = "inference.workflow.rollout_config.step_timeout"
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         cli.main(["eval", str(config)])
 
-    assert capsys.readouterr().err.count(f"platoon: {key}: deprecated; use ") == 1
+    assert capsys.readouterr().err.count(f"platoon: {key}: deprecated; use a harness option instead") == 1
     assert _platoon_deprecations(caught) == []  # run_eval loaded the snapshot again, silently
     lock = json.loads((tmp_path / "results/lock.json").read_text())
     assert [deprecation["path"] for deprecation in lock["deprecations"]] == [key]
     snapshot = yaml.safe_load((tmp_path / "results/config.resolved.yaml").read_text())
-    assert snapshot["inference"]["workflow"]["rollout_config"] == {"propogate_root_success": True}  # as given
+    assert snapshot["inference"]["workflow"]["rollout_config"] == {"step_timeout": 60}  # as given
 
 
 def test_a_config_without_deprecated_keys_records_none(tmp_path, monkeypatch, capsys):
@@ -704,7 +701,7 @@ def test_a_config_without_deprecated_keys_records_none(tmp_path, monkeypatch, ca
 def test_an_error_warning_filter_makes_a_deprecated_key_a_config_error(tmp_path, monkeypatch, capsys):
     calls = []
     monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
-    config = _with_legacy_key(_train_config(tmp_path), ("train", "workflow_config"))
+    config = _with_legacy_key(_train_config(tmp_path))
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", PlatoonDeprecationWarning)
@@ -718,7 +715,7 @@ def test_a_command_s_deprecation_filters_end_with_it(tmp_path, monkeypatch):
     monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
     before = list(warnings.filters)
 
-    cli.main(["train", str(_with_legacy_key(_train_config(tmp_path), ("train", "workflow_config")))])
+    cli.main(["train", str(_with_legacy_key(_train_config(tmp_path)))])
 
     assert warnings.filters == before
 

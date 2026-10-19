@@ -304,28 +304,22 @@ def test_explicit_disabled_policy_overrides_global_cutoff_and_unlisted_values_us
     _scalars("test_global_fallback")
 
 
-def test_a_label_policy_applies_to_a_columns_values_as_text_and_a_deprecated_column_keeps_its_own():
-    # A level of 3 is labelled "3" (platoon.train.labels.label_text).
+def test_a_label_policy_applies_to_a_columns_values_as_text():
+    # A level of 3 is labelled "3" (platoon.train.labels.label_text); a level of 4 has no policy of its own.
     by_label = WorkflowConfig(group_size=2, straggler_policies={"3": StragglerPolicy(timeout_seconds=0.02)})
-    # straggler_policy_key, deprecated, still keys its own workflow config's policies on the column it names.
-    by_key = WorkflowConfig(
-        group_size=2, straggler_policy_key="kind", straggler_policies={"slow": StragglerPolicy(timeout_seconds=0.02)}
-    )
 
     async def run_all():
         labelled = _FakeWorkflow(by_label, [0, 0.3], [0, 1], "test_label_text_policy", label_by="level")
-        keyed = _FakeWorkflow(by_key, [0, 0.3], [0, 1], "test_deprecated_key_policy", label_by="level")
-        unkeyed = _FakeWorkflow(by_key, [0, 0.08], [0, 1], "test_deprecated_key_other", label_by="level")
+        other = _FakeWorkflow(by_label, [0, 0.08], [0, 1], "test_label_text_other", label_by="level")
         await asyncio.gather(
             labelled.arun_episode({"task_id": "a", "level": 3}),
-            keyed.arun_episode({"task_id": "b", "level": 3, "kind": "slow"}),
-            unkeyed.arun_episode({"task_id": "c", "level": 3, "kind": "fast"}),
+            other.arun_episode({"task_id": "b", "level": 4}),
         )
-        return labelled, keyed, unkeyed
+        return labelled, other
 
-    labelled, keyed, unkeyed = asyncio.run(run_all())
-    assert (labelled.cancelled, keyed.cancelled, unkeyed.cancelled) == ([1], [1], [])
-    for scope in ("test_label_text_policy", "test_deprecated_key_policy", "test_deprecated_key_other"):
+    labelled, other = asyncio.run(run_all())
+    assert (labelled.cancelled, other.cancelled) == ([1], [])
+    for scope in ("test_label_text_policy", "test_label_text_other"):
         _scalars(scope)
 
 
@@ -337,7 +331,6 @@ def test_straggler_policies_without_a_column_of_their_own_key_on_the_runs_labels
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"straggler_policy_key": ""},
         {"straggler_policies": {"": {"timeout_seconds": 1}}},
         {"straggler_policies": {"a": {"quorum": 1}}},
         {"straggler_policies": {"a": {"timeout_seconds": 0}}},

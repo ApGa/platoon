@@ -17,7 +17,6 @@ import pytest
 import yaml
 
 from platoon import cli
-from platoon.deprecations import PlatoonDeprecationWarning
 from platoon.train.tinker.config_defs import (
     EVAL_INHERITED_KEYS,
     EVAL_OWN_KEYS,
@@ -185,36 +184,17 @@ def test_overrides_reach_what_the_evaluation_inherits(tmp_path):
     ) == (3600, 60)
 
 
-def test_a_deprecated_rollout_key_training_sets_is_inherited_and_the_evaluation_may_replace_it(tmp_path):
-    workflow = {"rollout_config": {"propogate_root_success": True}}
+def test_a_rollout_key_training_sets_is_inherited_and_the_evaluation_may_replace_it(tmp_path):
+    workflow = {"rollout_config": {"propagate_root_success": True}}
 
-    with pytest.warns(PlatoonDeprecationWarning) as warned:
-        inherited = _load(tmp_path, {"every": 1}, workflow=workflow)
-    with pytest.warns(PlatoonDeprecationWarning):
-        replaced = _load(
-            tmp_path, {"workflow_config": {"rollout_config": {"propagate_root_success": False}}}, workflow=workflow
-        )
+    inherited = _load(tmp_path, {"every": 1}, workflow=workflow)
+    replaced = _load(
+        tmp_path, {"workflow_config": {"rollout_config": {"propagate_root_success": False}}}, workflow=workflow
+    )
 
-    assert [str(item.message).partition(":")[0] for item in warned if item.category is PlatoonDeprecationWarning] == [
-        "train.workflow_config.rollout_config.propogate_root_success"  # training's only: evaluation sets nothing
-    ]
     assert inherited.config.eval.workflow_config.rollout_config.propagate_root_success is True
     assert replaced.config.eval.workflow_config.rollout_config.propagate_root_success is False
     assert replaced.config.train.workflow_config.rollout_config.propagate_root_success is True
-
-
-def test_the_deprecated_name_of_a_rollout_key_training_sets_replaces_it_in_the_evaluation(tmp_path):
-    # Training sets propagate_root_success; the evaluation sets its deprecated name, which is the same key.
-    workflow = {"rollout_config": {"propagate_root_success": True}}
-    eval_section = {"workflow_config": {"rollout_config": {"propogate_root_success": False}}}
-
-    with pytest.warns(
-        PlatoonDeprecationWarning, match=r"eval\.workflow_config\.rollout_config\.propogate_root_success"
-    ):
-        config = _load(tmp_path, eval_section, workflow=workflow).config
-
-    assert config.eval.workflow_config.rollout_config.propagate_root_success is False
-    assert config.train.workflow_config.rollout_config.propagate_root_success is True
 
 
 def test_a_refused_eval_section_names_the_training_settings_it_kept(tmp_path):
@@ -244,7 +224,6 @@ def test_config_show_defaults_prints_what_the_evaluation_runs_with(tmp_path, cap
     assert (shown["group_size"], shown["rollout_isolation"]) == (1, "process")
     assert shown["rollout_config"]["max_steps"] == 200
     assert shown["rollout_config"]["inference_params"]["max_completion_tokens"] == 49152
-    assert "propogate_root_success" not in shown["rollout_config"]
 
 
 def test_platoon_rollout_of_the_eval_split_rolls_out_as_the_evaluation_does(tmp_path):

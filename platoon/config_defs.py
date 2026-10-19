@@ -7,7 +7,7 @@ parts of the codebase (rollouts, training, inference, etc.).
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
-from platoon.deprecations import DeprecatedKey
+from platoon.deprecations import removed_hint
 
 
 @dataclass
@@ -36,9 +36,9 @@ class RolloutConfig:
     writes its files, and the default sampling of its model calls.
     """
 
-    # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
-    DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-        "propogate_root_success": DeprecatedKey(removed_in="0.3.0", renamed_to="propagate_root_success"),
+    # Keys a release removed, with what replaces them (platoon.deprecations).
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+        "propogate_root_success": removed_hint("0.3.0", "propagate_root_success"),
     }
 
     # The policy's model name (None: the trainer's or evaluator's model).
@@ -68,8 +68,6 @@ class RolloutConfig:
     # Give every trajectory of a rollout the root's success (the ``single`` program adds the finalizer). Unset
     # means false.
     propagate_root_success: bool | None = None
-    # The misspelling of ``propagate_root_success``, read as that key is; setting both to different values is an error.
-    propogate_root_success: bool | None = None
     # Score every subagent 0 (the ``single`` program adds the finalizer, before root-success propagation).
     skip_subagent_reward_computation: bool = False
     # Master switch for verifier subagents and behavior judges on completed children, across the whole agent
@@ -95,13 +93,7 @@ class RolloutConfig:
     judges: bool = True
 
     def __post_init__(self) -> None:
-        canonical = self.propagate_root_success
-        legacy = self.propogate_root_success
-        if canonical is not None and legacy is not None and canonical != legacy:
-            raise ValueError(
-                "Conflicting rollout propagation settings: propagate_root_success and deprecated propogate_root_success"
-            )
-        self.propagate_root_success = bool(legacy if canonical is None and legacy is not None else canonical)
+        self.propagate_root_success = bool(self.propagate_root_success)
         # Support loading from plain dicts from config loaders and subprocess paths.
         if isinstance(self.inference_params, dict):
             self.inference_params = InferenceParams(**self.inference_params)
