@@ -29,10 +29,11 @@ BudgetMode = Literal["linear", "depth_aware"]
 ChildGrading = Literal["env", "verifier", "none"]
 ToolAccess = Literal["full", "no_terminal", "read_only"]
 ForkMode = Literal["shared", "copy", "fresh"]
-# ``train.task_order`` (:class:`platoon.train.auto.AutoDataset`): ``auto`` orders a mixture's training tasks by
-# weight and leaves a single environment's to the dataloader's shuffle; ``weighted`` orders both by weight.
-TaskOrder = Literal["auto", "weighted"]
-TASK_ORDERS: tuple[str, ...] = get_args(TaskOrder)
+# ``train.task_sampler`` (:class:`platoon.train.auto.AutoDataset`), how a run draws its training tasks: ``auto``
+# orders a mixture's training tasks by weight and leaves a single environment's to the dataloader's shuffle;
+# ``weighted`` orders both by weight.
+TaskSampler = Literal["auto", "weighted"]
+TASK_SAMPLERS: tuple[str, ...] = get_args(TaskSampler)
 # ``environments[].weight: tasks``: the entry's share of a mixture is its number of training tasks, so that every task
 # of the mixture is drawn equally often.
 TASKS_WEIGHT = "tasks"

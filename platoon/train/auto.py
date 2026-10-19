@@ -26,7 +26,7 @@ from platoon.task import Task
 from platoon.train.components import (
     ENVIRONMENT_COLUMN,
     HARNESS_ROLLOUT,
-    TASK_ORDERS,
+    TASK_SAMPLERS,
     EnvironmentConfig,
     EnvironmentRoute,
     WeightedOrder,
@@ -204,8 +204,8 @@ class AutoDataset:
     each environment's tasks shuffled with its ``seed``), in epochs of as many tasks as there are, filled to whole
     batches; each epoch takes up the order where the one before it stopped (:meth:`training`).  A single
     environment's tasks go to the dataloader as listed, which draws them in seeded shuffled passes (seed 42), each
-    epoch the whole batches they fill, its last partial batch starting the next epoch, unless ``train.task_order`` is
-    ``weighted``: then they take the mixture's path, as a mixture of one (task ids stay unlabeled).  Evaluation, and
+    epoch the whole batches they fill, its last partial batch starting the next epoch, unless ``train.task_sampler``
+    is ``weighted``: then they take the mixture's path, as a mixture of one (task ids stay unlabeled).  Evaluation, and
     any split of an evaluation config, visits every selected task once, in config order.
 
     Each environment's ``exclude_tasks`` leave its list first (:func:`_load_split`), so the order and the batches
@@ -232,7 +232,7 @@ class AutoDataset:
     def training(cls, config: Any, *, exclusions: list[TaskExclusion] | None = None) -> TrainingTasks:
         """The training tasks of a training config, listed once, and the order its dataloader draws them in.
 
-        A mixture's tasks, or a single environment's under ``train.task_order: weighted``, take a
+        A mixture's tasks, or a single environment's under ``train.task_sampler: weighted``, take a
         :class:`WeightedOrder` over the environments, whose epochs hold as many tasks as there are, filled to whole
         batches of ``train.batch_size``: each epoch takes up the credits and each environment's pass where the one
         before it stopped, so an environment that gets fewer slots than it has tasks draws the rest in the next
@@ -245,7 +245,7 @@ class AutoDataset:
         environments = AutoEnvironment.environments(config)
         train = getattr(config, "train", None)
         batch_size = getattr(train, "batch_size", None)
-        if len(environments) == 1 and _task_order(config) != "weighted":
+        if len(environments) == 1 and _task_sampler(config) != "weighted":
             dataset = _load_split(config, environments[0], "train", exclusions)
             dataset = _dataset_from_rows(_rows(dataset)) if isinstance(dataset, list) else dataset
             count = len(dataset) if hasattr(dataset, "__len__") else 0
@@ -321,13 +321,13 @@ def _listed_rows(
     return listed
 
 
-def _task_order(config: Any) -> str:
-    """``train.task_order``: ``weighted`` orders a single environment's training tasks as a mixture's."""
+def _task_sampler(config: Any) -> str:
+    """``train.task_sampler``: ``weighted`` orders a single environment's training tasks as a mixture's."""
 
-    order = getattr(getattr(config, "train", None), "task_order", "auto")
-    if order not in TASK_ORDERS:
-        raise ValueError(f"train.task_order must be one of {TASK_ORDERS}, got {order!r}")
-    return order
+    sampler = getattr(getattr(config, "train", None), "task_sampler", None) or "auto"
+    if sampler not in TASK_SAMPLERS:
+        raise ValueError(f"train.task_sampler must be one of {TASK_SAMPLERS}, got {sampler!r}")
+    return sampler
 
 
 def _dataset_from_rows(rows: list[dict[str, Any]]) -> Any:

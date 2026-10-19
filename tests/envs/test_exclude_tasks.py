@@ -32,7 +32,7 @@ HERE = __name__
 
 
 def _config(*environments: EnvironmentConfig) -> SimpleNamespace:
-    return SimpleNamespace(environments=list(environments), train=SimpleNamespace(batch_size=None, task_order="auto"))
+    return SimpleNamespace(environments=list(environments), train=SimpleNamespace(batch_size=None, task_sampler="auto"))
 
 
 def _ids(config: SimpleNamespace, split: str = "train") -> list[str]:

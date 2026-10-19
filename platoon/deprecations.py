@@ -16,6 +16,11 @@ The config loader (:func:`platoon.utils.config.resolve_config`) finds every such
 and reports each as a :class:`Deprecation` with its dotted path: as a warning, in ``platoon config validate``'s report
 (a failure with ``--strict``) and in the run's ``lock.json`` (``deprecations``).
 
+A config that sets a renamed key and its new name to different values is a conflict that the config class refuses,
+with one exception: the renamed key at the default it had before the rename (``former_default``), which a dump of an
+older release's ``platoon config show --defaults`` spells out, yields to the new name.  The config class lets the new
+name win then, and the deprecation says that the key's value was ignored.
+
 The keys of a free-form mapping belong to whatever it configures, so a config class names how to find the deprecated
 ones in a second class attribute, ``DEPRECATED_OPTIONS``: ``{field: function}``, the function taking the section that
 holds the field and returning its ``{key: DeprecatedKey}``.  An environment entry's ``service_kwargs`` are found so,
@@ -64,25 +69,46 @@ class PlatoonDeprecationWarning(FutureWarning):
 class DeprecatedKey:
     """How a config key is going away: the release that removes it (``removed_in``, the minor release after the first
     one that warns about it), and what replaces it, either a key of the same section (``renamed_to``) or what to do
-    instead, said in a few words (``instead``)."""
+    instead, said in a few words (``instead``).  A renamed key may name the default it had before the rename
+    (``former_default``): at that value it yields to its new name set to another value, and is ignored."""
 
     removed_in: str
     renamed_to: str | None = None
     instead: str | None = None
+    former_default: Any = None
 
     def __post_init__(self) -> None:
         if (self.renamed_to is None) == (self.instead is None):
             raise ValueError("a deprecated key names what replaces it: give one of renamed_to and instead")
+        if self.former_default is not None and self.renamed_to is None:
+            raise ValueError("only a renamed key has a former default")
 
-    def at(self, path: str) -> Deprecation:
-        """The deprecation of a config that sets this key at the dotted ``path``."""
+    def ignored_beside(self, value: Any, renamed_value: Any) -> bool:
+        """Whether the key, set to ``value`` beside its new name set to ``renamed_value`` (None: not set), is ignored:
+        it is at its former default, and the new name says otherwise."""
+
+        return (
+            self.former_default is not None
+            and value == self.former_default
+            and renamed_value is not None
+            and renamed_value != value
+        )
+
+    def at(self, path: str, value: Any = None, renamed_value: Any = None) -> Deprecation:
+        """The deprecation of a config that sets this key at the dotted ``path``, to ``value``, beside its new name set
+        to ``renamed_value`` (None: not set), which says when the key's value is ignored (:meth:`ignored_beside`)."""
 
         if self.renamed_to is not None:
             parent = path.rpartition(".")[0]
             replacement = f"{parent}.{self.renamed_to}" if parent else self.renamed_to
         else:
             replacement = str(self.instead)
-        return Deprecation(path=path, replacement=replacement, removed_in=self.removed_in)
+        ignored = (
+            f"its value {value!r} is ignored, since {replacement} is {renamed_value!r}"
+            if self.ignored_beside(value, renamed_value)
+            else None
+        )
+        return Deprecation(path=path, replacement=replacement, removed_in=self.removed_in, ignored=ignored)
 
 
 def deprecated_keys(schema: Any) -> Mapping[str, DeprecatedKey]:
@@ -95,17 +121,20 @@ def deprecated_keys(schema: Any) -> Mapping[str, DeprecatedKey]:
 @dataclasses.dataclass(frozen=True)
 class Deprecation:
     """A deprecated form that a config uses: the key's dotted ``path``, what replaces it and the release that
-    removes it."""
+    removes it, and, when the config ignores the key's value (:meth:`DeprecatedKey.ignored_beside`), why
+    (``ignored``)."""
 
     path: str
     replacement: str
     removed_in: str
+    ignored: str | None = None
 
     @property
     def message(self) -> str:
         """One line, as a warning, ``platoon config validate`` and the command line give it."""
 
-        return f"{self.path}: deprecated; use {self.replacement} instead (platoon {self.removed_in} removes it)"
+        message = f"{self.path}: deprecated; use {self.replacement} instead (platoon {self.removed_in} removes it)"
+        return message if self.ignored is None else f"{message}; {self.ignored}"
 
     def to_dict(self) -> dict[str, str]:
         """The record ``lock.json`` keeps under ``deprecations``."""

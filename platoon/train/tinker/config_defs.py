@@ -7,7 +7,7 @@ from typing import Any, ClassVar, Literal
 
 from platoon.config_defs import RolloutConfig
 from platoon.deprecations import DeprecatedKey, deprecated_keys
-from platoon.train.components import TASK_ORDERS, EnvironmentConfig, TaskOrder, normalize_environment_configs
+from platoon.train.components import TASK_SAMPLERS, EnvironmentConfig, TaskSampler, normalize_environment_configs
 from platoon.train.tinker.checkpoint_pruning import recovery_pruning_problems
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
@@ -339,6 +339,7 @@ class TrainConfig:
     # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
     DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
         "rollout_group_key": DeprecatedKey(removed_in="0.3.0", renamed_to="label_by"),
+        "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
         "num_concurrent_rollout_workflow_workers": DeprecatedKey(
             removed_in="0.3.0",
             instead="train.max_concurrent_rollouts (rollouts, not groups: this value × "
@@ -364,7 +365,7 @@ class TrainConfig:
     context_window_length: int | None = None
     # Tasks per training batch; each task is rolled out ``workflow_config.group_size`` times. ``platoon train``
     # refuses a batch larger than the training set it would draw whole batches from (one environment under
-    # ``task_order: auto``); ``task_order: weighted`` repeats tasks into whole batches.
+    # ``task_sampler: auto``); ``task_sampler: weighted`` repeats tasks into whole batches.
     batch_size: int = 32
     # Passes over the training tasks. With max_training_steps as well, training runs the shorter of the two;
     # ``platoon train`` refuses a config that sets neither.
@@ -409,13 +410,17 @@ class TrainConfig:
     # Most rollout groups that may run at once for each label, for example to cap a slow environment of a mixture.
     # Groups wait for a slot before they take a rollout worker.
     rollout_group_limits: dict[str, int] = field(default_factory=dict)
-    # How the training tasks are ordered (platoon.train.auto.AutoDataset).  ``auto``: a mixture's tasks in the
-    # weighted fair order of its environments (each shuffled with its ``seed``), in epochs of its tasks filled to
-    # whole batches, each epoch going on with the order where the one before it stopped; a single environment's tasks
-    # in seeded shuffled passes by the dataloader (seed 42), each epoch the whole batches they fill, its last partial
-    # batch starting the next epoch.  ``weighted``: a single environment's tasks too take the weighted order (shuffled
-    # with its ``seed``, last batch filled).
-    task_order: TaskOrder = "auto"
+    # How a run draws its training tasks (platoon.train.auto.AutoDataset; None: ``auto``).  ``auto``: a mixture's
+    # tasks in the weighted fair order of its environments (each shuffled with its ``seed``), in epochs of its tasks
+    # filled to whole batches, each epoch going on with the order where the one before it stopped; a single
+    # environment's tasks in seeded shuffled passes by the dataloader (seed 42), each epoch the whole batches they
+    # fill, its last partial batch starting the next epoch.  ``weighted``: a single environment's tasks too take the
+    # weighted order (shuffled with its ``seed``, last batch filled).
+    task_sampler: TaskSampler | None = None
+    # The former name of ``task_sampler``, read as that key is.  Beside another ``task_sampler``, its former default
+    # ``auto`` (as a dump of platoon 0.2.0's ``config show --defaults`` spells it) is ignored, with a warning, and
+    # ``weighted`` is an error.
+    task_order: TaskSampler | None = None
 
     # Client-side deadline in seconds for a ``forward_backward`` result.  The client submits every microbatch up
     # front and the Tinker service runs them in order, so the first wait covers the whole optimizer step's
@@ -437,8 +442,24 @@ class TrainConfig:
             raise ValueError(
                 f"train.sample_timeout_seconds must be a positive number of seconds or null, got {seconds!r}"
             )
-        if self.task_order not in TASK_ORDERS:
-            raise ValueError(f"train.task_order must be one of {TASK_ORDERS}, got {self.task_order!r}")
+        sampler, legacy = self.task_sampler, self.task_order
+        # task_order at its default before the rename (auto, as a dump of 0.2.0's config show --defaults spells it)
+        # yields to task_sampler, and the loader's deprecation says that it was ignored; another sampler conflicts.
+        if (
+            legacy is not None
+            and sampler is not None
+            and legacy != sampler
+            and not TrainConfig.DEPRECATED_KEYS["task_order"].ignored_beside(legacy, sampler)
+        ):
+            raise ValueError(
+                f"train.task_sampler is {sampler!r} and train.task_order, its deprecated name, is {legacy!r}; set "
+                "task_sampler alone"
+            )
+        # The run's one sampler: the deprecated name's value until it is resolved here, then task_sampler's alone.
+        sampler = sampler if sampler is not None else legacy if legacy is not None else "auto"
+        if sampler not in TASK_SAMPLERS:
+            raise ValueError(f"train.task_sampler must be one of {TASK_SAMPLERS}, got {sampler!r}")
+        self.task_sampler, self.task_order = sampler, None
         legacy = self.rollout_group_key
         if legacy is not None and self.label_by is not None and legacy != self.label_by:
             raise ValueError(
@@ -681,7 +702,7 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
     if num_train_tasks is not None and num_train_tasks < config.train.batch_size:
         problems.append(
             f"train.batch_size: {config.train.batch_size} is more than the {num_train_tasks} training tasks, so no "
-            "full batch exists; lower train.batch_size, or set train.task_order: weighted to repeat tasks into "
+            "full batch exists; lower train.batch_size, or set train.task_sampler: weighted to repeat tasks into "
             "whole batches"
         )
     # Loading checks keep_recovery too, but a config class whose __post_init__ skips this class's loads without it.

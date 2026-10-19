@@ -271,6 +271,35 @@ def test_wrong_types_and_missing_required_keys_fail(tmp_path):
     ]
 
 
+@dataclass
+class OptionalChoice:
+    # None: the default choice, as train.task_sampler's null is auto.
+    sampler: Literal["auto", "weighted"] | None = None
+    limit: int | None = None
+
+
+def test_a_wrong_value_of_an_optional_choice_names_its_choices(tmp_path):
+    """An optional choice (``Literal[...] | None``, whose null is its default) is told as the choices alone are, in a
+    file and in an override; other optional values still name the union."""
+
+    run = _write(tmp_path / "run.yaml", {"sampler": "random", "limit": "many"})
+
+    with pytest.raises(ConfigError) as error:
+        resolve_config(run, [], OptionalChoice)
+
+    assert error.value.problems == [
+        "sampler: 'random' is not one of 'auto', 'weighted'",
+        "limit: 'many' is not a int | null",
+    ]
+    with pytest.raises(ConfigError, match=re.escape("sampler must be one of 'auto', 'weighted', got 'random'")):
+        apply_overrides({}, ["sampler=random"], OptionalChoice)
+    assert apply_overrides({}, ["sampler=weighted", "limit=null"], OptionalChoice) == {
+        "sampler": "weighted",
+        "limit": None,
+    }
+    assert apply_overrides({}, ["sampler=null"], OptionalChoice) == {"sampler": None}
+
+
 def test_yaml_exponents_without_a_dot_read_as_floats_in_float_fields(tmp_path):
     run = tmp_path / "run.yaml"
     run.write_text("ratio: 3e-5\nname: 1e3\ninner:\n  ratio: 1e-8\n")
@@ -718,6 +747,42 @@ def test_a_deprecated_key_names_one_replacement():
         DeprecatedKey(removed_in="0.3.0")
     with pytest.raises(ValueError, match="renamed_to and instead"):
         DeprecatedKey(removed_in="0.3.0", renamed_to="a", instead="b")
+    with pytest.raises(ValueError, match="only a renamed key has a former default"):
+        DeprecatedKey(removed_in="0.3.0", instead="b", former_default="x")
+
+
+@dataclass
+class Renamed:
+    DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
+        "old_mode": DeprecatedKey(removed_in="0.4.0", renamed_to="mode", former_default="plain"),
+    }
+
+    mode: str | None = None
+    old_mode: str | None = None
+
+
+def test_a_renamed_key_at_its_former_default_beside_its_new_name_is_ignored_and_its_deprecation_says_so():
+    """A renamed key at the default it had before the rename, as an older release's ``config show --defaults`` spells
+    it, yields to its new name set to another value: its deprecation says that its value is ignored, and the lock's
+    record of it stays the same.  Alone, beside the same value, or at another value, its deprecation is the plain
+    one."""
+
+    (ignored,) = find_deprecations({"inner": {"old_mode": "plain", "mode": "fancy"}}, dict[str, Renamed])
+
+    assert ignored.message == (
+        "inner.old_mode: deprecated; use inner.mode instead (platoon 0.4.0 removes it); its value 'plain' is ignored, "
+        "since inner.mode is 'fancy'"
+    )
+    assert ignored.to_dict() == {"path": "inner.old_mode", "replacement": "inner.mode", "removed_in": "0.4.0"}
+    for data in (
+        {"old_mode": "plain"},
+        {"old_mode": "plain", "mode": None},
+        {"old_mode": "plain", "mode": "plain"},
+        {"old_mode": "fancy", "mode": "plain"},  # not its former default: a conflict, which the config class refuses
+    ):
+        (read,) = find_deprecations(data, Renamed)
+        assert read.ignored is None
+        assert read.message == "old_mode: deprecated; use mode instead (platoon 0.4.0 removes it)"
 
 
 def test_the_lock_records_the_deprecated_keys_a_config_sets(tmp_path):

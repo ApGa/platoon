@@ -77,7 +77,7 @@ def _config(*entries: EnvironmentConfig, label_by: str = ENVIRONMENT_COLUMN, **t
         environments=list(entries),
         train=SimpleNamespace(
             batch_size=None,
-            task_order="auto",
+            task_sampler="auto",
             label_by=label_by,
             rollout_group_limits={},
             workflow_config=SimpleNamespace(straggler_policies={}, straggler_policy_key=None),

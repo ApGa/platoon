@@ -243,8 +243,10 @@ def test_the_deprecated_cache_variables_still_work_and_warn(tmp_path, monkeypatc
 
     assert default_cache() == tmp_path / "old-cache"
     assert [deprecation.path for deprecation in resolved.deprecations] == ["$PLATOON_HARBOR_CACHE"]
-    assert "use the site profile's cache, whose harbor directory it names" in str(caught[0].message)
-    assert "platoon 0.3.0 removes it" in str(caught[0].message)
+    # Among the warnings caught, which may hold another test's, such as a ResourceWarning of an event loop it left open.
+    message = next(str(item.message) for item in caught if item.category is PlatoonDeprecationWarning)
+    assert "use the site profile's cache, whose harbor directory it names" in message
+    assert "platoon 0.3.0 removes it" in message
 
 
 def test_a_cache_variable_that_disagrees_with_the_profile_is_an_error(tmp_path, monkeypatch):

@@ -4,6 +4,17 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
 
+## 0.3.0 (unreleased)
+
+- **`train.task_sampler` names how a run draws its training tasks.** It takes the values of `train.task_order`,
+  which it replaces: `auto`, the default, draws a mixture in its weighted fair order and a single environment in the
+  dataloader's shuffled passes, and `weighted` draws a single environment in the weighted order too. The order a run
+  draws is unchanged. `train.task_order` still loads, with a deprecation warning, until platoon 0.4.0 removes it;
+  `lock.json` records it and `platoon config validate --strict` fails on it. Beside another `task_sampler`,
+  `task_order: auto` (its default in 0.2.0, as a dump of that release's `config show --defaults` spells it) is
+  ignored, with a warning that says so, and `task_order: weighted` does not load
+  ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+
 ## 0.2.1 (2026-10-19)
 
 ### Fixes
