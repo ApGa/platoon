@@ -104,6 +104,19 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   validate` warn of a `max_concurrent_rollouts` that the capped labels' groups can fill. Each step also logs each
   label's `stale_groups` and `num_steps`
   ([Settings per environment](docs/how-to/train-and-eval.md#settings-per-environment)).
+- **Training keeps per-task statistics.** Each settled group of a training task is recorded with the workflow's
+  verdict on what it trains (`trained`, `uniform`, or why it trains nothing) and what each rollout returned, passes
+  judged as `platoon eval` judges success: on the reward the environment scored, before any reward processor, against
+  the entry's new `success_threshold` (1.0 by default; a named environment may ship its own). Each step logs each
+  label's mean expected pass@1 and pass@G under decayed per-task counts (`train/tasks/<column>/<label>/pass_at_1`,
+  `pass_at_G`), the share of its tasks seen, its tasks by pass-rate band and those without evidence, and the kinds of
+  the groups it trained on (`train/batch/informative_groups`, `all_pass_groups`, `all_fail_groups`,
+  `uniform_mixed_groups`, also by label). Each full checkpoint saves the statistics to `tasks/` in the run directory
+  and names the file in its `checkpoints.jsonl` row, a resume loads them before its launch save (from a checkpoint
+  without them, it goes on from the newest older one that has them, else from empty, and `lock.json` lists the start
+  under `tasks_state_lost`), recovery pruning deletes a pruned checkpoint's file, and `tasks/events.jsonl` logs every
+  draw, settle and fate. The statistics never fail training. `platoon tasks show` and `platoon tasks export` read
+  them ([Per-task statistics](docs/how-to/train-and-eval.md#per-task-statistics)).
 
 ## 0.2.1 (2026-10-19)
 

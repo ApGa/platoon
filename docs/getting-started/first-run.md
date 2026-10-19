@@ -171,6 +171,7 @@ Everything the run writes goes to `runs/number-search/first-run/` (`log_path`, t
 | `config.resolved.yaml`, `lock.json` | The config the run trained with, and what it ran on. |
 | `checkpoints.jsonl` | One record per checkpoint, with its `sampler_path` (`tinker://...`). |
 | `evaluations.jsonl` | One line per evaluation that completed, so that a resumed run does not run it again. |
+| `tasks/` | Each training task's statistics, saved with each checkpoint (`platoon tasks show` reads them), and their event log. |
 | `rollouts/train/<version>/events/` | One event file per training episode, by policy version. |
 | `rollouts/eval/<version>/events/` | The evaluation episodes. |
 

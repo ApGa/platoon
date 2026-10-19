@@ -37,10 +37,11 @@ resolved to, so ``config.resolved.yaml`` pins it.
 
 **Training settings.**  A named environment may ship the rollout settings its tasks were measured with, such as a
 calibrated step budget (``workflow_config: {rollout_config: {max_steps: 30}}``), as the lowest layer of its entry's
-own, which its evaluations inherit beneath the phase's section; the rest of an entry's ``workflow_config`` (the group
-size, the baseline, the minimum group size, the straggler defaults), its ``max_staleness`` and its ``weight`` are
-training strategy, which a run chooses (:data:`FORBIDDEN_KEYS`), and it ships no ``eval_overrides.workflow_config``,
-whose values would win over the run's evaluation settings.
+own, which its evaluations inherit beneath the phase's section, and the reward that counts as a pass
+(``success_threshold``); the rest of an entry's ``workflow_config`` (the group size, the baseline, the minimum group
+size, the straggler defaults), its ``max_staleness`` and its ``weight`` are training strategy, which a run chooses
+(:data:`FORBIDDEN_KEYS`), and it ships no ``eval_overrides.workflow_config``, whose values would win over the run's
+evaluation settings.
 
 **Tasks left out.**  An entry that selects a named environment sets ``exclude_tasks`` like any entry: its items
 name that environment's tasks, and they leave each list before the named environment's ``limit`` takes its share.

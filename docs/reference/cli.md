@@ -43,6 +43,9 @@ Build and train systems of agents.
     - [`check`](#platoon-extensions-check)
 - [`sandbox`](#platoon-sandbox)
     - [`reap`](#platoon-sandbox-reap)
+- [`tasks`](#platoon-tasks)
+    - [`show`](#platoon-tasks-show)
+    - [`export`](#platoon-tasks-export)
 - [`harbor`](#platoon-harbor)
     - [`images`](#platoon-harbor-images)
         - [`plan`](#platoon-harbor-images-plan)
@@ -69,6 +72,7 @@ Build and train systems of agents.
 * [`program`](#platoon-program): List and inspect the episode programs: core's and the installed extensions'.
 * [`rollout`](#platoon-rollout): Run one task through its configured route and print the trajectory tree, for debugging.
 * [`sandbox`](#platoon-sandbox): The sandboxes a run left running.
+* [`tasks`](#platoon-tasks): A training run's per-task statistics: what each task's groups did so far.
 * [`toolchain`](#platoon-toolchain): Build the toolchains that CLI harnesses run from inside task sandboxes.
 * [`train`](#platoon-train): Train with Tinker on the environments a config selects.
 * [`viz`](#platoon-viz): Open the trajectory viewer: tail, replay or show-dump event files (`platoon viz --help` lists them).
@@ -317,6 +321,52 @@ host, and when the run last ran on another host, which holds its sandboxes. Prin
 
 * `RUN_DIR`: The run directory: a training run's log_path/experiment_name/trial_name, or an evaluation's
     inference.output_dir. **[required]**
+
+### platoon tasks
+
+A training run's per-task statistics: what each task's groups did so far.
+
+#### platoon tasks show
+
+```console
+platoon tasks show [OPTIONS] RUN_DIR
+```
+
+Print a training run's per-task statistics, as its newest full checkpoint saved them: one row per task with a settled group, while the run trains too.
+
+Each row: the task's groups; its passes over its attempts (valid rollouts, passes judged on the reward its
+environment scored, against its entry's success_threshold); the expected pass rate E[p], pass@G and chance that a
+group of G mixes passes and failures, E[inf], under its decayed posterior (G its entry's group size); the newest
+policy version of its recent groups (each group's oldest sampled version, which the stale filter reads); its
+draws not yet consumed (out); and what became of the rest: consumed/stale/failed/skipped/lost. When the newest
+checkpoint's snapshot cannot be read, an older one is shown, and stderr says why.
+
+**Arguments**:
+
+* `RUN_DIR`: The run directory: log_path/experiment_name/trial_name. **[required]**
+
+**Parameters**:
+
+* `--label STR`: Only the tasks of this label (train.label_by; by default each task's environment entry).
+* `--sort CHOICE`: informative: the most likely to give a group that trains first; pass_rate: the hardest first; groups: the
+    most groups first. *[choices: informative, pass_rate, groups]* *[default: informative]*
+* `--top INT`: Print only this many rows.
+
+#### platoon tasks export
+
+```console
+platoon tasks export [OPTIONS] RUN_DIR
+```
+
+Write a training run's per-task statistics to stdout, every task of the run, as its newest full checkpoint saved them: the columns of platoon tasks show, and the counts behind them.
+
+**Arguments**:
+
+* `RUN_DIR`: The run directory: log_path/experiment_name/trial_name. **[required]**
+
+**Parameters**:
+
+* `--format CHOICE`: csv, with a header row, or jsonl, one JSON object per task. *[choices: csv, jsonl]* *[default: csv]*
 
 ### platoon harbor
 

@@ -345,11 +345,12 @@ ARITHMETIC = pt.EnvironmentEntry(
 `pt.EnvironmentEntry(name, version="1", *, description="", harness_defaults=None, **keys)` takes the keys of an
 `environments` entry, except the ones each run decides: `name`, `weight`, `env`, `harness_options`, `exclude_tasks`,
 `max_staleness`, the run-level settings, and of the entry's training settings all but the rollout settings its tasks
-were measured with (`workflow_config.rollout_config`, with no `eval_overrides.workflow_config`). `harness_defaults`
-maps a harness to the options the environment needs from it, so a config that picks another harness does not inherit
-options it cannot read. Leave a task the environment should not offer out of its own task lists, in a new version,
-rather than in `exclude_tasks`: a config's own `exclude_tasks` would replace the entry's list instead of adding to it.
-The entry is checked against the config schema when it is built.
+were measured with (`workflow_config.rollout_config`, with no `eval_overrides.workflow_config`) and the reward that
+counts as a pass (`success_threshold`). `harness_defaults` maps a harness to the options the environment needs from
+it, so a config that picks another harness does not inherit options it cannot read. Leave a task the environment
+should not offer out of its own task lists, in a new version, rather than in `exclude_tasks`: a config's own
+`exclude_tasks` would replace the entry's list instead of adding to it. The entry is checked against the config schema
+when it is built.
 
 [`named.yaml`](../../examples/extension-package/named.yaml) evaluates through it:
 

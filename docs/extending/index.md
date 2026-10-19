@@ -148,7 +148,9 @@ a named environment may ship the rollout settings its tasks were measured with, 
 such as a calibrated step budget (`workflow_config: {rollout_config: {max_steps: 30}}`): they are the lowest layer of
 the entry's settings, beneath the run's evaluation settings in its evaluations. The rest of `workflow_config` (the
 group size, the baseline, the minimum group size and the other training strategy) and `eval_overrides.workflow_config`
-are the run's to choose, and building the entry refuses them.
+are the run's to choose, and building the entry refuses them. An environment that gives partial credit may ship its
+`success_threshold`, the scored reward that counts as a pass in the run's per-task statistics
+([Per-task statistics](../how-to/train-and-eval.md#per-task-statistics)).
 
 `platoon-number-search@1` ships with platoon and needs nothing installed; `textcraft@1` and `textcraft-synth@1` come
 from the first-party extension `platoon-textcraft` (`extensions/textcraft`).

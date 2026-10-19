@@ -96,6 +96,7 @@ toolchain_app = App(name="toolchain", help="Build the toolchains that CLI harnes
 env_app = App(name="env", help="Environment services, named environments, and the environments a config selects.")
 extensions_app = App(name="extensions", help="The installed extensions: their components, versions and problems.")
 sandbox_app = App(name="sandbox", help="The sandboxes a run left running.")
+tasks_app = App(name="tasks", help="A training run's per-task statistics: what each task's groups did so far.")
 app.command(config_app)
 app.command(harness_app)
 app.command(program_app)
@@ -103,6 +104,7 @@ app.command(toolchain_app)
 app.command(env_app)
 app.command(extensions_app)
 app.command(sandbox_app)
+app.command(tasks_app)
 # Imported when it runs (`platoon --help` stays fast): platoon.envs.harbor.cli.
 app.command(
     "platoon.envs.harbor.cli:harbor_app",
@@ -1712,6 +1714,150 @@ def sandbox_reap(run_dir: Path, /) -> int:
         print(f"platoon: not reaping the sandboxes of {run_dir}: {refusal}", file=sys.stderr)
         return 1
     print(f"reaped {reaped} sandbox(es) of {run_dir}")
+    return 0
+
+
+# --- tasks -----------------------------------------------------------------------------------------------------
+
+TaskSort = Literal["informative", "pass_rate", "groups"]
+
+
+def _task_statistics(run_dir: Path) -> tuple[Any, Any, int] | None:
+    """``(store, row, policy version)`` of a training run's newest snapshot of its per-task statistics that reads back,
+    which its newest full checkpoint saved, else an older one, with a note on stderr for each newer one passed over;
+    None, with the reason on stderr, when it has none."""
+
+    from platoon.train.task_stats import LOOP_STATE_KEY, TaskStatsStore, checkpoint_rows, newest_snapshot, read_snapshot
+
+    try:
+        found = newest_snapshot(run_dir)
+        if found is None:
+            named = [row for row in checkpoint_rows(run_dir) if isinstance(row.get(LOOP_STATE_KEY), dict)]
+            if not named:
+                print(
+                    f"platoon: {run_dir} has no checkpoint that saved per-task statistics: it is no run directory of "
+                    "platoon train, or none of its full checkpoints is from a platoon that keeps them",
+                    file=sys.stderr,
+                )
+                return None
+            print(f"platoon: {run_dir}: no snapshot its checkpoints name can be read:", file=sys.stderr)
+            for row in reversed(named):
+                try:
+                    read_snapshot(run_dir, row[LOOP_STATE_KEY])
+                except ValueError as exc:
+                    print(f"platoon: checkpoint {row.get('name')}: {exc}", file=sys.stderr)
+            return None
+        for problem in found.passed_over:
+            print(f"platoon: passed over {problem}", file=sys.stderr)
+        row = found.row
+        store = TaskStatsStore.from_snapshot(found.data)
+    except ValueError as exc:
+        print(f"platoon: {exc}", file=sys.stderr)
+        return None
+    version = row.get("policy_version", row.get("batch", 0))
+    return store, row, int(version) if isinstance(version, int) else 0
+
+
+@tasks_app.command(name="show")
+def tasks_show(
+    run_dir: Path, /, *, label: str | None = None, sort: TaskSort = "informative", top: int | None = None
+) -> int:
+    """Print a training run's per-task statistics, as its newest full checkpoint saved them: one row per task with a
+    settled group, while the run trains too.
+
+    Each row: the task's groups; its passes over its attempts (valid rollouts, passes judged on the reward its
+    environment scored, against its entry's success_threshold); the expected pass rate E[p], pass@G and chance that a
+    group of G mixes passes and failures, E[inf], under its decayed posterior (G its entry's group size); the newest
+    policy version of its recent groups (each group's oldest sampled version, which the stale filter reads); its
+    draws not yet consumed (out); and what became of the rest: consumed/stale/failed/skipped/lost. When the newest
+    checkpoint's snapshot cannot be read, an older one is shown, and stderr says why.
+
+    Parameters
+    ----------
+    run_dir
+        The run directory: log_path/experiment_name/trial_name.
+    label
+        Only the tasks of this label (train.label_by; by default each task's environment entry).
+    sort
+        informative: the most likely to give a group that trains first; pass_rate: the hardest first; groups: the
+        most groups first.
+    top
+        Print only this many rows.
+    """
+
+    from platoon.train.task_stats import FATES, task_rows
+
+    found = _task_statistics(run_dir)
+    if found is None:
+        return 1
+    store, row, version = found
+    rows = [entry for entry in task_rows(store, now=version, label=label) if entry["groups"]]
+    keys = {
+        "informative": lambda entry: (-entry["informative_at_G"], entry["task_id"]),
+        "pass_rate": lambda entry: (entry["pass_rate"], entry["task_id"]),
+        "groups": lambda entry: (-entry["groups"], entry["task_id"]),
+    }
+    rows.sort(key=keys[sort])
+    shown = rows[:top] if top is not None else rows
+    total = len(task_rows(store, now=version, label=label))
+    print(
+        f"{run_dir}: checkpoint {row.get('name')}, policy version {version}: {len(rows)} of {total} tasks"
+        + (f" of label {label}" if label is not None else "")
+        + " have a settled group"
+    )
+    if not shown:
+        return 0
+    lines = [("task", "groups", "pass/att", "E[p]", "E[pass@G]", "E[inf]", "newest v", "out", "/".join(FATES))]
+    for entry in shown:
+        lines.append(
+            (
+                entry["task_id"],
+                str(entry["groups"]),
+                f"{entry['passes']}/{entry['attempts']}",
+                f"{entry['pass_rate']:.2f}",
+                f"{entry['pass_at_G']:.2f}",
+                f"{entry['informative_at_G']:.2f}",
+                "" if entry["newest_version"] is None else str(entry["newest_version"]),
+                str(entry["outstanding"]),
+                "/".join(str(entry[f"fate_{fate}"]) for fate in FATES),
+            )
+        )
+    widths = [max(len(line[index]) for line in lines) for index in range(len(lines[0]))]
+    for line in lines:  # the task left-aligned, the numbers right-aligned, the fates as they are
+        cells = [line[0].ljust(widths[0]), *(cell.rjust(width) for cell, width in zip(line[1:-1], widths[1:-1]))]
+        print("  ".join([*cells, line[-1]]))
+    return 0
+
+
+@tasks_app.command(name="export")
+def tasks_export(run_dir: Path, /, *, format: Literal["csv", "jsonl"] = "csv") -> int:
+    """Write a training run's per-task statistics to stdout, every task of the run, as its newest full checkpoint
+    saved them: the columns of platoon tasks show, and the counts behind them.
+
+    Parameters
+    ----------
+    run_dir
+        The run directory: log_path/experiment_name/trial_name.
+    format
+        csv, with a header row, or jsonl, one JSON object per task.
+    """
+
+    import csv
+
+    from platoon.train.task_stats import TASK_COLUMNS, task_rows
+
+    found = _task_statistics(run_dir)
+    if found is None:
+        return 1
+    store, _row, version = found
+    rows = task_rows(store, now=version)
+    if format == "jsonl":
+        for entry in rows:
+            print(json.dumps(entry))
+        return 0
+    writer = csv.DictWriter(sys.stdout, fieldnames=list(TASK_COLUMNS), lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
     return 0
 
 
