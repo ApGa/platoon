@@ -32,6 +32,7 @@ compute on the next.
 | `platoon env list [CONFIG]\|show NAME` | The environment service schemes, the named environments, and the environments a config selects |
 | `platoon extensions list\|show NAME\|check` | The installed packages' components with their versions, one of them in detail, and what is wrong with them |
 | `platoon sandbox reap RUN_DIR` | Reap the sandboxes a run left running when its process was killed ([Long runs](#long-runs)) |
+| `platoon tasks show\|export RUN_DIR` | A training run's per-task statistics: each task's groups, passes and expected pass rates ([Per-task statistics](#per-task-statistics)) |
 
 Every command takes `--help`.
 
@@ -103,8 +104,10 @@ writes under the site profile's `runs`, with `stats.experiment_name` named after
 ([Run on a cluster](clusters.md#4-write-the-sites-profile-once)); a relative `log_path` is relative to the working
 directory. The run directory holds the run record
 (`config.resolved.yaml`, `lock.json`, and `process.json`, the process that runs it), `checkpoints.jsonl`,
-`evaluations.jsonl` (each evaluation during training that completed), and `rollouts/train/<policy version>/` and
-`rollouts/eval/<policy version>/` with each rollout's harness logs (`harness/`) and viewer event files (`events/`).
+`evaluations.jsonl` (each evaluation during training that completed), `tasks/` (the per-task statistics each full
+checkpoint saves, and their event log: [Per-task statistics](#per-task-statistics)), and
+`rollouts/train/<policy version>/` and `rollouts/eval/<policy version>/` with each rollout's harness logs
+(`harness/`) and viewer event files (`events/`).
 Metrics go to the console after every step and to W&B unless `stats.wandb.mode` is `disabled` (W&B needs
 `WANDB_API_KEY`).
 
@@ -737,7 +740,9 @@ directory, with its `state_path` (weights and optimizer, for resuming) and `samp
 | `000007_interrupted` | At the first SIGINT or SIGTERM, when a step completed since launch; weights and optimizer, kept |
 | `final` | When training reaches its last step, after the evaluation due at that step |
 
-Between full checkpoints, each step only pushes new sampling weights, which cannot be resumed from.
+Between full checkpoints, each step only pushes new sampling weights, which cannot be resumed from. Each full
+checkpoint also saves the run's per-task statistics, which a resume loads ([Per-task
+statistics](#per-task-statistics)).
 
 **Delete old recovery checkpoints.** A full checkpoint of a large model trained in full is hundreds of gigabytes, so
 a long run that sets `recovery_every` can fill the service's disk. With `checkpoint.keep_recovery: N`, each time a
@@ -914,6 +919,9 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/stale_rollouts`, `train/batch/<column>/<label>/stale_groups` | 0 or rare | Rollouts older than `max_staleness` were dropped; by label, which one's groups grow too old: raise its entry's bound ([Settings per environment](#settings-per-environment)) |
 | `train/batch/skipped_rows`, `train/batch/<column>/<label>/skipped_rows` | 0 | Rows of a label at its `rollout_group_limits` were skipped, four batches of them waiting already: lower its weight or raise its limit |
 | `train/batch/parked_rows`, `train/batch/<column>/<label>/parked_rows` | Small, steady | Rows of a label at its `rollout_group_limits` that wait for a slot: a count that grows, step after step, is a label whose share of the order its limit cannot serve, so it trains less than its weight; those still waiting when the run ends never train |
+| `train/batch/informative_groups`, `.../all_pass_groups`, `.../all_fail_groups`, `.../uniform_mixed_groups`, and each label's under `train/batch/<column>/<label>/` | A large share informative | The step's groups that trained, and those whose advantages were all zero: every rollout passed, none did, or both ([Per-task statistics](#per-task-statistics)). Mostly all-pass or all-fail: the tasks are too easy or too hard for the policy, and their groups train nothing |
+| `train/tasks/<column>/<label>/pass_at_1`, `.../pass_at_G` | Rise over steps | Each label's mean expected pass@1 and pass@G over its tasks with a settled group, G its entry's group size: the pass@k curve of training, for every run. Flat while the reward rises: a shaping reward processor rewards something other than passing |
+| `train/tasks/<column>/<label>/no_evidence` | 0 | The label's tasks whose last three groups had no valid rollout: a broken grader or setup; `platoon tasks export` lists them (`no_evidence_streak`) |
 | `rollout_client/trainer_queue_wait_seconds_total` | Small next to `timing/batch_total` | The trainer waits on rollouts: raise rollout concurrency or speed up the environment |
 | `rollout_client/cpu_saturation` | Below 1 | The client machine is out of CPU: use fewer concurrent rollouts or a bigger node |
 | `rollout_client/agent_step_tool_fraction` | Depends on the environment | Most of each step is spent in tools and the environment, not the model |
@@ -933,6 +941,95 @@ meanwhile. The starting policy's evaluation (`eval/step` 0, with `eval.at_start`
 first update only once that evaluation has ended, so the held-out curve starts at the base model.
 
 `platoon eval`'s report has the matching numbers per task (`reports/task_results.jsonl`).
+
+## Per-task statistics
+
+Training keeps a record of each training task: what each of its groups did, and what they say so far about how often
+it passes. Each step logs it by label, each full checkpoint saves it, and `platoon tasks` reads it.
+
+**What a group did.** Each group settles with the workflow's verdict on what it trains: `trained` (an informative
+group, with a nonzero advantage), `uniform` (every retained advantage zero), or why it trains nothing:
+`reward_key_mismatch`, `no_results`, `below_min` (fewer valid rollouts than `min_successful_group_size`),
+`no_completed_root`, `no_datums`, and `failed` for a workflow that raised or returned nothing. Every settled group
+counts once, stale ones too: their rollouts ran, and a uniform group says the most about a task's difficulty. A
+workflow class of your own that returns a plain list of datums gives no verdict (`unknown`) and says nothing of its
+rollouts, so its groups count but give no evidence: its tasks read as not seen, and the step logs no pass@k for them.
+The trainer numbers each training row it draws, `_platoon_seq` and `_platoon_position` in the row a workflow gets, to
+join the group's record to its draw.
+
+**What passes.** A rollout passes when it is valid (its root completed with a scored outcome, so it entered the
+baseline) and the reward its environment scored, before any reward processor, reaches its entry's
+`success_threshold`, 1.0 by default: `platoon eval` judges success the same way. A shaping reward processor that trains
+0.98 for a correct rollout changes what trains, not what passes. Set the threshold of an environment that gives
+partial credit on its entry; a named environment may ship its own:
+
+```yaml
+environments:
+  - name: proofs
+    env: acme-proofs@1
+    success_threshold: 0.5
+```
+
+As in `platoon eval`, a rollout whose trace records no outcome passes on its own success flag at 1, whatever the
+threshold, and one without a flag on its trained reward. A rollout without a valid result (an error, a timeout, a
+cancelled straggler, a dead worker) counts as neither a pass nor a failure, as the baseline leaves it out. A uniform
+group is all-pass when every valid rollout passed, all-fail when none did, and mixed otherwise: no datum kept the
+signal, or the trained reward and the scored one disagree.
+
+**What each step logs.**
+
+| Metric | What it is |
+|---|---|
+| `train/batch/{informative,all_pass,all_fail,uniform_mixed}_groups`, and each label's under `train/batch/<column>/<label>/` | The step's groups that trained, and those whose advantages were all zero, by success: together, the groups it trained on (stale groups are left out, as from every `batch/` metric) |
+| `train/tasks/<column>/<label>/pass_at_1`, `pass_at_G` | The mean expected pass@1 and pass@G over the label's seen tasks, those with a group whose rollouts were recorded, G its entry's group size; `train/tasks/pass_at_1` and `pass_at_G` over every task |
+| `train/tasks/<column>/<label>/coverage` | The share of the label's tasks seen |
+| `train/tasks/<column>/<label>/bands/{zero,low,mid,high,solved}` | The label's seen tasks by expected pass rate: at most 0.05, at most 0.2, below 0.8, below 0.95, and from 0.95 |
+| `train/tasks/<column>/<label>/no_evidence` | The label's tasks whose last three groups had no valid rollout |
+
+The expected rates come from each task's passes and failures, weighted by age: a group sampled `n` policy versions ago
+weighs `2^(-n/32)`, so a step that takes no optimizer update ages nothing. A task's counts start from a prior of
+weight 2 centered on its entry's pass rate, so a task not yet seen reads as its entry does, and its own groups soon
+outweigh the prior: one group of 4 to 8 valid rollouts already counts for more. pass@G is the chance that at least
+one of G rollouts passes, under that estimate.
+
+**Saved with each checkpoint.** Each full checkpoint writes the statistics to
+`tasks/state-s<start>-<checkpoint>.json` in the run directory, where `<start>` numbers the run's starts, and its row
+of `checkpoints.jsonl` names the file with its SHA-256 (`tasks`). A start that resumes loads the file its checkpoint
+names before the checkpoint it saves at launch, which saves them again under its own number. Groups drawn before the
+checkpoint that no completed step had trained on count as lost: the run draws its tasks from the checkpoint's batch,
+as it always did. A file that cannot be written (a full disk, say) leaves its checkpoint without one, with a warning,
+and the next full checkpoint writes the statistics again. A start whose checkpoint names no file (one saved before
+platoon 0.3.0, or whose write failed), or whose file is missing or changed, goes on from the newest older checkpoint's
+file that reads back, without the groups since, else from empty, with a warning; `lock.json` lists each such start,
+the checkpoint, why, and the checkpoint whose statistics it loaded (`tasks_state_lost`). Training goes on either way.
+`checkpoint.keep_recovery` deletes a pruned checkpoint's file with it.
+
+`tasks/events.jsonl` logs each draw, settle and fate (`consumed`, `stale`, `failed`, `skipped`, `lost`) and each
+start, one JSON line each, by start and draw number; a start logs its own events once its launch checkpoint is saved.
+A resume never reads it: losing it loses history only.
+
+**Read them.** `platoon tasks show RUN_DIR` prints the statistics of the run's newest full checkpoint, while it trains
+too (an older checkpoint's, when the newest one's file cannot be read, and stderr says why): one row per task with a
+settled group, the likeliest to give a group that trains first. Each row has the task's groups, its passes over its
+valid rollouts, its expected pass rate, pass@G and chance of a group that trains, the newest policy version of its
+recent groups (each group's oldest sampled version, which the stale filter reads), its draws not yet trained on, and
+what became of the rest:
+
+```console
+$ platoon tasks show runs/mix/trial-1
+runs/mix/trial-1: checkpoint recovery-000004, policy version 4: 3 of 4 tasks have a settled group
+task           groups  pass/att  E[p]  E[pass@G]  E[inf]  newest v  out  consumed/stale/failed/skipped/lost
+quick::hard         2       1/7  0.23       0.59    0.57         3    0  2/0/0/0/0
+quick::easy         2       7/8  0.80       0.99    0.53         2    0  2/0/0/0/0
+slow::partial       2       1/2  0.50       0.70    0.40         3    1  0/1/0/0/0
+```
+
+`--sort pass_rate` puts the hardest first, `--label` keeps one label's tasks and `--top N` the first N. `platoon tasks
+export RUN_DIR` writes a row for every task of the run as CSV, or JSON lines with `--format jsonl`, with the counts
+behind them, the kinds of groups named as the step metrics name them (`informative_groups`, `all_pass_groups`,
+`all_fail_groups`, `uniform_mixed_groups`).
+
+The statistics' types (`platoon.train.task_stats`) are experimental: a later release may add fields to them.
 
 ## Next steps
 
