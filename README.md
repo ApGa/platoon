@@ -69,20 +69,6 @@ client takes only a key that starts with `tml-`. For a self-hosted server (for e
 [miles-tinker](https://github.com/neulab/miles-tinker)), set `TINKER_BASE_URL` too; in a training config,
 `tinker_base_url` takes its place for every Tinker client the config opens. W&B logging needs `WANDB_API_KEY`.
 
-## Coming from the original platoon?
-
-This release replaces the original platoon: its AReaL-based trainer, its standalone inference workflows
-(the plugins' `run_inference` scripts, now `platoon eval`) and its plugin layout are gone, and there is no
-step-by-step upgrade guide. The experiments in
-[Recursive Agent Optimization (RAO)](https://arxiv.org/abs/2605.06639) ran on the original code. To reproduce
-them, use the [`apga/rao-snapshot`](https://github.com/ApGa/platoon/tree/apga/rao-snapshot) branch of
-[ApGa/platoon](https://github.com/ApGa/platoon), a snapshot of the code the paper used.
-
-The original platoon gave its version as 0.1.0, so this one starts at 0.2.0: the two never share a version, and
-`pip install --upgrade platoon` replaces a git install of the original. The original code is at the tag
-[`archive/v0.1`](https://github.com/ApGa/platoon/tree/archive/v0.1); to install it from git, pin that tag
-(`git+https://github.com/ApGa/platoon@archive/v0.1`).
-
 ## Quickstart
 
 A run needs three things: an environment, a harness that plays it, and a config that pairs them. The files
