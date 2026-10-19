@@ -132,10 +132,15 @@ an exec'd worker gets, new seeds for numpy's and torch's generators and for ever
 imports seeded from the OS (sympy's, datasets' fingerprint generator), the worker invariants and the startup alarm;
 it then runs the entrypoint as `__main__`. It keeps the server's string hash seed. The fork server runs no thread of
 its own and forks nothing while another runs (jemalloc's background thread aside), dies with the trainer, and stops
-the workers it forked if it dies itself; the supervisor then starts another, and does when the trainer's environment
-or working directory changed since the server started, which its imports may have read. A worker no fork server can
-fork (one failed to import, a thread runs in it, a fork failed) starts by exec, as every worker does with
-`worker_start_method: exec`; the trainer logs why, naming each thread and what it is.
+the workers it forked if it dies itself; the supervisor then starts another, unless it said it cannot serve, and does
+when the trainer's environment or working directory changed since the server started, which its imports may have
+read. A worker no fork server can fork (one failed to import, a thread runs in it, a fork failed) starts by exec, as
+every worker does with `worker_start_method: exec`; the trainer logs why, naming each thread and what it is. So does a
+worker asked for while the server is still importing after the worker's startup budget; the server is not killed for
+it, and forks the workers asked for after it has imported the stack (a server that then finds it cannot serve turns
+forking off, as one that says so in time does). The trainer gives up on a fork only once the server has answered no
+request for a minute, and reads what the server sent before it judges: on a node whose CPUs are all busy, the
+trainer's event loop can be held up for minutes, and a worker forked meanwhile is still the trainer's.
 
 Neither the fork server nor a worker sees a GPU or starts the CUDA driver: their environment hides the GPUs and has
 torch ask NVML (`CUDA_VISIBLE_DEVICES=` and `PYTORCH_NVML_BASED_CUDA_CHECK=1`), so the `torch.cuda.is_available()`
