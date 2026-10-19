@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,8 +19,9 @@ import yaml
 
 from platoon.train.components import ENVIRONMENT_COLUMN, task_ids_to_dataset
 from platoon.train.labels import check_labels, dataset_labels, label_text, task_label
+from platoon.train.tinker import rl
 from platoon.train.tinker.config_defs import ENVIRONMENT_LABEL, PlatoonTinkerRLTrainerConfig, TrainConfig
-from platoon.train.tinker.rollout_queue import RolloutTaskQueue
+from platoon.train.tinker.dispatcher import Dispatcher
 from platoon.utils.config import ConfigError, resolve_config
 
 
@@ -91,18 +93,55 @@ def test_a_label_is_a_columns_value_as_text():
     assert dataset_labels(task_ids_to_dataset(["a", "b"]), "suite") == [None, None]
 
 
+def test_rollout_groups_default_to_the_environment_column_mixtures_write():
+    config = TrainConfig(model_name="Qwen/Qwen3-4B-Instruct-2507", renderer_name="qwen3_instruct")
+    assert config.label_by == ENVIRONMENT_COLUMN == "_platoon_environment"
+
+
 def test_group_limits_apply_to_a_columns_values_as_labels():
+    """The dispatcher reads each row's label as text, so limits keyed on ``3`` and ``true`` apply to a column's int and
+    boolean values: one group of each label at a time, the next of a label once its group ends."""
+
     async def run():
-        queue = RolloutTaskQueue(4, key="level", limits={"3": 1, "true": 1})
-        rows = [{"level": 3, "id": 0}, {"level": 3, "id": 1}, {"level": True, "id": 2}, {"level": True, "id": 3}]
-        for row in rows:
-            await queue.put(row)
-        assert [(await queue.get())["id"] for _ in range(2)] == [0, 2]  # one of each label at a time
-        waiter = asyncio.create_task(queue.get())
-        await asyncio.sleep(0)
-        assert not waiter.done()
-        await queue.release(rows[0])
-        assert (await asyncio.wait_for(waiter, 1))["id"] == 1
+        rows = [{"task_id": str(index), "level": level} for index, level in enumerate([3, 3, True, True])]
+        started: list[str] = []
+        gates: dict[str, asyncio.Event] = {}
+
+        class Rows:
+            def __init__(self) -> None:
+                self.permits = rl._GroupPermits(100)
+
+            def of(self, data: Mapping[str, Any]) -> tuple[str | None, str | None, int]:
+                return None, task_label(data, "level"), 1
+
+        async def run_group(draw, release):
+            started.append(draw.task_id)
+            await gates.setdefault(draw.task_id, asyncio.Event()).wait()
+            release()
+
+        dispatcher = Dispatcher(
+            rows=Rows(),
+            order=lambda position: rows[position],
+            batch_size=4,
+            max_staleness=None,
+            steps=1,
+            limits={"3": 1, "true": 1},
+            labels=("3", "true"),
+        )
+        groups: list[asyncio.Task] = []
+        loop = asyncio.ensure_future(
+            dispatcher.run(spawn=lambda coroutine: groups.append(asyncio.ensure_future(coroutine)), run_group=run_group)
+        )
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert started == ["0", "2"]  # one of each label at a time
+        gates.setdefault("0", asyncio.Event()).set()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert started == ["0", "2", "1"]
+        for task in [loop, *groups]:
+            task.cancel()
+        await asyncio.gather(loop, *groups, return_exceptions=True)
 
     asyncio.run(run())
 

@@ -29,7 +29,7 @@ from platoon.train.task_stats import TaskStatsStore, read_events, snapshot_bytes
 from platoon.train.tinker import rl as rl_module
 from platoon.train.tinker import task_records
 from platoon.train.tinker.checkpoint_pruning import read_checkpoint_records
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig
 from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
 from platoon.train.tinker.task_records import LOST_KEY
 from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
@@ -254,14 +254,18 @@ def test_a_resume_saves_the_loaded_statistics_under_its_own_start_and_pruning_de
     # The crash: nothing after recovery-000001 was saved.
     (run_dir / "checkpoints.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows[:2]))
     for row in rows[2:]:
-        (run_dir / row["tasks"]["file"]).unlink()
+        for name in (row["tasks"]["file"], row["dispatch"]["file"], row["dispatch"].get("kept")):
+            if name is not None:
+                (run_dir / name).unlink()
     older = rows[1]["tasks"]
     older_bytes = (run_dir / older["file"]).read_bytes()
     saved = json.loads(older_bytes)
     assert saved["outstanding"]  # the draws of step 2, which no committed step consumed
-    # A loaded snapshot serializes byte for byte as the one saved.
+    # A loaded snapshot serializes byte for byte as the one saved; the dispatcher's state is a file of its own.
     loaded = TaskStatsStore.from_snapshot(saved)
     assert snapshot_bytes(loaded.snapshot(start=saved["start"], next_seq=saved["next_seq"])) == older_bytes
+    dispatch = json.loads((run_dir / rows[1]["dispatch"]["file"]).read_bytes())
+    assert sorted(map(tuple, dispatch["outstanding"])) == sorted(map(tuple, saved["outstanding"]))
 
     seen: dict[str, Any] = {}
 
@@ -296,16 +300,23 @@ def test_a_resume_saves_the_loaded_statistics_under_its_own_start_and_pruning_de
     assert {"state-s1-recovery-000001.json", "state-s2-recovery-000001.json"} <= set(seen["before"])
     assert set(seen["before"]) - set(seen["after"]) == {"state-s1-recovery-000001.json"}
     assert "state-s2-recovery-000001.json" in _states(run_dir)
-    # The launch save holds the loaded statistics, the draws no committed step consumed counted as lost.
+    # The launch save holds the loaded statistics, the draws no committed step consumed still outstanding: a group the
+    # checkpoint kept under its own draw, the others drawn again as this start's draws, at their positions.
     newer = (run_dir / launch["tasks"]["file"]).read_bytes()
     assert hashlib.sha256(newer).hexdigest() == launch["tasks"]["sha256"]
-    lost = loaded.lose_outstanding()
-    assert lost == [(start, seq) for start, seq, _task, _position in saved["outstanding"]]
-    assert newer == snapshot_bytes(loaded.snapshot(start=2, next_seq=0))
+    relaunched = json.loads(newer)
+    kept = {tuple(key) for key in (dispatch["kept"] or {}).get("groups", [])}
+    before = {(start, seq): (task, place) for start, seq, task, place in saved["outstanding"]}
+    after = {(start, seq): (task, place) for start, seq, task, place in relaunched["outstanding"]}
+    assert sorted(after.values()) == sorted(before.values())
+    assert {key for key in after if key[0] == 1} == kept and {key[0] for key in set(after) - kept} == {2}
+    assert relaunched["tasks"] == saved["tasks"]  # each task's draws and fates as they were: none lost
     events = list(read_events(run_dir))
     starts = [(event["start"], event["batch"], event["checkpoint"]) for event in events if event["event"] == "start"]
     assert starts == [(1, 0, None), (2, 1, "recovery-000001")]
-    assert [(event["start"], event["seq"]) for event in events if event.get("fate") == "lost"] == lost
+    assert not [event for event in events if event.get("fate") == "lost"]
+    reissued = [tuple(event["reissues"]) for event in events if event.get("reason") == "reissue"]
+    assert sorted(reissued) == sorted(set(before) - kept)
 
 
 @pytest.mark.parametrize("damage", ["no snapshot", "changed snapshot", "every snapshot"])
@@ -367,6 +378,8 @@ def test_statistics_that_fail_stop_with_a_warning_and_training_goes_on(tmp_path,
     assert logged == [1, 2, 3]
     assert "tasks" in loop_states["recovery-000000"]  # the launch save, before any group settled
     assert "tasks" not in loop_states["recovery-000001"] and "tasks" not in loop_states["final"]
+    # Where the run's draws stand is saved all the same, so a resume from any of them is exact.
+    assert all("dispatch" in loop_state for loop_state in loop_states.values())
     assert any(
         "per-task statistics stop for the rest of this start: recording a settled group failed" in entry.getMessage()
         for entry in caplog.records
@@ -417,18 +430,22 @@ def test_a_snapshot_that_cannot_be_written_costs_its_checkpoint_alone(tmp_path, 
     second, _logged = make_pruning_trainer(
         monkeypatch, trainer_config(tmp_path, "train.max_training_steps=4", "checkpoint.recovery_every=1"), service
     )
-    _train(second)
+    workflow = Workflow(delay=0.02)
+    _train(second, workflow)
 
     [lost] = json.loads((run_dir / "lock.json").read_text())[LOST_KEY]
     assert (lost["checkpoint"], lost["loaded"]) == ("recovery-000002", "recovery-000001")
     groups = sum(older.task(task_id).groups for task_id in older.task_ids())
     store = second._recorder.store
-    assert groups > 0 and sum(store.task(task_id).groups for task_id in store.task_ids()) == groups + 4
+    # The older statistics, and each group the resume rolled out; the draws themselves resume exactly, from the
+    # dispatcher's own state, which recovery-000002 saved.
+    assert groups > 0 and sum(store.task(task_id).groups for task_id in store.task_ids()) == groups + workflow.started
+    assert "dispatch" in rows[2] and workflow.started <= 4
 
 
-def test_a_start_whose_launch_save_fails_logs_neither_its_start_nor_its_lost_draws(tmp_path, monkeypatch):
-    """The next start takes the dead start's number, so the dead start's events would have doubled it and every lost
-    fate: a start's own events wait for its launch save."""
+def test_a_start_whose_launch_save_fails_logs_neither_its_start_nor_its_draws_drawn_again(tmp_path, monkeypatch):
+    """The next start takes the dead start's number, so the dead start's events would have doubled it and every draw
+    it drew again: a start's own events wait for its launch save."""
 
     service = FakeTinkerService()
     config = ("train.max_training_steps=2", "train.max_staleness=1", "checkpoint.recovery_every=1")
@@ -455,8 +472,8 @@ def test_a_start_whose_launch_save_fails_logs_neither_its_start_nor_its_lost_dra
 
     events = list(read_events(run_dir))
     assert [event["start"] for event in events if event["event"] == "start"] == [1, 2]
-    lost = [(event["start"], event["seq"]) for event in events if event.get("fate") == "lost"]
-    assert lost and len(lost) == len(set(lost))
+    reissued = [(event["start"], event["seq"]) for event in events if event.get("reason") == "reissue"]
+    assert reissued and len(reissued) == len(set(reissued)) and {start for start, _seq in reissued} == {2}
 
 
 def test_once_the_statistics_stop_a_step_logs_no_group_kinds(tmp_path, monkeypatch):
@@ -519,3 +536,26 @@ def test_lock_json_lists_each_start_that_lost_the_statistics(tmp_path):
     broken = tmp_path / "broken"
     (broken / "lock.json").mkdir(parents=True)  # unreadable: never fails training
     task_records.record_lost_state(broken, first)
+
+
+def test_a_kept_group_without_a_record_gets_its_fate_by_its_draw_and_older_outstanding_draws_are_lost(tmp_path):
+    """A group that a start whose statistics had stopped kept has no record: its fate goes by its draw.  And a resume
+    whose statistics came from an older snapshot counts as lost the outstanding draws the checkpoint no longer holds,
+    but not those it does, which it takes up."""
+
+    config = SimpleNamespace(
+        environments=[],
+        train=SimpleNamespace(workflow_config=WorkflowConfig(group_size=1), max_staleness=None, task_sampler=None),
+        eval=SimpleNamespace(workflow_config=None),
+    )
+    tasks = [{"task_id": "t0"}, {"task_id": "t1"}, {"task_id": "t2"}]
+    recorder = task_records.TaskRecorder(run_dir=str(tmp_path), config=config, tasks=tasks, start=2)
+    for seq, task in enumerate(tasks):
+        recorder.store.draw(1, seq, task["task_id"], seq)  # as an older snapshot holds them
+
+    assert recorder.lose_outstanding(keep=[(1, 1), (1, 2)]) == 1  # (1, 0) was consumed since: the statistics lost it
+    recorder.fate_of((1, 1), "consumed")
+
+    assert [draw[:2] for draw in recorder.store.outstanding] == [(1, 2)]
+    assert recorder.store.task("t0").fates == {"lost": 1} and recorder.store.task("t1").fates == {"consumed": 1}
+    recorder.close()

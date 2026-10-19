@@ -99,7 +99,7 @@ def _run_batches(
     """Run ``_train_loop`` over ``outputs``, ``batch_size`` groups a step.  The training tasks are labelled
     ``labels`` (by ``label_by``), and a mixture's ``environments`` each label one task by its entry."""
 
-    trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
+    trainer: Any = object.__new__(rl_module.PlatoonTinkerRLTrainer)  # its seams are replaced below
     column = label_by or ENVIRONMENT_COLUMN
     trainer.train_dataset = [{"task_id": f"{name}::t", ENVIRONMENT_COLUMN: name} for name in environments] + [
         {"task_id": f"t{index}", column: label} for index, label in enumerate(labels)
@@ -119,7 +119,6 @@ def _run_batches(
         checkpoint=SimpleNamespace(recovery_every=None),
     )
     trainer.batch_transforms = []
-    trainer._train_dataloader_loop = AsyncMock()
     trainer._save_checkpoint_and_get_sampling_client = AsyncMock(return_value=object())
     trainer.shutdown_loops = AsyncMock()
     monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
@@ -143,12 +142,12 @@ def _run_batches(
             stats_logger=SimpleNamespace(log=lambda *, step, stats: logged.append(stats)),
         )
 
-        async def finish_all_groups(shared_state, workflow, task_queue, result_queue, rows=None):
-            # No yield: all groups finish before the first batch is trained.
+        def finish_all_groups(task_group, shared_state, start, end, workflow, result_queue):
+            # In place of the dispatcher's groups, and no yield: all groups finish before the first batch is trained.
             for output in outputs:
                 result_queue.put_nowait(output)
 
-        trainer._rollout_workflow_worker_loop = finish_all_groups
+        trainer._dispatch = finish_all_groups
         async with asyncio.TaskGroup() as task_group:
             steps = len(outputs) // batch_size
             await trainer._train_loop(task_group, shared, start_batch, start_batch + steps, object())

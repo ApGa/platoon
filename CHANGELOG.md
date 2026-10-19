@@ -97,7 +97,7 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   layer each came from (`--entry NAME` for one), `platoon config validate` and `platoon train` say what each entry
   changes, and `lock.json` records it (`entry_settings`). `max_concurrent_rollouts` counts rollouts that groups of
   different sizes share. A label at its `rollout_group_limits` no longer stalls the others, in every config that sets
-  limits: its waiting rows neither fill the pending batch nor count toward the batches `train.max_staleness` lets the
+  limits: its waiting rows neither take a place in a batch nor count toward the batches `train.max_staleness` lets the
   run draw ahead, and past four batches of them its new rows are skipped and counted (`train/batch/skipped_rows`). So
   a capped label whose limit cannot keep up with its share trains less than its weight, and the rows still waiting
   when a run ends never train (`train/batch/parked_rows` counts them each step); `platoon train` and `platoon config
@@ -117,6 +117,40 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   under `tasks_state_lost`), recovery pruning deletes a pruned checkpoint's file, and `tasks/events.jsonl` logs every
   draw, settle and fate. The statistics never fail training. `platoon tasks show` and `platoon tasks export` read
   them ([Per-task statistics](docs/how-to/train-and-eval.md#per-task-statistics)).
+- **A dispatcher starts each training group when it can start.** The producer that drew a batch's tasks ahead of the
+  rollout workers, the pending queue and the pool of workers are replaced by a dispatcher that draws a task only when
+  its group can start: within the horizon of `train.max_staleness` (at most `max_staleness + 1` batches of groups
+  started and not yet trained), with rollout permits for the whole group, and with room in its label's
+  `rollout_group_limits`. A run without `rollout_group_limits` trains the groups it trained before; at
+  `max_staleness: 0` each step trains exactly the groups of its batch, unless a label's limit holds one of them back.
+  The run starts no group past its last step ([Settings per
+  environment](docs/how-to/train-and-eval.md#settings-per-environment)).
+- **A capped label's groups start as its limit allows, not as the steps do.** A draw whose label is at its
+  `rollout_group_limits` waits in the label's backlog, outside the horizon; past four batches of them its new draws
+  are skipped and counted, and the run draws only while some label has room. While a capped label has draws waiting,
+  each of its running groups holds a slot of the horizon for the next one, which starts as soon as the group ends, as
+  far as the capped labels' groups and those slots fit in `max_staleness` batches; at `max_staleness: 0` there is no
+  slot to hold, and a capped label starts at most its limit of groups a step. This changes what a config with
+  `rollout_group_limits` trains: its capped labels' draws that wait are drawn past at every bound, `max_staleness: 0`
+  included, and those still waiting when the run ends never start. The `train/batch/parked_rows` and `skipped_rows`
+  metrics count the draws that wait and those skipped.
+- **A resume takes up exactly where the run stood.** Each full checkpoint saves where the run's draws stand in a file
+  of its own (`tasks/dispatch-s<start>-<checkpoint>.json`, which its row names as `dispatch`), and the groups that
+  settled and that no step had trained yet (`tasks/kept-s<start>-<checkpoint>.json.gz`): a resume trains those as they
+  are, a failed one as failed, without rolling them out again, draws again first the tasks whose groups were running
+  or waiting, and goes on with the order where it stopped. So every position of the order is consumed exactly once,
+  trained, dropped as stale, failed or skipped, and an interrupt or a crash no longer reruns hours of a slow
+  environment's groups or loses the groups in flight, also when the per-task statistics stopped or could not be
+  written. Every full save writes the groups it keeps again, about ten bytes a token, in a thread beside training;
+  `checkpoint.keep_recovery` deletes them with their checkpoint. A resume whose sampling inputs changed (the task
+  sampler, the batch size, the label column, the entries' order, an entry's weight, seed or tasks) warns, records it
+  in `lock.json` (`sampling_changed`) and goes on; one from a checkpoint of an earlier platoon draws from its batch,
+  as before ([Checkpoints and resume](docs/how-to/train-and-eval.md#checkpoints-and-resume)).
+- **`train.task_sampler: uniform`** draws every training task of every entry in seeded shuffled passes, with no
+  entry slots: every task equally often, as `weight: tasks` does, with batches as the shuffle mixes them rather than
+  balanced by entry. It reads no entry's weight or seed: a config that gives an entry a numeric weight does not load
+  (exit 78). For a single environment it draws the batches `auto` draws, in epochs that hold every task
+  ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
 - **Breaking: the forms that platoon 0.2.0 deprecated are gone.** A config, an override or a command that still uses
   one fails as a configuration error (exit 78), with a message that names what replaces it and says that platoon 0.3.0
   removed it, such as `train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by`

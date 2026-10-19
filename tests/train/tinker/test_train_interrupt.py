@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import signal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from trainer_fakes import TrainingClient, Workflow, make_trainer, trainer_config
@@ -123,22 +124,24 @@ def test_the_stop_at_once_a_supervisor_passes_on_forces_the_exit(tmp_path, monke
 
 
 @pytest.mark.parametrize("num_minibatches", [1, 2])
-def test_after_a_shutdown_request_rollout_workers_serve_only_batches_with_several_updates(num_minibatches):
-    # With several updates per batch, a batch that applied one finishes after the request, so its workers keep
-    # serving until the train loop's task group cancels them; with one, they stop taking tasks at the request.
-    trainer = object.__new__(rl.PlatoonTinkerRLTrainer)
+def test_after_a_shutdown_request_an_evaluation_s_rollout_workers_take_no_task(num_minibatches):
+    # Training never waits for an evaluation after the request, whatever its updates per batch (training's groups,
+    # which a batch with several updates may still need, start through the dispatcher): they return at once.
+    trainer: Any = object.__new__(rl.PlatoonTinkerRLTrainer)
     trainer.config = SimpleNamespace(train=SimpleNamespace(num_minibatches=num_minibatches))
-    shared = SimpleNamespace(shutdown_event=asyncio.Event(), train_tracker=get_tracker("train"), watchdog=None)
+    shared: Any = SimpleNamespace(shutdown_event=asyncio.Event(), train_tracker=get_tracker("train"), watchdog=None)
     shared.shutdown_event.set()
 
     async def serve() -> tuple[int, int]:
         tasks, results = asyncio.Queue(), asyncio.Queue()
         tasks.put_nowait({"task_id": "a"})
-        worker = asyncio.ensure_future(trainer._rollout_workflow_worker_loop(shared, Workflow(0), tasks, results))
+        worker = asyncio.ensure_future(
+            trainer._rollout_workflow_worker_loop(shared, Workflow(0), tasks, results, tracker=get_tracker("eval"))
+        )
         try:
             await asyncio.wait({worker}, timeout=1)  # one that stops returns at once; one that serves blocks
             return tasks.qsize(), results.qsize()
         finally:
             worker.cancel()
 
-    assert asyncio.run(serve()) == ((0, 1) if num_minibatches > 1 else (1, 0))
+    assert asyncio.run(serve()) == (1, 0)

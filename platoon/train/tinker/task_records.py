@@ -1,19 +1,25 @@
 """The trainer's records of its groups: each draw, settle and fate into the run's per-task statistics.
 
-:class:`TaskRecorder` is how the trainer keeps a :class:`~platoon.train.task_stats.TaskStatsStore`: the producer
-records each draw (:meth:`TaskRecorder.draw`, which numbers the row as the start's next draw), the rollout worker each
-settled group (:meth:`TaskRecorder.settle`, from the row it ran and its workflow's output), and the train loop each
-group's fate once the step that dequeued it commits (:meth:`TaskRecorder.fate`).  Each full checkpoint saves the store
-as a snapshot (:meth:`TaskRecorder.snapshot`, whose record goes into the checkpoint's ``loop_state``), and a start
-that resumes loads the snapshot its checkpoint names before its launch save (:meth:`TaskRecorder.begin`), counting
-the draws it held as lost: this release does not draw them again.  When that snapshot cannot be read, the start goes
-on from the newest older one that can, else from empty, and the run's ``lock.json`` records why
-(:func:`record_lost_state`).  ``tasks/events.jsonl`` logs every step of it, a start's own events once its launch save
-has succeeded (:meth:`TaskRecorder.started`), so that a start that dies before it leaves none.
+:class:`TaskRecorder` is how the trainer keeps a :class:`~platoon.train.task_stats.TaskStatsStore`: the dispatcher
+(:mod:`platoon.train.tinker.dispatcher`) records each draw it numbers (:meth:`TaskRecorder.draw`) and each draw it
+skips, each group records itself when it settles (:meth:`TaskRecorder.settle`, from the row it ran and its workflow's
+output), and the train loop gives each group its fate once the step that dequeued it commits
+(:meth:`TaskRecorder.fate`).  Each full checkpoint saves the store as a snapshot (:meth:`TaskRecorder.snapshot`, whose
+record goes into the checkpoint's ``loop_state``).  A start that resumes loads the snapshot its checkpoint names before
+its launch save (:meth:`TaskRecorder.begin`).  The dispatcher saves where the draws stand in a file of its own
+(:mod:`platoon.train.tinker.dispatcher`), and takes up the outstanding draws from it: the groups the checkpoint kept
+train as they are, and the others are drawn again, each still one draw of its task (:meth:`TaskStatsStore.reissue`).
+When the snapshot cannot be read, the start goes on from the newest older one that can, else from empty, and the run's
+``lock.json`` records why (:func:`record_lost_state`); the draws that older snapshot holds as outstanding and the
+checkpoint no longer does count as lost.  So do all of them when the checkpoint saved no state of the dispatcher's
+draws (one saved before platoon 0.3.0, or whose write failed), and the run then draws from the checkpoint's batch.
+``tasks/events.jsonl`` logs every step of it, a start's own events once its launch save has succeeded
+(:meth:`TaskRecorder.started`), so that a start that dies before it leaves none.
 
 The statistics never fail training: a snapshot that cannot be written leaves its checkpoint without one, and the next
 full save writes them again; any other unexpected error stops the recorder for the rest of the start, with a warning,
-and the checkpoints it saves then name no snapshot.
+and the checkpoints it saves then name no snapshot: a resume from one of them goes on from an older snapshot's
+statistics, and takes up the draws all the same, from the dispatcher's own file.
 """
 
 from __future__ import annotations
@@ -40,17 +46,15 @@ from platoon.train.task_stats import (
     snapshot_name,
     write_snapshot,
 )
+from platoon.train.tinker.dispatcher import POSITION_COLUMN, SEQ_COLUMN
 from platoon.utils.config import LOCK_NAME, update_run_lock
 
 logger = logging.getLogger(__name__)
 
-# The columns the trainer stamps on each training row it draws: the start's draw number and the row's place in the
-# order.
-SEQ_COLUMN = "_platoon_seq"
-POSITION_COLUMN = "_platoon_position"
-# The lock.json key that lists the starts that could not load the statistics their checkpoint named
-# (record_lost_state).
+# The lock.json keys that list the starts that could not load the statistics their checkpoint named
+# (record_lost_state), and those whose sampling inputs changed since it (record_sampling_changed).
 LOST_KEY = "tasks_state_lost"
+CHANGED_KEY = "sampling_changed"
 
 
 class TaskRecorder:
@@ -80,10 +84,12 @@ class TaskRecorder:
         # Set by an unexpected error: the recorder records nothing more in this start.
         self.stopped = False
         self._next_seq = 0
-        # The policy version each outstanding draw was drawn at, by (start, seq).
+        # The policy version each outstanding draw of this start was drawn at, by (start, seq), and those that draw an
+        # earlier start's draw again.
         self._drawn_at: dict[tuple[int, int], int] = {}
-        # The events of this start's beginning, written once its launch save has succeeded (started).
-        self._beginning: list[tuple[str, dict[str, Any]]] = []
+        self._reissues: set[tuple[int, int]] = set()
+        # The events of this start's beginning, written once its launch save has succeeded (started); None after.
+        self._beginning: list[tuple[str, dict[str, Any]]] | None = []
 
     @classmethod
     def begin(
@@ -99,12 +105,12 @@ class TaskRecorder:
     ) -> tuple[TaskRecorder, dict[str, Any] | None]:
         """The recorder of a new start of a run whose ``checkpoints.jsonl`` holds ``records``, numbered after the
         starts they name, with the statistics of the checkpoint it resumes from (``checkpoint``, whose row's
-        ``loop_state`` names its snapshot in ``resume``) loaded and that snapshot's outstanding draws counted as
-        lost.  When that checkpoint names no snapshot (one saved before this release, or when its write failed), or
-        its file is missing, changed or unreadable, the start goes on from the newest older checkpoint whose snapshot
-        reads back, else from empty, and the second value says so: ``{start, checkpoint, problem, loaded}`` (the
-        checkpoint whose snapshot it loaded, or None), for ``lock.json`` (:func:`record_lost_state`).  The start's
-        events wait for :meth:`started`."""
+        ``loop_state`` names its snapshot in ``resume``) loaded; the dispatcher then takes up its outstanding draws
+        (:meth:`lose_outstanding` counts as lost those it cannot draw again).  When that checkpoint names no snapshot
+        (one saved before platoon 0.3.0, or when its write failed), or its file is missing, changed or unreadable, the
+        start goes on from the newest older checkpoint whose snapshot reads back, else from empty, and the second
+        value says so: ``{start, checkpoint, problem, loaded}`` (the checkpoint whose snapshot it loaded, or None), for
+        ``lock.json`` (:func:`record_lost_state`).  The start's events wait for :meth:`started`."""
 
         recorder = cls(run_dir=run_dir, config=config, tasks=tasks, start=next_start(records))
         lost = None
@@ -131,26 +137,33 @@ class TaskRecorder:
                     )
                 else:
                     logger.warning("The run's per-task statistics start from empty: %s", problem)
-        recorder._beginning.append(
-            (
-                "start",
-                {
-                    "start": recorder.start,
-                    "batch": batch,
-                    "checkpoint": checkpoint,
-                    "state_lost": lost["problem"] if lost is not None else None,
-                    "loaded": lost["loaded"] if lost is not None else checkpoint,
-                },
-            )
+        recorder._event(
+            "start",
+            start=recorder.start,
+            batch=batch,
+            checkpoint=checkpoint,
+            state_lost=lost["problem"] if lost is not None else None,
+            loaded=lost["loaded"] if lost is not None else checkpoint,
         )
-        if lost_draws := recorder.store.lose_outstanding():
-            recorder._beginning += [("fate", {"start": start, "seq": seq, "fate": "lost"}) for start, seq in lost_draws]
-            logger.info(
-                "%d groups drawn before the checkpoint had not trained in a committed step; they count as lost, and "
-                "the run draws from the order where the checkpoint left it",
-                len(lost_draws),
-            )
         return recorder, lost
+
+    def lose_outstanding(self, *, keep: Iterable[tuple[int, int]] = ()) -> int:
+        """Count every outstanding draw but those of ``keep`` as lost, as a resume does with those it cannot draw
+        again (all of them, when its checkpoint saved no state of the dispatcher's draws; else those of an older
+        snapshot that the checkpoint no longer holds); returns how many.  Never raises."""
+
+        if self.stopped:
+            return 0
+        try:
+            keep = set(keep)
+            lost = [(start, seq) for start, seq, _task, _position in self.store.outstanding if (start, seq) not in keep]
+            for start, seq in lost:
+                self.store.fate(start, seq, "lost")
+                self._event("fate", start=start, seq=seq, fate="lost")
+            return len(lost)
+        except Exception:
+            self._stop("counting the outstanding draws as lost")
+            return 0
 
     def _load_older(self, run_dir: str, records: Sequence[Mapping[str, Any]], checkpoint: str) -> str | None:
         """Load the newest snapshot that reads back among the rows before the last one of ``checkpoint`` (the
@@ -171,12 +184,19 @@ class TaskRecorder:
         return None
 
     def started(self) -> None:
-        """This start's launch save succeeded: write its ``start`` event, and a ``lost`` fate for each draw that the
-        snapshot it loaded held, to the event log.  A start that dies before then leaves none, so that the next start,
-        which takes its number, writes them once."""
+        """This start's launch save succeeded: write the events of its beginning to the event log (its ``start``
+        event, a ``lost`` fate for each draw it could not draw again, a ``draw`` for each one it draws again), and
+        each later event as it happens.  A start that dies before then leaves none, so that the next start, which takes
+        its number, writes them once."""
 
-        beginning, self._beginning = self._beginning, []
+        beginning, self._beginning = self._beginning or [], None
         for event, fields in beginning:
+            self.events.write(event, **fields)
+
+    def _event(self, event: str, **fields: Any) -> None:
+        if self._beginning is not None:
+            self._beginning.append((event, fields))
+        else:
             self.events.write(event, **fields)
 
     def _new_store(self) -> TaskStatsStore:
@@ -188,27 +208,53 @@ class TaskRecorder:
         self.stopped = True
         logger.warning("The run's per-task statistics stop for the rest of this start: %s failed", what, exc_info=True)
 
-    def draw(self, row: dict[str, Any], *, position: int, version: int) -> None:
-        """Number ``row`` as this start's next draw, at ``position`` in the order and policy ``version``."""
+    def draw(
+        self,
+        row: Mapping[str, Any],
+        *,
+        seq: int,
+        position: int | None,
+        version: int,
+        reissues: tuple[int, int] | None = None,
+    ) -> None:
+        """Record ``row``, which the dispatcher numbered as this start's draw ``seq``, at ``position`` in the order and
+        policy ``version``; ``reissues`` names the outstanding draw of an earlier start that it draws again, which it
+        replaces among the outstanding draws."""
 
+        self._next_seq = max(self._next_seq, seq + 1)
         if self.stopped:
             return
         try:
-            seq = self._next_seq
-            self._next_seq += 1
-            row[SEQ_COLUMN] = seq
-            row[POSITION_COLUMN] = position
             task_id = str(row.get("task_id"))
-            self.store.draw(self.start, seq, task_id, position)
-            self._drawn_at[(self.start, seq)] = version
-            self.events.write("draw", start=self.start, seq=seq, task_id=task_id, position=position, version=version)
+            key = (self.start, seq)
+            if reissues is None or not self.store.reissue(reissues, key):
+                self.store.draw(self.start, seq, task_id, position)
+            self._drawn_at[key] = version
+            if reissues is not None:
+                self._reissues.add(key)
+            fields: dict[str, Any] = {
+                "start": self.start,
+                "seq": seq,
+                "task_id": task_id,
+                "position": position,
+                "version": version,
+            }
+            if reissues is not None:
+                fields.update(reason="reissue", reissues=list(reissues))
+            self._event("draw", **fields)
         except Exception:
             self._stop("recording a draw")
 
     def skipped(self, row: Mapping[str, Any]) -> None:
         """A drawn row that a capped label's full backlog skipped."""
 
-        self._fate(row.get(SEQ_COLUMN), "skipped")
+        seq = row.get(SEQ_COLUMN)
+        self._fate((self.start, seq) if isinstance(seq, int) else None, "skipped")
+
+    def lose(self, key: tuple[int, int], task_id: str | None = None) -> None:
+        """An outstanding draw of ``task_id`` that a resume cannot draw again: its task left the pool."""
+
+        self._fate(key, "lost", task_id)
 
     def settle(
         self, row: Mapping[str, Any], *, entry: str | None, label: str | None, output: Any
@@ -239,7 +285,7 @@ class TaskRecorder:
             harness=None,
             group_size=info.group_size if info is not None else len(getattr(output, "members", ()) or ()),
             sampler=self.sampler,
-            reason="order",
+            reason="reissue" if (self.start, seq) in self._reissues else "order",
             score=None,
             position=row.get(POSITION_COLUMN),
             drawn_at={MAIN: self._drawn_at.get((self.start, seq), 0)},
@@ -247,7 +293,7 @@ class TaskRecorder:
             verdict=verdict if isinstance(verdict, str) else "unknown",
         )
         self.store.settle(record)
-        self.events.write(
+        self._event(
             "settle",
             start=self.start,
             seq=seq,
@@ -260,26 +306,34 @@ class TaskRecorder:
         return record
 
     def fate(self, record: GroupRecord, fate: str) -> None:
-        """What became of a settled group once the step that dequeued it committed: consumed, stale or failed."""
+        """What became of a settled group once the step that dequeued it committed: consumed, stale or failed.  A group
+        an earlier start's checkpoint kept has that start's key."""
 
-        self._fate(record.seq, fate, record.task_id)
+        self._fate((record.start, record.seq), fate, record.task_id)
 
-    def _fate(self, seq: Any, fate: str, task_id: str | None = None) -> None:
-        if self.stopped or not isinstance(seq, int):
+    def fate_of(self, key: tuple[int, int], fate: str) -> None:
+        """The fate of draw ``key`` whose group has no record: a start whose statistics had stopped kept it."""
+
+        self._fate(key, fate)
+
+    def _fate(self, key: tuple[int, int] | None, fate: str, task_id: str | None = None) -> None:
+        if self.stopped or key is None:
             return
         try:
-            self._drawn_at.pop((self.start, seq), None)
-            self.store.fate(self.start, seq, fate, task_id)
-            self.events.write("fate", start=self.start, seq=seq, fate=fate)
+            self._drawn_at.pop(key, None)
+            self._reissues.discard(key)
+            self.store.fate(key[0], key[1], fate, task_id)
+            self._event("fate", start=key[0], seq=key[1], fate=fate)
         except Exception:
             self._stop("recording a fate")
 
     # --- checkpoints and metrics ---------------------------------------------------------------------------------
 
     def snapshot(self, checkpoint: str) -> dict[str, Any] | None:
-        """Write the store as the snapshot of ``checkpoint``, which this start is saving, and return the record its
-        row keeps in ``loop_state`` (``tasks``); None once the recorder has stopped, and None, with a warning, when the
-        file cannot be written: the statistics go on, and the next full save writes them again."""
+        """Write the store as the snapshot of ``checkpoint``, which this start is saving, and return the record the
+        checkpoint's row keeps in ``loop_state`` (``tasks``).  None once the recorder has stopped, and None, with a
+        warning, when the snapshot cannot be written: the statistics go on, and the next full save writes them
+        again."""
 
         if self.stopped:
             return None
@@ -319,13 +373,25 @@ def record_lost_state(run_dir: str | Path, lost: Mapping[str, Any]) -> None:
     the list ``lock.json`` keeps of them (``tasks_state_lost``): each supervised start of one ``platoon train``
     writes into the same ``lock.json``, so the list says which starts lost what.  Never raises."""
 
+    _append_to_lock(run_dir, LOST_KEY, lost, "that this start's per-task statistics were lost")
+
+
+def _append_to_lock(run_dir: str | Path, key: str, value: Mapping[str, Any], what: str) -> None:
     try:
         path = Path(run_dir) / LOCK_NAME
         lock = json.loads(path.read_text()) if path.is_file() else None
-        earlier = lock.get(LOST_KEY) if isinstance(lock, dict) else None
-        update_run_lock(run_dir, {LOST_KEY: [*(earlier if isinstance(earlier, list) else []), dict(lost)]})
+        earlier = lock.get(key) if isinstance(lock, dict) else None
+        update_run_lock(run_dir, {key: [*(earlier if isinstance(earlier, list) else []), dict(value)]})
     except Exception:  # the statistics never fail training
-        logger.warning("Could not record in lock.json that this start's per-task statistics were lost", exc_info=True)
+        logger.warning("Could not record in lock.json %s", what, exc_info=True)
+
+
+def record_sampling_changed(run_dir: str | Path, change: Mapping[str, Any]) -> None:
+    """Add ``change``, a start whose sampling inputs differ from those of the checkpoint it resumed from
+    (``{start, checkpoint, changes}``), to the list ``lock.json`` keeps of them (``sampling_changed``).  Never
+    raises."""
+
+    _append_to_lock(run_dir, CHANGED_KEY, change, "that the run's sampling inputs changed")
 
 
 def resume_record(resume_info: Any) -> Mapping[str, Any] | None:

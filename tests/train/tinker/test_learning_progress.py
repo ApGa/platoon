@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -49,7 +50,7 @@ def run_batches(
     filter_zero=False,
     loss_fn_config=None,
 ):
-    trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
+    trainer: Any = object.__new__(rl_module.PlatoonTinkerRLTrainer)  # its seams are replaced below
     trainer.config = SimpleNamespace(
         train=SimpleNamespace(
             batch_size=1,
@@ -67,7 +68,6 @@ def run_batches(
         checkpoint=SimpleNamespace(recovery_every=1),
     )
     trainer.batch_transforms = []
-    trainer._train_dataloader_loop = AsyncMock()
     trainer._save_checkpoint_and_get_sampling_client = AsyncMock(return_value=object())
     trainer.shutdown_loops = AsyncMock()
     monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
@@ -104,11 +104,11 @@ def run_batches(
         stats_logger=SimpleNamespace(log=lambda *, step, stats: logged.append(stats)),
     )
 
-    async def produce(_shared, _workflow, _queue, results, rows=None):
+    def produce(task_group, _shared, _start, _end, _workflow, results):  # in place of the dispatcher's groups
         for output in outputs:
             results.put_nowait(output)
 
-    trainer._rollout_workflow_worker_loop = produce
+    trainer._dispatch = produce
 
     async def run():
         async with asyncio.TaskGroup() as group:

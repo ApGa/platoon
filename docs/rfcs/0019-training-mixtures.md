@@ -6,8 +6,8 @@
 | Created | 2026-10-19; revised 2026-10-20 |
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0018](0018-configuration-only-projects.md), section 8 (the weighted fair order, `weight: tasks` and the sampling plan); [RFC 0016](0016-component-configuration.md) (component options, and the rollout settings of each phase, which section 2 of this RFC amends); [RFC 0013](0013-extension-model.md) (registration by name); [RFC 0017](0017-public-surface-and-conformance.md) (experimental API, conformance kits); [RFC 0003](0003-multi-policy-training.md) and [RFC 0001](0001-native-multi-agent.md), for what must stay compatible; the trainer (`platoon/train/tinker/rl.py`) and the group workflow (`platoon/train/tinker/workflows/group_rollout_workflow.py`) |
-| Discussion | The pull request that adds this RFC, which also records the decisions of 2026-10-20 (open questions 1 to 3 and 7 to 11) |
-| Implementation | M0b, M1 and M2 in the three pull requests that follow this one; none merged yet |
+| Discussion | The pull request that adds this RFC, which also records the decisions of 2026-10-20 (open questions 1 to 3 and 7 to 11); M3's, which records those on questions 4 to 6 |
+| Implementation | M0b, M1 and M2, merged; M3 in the pull request that adds the dispatcher; all four in platoon 0.3.0 |
 
 ## Summary
 
@@ -28,9 +28,11 @@ read, and a measurement of pass@k during training for every run.
   returned; passes are judged as `platoon eval` judges success. Each step logs each label's expected pass@1 and pass@G;
   each full checkpoint saves the statistics and a resume loads them; `platoon tasks show` and `export` read them.
 
-**What comes after** (M3-M5): a dispatcher that draws a task only when its group can start, with exact resume; the
-sampler API, with an adaptive `pass_rate` sampler that prefers tasks whose next group is likely to train; and group
-admission with refill. Each ships experimental, and the adaptive parts only after an A/B test.
+**What comes next** (in platoon 0.3.0 too): **M3**, a dispatcher that draws a task only when its group can start, so
+that a resume takes up exactly where the run stood and trains the groups a checkpoint kept, and the run-level
+`uniform` sampler. **After it** (M4-M5): the sampler API, with an adaptive `pass_rate` sampler that prefers tasks
+whose next group is likely to train, and group admission with refill. Each ships experimental, and the adaptive
+parts only after an A/B test.
 
 ## Motivation
 
@@ -68,12 +70,13 @@ never train.
 |---|---|---|
 | `auto` (default) | the weighted fair order of RFC 0018, section 8 | shuffled passes by the dataloader |
 | `weighted` | the weighted fair order | the weighted order, as a mixture of one |
+| `uniform` (M3) | shuffled passes over every task of every entry, with no entry slots | `auto`'s batches |
 
 The rename comes first because later milestones extend the choice: a run-level `uniform` (every task of every entry
-equally often, with no entry slots), an entry-level `task_sampler` that chooses which of the entry's own tasks comes
-next (`uniform`, today's seeded passes, or the adaptive `pass_rate`), and custom samplers by registered name or
-`module:Class`, each with typed options (`task_sampler_options`, RFC 0016). Under `weighted`, the run's sampler hands
-each slot to an entry, and the entry's sampler fills it.
+equally often, with no entry slots; M3, section 4), an entry-level `task_sampler` that chooses which of the entry's
+own tasks comes next (`uniform`, today's seeded passes, or the adaptive `pass_rate`), and custom samplers by
+registered name or `module:Class`, each with typed options (`task_sampler_options`, RFC 0016). Under `weighted`, the
+run's sampler hands each slot to an entry, and the entry's sampler fills it.
 
 `train.task_order` is a deprecated alias until 0.4.0: it loads with a warning and is read as `task_sampler`;
 `lock.json` records it; `platoon config validate --strict` fails on it. A config may set both names when they agree,
@@ -131,15 +134,16 @@ holds no group of the largest entry, and warns of one that the capped labels' gr
 wait, first in line, for a capped group to end. That one stays a warning, not an error: it slows the run to the
 capped labels' pace but does not stop it (decided 2026-10-20, open question 7).
 
-**A capped label never stalls the others** (on today's producer and queue, until M3 replaces them): the rows of a label
-at its limit wait beside the batch's rows rather than among them, and do not count toward the staleness lookahead;
-past four batches of them, the label's new rows are skipped and counted, while another label can start a group. So a
-label whose limit cannot keep up with its share of the order trains less than its weight, and the metrics say so.
-These rules apply by default to every config that sets `rollout_group_limits`, those written before them included
-(decided 2026-10-20, open question 3). At the end of a run, the rows still waiting never train: the producer replaces
-them with rows past the run's planned batches, so that the last steps do not wait for the capped label, and a waiting
-row whose label frees before the run ends still runs, as a group no step consumes. Those extra groups are accepted
-until M3 (decided 2026-10-20, open question 11).
+**A capped label never stalls the others** (M1 on the producer and its queue; M3's dispatcher keeps the rules, section
+4): the rows of a label at its limit wait beside the batch's rows rather than among them, and do not count toward the
+staleness lookahead; past four batches of them, the label's new rows are skipped and counted, while another label can
+start a group. So a label whose limit cannot keep up with its share of the order trains less than its weight, and the
+metrics say so. These rules apply by default to every config that sets `rollout_group_limits`, those written before
+them included (decided 2026-10-20, open question 3). Under M1, at the end of a run, the rows still waiting never
+train: the producer replaces them with rows past the run's planned batches, so that the last steps do not wait for the
+capped label, and a waiting row whose label frees before the run ends still runs, as a group no step consumes. Those
+extra groups were accepted until M3 (decided 2026-10-20, open question 11), whose dispatcher starts no group past the
+plan.
 
 **Applying them.** Inside a group, `GroupRolloutWorkflow.config` is the settings of the group's entry (a `ContextVar`
 set from the row), and `current_entry()` names it, so a subclass's `compute_baselines` reads its entry's settings
@@ -210,31 +214,93 @@ checkpoint at launch: a run that resumes from `recovery-000120` saves a second c
 by `(start, seq)`, with `start` one more than the largest start the run's rows name.
 
 A resume loads the snapshot its checkpoint names before its launch save, so that the launch save holds the loaded
-state. Until M3 reissues them, the snapshot's outstanding draws (drawn, never consumed by a committed step) count as
-`lost`. A checkpoint without a readable snapshot (one saved before this release, a failed write, a changed file) goes
-on from the newest older checkpoint whose snapshot reads, else from empty; a warning says which, and `lock.json`
-records it per start (`tasks_state_lost`). A snapshot that cannot be written does not stop the statistics: the
-checkpoint names none, and the next full save writes them again. Recovery pruning deletes a pruned checkpoint's
-snapshot with it, the file its own row names. `tasks/events.jsonl` logs each start, draw, settle and fate, for audit;
-a resume never reads it. The statistics never fail training: an unexpected error stops them for the rest of the
-start, with a warning.
+state. The snapshot's outstanding draws (drawn, never consumed by a committed step) are what M3 takes up from the
+dispatcher's own state (section 4): it trains the groups the checkpoint kept and draws the others again; a checkpoint
+without that state, as M2 saved it, has them counted as `lost`. A checkpoint without a readable snapshot (one saved
+before this release, a failed write, a changed file) goes on from the newest older checkpoint whose snapshot reads,
+else from empty; a warning says which, and `lock.json` records it per start (`tasks_state_lost`). A snapshot that
+cannot be written does not stop the statistics: the checkpoint names none, and the next full save writes them again.
+Recovery pruning deletes a pruned checkpoint's snapshot with it, the file its own row names. `tasks/events.jsonl` logs
+each start, draw, settle and fate, for audit; a resume never reads it. The statistics never fail training: an
+unexpected error stops them for the rest of the start, with a warning, and its later checkpoints save none, so a
+resume from one of them goes on from an older snapshot's statistics; its draws resume exactly all the same (section
+4).
 
 `platoon tasks show RUN_DIR` prints the newest snapshot's tasks, sorted by the chance of an informative group, by pass
 rate or by groups, and `platoon tasks export` writes every task's row as CSV or JSON lines; both are read-only and
 safe while the run trains.
 
-### 4. Later: the dispatcher and exact resume (M3)
+### 4. The dispatcher and exact resume (M3)
 
-A dispatcher replaces the producer and the pending queue. It asks for a draw only when a group can start: within the
-horizon (the groups dispatched and not yet dequeued, plus those the current step counted, stay below
-`(max_staleness + 1) × batch_size`), with rollout permits, and with label capacity. A static draw whose label is full
-waits in its label's first-in, first-out backlog, which does not count toward the horizon; past `4 × batch_size` of
-them, new draws of that label are recorded as `skipped`, and the dispatcher draws only while some label of the run has
-room. A checkpoint's snapshot also holds the samplers' state, the positions and backlogs, and the outstanding draws,
-which a resume reissues first, as new groups with new `seq` numbers. So no draw is lost and none trains twice, and
-every position of a static order is consumed exactly once. A fingerprint of the sampling inputs (weights, samplers and
-their options, the pools) tells a resume what changed; it warns and goes on. The run-level `uniform` sampler lands
-here.
+A dispatcher (`platoon/train/tinker/dispatcher.py`) replaces the producer, the pending queue and the pool of rollout
+workers. It draws a task only when its group can start, and starts each group as a task of its own, when three things
+allow it:
+
+- **The horizon.** With `k = train.max_staleness`, the groups dispatched and not yet dequeued (running, or settled and
+  waiting for a step), plus those the current step has dequeued, stay below `(k + 1) × batch_size`; the count drops
+  back when a step starts, after its policy is published. That is the producer's lookahead, made exact: with `k = 0`
+  each step trains exactly the groups drawn for it, as before, unless a label's limit holds one of them back. Without
+  a bound there is no horizon. Either way the dispatcher starts no group past those the run's remaining steps
+  consume, so the groups that M1 drew past the plan for a capped label are gone (open question 11).
+- **Rollout permits** (section 2): a group takes its entry's group size at once, first come first served.
+- **Label capacity.** A draw whose label is at its `rollout_group_limits` waits in its label's first-in, first-out
+  backlog, which does not count toward the horizon. Past `4 × batch_size` of them, a new draw of that label is recorded
+  as `skipped`: its position is used up. The dispatcher draws only while some label of the run (one its training tasks
+  carry) has room, so it never draws only to skip, and while every label is at its limit it draws nothing until a group
+  ends.
+
+It takes the oldest waiting draw whose label has room (the draws a resume reissued first), else the next position of
+the order. It wakes on what it waits for: a group's release of its label slot and permits, a dequeue, a step that
+starts; the producer's 20-second poll is gone.
+
+**Slots held for a capped label.** The horizon's slots free when a step starts, and the draws that start then take
+them, so a capped label's group that ends in the middle of a step would leave the label's next draw waiting for the
+next step: a limit of `n` would become `n` groups a step, however short the label's groups. So while a capped label
+has draws waiting, each of its running groups holds one more slot of the horizon, which the other labels' draws leave
+free, and the label's oldest waiting draw takes it when the group ends. The capped labels' running groups and the
+slots they hold stay within `k × batch_size`, so that the other labels keep at least a batch of the horizon; with
+`k = 0` no slot is held, and a capped label starts at most its limit of groups a step.
+
+**Exact resume.** Every draw is numbered `(start, seq)` and stamped on its row, and the dispatcher keeps every draw no
+committed step consumed (outstanding). Each full checkpoint saves its state in a file of its own,
+`tasks/dispatch-s<start>-<checkpoint>.json`, which the checkpoint's row names (`dispatch`), apart from the per-task
+statistics, so that a resume is exact also when they stopped or their snapshot could not be written: the sampler, a
+fingerprint of its inputs, the next position of the order, the outstanding draws and each label's waiting draws.
+Every full save, the recovery saves and the one at launch included, also writes the groups that settled and that no
+committed step consumed to `tasks/kept-s<start>-<checkpoint>.json.gz`: gzip-compressed JSON of their datums, exactly,
+and of what the step that consumes a group logs of it, or, for a group whose workflow failed, that it failed. The
+state names that file with its SHA-256, and the checkpoint's row names it too, so that recovery pruning deletes both
+with their checkpoint (decided 2026-10-20, open question 4). A resume:
+
+1. loads the kept groups, which go to the result queue first: the steps after the resume train each once, without
+   rolling it out again, under the draw it settled for, and consume a failed one as failed;
+2. draws again first every other outstanding draw (one whose group was running, or could not be kept: a workflow's
+   output other than `GroupRolloutWorkflow`'s or a plain list of datums), in `(start, seq)` order, then the draws
+   that waited for their label, back in their backlogs, in order: each as a new draw of this start (reason `reissue`)
+   at its old position, which replaces the old one among the statistics' outstanding draws, so that it stays one draw
+   of its task;
+3. goes on with the order at the saved position.
+
+So every position of the order is consumed exactly once: trained, dropped as stale, failed or skipped. Kept groups
+that cannot be read (their file lost or changed, or never written because the disk refused it, each with a warning) are
+rolled out again instead, as before this milestone; the statistics count both of such a task's groups, which both ran,
+as one draw. A checkpoint without the dispatcher's state (one saved before platoon 0.3.0, one whose write failed, or
+a state that cannot be read) counts the outstanding draws as `lost` and draws from the checkpoint's batch, as the
+producer did. A snapshot of the statistics older than the checkpoint, loaded in place of its own, counts as `lost`
+the draws it holds as outstanding that the checkpoint no longer does.
+
+**Changed inputs.** The fingerprint holds `task_sampler`, `batch_size`, `label_by`, the entries in the order the
+config lists them (a weighted order seeds and breaks ties by it, and `uniform` lists the pool in it), and for each
+entry its weight, its seed when the sampler reads the entries' seeds, and the number of its training tasks and a
+digest of their ids. A resume whose inputs differ warns, naming each change, records it in `lock.json`
+(`sampling_changed`), and goes on: the order goes on at the saved position, now in the order the new inputs give, and
+the outstanding draws of tasks that left the pool are `lost`.
+
+**`uniform`.** The run-level `uniform` draws every training task of every entry in seeded shuffled passes
+(`Dataset.shuffle(42 + 101 p)` of the pool in listing order, the passes a single environment's dataloader draws), with
+no entry slots, in epochs of the pool's tasks filled to whole batches: every task equally often, as `weight: tasks`
+draws them, with batches as the shuffle mixes them. It reads no entry's weight or seed, so an entry's numeric `weight`
+beside it does not load; for one environment it draws `auto`'s batches.
 
 ### 5. Later: the sampler API and `pass_rate` (M4)
 
@@ -258,22 +324,25 @@ A/B test shows a higher informative share at an unchanged held-out pass@1.
 A `group_admission` component decides at settle whether a group counts toward the batch (`all`, the default, admits
 every group, as today; `informative` admits groups that train, optionally within a pass-rate band). A rejected group
 frees its slot at once, so the dispatcher refills while the trainer is busy, and a step trains the first
-`batch_size` admitted groups, within a cap of dequeued groups per step. It ships only after its own A/B test.
+`batch_size` admitted groups, within a cap of dequeued groups per step. It ships only after its own A/B test, not as
+an opt-in with M4 (decided 2026-10-20, open question 6).
 
 ## The hard parts
 
 1. **Fresh evidence against exact resume.** Evidence enters when a group settles, and the store and every sampler's
    state are saved together at one consistent point, the start of each full save. A restart can lose a group's result
    but never count it twice, with no replay of the event log.
-2. **A capped label before the dispatcher.** On today's producer, a capped label's waiting rows must neither fill the
+2. **A capped label before the dispatcher.** On M1's producer, a capped label's waiting rows must neither fill the
    pending queue nor use up the staleness lookahead, or the label paces the run. M1 parks them beside the queue, gates
    the producer on the rows that can run, skips past a full backlog only while a label of the run has room, and
    replaces the rows still waiting at the end of the run. The price is a smaller share for that label, which the
-   metrics show, and groups at the end of a run that never train, both accepted until M3 makes the horizon exact
-   (decided 2026-10-20, open questions 3 and 11).
+   metrics show, and groups at the end of a run that never train, both accepted until M3 made the horizon exact
+   (decided 2026-10-20, open questions 3 and 11). M3's dispatcher keeps the backlogs and the skips, and counts in its
+   horizon only the groups that run, so it starts no group past the plan; it holds a slot of the horizon for a capped
+   label's next group, so that the label's limit, not the steps, paces it.
 3. **Staleness per entry.** The lookahead must stay the run's, or a slow entry's bound would let every entry run far
    ahead; and no entry's bound may be below it. Pruning must use the largest bound, so a large bound costs storage
-   until the pruner knows which checkpoints rollouts still sample (open question 5).
+   until the pruner knows which checkpoints rollouts still sample (open question 5, deferred).
 4. **Group sizes that differ by entry.** Concurrency counts rollouts, and a whole group takes its permits at once,
    first come first served, so a large group is not overtaken by small ones; capped labels must leave room for the
    others' groups, which loading checks.
@@ -306,14 +375,14 @@ frees its slot at once, so the dispatcher refills while the trainer is busy, and
 | M0b the sampler's name | `train.task_sampler: auto \| weighted`; `task_order` a deprecated alias until 0.4.0 | a config that sets `task_order: weighted` loads with a warning and draws the same rows; `--strict` fails on it; a dump of 0.2.0's `config show --defaults` loads beside `task_sampler: weighted` with a warning that `task_order` was ignored | |
 | M1 per-environment settings | section 2: entry `workflow_config`, `eval_overrides.workflow_config`, `max_staleness`; rollout permits; the capped-label rules on today's queue; `config show` per entry | a CPU run with fakes: two entries of different group sizes, step limits, minimum groups and baselines each run with their own, within the budget; a slow entry's groups train under its own bound; a capped slow label leaves the other's steps running, with and without a staleness bound | |
 | M2 per-task statistics | section 3: members and verdicts, the store, snapshots and resume, `events.jsonl`, the `tasks/` metrics, `platoon tasks` | every verdict site has a test; a shaping reward processor changes no pass count; a loaded snapshot saves byte for byte; a resume from a recovery checkpoint keeps the older row's snapshot until pruning deletes it alone; `platoon tasks show` matches golden output | |
-| M3 the dispatcher and exact resume | section 4; the run-level `uniform` | at `k = 0` every step trains exactly today's rows, and at `k >= 1` the pipeline never exceeds `(k + 1) × batch_size`; a capped slow label leaves the other label's step time within 10%; a run interrupted twice consumes every position exactly once; no draw while every label is at its limit | |
+| M3 the dispatcher and exact resume | section 4: the dispatcher, its state in a file of each full checkpoint and the groups it keeps (open question 4), the fingerprint; the run-level `uniform` | at `k = 0` every step trains exactly today's rows when no label's limit holds one back (CPU runs with fakes, and the same `forward_backward` datums, in order, as before it), and at `k >= 1` the pipeline never exceeds `(k + 1) × batch_size`; a capped slow label leaves the other label's step time within 10%; a run interrupted twice consumes every position exactly once; no draw while every label is at its limit; a resume trains each group its checkpoint kept once, without rolling it out again, one from a checkpoint without them rolls them out again, and pruning deletes them with their checkpoint | |
 | M4 the sampler API and `pass_rate` | section 5 | the conformance check passes on every built-in; the closed forms match exact Beta-binomial sums; a `k = 0` run replays decision for decision; a GPU A/B against `uniform` | |
 | M5 admission and refill | section 6 | with fakes, steps admit `batch_size` groups within the cap; a GPU A/B | |
 
 ## Open questions
 
 Questions 1 to 3 are the draft's, and 7 to 11 came up in the review of M0b, M1 and M2; all of them were decided on
-2026-10-20. Questions 4 to 6 stay open for the milestones they concern.
+2026-10-20, 1 to 3 and 7 to 11 with M0b to M2, and 4 to 6 with M3 (question 5 deferred).
 
 1. **Members without a valid result: censored or failures?** M2 censors them, as the baseline does, which leans
    optimistic when stragglers are slow failures. A `censored: failure` option, or counting a timeout the entry does
@@ -327,10 +396,14 @@ Questions 1 to 3 are the draft's, and 7 to 11 came up in the review of M0b, M1 a
    so a capped label whose limit cannot keep up trains less than its weight instead of pacing the run. Should they be
    opt-in until M3? *Decided 2026-10-20:* they apply by default, to every config that sets limits (section 2).
 4. **Settled groups across restarts.** A resume reruns groups that had settled but were not yet consumed, which is
-   hours of work for a slow entry. Should full saves persist them? Decide with M3.
+   hours of work for a slow entry. Should full saves persist them? *Decided 2026-10-20:* yes. Every full save, the
+   recovery saves included, keeps them with its snapshot, a resume trains each once without rolling it out again, and
+   pruning deletes them with their checkpoint (section 4).
 5. **Pruning under a large staleness bound.** Keeping every checkpoint within the largest bound costs storage. Should
-   the pruner learn which versions rollouts still sample? Decide with M3.
-6. **When refill ships.** After its A/B test (M5), or opt-in with M4? Decide with M4.
+   the pruner learn which versions rollouts still sample? *Deferred 2026-10-20:* not for now. The runs in view keep
+   small staleness bounds; recovery pruning keeps every checkpoint within the largest bound, as section 2 says.
+6. **When refill ships.** After its A/B test (M5), or opt-in with M4? *Decided 2026-10-20:* after its own A/B test,
+   not as an opt-in with M4 (section 6).
 7. **A rollout budget that the capped labels' groups can fill: an error or a warning?** Such a budget makes a larger
    group wait for a capped one to end, and every group after it with it. *Decided 2026-10-20:* a warning, at load and
    once the tasks are listed: the run slows to the capped labels' pace, but goes on (section 2).
@@ -347,4 +420,4 @@ Questions 1 to 3 are the draft's, and 7 to 11 came up in the review of M0b, M1 a
 11. **The groups a capped label leaves at the end of a run.** The rows still waiting when the run ends never train,
     and a waiting row whose label frees before then runs as a group that no step consumes, since rows past the run's
     plan replaced it. *Decided 2026-10-20:* accepted until M3, whose dispatcher draws only rows that can start
-    (section 2).
+    (section 2); since M3 it starts no group past the plan (section 4).

@@ -126,7 +126,9 @@ def test_worker_loop_counts_failed_group_and_keeps_heartbeating(monkeypatch):
         result_q: asyncio.Queue = asyncio.Queue()
         data_q.put_nowait({"task_id": "t2"})
         worker = asyncio.ensure_future(
-            _trainer()._rollout_workflow_worker_loop(shared, _SlowWorkflow(0.1, fail=True), data_q, result_q)
+            _trainer()._rollout_workflow_worker_loop(
+                shared, _SlowWorkflow(0.1, fail=True), data_q, result_q, tracker=shared.train_tracker
+            )
         )
         result = await asyncio.wait_for(result_q.get(), timeout=5)
         worker.cancel()
@@ -149,7 +151,9 @@ def test_cancelling_worker_cancels_in_flight_group(monkeypatch):
         result_q: asyncio.Queue = asyncio.Queue()
         workflow = _SlowWorkflow(delay=10.0)
         data_q.put_nowait({"task_id": "t3"})
-        worker = asyncio.ensure_future(_trainer()._rollout_workflow_worker_loop(shared, workflow, data_q, result_q))
+        worker = asyncio.ensure_future(
+            _trainer()._rollout_workflow_worker_loop(shared, workflow, data_q, result_q, tracker=shared.train_tracker)
+        )
         await asyncio.sleep(0.1)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
@@ -187,7 +191,9 @@ def test_worker_loop_keeps_a_groups_rollout_time_with_the_group():
         result_q: asyncio.Queue = asyncio.Queue()
         data_q.put_nowait({"task_id": "t4"})
         worker = asyncio.ensure_future(
-            _trainer()._rollout_workflow_worker_loop(shared, _GroupWorkflow(), data_q, result_q)
+            _trainer()._rollout_workflow_worker_loop(
+                shared, _GroupWorkflow(), data_q, result_q, tracker=shared.train_tracker
+            )
         )
         result = await asyncio.wait_for(result_q.get(), timeout=5)
         worker.cancel()

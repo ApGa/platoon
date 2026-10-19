@@ -8,7 +8,7 @@ import signal
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,7 +24,8 @@ from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.train import entry_settings
 from platoon.train.components import row_entry
 from platoon.train.labels import dataset_labels, label_column, metric_labels, metric_prefix, task_label
-from platoon.train.sampling import planned_steps
+from platoon.train.sampling import fingerprint_changes, planned_steps, sampling_fingerprint
+from platoon.train.task_stats import DISPATCH_KEY, next_start
 from platoon.train.tinker.batch_transforms import (
     LOSS_NORMALIZATION_TOKENS_KEY,
     BatchTransform,
@@ -52,14 +53,15 @@ from platoon.train.tinker.config_defs import (
     evaluates,
     event_interval,
 )
-from platoon.train.tinker.dataset_order import EpochOrder, epoch_order
+from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN, SHUFFLE_SEED, EpochOrder, epoch_order
+from platoon.train.tinker.dispatcher import Dispatcher, Draw, plan_resume, read_state, save_state
 from platoon.train.tinker.evaluation_record import EVALUATIONS_NAME, completed_evaluation_steps, record_evaluation
+from platoon.train.tinker.kept_groups import decode_group, read_kept
 from platoon.train.tinker.key_refusal import key_refusals
 from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
-from platoon.train.tinker.rollout_queue import RolloutTaskQueue
-from platoon.train.tinker.task_records import TaskRecorder, record_lost_state, resume_record
+from platoon.train.tinker.task_records import TaskRecorder, record_lost_state, record_sampling_changed, resume_record
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.utils.rollout_stats import REWARD_KEY_MISMATCH, REWARD_KEY_PREFIX, RolloutStats, outcome_counts
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -150,15 +152,17 @@ LABEL_STATS = ("task_reward", "num_steps")
 
 @dataclass(frozen=True)
 class _Settled:
-    """A group's output as a rollout worker hands it to the step that consumes it, with the environment entry and the
-    label of the row it ran: the stale filter and the label metrics read them from the row, which the worker holds,
+    """A group's output as a rollout group hands it to the step that consumes it, with the environment entry and the
+    label of the row it ran: the stale filter and the label metrics read them from the row, which the group holds,
     and not from the output, which a custom workflow's plain list of datums cannot carry.  ``record`` is the group's
-    record in the run's per-task statistics, when the trainer keeps them."""
+    record in the run's per-task statistics, when the trainer keeps them, and ``key`` its draw's ``(start, seq)``,
+    which the dispatcher keeps it by until a committed step consumes it."""
 
     entry: str | None
     label: str | None
     rollout: Any
     record: Any = None
+    key: tuple[int, int] | None = None
 
 
 def _output_label(rollout: Any) -> str | None:
@@ -218,9 +222,9 @@ class _GroupPermits:
 
 @dataclass(frozen=True)
 class _Rows:
-    """What a rollout worker reads from each row it runs: the row's environment entry (one of ``entries``), its label
-    (its ``column`` value) and its entry's group size (``group_sizes``, else ``group_size``), whose rollout permits
-    (``permits``) the group takes before it starts."""
+    """What the dispatcher, and an evaluation's rollout workers, read from each row they run: the row's environment
+    entry (one of ``entries``), its label (its ``column`` value) and its entry's group size (``group_sizes``, else
+    ``group_size``), whose rollout permits (``permits``) the group takes before it starts."""
 
     entries: tuple[str, ...]
     column: str
@@ -233,28 +237,90 @@ class _Rows:
         return entry, task_label(data, self.column), self.group_sizes.get(entry, self.group_size)
 
 
-def _rows(config: Any, phase: str, budget: int | None) -> tuple[_Rows, int]:
-    """The rows of a phase (``train`` or ``eval``) of a run, and how many rollout workers run its groups: as many as
-    the budget of rollouts (``max_concurrent_rollouts``) holds groups of the smallest entry's size, each taking its
-    group's size in permits, so the budget is never exceeded and every group of one size gets as many workers as
-    before."""
+def _group_sizes(config: Any, phase: str) -> tuple[dict[str, int], int]:
+    """The group size of each environment entry of a phase (``train`` or ``eval``) of a run that sets its own, by
+    label, and the run's."""
 
     settings = entry_settings.run_settings(config)
     run = getattr(getattr(config, phase, None), "workflow_config", None)
-    group_size = int(getattr(run, "group_size", 1))
     sizes = {
         label: getattr(own, phase).group_size for label, own in settings.items() if getattr(own, phase) is not None
     }
-    smallest = min([*sizes.values(), group_size]) if sizes else group_size
+    return sizes, int(getattr(run, "group_size", 1))
+
+
+def _groups_at_once(config: Any, phase: str, budget: int | None) -> tuple[int, int]:
+    """The budget of rollouts of a phase of a run (``max_concurrent_rollouts``, else its group size) and how many of
+    its groups run at once at most: as many as it holds groups of the smallest entry's size, each taking its group's
+    size in permits, so the budget is never exceeded."""
+
+    sizes, group_size = _group_sizes(config, phase)
     budget = budget if budget is not None else group_size
+    return budget, max(1, budget // max(1, min([*sizes.values(), group_size])))
+
+
+def _rows(config: Any, phase: str, budget: int | None) -> tuple[_Rows, int]:
+    """The rows of a phase (``train`` or ``eval``) of a run, with the rollout permits of its budget, and how many of
+    its groups run at once at most (:func:`_groups_at_once`): an evaluation runs as many rollout workers."""
+
+    sizes, group_size = _group_sizes(config, phase)
+    budget, groups = _groups_at_once(config, phase, budget)
     rows = _Rows(
-        entries=tuple(settings),
+        entries=tuple(entry_settings.run_settings(config)),
         column=label_column(config),
         group_sizes=sizes,
         group_size=group_size,
         permits=_GroupPermits(budget),
     )
-    return rows, max(1, budget // max(1, smallest))
+    return rows, groups
+
+
+def _rollouts_at_once(config: Any, phase: str, budget: int | None) -> float:
+    """The most rollouts of a phase of a run that run at once, which the client metrics compare the rollouts in flight
+    with: its budget, or as many groups of the largest entry's size as it holds groups of the smallest's, when that
+    is fewer."""
+
+    sizes, group_size = _group_sizes(config, phase)
+    budget, groups = _groups_at_once(config, phase, budget)
+    return float(min(budget, groups * max([*sizes.values(), group_size])))
+
+
+def _run_steps(config: Any, batches_per_epoch: int) -> int:
+    """The training steps a run plans, with ``batches_per_epoch`` batches an epoch (:func:`planned_steps`)."""
+
+    steps = planned_steps(config.train, batches_per_epoch)
+    if steps is None:
+        raise ValueError("Must specify at least one of num_epochs or max_training_steps")
+    return steps
+
+
+def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:
+    """A group's datums as a step trains them: each its own datum, with its own loss inputs, so that the step's batch
+    transforms, which set loss inputs in place, leave the group as it settled; a checkpoint that keeps a group a dropped
+    step had dequeued then keeps it as it settled, and the step after the resume transforms it once."""
+
+    return [tinker.Datum(model_input=datum.model_input, loss_fn_inputs=dict(datum.loss_fn_inputs)) for datum in rollout]
+
+
+def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracker, watchdog: Any) -> None:
+    """What a group that ended adds to the statistics: its time, with the group's own statistics when it has them (the
+    step that consumes it records them, :func:`_record_group_stats`), else in ``tracker`` at once (a failed group, or
+    a workflow's plain list); a log line for a slow one; and a watchdog heartbeat."""
+
+    group_stats = getattr(rollout, "group_stats", None)
+    if isinstance(group_stats, DeferredStats):
+        group_stats.scalar(**{"rollout_completion/rollout_time": elapsed})
+    else:
+        tracker.scalar(**{"rollout_completion/rollout_time": elapsed})
+    rollout_stats = getattr(rollout, "rollout_stats", None)
+    if isinstance(rollout_stats, RolloutStats):
+        rollout_stats.add("rollout_time", [elapsed])
+    if elapsed > 120.0:
+        logger.warning(f"Rollout for task {task_id} took {elapsed:.1f}s (very slow)")
+    elif elapsed > 60.0:
+        logger.info(f"Rollout for task {task_id} took {elapsed:.1f}s (slow)")
+    if watchdog:
+        watchdog.heartbeat()
 
 
 def _no_groups_yet() -> RolloutStats:
@@ -561,7 +627,7 @@ class PlatoonTinkerDataloader:
         self,
         dataset: Dataset,
         batch_size: int,
-        shuffle_seed: int | None = 42,
+        shuffle_seed: int | None = SHUFFLE_SEED,
         drop_last: bool = True,
         order: EpochOrder | None = None,
     ):
@@ -653,13 +719,6 @@ class TrainLoopSharedState:
     def num_train_batches_per_epoch(self) -> int:
         return len(self.train_dataloader)
 
-    @property
-    def num_train_batches(self) -> int:
-        steps = planned_steps(self.config.train, self.num_train_batches_per_epoch)
-        if steps is None:
-            raise ValueError("Must specify at least one of num_epochs or max_training_steps")
-        return steps
-
 
 def _evaluation_plan(state: TrainLoopSharedState, *, resumed: bool, end: int) -> tuple[int, str]:
     """The log line that says when a start of the run that evaluates evaluates first, and why, with its level: a
@@ -704,6 +763,8 @@ def _evaluation_plan(state: TrainLoopSharedState, *, resumed: bool, end: int) ->
 class PlatoonTinkerRLTrainer:
     # Deletes the run's older recovery checkpoints while train() runs (checkpoint.keep_recovery); None without it.
     _recovery_pruner: RecoveryCheckpointPruner | None = None
+    # Starts the training groups of the start train() runs (platoon.train.tinker.dispatcher); None before it.
+    _dispatcher: Dispatcher | None = None
     # The order training draws its tasks in, epoch by epoch, such as a mixture's weighted order; None: the dataloader
     # shuffles train_dataset (platoon.train.tinker.dataset_order).
     train_order: EpochOrder | None = None
@@ -807,67 +868,6 @@ class PlatoonTinkerRLTrainer:
         # Don't suppress exceptions
         return False
 
-    async def _train_dataloader_loop(
-        self,
-        shared_state: TrainLoopSharedState,
-        start_batch: int,
-        end_batch: int,
-        data_queue: asyncio.Queue[dict] | RolloutTaskQueue,
-    ):
-        # The steps consume (end_batch - start_batch) whole batches of groups. A row that a capped label's full backlog
-        # skips (RolloutTaskQueue.put returns False) is replaced from the batches after, and so are the rows that wait
-        # for their label's limit (parked) once that many are queued: the steps never wait for a capped label's
-        # backlog, and a parked row that runs after all is a group the run does not need.
-        i_batch = start_batch
-        max_staleness = self.config.train.max_staleness
-        batch_size = self.config.train.batch_size
-        needed = (end_batch - start_batch) * batch_size
-        capped = isinstance(data_queue, RolloutTaskQueue)
-        recorder = getattr(self, "_recorder", None)
-        queued = 0
-
-        def runnable() -> int:
-            """The rows queued that a worker can take or took: a parked row waits for its label's limit, and a
-            skipped row was never queued."""
-
-            return queued - (data_queue.parked() if capped else 0)
-
-        def ahead() -> bool:
-            """Whether the rows that can run fill the batches up to max_staleness past the one training is on: the
-            producer then waits for training to catch up.  The rows of a capped label that wait for its limit, and
-            those skipped, do not use up this lookahead.  Without a capped label every row drawn can run, so the
-            producer draws the whole batches up to max_staleness ahead, as a gate on the batch index does."""
-
-            if max_staleness is None:
-                return False
-            return runnable() >= (shared_state.train_step - start_batch + max_staleness + 1) * batch_size
-
-        while not shared_state.shutdown_event.is_set():
-            if runnable() >= needed:
-                if not capped:
-                    break
-                await data_queue.changed()  # until a row parks: then it is replaced
-                continue
-            batch = shared_state.train_dataloader.get_batch(i_batch)
-            index = 0
-            while index < len(batch) and runnable() < needed:
-                if ahead():  # Control staleness by waiting for training to catch up.
-                    if shared_state.shutdown_event.is_set():
-                        return
-                    await asyncio.sleep(20.0)
-                    continue
-                data = batch[index]
-                if recorder is not None:
-                    recorder.draw(
-                        data, position=i_batch * batch_size + index, version=shared_state.model_info.llm.version
-                    )
-                if await data_queue.put(data) is not False:
-                    queued += 1
-                elif recorder is not None:
-                    recorder.skipped(data)
-                index += 1
-            i_batch += 1
-
     async def _await_with_heartbeat(
         self,
         coro,
@@ -944,31 +944,43 @@ class PlatoonTinkerRLTrainer:
             raise
         return task.result()
 
+    async def _run_group(self, workflow: RolloutWorkflow, row: dict[str, Any], *, watchdog, tracker) -> Any:
+        """Run the group of ``row`` and return its workflow's output; None for a workflow that raised, or whose own
+        await was cancelled while this group was not (an inner task it awaited was cancelled): the group failed,
+        which ``tracker`` records at once (``rollout_completion/failed_rollouts``), no group output carrying it to the
+        step that consumes the group.  A cancellation of the group itself goes on."""
+
+        task_id = row.get("task_id", "unknown")
+        try:
+            return await self._await_rollout_with_heartbeat(workflow.arun_episode(row), watchdog=watchdog)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is None or current.cancelling():
+                raise
+            logger.exception(f"The rollout group for task {task_id} was cancelled from within: it counts as failed")
+        except Exception as e:
+            logger.exception(f"Exception in rollout group for task {task_id}: {e}")
+        tracker.scalar(**{"rollout_completion/failed_rollouts": 1.0})
+        return None
+
     async def _rollout_workflow_worker_loop(
         self,
         shared_state: TrainLoopSharedState,
         workflow: RolloutWorkflow,
-        task_data_queue: asyncio.Queue[dict] | RolloutTaskQueue,
-        rollout_result_queue: asyncio.Queue[list[tinker.Datum | None]],
-        tracker: StatsTracker | None = None,
+        task_data_queue: asyncio.Queue[dict],
+        rollout_result_queue: asyncio.Queue[Any],
+        *,
+        tracker: StatsTracker,
         rows: _Rows | None = None,
     ):
-        """Run the groups of the rows ``task_data_queue`` gives, one at a time, and put each output on
-        ``rollout_result_queue``.  With ``rows``, a group first takes its entry's group size in rollout permits, and
-        its output goes with the entry and the label of the row it ran (:class:`_Settled`)."""
+        """An evaluation's rollout worker (training's groups start through the dispatcher): run the groups of the rows
+        ``task_data_queue`` gives, one at a time, until a shutdown is requested, record their statistics in
+        ``tracker``, and put each output on ``rollout_result_queue``.  With ``rows``, a group first takes its entry's
+        group size in rollout permits, and its output goes with the entry and the label of the row it ran
+        (:class:`_Settled`)."""
 
-        # Use provided tracker or default to train_tracker
-        stats_tracker = tracker if tracker is not None else shared_state.train_tracker
-        rollout_count = 0
-        # The train loop stops at a step boundary after a shutdown request, so a batch that has applied an optimizer
-        # update finishes first.  With several updates per batch (num_minibatches > 1) its remaining rollouts are
-        # still needed: the workers serve until the task group cancels them.  With one, the train loop never waits
-        # for a rollout after its update, and they stop taking tasks at the request.
-        finish_batches = getattr(getattr(getattr(self, "config", None), "train", None), "num_minibatches", 1) > 1
-
-        while finish_batches or not shared_state.shutdown_event.is_set():
+        while not shared_state.shutdown_event.is_set():
             data = await task_data_queue.get()
-            task_id = data.get("task_id", "unknown")
             entry, label, group_size = rows.of(data) if rows is not None else (None, None, 0)
             granted = 0
             try:
@@ -976,45 +988,44 @@ class PlatoonTinkerRLTrainer:
                     await rows.permits.acquire(group_size)
                     granted = group_size
                 start_time = time.perf_counter()
-                rollout_count += 1
-                try:
-                    rollout = await self._await_rollout_with_heartbeat(
-                        workflow.arun_episode(data), watchdog=shared_state.watchdog
-                    )
-                except Exception as e:
-                    logger.exception(f"Exception in rollout worker for task {task_id}: {e}")
-                    # No group output carries it to the step that consumes the group: recorded as it happens.
-                    stats_tracker.scalar(**{"rollout_completion/failed_rollouts": 1.0})
-                    rollout = None
+                rollout = await self._run_group(workflow, data, watchdog=shared_state.watchdog, tracker=tracker)
             finally:
-                if granted:
+                if granted and rows is not None:
                     rows.permits.release(granted)
-                if isinstance(task_data_queue, RolloutTaskQueue):
-                    await task_data_queue.release(data)
 
-            elapsed = time.perf_counter() - start_time
-            group_stats = getattr(rollout, "group_stats", None)
-            if isinstance(group_stats, DeferredStats):
-                # With the group's other statistics, in the step that consumes the group (_record_group_stats).
-                group_stats.scalar(**{"rollout_completion/rollout_time": elapsed})
-            else:  # a failed group, or a workflow's plain list
-                stats_tracker.scalar(**{"rollout_completion/rollout_time": elapsed})
-            rollout_stats = getattr(rollout, "rollout_stats", None)
-            if isinstance(rollout_stats, RolloutStats):
-                rollout_stats.add("rollout_time", [elapsed])
+            task_id = data.get("task_id", "unknown")
+            _group_done(rollout, time.perf_counter() - start_time, task_id, tracker, shared_state.watchdog)
+            rollout_result_queue.put_nowait(_Settled(entry, label, rollout) if rows is not None else rollout)
 
-            if elapsed > 120.0:
-                logger.warning(f"Rollout for task {task_id} took {elapsed:.1f}s (very slow)")
-            elif elapsed > 60.0:
-                logger.info(f"Rollout for task {task_id} took {elapsed:.1f}s (slow)")
+    async def _run_training_group(
+        self,
+        shared_state: TrainLoopSharedState,
+        workflow: RolloutWorkflow,
+        dispatcher: Dispatcher,
+        draw: Draw,
+        release: Callable[[], None],
+    ) -> None:
+        """Run the group of one of the dispatcher's draws, whose label slot and rollout permits are taken: free them
+        once its workflow returns (``release``), record the group in the run's per-task statistics, and hand its output
+        to the step that dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output."""
 
-            # Heartbeat after each completed rollout
-            if shared_state.watchdog:
-                shared_state.watchdog.heartbeat()
-
-            recorder = getattr(self, "_recorder", None) if rows is not None else None
-            record = recorder.settle(data, entry=entry, label=label, output=rollout) if recorder is not None else None
-            rollout_result_queue.put_nowait(_Settled(entry, label, rollout, record) if rows is not None else rollout)
+        start_time = time.perf_counter()
+        try:
+            rollout = await self._run_group(
+                workflow, draw.row, watchdog=shared_state.watchdog, tracker=shared_state.train_tracker
+            )
+        finally:
+            release()
+        _group_done(
+            rollout, time.perf_counter() - start_time, draw.task_id, shared_state.train_tracker, shared_state.watchdog
+        )
+        recorder = getattr(self, "_recorder", None)
+        record = (
+            recorder.settle(draw.row, entry=draw.entry, label=draw.label, output=rollout)
+            if recorder is not None
+            else None
+        )
+        dispatcher.settle(draw, _Settled(draw.entry, draw.label, rollout, record, draw.key))
 
     @staticmethod
     def _publish_worker_binding(workflow, sampling_client, version: int, *, required: bool = False) -> None:
@@ -1052,55 +1063,30 @@ class PlatoonTinkerRLTrainer:
         end_batch: int,
         train_workflow: RolloutWorkflow,
     ):
-        # Initialize queues to pipeline data loading, rollout sampling and training.
         column = label_column(self.config)
         # Every task the run draws from, a weighted order's tasks that its first epoch leaves out included.
-        tasks = getattr(getattr(self, "train_order", None), "items", None)
-        if tasks is None:
-            tasks = getattr(self, "train_dataset", None)
+        tasks = self._training_tasks()
         group_limits = getattr(self.config.train, "rollout_group_limits", {})
-        task_data_queue = (
-            RolloutTaskQueue(
-                maxsize=self.config.train.batch_size,
-                key=column,
-                limits=group_limits,
-                # A capped label's row is skipped rather than waited for while a label of the run has room.
-                labels=dataset_labels(tasks, column) if tasks is not None else (),
-            )
-            if group_limits
-            else asyncio.Queue[dict](maxsize=self.config.train.batch_size)
+        # The groups settle into the result queue, which the steps dequeue from: the dispatcher starts each group when
+        # the horizon, the rollout permits and the label limits allow (platoon.train.tinker.dispatcher).
+        task_rollout_result_queue = asyncio.Queue[_Settled]()
+        dispatcher = self._dispatch(
+            task_group, shared_state, start_batch, end_batch, train_workflow, task_rollout_result_queue
         )
-        task_rollout_result_queue = asyncio.Queue[list[tinker.Datum | None]]()
 
-        # Launch background tasks to start streaming in rollouts for training.
-        task_group.create_task(
-            self._train_dataloader_loop(shared_state, start_batch, end_batch, task_data_queue),
-            name="train_data_loader_loop",
-        )
-        # Concurrency for task processing (rollout workflow sampling) is controlled by max_concurrent_rollouts, a
-        # budget of rollouts: as many workflow workers as it holds groups of the smallest entry's size, each running one
-        # group at a time once it has taken its group's size in permits from the budget.
-        rows, num_workers = _rows(self.config, "train", self.config.train.max_concurrent_rollouts)
-        group_size = max([*rows.group_sizes.values(), rows.group_size])
-        for i in range(num_workers):
-            task_group.create_task(
-                self._rollout_workflow_worker_loop(
-                    shared_state, train_workflow, task_data_queue, task_rollout_result_queue, rows=rows
-                ),
-                name=f"train_rollout_workflow_worker_{i}",
-            )
-
-        # Publish the initial sampling-client binding before any worker can
+        # Publish the initial sampling-client binding before any group can
         # start, then declare the concurrency ceiling the metrics compare
-        # against.
+        # against: max_concurrent_rollouts is a budget of rollouts, of which
+        # a group takes its size in permits.
         self._publish_worker_binding(
             train_workflow,
             shared_state.sampling_client,
             shared_state.model_info.llm.version,
             required=True,
         )
-        budget = self.config.train.max_concurrent_rollouts or num_workers * group_size
-        client_monitor("train").set_configured_concurrency(float(min(budget, num_workers * group_size)))
+        client_monitor("train").set_configured_concurrency(
+            _rollouts_at_once(self.config, "train", self.config.train.max_concurrent_rollouts)
+        )
 
         # Start training loop.
         shared_state.train_step = start_batch
@@ -1114,7 +1100,7 @@ class PlatoonTinkerRLTrainer:
         prefixes = {label: metric_prefix(column, label) for label in labels}
         run_bound = self.config.train.max_staleness
         bounds = {label: own.max_staleness for label, own in entry_settings.run_settings(self.config).items()}
-        skipped_seen: Counter[str] = Counter()  # rows a capped label's full backlog skipped, by label, logged so far
+        skipped_seen: Counter[str | None] = Counter()  # draws a capped label's full backlog skipped, logged so far
 
         while shared_state.train_step < end_batch:
             batch_start_time = time.perf_counter()
@@ -1148,9 +1134,11 @@ class PlatoonTinkerRLTrainer:
             batch_label_stats = {label: _no_groups_yet() for label in labels}
             batch_stale_groups = 0
             batch_label_stale: Counter[str] = Counter()
-            # The step's groups in the per-task statistics, each with its fate once the step commits, and the kinds of
-            # the groups it trained on, by label ("" for the whole batch).
-            step_fates: list[tuple[Any, str]] = []
+            # The step's groups in the per-task statistics, each with its record and its draw, and its fate once the
+            # step commits, and the kinds of the groups it trained on, by label ("" for the whole batch).
+            step_fates: list[tuple[Any, tuple[int, int] | None, str]] = []
+            # The draws of the groups the step dequeued: a checkpoint keeps them until the step commits.
+            step_keys: list[tuple[int, int] | None] = []
             batch_kinds: dict[str, Counter[str]] = {"": Counter(), **{label: Counter() for label in labels}}
             batch_groups_without_stats = 0
             batch_optimizer_steps = 0
@@ -1184,6 +1172,9 @@ class PlatoonTinkerRLTrainer:
                                 task_rollout_result_queue, shared_state, interruptible=batch_optimizer_steps == 0
                             )
                         )
+                        if dispatcher is not None:
+                            dispatcher.dequeued()
+                        step_keys.append(settled.key)
                         entry, row_label, rollout, record = (
                             settled.entry,
                             settled.label,
@@ -1191,6 +1182,7 @@ class PlatoonTinkerRLTrainer:
                             settled.record,
                         )
                         failed = rollout is None
+                        stale = False
                         batch_total_tasks += 1
                         # The group's own statistics belong to this step, which consumes it, stale or not.
                         _record_group_stats(rollout, shared_state.train_tracker)
@@ -1245,12 +1237,12 @@ class PlatoonTinkerRLTrainer:
                                 batch_stale_groups += 1
                                 batch_label_stale[row_label if row_label is not None else _output_label(rollout)] += 1
                                 rollout = None
-                                if record is not None:
-                                    step_fates.append((record, "stale"))
-                                    record = None
-                        if record is not None:
-                            step_fates.append((record, "failed" if failed else "consumed"))
-                            if not failed and (kind := record.kind(recorder.threshold(record.entry))) is not None:
+                                stale = True
+                        fate = "stale" if stale else "failed" if failed else "consumed"
+                        if recorder is not None:
+                            step_fates.append((record, settled.key, fate))
+                        if recorder is not None and record is not None and fate == "consumed":
+                            if (kind := record.kind(recorder.threshold(record.entry))) is not None:
                                 batch_kinds[""][kind] += 1
                                 if row_label in batch_kinds:
                                     batch_kinds[row_label][kind] += 1
@@ -1261,7 +1253,7 @@ class PlatoonTinkerRLTrainer:
                                 label = row_label if row_label is not None else _output_label(rollout)
                                 if label in batch_label_stats:  # a label whose metrics are logged
                                     batch_label_stats[label].merge(rollout_stats.subset(LABEL_STATS))
-                            task_rollout_results.extend(rollout)
+                            task_rollout_results.extend(_step_datums(rollout))
                             total_datums += len(rollout)
 
                     if len(task_rollout_results) == 0:
@@ -1563,9 +1555,16 @@ class PlatoonTinkerRLTrainer:
                 },
             )
 
-            # The step commits: what became of each of its groups, before a full checkpoint saves the statistics.
-            for record, fate in step_fates:
-                recorder.fate(record, fate)
+            # The step commits: what became of each of its groups, before a full checkpoint saves the statistics and
+            # keeps the groups that settled and no step consumed.
+            if recorder is not None:
+                for record, key, fate in step_fates:
+                    if record is not None:
+                        recorder.fate(record, fate)
+                    elif key is not None:  # a group a start kept after its statistics stopped: no record of its own
+                        recorder.fate_of(key, fate)
+            if dispatcher is not None:
+                dispatcher.committed(step_keys)
 
             # Consuming an all-zero batch does not change the policy. In
             # particular it must not age slower, useful rollouts as stale.
@@ -1598,6 +1597,8 @@ class PlatoonTinkerRLTrainer:
             shared_state.train_tracker.scalar(update_weights_time=update_elapsed)
 
             shared_state.train_step += 1
+            if dispatcher is not None:
+                dispatcher.step_started()  # its policy published: the horizon moves one batch on
 
             # Evaluation cadence remains based on consumed batches, including
             # zero-signal ones; the sampler itself may be unchanged.
@@ -1628,13 +1629,12 @@ class PlatoonTinkerRLTrainer:
                 shared_state.train_tracker.scalar(
                     **recorder.step_metrics(now=shared_state.model_info.llm.version, prefixes=prefixes)
                 )
-            if isinstance(task_data_queue, RolloutTaskQueue):
-                # Rows a capped label's full backlog skipped since the last step: its share of the order asks for
-                # more groups than its limit runs. And the rows that wait for their label's limit now (parked): the
-                # rows still parked when the run ends never train.
-                skipped = task_data_queue.skipped - skipped_seen
+            if group_limits and dispatcher is not None:
+                # Draws a capped label's full backlog skipped since the last step: its share of the order asks for
+                # more groups than its limit runs. And the draws that wait for their label's limit now (parked).
+                skipped = dispatcher.skipped - skipped_seen
                 skipped_seen.update(skipped)
-                parked = task_data_queue.parked_by_label()
+                parked = dispatcher.parked_by_label()
                 shared_state.train_tracker.scalar(
                     **{"batch/skipped_rows": float(skipped.total()), "batch/parked_rows": float(parked.total())}
                 )
@@ -1710,7 +1710,7 @@ class PlatoonTinkerRLTrainer:
     async def _eval_completion_monitor(
         self,
         total_eval_tasks: int,
-        eval_rollout_result_queue: asyncio.Queue[list[tinker.Datum | None]],
+        eval_rollout_result_queue: asyncio.Queue[Any],
         tracker: StatsTracker | None = None,
         label_stats: dict[str, RolloutStats] | None = None,
     ):
@@ -1758,7 +1758,7 @@ class PlatoonTinkerRLTrainer:
                     self._publish_worker_binding(workflow, shared_state.sampling_client, version)
 
                 eval_data_queue = asyncio.Queue[dict]()
-                eval_rollout_result_queue = asyncio.Queue[list[tinker.Datum | None]]()
+                eval_rollout_result_queue = asyncio.Queue[Any]()  # each group's _Settled
 
                 # Populate eval queue with all eval data upfront
                 total_eval_tasks = 0
@@ -1960,7 +1960,7 @@ class PlatoonTinkerRLTrainer:
                     training_client=training_client,
                     name=checkpoint_name,
                     log_path=self.run_log_path,
-                    loop_state=self._with_tasks(
+                    loop_state=await self._checkpoint_state(
                         checkpoint_name,
                         {
                             "batch": next_batch,
@@ -1989,15 +1989,22 @@ class PlatoonTinkerRLTrainer:
         logger.info("Sampling client created successfully")
         return sampling_client
 
+    def _training_tasks(self) -> Any:
+        """Every task training draws from, once each, in pool order: a given order's tasks (a weighted order's, those
+        its first epoch leaves out included), else the training dataset's rows."""
+
+        tasks = getattr(getattr(self, "train_order", None), "items", None)
+        if tasks is None:
+            tasks = getattr(self, "train_dataset", None)
+        return tasks
+
     def _begin_task_records(self, resume_info: Any, start_batch: int) -> None:
         """Start this start's records of the run's per-task statistics (:class:`TaskRecorder`) over every task training
         draws from, with those of the checkpoint ``resume_info`` resumes from, when it names a snapshot that reads back,
         else those of the newest older checkpoint whose snapshot does, else from empty (:meth:`_task_records_started`
         records why in ``lock.json``)."""
 
-        tasks = getattr(getattr(self, "train_order", None), "items", None)
-        if tasks is None:
-            tasks = getattr(self, "train_dataset", None) or []
+        tasks = self._training_tasks() or []
         self._recorder = None
         self._tasks_lost = None
         try:
@@ -2027,13 +2034,203 @@ class PlatoonTinkerRLTrainer:
         if (lost := getattr(self, "_tasks_lost", None)) is not None:
             record_lost_state(self.run_log_path, lost)
 
-    def _with_tasks(self, checkpoint: str, loop_state: dict[str, Any]) -> dict[str, Any]:
-        """``loop_state`` of a full checkpoint, with the record of the snapshot of the run's per-task statistics, which
-        it writes first (``tasks``); as it is when the trainer keeps none, or they stopped."""
+    async def _checkpoint_state(self, checkpoint: str, loop_state: dict[str, Any]) -> dict[str, Any]:
+        """``loop_state`` of full checkpoint ``checkpoint``, with the records of what it saves first: the snapshot of
+        the run's per-task statistics (``tasks``), and where the run's draws stand, with the groups that settled and no
+        committed step consumed (``dispatch``, :func:`~platoon.train.tinker.dispatcher.save_state`).  Both are taken
+        at the same point, before anything else runs; the dispatcher's files are written in a thread, since the groups
+        they keep can take seconds to encode.  Each record is left out when it was not written: the statistics are not
+        kept or stopped, or a file could not be written."""
 
+        loop_state = dict(loop_state)
         recorder = getattr(self, "_recorder", None)
-        record = recorder.snapshot(checkpoint) if recorder is not None else None
-        return {**loop_state, "tasks": record} if record is not None else loop_state
+        if recorder is not None and (record := recorder.snapshot(checkpoint)) is not None:
+            loop_state["tasks"] = record
+        dispatcher = getattr(self, "_dispatcher", None)
+        if dispatcher is not None:
+            state, kept = dispatcher.state(), dispatcher.kept()
+            if (record := await asyncio.to_thread(save_state, self.run_log_path, checkpoint, state, kept)) is not None:
+                loop_state[DISPATCH_KEY] = record
+        return loop_state
+
+    def _dispatch(
+        self,
+        task_group: asyncio.TaskGroup,
+        shared_state: TrainLoopSharedState,
+        start_batch: int,
+        end_batch: int,
+        train_workflow: RolloutWorkflow,
+        results: asyncio.Queue,
+    ) -> Dispatcher | None:
+        """Start the dispatcher of this start's training groups (:mod:`platoon.train.tinker.dispatcher`) in
+        ``task_group``: the one built at launch (:meth:`_new_dispatcher`), with what the checkpoint it resumes from
+        saved, else a new one.  Its groups settle into ``results``, the groups a resume kept first.  The train loop's
+        tests put their groups in ``results`` in its place, and return None: the loop then tells no dispatcher of its
+        steps."""
+
+        dispatcher = getattr(self, "_dispatcher", None)
+        if dispatcher is None:
+            dispatcher = self._dispatcher = self._new_dispatcher(shared_state.train_dataloader, start_batch, end_batch)
+        dispatcher.bind(results)
+
+        async def run_group(draw: Draw, release: Callable[[], None]) -> None:
+            await self._run_training_group(shared_state, train_workflow, dispatcher, draw, release)
+
+        def spawn(coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+            return task_group.create_task(coroutine)
+
+        task_group.create_task(
+            dispatcher.run(spawn=spawn, run_group=run_group, stop=shared_state.shutdown_event),
+            name="train_dispatcher",
+        )
+        return dispatcher
+
+    def _new_dispatcher(self, train_dataloader: Any, start_batch: int, end_batch: int) -> Dispatcher:
+        """The dispatcher of this start's training groups, from ``start_batch`` to ``end_batch``, over the order the
+        dataloader draws (its batch ``b`` is positions ``b × batch_size`` on), starting at the checkpoint's batch."""
+
+        config = self.config
+        batch_size = config.train.batch_size
+        tasks = self._training_tasks()
+        column = label_column(config)
+        recorder = getattr(self, "_recorder", None)
+        rows, _ = _rows(config, "train", config.train.max_concurrent_rollouts)
+        batches: dict[int, list[dict]] = {}
+
+        def order(position: int) -> dict:
+            batch, index = divmod(position, batch_size)
+            if batch not in batches:
+                batches.clear()  # the dispatcher reads the order forward: one batch at a time
+                batches[batch] = train_dataloader.get_batch(batch)
+            return batches[batch][index]
+
+        try:
+            fingerprint = sampling_fingerprint(config, tasks or [])
+        except Exception:  # what a resume compares never stops training
+            logger.warning("Could not take the fingerprint of the run's sampling inputs", exc_info=True)
+            fingerprint = {}
+        if recorder is not None:
+            start = recorder.start
+        else:  # the statistics did not start: number this start's draws as they would have
+            start = next_start(read_checkpoint_records(self.run_log_path))
+        return Dispatcher(
+            rows=rows,
+            order=order,
+            batch_size=batch_size,
+            max_staleness=config.train.max_staleness,
+            steps=max(0, end_batch - start_batch),
+            limits=getattr(config.train, "rollout_group_limits", None) or {},
+            labels=dataset_labels(tasks, column) if tasks is not None else (),
+            start=start,
+            next_position=start_batch * batch_size,
+            recorder=recorder,
+            version=lambda: self.model_info.llm.version,
+            finish_batches=getattr(config.train, "num_minibatches", 1) > 1,
+            sampler=str(getattr(config.train, "task_sampler", None) or "auto"),
+            fingerprint=fingerprint,
+        )
+
+    def _restore_dispatch(self, dispatcher: Dispatcher, resume_info: Any, policy_version: int) -> None:
+        """Take up the draws that the checkpoint this start resumes from (``resume_info``) left outstanding, from the
+        dispatcher's state its row names (``dispatch``): the groups it kept go to the steps first, the draws that waited
+        for their label back to their backlogs, and the rest are drawn again; the order goes on where it stopped.  A
+        change of the sampling inputs is warned of and recorded in ``lock.json`` (``sampling_changed``), and the run
+        goes on with it: the order goes on at the same position, and a draw whose task left the pool counts as lost.
+        A checkpoint without that state (one saved before platoon 0.3.0, or one whose write failed), or a state that
+        cannot be read, has the outstanding draws the per-task statistics hold counted as lost, and the order goes on
+        from the checkpoint's batch, as the producer had it."""
+
+        checkpoint = str(resume_info.name)
+        recorder = getattr(self, "_recorder", None)
+        record = (getattr(resume_info, "extra", None) or {}).get(DISPATCH_KEY)
+        if not isinstance(record, Mapping):
+            lost = recorder.lose_outstanding() if recorder is not None else 0
+            logger.info(
+                "Checkpoint %s saved no state of the run's draws (a platoon before 0.3.0 saved none, or its write "
+                "failed): the run draws from the order where the checkpoint's batch begins, and %d draws that no "
+                "committed step had trained count as lost",
+                checkpoint,
+                lost,
+            )
+            return
+        try:
+            state = read_state(self.run_log_path, record)
+            position = state.get("next_position")
+            if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+                raise ValueError(f"next_position {position!r} is no position")
+            kept = self._read_kept_groups(state.get("kept"))
+            pool: dict[str, dict] = {}
+            for row in self._training_tasks() or []:
+                pool.setdefault(
+                    str(row["task_id"]), {k: v for k, v in row.items() if k != PRESERVE_DATASET_ORDER_COLUMN}
+                )
+            plan = plan_resume(
+                outstanding=state.get("outstanding") or [],
+                waiting=state.get("waiting") or {},
+                kept=kept,
+                pool=pool,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            if recorder is not None:
+                recorder.lose_outstanding()
+            logger.warning(
+                "The state of the run's draws that checkpoint %s saved cannot be read (%s): the draws it left "
+                "outstanding are lost, and the order goes on from the checkpoint's batch",
+                checkpoint,
+                exc,
+            )
+            return
+        if recorder is not None:
+            # The draws an older snapshot of the statistics holds as outstanding that the checkpoint no longer does: the
+            # statistics lost what became of them, when the checkpoint's own snapshot did not read back.
+            recorder.lose_outstanding(keep=plan.keys())
+            for key, task_id, _position in plan.lost:
+                recorder.lose(key, task_id)
+        if changes := fingerprint_changes(state.get("fingerprint"), dispatcher.fingerprint):
+            logger.warning(
+                "The run's sampling inputs changed since checkpoint %s: %s. The run goes on with them, from where the "
+                "order stopped, and the draws of tasks that left the run's training tasks are lost",
+                checkpoint,
+                "; ".join(changes),
+            )
+            record_sampling_changed(
+                self.run_log_path, {"start": dispatcher.start, "checkpoint": checkpoint, "changes": changes}
+            )
+        dispatcher.next_position = position
+        dispatcher.restore(
+            kept=[(key, task_id, place, kept[key]) for key, task_id, place in plan.kept],
+            reissue=[(key, pool[task_id], place) for key, task_id, place in plan.reissue],
+            waiting=[(key, pool[task_id], place) for key, task_id, place in plan.waiting],
+            version=policy_version,
+        )
+        logger.info(
+            "Resuming from checkpoint %s: %d groups that had settled and no step had trained train first, %d draws "
+            "that had not trained are drawn again first%s, and the order goes on at position %d",
+            checkpoint,
+            len(plan.kept),
+            len(plan.reissue) + len(plan.waiting),
+            f" ({len(plan.lost)} lost: their tasks left the run)" if plan.lost else "",
+            position,
+        )
+
+    def _read_kept_groups(self, record: Any) -> dict[tuple[int, int], "_Settled"]:
+        """The groups the checkpoint a start resumes from kept, as the steps dequeue them, by draw, in the order they
+        settled; none, with a warning, when their file cannot be read, so that their tasks are rolled out again."""
+
+        if not isinstance(record, Mapping):
+            return {}
+        try:
+            groups = [decode_group(group) for group in read_kept(self.run_log_path, record)]
+        except ValueError as exc:
+            logger.warning(
+                "The groups the checkpoint kept, which had settled and no step had trained yet, cannot be read, so "
+                "their tasks are rolled out again: %s",
+                exc,
+            )
+            return {}
+        return {
+            key: _Settled(entry, label, output, group_record, key) for key, entry, label, group_record, output in groups
+        }
 
     def _start_recovery_pruning(self) -> RecoveryCheckpointPruner | None:
         """The pruner of this run's recovery checkpoints (``checkpoint.keep_recovery``), which deletes them on a Tinker
@@ -2225,6 +2422,15 @@ class PlatoonTinkerRLTrainer:
         # The run's per-task statistics, those of the checkpoint it resumes from loaded before the launch save, which
         # saves them: a crash before the next full save loses none of them.
         self._begin_task_records(resume_info, start_batch)
+        # The dispatcher of the training groups, which takes up the draws the checkpoint left outstanding before the
+        # launch save, which saves them again: its kept groups, the draws to draw again, and the order's position.
+        train_dataloader = PlatoonTinkerDataloader(
+            self.train_dataset, self.config.train.batch_size, order=self.train_order
+        )
+        end_batch = _run_steps(self.config, len(train_dataloader))
+        self._dispatcher = self._new_dispatcher(train_dataloader, start_batch, end_batch)
+        if resume_info is not None:
+            self._restore_dispatch(self._dispatcher, resume_info, policy_version)
 
         # Initial sampling client to use (the watchdog is not running yet). The
         # launch save is a *recovery* checkpoint: every (re)launch writes one, so
@@ -2236,7 +2442,7 @@ class PlatoonTinkerRLTrainer:
                 training_client=training_client,
                 name=launch_checkpoint_name,
                 log_path=self.run_log_path,
-                loop_state=self._with_tasks(
+                loop_state=await self._checkpoint_state(
                     launch_checkpoint_name,
                     {
                         "batch": start_batch,
@@ -2272,9 +2478,6 @@ class PlatoonTinkerRLTrainer:
             grad_clip_norm=self.config.train.optimizer.grad_clip_norm,
         )
 
-        train_dataloader = PlatoonTinkerDataloader(
-            self.train_dataset, self.config.train.batch_size, order=self.train_order
-        )
         eval_dataloader = None
         if self.eval_dataset is not None:
             eval_dataloader = PlatoonTinkerDataloader(
@@ -2315,7 +2518,6 @@ class PlatoonTinkerRLTrainer:
             evaluations_path=os.path.join(self.run_log_path, EVALUATIONS_NAME),
         )
 
-        end_batch = shared_state.num_train_batches
         shared_state.eval_loop_running = self._evaluates_during_training(shared_state)
         if shared_state.eval_loop_running:
             logger.log(*_evaluation_plan(shared_state, resumed=resume_info is not None, end=end_batch))
@@ -2350,7 +2552,7 @@ class PlatoonTinkerRLTrainer:
                         name=f"{current_step:06d}_interrupted",
                         log_path=self.run_log_path,
                         kind="both",
-                        loop_state=self._with_tasks(
+                        loop_state=await self._checkpoint_state(
                             f"{current_step:06d}_interrupted",
                             {
                                 "batch": current_step,
@@ -2373,7 +2575,7 @@ class PlatoonTinkerRLTrainer:
                     name="final",
                     log_path=self.run_log_path,
                     kind="both",
-                    loop_state=self._with_tasks(
+                    loop_state=await self._checkpoint_state(
                         "final",
                         {
                             "batch": end_batch,

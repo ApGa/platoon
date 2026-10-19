@@ -34,9 +34,15 @@ its expected pass@k.  The ``tasks/`` metrics of each step average these over the
 <checkpoint>.json`` in the run directory (:func:`write_snapshot`), and the checkpoint's row names it, with its SHA-256,
 in its ``loop_state`` (``tasks``); a start that resumes from the row loads it (:func:`read_snapshot`), or, when it
 cannot, the newest older one that reads back (:func:`readable_snapshot`).  A snapshot holds the draws no committed
-step had consumed; this release does not draw them again, so a resume counts them as lost.  ``tasks/events.jsonl``
-logs each draw, settle and fate, one JSON line each (:class:`EventLog`), for audit and ``platoon tasks``; a resume
-never reads it.
+step had consumed (outstanding).  The checkpoint saves where those draws stand in a file of the dispatcher's own
+(:mod:`platoon.train.tinker.dispatcher`, which its row names as ``dispatch``), and a resume takes them up from it: the
+steps after it train the groups the checkpoint kept as they are, and it draws the others again
+(:meth:`TaskStatsStore.reissue` moves each to its new draw).  A resume from a checkpoint without that file (one saved
+before platoon 0.3.0, or whose write failed) counts them as lost, as one does the draws of an older snapshot loaded in
+place of the checkpoint's own that the checkpoint no longer holds.  A group that had settled and that a resume rolls
+out again (its checkpoint could not keep it) counts as two groups of one draw: both rollouts happened.
+``tasks/events.jsonl`` logs each draw, settle and fate, one JSON line each (:class:`EventLog`), for audit and
+``platoon tasks``; a resume never reads it.
 
 The record types are experimental: a later release may add fields to them.
 """
@@ -69,7 +75,8 @@ VERDICTS = (
     "unknown",
 )
 # What becomes of a draw: a committed step consumed its group, dropped it as stale, or found that its workflow failed;
-# a capped label's full backlog skipped its row; or a resume found it outstanding, never consumed.
+# a capped label's full backlog skipped its row; or a resume found it outstanding and could not draw it again (its task
+# left the pool, or the checkpoint saved no state of the dispatcher's draws).
 FATES = ("consumed", "stale", "failed", "skipped", "lost")
 # Policy versions after which a group's evidence weighs half.
 HALF_LIFE_VERSIONS = 32.0
@@ -86,8 +93,10 @@ SNAPSHOT_FORMAT = 1
 # The directory of a run's snapshots and event log, and the event log's name.
 TASKS_DIR = "tasks"
 EVENTS_NAME = "events.jsonl"
-# The key of a checkpoint row's loop_state that names its snapshot.
+# The key of a checkpoint row's loop_state that names its snapshot, and the one that names the state of the
+# dispatcher's draws (platoon.train.tinker.dispatcher): each record names the start that wrote it.
 LOOP_STATE_KEY = "tasks"
+DISPATCH_KEY = "dispatch"
 # The main policy, by whose versions evidence ages until a run trains several policies.
 MAIN = "main"
 
@@ -143,6 +152,28 @@ class MemberResult:
             "versions": {policy: list(span) for policy, span in self.versions.items()},
             "flag": self.flag,
         }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> MemberResult:
+        """The member :meth:`to_json` wrote."""
+
+        return cls(
+            reward=_number(data["reward"]),
+            scored=_number(data["scored"]),
+            valid=bool(data["valid"]),
+            outcome=str(data["outcome"]),
+            disposition=str(data["disposition"]),
+            reward_key=None if data["reward_key"] is None else str(data["reward_key"]),
+            steps=None if data["steps"] is None else int(data["steps"]),
+            output_tokens=None if data["output_tokens"] is None else int(data["output_tokens"]),
+            seconds=_number(data["seconds"]),
+            versions={str(policy): (int(span[0]), int(span[1])) for policy, span in data["versions"].items()},
+            flag=bool(data.get("flag", False)),
+        )
+
+
+def _number(value: Any) -> float | None:
+    return None if value is None else float(value)
 
 
 @dataclass(frozen=True)
@@ -220,6 +251,27 @@ class GroupRecord:
             "members": [member.to_json() for member in self.members],
             "verdict": self.verdict,
         }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> GroupRecord:
+        """The record :meth:`to_json` wrote."""
+
+        return cls(
+            start=int(data["start"]),
+            seq=int(data["seq"]),
+            task_id=str(data["task_id"]),
+            entry=None if data["entry"] is None else str(data["entry"]),
+            labels={str(column): str(label) for column, label in data["labels"].items()},
+            harness=None if data["harness"] is None else str(data["harness"]),
+            group_size=int(data["group_size"]),
+            sampler=str(data["sampler"]),
+            reason=str(data["reason"]),
+            score=_number(data["score"]),
+            position=None if data["position"] is None else int(data["position"]),
+            drawn_at={str(policy): int(version) for policy, version in data["drawn_at"].items()},
+            members=tuple(MemberResult.from_json(member) for member in data["members"]),
+            verdict=str(data["verdict"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -625,9 +677,20 @@ class TaskStatsStore:
             task.outstanding = max(0, task.outstanding - 1)
         task.fates[fate] += 1
 
+    def reissue(self, old: Sequence[int], new: tuple[int, int]) -> bool:
+        """A resume draws outstanding draw ``old`` (``(start, seq)``) again as draw ``new``, of the same task at the
+        same position: the same draw of its task, under a new number, so it is neither counted as drawn twice nor given
+        a fate.  False, changing nothing, when ``old`` is not outstanding."""
+
+        drawn = self._outstanding.pop((int(old[0]), int(old[1])), None)
+        if drawn is None:
+            return False
+        self._outstanding[new] = drawn
+        return True
+
     def lose_outstanding(self) -> list[tuple[int, int]]:
-        """Count every outstanding draw as lost (a resume, which does not draw them again); returns them, ``(start,
-        seq)`` each."""
+        """Count every outstanding draw as lost (a resume that cannot draw them again: its checkpoint saved no
+        dispatcher's state); returns them, ``(start, seq)`` each."""
 
         lost = list(self._outstanding)
         for start, seq in lost:
@@ -810,11 +873,10 @@ def snapshot_bytes(data: Mapping[str, Any]) -> bytes:
     return (json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n").encode()
 
 
-def write_snapshot(run_dir: str | os.PathLike[str], name: str, data: Mapping[str, Any]) -> dict[str, Any]:
-    """Write a snapshot as ``tasks/<name>`` in ``run_dir``, durably (a file synced, then renamed into place), and
-    return what the checkpoint's row records of it: ``{file, sha256, format, start}``."""
+def write_tasks_file(run_dir: str | os.PathLike[str], name: str, content: bytes) -> dict[str, Any]:
+    """Write ``content`` as ``tasks/<name>`` in ``run_dir``, durably (a file synced, then renamed into place, so that
+    no half-written file is left behind), and return what a checkpoint's row records of it: ``{file, sha256}``."""
 
-    content = snapshot_bytes(data)
     directory = Path(run_dir, TASKS_DIR)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -827,11 +889,35 @@ def write_snapshot(run_dir: str | os.PathLike[str], name: str, data: Mapping[str
         os.replace(partial, path)
     except BaseException:
         with contextlib.suppress(OSError):
-            partial.unlink(missing_ok=True)  # no half-written file is left behind
+            partial.unlink(missing_ok=True)
         raise
+    return {"file": f"{TASKS_DIR}/{name}", "sha256": hashlib.sha256(content).hexdigest()}
+
+
+def read_tasks_file(run_dir: str | os.PathLike[str], record: Mapping[str, Any], *, by: str = "checkpoint") -> bytes:
+    """The content of the file a record of :func:`write_tasks_file` names (``file``), checked against its SHA-256; a
+    ``ValueError`` that says why when it names none, or the file is missing, changed or unreadable (``by`` names what
+    recorded it, for the message)."""
+
+    name = record.get("file")
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"the {by} names no file: {dict(record)!r}")
+    path = Path(run_dir, name)
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{path} cannot be read: {exc}") from exc
+    if hashlib.sha256(content).hexdigest() != record.get("sha256"):
+        raise ValueError(f"{path} does not have the SHA-256 its {by} recorded")
+    return content
+
+
+def write_snapshot(run_dir: str | os.PathLike[str], name: str, data: Mapping[str, Any]) -> dict[str, Any]:
+    """Write a snapshot as ``tasks/<name>`` in ``run_dir``, durably, and return what the checkpoint's row records of
+    it: ``{file, sha256, format, start}``."""
+
     return {
-        "file": f"{TASKS_DIR}/{name}",
-        "sha256": hashlib.sha256(content).hexdigest(),
+        **write_tasks_file(run_dir, name, snapshot_bytes(data)),
         "format": SNAPSHOT_FORMAT,
         "start": int(data["start"]),
     }
@@ -849,16 +935,10 @@ def read_snapshot(run_dir: str | os.PathLike[str], record: Mapping[str, Any]) ->
     """The snapshot a checkpoint row's ``tasks`` record names, checked against its SHA-256; a ``ValueError`` that says
     why when it is missing, changed or unreadable."""
 
-    name = record.get("file")
-    if not isinstance(name, str) or not name:
+    if not isinstance(record.get("file"), str) or not record.get("file"):
         raise ValueError(f"the checkpoint names no snapshot file: {dict(record)!r}")
-    path = Path(run_dir, name)
-    try:
-        content = path.read_bytes()
-    except OSError as exc:
-        raise ValueError(f"{path} cannot be read: {exc}") from exc
-    if hashlib.sha256(content).hexdigest() != record.get("sha256"):
-        raise ValueError(f"{path} does not have the SHA-256 its checkpoint recorded")
+    content = read_tasks_file(run_dir, record)
+    path = Path(run_dir, record["file"])
     try:
         data = json.loads(content)
     except ValueError as exc:
@@ -994,12 +1074,14 @@ def task_rows(store: TaskStatsStore, *, now: int, label: str | None = None) -> l
 
 def next_start(records: Iterable[Mapping[str, Any]]) -> int:
     """The number of a new start of a run whose ``checkpoints.jsonl`` holds ``records``: one more than the largest
-    start a row's snapshot names (each start saves a checkpoint before it draws anything), else 1."""
+    start a row's snapshot or dispatcher's state names (each start saves a checkpoint before it draws anything), else
+    1."""
 
     starts = [
-        int(record[LOOP_STATE_KEY]["start"])
+        int(record[key]["start"])
         for record in records
-        if isinstance(record.get(LOOP_STATE_KEY), Mapping) and isinstance(record[LOOP_STATE_KEY].get("start"), int)
+        for key in (LOOP_STATE_KEY, DISPATCH_KEY)
+        if isinstance(record.get(key), Mapping) and isinstance(record[key].get("start"), int)
     ]
     return max(starts, default=0) + 1
 

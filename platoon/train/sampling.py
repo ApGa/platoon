@@ -12,13 +12,18 @@ has listed the tasks, and ``platoon config validate --tasks`` prints it.  Both w
   :data:`REPEAT_RATIO_LIMIT` times as often as another entry's.
 
 Each warning says the numbers and the fix: ``weight: tasks`` on every entry draws every task equally often.
+
+:func:`sampling_fingerprint` sums up what the order follows from (the sampler, the batch size, the label column, each
+entry's weight, seed and training tasks), which each full checkpoint saves; a start that resumes compares its own with
+it, and :func:`fingerprint_changes` says what changed, so that the run warns of a change and goes on with it.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -177,3 +182,81 @@ def _number(value: float | str) -> str:
     if math.isclose(value, round(value), rel_tol=0, abs_tol=1e-9):
         return str(round(value))
     return f"{value:.1f}" if value >= 1 else f"{value:.2g}"
+
+
+def sampling_fingerprint(config: Any, tasks: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """What the order a training run draws its tasks in follows from: ``train.task_sampler``, the batch size, the label
+    column (which ``rollout_group_limits`` key on), the environment entries in the order the config lists them (a
+    weighted order seeds and breaks ties by it, and ``uniform`` lists the pool in it), and for each entry its weight,
+    its seed when the sampler reads it, and its training tasks (``tasks``, the run's pool: their number and a digest
+    of their ids, in listing order)."""
+
+    from platoon.train.components import row_entry
+    from platoon.train.labels import label_column
+
+    train = getattr(config, "train", None)
+    environments = list(getattr(config, "environments", None) or [])
+    sampler = str(getattr(train, "task_sampler", None) or "auto")
+    labels = tuple(environment.label for environment in environments)
+    ids: dict[str | None, list[str]] = {}
+    for row in tasks:
+        ids.setdefault(row_entry(row, labels), []).append(str(row.get("task_id")))
+    # The entries' seeds shuffle a weighted order's entries; a single environment's draw (auto) and uniform ignore them.
+    seeded = sampler == "weighted" or (sampler == "auto" and len(environments) > 1)
+    entries: dict[str, Any] = {}
+    for environment in environments:
+        own = ids.get(environment.label, [])
+        entry: dict[str, Any] = {"weight": environment.weight, "tasks": len(own), "pool": _digest(own)}
+        if seeded:
+            entry["seed"] = environment.seed
+        entries[environment.label] = entry
+    return {
+        "task_sampler": sampler,
+        "batch_size": getattr(train, "batch_size", None),
+        "label_by": label_column(config),
+        "order": list(labels),
+        "entries": entries,
+    }
+
+
+def fingerprint_changes(saved: Mapping[str, Any] | None, now: Mapping[str, Any]) -> list[str]:
+    """What changed from the inputs a checkpoint drew with (``saved``, its :func:`sampling_fingerprint`) to a resume's
+    (``now``), one line each; none when nothing did, or when ``saved`` says nothing (a checkpoint that saved none)."""
+
+    if not isinstance(saved, Mapping) or not saved:
+        return []
+    changes = []
+    for key, name in (
+        ("task_sampler", "train.task_sampler"),
+        ("batch_size", "train.batch_size"),
+        ("label_by", "train.label_by"),
+    ):
+        if saved.get(key) != now.get(key):
+            changes.append(f"{name}: {saved.get(key)} -> {now.get(key)}")
+    before, after = saved.get("entries") or {}, now.get("entries") or {}
+    old_order, new_order = saved.get("order"), now.get("order")
+    if isinstance(old_order, list) and isinstance(new_order, list):
+        # The entries both list, in the order each lists them: a joined or a departed entry is a change of its own.
+        if [label for label in old_order if label in new_order] != [label for label in new_order if label in old_order]:
+            changes.append(f"environments: order {', '.join(map(str, old_order))} -> {', '.join(map(str, new_order))}")
+    for label in [*before, *(label for label in after if label not in before)]:
+        if label not in after:
+            changes.append(f"environments[{label}] left the run")
+            continue
+        if label not in before:
+            changes.append(f"environments[{label}] joined the run")
+            continue
+        old, new = before[label], after[label]
+        for key in ("weight", "seed"):
+            if key in old and key in new and old[key] != new[key]:
+                changes.append(f"environments[{label}].{key}: {old[key]} -> {new[key]}")
+        if old.get("pool") != new.get("pool"):
+            if old.get("tasks") != new.get("tasks"):
+                changes.append(f"environments[{label}]: its training tasks, {old.get('tasks')} -> {new.get('tasks')}")
+            else:
+                changes.append(f"environments[{label}]: its training tasks (as many, {new.get('tasks')}, but others)")
+    return changes
+
+
+def _digest(task_ids: Sequence[str]) -> str:
+    return hashlib.sha256("\n".join(task_ids).encode()).hexdigest()[:16]

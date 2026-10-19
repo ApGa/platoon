@@ -174,20 +174,12 @@ class PolicyVersions:
 
 def make_pruning_trainer(
     monkeypatch, config: PlatoonTinkerRLTrainerConfig, service: FakeTinkerService, *, tasks: int = 8
-) -> tuple[rl.PlatoonTinkerRLTrainer, list[tuple[int, dict]]]:
+) -> tuple[Any, list[tuple[int, dict]]]:
     """``(trainer, logged)`` for one start of a run on ``service``: ``tinker.ServiceClient`` opens a session on it,
-    the start trains a new training run, and ``logged`` collects each logged step with its stats.  ``asyncio.sleep``
-    sleeps at most 10 ms while the test runs."""
+    the start trains a new training run, and ``logged`` collects each logged step with its stats."""
 
     logged: list[tuple[int, dict]] = []
     monkeypatch.setattr(rl.tinker, "ServiceClient", service.service_client)
-    # The dataloader waits 20 s at a time for training to catch up within max_staleness; these runs take a second.
-    sleep = asyncio.sleep
-
-    async def short_sleep(delay, result=None):
-        return await sleep(min(delay, 0.01), result)
-
-    monkeypatch.setattr(rl.asyncio, "sleep", short_sleep)
     trainer: Any = object.__new__(rl.PlatoonTinkerRLTrainer)  # its fakes are not the attributes' types
     trainer.config = config
     trainer.train_dataset = task_ids_to_dataset([f"train:{index}" for index in range(tasks)])

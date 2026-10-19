@@ -109,6 +109,16 @@ def _datum(advantage: float = 0.0) -> tinker.Datum:
     )
 
 
+def _feed_training(trainer, feed) -> None:
+    """The training steps' groups come from ``feed(shared_state, results)``, in place of the dispatcher's groups."""
+
+    def dispatch(task_group, shared_state, start_batch, end_batch, workflow, results):
+        task_group.create_task(feed(shared_state, results))
+        return None
+
+    trainer._dispatch = dispatch
+
+
 class _EvalSplit:
     """An eval dataloader of ``size`` one-task batches."""
 
@@ -159,20 +169,21 @@ def _train_and_evaluate(
     )
     trainer.eval_dataset = object()
     trainer.batch_transforms = []
-    trainer._train_dataloader_loop = AsyncMock()
     monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
     monkeypatch.setattr(rl_module, "client_step_metrics", lambda scope: {})
     monkeypatch.setattr(rl_module, "_ptc_cell_guard_stats", lambda scope: {})
     evaluated: list[int] = []
     logged: list[tuple[int, dict]] = []
 
+    async def train_groups(shared_state, results):  # every step's group is ready at once, with no training signal
+        for _ in range(steps - start):
+            while paced and shared_state.eval_handled_step != shared_state.train_step:
+                await asyncio.sleep(0)
+            results.put_nowait([_datum()])
+
+    _feed_training(trainer, train_groups)
+
     async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
-        if tracker is None:  # a training worker: every step's group is ready at once, with no training signal
-            for _ in range(steps - start):
-                while paced and shared_state.eval_handled_step != shared_state.train_step:
-                    await asyncio.sleep(0)
-                results.put_nowait([_datum()])
-            return
         while True:  # an evaluation worker
             await queue.get()
             evaluated.append(shared_state.train_step)
@@ -345,17 +356,18 @@ def _first_update(
     )
     trainer.eval_dataset = object()
     trainer.batch_transforms = []
-    trainer._train_dataloader_loop = AsyncMock()
     monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
     monkeypatch.setattr(rl_module, "client_step_metrics", lambda scope: {})
     monkeypatch.setattr(rl_module, "_ptc_cell_guard_stats", lambda scope: {})
     evaluated: list[int] = []
     first_update: list[tuple[int | None, list[int]]] = []
 
+    async def train_groups(shared_state, results):  # the first step's group is ready at once, with a training signal
+        results.put_nowait([_datum(advantage=1.0)])
+
+    _feed_training(trainer, train_groups)
+
     async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
-        if tracker is None:  # a training worker: the first step's group is ready at once, with a training signal
-            results.put_nowait([_datum(advantage=1.0)])
-            return
         while True:  # an evaluation worker, slower than training's first step
             await queue.get()
             await asyncio.sleep(0.02)

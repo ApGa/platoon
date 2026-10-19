@@ -15,7 +15,15 @@ import yaml
 from platoon import cli
 from platoon.train.auto import AutoDataset
 from platoon.train.components import EnvironmentConfig
-from platoon.train.sampling import REPEAT_RATIO_LIMIT, SamplingPlan, log_sampling_plan, planned_steps, sampling_plan
+from platoon.train.sampling import (
+    REPEAT_RATIO_LIMIT,
+    SamplingPlan,
+    fingerprint_changes,
+    log_sampling_plan,
+    planned_steps,
+    sampling_fingerprint,
+    sampling_plan,
+)
 
 HERE = __name__
 
@@ -140,18 +148,16 @@ def test_a_single_environment_is_described_and_warns_of_nothing():
     [(3, None, 30), (None, 7, 7), (3, 25, 25), (3, 40, 30), (None, None, None)],
 )
 def test_planned_steps_count_as_the_trainer_does(epochs, steps, expected):
-    from platoon.train.tinker.rl import TrainLoopSharedState
+    from platoon.train.tinker.rl import _run_steps
 
     train = SimpleNamespace(num_epochs=epochs, max_training_steps=steps)
     assert planned_steps(train, 10) == expected
-    state: Any = object.__new__(TrainLoopSharedState)
-    state.config = SimpleNamespace(train=train)
-    state.train_dataloader = [None] * 10  # 10 batches an epoch
+    config = SimpleNamespace(train=train)
     if expected is None:
         with pytest.raises(ValueError, match="num_epochs or max_training_steps"):
-            state.num_train_batches
+            _run_steps(config, 10)  # 10 batches an epoch
     else:
-        assert state.num_train_batches == expected
+        assert _run_steps(config, 10) == expected
 
 
 def test_the_plan_is_logged_with_its_warnings(caplog):
@@ -247,3 +253,82 @@ def test_config_validate_tasks_fails_on_what_listing_the_tasks_finds(tmp_path, c
     assert "train.batch_size: 32 is more than the 20 training tasks" in capsys.readouterr().out
     assert cli.config_validate(one, *single, "train.batch_size=8", tasks=True) == 0
     assert "  training tasks: 20, drawn in epochs of 16 (2 batches of 8), 20 steps planned" in capsys.readouterr().out
+
+
+# --- the fingerprint a checkpoint saves of the sampling inputs ------------------------------------------------------
+
+
+def _fingerprint(sampler: str = "auto", batch_size: int = 4, label_by: str | None = None, **entries: dict[str, Any]):
+    environments = [
+        EnvironmentConfig(name=name, weight=values.get("weight", "tasks"), seed=values.get("seed", 0))
+        for name, values in entries.items()
+    ]
+    config = SimpleNamespace(
+        environments=environments,
+        train=SimpleNamespace(task_sampler=sampler, batch_size=batch_size, label_by=label_by),
+    )
+    tasks = [
+        {"task_id": f"{name}::{task}", "_platoon_environment": name}
+        for name, values in entries.items()
+        for task in values.get("tasks", ["t0", "t1"])
+    ]
+    return sampling_fingerprint(config, tasks)
+
+
+def test_the_fingerprint_names_what_changed_and_nothing_else():
+    saved = _fingerprint(a={"weight": 1.0, "seed": 3}, b={"weight": 2.0})
+    assert saved == {
+        "task_sampler": "auto",
+        "batch_size": 4,
+        "label_by": "_platoon_environment",
+        "order": ["a", "b"],
+        "entries": {
+            "a": {"weight": 1.0, "tasks": 2, "pool": saved["entries"]["a"]["pool"], "seed": 3},
+            "b": {"weight": 2.0, "tasks": 2, "pool": saved["entries"]["b"]["pool"], "seed": 0},
+        },
+    }
+    assert fingerprint_changes(saved, _fingerprint(a={"weight": 1.0, "seed": 3}, b={"weight": 2.0})) == []
+    changed = _fingerprint(
+        "weighted",
+        8,
+        "suite",
+        a={"weight": 3.0, "seed": 4, "tasks": ["t0"]},
+        c={"weight": 1.0},
+    )
+    assert fingerprint_changes(saved, changed) == [
+        "train.task_sampler: auto -> weighted",
+        "train.batch_size: 4 -> 8",
+        "train.label_by: _platoon_environment -> suite",
+        "environments[a].weight: 1.0 -> 3.0",
+        "environments[a].seed: 3 -> 4",
+        "environments[a]: its training tasks, 2 -> 1",
+        "environments[b] left the run",
+        "environments[c] joined the run",
+    ]
+    others = _fingerprint(a={"weight": 1.0, "seed": 3, "tasks": ["t0", "t9"]}, b={"weight": 2.0})
+    assert fingerprint_changes(saved, others) == ["environments[a]: its training tasks (as many, 2, but others)"]
+    assert fingerprint_changes(None, saved) == [] and fingerprint_changes({}, saved) == []
+
+
+@pytest.mark.parametrize("sampler", ["auto", "weighted", "uniform"])
+def test_the_fingerprint_names_entries_listed_in_another_order(sampler):
+    """A weighted order seeds and breaks ties by the entries' order, and uniform lists the pool in it: the same entries
+    listed in another order draw another order, which a resume warns of."""
+
+    saved = _fingerprint(sampler, a={}, b={}, c={})
+    assert fingerprint_changes(saved, _fingerprint(sampler, b={}, a={}, c={})) == [
+        "environments: order a, b, c -> b, a, c"
+    ]
+    # An entry that joins or leaves is a change of its own, not of the others' order.
+    assert fingerprint_changes(saved, _fingerprint(sampler, a={}, c={})) == ["environments[b] left the run"]
+
+
+def test_the_fingerprint_leaves_out_the_seeds_a_sampler_does_not_read():
+    """A single environment under auto (the dataloader's seed 42) and uniform (seed 42) read no entry's seed: changing
+    one changes no draw, and no warning says it did."""
+
+    for sampler in ("auto", "uniform"):
+        single = _fingerprint(sampler, a={"seed": 1})
+        assert "seed" not in single["entries"]["a"]
+        assert fingerprint_changes(single, _fingerprint(sampler, a={"seed": 2})) == []
+    assert fingerprint_changes(_fingerprint("uniform", a={}, b={}), _fingerprint("uniform", a={"seed": 5}, b={})) == []

@@ -17,8 +17,9 @@ from tinker import TensorData
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
 from platoon.train.tinker.config_defs import WorkflowConfig
+from platoon.train.tinker.dispatcher import POSITION_COLUMN, SEQ_COLUMN
 from platoon.train.tinker.rollout_metrics import RolloutTimeline, timeline_scope
-from platoon.train.tinker.task_records import SEQ_COLUMN, TaskRecorder
+from platoon.train.tinker.task_records import TaskRecorder
 from platoon.train.tinker.workers import run as worker_run
 from platoon.train.tinker.workers.protocol import (
     PROTOCOL_VERSION,
@@ -154,13 +155,14 @@ def test_a_workflow_that_raised_settles_as_failed(tmp_path):
         eval=SimpleNamespace(workflow_config=None),
     )
     recorder = TaskRecorder(run_dir=str(tmp_path), config=config, tasks=[{"task_id": "quick::a"}], start=1)
-    row = {"task_id": "quick::a"}
-    recorder.draw(row, position=0, version=0)
+    row = {"task_id": "quick::a", SEQ_COLUMN: 0, POSITION_COLUMN: 0}  # as the dispatcher stamps the rows it draws
+    recorder.draw(row, seq=0, position=0, version=0)
 
     record = recorder.settle(row, entry="quick", label="quick", output=None)
 
     assert record is not None and (record.verdict, record.members, record.group_size) == ("failed", (), 4)
-    assert row[SEQ_COLUMN] == 0 and recorder.store.task("quick::a").groups == 1
+    assert (record.start, record.seq, record.position) == (1, 0, 0)  # the draw the dispatcher stamped on the row
+    assert recorder.store.task("quick::a").groups == 1
     # A row the recorder did not draw (an evaluation's) records nothing.
     assert recorder.settle({"task_id": "quick::a"}, entry="quick", label="quick", output=None) is None
     recorder.close()

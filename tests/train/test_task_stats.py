@@ -3,6 +3,7 @@ counts as, decay, the posterior's closed forms, snapshots that round-trip byte f
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from itertools import product
@@ -198,6 +199,29 @@ def test_a_resume_counts_the_outstanding_draws_as_lost_and_follows_a_changed_poo
         store().load({**data, "format": 99})
 
 
+def test_a_resume_draws_an_outstanding_draw_again_under_a_new_number_neither_drawn_twice_nor_given_a_fate():
+    stats = store()
+    stats.draw(1, 0, "quick::a", position=4)
+    stats.draw(1, 1, "slow::c", position=5)
+
+    assert stats.reissue((1, 0), (2, 0)) and stats.reissue([1, 1], (2, 1))
+    assert not stats.reissue((1, 9), (2, 2))  # not outstanding: nothing changes
+
+    assert stats.outstanding == [(2, 0, "quick::a", 4), (2, 1, "slow::c", 5)]
+    task = stats.task("quick::a")
+    assert (task.drawn, task.outstanding, task.fates) == (1, 1, {})
+    stats.fate(2, 0, "consumed")
+    assert stats.task("quick::a").fates == {"consumed": 1} and stats.task("quick::a").outstanding == 0
+
+
+def test_a_group_record_and_its_members_read_back_from_json():
+    group = record("slow::c", [member(0.7), member(None, valid=False)], "below_min", seq=3, start=2)
+
+    assert GroupRecord.from_json(json.loads(json.dumps(group.to_json()))) == group
+    flagged = dataclasses.replace(member(1.0), flag=True)
+    assert MemberResult.from_json(flagged.to_json()) == flagged
+
+
 def test_the_step_metrics_average_the_seen_tasks_posteriors_by_label():
     stats = store()
     stats.settle(record("quick::a", [member(1.0)] * 4, "uniform", seq=0, start=1))
@@ -312,6 +336,8 @@ def test_a_new_start_numbers_itself_after_the_starts_the_rows_name():
     assert next_start([]) == 1
     rows = [{"name": "recovery-000000"}, {"name": "x", "tasks": {"start": 2}}, {"name": "y", "tasks": {"start": 1}}]
     assert next_start(rows) == 3
+    # A start whose statistics stopped names its start in the state of the dispatcher's draws alone.
+    assert next_start([*rows, {"name": "z", "dispatch": {"start": 4}}]) == 5
 
 
 def test_the_event_log_appends_a_line_per_event(tmp_path):

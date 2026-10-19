@@ -120,7 +120,7 @@ def test_validate_reports_every_problem_of_a_broken_layer(tmp_path, capsys):
     out = capsys.readouterr().out
     assert f"FAIL {broken}" in out
     assert "  train.learning_rate: unknown key" in out
-    assert "  train.task_sampler: 'random' is not one of 'auto', 'weighted'" in out
+    assert "  train.task_sampler: 'random' is not one of 'auto', 'weighted', 'uniform'" in out
 
 
 # --- platoon rollout with a scripted policy ----------------------------------------------------------------------
