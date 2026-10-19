@@ -232,7 +232,7 @@ Harbor and platoon name the same things differently:
 | platoon | Harbor | What it is |
 |---|---|---|
 | environment | dataset | An `environments` entry with `service: harbor`: one dataset's tasks, their sandboxes and their grading. `dataset:` names it, as `hf://<org>/<name>@<commit>` or a directory |
-| harness | agent | What plays each task, in the task's sandbox (`harness:`): `platoon-bash`, `mini-swe-agent@2.4.6`, `openhands@1.54.0` or your own |
+| harness | agent | What plays each task, in the task's sandbox (`harness:`): `platoon-bash`, `mini-swe-agent@2.4.6`, `openhands@1.54.0.post1` or your own |
 | provider | environment | The container runtime that starts each sandbox: `docker`, `singularity` or `enroot`, named by the site profile, or by `provider` in an entry's `service_kwargs` |
 | task | task | One task directory: `task.toml`, `instruction.md`, `environment/`, `tests/` and `solution/` |
 | verifier | verifier | The task's `tests/`, which write `reward.txt` or `reward.json` once the harness is done; `reward` in the entry's `service_kwargs` says which reported reward trains |
@@ -249,7 +249,7 @@ Hub, held-out splits, rewards, images, harnesses in task sandboxes and what plat
 | `platoon-codeact` | function | writes Python cells that call the tools as functions, and can launch subagents from code |
 | `platoon-bash` | TOML spec | a small bash agent that needs only `python3`; it also offers the env's tools when they are served over MCP |
 | `mini-swe-agent@2.4.6` | TOML spec | [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent), installed in the task sandbox |
-| `openhands@1.54.0` | TOML spec | an OpenHands SDK agent in the task sandbox, configured by options (reasoning replay, request timeout, retries, a condenser), from a toolchain that `platoon prepare` builds once per site |
+| `openhands@1.54.0.post1` | TOML spec | an OpenHands SDK agent in the task sandbox, configured by options (reasoning replay, request timeout, retries, a condenser), from a toolchain that `platoon prepare` builds once per site |
 | `platoon-oracle`, `platoon-noop` | function | no model calls: run the task's reference solution, or nothing, to check a dataset |
 
 `uv run platoon harness list` lists every harness with the distribution that provides it, and `platoon harness

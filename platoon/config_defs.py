@@ -83,7 +83,8 @@ class RolloutConfig:
     # ``config``: a policy call samples with inference_params' temperature, top_p and top_k, never with its own (the
     # gateway's defaults stand in for those inference_params leaves unset); with inference_params'
     # max_completion_tokens when set, else its own; and with its own seed and its own stop sequences, by which its
-    # harness parses the reply. ``aux`` and ``judge`` calls keep their own parameters either way.
+    # harness parses the reply. ``aux`` and ``judge`` calls keep their own parameters either way, except the ``aux``
+    # calls of a harness in a task sandbox, which sample as its policy calls.
     sampling_precedence: Literal["request", "config"] = "request"
     # Free-form settings for custom rollouts and harnesses.
     extra: dict[str, Any] = field(default_factory=dict)

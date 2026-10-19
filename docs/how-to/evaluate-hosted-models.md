@@ -167,7 +167,8 @@ refuses the run, as a wrong key does.
   else is added, and the server's own defaults stand;
 - with `rollout_config.sampling_precedence: config`, a policy call's own `temperature`, `top_p` and `top_k`, which
   are removed, and its completion budget when `inference_params` sets one, so that the rollout's values above take
-  their place, as with Tinker; `aux` and `judge` calls keep their own;
+  their place, as with Tinker; `aux` and `judge` calls keep their own, except the `aux` calls of a harness in a task
+  sandbox, which are treated as its policy calls;
 - the fields that keep or edit a conversation at the provider, which are removed (Responses `previous_response_id`,
   `conversation`, `prompt`, `background` and `truncation`; Messages `context_management` and `compaction`);
 - a Chat Completions `n` other than 1, which is refused, as in training.
@@ -188,8 +189,8 @@ unchanged. It is not recorded and takes no step.
 
 Some calls never reach the server, as with Tinker: a policy call past the agent's gateway step budget (a harness spec's
 `[budget] enforce = "gateway"`, counting the calls in flight) gets the gateway's budget stop, a final message without
-tool calls, and an agent limited to policy calls (a harness in a task sandbox) gets the dialect's permission error
-(403) for its `aux` and `judge` calls.
+tool calls, and a harness in a task sandbox gets the dialect's permission error (403) for its `judge` calls, and
+under a gateway step budget for its `aux` calls too.
 
 ### Tools behave as in training
 

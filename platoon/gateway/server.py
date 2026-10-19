@@ -15,8 +15,10 @@ rollout worker):
   sooner keeps its own status.
 * ``GET /v1/models`` and ``GET /healthz``.
 * The ``X-Platoon-Call-Kind`` header marks a call ``policy`` (default), ``aux`` or ``judge`` (see
-  :mod:`platoon.harness.agent`).  An agent limited to policy calls (``AgentSession.policy_only``, a harness in a task
-  sandbox) gets the dialect's permission error (403) for the others, and nothing is sampled.
+  :mod:`platoon.harness.agent`).  An agent whose key code the policy runs can read (``AgentSession.policy_only``, a
+  harness in a task sandbox) gets the dialect's permission error (403) for a ``judge`` call, and for an ``aux`` call
+  while a call cap counts its policy calls, and nothing is sampled; its other ``aux`` calls sample as its policy calls
+  do (``AgentSession.sampling_kind``).
 * ``POST /v1/platoon/agents``: mint a subagent (``{role, goal?}`` -> ``{agent_id, api_key, base_url}``), so a
   cooperative harness gets exact per-agent attribution.  A rollout mints at most ``ModelGateway.max_minted_agents``
   (400 past it), and a child's policy calls count against its parent's call cap.
@@ -303,7 +305,7 @@ class GatewayServer:
     async def _call(self, request: web.Request, dialect: Dialect) -> web.StreamResponse:
         """Authenticate, prepare the dialect's request, sample it for the agent and answer in the dialect.
 
-        A call of a kind the agent may not make (``AgentSession.policy_only``) is refused before anything else.
+        A call of a kind the agent may not make (``AgentSession.check_kind``) is refused before anything else.
         Rendering errors (an overflowing prompt, an unsupported parameter) are answered before any stream starts.
         """
         try:
@@ -321,7 +323,9 @@ class GatewayServer:
         if isinstance(self.gateway, HostedGateway):
             return await self._forward(request, agent, dialect, body, kind=kind)
         try:
-            call = self.gateway.prepare(dialect.chat_request(body), defaults=agent.sampling_defaults, kind=kind)
+            call = self.gateway.prepare(
+                dialect.chat_request(body), defaults=agent.sampling_defaults, kind=agent.sampling_kind(kind)
+            )
         except ContextWindowExceededError as exc:
             agent.context_overflows += 1
             return _error_response(dialect, exc)

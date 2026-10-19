@@ -13,9 +13,12 @@ final assistant message without tool calls, which is neither sampled nor recorde
 `reason="budget"`. The OpenHands CLI spec (`openhands@1.16.0`), which had no step setting, was the first to use it,
 until RFC 0016 replaced it with the `openhands` SDK harness, which stops at its own step limit. Agents the harness
 mints over HTTP share the root's cap, so the cap bounds their policy calls and the root's together, and a harness in
-a task sandbox may make only `policy` calls (its `aux` and `judge` calls are refused with 403), since code the policy
-runs there can read the agent's key and would otherwise sample past the cap. The objection below, that a step is not
-a call, matters less for a harness that makes one policy call per step; option B remains the general answer.
+a task sandbox under a cap may make only `policy` calls (its `aux` and `judge` calls are refused with 403), since code
+the policy runs there can read the agent's key and would otherwise sample past the cap. Without a cap such a harness
+is refused only its `judge` calls, which never train: nothing at the gateway counts its other calls then, so an
+`aux` call gets it nothing a `policy` call would not (the `openhands` condenser marks its summary calls `aux`). The
+objection below, that a step is not a call, matters less for a harness that makes one policy call per step; option B
+remains the general answer.
 
 ## Summary
 

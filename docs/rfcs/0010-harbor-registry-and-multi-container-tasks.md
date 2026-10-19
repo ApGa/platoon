@@ -342,8 +342,9 @@ class Sandbox(Protocol):  # additions
   - each rollout has a cap on minted agents (`POST /v1/platoon/agents`, 64 by default);
   - specs without their own step limit get a call cap, which counts the policy calls of the capped agent and of
     every agent minted under it together;
-  - a harness in the task sandbox, where code the policy runs can read its key, may make only the policy calls the
-    cap counts: its `aux` and `judge` calls get a permission error (403) and nothing is sampled for them.
+  - a harness in the task sandbox, where code the policy runs can read its key, may make no `judge` calls, and under
+    a call cap only the policy calls the cap counts: its other calls get a permission error (403) and nothing is
+    sampled for them.
 
 ### 5. Grading
 

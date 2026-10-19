@@ -33,7 +33,7 @@ SNAPSHOT = Path(
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "openhands" / "replay.json.gz"
 # A directory holding the toolchain `platoon toolchain build openhands` built (openhands-1.54.0).
 TOOLCHAINS = os.environ.get("PLATOON_TEST_TOOLCHAINS")
-HARNESS = "openhands@1.54.0"
+HARNESS = "openhands@1.54.0.post1"
 
 
 def toolchain_ready(name: str) -> bool:
@@ -108,13 +108,33 @@ def chat_template_renderer(tokenizer):
 
 
 def recording_gateway(tokenizer, policy: ScriptedPolicy, *, context_window_length: int | None = None):
-    """A real ``ModelGateway`` over ``policy`` that also keeps every request it renders (``.requests``); with
-    ``context_window_length``, it refuses a prompt that fills that window, as a served model's gateway does."""
+    """A real ``ModelGateway`` over ``policy`` that also keeps every request it renders (``.requests``), and in
+    ``.renders`` the length of each prompt it renders, in order: ``("call", n)`` for a model call, ``("count", n)``
+    for a token count (``count_tokens``); with ``context_window_length``, it refuses a prompt that fills that window,
+    as a served model's gateway does.  ``.chats`` has, for each call it samples, the call's kind (from the call-kind
+    header), whether its agent was ``policy_only``, the agent's ``call_cap``, the sampling the request asked for and
+    the kind of call whose sampling it got (``AgentSession.sampling_kind``)."""
 
-    from platoon.gateway.core import ModelGateway
+    from platoon.gateway.core import ModelGateway, PreparedCall
 
     class RecordingGateway(ModelGateway):
         requests: list[dict[str, Any]]
+        renders: list[tuple[str, int]]
+        chats: list[dict[str, Any]]
+        _preparing = False
+
+        async def chat(self, agent, request, *, kind="policy"):
+            asked = request.request if isinstance(request, PreparedCall) else request
+            self.chats.append(
+                {
+                    "kind": kind,
+                    "policy_only": agent.policy_only,
+                    "call_cap": agent.call_cap,
+                    "sampling": asked.sampling,
+                    "sampled_as": agent.sampling_kind(kind),
+                }
+            )
+            return await super().chat(agent, request, kind=kind)
 
         def prepare(self, request, *, defaults=None, **kwargs):
             render = request.render
@@ -125,7 +145,16 @@ def recording_gateway(tokenizer, policy: ScriptedPolicy, *, context_window_lengt
                     "render_kwargs": render.render_kwargs,
                 }
             )
-            return super().prepare(request, defaults=defaults, **kwargs)
+            self._preparing = True
+            try:
+                return super().prepare(request, defaults=defaults, **kwargs)
+            finally:
+                self._preparing = False
+
+        def render(self, messages, request=None):
+            prompt = super().render(messages, request)
+            self.renders.append(("call" if self._preparing else "count", prompt.length))
+            return prompt
 
     gateway = RecordingGateway(
         sampler=policy,
@@ -135,6 +164,8 @@ def recording_gateway(tokenizer, policy: ScriptedPolicy, *, context_window_lengt
         context_window_length=context_window_length,
     )
     gateway.requests = []
+    gateway.renders = []
+    gateway.chats = []
     return gateway
 
 
@@ -169,7 +200,8 @@ async def run_episode(
     ``harness_options``) through ``run_harness_rollout`` on the harness fakes' task (write 42 to answer.txt) with a
     real gateway (whose context window is ``context_window_length``, else unlimited).
 
-    Returns ``(collection, gateway, policy)``.
+    Returns ``(collection, gateway, policy)``; ``gateway.interactions`` holds the recorded calls, by call id, as a
+    rollout worker hands them to training.
     """
 
     from harness_fakes import FakeService
@@ -179,6 +211,7 @@ async def run_episode(
     from platoon.harness.runner import HarnessRunner
     from platoon.task import Task
     from platoon.train.components import EnvironmentRoute
+    from platoon.train.tinker.proxy import proxy_interactions
 
     tokenizer = load_tokenizer()
     policy = ScriptedPolicy(tokenizer, list(script))
@@ -198,11 +231,14 @@ async def run_episode(
     )
     saved = os.environ.get("PLATOON_TOOLCHAINS")
     os.environ["PLATOON_TOOLCHAINS"] = str(TOOLCHAINS)  # where the runner resolves the specs' named toolchains
+    gateway.interactions = {}
+    token = proxy_interactions.set(gateway.interactions)
     try:
         collection = await run_harness_rollout(
             route.attach(Task(id="train-0")), config, gateway=EmbeddedGateway(gateway), runner=runner
         )
     finally:
+        proxy_interactions.reset(token)
         if saved is None:
             os.environ.pop("PLATOON_TOOLCHAINS", None)
         else:

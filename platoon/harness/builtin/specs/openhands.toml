@@ -3,17 +3,17 @@
 # openhands-sdk adapter (terminal, file_editor, task_tracker, plus the SDK's finish and think); it runs without
 # skills or delegation and stops at {max_steps} model calls. Its options (`platoon harness show openhands`) choose
 # the rest; the defaults are its training settings: reasoning replay, so each prompt extends the last, a one-hour
-# request timeout, no retries and no condenser. An evaluation that should score as Harbor's adapter does sets
-# reasoning_replay false, request_timeout_s 300 and num_retries 5, and a max_steps of 500 (eval_overrides in a
-# training config). Options change how the agent runs, never what is installed, so one toolchain serves every
-# setting. Build it once per site:
+# request timeout, no retries and no condenser (condenser_max_tokens condenses before a prompt passes a token count,
+# as the gateway counts it). An evaluation that should score as Harbor's adapter does sets reasoning_replay false,
+# request_timeout_s 300 and num_retries 5, and a max_steps of 500 (eval_overrides in a training config). Options
+# change how the agent runs, never what is installed, so one toolchain serves every setting. Build it once per site:
 #
 #   platoon toolchain build openhands --root /path/to/toolchains
 #
 # The version is the SDK's; a change to the runner alone bumps a .postN suffix, and so does an option whose new
 # default changes the launch.
 name = "openhands"
-version = "1.54.0"
+version = "1.54.0.post1"  # .post1: the runner's summarizing condenser changed
 dialect = "openai_chat"
 timeout_s = 3600
 max_steps = 30  # used when the run sets no step budget; the run's max_steps wins
@@ -48,7 +48,13 @@ description = "Most attempts the SDK makes at a model call that fails transientl
 type = "str"
 default = "none"
 allowed = ["none", "llm_summarizing"]
-description = "The SDK's context condenser; its summaries are the agent's model calls, recorded and trained on"
+description = "A summarizing condenser (the SDK's, keeping the task); its summaries are the agent's aux calls, trained on"
+
+[options.condenser_max_tokens]
+type = "int"
+default = 0
+min = 0
+description = "Condense when a prompt would pass this many tokens, as the gateway counts them (0: none); above 0 runs llm_summarizing"
 
 [resources]
 memory_mb = 2048  # the SDK and its terminal, on top of the task's own memory
@@ -63,6 +69,7 @@ argv = [
     "--llm-timeout", "{options.request_timeout_s}",
     "--num-retries", "{options.num_retries}",
     "--condenser", "{options.condenser}",
+    "--condenser-max-tokens", "{options.condenser_max_tokens}",
 ]
 files = { "instruction.md" = "{instruction}" }
 assets = { "run_openhands.py" = "../openhands/run_openhands.py" }

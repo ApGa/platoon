@@ -1,8 +1,8 @@
 """A spec with ``[budget] enforce = "gateway"``: the gateway ends a harness that has no step limit of its own at the
 run's step budget, the episode is graded with reason ``budget``, and only the sampled calls train.  End to end on
 CPU through the rollout worker's own body, the real gateway (Qwen3-4B-Instruct tokenizer, scripted sampler) and
-platoon-bash told to take far more turns than the budget.  A harness in the task sandbox may make only the policy
-calls a budget counts; one on the rollout host keeps its aux and judge calls."""
+platoon-bash told to take far more turns than the budget.  A harness in the task sandbox makes no judge calls, and
+no aux calls under a gateway budget, which counts only policy calls; one on the rollout host keeps every kind."""
 
 from __future__ import annotations
 
@@ -70,16 +70,18 @@ file = "{{state_dir}}/final.txt"
     return str(path)
 
 
-def call_kind_probe(tmp_path: Path) -> str:
-    """The spec of a harness that runs :data:`CALL_KIND_PROBE`."""
+def call_kind_probe(tmp_path: Path, *, gateway_budget: bool = False) -> str:
+    """The spec of a harness that runs :data:`CALL_KIND_PROBE`; with ``gateway_budget``, under a gateway step budget of
+    5 calls (``[budget] enforce = "gateway"``)."""
 
     script = tmp_path / "probe.py"
     script.write_text(CALL_KIND_PROBE)
     path = tmp_path / "call-kind-probe.toml"
+    budget = 'max_steps = 5\n\n[budget]\nenforce = "gateway"\n' if gateway_budget else ""
     path.write_text(
         f"""name = "call-kind-probe"
 version = "1"
-
+{budget}
 [launch]
 argv = ["python3", "{{state_dir}}/probe.py", "{{base_url}}", "{{state_dir}}/final.txt"]
 env = {{ PLATOON_API_KEY = "{{api_key}}" }}
@@ -209,25 +211,31 @@ async def test_a_gateway_that_cannot_cap_calls_refuses_the_spec(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("sandbox", "placement", "statuses", "sampled"),
+    ("sandbox", "gateway_budget", "placement", "statuses", "sampled"),
     [
-        (True, "task_sandbox", "aux=403 judge=403 policy=200", 1),
-        (False, "local", "aux=200 judge=200 policy=200", 3),
+        (True, False, "task_sandbox", "aux=200 judge=403 policy=200", ["A summary.", "An answer."]),
+        (True, True, "task_sandbox", "aux=403 judge=403 policy=200", ["An answer."]),
+        (False, False, "local", "aux=200 judge=200 policy=200", ["A summary.", "A verdict.", "An answer."]),
+        (False, True, "local", "aux=200 judge=200 policy=200", ["A summary.", "A verdict.", "An answer."]),
     ],
-    ids=["task-sandbox", "rollout-host"],
+    ids=["task-sandbox", "task-sandbox-gateway-budget", "rollout-host", "rollout-host-gateway-budget"],
 )
-async def test_a_harness_in_the_task_sandbox_may_make_only_policy_calls(
-    tmp_path, budget_gateway, sandbox, placement, statuses, sampled
+async def test_a_harness_in_the_task_sandbox_makes_no_judge_calls_and_no_aux_calls_under_a_gateway_budget(
+    tmp_path, budget_gateway, sandbox, gateway_budget, placement, statuses, sampled
 ):
+    """Code the policy runs in the task sandbox can read the agent's key: its harness may make no judge calls, which
+    never train, and under a gateway step budget no aux calls, which the budget does not count.  Without one its aux
+    calls are recorded and train as its policy calls do.  A harness on the rollout host keeps every kind."""
+
     from platoon.harness.rollout import EmbeddedGateway
 
     FakeService.root = tmp_path / "sandboxes"
     FakeService.sessions.clear()
     gateway, sampler = budget_gateway
-    sampler.script[:] = ["A summary.", "A verdict.", "An answer."][-sampled:]
+    sampler.script[:] = list(sampled)
 
     collection = await run_harness_rollout(
-        routed(call_kind_probe(tmp_path), service_kwargs={"sandbox": sandbox}),
+        routed(call_kind_probe(tmp_path, gateway_budget=gateway_budget), service_kwargs={"sandbox": sandbox}),
         rollout_config(tmp_path),
         gateway=EmbeddedGateway(gateway),
         runner=runner(tmp_path),
@@ -235,4 +243,7 @@ async def test_a_harness_in_the_task_sandbox_may_make_only_policy_calls(
 
     (root,) = collection["trajectories"].values()
     assert root["misc"]["harness"]["placement"] == placement
-    assert root["finish_message"] == statuses and len(sampler.prompts) == sampled and sampler.script == []
+    assert root["finish_message"] == statuses and len(sampler.prompts) == len(sampled) and sampler.script == []
+    kinds = [step["misc"]["action_misc"].get("kind", "policy") for step in root["steps"]]
+    assert kinds == (["aux", "policy"] if "aux=200" in statuses else ["policy"])  # a judge call is no step
+    assert len(root["misc"].get("judge_calls", [])) == int("judge=200" in statuses)
