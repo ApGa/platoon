@@ -241,7 +241,7 @@ returns `reward/success` would undo the shaping.
 - **Built-in programs.** `single` (the default) and `gym`, which scores a `pt.gym.loop` harness by the return it
   recorded.
 - **Registration.** `@pt.program(name)` registers when its module is imported, so name that module in the
-  environment's `package:`. Rollout worker processes import it too. Since the next release, a program has a
+  environment's `package:`. Rollout worker processes import it too. Since 0.2.0, a program has a
   version, `1` unless `@pt.program(name, version=...)` says otherwise, which a config may pin with
   `program: name@version`; and an installed package can declare a `platoon.programs` entry point named after the
   program instead, which platoon imports when a config names it ([Publish an extension

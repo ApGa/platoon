@@ -129,7 +129,8 @@ step-by-step upgrade guide; start from [Install](getting-started/install.md) and
 [Your first run](getting-started/first-run.md). The code that the
 [Recursive Agent Optimization (RAO)](https://arxiv.org/abs/2605.06639) paper's experiments ran on is on the
 [`apga/rao-snapshot`](https://github.com/ApGa/platoon/tree/apga/rao-snapshot) branch of
-[ApGa/platoon](https://github.com/ApGa/platoon).
+[ApGa/platoon](https://github.com/ApGa/platoon), and the original code is at the tag
+[`archive/v0.1`](https://github.com/ApGa/platoon/tree/archive/v0.1).
 
 ## Contributing
 

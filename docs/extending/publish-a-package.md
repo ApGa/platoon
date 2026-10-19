@@ -26,9 +26,8 @@ Run the commands from the repository root.
 | Arithmetic questions, as a task table shipped in the package | `example_extension.tasks:arithmetic` | `tasks.py`, `data/arithmetic.jsonl` | none: a `module:function` reference |
 | A named environment that bundles them, with the harness's options and the splits | `example-arithmetic@1` | `entries.py` | `platoon.environments` |
 
-Since the next release, a package provides programs, named environments and reward processors by name, as it
-provides harnesses ([RFC 0013](../rfcs/0013-extension-model.md)); before, a config named programs and reward
-processors by import string.
+Since 0.2.0, a package provides programs, named environments and reward processors by name, as it
+provides harnesses ([RFC 0013](../rfcs/0013-extension-model.md)).
 
 ## Step 1: Lay out the package
 
@@ -51,7 +50,7 @@ examples/extension-package/
 
 - **One owner per package.** Every component name starts with the package's owner, `example-` here: `<owner>-<name>`,
   in lower-case words of letters and digits joined by `-`, `_` or `.`. Names that start with `platoon-`, and
-  `single`, `gym`, `mini-swe-agent` and `openhands`, belong to platoon itself. Since the next release, platoon refuses
+  `single`, `gym`, `mini-swe-agent` and `openhands`, belong to platoon itself. Since 0.2.0, platoon refuses
   a name that breaks the rule, and `platoon extensions check` warns about a package with more than one owner.
 - **Keep `__init__.py` empty.** Platoon imports each component's module when a config names it, in the trainer and
   in every rollout worker; an `__init__.py` that imports everything would make every run that names one component
@@ -302,7 +301,7 @@ select = ["E", "F", "I"]
 | `platoon.reward_processors` | the reward processor's name | the function |
 | `platoon.environments` | the named environment's name | the `pt.EnvironmentEntry`, or a list of entries that share the name, one per version |
 
-Since the next release, platoon reads the groups from the installed metadata and imports an entry point only when a
+Since 0.2.0, platoon reads the groups from the installed metadata and imports an entry point only when a
 config names its component, in each process that needs it, so installing a package never changes a run that does not
 name one of its components. The requirement on platoon, `platoon >= 0.2, < 0.3`, says which versions of platoon the
 package works with (step 10).
@@ -313,7 +312,7 @@ imports sort with platoon as a dependency and `example_extension` as the package
 
 ## Step 6: Bundle a named environment
 
-*Since the next release.* A named environment says once how to run your tasks: the service, the harness and the
+*Since 0.2.0.* A named environment says once how to run your tasks: the service, the harness and the
 options it needs, the program, the reward processor and the splits. A config then needs one line for them.
 [`entries.py`](../../examples/extension-package/src/example_extension/entries.py):
 
@@ -399,7 +398,7 @@ An entry point that fails to load (its module does not import, or it names somet
 its group) fails the lookups of its own name, with an error that names its package, and leaves every other component
 available; a run that names it exits with code 78 and the reason.
 
-Since the next release, more commands show what a package provides. `platoon extensions list` reads the installed
+Since 0.2.0, more commands show what a package provides. `platoon extensions list` reads the installed
 metadata, so it imports nothing of an extension:
 
 ```bash
@@ -622,7 +621,7 @@ agents 1  steps 2  max depth 0  reward 1.0  outcome scored reward=1.0, close=1.0
 environment. `uv run platoon eval examples/extension-package/eval.yaml` evaluates the eight test tasks, and
 `uv run platoon train examples/extension-package/train.yaml` trains a LoRA for five steps.
 
-Since the next release, a run's `lock.json` records every component the run named: what it resolved to, the
+Since 0.2.0, a run's `lock.json` records every component the run named: what it resolved to, the
 distribution and version that provided it, and the entry point that named it.
 
 ## Step 10: Publish
@@ -630,7 +629,7 @@ distribution and version that provided it, and the entry point that named it.
 - **Version.** Give the distribution a version and bump it on every release.
 - **Require a range of platoon.** `dependencies = ["platoon >= X.Y, < N"]`, from the release you tested against up
   to the first release that may break it: the next minor release while platoon is below 1.0 (`platoon >= 0.2, < 0.3`),
-  the next major release from 1.0 on. Since the next release, platoon checks an extension's requirement against the
+  the next major release from 1.0 on. Since 0.2.0, platoon checks an extension's requirement against the
   running platoon before it imports any of its components, and refuses one that excludes it; set
   `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` to load it anyway while you develop against a checkout.
 - **Check it.** `uv run platoon extensions check example-extension --load` checks the names, the owner and the
@@ -646,7 +645,7 @@ distribution and version that provided it, and the entry point that named it.
 
 ### How platoon resolves a name
 
-Since the next release, a reference with `:` is an import string and is imported as written. Any other reference
+Since 0.2.0, a reference with `:` is an import string and is imported as written. Any other reference
 is `name` or `name@version`, and resolves in this order:
 
 1. Platoon's own components. Their names are reserved: `platoon-*` names, and `single`, `gym`, `mini-swe-agent` and

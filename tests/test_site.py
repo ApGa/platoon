@@ -550,15 +550,15 @@ def test_a_harbor_service_classs_own_default_provider_is_recorded_and_checked(tm
         def __init__(self, *args: Any, provider: str = "process", **kwargs: Any) -> None:
             super().__init__(*args, provider=provider, **kwargs)
 
-    module = types.ModuleType("pr5_host_harbor")
+    module = types.ModuleType("host_harbor_service")
     setattr(module, "HostHarbor", HostHarbor)  # an attribute that ModuleType does not declare
-    monkeypatch.setitem(sys.modules, "pr5_host_harbor", module)
+    monkeypatch.setitem(sys.modules, "host_harbor_service", module)
     config = _write(
         tmp_path / "train.yaml",
         {
             "train": TRAIN,
             "log_path": str(tmp_path),
-            "environments": [{"service": "pr5_host_harbor:HostHarbor", "service_kwargs": {"task_dirs": []}}],
+            "environments": [{"service": "host_harbor_service:HostHarbor", "service_kwargs": {"task_dirs": []}}],
         },
     )
 

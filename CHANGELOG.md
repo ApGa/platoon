@@ -4,11 +4,12 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-19)
 
 The first release on PyPI, numbered 0.2.0 because the original platoon gave its version as 0.1.0, so that the
 two never share one. It replaces the original platoon, whose AReaL-based trainer, standalone inference
-scripts and plugin layout are gone; the code that the
+scripts and plugin layout are gone. The original code is at the tag
+[`archive/v0.1`](https://github.com/ApGa/platoon/tree/archive/v0.1), and the code that the
 [Recursive Agent Optimization (RAO)](https://arxiv.org/abs/2605.06639) paper's experiments ran on stays on the
 [`apga/rao-snapshot`](https://github.com/ApGa/platoon/tree/apga/rao-snapshot) branch.
 
