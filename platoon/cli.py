@@ -589,7 +589,7 @@ def rollout(
             return code  # not ready: the rollout does not start
     run_dir = output_dir or Path("runs/adhoc") / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{_slug(task)}"
     record = write_run_record(run_dir, resolved, argv=_invocation, components=_run_components(resolved, split=split))
-    rollout_config = _rollout_config(settings, split, run_dir)
+    rollout_config = _rollout_config(settings, split, run_dir, task)
     if model is not None:
         rollout_config.model_name = model
     if inference:
@@ -607,6 +607,27 @@ def rollout(
     print(json.dumps(summary, indent=2) if json_output else format_summary(summary))
 
 
+def _entry_rollout_config(settings: Any, split: str, task_id: str | None) -> Any:
+    """The rollout config of the environment entry whose task ``task_id`` names (a mixture's ``<entry>::<task id>``,
+    or a single environment's any task) in ``split``'s phase; None when the entry is not known."""
+
+    from platoon.train import entry_settings
+    from platoon.train.components import TASK_ID_SEPARATOR
+
+    labels = [environment.label for environment in getattr(settings, "environments", None) or []]
+    if len(labels) == 1:
+        label = labels[0]
+    elif task_id is not None and TASK_ID_SEPARATOR in task_id:
+        label = task_id.partition(TASK_ID_SEPARATOR)[0]
+    else:
+        return None
+    if hasattr(settings, "inference"):
+        return entry_settings.evaluation_rollout_configs(settings, split).get(label)
+    own = entry_settings.run_settings(settings).get(label)
+    section = None if own is None else own.train if split == "train" else own.eval
+    return None if section is None else section.rollout_config
+
+
 def _write_rollout_events(output_dir: str, task_id: str, collection: Mapping[str, Any]) -> None:
     """The rollout's event file under ``<output_dir>/events/``, as training and evaluation rollouts write one, for
     ``platoon viz``; never fails the command."""
@@ -621,16 +642,19 @@ def _write_rollout_events(output_dir: str, task_id: str, collection: Mapping[str
         print(f"platoon: could not write the rollout's event file: {exc}", file=sys.stderr)
 
 
-def _rollout_config(settings: Any, split: str, run_dir: Path) -> Any:
-    """The rollout config a run of ``split`` uses, pointed at the run directory."""
+def _rollout_config(settings: Any, split: str, run_dir: Path, task_id: str | None = None) -> Any:
+    """The rollout config a run of ``split`` uses for the task ``task_id``, the one of its environment entry (an
+    entry's own rollout settings, :mod:`platoon.train.entry_settings`), pointed at the run directory."""
 
     if hasattr(settings, "inference"):
         _evaluation().apply_judges(settings.inference)  # the rollout honours inference.judges, as platoon eval does
-        rollout_config = copy.deepcopy(settings.inference.workflow.rollout_config)
+        own = _entry_rollout_config(settings, split, task_id)
+        rollout_config = copy.deepcopy(own if own is not None else settings.inference.workflow.rollout_config)
         rollout_config.model_name = settings.inference.model_name
     else:
         phase = settings.train if split == "train" else settings.eval
-        rollout_config = copy.deepcopy(phase.workflow_config.rollout_config)
+        own = _entry_rollout_config(settings, split, task_id)
+        rollout_config = copy.deepcopy(own if own is not None else phase.workflow_config.rollout_config)
         rollout_config.model_name = rollout_config.model_name or settings.train.model_name
     rollout_config.return_dict = True
     rollout_config.train = False
@@ -842,9 +866,21 @@ def _slug(text: str) -> str:
 
 @config_app.command(name="show")
 def config_show(
-    config: Path, /, *overrides: str, kind: Kind = "auto", schema: str | None = None, defaults: bool = False
+    config: Path,
+    /,
+    *overrides: str,
+    kind: Kind = "auto",
+    schema: str | None = None,
+    defaults: bool = False,
+    entry: str | None = None,
 ) -> None:
     """Print the resolved config: the file merged with its extends chain and the overrides, as YAML.
+
+    Then, as YAML comments, the effective settings of each environment entry that sets its own (workflow_config,
+    eval_overrides.workflow_config, max_staleness): one block per phase the config runs (training groups, evaluation
+    during training, or platoon eval's rollouts), each key with its value, the layer it came from (default,
+    train.workflow_config, the named environment, the entry, eval.workflow_config or inference.workflow,
+    eval_overrides) and the value that layer replaced.
 
     Parameters
     ----------
@@ -859,15 +895,54 @@ def config_show(
         A config class to validate against instead, as module:Class.
     defaults
         Print every field, with the schema defaults filled in.
+    entry
+        Print only the effective settings of the environment entry of this name, whether it sets its own or not.
     """
 
     import yaml
 
     resolved = _resolve(config, overrides, kind, schema=schema)
+    if entry is not None:
+        print("\n".join(_entry_settings_blocks(resolved, entry)))
+        return
     data: Any = resolved.data
     if defaults and resolved.schema is not None:
         data = _plain(resolved.config)
     print(yaml.safe_dump(data, sort_keys=False, default_flow_style=False, allow_unicode=True), end="")
+    if blocks := _entry_settings_blocks(resolved):
+        print("# The effective settings of each environment entry that sets its own: each key's value, where it came")
+        print("# from, and the value that layer replaced (platoon config show CONFIG --entry NAME prints one entry's).")
+        print("\n".join(f"# {line}" for line in blocks))
+
+
+def _entry_settings_blocks(resolved: ResolvedConfig, entry: str | None = None) -> list[str]:
+    """The blocks that say what each environment entry runs with (:func:`platoon.train.entry_settings.describe`):
+    ``entry``'s, or those of every entry that sets settings of its own; none for a config without entries.  A name
+    that no entry has is a :class:`ConfigError`."""
+
+    from platoon.train import entry_settings
+
+    config = resolved.config
+    environments = getattr(config, "environments", None) if resolved.schema is not None else None
+    if not environments or not any(hasattr(config, section) for section in ("train", "inference")):
+        if entry is not None:
+            raise ConfigError(f"--entry {entry}: the config has no environments to show")
+        return []
+    labels = [environment.label for environment in environments]
+    if entry is not None and entry not in labels:
+        raise ConfigError(
+            f"--entry {entry}: the config has no environment entry of that name; its entries are " + ", ".join(labels)
+        )
+    settings = entry_settings.run_settings(config) if getattr(config, "train", None) is not None else None
+    chosen = (
+        [entry]
+        if entry is not None
+        else [environment.label for environment in environments if entry_settings.sets_anything(environment)]
+    )
+    blocks: list[str] = []
+    for label in chosen:
+        blocks += entry_settings.describe(config, label, settings)
+    return blocks
 
 
 @config_app.command(name="validate")
@@ -935,29 +1010,51 @@ def config_validate(
             if exc.source is not None and Path(exc.source).resolve() != path.resolve():  # the site profile, a base
                 problems = [f"{exc.source}: {problem}" for problem in problems]
         deprecations = [deprecation.message for deprecation in resolved.deprecations] if resolved is not None else []
+        entry_lines = _entry_settings_lines(resolved) if resolved is not None and not problems else []
         if problems or (strict and deprecations):
             failed += 1
             print(f"FAIL {path}")
         else:
             label = resolved.schema.__name__ if resolved is not None and resolved.schema is not None else "no schema"
             print(f"ok   {path} ({label})")
-        for line in (*problems, *deprecations, *listed):
+        for line in (*problems, *deprecations, *entry_lines, *listed):
             print(f"  {line}")
     return EXIT_CONFIG if failed else 0
 
 
+def _entry_settings_lines(resolved: ResolvedConfig) -> list[str]:
+    """``config validate``'s lines about the entries' own settings: one per entry of a training config with settings
+    that differ from the run's, saying what differs, then each warning (``warning: ...``); for an evaluation config,
+    the entry keys ``platoon eval`` does not apply, as warnings."""
+
+    from platoon.train import entry_settings
+
+    config = resolved.config
+    if resolved.schema is None or not getattr(config, "environments", None):
+        return []
+    if getattr(config, "train", None) is not None:
+        settings = entry_settings.run_settings(config)
+        lines = entry_settings.summary(config, settings)
+        return [*lines, *(f"warning: {line}" for line in entry_settings.warnings(config, settings))]
+    if getattr(config, "inference", None) is not None:
+        return [f"warning: {line}" for line in entry_settings.evaluation_unapplied(config)]
+    return []
+
+
 def _training_tasks(resolved: ResolvedConfig) -> list[str]:
-    """``config validate --tasks``: list a training config's training tasks as ``platoon train`` does, before it opens
-    the training service, and describe how the run draws them (:class:`~platoon.train.sampling.SamplingPlan`), its
-    warnings prefixed ``warning:``.  What train would refuse once the tasks are listed (an ``exclude_tasks`` item that
-    names no task, a batch larger than the training tasks) raises :class:`ConfigError`; a listing that fails
-    otherwise, such as an env server that does not answer, is a problem of the config too."""
+    """``config validate --tasks``: list a training config's training tasks, and its evaluation tasks when it
+    evaluates, as ``platoon train`` does, before it opens the training service, and describe how the run draws them
+    (:class:`~platoon.train.sampling.SamplingPlan`), its warnings and those about the listed labels prefixed
+    ``warning:``.  What train would refuse once the tasks are listed (an ``exclude_tasks`` item that names no task, a
+    batch larger than the training tasks, a label's straggler quorum above the group size of an entry whose tasks carry
+    it) raises :class:`ConfigError`; a listing that fails otherwise, such as an env server that does not answer, is a
+    problem of the config too."""
 
     config = resolved.config
     if resolved.schema is None or getattr(config, "train", None) is None:
         return ["tasks: only a training config's tasks are listed"]
     from platoon.train.auto import AutoDataset, AutoEnvironment, check_mixture_pools
-    from platoon.train.tinker.config_defs import training_problems
+    from platoon.train.tinker.config_defs import evaluates, training_problems
 
     AutoEnvironment.load(config)
     check_mixture_pools(AutoEnvironment.environments(config))  # before any env server is contacted, as train does
@@ -971,9 +1068,22 @@ def _training_tasks(resolved: ResolvedConfig) -> list[str]:
     without = training_problems(config)
     if problems := [problem for problem in training_problems(config, num_train_tasks=count) if problem not in without]:
         raise ConfigError(problems)
+    from platoon.train import entry_settings
+
+    try:  # with evaluation off the eval split is never read, as in platoon train
+        eval_tasks = AutoDataset.from_config(config, "eval") if evaluates(config) else None
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError(f"the evaluation tasks cannot be listed: {type(exc).__name__}: {exc}") from exc
+    settings = entry_settings.run_settings(config)
+    # A label's straggler quorum above the group size of an entry whose tasks carry it, as platoon train checks.
+    if problems := entry_settings.listed_straggler_problems(config, settings, training.tasks, eval_tasks):
+        raise ConfigError(problems)
+    listed = [f"warning: {line}" for line in entry_settings.listed_permit_warnings(config, settings, training.tasks)]
     if training.plan is None:
-        return ["tasks: listed"]
-    return [*training.plan.describe(), *(f"warning: {warning}" for warning in training.plan.warnings())]
+        return ["tasks: listed", *listed]
+    return [*training.plan.describe(), *(f"warning: {warning}" for warning in training.plan.warnings()), *listed]
 
 
 def _names_components(resolved: ResolvedConfig) -> bool:

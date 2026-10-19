@@ -28,7 +28,7 @@ import shutil
 import signal
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from copy import deepcopy
@@ -41,7 +41,7 @@ from platoon.eval.config_defs import EvalPolicy, EvalWorkflowConfig, TinkerKeyRe
 from platoon.gateway.trace import OUTCOME_MISC_KEY
 from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.task import Task
-from platoon.train.components import EnvironmentRoute
+from platoon.train.components import EnvironmentRoute, row_entry
 from platoon.utils import scratch
 from platoon.utils.judges import is_judge_trajectory
 from platoon.utils.trajectory_status import outcome_status, trained_reward_key
@@ -452,7 +452,15 @@ def _kill_process_group(pid: int | None) -> None:
 
 
 class DefaultEvalGroupWorkflow:
-    """Default rollout workflow for evaluation."""
+    """Default rollout workflow for evaluation.
+
+    Each rollout runs with its environment entry's rollout config (``entry_rollout_configs``), which ``platoon eval``
+    sets from the entries' own rollout settings (:func:`platoon.train.entry_settings.evaluation_rollout_configs`); a
+    rollout of an entry it does not list runs with ``config.rollout_config``.
+    """
+
+    # Each environment entry's rollout config, by label.
+    entry_rollout_configs: Mapping[str, RolloutConfig] = {}
 
     def __init__(
         self,
@@ -493,8 +501,11 @@ class DefaultEvalGroupWorkflow:
 
         return run_provenance(self.policy, judges=bool(getattr(self.config.rollout_config, "judges", True)))
 
-    def _get_rollout_config(self, output_dir: str) -> RolloutConfig:
-        rollout_config = deepcopy(self.config.rollout_config)
+    def _get_rollout_config(self, output_dir: str, entry: str | None = None) -> RolloutConfig:
+        """A copy of the rollout config of ``entry``'s rollouts (``entry_rollout_configs``, else the workflow's own),
+        set to run the policy and write into ``output_dir``."""
+
+        rollout_config = deepcopy(self.entry_rollout_configs.get(entry, self.config.rollout_config))
         rollout_config.model_name = self.model_name
         rollout_config.return_dict = True
         rollout_config.train = False
@@ -608,7 +619,9 @@ class DefaultEvalGroupWorkflow:
         task_id = str(data["task_id"])
         start = time.perf_counter()
         try:
-            rollout_config = self._get_rollout_config(output_dir=output_dir)
+            entries = tuple(self.entry_rollout_configs)
+            entry = row_entry(data, entries) if entries else None
+            rollout_config = self._get_rollout_config(output_dir=output_dir, entry=entry)
             task = self.get_task_fn(task_id)
             if rollout_config.max_steps is not None:
                 task.max_steps = rollout_config.max_steps
