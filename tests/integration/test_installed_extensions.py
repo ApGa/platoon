@@ -203,7 +203,7 @@ def example_wheel(directory: Path) -> Path:
 def rival_wheel(directory: Path) -> Path:
     files = {path: textwrap.dedent(code).lstrip() for path, code in RIVAL_FILES.items()}
     return build_wheel(
-        directory, "rival-extension", "6.6.6", files, requires=["platoon>=0.2,<0.3"], entry_points=RIVAL_ENTRY_POINTS
+        directory, "rival-extension", "6.6.6", files, requires=["platoon>=0.3,<0.4"], entry_points=RIVAL_ENTRY_POINTS
     )
 
 

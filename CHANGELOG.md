@@ -2,17 +2,67 @@
 
 What each release of platoon changes. Platoon's version is below 1.0: a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
-release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
+release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-10-20)
 
-- **`train.task_sampler` names how a run draws its training tasks.** It takes the values of `train.task_order`,
-  which it replaces: `auto`, the default, draws a mixture in its weighted fair order and a single environment in the
-  dataloader's shuffled passes, and `weighted` draws a single environment in the weighted order too. The order a run
-  draws is unchanged. `train.task_order` still loads, with a deprecation warning, until platoon 0.4.0 removes it;
-  `lock.json` records it and `platoon config validate --strict` fails on it. Beside another `task_sampler`,
-  `task_order: auto` (its default in 0.2.0, as a dump of that release's `config show --defaults` spells it) is
-  ignored, with a warning that says so, and `task_order: weighted` does not load
+Each environment of a training mixture can set the training settings of its own groups, training keeps per-task
+statistics and logs pass@k, a dispatcher starts each training group when it can start, and a resume takes up exactly
+where the run stood. A label at its `rollout_group_limits` no longer paces the run, which changes what such a config
+trains. Harbor verifiers that ask for root can run as root (`verifier_user: honor`), and the `openhands` harness can
+condense at a token count. `train.task_order` is now `train.task_sampler`, with a new `uniform` sampler. The forms that
+platoon 0.2.0 deprecated are gone, but `strategy` stays, as the unit of `every`. The `hpc` extra takes hpc-sandbox 0.4,
+and the TextCraft extension's release for platoon 0.3 is `platoon-textcraft` 0.2.0.
+
+### New features
+
+- **Each environment of a mixture sets the training settings of its own groups.** An entry's `workflow_config` is laid
+  over `train.workflow_config` for its groups: its `group_size`, its baseline (`leave_one_out_baseline`), its
+  `min_successful_group_size`, its straggler defaults, its filters (`filter_errors`, `filter_message_actions`) and
+  subagent datum sampling, and its rollout settings (`rollout_config`: `max_steps`, `timeout`, sampling and the rest),
+  so a dataset's calibrated step budget and a slow environment's fewer, longer rollouts sit beside the run's. Its
+  rollout settings are its evaluations' defaults, below `eval.workflow_config` (and in `platoon eval`, below
+  `inference.workflow`), and `eval_overrides.workflow_config` sets what its evaluation rollouts change (every split but
+  `train`). An entry's `max_staleness` raises the staleness bound of its own groups, while `train.max_staleness` stays
+  the bound on how far rollouts run ahead, and recovery pruning keeps the checkpoints within the largest bound. Loading
+  refuses a key that acts on microbatches or on the run's rollout workers with where to set it, an entry bound below the
+  run's, and an entry's settings beside a workflow class that does not apply them (exit 78). Named environments may ship
+  rollout settings (`workflow_config.rollout_config`) only. `platoon config show` prints each entry's effective settings
+  with the layer each came from (`--entry NAME` for one), `platoon config validate` and `platoon train` say what each
+  entry changes, and `lock.json` records it (`entry_settings`). `max_concurrent_rollouts` counts rollouts that groups of
+  different sizes share, and each step logs each label's `stale_groups` and `num_steps`
+  ([Settings per environment](docs/how-to/train-and-eval.md#settings-per-environment)).
+- **Training keeps per-task statistics.** Each settled group of a training task is recorded with the workflow's
+  verdict on what it trains (`trained`, `uniform`, or why it trains nothing) and what each rollout returned, passes
+  judged as `platoon eval` judges success: on the reward the environment scored, before any reward processor, against
+  the entry's new `success_threshold` (1.0 by default; a named environment may ship its own), which only these
+  statistics read (`platoon eval` keeps `inference.workflow.success_threshold`). Each step logs each label's mean
+  expected pass@1 and pass@G under decayed per-task counts (`train/tasks/<column>/<label>/pass_at_1`, `pass_at_G`), the
+  share of its tasks seen, its tasks by pass-rate band and those without evidence, and the kinds of the groups it
+  trained on (`train/batch/informative_groups`, `all_pass_groups`, `all_fail_groups`, `uniform_mixed_groups`, also by
+  label). Each full checkpoint saves the statistics to `tasks/` in the run directory and names the file in its
+  `checkpoints.jsonl` row, a resume loads them before its launch save (from a checkpoint without them, it goes on from
+  the newest older one that has them, else from empty, and `lock.json` lists the start under `tasks_state_lost`),
+  recovery pruning deletes a pruned checkpoint's file, and `tasks/events.jsonl` logs every draw, settle and fate. The
+  statistics never fail training. `platoon tasks show` and `platoon tasks export` read them
+  ([Per-task statistics](docs/how-to/train-and-eval.md#per-task-statistics)).
+- **A resume takes up exactly where the run stood.** Each full checkpoint saves where the run's draws stand in a file
+  of its own (`tasks/dispatch-s<start>-<checkpoint>.json`, which its row names as `dispatch`), and the groups that
+  settled and that no step had trained yet (`tasks/kept-s<start>-<checkpoint>.json.gz`): a resume trains those as they
+  are, a failed one as failed, without rolling them out again, draws again first the tasks whose groups were running
+  or waiting, and goes on with the order where it stopped. So every position of the order is consumed exactly once,
+  trained, dropped as stale, failed or skipped, and an interrupt or a crash no longer reruns hours of a slow
+  environment's groups or loses the groups in flight, also when the per-task statistics stopped or could not be
+  written. Every full save writes the groups it keeps again, about ten bytes a token, in a thread beside training;
+  `checkpoint.keep_recovery` deletes them with their checkpoint. A resume whose sampling inputs changed (the task
+  sampler, the batch size, the label column, the entries' order, an entry's weight, seed or tasks) warns, records it
+  in `lock.json` (`sampling_changed`) and goes on; one from a checkpoint of an earlier platoon draws from its batch,
+  as before ([Checkpoints and resume](docs/how-to/train-and-eval.md#checkpoints-and-resume)).
+- **`train.task_sampler: uniform`** (`train.task_sampler` is the new name of `train.task_order`, below) draws every
+  training task of every entry in seeded shuffled passes, with no entry slots: every task equally often, as
+  `weight: tasks` does, with batches as the shuffle mixes them rather than balanced by entry. It reads no entry's weight
+  or seed: a config that gives an entry a numeric weight does not load (exit 78). For a single environment it draws the
+  batches `auto` draws, in epochs that hold every task
   ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
 - **Harbor verifiers that run as root.** Some Harbor tasks grade as root (`[verifier] user = "root"`) and run the
   agent's code as another user, nobody as a rule, so that it cannot read the files the grader keeps for itself, such
@@ -37,19 +87,6 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   image lacks, the image's own modes for those it has, its artifacts readable by every user, and the outcome records
   `verifier_user: root`. Separate verifiers' sandboxes are reaped with their own options too
   ([Verifiers that run as root](docs/how-to/sandboxes-and-harbor.md#verifiers-that-run-as-root)).
-- **The `oci` image builder keeps the permissions an image gives other users.** Run by anyone but root,
-  `unsquashfs` gave the files it unpacked the image's modes through the host's umask, so under a umask such as 027
-  every file of an image the `oci` builder made lost the read and execute bits the image gives other users. Rootless
-  sandboxes never noticed, since everything there runs as the files' owner, but a verifier that runs as root and
-  switches users could not even run the image's shell. The builder now unpacks under umask 0, in a build directory
-  only you can enter, and records `builder_revision` in its receipts. Images it built before are not built again by
-  themselves, since their build keys do not change: with `verifier_user: honor`, `platoon train`, `eval`, `rollout`
-  and `prepare` refuse the root verifiers' images among them, naming the build that makes them again
-  (`platoon harbor images build CONFIG --key KEY`)
-  ([Verifiers that run as root](docs/how-to/sandboxes-and-harbor.md#verifiers-that-run-as-root)).
-- **The `hpc` extra takes hpc-sandbox 0.4** (`hpc-sandbox>=0.4.0,<0.5`), whose singularity provider has the
-  `fakeroot` option that verifiers that run as root need (above), so pip upgrades an hpc-sandbox 0.3 it finds.
-  Sandboxes started without `fakeroot` behave as with 0.3.
 - **The `openhands` harness condenses at a token count.** Its new option `condenser_max_tokens` gives its summarizing
   condenser a token trigger, and runs that condenser whatever `condenser` says: before each model call, it condenses
   once the prompt the agent would send is longer than that many tokens, summarizing the oldest turns after the system
@@ -61,62 +98,9 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   that still overflows the window condenses as before. The summaries are the agent's `aux` calls (below), trained
   with the rollout's advantage. The default, 0, sets no trigger and counts no tokens
   ([`openhands`](docs/tutorials/builtin-harnesses.md#openhands)).
-- **The `openhands` harness's condenser keeps the task and shows its summary call what happened.** The spec is now
-  `openhands@1.54.0.post1`, from the same toolchain, and a config that names `openhands@1.54.0` gets it. With
-  `condenser: llm_summarizing` or a token trigger, the summary call reads each forgotten turn whole: the commands it
-  ran, their whole output and an earlier summary entire, where the SDK's condenser showed it 500 characters of each
-  and no tool call's arguments. A condensation that resets the whole context keeps the system prompt and the task,
-  which the SDK's summarized away with the rest, and one for the token trigger forgets only what it takes to get
-  under half the trigger. A summary call answered without text (a tool call, or a completion cut short in its
-  reasoning) still condenses, with a notice in the summary's place that the earlier turns were dropped, where the
-  SDK's condenser dropped them and said nothing.
-- **The `openhands` condenser's summary calls are `aux` calls.** The runner marks each summary call with
-  `X-Platoon-Call-Kind: aux`, and the agent's own turns stay `policy` calls. A summary's trajectory step now says
-  `kind: aux` in its `action_misc`, and an evaluation report counts the summaries under `usage.aux` rather than
-  `usage.policy`. They train as before, with the rollout's advantage, each condensation still takes one of the
-  agent's steps (`max_steps`), and the step counts in training and evaluation metrics still count each summary as a
-  step. For this the gateway now takes `aux` calls from a harness in a task sandbox, where code the policy runs can
-  read the agent's key, unless a gateway step budget (`[budget] enforce = "gateway"`) counts its calls: that budget
-  does not count `aux` calls, so under it they are still refused (403). Without one the gateway counts none of the
-  harness's calls, and it samples the harness's `aux` calls as its policy calls, also under
-  `sampling_precedence: config`, where an `aux` call elsewhere keeps its own parameters; so an `aux` call gets that
-  code nothing that a policy call would not. Its `judge` calls are still refused in every case
-  ([how a run ends](docs/how-to/sandboxes-and-harbor.md#3-how-a-run-ends)).
-- **Each environment of a mixture sets the training settings of its own groups.** An entry's `workflow_config` is laid
-  over `train.workflow_config` for its groups: its `group_size`, its baseline (`leave_one_out_baseline`), its
-  `min_successful_group_size`, its straggler defaults, its error filters and subagent datum sampling, and its rollout
-  settings (`rollout_config`: `max_steps`, `timeout`, sampling and the rest), so a dataset's calibrated step budget and
-  a slow environment's fewer, longer rollouts sit beside the run's. Its rollout settings are its evaluations'
-  defaults, below `eval.workflow_config` (and in `platoon eval`, below `inference.workflow`), and
-  `eval_overrides.workflow_config` sets what its evaluation rollouts change. An entry's `max_staleness` raises the
-  staleness bound of its own groups, while `train.max_staleness` stays the bound on how far rollouts run ahead, and
-  recovery pruning keeps the checkpoints within the largest bound. Loading refuses a key that acts on microbatches or
-  on the run's rollout workers with where to set it, an entry bound below the run's, and an entry's settings beside a
-  workflow class that does not apply them (exit 78). Named environments may ship rollout settings
-  (`workflow_config.rollout_config`) only. `platoon config show` prints each entry's effective settings with the
-  layer each came from (`--entry NAME` for one), `platoon config validate` and `platoon train` say what each entry
-  changes, and `lock.json` records it (`entry_settings`). `max_concurrent_rollouts` counts rollouts that groups of
-  different sizes share. A label at its `rollout_group_limits` no longer stalls the others, in every config that sets
-  limits: its waiting rows neither take a place in a batch nor count toward the batches `train.max_staleness` lets the
-  run draw ahead, and past four batches of them its new rows are skipped and counted (`train/batch/skipped_rows`). So
-  a capped label whose limit cannot keep up with its share trains less than its weight, and the rows still waiting
-  when a run ends never train (`train/batch/parked_rows` counts them each step); `platoon train` and `platoon config
-  validate` warn of a `max_concurrent_rollouts` that the capped labels' groups can fill. Each step also logs each
-  label's `stale_groups` and `num_steps`
-  ([Settings per environment](docs/how-to/train-and-eval.md#settings-per-environment)).
-- **Training keeps per-task statistics.** Each settled group of a training task is recorded with the workflow's
-  verdict on what it trains (`trained`, `uniform`, or why it trains nothing) and what each rollout returned, passes
-  judged as `platoon eval` judges success: on the reward the environment scored, before any reward processor, against
-  the entry's new `success_threshold` (1.0 by default; a named environment may ship its own). Each step logs each
-  label's mean expected pass@1 and pass@G under decayed per-task counts (`train/tasks/<column>/<label>/pass_at_1`,
-  `pass_at_G`), the share of its tasks seen, its tasks by pass-rate band and those without evidence, and the kinds of
-  the groups it trained on (`train/batch/informative_groups`, `all_pass_groups`, `all_fail_groups`,
-  `uniform_mixed_groups`, also by label). Each full checkpoint saves the statistics to `tasks/` in the run directory
-  and names the file in its `checkpoints.jsonl` row, a resume loads them before its launch save (from a checkpoint
-  without them, it goes on from the newest older one that has them, else from empty, and `lock.json` lists the start
-  under `tasks_state_lost`), recovery pruning deletes a pruned checkpoint's file, and `tasks/events.jsonl` logs every
-  draw, settle and fate. The statistics never fail training. `platoon tasks show` and `platoon tasks export` read
-  them ([Per-task statistics](docs/how-to/train-and-eval.md#per-task-statistics)).
+
+### Changes
+
 - **A dispatcher starts each training group when it can start.** The producer that drew a batch's tasks ahead of the
   rollout workers, the pending queue and the pool of workers are replaced by a dispatcher that draws a task only when
   its group can start: within the horizon of `train.max_staleness` (at most `max_staleness + 1` batches of groups
@@ -125,32 +109,64 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
   `max_staleness: 0` each step trains exactly the groups of its batch, unless a label's limit holds one of them back.
   The run starts no group past its last step ([Settings per
   environment](docs/how-to/train-and-eval.md#settings-per-environment)).
-- **A capped label's groups start as its limit allows, not as the steps do.** A draw whose label is at its
-  `rollout_group_limits` waits in the label's backlog, outside the horizon; past four batches of them its new draws
-  are skipped and counted, and the run draws only while some label has room. While a capped label has draws waiting,
-  each of its running groups holds a slot of the horizon for the next one, which starts as soon as the group ends, as
-  far as the capped labels' groups and those slots fit in `max_staleness` batches; at `max_staleness: 0` there is no
-  slot to hold, and a capped label starts at most its limit of groups a step. This changes what a config with
-  `rollout_group_limits` trains: its capped labels' draws that wait are drawn past at every bound, `max_staleness: 0`
-  included, and those still waiting when the run ends never start. The `train/batch/parked_rows` and `skipped_rows`
-  metrics count the draws that wait and those skipped.
-- **A resume takes up exactly where the run stood.** Each full checkpoint saves where the run's draws stand in a file
-  of its own (`tasks/dispatch-s<start>-<checkpoint>.json`, which its row names as `dispatch`), and the groups that
-  settled and that no step had trained yet (`tasks/kept-s<start>-<checkpoint>.json.gz`): a resume trains those as they
-  are, a failed one as failed, without rolling them out again, draws again first the tasks whose groups were running
-  or waiting, and goes on with the order where it stopped. So every position of the order is consumed exactly once,
-  trained, dropped as stale, failed or skipped, and an interrupt or a crash no longer reruns hours of a slow
-  environment's groups or loses the groups in flight, also when the per-task statistics stopped or could not be
-  written. Every full save writes the groups it keeps again, about ten bytes a token, in a thread beside training;
-  `checkpoint.keep_recovery` deletes them with their checkpoint. A resume whose sampling inputs changed (the task
-  sampler, the batch size, the label column, the entries' order, an entry's weight, seed or tasks) warns, records it
-  in `lock.json` (`sampling_changed`) and goes on; one from a checkpoint of an earlier platoon draws from its batch,
-  as before ([Checkpoints and resume](docs/how-to/train-and-eval.md#checkpoints-and-resume)).
-- **`train.task_sampler: uniform`** draws every training task of every entry in seeded shuffled passes, with no
-  entry slots: every task equally often, as `weight: tasks` does, with batches as the shuffle mixes them rather than
-  balanced by entry. It reads no entry's weight or seed: a config that gives an entry a numeric weight does not load
-  (exit 78). For a single environment it draws the batches `auto` draws, in epochs that hold every task
-  ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+- **Breaking: a label at its `rollout_group_limits` no longer stalls the others, and its groups start as its limit
+  allows, not as the steps do.** In every config that sets limits, a draw whose label is at its limit waits in the
+  label's backlog, outside the horizon: it neither takes a place in a batch nor counts toward the batches
+  `train.max_staleness` lets the run draw ahead. Past four batches of them, the label's new draws are skipped and
+  counted, and the run draws only while some label has room. While a capped label has draws waiting, each of its
+  running groups holds a slot of the horizon for the next one, which starts as soon as the group ends, as far as the
+  capped labels' groups and those slots fit in `max_staleness` batches; at `max_staleness: 0` there is no slot to
+  hold, and a capped label starts at most its limit of groups a step. So a capped label whose limit cannot keep up
+  with its share trains less than its weight, and its draws still waiting when the run ends never start;
+  `train/batch/parked_rows` counts the draws that wait, each step, and `train/batch/skipped_rows` those skipped.
+  `platoon train` and `platoon config validate` warn of a `max_concurrent_rollouts` that the capped labels' groups can
+  fill. There is no switch: in 0.2, a label at its limit held back the other labels' rows, and so paced the whole
+  run. This changes what a config with `rollout_group_limits` trains: its capped labels' draws that wait are drawn
+  past at every bound, `max_staleness: 0` included
+  ([Settings per environment](docs/how-to/train-and-eval.md#settings-per-environment)).
+- **The `openhands` harness's condenser keeps the task and shows its summary call what happened.** The spec is now
+  `openhands@1.54.0.post1`, from the same toolchain, so no site builds it again, and a config that names
+  `openhands@1.54.0` gets it; with the default options (no condenser and no token trigger), the agent runs as before.
+  With `condenser: llm_summarizing` or a token trigger, the summary call reads each forgotten turn whole: the commands
+  it ran, their whole output and an earlier summary entire, where the SDK's condenser showed it 500 characters of each
+  and no tool call's arguments, so a summary call's prompt is now as long as the turns it forgets. A condensation that
+  resets the whole context keeps the system prompt and the task, which the SDK's summarized away with the rest, and
+  one for the token trigger forgets only what it takes to get under half the trigger. A summary call answered without
+  text (a tool call, or a completion cut short in its reasoning) still condenses, with a notice in the summary's place
+  that the earlier turns were dropped, where the SDK's condenser dropped them and said nothing. A context reset whose
+  summary call fails, such as one the gateway refuses for overflowing the context window, is made again with the
+  turns cut shorter each time, and if every try fails, the turns are dropped with the same notice, where the SDK's
+  condenser stopped the agent. No option brings back the SDK's condenser.
+- **The `openhands` condenser's summary calls are `aux` calls.** The runner marks each summary call with
+  `X-Platoon-Call-Kind: aux`, and the agent's own turns stay `policy` calls. A summary's trajectory step now says
+  `kind: aux` in its `action_misc`, and an evaluation report counts the summaries under `usage.aux` rather than
+  `usage.policy`. They train as before, with the rollout's advantage, each condensation still takes one of the
+  agent's steps (`max_steps`), and the step counts in training and evaluation metrics still count each summary as a
+  step. In a task sandbox, the gateway takes them under the rule below.
+- **A harness in a task sandbox may make `aux` calls.** In 0.2 the gateway refused every call but a policy call from a
+  harness in a task sandbox, where code the policy runs can read the agent's key. It now takes its `aux` calls, unless
+  a gateway step budget (`[budget] enforce = "gateway"`) counts its calls: that budget does not count `aux` calls, so
+  under it they are still refused (403). Without one the gateway counts none of the harness's calls, and it samples
+  the harness's `aux` calls as its policy calls, also under `sampling_precedence: config`, where an `aux` call
+  elsewhere keeps its own parameters; so an `aux` call gets that code nothing that a policy call would not. Its
+  `judge` calls are still refused in every case
+  ([how a run ends](docs/how-to/sandboxes-and-harbor.md#3-how-a-run-ends)).
+
+### Fixes
+
+- **The `oci` image builder keeps the permissions an image gives other users.** Run by anyone but root,
+  `unsquashfs` gave the files it unpacked the image's modes through the host's umask, so under a umask such as 027
+  every file of an image the `oci` builder made lost the read and execute bits the image gives other users. Rootless
+  sandboxes never noticed, since everything there runs as the files' owner, but a verifier that runs as root and
+  switches users could not even run the image's shell. The builder now unpacks under umask 0, in a build directory
+  only you can enter, and records `builder_revision` in its receipts. Images it built before are not built again by
+  themselves, since their build keys do not change: with `verifier_user: honor`, `platoon train`, `eval`, `rollout`
+  and `prepare` refuse the root verifiers' images among them, naming the build that makes them again
+  (`platoon harbor images build CONFIG --key KEY`)
+  ([Verifiers that run as root](docs/how-to/sandboxes-and-harbor.md#verifiers-that-run-as-root)).
+
+### Removed
+
 - **Breaking: the forms that platoon 0.2.0 deprecated are gone.** A config, an override or a command that still uses
   one fails as a configuration error (exit 78), with a message that names what replaces it and says that platoon 0.3.0
   removed it, such as `train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by`
@@ -171,15 +187,91 @@ release, require a range such as `platoon[tinker,ors]>=0.2,<0.3`.
     `default_image`, and naming the directory as a `dataset` to fetch has `platoon prepare` build their images;
   - fetch config files of `platoon harbor`, and `platoon harbor fetch`'s `--lock` and `--cache`, which applied to them
     alone: a Harbor entry of a training or evaluation config, and `--workers` for their `workers`;
-  - `python -m platoon.train.tinker.restart_wrapper` and `run_with_restart`: `watchdog.max_restarts` in the training
-    config, with which `platoon train` restarts training after any failure.
-- **`strategy` stays, as the unit of `every`.** Platoon 0.2.0 deprecated the `strategy` of `eval` and `checkpoint`
-  for removal in 0.3.0; it stays instead, and loads without a deprecation warning. `every` counts in its units:
-  `step`, what a section that leaves it out counts, or `epoch`, a pass over the training tasks, so `eval: {strategy:
-  epoch, every: 1}` evaluates at the end of each epoch. A config that sets it keeps the meaning it has had: a section
-  that sets `strategy` and leaves `every` out triggers its event every 1 of its units, and one that sets neither never
-  does. `strategy: none`, which `every: 0` duplicates, is gone (above)
+  - `python -m platoon.train.tinker.restart_wrapper` and `run_with_restart`, whose import raises an `ImportError`:
+    `watchdog.max_restarts` in the training config, with which `platoon train` restarts training after any failure.
+
+### Deprecations
+
+- **`train.task_order` is now `train.task_sampler`,** which names how a run draws its training tasks and takes the same
+  values: `auto`, the default, draws a mixture in its weighted fair order and a single environment in the dataloader's
+  shuffled passes, and `weighted` draws a single environment in the weighted order too. The order a run draws is
+  unchanged. `train.task_order` still loads, with a deprecation warning, until platoon 0.4.0 removes it; `lock.json`
+  records it and `platoon config validate --strict` fails on it. Beside another `task_sampler`, `task_order: auto` (its
+  default in 0.2.0, as a dump of that release's `config show --defaults` spells it) is ignored, with a warning that says
+  so, and `task_order: weighted` does not load
+  ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+- **`strategy` is no longer deprecated.** Platoon 0.2.0 deprecated the `strategy` of `eval` and `checkpoint` for removal
+  in 0.3.0; it stays instead, as the unit of `every`, and loads without a deprecation warning. `every` counts in its
+  units: `step`, what a section that leaves it out counts, or `epoch`, a pass over the training tasks, so
+  `eval: {strategy: epoch, every: 1}` evaluates at the end of each epoch. A config that sets it keeps the meaning it has
+  had: a section that sets `strategy` and leaves `every` out triggers its event every 1 of its units, and one that sets
+  neither never does. `strategy: none`, which `every: 0` duplicates, is gone (above)
   ([Cadences in steps or epochs](docs/how-to/train-and-eval.md#cadences-in-steps-or-epochs)).
+
+### Install and upgrade
+
+```bash
+pip install -U 'platoon[tinker,ors]>=0.3,<0.4'
+# with the hpc extra and the TextCraft extension, name them too:
+pip install -U 'platoon[tinker,ors,hpc]>=0.3,<0.4' 'platoon-textcraft[platoon]'
+```
+
+- **Name every extra and extension you installed.** pip upgrades only what the command names and what that needs, and
+  it does not record the extras a package was installed with, so `pip check` passes either way: an upgrade without
+  `hpc` keeps hpc-sandbox 0.3, and one without `platoon-textcraft` keeps its 0.1.0 (both below).
+- **Replace what 0.3.0 removed** (above): `platoon config validate` reports every removed key or value that a config
+  file still sets, each with what replaces it, and refuses to run while a removed variable is set, naming what replaces
+  it ([Check the result before you run it](docs/how-to/configs.md#4-check-the-result-before-you-run-it)). A script that
+  runs `python -m platoon.train.tinker.restart_wrapper`, `platoon harbor` on a fetch config file, or
+  `platoon harbor fetch` with `--lock` or `--cache` stops with exit 78 too, naming what replaces it.
+- **Check what trains differently with the same config** (Changes, above): a config with `rollout_group_limits` no
+  longer lets a capped label pace the run, so a capped label whose limit cannot keep up trains less than its weight, and
+  its new draws are skipped once four batches of them wait; an `openhands` harness with `condenser: llm_summarizing` or
+  a token trigger shows its summary call the forgotten turns whole, and an evaluation report counts the summaries under
+  `usage.aux`; and a harness in a task sandbox gets its `aux` calls answered and trained, where 0.2 refused them, unless
+  a gateway step budget counts its calls. None of these has a switch back.
+- **To upgrade a project that pins one minor release**, move its range to 0.3, such as `platoon[tinker,ors]>=0.3,<0.4`.
+  Platoon 0.3 refuses the components of an installed extension whose requirement on platoon excludes it, such as
+  `platoon>=0.2,<0.3`, with an error that names both versions, until a release of the extension admits 0.3;
+  meanwhile, `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` loads them anyway
+  ([Compatibility and provenance](docs/extending/index.md#compatibility-and-provenance)).
+- **The `hpc` extra takes hpc-sandbox 0.4** (`hpc-sandbox>=0.4.0,<0.5`), whose singularity provider has the
+  `fakeroot` option that verifiers that run as root need (above). An upgrade that names the extra upgrades an
+  hpc-sandbox 0.3 it finds. One that does not keeps it, and platoon 0.3 then refuses `fakeroot`, and with it the root
+  verifiers on Singularity, with a message that names hpc-sandbox 0.4. Sandboxes started without `fakeroot` (or
+  `--fakeroot` in `extra_start_args`) behave as with hpc-sandbox 0.3.
+- **The TextCraft extension's release for platoon 0.3 is `platoon-textcraft` 0.2.0**, whose `platoon` extra requires
+  `platoon[ors]>=0.3,<0.4`. Its code and data are those of 0.1.0, but for the dataset card that its Harbor export
+  writes, whose example config for platoon no longer sets `image_map`, which platoon 0.3.0 removed. The release for
+  platoon 0.2 stays 0.1.0: there, keep the extension within 0.1 (`platoon-textcraft>=0.1,<0.2`), since platoon 0.2
+  refuses the components of 0.2.0, also when it is installed without its extra. An upgrade of platoon alone leaves
+  0.1.0 installed, which pip does not flag and platoon 0.3 refuses: upgrade the two together, as above
+  ([The TextCraft extension](docs/getting-started/install.md#the-textcraft-extension)).
+- **Every training run keeps per-task statistics and where its draws stand, with no switch** (above). Its run
+  directory gains `tasks/`: with each full checkpoint, a snapshot of the statistics, which its row of
+  `checkpoints.jsonl` names (`tasks`), the state of its draws (`dispatch`) and the groups it keeps, about ten bytes a
+  token (with `max_staleness: 3`, batches of 32 groups of 8 and rollouts of 16,000 tokens, a save can keep some 130 MB);
+  and `tasks/events.jsonl`, a line for each draw, settle and fate, which grows with the run. `checkpoint.keep_recovery`
+  deletes a pruned recovery checkpoint's files with it; those of permanent checkpoints stay, as the checkpoints do, and
+  without it so do all. Each step logs more series for each label. A run that platoon 0.2 started resumes from its
+  checkpoint's batch, as before, with empty statistics and a warning, and its `lock.json` lists the start under
+  `tasks_state_lost`.
+- **Code of your own.** The rows a workflow gets carry two more keys, `_platoon_seq` and `_platoon_position`, which
+  number the training rows the trainer draws, and a loaded `TrainConfig` names its sampler in `task_sampler` alone,
+  with `task_order` None. Inside a group, a `GroupRolloutWorkflow` subclass's `self.config` holds the settings of the
+  group's entry, which `platoon.train.tinker.workflows.group_rollout_workflow.current_entry()` names; a workflow class
+  that is no `GroupRolloutWorkflow` must apply an entry's settings itself and declare `applies_entry_settings = True`,
+  or a config whose entries set any does not load into `platoon train` (exit 78). A workflow class of your own that
+  returns a plain list of datums gives the per-task statistics no evidence, and one that returns neither that nor a
+  `GroupRolloutWorkflow`'s output has its task rolled out again on a resume, rather than its group kept. A sandbox
+  provider may say why its sandboxes cannot give a root verifier root and other users, with a `root_refusal(options)`
+  class method.
+
+### Documentation
+
+[RFC 0019](docs/rfcs/0019-training-mixtures.md), a draft, designs training mixtures' per-environment settings, per-task
+statistics and task samplers. This release ships its first milestones: `train.task_sampler`, settings per environment,
+per-task statistics, and the dispatcher with exact resume and the run-level `uniform` sampler.
 
 ## 0.2.1 (2026-10-19)
 

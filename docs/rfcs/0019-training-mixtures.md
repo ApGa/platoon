@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0018](0018-configuration-only-projects.md), section 8 (the weighted fair order, `weight: tasks` and the sampling plan); [RFC 0016](0016-component-configuration.md) (component options, and the rollout settings of each phase, which section 2 of this RFC amends); [RFC 0013](0013-extension-model.md) (registration by name); [RFC 0017](0017-public-surface-and-conformance.md) (experimental API, conformance kits); [RFC 0003](0003-multi-policy-training.md) and [RFC 0001](0001-native-multi-agent.md), for what must stay compatible; the trainer (`platoon/train/tinker/rl.py`) and the group workflow (`platoon/train/tinker/workflows/group_rollout_workflow.py`) |
 | Discussion | The pull request that adds this RFC, which also records the decisions of 2026-10-20 (open questions 1 to 3 and 7 to 11); M3's, which records those on questions 4 to 6 |
-| Implementation | M0b, M1 and M2, merged; M3 in the pull request that adds the dispatcher; all four in platoon 0.3.0 |
+| Implementation | M0b, M1, M2 and M3, merged; all four in platoon 0.3.0 |
 
 ## Summary
 
@@ -28,7 +28,7 @@ read, and a measurement of pass@k during training for every run.
   returned; passes are judged as `platoon eval` judges success. Each step logs each label's expected pass@1 and pass@G;
   each full checkpoint saves the statistics and a resume loads them; `platoon tasks show` and `export` read them.
 
-**What comes next** (in platoon 0.3.0 too): **M3**, a dispatcher that draws a task only when its group can start, so
+**Then** (in platoon 0.3.0 too): **M3**, a dispatcher that draws a task only when its group can start, so
 that a resume takes up exactly where the run stood and trains the groups a checkpoint kept, and the run-level
 `uniform` sampler. **After it** (M4-M5): the sampler API, with an adaptive `pass_rate` sampler that prefers tasks
 whose next group is likely to train, and group admission with refill. Each ships experimental, and the adaptive

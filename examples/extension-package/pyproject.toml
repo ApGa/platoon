@@ -8,7 +8,7 @@ name = "example-extension"
 version = "0.1.0"
 description = "An example platoon extension: a self-checking harness, an exact-answer program and arithmetic tasks."
 requires-python = ">=3.12"
-dependencies = ["platoon >= 0.2, < 0.3"]
+dependencies = ["platoon >= 0.3, < 0.4"]
 
 # One group per kind of component. Each entry's name is the component's name and its value is the object that
 # defines it, so platoon imports a module only when a config names one of its components.

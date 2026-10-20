@@ -34,7 +34,7 @@ never `process`, and only the options that do not weaken that isolation.
 |---|---|---|---|---|
 | `process` | None: a host directory, commands run as you | ignored | nothing | `root` (where sandbox directories go; default `<tmp>/platoon-sandboxes`) |
 | `docker` | One long-lived container per sandbox | `docker://repo:tag` or a plain reference | the `docker` CLI (`binary: podman` for Podman) | `binary`, `cli_timeout_s` (600; bounds `docker run` including the pull) |
-| `singularity` | Rootless SingularityCE or Apptainer instances: private PID and IPC namespaces, root filesystem, `/tmp` and environment | `docker://` references, also pinned by digest (`docker://repo@sha256:<digest>`), or local `.sif` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `allow_network_none`, `gpu`, `rootfs_layout` ([below](#the-singularity-providers-root-filesystem)), `fakeroot` (since the next release, with hpc-sandbox 0.4: [root in a verifier](#verifiers-that-run-as-root)), ... |
+| `singularity` | Rootless SingularityCE or Apptainer instances: private PID and IPC namespaces, root filesystem, `/tmp` and environment | `docker://` references, also pinned by digest (`docker://repo@sha256:<digest>`), or local `.sif` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `allow_network_none`, `gpu`, `rootfs_layout` ([below](#the-singularity-providers-root-filesystem)), `fakeroot` (since 0.3.0, with hpc-sandbox 0.4: [root in a verifier](#verifiers-that-run-as-root)), ... |
 | `enroot` | Rootless enroot containers in their own user, mount, PID and IPC namespaces | `docker://` references, also pinned by digest, or local `.sqsh` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `gpus`, `remap_root`, ...; the singularity names also work (below) |
 
 Every provider runs a string command with `bash -c`, so a Harbor task's `bash` tool takes bash syntax (`[[ ]]`,
@@ -205,8 +205,8 @@ platoon runs from ([Write and override configs](configs.md#2-build-on-it-with-ex
 | `reward` | `{primary: reward}` | The [reward contract](#rewards-the-reward-contract-and-log-classifiers): `{primary, components, range, check}`, a reward name, or a list of the names that may train |
 | `verifier_classifiers` | none | Verifier-log patterns that make an outcome `invalid`: a named set (`harbor-common`), `{pattern, kind}` tables, or a list of both |
 | `agent_user` | `refuse` | A task that sets `[agent].user` or `[verifier].user`: `refuse` it, or `ignore` the user and run as the sandbox's single uid (recorded in the outcome's `ignored_users`) |
-| `verifier_user` | as `agent_user` | *Since the next release.* What `[verifier].user` gets instead, when set: `refuse`, `ignore`, or `honor`, which runs a separate verifier whose user is root as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
-| `verifier_provider_options` | none: `provider_options` | *Since the next release.* The provider options of every separate verifier's sandbox, laid over `provider_options`, such as `{rootfs_layout: copy, fakeroot: true}` for verifiers that run as root |
+| `verifier_user` | as `agent_user` | *Since 0.3.0.* What `[verifier].user` gets instead, when set: `refuse`, `ignore`, or `honor`, which runs a separate verifier whose user is root as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
+| `verifier_provider_options` | none: `provider_options` | *Since 0.3.0.* The provider options of every separate verifier's sandbox, laid over `provider_options`, such as `{rootfs_layout: copy, fakeroot: true}` for verifiers that run as root |
 | `concurrent_tools` | none | Tools that may overlap other calls on the same sandbox (`bash`, `view`) |
 | `queue_timeout_s` | 240 | How long a call or a grade waits for its turn before it is refused (`env_busy`) |
 | `close_timeout_s` | 30 | How long closing waits for calls in flight before it stops the sandbox |
@@ -626,7 +626,7 @@ own image gets the task's image and deferred steps, as Harbor's verifier would r
 
 ## Verifiers that run as root
 
-*Since the next release.* Some Harbor tasks grade as root: `task.toml` says `[verifier] user = "root"`, and the tests
+*Since 0.3.0.* Some Harbor tasks grade as root: `task.toml` says `[verifier] user = "root"`, and the tests
 run the agent's code as another user, `nobody` (65534) as a rule, so that it cannot read the files the grader keeps
 for itself, such as held-out answers. In Docker that works as written. In a rootless sandbox the tests run as your own
 uid, which cannot switch to another user, and the files they keep for themselves are yours too: such tests either fail
