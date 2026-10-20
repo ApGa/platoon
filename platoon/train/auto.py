@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
     from platoon.train.exclusion import TaskExclusion
     from platoon.train.sampling import SamplingPlan
+    from platoon.train.tinker.dataset_order import EpochOrder
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +191,9 @@ class TrainingTasks:
     # Every task the run draws from, once each: a weighted order's tasks as rows, those its first epoch leaves out
     # included, or a single environment's listing (``dataset``).
     tasks: Any
-    # The weighted order, which the dataloader draws epoch after epoch; None for a listing that it shuffles.
-    order: WeightedOrder[dict[str, Any]] | None = None
+    # The order the dataloader draws epoch after epoch: a weighted order, or uniform's passes over every task; None for
+    # a listing that it shuffles.
+    order: EpochOrder | None = None
     # How the run draws the tasks: each environment's share and how often each task is drawn over the planned steps
     # (platoon.train.sampling); None when the listing's size is not known.
     plan: SamplingPlan | None = None
@@ -205,8 +207,11 @@ class AutoDataset:
     batches; each epoch takes up the order where the one before it stopped (:meth:`training`).  A single
     environment's tasks go to the dataloader as listed, which draws them in seeded shuffled passes (seed 42), each
     epoch the whole batches they fill, its last partial batch starting the next epoch, unless ``train.task_sampler``
-    is ``weighted``: then they take the mixture's path, as a mixture of one (task ids stay unlabeled).  Evaluation, and
-    any split of an evaluation config, visits every selected task once, in config order.
+    is ``weighted``: then they take the mixture's path, as a mixture of one (task ids stay unlabeled).  Under
+    ``train.task_sampler: uniform`` every training task of every entry is drawn in those seeded shuffled passes, with
+    no entry's share (:class:`~platoon.train.tinker.dataset_order.PoolPasses`), in epochs of as many tasks as there
+    are, filled to whole batches.  Evaluation, and any split of an evaluation config, visits every selected task once,
+    in config order.
 
     Each environment's ``exclude_tasks`` leave its list first (:func:`_load_split`), so the order and the batches
     are drawn from the tasks that remain.
@@ -237,15 +242,19 @@ class AutoDataset:
         batches of ``train.batch_size``: each epoch takes up the credits and each environment's pass where the one
         before it stopped, so an environment that gets fewer slots than it has tasks draws the rest in the next
         epochs, and the whole run follows from the environments' seeds.  An environment's share is its ``weight``
-        over the mixture's, ``weight: tasks`` counting the tasks it lists here (:func:`mixture_weights`).  What each
-        environment's ``exclude_tasks`` left out is appended to ``exclusions`` when given."""
+        over the mixture's, ``weight: tasks`` counting the tasks it lists here (:func:`mixture_weights`).  Under
+        ``train.task_sampler: uniform`` the tasks of every environment take shuffled passes over all of them instead
+        (:class:`~platoon.train.tinker.dataset_order.PoolPasses`), in epochs of the same size, and an environment's
+        share is its tasks'.  What each environment's ``exclude_tasks`` left out is appended to ``exclusions`` when
+        given."""
 
         from platoon.train.sampling import sampling_plan
 
         environments = AutoEnvironment.environments(config)
         train = getattr(config, "train", None)
         batch_size = getattr(train, "batch_size", None)
-        if len(environments) == 1 and _task_sampler(config) != "weighted":
+        sampler = _task_sampler(config)
+        if len(environments) == 1 and sampler == "auto":
             dataset = _load_split(config, environments[0], "train", exclusions)
             dataset = _dataset_from_rows(_rows(dataset)) if isinstance(dataset, list) else dataset
             count = len(dataset) if hasattr(dataset, "__len__") else 0
@@ -268,6 +277,18 @@ class AutoDataset:
         size = sum(counts.values())
         if batch_size:
             size = math.ceil(size / batch_size) * batch_size  # each epoch is whole batches, its last one filled
+        if sampler == "uniform":  # every task equally often, in shuffled passes: an entry's share is its tasks'
+            from platoon.train.tinker.dataset_order import PoolPasses
+
+            rows = [row for entry_rows in pools.values() for row in entry_rows]
+            passes = PoolPasses(rows, epoch_size=size)
+            weights = {label: float(count) for label, count in counts.items()}
+            return TrainingTasks(
+                dataset=_dataset_from_rows([{**row, PRESERVE_DATASET_ORDER_COLUMN: True} for row in passes.epoch(0)]),
+                tasks=rows,
+                order=passes,
+                plan=sampling_plan(environments, counts, weights, train=train, epoch_size=size),
+            )
         weights = mixture_weights(environments, counts)
         order = WeightedOrder(
             pools,
@@ -322,7 +343,8 @@ def _listed_rows(
 
 
 def _task_sampler(config: Any) -> str:
-    """``train.task_sampler``: ``weighted`` orders a single environment's training tasks as a mixture's."""
+    """``train.task_sampler``: ``weighted`` orders a single environment's training tasks as a mixture's, and
+    ``uniform`` draws every training task in shuffled passes."""
 
     sampler = getattr(getattr(config, "train", None), "task_sampler", None) or "auto"
     if sampler not in TASK_SAMPLERS:

@@ -11,6 +11,7 @@ from platoon.train import entry_settings
 from platoon.train.components import (
     STRAGGLER_POLICY_KEY_REMOVED,
     TASK_SAMPLERS,
+    TASKS_WEIGHT,
     EnvironmentConfig,
     TaskSampler,
     normalize_environment_configs,
@@ -277,7 +278,7 @@ EVAL_ROLLOUTS_AT_ONCE = 256
 
 
 # The default label column, each task's mixture entry (``platoon.train.components.ENVIRONMENT_COLUMN``, which
-# ``tests/train/tinker/test_rollout_admission.py`` checks it against).
+# ``tests/train/tinker/test_label_by.py`` checks it against).
 ENVIRONMENT_LABEL = "_platoon_environment"
 
 
@@ -366,8 +367,9 @@ class TrainConfig:
     # to overlap rollout sampling with forward backward computation within the same batch.
     num_microbatches: int = 1
     # How many training steps the rollouts of a batch may run ahead of the trained policy, and how many policy
-    # versions old a group may be and still train (None: no limit). An environment entry may raise its own groups'
-    # bound (``environments[].max_staleness``); the run's stays the bound on how far rollouts run ahead.
+    # versions old a group may be and still train (None: no limit): at most ``max_staleness + 1`` batches of groups are
+    # started and not yet trained. An environment entry may raise its own groups' bound
+    # (``environments[].max_staleness``); the run's stays the bound on how far rollouts run ahead.
     max_staleness: int | None = None
     optimizer: AdamParams = field(default_factory=AdamParams)
     # Tinker loss function, for example ``cispo`` or ``importance_sampling``.
@@ -389,20 +391,23 @@ class TrainConfig:
     # the default column logs as ``environment``), for the 64 most frequent labels; see
     # docs/how-to/train-and-eval.md.
     label_by: str | None = None
-    # Most rollout groups that may run at once for each label, for example to cap a slow environment of a mixture.
-    # Groups wait for a slot before they take a rollout worker.
+    # Most rollout groups that may run at once for each label, for example to cap a slow environment of a mixture. A
+    # draw of a label at its limit waits in the label's backlog, which never holds another label's groups back; past
+    # four batches of waiting draws, the label's new draws are skipped (see docs/how-to/train-and-eval.md).
     rollout_group_limits: dict[str, int] = field(default_factory=dict)
     # How a run draws its training tasks (platoon.train.auto.AutoDataset; None: ``auto``).  ``auto``: a mixture's
     # tasks in the weighted fair order of its environments (each shuffled with its ``seed``), in epochs of its tasks
     # filled to whole batches, each epoch going on with the order where the one before it stopped; a single
     # environment's tasks in seeded shuffled passes by the dataloader (seed 42), each epoch the whole batches they
     # fill, its last partial batch starting the next epoch.  ``weighted``: a single environment's tasks too take the
-    # weighted order (shuffled with its ``seed``, last batch filled).
+    # weighted order (shuffled with its ``seed``, last batch filled).  ``uniform``: every training task of every entry
+    # in seeded shuffled passes (seed 42; a single environment's in the batches ``auto`` draws), with no entry's share,
+    # in epochs of its tasks filled to whole batches; it takes no entry's numeric ``weight``.
     task_sampler: TaskSampler | None = None
-    # The former name of ``task_sampler``, read as that key is.  Beside another ``task_sampler``, its former default
-    # ``auto`` (as a dump of platoon 0.2.0's ``config show --defaults`` spells it) is ignored, with a warning, and
-    # ``weighted`` is an error.
-    task_order: TaskSampler | None = None
+    # The former name of ``task_sampler``, read as that key is, with the values it had (``uniform`` came after it).
+    # Beside another ``task_sampler``, its former default ``auto`` (as a dump of platoon 0.2.0's ``config show
+    # --defaults`` spells it) is ignored, with a warning, and ``weighted`` is an error.
+    task_order: Literal["auto", "weighted"] | None = None
 
     # Client-side deadline in seconds for a ``forward_backward`` result.  The client submits every microbatch up
     # front and the Tinker service runs them in order, so the first wait covers the whole optimizer step's
@@ -425,6 +430,11 @@ class TrainConfig:
                 f"train.sample_timeout_seconds must be a positive number of seconds or null, got {seconds!r}"
             )
         sampler, legacy = self.task_sampler, self.task_order
+        if legacy in TASK_SAMPLERS and legacy not in ("auto", "weighted"):  # a sampler that came after the rename
+            raise ValueError(
+                f"train.task_order, the deprecated name of train.task_sampler, takes 'auto' or 'weighted', got "
+                f"{legacy!r}: set train.task_sampler instead"
+            )
         # task_order at its default before the rename (auto, as a dump of 0.2.0's config show --defaults spells it)
         # yields to task_sampler, and the loader's deprecation says that it was ignored; another sampler conflicts.
         if (
@@ -695,7 +705,25 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
     # Loading checks these too, but a config class whose __post_init__ skips this class's loads without them.
     problems.extend(entry_settings.problems(config))
     problems.extend(config_pruning_problems(config))
+    problems.extend(task_sampler_problems(config))
     return problems
+
+
+def task_sampler_problems(config: Any) -> list[str]:
+    """What ``train.task_sampler`` would leave unread, one entry each: under ``uniform``, an environment entry's
+    numeric ``weight``, since it draws every training task equally often whatever the entries' shares (``weight:
+    tasks``, every entry's default, is uniform's own share)."""
+
+    if getattr(getattr(config, "train", None), "task_sampler", None) != "uniform":
+        return []
+    return [
+        f"environments[{environment.label}].weight: {environment.weight}: train.task_sampler: uniform draws every "
+        "training task of every entry equally often, with no entry's share, so it takes no weights; leave weight out "
+        "(weight: tasks, the default, is uniform's own share), or set train.task_sampler: weighted to share the slots "
+        "by weight"
+        for environment in getattr(config, "environments", None) or []
+        if environment.weight != TASKS_WEIGHT
+    ]
 
 
 @dataclass
@@ -734,5 +762,5 @@ class PlatoonTinkerRLTrainerConfig:
         self.environments = normalize_environment_configs(self.environments)
         # Each entry's own training settings, laid over the run's (platoon.train.entry_settings), and recovery
         # pruning, which keeps the checkpoints within the largest staleness bound of the run and its entries.
-        if problems := [*entry_settings.problems(self), *config_pruning_problems(self)]:
+        if problems := [*entry_settings.problems(self), *config_pruning_problems(self), *task_sampler_problems(self)]:
             raise ConfigError(problems)

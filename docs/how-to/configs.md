@@ -184,7 +184,7 @@ $ uv run platoon config validate train.yaml broken.yaml
 ok   train.yaml (PlatoonTinkerRLTrainerConfig)
 FAIL broken.yaml
   train.learning_rate: unknown key
-  train.task_sampler: 'random' is not one of 'auto', 'weighted'
+  train.task_sampler: 'random' is not one of 'auto', 'weighted', 'uniform'
   stats.trail_name: unknown key; did you mean stats.trial_name?
 ```
 
@@ -325,7 +325,10 @@ Two files go there, replacing any older copies:
   adds `entry_settings`: what each entry's settings change from the run's
   ([Settings per environment](train-and-eval.md#settings-per-environment)). A start that cannot load the per-task
   statistics its checkpoint names adds itself to `tasks_state_lost`: its number, the checkpoint, why, and the older
-  checkpoint whose statistics it loaded instead, if any ([Per-task statistics](train-and-eval.md#per-task-statistics)).
+  checkpoint whose statistics it loaded instead, if any ([Per-task statistics](train-and-eval.md#per-task-statistics)),
+  and one whose sampling inputs (the task sampler, the batch size, the label column, the entries' order, an entry's
+  weight, seed or training tasks) differ from its checkpoint's adds itself to `sampling_changed`: its number, the
+  checkpoint and the changes ([Checkpoints and resume](train-and-eval.md#checkpoints-and-resume)).
 
 To repeat a run, pass its record back as the config: `platoon train <run dir>/config.resolved.yaml`. Use a new
 `stats.trial_name` for a fresh run; reusing the same run directory resumes it (see [Checkpoints and

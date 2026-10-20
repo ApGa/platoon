@@ -31,7 +31,7 @@ from platoon.train.components import (
     interleave_by_weight,
     normalize_environment_configs,
 )
-from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
+from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN, PoolPasses
 from platoon.train.tinker.workers.protocol import validated_ref
 from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR
 from platoon.trajectory import ParentInfo, Trajectory, TrajectoryCollection
@@ -399,6 +399,85 @@ def test_a_single_environment_trains_in_the_weighted_order_when_asked(count):
     assert AutoDataset.from_config(config(single, task_sampler="weighted"), "eval")["task_id"] == ["a-eval"]
 
 
+def test_uniform_draws_every_task_of_every_entry_in_seeded_passes_without_entry_shares():
+    """``train.task_sampler: uniform``: every training task of every entry once per pass, the passes
+    ``Dataset.shuffle(42 + 101 p)`` of the listing, in epochs of as many tasks as there are, filled to whole batches
+    from the next pass; each entry's share is its tasks'.  The entries' weights and seeds play no part."""
+
+    from datasets import Dataset
+
+    mixed = config(
+        environment("a", dataset_kwargs={"prefix": "a", "count": 3}, seed=5),
+        environment("b", dataset_kwargs={"prefix": "b", "count": 6}, seed=9),
+        task_sampler="uniform",
+    )
+
+    training = AutoDataset.training(mixed)
+
+    listing = [f"a::a{index}" for index in range(3)] + [f"b::b{index}" for index in range(6)]
+    assert [row["task_id"] for row in training.tasks] == listing
+    order, plan = training.order, training.plan
+    assert isinstance(order, PoolPasses) and plan is not None
+    assert order.epoch_size == 12  # 9 tasks, filled to whole batches of 4
+    passes = [Dataset.from_dict({"id": listing}).shuffle(seed=42 + 101 * number)["id"] for number in range(4)]
+    stream = [task for drawn in passes for task in drawn]
+    assert [row["task_id"] for epoch in range(3) for row in order.epoch(epoch)] == stream[:36]
+    assert [row["task_id"] for row in training.dataset.to_list()] == stream[:12]
+    assert all(row[PRESERVE_DATASET_ORDER_COLUMN] for row in training.dataset.to_list())
+    assert {entry.label: entry.share for entry in plan.entries} == {"a": 3 / 9, "b": 6 / 9}
+    assert not plan.warnings()
+    # The entries' seeds do not change it.
+    reseeded = config(
+        environment("a", dataset_kwargs={"prefix": "a", "count": 3}, seed=1),
+        environment("b", dataset_kwargs={"prefix": "b", "count": 6}, seed=2),
+        task_sampler="uniform",
+    )
+    reseeded_order = AutoDataset.training(reseeded).order
+    assert reseeded_order is not None and [row["task_id"] for row in reseeded_order.epoch(1)] == stream[12:24]
+
+
+@pytest.mark.parametrize("count", [5, 8, 10])
+def test_uniform_draws_a_single_environment_in_the_batches_auto_draws(count):
+    """For one environment, ``uniform`` draws the batches the dataloader's shuffled passes draw under ``auto``; only its
+    epochs differ, which hold every task, the last batch filled from the next pass."""
+
+    from platoon.train.tinker.rl import PlatoonTinkerDataloader
+
+    single = environment("a", dataset_kwargs={"prefix": "a", "count": count})
+    auto = AutoDataset.training(config(single))
+    uniform = AutoDataset.training(config(single, task_sampler="uniform"))
+
+    assert isinstance(uniform.order, PoolPasses)
+    batches = PlatoonTinkerDataloader(auto.dataset, 4)
+    drawn = PlatoonTinkerDataloader(uniform.dataset, 4, order=uniform.order)
+    assert [[row["task_id"] for row in drawn.get_batch(number)] for number in range(12)] == [
+        [row["task_id"] for row in batches.get_batch(number)] for number in range(12)
+    ]
+    assert len(drawn) == -(-count // 4) and uniform.order.items == auto.tasks.to_list()
+
+
+def test_uniform_takes_no_entry_weights(tmp_path):
+    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, task_sampler_problems
+    from platoon.utils.config import ConfigError, resolve_config
+
+    path = tmp_path / "train.yaml"
+    path.write_text(
+        "train: {model_name: m, renderer_name: r, task_sampler: uniform}\nlog_path: runs\n"
+        "environments:\n  - {name: a, rollout: 'x:y', weight: 3}\n  - {name: b, rollout: 'x:y', weight: 1}\n"
+    )
+    with pytest.raises(ConfigError) as error:
+        resolve_config(path, [], PlatoonTinkerRLTrainerConfig)
+    assert error.value.problems == [
+        f"environments[{name}].weight: {weight}: train.task_sampler: uniform draws every training task of every "
+        "entry equally often, with no entry's share, so it takes no weights; leave weight out (weight: tasks, the "
+        "default, is uniform's own share), or set train.task_sampler: weighted to share the slots by weight"
+        for name, weight in (("a", 3), ("b", 1))
+    ]
+    path.write_text(path.read_text().replace(", weight: 3", "").replace(", weight: 1", ""))
+    loaded = resolve_config(path, [], PlatoonTinkerRLTrainerConfig).config
+    assert loaded.train.task_sampler == "uniform" and task_sampler_problems(loaded) == []
+
+
 def test_an_unknown_task_sampler_is_refused():
     from platoon.train.tinker.config_defs import TrainConfig
 
@@ -409,12 +488,18 @@ def test_an_unknown_task_sampler_is_refused():
     with pytest.raises(ValueError, match="task_sampler must be one of"):  # the deprecated name's value too
         TrainConfig(model_name="m", renderer_name="r", task_order="shuffled")
     assert TrainConfig(model_name="m", renderer_name="r").task_sampler == "auto"
+    # The deprecated name takes only the values it had: uniform came after it.
+    uniform: Any = "uniform"
+    with pytest.raises(ValueError, match="takes 'auto' or 'weighted', got 'uniform': set train.task_sampler instead"):
+        TrainConfig(model_name="m", renderer_name="r", task_order=uniform)
 
 
-@pytest.mark.parametrize("key", ["task_sampler", "task_order"])
-def test_a_config_file_s_unknown_sampler_names_the_samplers_under_either_name(tmp_path, key):
+@pytest.mark.parametrize(
+    ("key", "values"), [("task_sampler", "'auto', 'weighted', 'uniform'"), ("task_order", "'auto', 'weighted'")]
+)
+def test_a_config_file_s_unknown_sampler_names_the_samplers_under_either_name(tmp_path, key, values):
     """The message platoon gave for ``train.task_order`` before 0.3.0, also for its new name, whose null is ``auto``,
-    in a file and in an override."""
+    in a file and in an override; the deprecated name lists the values it takes, which ``uniform`` is not."""
 
     import warnings
 
@@ -426,9 +511,9 @@ def test_a_config_file_s_unknown_sampler_names_the_samplers_under_either_name(tm
     with warnings.catch_warnings(), pytest.raises(ConfigError) as error:
         warnings.simplefilter("ignore")  # task_order's deprecation
         resolve_config(path, [], PlatoonTinkerRLTrainerConfig)
-    assert f"train.{key}: 'random' is not one of 'auto', 'weighted'" in error.value.problems
+    assert f"train.{key}: 'random' is not one of {values}" in error.value.problems
     path.write_text("train: {model_name: m, renderer_name: r}\nlog_path: runs\n")
-    with pytest.raises(ConfigError, match=rf"train\.{key} must be one of 'auto', 'weighted', got 'random'"):
+    with pytest.raises(ConfigError, match=rf"train\.{key} must be one of {values}, got 'random'"):
         resolve_config(path, [f"train.{key}=random"], PlatoonTinkerRLTrainerConfig)
 
 

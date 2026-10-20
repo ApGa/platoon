@@ -257,11 +257,6 @@ def _stale_run(tmp_path: Path, monkeypatch, slow_bound: int | None) -> list[dict
     trainer._stats_logger = SimpleNamespace(
         wandb_run_id=None, log=lambda step, stats, force=False: logged.append(stats)
     )
-    # The producer waits for training to catch up in 20-second polls (train.max_staleness): poll often instead.
-    sleep = asyncio.sleep
-    monkeypatch.setattr(
-        rl_module, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": lambda s: sleep(min(s, 0.01))})
-    )
     asyncio.run(trainer.train(train_workflow=_AgedWorkflow(trainer._model_info.llm)))
     return logged
 
@@ -297,9 +292,9 @@ class _SlowWorkflow:
 
 def test_a_capped_slow_label_skips_its_excess_rows_and_never_stalls_the_other_label(tmp_path, monkeypatch):
     """With rollout_group_limits {slow: 1} and the slow entry at 13% of the order, the quick entry's steps keep running
-    for 100 steps while slow groups run one at a time, and the slow rows beyond its backlog are skipped and counted.
-    Rows parked behind the limit used to fill the pending queue and stop every entry's rows at the slow groups' pace:
-    over a hundred slow groups of two seconds each."""
+    for 100 steps while slow groups run one at a time, and the slow draws beyond its backlog are skipped and counted.
+    Draws waiting for the limit once filled a pending queue and stopped every entry's at the slow groups' pace: over a
+    hundred slow groups of two seconds each."""
 
     config = _config(
         tmp_path,
@@ -325,15 +320,6 @@ def test_a_capped_slow_label_skips_its_excess_rows_and_never_stalls_the_other_la
     assert skipped > 0
     assert skipped == sum(step["train/batch/environment/slow/skipped_rows"] for step in logged)
     assert all(step["train/batch/environment/quick/skipped_rows"] == 0 for step in logged)
-
-
-def _quick_polls(monkeypatch) -> None:
-    """The producer waits for training to catch up in 20-second polls (train.max_staleness): poll often instead."""
-
-    sleep = asyncio.sleep
-    monkeypatch.setattr(
-        rl_module, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": lambda s: sleep(min(s, 0.01))})
-    )
 
 
 @pytest.mark.parametrize(
@@ -377,12 +363,11 @@ def _quick_polls(monkeypatch) -> None:
 def test_a_capped_slow_label_never_stalls_the_other_label_under_a_staleness_bound(
     tmp_path, monkeypatch, train, environments, steps
 ):
-    """train.max_staleness bounds the batches drawn ahead of training in the rows that can run, so the rows of a
-    capped label that wait (parked) or are skipped do not use up the lookahead: the quick entry's steps keep running
-    while slow groups run one at a time.  Counted in batch indices, the parked and skipped slow rows filled the
-    lookahead, and every step then waited for a slow group (48 of 100 steps in a minute)."""
+    """train.max_staleness bounds the groups started ahead of training (the horizon), and the draws of a capped label
+    that wait (parked) or are skipped do not count toward it: the quick entry's steps keep running while slow groups
+    run one at a time.  Counted in batch indices, the parked and skipped slow rows once filled the lookahead, and every
+    step then waited for a slow group (48 of 100 steps in a minute)."""
 
-    _quick_polls(monkeypatch)
     config = _config(
         tmp_path,
         {"max_training_steps": steps, "rollout_group_limits": {"slow": 1}, **train},
@@ -402,55 +387,6 @@ def test_a_capped_slow_label_never_stalls_the_other_label_under_a_staleness_boun
     parked = [step["train/batch/parked_rows"] for step in logged]
     assert max(parked) > 0 and parked == [step["train/batch/environment/slow/parked_rows"] for step in logged]
     assert all(step["train/batch/environment/quick/parked_rows"] == 0 for step in logged)
-
-
-def test_with_a_capped_label_the_staleness_gate_counts_the_rows_that_can_run(monkeypatch):
-    """The producer draws until the rows that can run reach max_staleness batches past the batch training is on, and
-    no further: the rows that wait for a capped label's limit do not count, so it draws past them, row by row."""
-
-    _quick_polls(monkeypatch)
-
-    async def run():
-        trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
-        trainer.config = SimpleNamespace(train=SimpleNamespace(max_staleness=1, batch_size=4))
-        order = [{"task_id": str(i), ENVIRONMENT_COLUMN: "slow" if i % 2 else "quick"} for i in range(400)]
-        dataloader = SimpleNamespace(get_batch=lambda index: [dict(row) for row in order[4 * index : 4 * index + 4]])
-        shared = SimpleNamespace(shutdown_event=asyncio.Event(), train_step=0, train_dataloader=dataloader)
-        queue = rl_module.RolloutTaskQueue(4, key=ENVIRONMENT_COLUMN, limits={"slow": 1}, labels=("quick", "slow"))
-        taken: list[dict] = []
-
-        async def worker():  # takes every row it can: quick groups, and one slow group, that never end
-            while True:
-                taken.append(await queue.get())
-
-        async def settled(count: int) -> None:
-            """Until the worker has taken ``count`` rows, then a moment more, in which it must take no other."""
-
-            for _ in range(500):
-                if len(taken) >= count:
-                    break
-                await asyncio.sleep(0.01)
-            await asyncio.sleep(0.1)
-
-        tasks = [
-            asyncio.create_task(worker()),
-            asyncio.create_task(trainer._train_dataloader_loop(shared, 0, 50, queue)),
-        ]
-        try:
-            await settled(8)
-            # Two batches of rows that can run (max_staleness 1 at step 0): seven quick rows and the one slow group;
-            # five slow rows wait for the limit, so the producer drew 13 rows, past the second batch.
-            assert len(taken) == 8 and sum(row[ENVIRONMENT_COLUMN] == "slow" for row in taken) == 1
-            assert queue.parked() == 5
-            shared.train_step = 1  # a step trains: one batch more
-            await settled(12)
-            assert len(taken) == 12 and queue.parked() == 9
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    asyncio.run(run())
 
 
 # --- rollout permits ------------------------------------------------------------------------------------------------

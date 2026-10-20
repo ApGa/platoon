@@ -81,9 +81,11 @@ flowchart LR
 
 ### One training step
 
-1. The trainer's dataloader admits tasks while the train step is within `train.max_staleness` of the batch
-   being collected; with `train.rollout_group_limits`, the rows of a label at its limit wait beside the batch and
-   do not count toward it.
+1. The trainer's dispatcher draws the next task of the order and starts its group when the group can start: within
+   the horizon of `train.max_staleness` (at most `max_staleness + 1` batches of groups started and not yet trained),
+   with rollout permits for the whole group (`train.max_concurrent_rollouts`), and with room in its label's
+   `train.rollout_group_limits`; a draw whose label is at its limit waits in the label's backlog, outside the horizon,
+   for the slot the label's running groups hold for it.
 2. For each task, `GroupRolloutWorkflow` runs `group_size` rollouts, with the settings of the task's environment
    entry (its own `workflow_config` laid over `train.workflow_config`). With
    `train.workflow_config.rollout_isolation: process`, each rollout runs in its own worker process, which
@@ -99,7 +101,9 @@ flowchart LR
 6. The trainer drops rollouts older than their entry's staleness bound (its `max_staleness`, else
    `train.max_staleness`), applies batch transforms per microbatch (such as
    depth weighting), skips datums with zero advantage while keeping their share of the loss normalization,
-   runs `forward_backward` and `optim_step`, saves weights and publishes the new sampler to the workers.
+   runs `forward_backward` and `optim_step`, saves weights and publishes the new sampler to the workers. A full
+   checkpoint also saves the per-task statistics, and, in a file of the dispatcher's own, where the draws stand, with
+   the groups that settled and that no step has trained yet, which a resume trains as they are.
 
 Rollouts whose outcome is not `scored` never train as reward 0: the workflow keeps them out of baselines and
 out of the batch.

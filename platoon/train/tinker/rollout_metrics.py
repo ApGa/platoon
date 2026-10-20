@@ -18,7 +18,9 @@ asked for, and is the trainer waiting on them?*
 ``rollout_client/rollouts_in_flight_max``
     Peak concurrency actually reached in the step.
 ``rollout_client/rollouts_in_flight_configured``
-    The ceiling implied by config (workflow workers x group size).
+    The ceiling implied by config: ``max_concurrent_rollouts``, the budget of
+    rollouts each group takes its size of, or the groups of the largest entry's
+    size that run at once within it, when they hold fewer.
 ``rollout_client/groups_in_flight_mean`` / ``_max``
     The same at task granularity, so a group-atomic admission gate is visible.
 ``rollout_client/trainer_queue_wait_seconds_total`` / ``_mean`` / ``_max``
@@ -28,7 +30,7 @@ asked for, and is the trainer waiting on them?*
     keeping up and the step is training-bound.
 ``rollout_client/trainer_queue_ready_fraction``
     Fraction of dequeues that were satisfied immediately (a result was already
-    waiting).  1.0 means the producer is comfortably ahead.
+    waiting).  1.0 means the rollouts are comfortably ahead of training.
 
 Where an episode's wall clock goes -- *model call, client CPU, or the
 environment?*  Recorded per model call by the model gateway (the rollout's

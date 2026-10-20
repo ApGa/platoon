@@ -33,8 +33,9 @@ ToolAccess = Literal["full", "no_terminal", "read_only"]
 ForkMode = Literal["shared", "copy", "fresh"]
 # ``train.task_sampler`` (:class:`platoon.train.auto.AutoDataset`), how a run draws its training tasks: ``auto``
 # orders a mixture's training tasks by weight and leaves a single environment's to the dataloader's shuffle;
-# ``weighted`` orders both by weight.
-TaskSampler = Literal["auto", "weighted"]
+# ``weighted`` orders both by weight; ``uniform`` draws every training task of every entry in seeded shuffled passes,
+# with no entry's share.
+TaskSampler = Literal["auto", "weighted", "uniform"]
 TASK_SAMPLERS: tuple[str, ...] = get_args(TaskSampler)
 # ``environments[].weight: tasks``: the entry's share of a mixture is its number of training tasks, so that every task
 # of the mixture is drawn equally often.

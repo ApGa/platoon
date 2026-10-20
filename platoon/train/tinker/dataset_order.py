@@ -12,7 +12,8 @@ the run it resumes would have drawn.  The order is one of:
 - **Seeded shuffled passes** over the rows, for a dataset that is shuffled (:class:`ShuffledPasses`): pass ``p`` is
   ``Dataset.shuffle(seed + p * 101)``'s order, and each epoch takes up the passes where the epoch before it stopped.
   An epoch that holds only whole batches leaves the rows of its last partial batch to start the next one, so every
-  row is drawn as often as every other, give or take one.
+  row is drawn as often as every other, give or take one.  ``train.task_sampler: uniform`` draws every training task
+  of a run this way, a mixture's too (:class:`PoolPasses`).
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
 PRESERVE_DATASET_ORDER_COLUMN = "_platoon_preserve_dataset_order"
 # A shuffled dataset's seed stride per pass over its rows: pass 0 is Dataset.shuffle(seed), the first epoch's order.
 PASS_SEED_STRIDE = 101
+# The seed of a single environment's shuffled passes, which the dataloader draws by default, and of uniform's.
+SHUFFLE_SEED = 42
 
 
 class EpochOrder(Protocol):
@@ -105,3 +108,24 @@ class ShuffledPasses:
                 self._passes.pop(min(self._passes))
             self._passes[number] = self._dataset.shuffle(seed=self._seed + number * PASS_SEED_STRIDE)
         return self._passes[number]
+
+
+class PoolPasses(ShuffledPasses):
+    """Every task of a run's pool in seeded shuffled passes (``train.task_sampler: uniform``): pass ``p`` is
+    ``Dataset.shuffle(42 + p * 101)`` of the pool's rows, in listing order, the passes a single environment's
+    dataloader draws, so that ``uniform`` draws one environment's tasks in the batches ``auto`` draws them in.
+    :attr:`items` are the pool's rows."""
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]], *, epoch_size: int, seed: int = SHUFFLE_SEED) -> None:
+        from datasets import Dataset
+
+        self._rows = [dict(row) for row in rows]
+        columns = list(dict.fromkeys(column for row in self._rows for column in row))
+        dataset = Dataset.from_dict({column: [row.get(column) for row in self._rows] for column in columns})
+        super().__init__(dataset, seed=seed, epoch_size=epoch_size)
+
+    @property
+    def items(self) -> list[dict[str, Any]]:
+        """Every row the passes draw from, once each, in listing order."""
+
+        return [dict(row) for row in self._rows]

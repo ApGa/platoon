@@ -441,7 +441,7 @@ def test_config_validate_reports_each_file_and_exits_78_when_any_fails(tmp_path,
     out = capsys.readouterr().out
     assert f"ok   {good} (PlatoonTinkerRLTrainerConfig)" in out
     assert f"FAIL {bad}" in out
-    assert "  train.task_sampler: 'random' is not one of 'auto', 'weighted'" in out
+    assert "  train.task_sampler: 'random' is not one of 'auto', 'weighted', 'uniform'" in out
     assert "  stats.trail_name: unknown key; did you mean stats.trial_name?" in out
 
 

@@ -260,6 +260,41 @@ class DeferredStats:
         for method, kwargs in self._calls:
             getattr(tracker, method)(**kwargs)
 
+    def to_json(self) -> list[Any]:
+        """The calls, in order, as JSON data, which :meth:`from_json` reads back."""
+
+        return [[method, {key: _value_json(value) for key, value in kwargs.items()}] for method, kwargs in self._calls]
+
+    @classmethod
+    def from_json(cls, data: list[Any]) -> "DeferredStats":
+        """The statistics :meth:`to_json` wrote, each call made again, and so checked again."""
+
+        stats = cls()
+        for method, kwargs in data:
+            if method not in ("scalar", "denominator", "stat"):
+                raise ValueError(f"not a statistics call: {method!r}")
+            getattr(stats, method)(**{str(key): _value_from_json(value) for key, value in kwargs.items()})
+        return stats
+
+
+def _value_json(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return {"tensor": str(value.dtype).removeprefix("torch."), "shape": list(value.shape), "values": value.tolist()}
+    if isinstance(value, ReduceType):
+        return {"reduce": value.name}
+    return value
+
+
+def _value_from_json(value: Any) -> Any:
+    if isinstance(value, dict) and "tensor" in value:
+        dtype = getattr(torch, str(value["tensor"]))
+        if not isinstance(dtype, torch.dtype):
+            raise ValueError(f"not a tensor type: {value['tensor']!r}")
+        return torch.tensor(value["values"], dtype=dtype).reshape(value["shape"])
+    if isinstance(value, dict) and "reduce" in value:
+        return ReduceType[str(value["reduce"])]
+    return value
+
 
 # Global trackers registry
 _TRACKERS: dict[str, StatsTracker] = {}
