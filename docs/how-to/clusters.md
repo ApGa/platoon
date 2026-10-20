@@ -188,7 +188,7 @@ an entry's `service_kwargs`, never in a block both sites use. See [Sandboxes and
 tasks](sandboxes-and-harbor.md#sandbox-providers).
 
 Harbor tasks whose verifier runs as root ([Verifiers that run as
-root](sandboxes-and-harbor.md#verifiers-that-run-as-root), since the next release) need Singularity's `--fakeroot` for
+root](sandboxes-and-harbor.md#verifiers-that-run-as-root), since 0.3.0) need Singularity's `--fakeroot` for
 their verifiers, which works where the site gives your user subordinate ids. Check on a compute node that
 `getsubids $USER` lists a range, and that `singularity exec --fakeroot IMAGE cat /proc/self/uid_map` shows a range
 that reaches uid 65534 (a line `1 <first subordinate id> 65536`, say), or that

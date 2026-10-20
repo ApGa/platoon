@@ -52,7 +52,7 @@ Nothing an agent writes reaches the verifier except the artifacts' regular files
 `verifier_mode` and the artifacts handed over. A verifier that times out makes the outcome `invalid`; it is not
 trained on.
 
-A verifier that runs as root (`verifier_user: honor`, since the next release: [Verifiers that run as
+A verifier that runs as root (`verifier_user: honor`, since 0.3.0: [Verifiers that run as
 root](sandboxes-and-harbor.md#verifiers-that-run-as-root)) starts in a sandbox of the verifiers' own options, which
 step 4 checks first: its commands must run as root with the other users mapped, and `nobody` must be able to run the
 image's shell, or the outcome is an `error` (`verifier_start`). Its directories are made, and its tests run, with

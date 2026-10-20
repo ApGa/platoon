@@ -84,13 +84,13 @@ for the tests.
 
    ```text
    harness                 kind      distribution   source
-   mini-swe-agent@2.4.6    spec      platoon 0.2.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-   openhands@1.54.0.post1  spec      platoon 0.2.0  platoon/harness/builtin/specs/openhands.toml
-   platoon-bash@1          spec      platoon 0.2.0  platoon/harness/builtin/specs/platoon-bash.toml
-   platoon-codeact@1       function  platoon 0.2.0  platoon.harness.builtin.codeact.harness:codeact
-   platoon-noop@1          function  platoon 0.2.0  platoon.harness.builtin.oracle:noop
-   platoon-oracle@1        function  platoon 0.2.0  platoon.harness.builtin.oracle:oracle
-   platoon-react@1         function  platoon 0.2.0  platoon.harness.builtin.react:react
+   mini-swe-agent@2.4.6    spec      platoon 0.3.0  platoon/harness/builtin/specs/mini-swe-agent.toml
+   openhands@1.54.0.post1  spec      platoon 0.3.0  platoon/harness/builtin/specs/openhands.toml
+   platoon-bash@1          spec      platoon 0.3.0  platoon/harness/builtin/specs/platoon-bash.toml
+   platoon-codeact@1       function  platoon 0.3.0  platoon.harness.builtin.codeact.harness:codeact
+   platoon-noop@1          function  platoon 0.3.0  platoon.harness.builtin.oracle:noop
+   platoon-oracle@1        function  platoon 0.3.0  platoon.harness.builtin.oracle:oracle
+   platoon-react@1         function  platoon 0.3.0  platoon.harness.builtin.react:react
    ```
 
 **Next:** [run the tests](#run-the-tests).
@@ -714,7 +714,7 @@ extensions/<name>/
 - **Dependencies.** PyPI packages only. The environment imports neither platoon nor IPython, so any ORS client can
   serve it, and its requirements are what it alone needs. What imports platoon (prompt builders, named environments,
   task generators) goes behind a `platoon` extra that requires `platoon[ors]` within one minor release
-  (`platoon[ors]>=0.2,<0.3`), which platoon checks before it loads the extension's components.
+  (`platoon[ors]>=0.3,<0.4`), which platoon checks before it loads the extension's components.
   `[tool.uv.sources]` takes `platoon` from the workspace (`{ workspace = true }`) for development only.
 - **Components.** Each is an entry point in the group of its kind (`platoon.environments`, ...), named as configs
   name it ([Extending platoon](docs/extending/index.md)); `platoon extensions check platoon-<name> --load` checks
@@ -795,7 +795,7 @@ The version is set in one place, `version` in `pyproject.toml`. `platoon.__versi
 `lock.json` and the extension checks read it the same way: from `pyproject.toml` when platoon runs from a checkout, and
 from the installed metadata otherwise. While the version is below 1.0, a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs, so a package built on platoon
-requires a range within one minor release, such as `platoon>=0.2,<0.3`. [CHANGELOG.md](CHANGELOG.md) lists what each
+requires a range within one minor release, such as `platoon>=0.3,<0.4`. [CHANGELOG.md](CHANGELOG.md) lists what each
 release changes.
 
 ### Deprecations
@@ -870,7 +870,7 @@ the changelog.
 
 1. On a branch, set `version` in `pyproject.toml`, run `uv lock` in the repository root (one lock covers core and
    the extensions, and records platoon's version), and date the version's section in [CHANGELOG.md](CHANGELOG.md):
-   its heading, such as `## 0.2.1 (unreleased)`, becomes `## 0.2.1 (2026-11-02)`. Where the docs mark what is new
+   its heading, such as `## 0.2.1 (unreleased)`, becomes `## 0.2.1 (2026-10-19)`. Where the docs mark what is new
    with "the next release" (`grep -rn "the next release" docs`), name this version instead. A minor release, such
    as 0.3.0, also moves every range that names the previous one: the extensions' and the examples' requirement on
    platoon, which would otherwise refuse the new release, and the docs and tests that show it
@@ -926,18 +926,18 @@ next patch release, and yank the broken one on PyPI.
 
 The TextCraft extension, `platoon-textcraft`, has a version of its own, `version` in
 `extensions/textcraft/pyproject.toml`, and is released from tags of its own, `platoon-textcraft-vX.Y.Z`. Its
-`platoon` extra requires one minor release of platoon (`platoon[ors]>=0.2,<0.3`): release it once that release of
+`platoon` extra requires one minor release of platoon (`platoon[ors]>=0.3,<0.4`): release it once that release of
 platoon is on PyPI.
 
 1. On a branch, set its `version` and run `uv lock` in the repository root. Open a pull request, such as
-   `chore: Release platoon-textcraft 0.1.1`, and merge it once CI and the release workflow's checks pass. When
+   `chore: Release platoon-textcraft 0.2.0`, and merge it once CI and the release workflow's checks pass. When
    `version` already names the release, as it does for the first one, go to step 2.
 2. Before its first release, add its publisher on PyPI ([Set up publishing once](#set-up-publishing-once), step 2).
    Tag a commit on `main` that has that version, such as the merge commit, and push the tag:
 
    ```bash
-   git tag -a platoon-textcraft-v0.1.1 -m "platoon-textcraft 0.1.1"
-   git push origin platoon-textcraft-v0.1.1
+   git tag -a platoon-textcraft-v0.2.0 -m "platoon-textcraft 0.2.0"
+   git push origin platoon-textcraft-v0.2.0
    ```
 
 3. The release workflow builds and checks everything as in [Cut a release](#cut-a-release), step 3, except the
@@ -950,7 +950,7 @@ platoon is on PyPI.
 
    When every check passes, the workflow uploads the extension's sdist and wheel, and nothing else, to PyPI from the
    `pypi` environment.
-4. Check the release in a fresh virtual environment (`pip install 'platoon-textcraft[platoon]==0.1.1'`, then
+4. Check the release in a fresh virtual environment (`pip install 'platoon-textcraft[platoon]==0.2.0'`, then
    `platoon env show textcraft-synth`), and create a GitHub release from the tag.
 
 ### What the distribution holds

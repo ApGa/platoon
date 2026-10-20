@@ -260,7 +260,7 @@ name = "example-extension"
 version = "0.1.0"
 description = "An example platoon extension: a self-checking harness, an exact-answer program and arithmetic tasks."
 requires-python = ">=3.12"
-dependencies = ["platoon >= 0.2, < 0.3"]
+dependencies = ["platoon >= 0.3, < 0.4"]
 
 # One group per kind of component. Each entry's name is the component's name and its value is the object that
 # defines it, so platoon imports a module only when a config names one of its components.
@@ -303,7 +303,7 @@ select = ["E", "F", "I"]
 
 Since 0.2.0, platoon reads the groups from the installed metadata and imports an entry point only when a
 config names its component, in each process that needs it, so installing a package never changes a run that does not
-name one of its components. The requirement on platoon, `platoon >= 0.2, < 0.3`, says which versions of platoon the
+name one of its components. The requirement on platoon, `platoon >= 0.3, < 0.4`, says which versions of platoon the
 package works with (step 10).
 
 `[tool.uv.sources]` points platoon at this repository while you develop here; a package of your own leaves it out,
@@ -409,8 +409,8 @@ uv run platoon extensions list --kind program
 
 ```text
 kind     name                  distribution       version  status  source
-program  gym@1                 platoon            0.2.1    ok      platoon.gym:gym_program
-program  single@1              platoon            0.2.1    ok      platoon.programs:single
+program  gym@1                 platoon            0.3.0    ok      platoon.gym:gym_program
+program  single@1              platoon            0.3.0    ok      platoon.programs:single
 program  example-exact-answer  example-extension  0.1.0    ok      example_extension.program:exact_answer
 ```
 
@@ -630,7 +630,7 @@ distribution and version that provided it, and the entry point that named it.
 
 - **Version.** Give the distribution a version and bump it on every release.
 - **Require a range of platoon.** `dependencies = ["platoon >= X.Y, < N"]`, from the release you tested against up
-  to the first release that may break it: the next minor release while platoon is below 1.0 (`platoon >= 0.2, < 0.3`),
+  to the first release that may break it: the next minor release while platoon is below 1.0 (`platoon >= 0.3, < 0.4`),
   the next major release from 1.0 on. Since 0.2.0, platoon checks an extension's requirement against the
   running platoon before it imports any of its components, and refuses one that excludes it; set
   `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` to load it anyway while you develop against a checkout.
