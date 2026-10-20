@@ -14,10 +14,10 @@ config that leaves ``log_path`` to its launcher prepares as it is.  For each ent
    and that the entry's image map lacks are built with the builder of the entry's sandbox provider and recorded in
    the map: ``oci`` for ``singularity``, ``docker`` for ``docker``.  The ``process`` provider runs no image, so their
    keys are recorded as ``local``.  Any other provider pulls its images from a registry, which prepare does not
-   guess: the step fails and names the command that builds and pushes them.  The map is the entry's ``image_map``,
-   else its default image map, ``images/<provider>.json`` in the Harbor cache, with the image files in
-   ``images/<provider>/`` (:mod:`platoon.envs.harbor.images`).  An entry that serves a directory builds nothing: its
-   tasks run their ``docker_image`` or ``default_image``.  With ``verifier_user: honor``, an image that a verifier
+   guess: the step fails and names the command that builds and pushes them.  The map is the entry's default image
+   map, ``images/<provider>.json`` in the Harbor cache, with the image files in ``images/<provider>/``
+   (:mod:`platoon.envs.harbor.images`).  An entry that serves a directory builds nothing: its tasks run their
+   ``docker_image`` or ``default_image``.  With ``verifier_user: honor``, an image that a verifier
    which runs as root runs on, and that the ``oci`` builder of platoon before 0.3.0 built, fails the step, naming the
    build that makes it again: prepare never replaces an image.
 3. **The toolchains.** Each toolchain the entry's harness specs run from that is not built under the toolchain root
@@ -187,11 +187,10 @@ def prepare(
             name = spec.install.toolchain
             if name is None or not is_named(name):
                 continue
-            root = environment.service_kwargs.get("toolchain_root")
-            key = (toolchain_root(root), name)
+            key = (toolchain_root(), name)
             if key not in toolchains:
                 toolchains.add(key)
-                record(_toolchain(where, spec, ref, root, dry_run=dry_run, say=log))
+                record(_toolchain(where, spec, ref, dry_run=dry_run, say=log))
     if (tokenizer := _tokenizer(resolved.data, dry_run=dry_run)) is not None:
         record(tokenizer)
     return steps
@@ -400,11 +399,12 @@ def _missing_images(
 
     images = service.task_images
     path = images.path
-    shown = f"the image map {path}" if path is not None else "the entry's inline image map"
+    assert path is not None  # images are planned from a lock, whose entry has a default image map
+    shown = f"the image map {path}"
     try:
-        current = None if path is not None and not path.exists() else images.load()
+        current = images.load()
     except ImageMapError as exc:
-        raise ConfigError(f"{where}.service_kwargs.image_map: {exc}") from exc
+        raise ConfigError(f"{where}: {exc}") from exc  # the map's file names itself
     plan = plan_images(lock, current)
     if not plan.images:
         return PrepareStep(where, "images", "none", "none to build: no runnable task builds its image")
@@ -414,11 +414,6 @@ def _missing_images(
     provider = service.provider_name
     builder = PROVIDER_BUILDERS.get(provider)
     lacking = f"{len(missing)} of the {_images_count(plan.images)}"
-    if path is None:
-        raise ConfigError(
-            f"{where}.service_kwargs.image_map: {lacking} are missing from the inline image map, which cannot record "
-            "built images: name a JSON file instead (or leave image_map out for the entry's default image map)"
-        )
     if dry_run:
         how = (
             "record as local" if provider == "process" else f"build with the {builder} builder" if builder else "build"
@@ -442,7 +437,7 @@ def _missing_images(
         )
     locked = service.locked
     assert locked is not None  # images are planned from a lock
-    out_dir = default_image_dir(locked.cache, provider) if images.is_default else None
+    out_dir = default_image_dir(locked.cache, provider)
     try:
         built = build_images(lock, cache=locked.cache, image_map=path, out_dir=out_dir, builder=builder, log=say)
     except BuildError as exc:
@@ -458,7 +453,7 @@ def _missing_images(
     return PrepareStep(where, "images", "done", f"built {len(built)} with the {builder} builder into {shown}{others}")
 
 
-def _toolchain(where: str, spec: HarnessSpec, ref: str, root: Any, *, dry_run: bool, say: Say) -> PrepareStep:
+def _toolchain(where: str, spec: HarnessSpec, ref: str, *, dry_run: bool, say: Say) -> PrepareStep:
     """Build the spec's named toolchain under the toolchain root unless one built from its recipe is there.  A
     finished one built from another recipe (or whose manifest cannot be read) is never replaced, since a live run of
     another config or platoon may be staging its rollouts from it: the step fails, naming the forced build that
@@ -474,18 +469,18 @@ def _toolchain(where: str, spec: HarnessSpec, ref: str, root: Any, *, dry_run: b
 
     name = spec.install.toolchain
     step = f"toolchain {name}"
-    path = toolchain_root(root) / str(name)
-    state = toolchain_state(spec, root=root)
+    path = toolchain_root() / str(name)
+    state = toolchain_state(spec)
     if state is None:
         return PrepareStep(where, step, "current", f"current: built at {path} for {spec.ref}")
     if not state.buildable:
         raise ConfigError(f"{where}.harness: {state.describe()}")
     if state.needs_force:
-        return PrepareStep(where, step, "failed", toolchain_problem(spec, ref=ref, root=root) or state.describe())
+        return PrepareStep(where, step, "failed", toolchain_problem(spec, ref=ref) or state.describe())
     if dry_run:
         return PrepareStep(where, step, "missing", f"would build it at {path} for {spec.ref}: {state.describe()}")
     try:
-        manifest, built = ensure_toolchain(spec, root=root, log=say)
+        manifest, built = ensure_toolchain(spec, log=say)
     except ToolchainBuildError as exc:
         return PrepareStep(where, step, "failed", f"building it at {path} for {spec.ref} failed: {exc}")
     if not built:

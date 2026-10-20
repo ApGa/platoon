@@ -1,7 +1,6 @@
 """Fetch Harbor datasets by name into a content-addressed cache, and pin them with a lock.
 
     dataset: hf://org/harbor-dataset@f216b86ca1a18d44433d6cb45f70bec81f47c66e   # or a local directory
-    cache: /data/harbor-cache                    # deprecated; default: harbor in the site profile's cache
     lock: locks/harbor-dataset-phase0.lock.json  # default: <cache>/locks/<hash of these settings>.lock.json
     tasks: [splits/phase0-smoldata.json]         # allowlists of task ids: only these are downloaded
     select: {source_dataset: [FineEnvs/SmolDataEnvs-harbor-train]}   # filters on the dataset index's fields
@@ -9,9 +8,8 @@
     refuse: {sidecars: true, gpus: true, agent_user: true, per_task_build: false, uploads_over_mb: 100}
     index: [{path: data/tasks.jsonl, fields: [split_group]}, {metadata: [kaggle_dataset_name]}]
 
-These are keys of a Harbor entry's ``service_kwargs`` (:func:`fetch_config`). A fetch config file that holds them at
-its top level (:func:`load_fetch_config`) is deprecated: ``platoon harbor`` warns of one, and platoon 0.3.0 removes
-them.
+These are keys of a Harbor entry's ``service_kwargs`` (:func:`fetch_config`). The cache is the Harbor cache,
+``harbor`` in the site profile's cache (:func:`platoon.envs.harbor.lock.default_cache`).
 
 A fetch resolves the source at its pinned revision, reads the dataset's index (``registry.json``, else
 ``task-index.json``, else a scan for ``task.toml``), downloads only the selected tasks, applies overlays, and
@@ -92,8 +90,6 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
-
-import yaml
 
 from platoon.envs.harbor.dataset import dataset_tasks
 from platoon.envs.harbor.dockerfile import BUILD_KEY_RULE, DockerfileError, plan_dockerfile
@@ -270,17 +266,14 @@ def fetch_config(
     overlays: str | Path | Sequence[str | Path] = (),
     refuse: Mapping[str, Any] | None = None,
     index: Sequence[str | Mapping[str, Any]] = (),
-    workers: int = 8,
-    base_dir: str | Path | None = None,
 ) -> FetchConfig:
-    """A :class:`FetchConfig` from config values; relative paths resolve against ``base_dir`` (default: the
-    working directory), and a relative local ``dataset`` too."""
-
-    base = Path(base_dir) if base_dir is not None else Path.cwd()
+    """A :class:`FetchConfig` from a Harbor entry's values, fetched into ``cache`` (default: the Harbor cache,
+    :func:`~platoon.envs.harbor.lock.default_cache`); relative paths resolve against the working directory, and a
+    relative local ``dataset`` too (a config's are absolute already)."""
 
     def resolve(value: str | Path) -> Path:
         path = Path(value).expanduser()
-        return Path(os.path.normpath(path if path.is_absolute() else base / path))
+        return Path(os.path.normpath(path if path.is_absolute() else Path.cwd() / path))
 
     def paths(value: str | Path | Sequence[str | Path]) -> tuple[Path, ...]:
         return (resolve(value),) if isinstance(value, (str, Path)) else tuple(resolve(item) for item in value)
@@ -295,8 +288,6 @@ def fetch_config(
         if name.startswith("flags."):
             raise FetchError(f"select: {key} filters on flags, which a fetch computes; select on index fields")
         selection[name] = tuple(values) if isinstance(values, (list, tuple)) else (values,)
-    if not isinstance(workers, int) or workers < 1:
-        raise FetchError(f"workers must be a positive integer, got {workers!r}")
     return FetchConfig(
         dataset=dataset,
         cache=resolve(cache) if cache is not None else default_cache(),
@@ -306,28 +297,7 @@ def fetch_config(
         overlays=paths(overlays),
         refuse=RefusePolicy.from_mapping(refuse),
         index=tuple(index_entry(item) for item in index),
-        workers=workers,
     )
-
-
-def load_fetch_config(path: str | Path, **overrides: Any) -> FetchConfig:
-    """A fetch config file (YAML); its relative paths resolve against the file's directory.  Deprecated with the files:
-    a Harbor entry's ``service_kwargs`` say the same (:func:`fetch_config`)."""
-
-    path = Path(path)
-    try:
-        data = yaml.safe_load(path.read_text()) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise FetchError(f"{path}: {exc}") from exc
-    if not isinstance(data, Mapping):
-        raise FetchError(f"{path}: expected a mapping")
-    known = {"dataset", "cache", "lock", "tasks", "select", "overlays", "refuse", "index", "workers"}
-    if unknown := sorted(set(data) - known):
-        raise FetchError(f"{path}: unknown keys {unknown}; known: {sorted(known)}")
-    if "dataset" not in data:
-        raise FetchError(f"{path}: dataset is required")
-    values = {**data, **{key: value for key, value in overrides.items() if value is not None}}
-    return fetch_config(**values, base_dir=path.parent)
 
 
 def is_pinned(dataset: str) -> bool:

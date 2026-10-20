@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from site_cache import use_site_cache
 
 from platoon.envs.harbor import HarborEnvironmentService, inputs
 from platoon.envs.harbor.fetch import answering_lock, current_lock, ensure_lock, fetch
@@ -25,6 +26,13 @@ from platoon.envs.harbor.lock import read_lock, write_lock
 from platoon.envs.service import EnvSetupError
 from platoon.train.auto import AutoDataset
 from platoon.train.components import EnvironmentConfig
+
+
+@pytest.fixture(autouse=True)
+def _harbor_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Each test's Harbor cache, where its fetched datasets go: in a site cache of its own."""
+
+    return use_site_cache(monkeypatch, tmp_path / "cache")
 
 
 def _rule(**values) -> HoldoutRule:
@@ -573,9 +581,7 @@ HOLDOUT = {"fraction": 0.25, "group_by": "split_group", "stratify_by": "source_d
 @pytest.mark.asyncio
 async def test_a_locked_service_lists_a_train_and_an_eval_split(tmp_path: Path):
     _science_like(tmp_path / "dataset", refused=("smol-5",))
-    service = HarborEnvironmentService(
-        dataset=str(tmp_path / "dataset"), cache=str(tmp_path / "cache"), holdout=HOLDOUT, provider="process"
-    )
+    service = HarborEnvironmentService(dataset=str(tmp_path / "dataset"), holdout=HOLDOUT, provider="process")
 
     assert await service.list_splits() == ["train", "eval"]
     train, evaluate = await service.list_tasks("train"), await service.list_tasks("eval")
@@ -602,7 +608,7 @@ async def test_a_locked_service_lists_a_train_and_an_eval_split(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_a_dataset_directory_splits_the_same_way(tmp_path: Path):
     root = _science_like(tmp_path / "dataset")
-    locked = HarborEnvironmentService(dataset=str(root), cache=str(tmp_path / "cache"), holdout=HOLDOUT)
+    locked = HarborEnvironmentService(dataset=str(root), holdout=HOLDOUT)
     directory = HarborEnvironmentService(str(root), holdout=HOLDOUT)
 
     assert await directory.list_tasks("eval") == await locked.list_tasks("eval")
@@ -653,11 +659,11 @@ def test_through_autodataset_train_and_eval_are_disjoint_and_cover_the_runnable_
     root = _science_like(tmp_path / "dataset", refused=("mco-7",))
     entry = EnvironmentConfig(
         service="harbor",
-        service_kwargs={"dataset": str(root), "cache": str(tmp_path / "cache"), "holdout": HOLDOUT},
+        service_kwargs={"dataset": str(root), "holdout": HOLDOUT},
         exclude_tasks=["smol-0", "mco-1"],
     )
     config = SimpleNamespace(environments=[entry], train=SimpleNamespace(batch_size=None, task_sampler="auto"))
-    _prepare_images(root, tmp_path / "cache")  # listing refuses tasks whose images are not built
+    _prepare_images(root)  # listing refuses tasks whose images are not built
 
     train = list(AutoDataset.from_config(config, "train")["task_id"])
     evaluate = list(AutoDataset.from_config(config, "eval")["task_id"])
@@ -667,17 +673,19 @@ def test_through_autodataset_train_and_eval_are_disjoint_and_cover_the_runnable_
     assert set(train) | set(evaluate) == runnable - {"smol-0", "mco-1"}
 
 
-def _prepare_images(dataset: Path, cache: Path, provider: str = "docker") -> None:
+def _prepare_images(dataset: Path, provider: str = "docker") -> None:
     """What platoon prepare does for the images of a fetched dataset, which a run checks when it lists its tasks:
-    the dataset's lock fetched, and each image its tasks build recorded in the default image map (as ``local``)."""
+    the dataset's lock fetched into the Harbor cache, and each image its tasks build recorded in the default image map
+    (as ``local``)."""
 
     from platoon.envs.harbor.builders import plan_images
     from platoon.envs.harbor.fetch import fetch, fetch_config
     from platoon.envs.harbor.images import ImageEntry, default_image_map, update_image_map
+    from platoon.envs.harbor.lock import default_cache
 
-    lock = fetch(fetch_config(str(dataset), cache=cache))
+    lock = fetch(fetch_config(str(dataset)))
     entries = {image.key: ImageEntry(image="local") for image in plan_images(lock).images}
-    update_image_map(default_image_map(cache, provider), entries)
+    update_image_map(default_image_map(default_cache(), provider), entries)
 
 
 # --- input files: what a task's agents' sandbox takes from it, and where a hold-out gets them ----------------------
@@ -843,7 +851,7 @@ def _shared_dataset(root: Path, *, game: bool = False) -> Path:
 async def test_a_lock_and_a_dataset_directory_join_the_same_groups(tmp_path: Path):
     root = _shared_dataset(tmp_path / "dataset")
     rule = {"fraction": 0.5, "group_by": "split_group"}
-    locked = HarborEnvironmentService(dataset=str(root), cache=str(tmp_path / "cache"), holdout=rule)
+    locked = HarborEnvironmentService(dataset=str(root), holdout=rule)
     directory = HarborEnvironmentService(str(root), holdout=rule)
 
     for split in ("train", "eval"):
@@ -870,7 +878,7 @@ async def test_a_table_saved_with_other_line_endings_or_a_byte_order_mark_joins_
     (root / "t0" / "environment" / "table-0.csv").write_bytes(b"x,y\r\n1,2\r\n")
     (root / "t6" / "environment" / "table-6.csv").write_bytes(b"\xef\xbb\xbfx,y\n1,2")
     rule = {"fraction": 0.5, "group_by": "split_group"}
-    locked = HarborEnvironmentService(dataset=str(root), cache=str(tmp_path / "cache"), holdout=rule)
+    locked = HarborEnvironmentService(dataset=str(root), holdout=rule)
     directory = HarborEnvironmentService(str(root), holdout=rule)
 
     for split in ("train", "eval"):
@@ -897,7 +905,7 @@ async def test_a_lock_written_before_input_files_answers_its_config_and_a_hold_o
     rule = {"fraction": 0.5, "group_by": "split_group"}
 
     def service(**holdout: Any) -> HarborEnvironmentService:
-        return HarborEnvironmentService(dataset=str(root), cache=str(tmp_path / "cache"), **holdout)
+        return HarborEnvironmentService(dataset=str(root), **holdout)
 
     first = service(holdout=rule)
     evaluated = await first.list_tasks("eval")

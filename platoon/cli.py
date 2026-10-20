@@ -1420,15 +1420,13 @@ def toolchain_build(*specs: str, root: Path | None = None, force: bool = False, 
     from platoon.harness.registry import get_harness_spec
     from platoon.harness.spec import HarnessSpecError
     from platoon.harness.toolchains import ToolchainBuildError, build_toolchain
-    from platoon.site import variable_deprecations, variable_problems
+    from platoon.site import removed_variable_problems
 
     if not specs:
         print("platoon toolchain build: name at least one harness spec", file=sys.stderr)
         return EXIT_USAGE
-    if root is None:  # the root comes from the site profile, or a deprecated variable
-        if problems := variable_problems():
-            raise ConfigError(problems)
-        _warn_of_deprecations(variable_deprecations())
+    if root is None and (problems := removed_variable_problems()):  # the root comes from the site profile
+        raise ConfigError(problems)
     try:
         resolved = [get_harness_spec(spec) for spec in specs]
     except (ValueError, OSError) as exc:

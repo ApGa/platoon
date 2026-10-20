@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 LOCK_VERSION = 1
 TASKS_DIR = "tasks"
-CACHE_ENV = "PLATOON_HARBOR_CACHE"
 
 
 class LockError(ValueError):
@@ -214,11 +213,9 @@ def write_lock(lock: DatasetLock, path: str | Path) -> None:
 
 def default_cache() -> Path:
     """The Harbor cache: ``harbor`` under the cache root (:func:`platoon.site.cache_root`: the site profile's
-    ``cache``, else ``~/.cache/platoon``), unless the deprecated ``$PLATOON_HARBOR_CACHE`` names another, until
-    platoon 0.3.0 removes it."""
+    ``cache``, else ``~/.cache/platoon``)."""
 
-    configured = os.environ.get(CACHE_ENV)
-    return Path(configured).expanduser() if configured else cache_root() / "harbor"
+    return cache_root() / "harbor"
 
 
 class LockedDataset:

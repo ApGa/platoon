@@ -24,7 +24,6 @@ import pytest
 from tinker_service_fakes import FakeTinkerService, make_pruning_trainer
 from trainer_fakes import Workflow, trainer_config
 
-from platoon.deprecations import PlatoonDeprecationWarning
 from platoon.train.components import task_ids_to_dataset
 from platoon.train.tinker import rl
 from platoon.train.tinker.evaluation_record import EVALUATIONS_NAME, completed_evaluation_steps, record_evaluation
@@ -288,20 +287,15 @@ def test_a_restart_at_step_0_after_the_starting_policy_was_evaluated_does_not_ev
     assert crash is None and steps == [2, 4]
 
 
-@pytest.mark.parametrize("off", ["eval.every=0", "eval={every: 3, strategy: none}"])
+@pytest.mark.parametrize("off", ["eval.every=0", "eval={strategy: epoch, every: 0}"])
 def test_at_start_without_evaluation_is_ignored_with_a_warning(tmp_path, monkeypatch, caplog, off):
-    if "strategy" in off:  # the deprecated strategy: none turns evaluation off whatever every says
-        with pytest.warns(PlatoonDeprecationWarning, match="eval.strategy"):
-            config = _run_config(tmp_path, off, "eval.at_start=true")
-    else:
-        config = _run_config(tmp_path, off, "eval.at_start=true")
+    config = _run_config(tmp_path, off, "eval.at_start=true")
 
     with caplog.at_level(logging.WARNING, logger=rl.__name__):
         trainer, logged = make_pruning_trainer(monkeypatch, config, FakeTinkerService())
         asyncio.run(asyncio.wait_for(trainer.train(train_workflow=Workflow(delay=0.01)), timeout=60))
 
-    reason = "eval.every is 0" if off == "eval.every=0" else "eval.strategy is none"
-    assert f"eval.at_start is ignored: {reason}, which turns evaluation during training off" in caplog.text
+    assert "eval.at_start is ignored: eval.every is 0, which turns evaluation during training off" in caplog.text
     assert not [stats for _step, stats in logged if "eval/step" in stats]
     assert not (Path(trainer.run_log_path) / EVALUATIONS_NAME).exists()
 

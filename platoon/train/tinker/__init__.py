@@ -23,7 +23,6 @@ from platoon.train.tinker.batch_transforms import (  # noqa: E402, I001
     DepthLevelWeightingTransform,
     build_default_batch_transforms,
 )
-from platoon.train.tinker.restart_wrapper import run_with_restart  # noqa: E402
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer, Watchdog  # noqa: E402
 
 __all__ = [
@@ -41,5 +40,4 @@ __all__ = [
     "WatchdogConfig",
     "AdamParams",
     "WorkflowConfig",
-    "run_with_restart",
 ]

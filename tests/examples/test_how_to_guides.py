@@ -108,7 +108,7 @@ def test_links_and_anchors_resolve(guide):
         ("platoon/cli.py", 'f"platoon: not reaping the sandboxes of {run_dir}: {refusal}"'),
         (
             "platoon/train/tinker/restart_wrapper.py",
-            'path="python -m platoon.train.tinker.restart_wrapper (run_with_restart)"',
+            'REMOVED = "python -m platoon.train.tinker.restart_wrapper (run_with_restart): " + removed_hint(',
         ),
         ("platoon/envs/harbor/session.py", 'reason="workdir_missing"'),
         ("platoon/envs/harbor/grading.py", '"verifier_ambiguous_primary"'),
@@ -158,7 +158,16 @@ def test_links_and_anchors_resolve(guide):
         ("platoon/eval/run.py", "{now or datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"),
         ("platoon/extensions.py", '].package: {environment.package!r} does not import "'),
         ("platoon/deprecations.py", 'f"{self.path}: deprecated; use {self.replacement} instead (platoon'),
-        ("platoon/config_defs.py", 'DeprecatedKey(removed_in="0.3.0", renamed_to="propagate_root_success")'),
+        ("platoon/deprecations.py", 'return f"platoon {removed_in} removed it; use {replacement}"'),
+        ("platoon/utils/config.py", 'return f"{_join(parent, key)}: unknown key; {hint}"'),
+        (
+            "platoon/train/tinker/config_defs.py",
+            '"task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto")',
+        ),
+        ("platoon/site.py", "f\"the site profile's cache, whose {directory} directory it named (~/.config"),
+        ("platoon/envs/harbor/service.py", '"cache": removed_hint("0.3.0", "the site profile\'s cache, whose harbor'),
+        ("platoon/envs/harbor/cli.py", 'raise ConfigError(f"{path}: a fetch config file; {FETCH_CONFIG_REMOVED}")'),
+        ("platoon/envs/harbor/cli.py", 'f"platoon harbor fetch {flag}, which applied to fetch config files alone: '),
         ("platoon/train/auto.py", 'f"{where}: harness {spec.ref} is a TOML harness spec, which runs no episode'),
         ("platoon/train/auto.py", '"has no grader, so every rollout would be invalid (self_grade)'),
         ("platoon/train/auto.py", 'f"{where}: program {environment.program!r} never runs: harness {names} is a TOML'),
@@ -189,15 +198,13 @@ def test_links_and_anchors_resolve(guide):
         ("platoon/train/labels.py", 'f"train.label_by: no training task has a {column!r} value to label it by; their'),
         ("platoon/train/labels.py", "MAX_METRIC_LABELS = 64"),
         ("platoon/train/auto.py", "names {name!r}, a column this environment's tasks have (an index field) whose"),
-        ("platoon/train/tinker/config_defs.py", 'DeprecatedKey(removed_in="0.3.0", renamed_to="label_by")'),
-        ("platoon/train/tinker/config_defs.py", 'DeprecatedKey(removed_in="0.3.0", instead="train.label_by")'),
-        ("platoon/train/tinker/config_defs.py", 'instead="every alone, which counts training steps (0: never)"'),
-        (
-            "platoon/train/tinker/config_defs.py",
-            'instead="train.max_concurrent_rollouts (rollouts, not groups: this value × "',
-        ),
+        ("platoon/train/tinker/config_defs.py", '"rollout_group_key": removed_hint("0.3.0", "train.label_by")'),
+        ("platoon/train/components.py", '"0.3.0", "train.label_by, whose labels straggler_policies key on"'),
+        ("platoon/train/tinker/config_defs.py", '{"none": removed_hint("0.3.0", "eval.every: 0, which never'),
+        ("platoon/train/tinker/config_defs.py", '"train.max_concurrent_rollouts, which counts rollouts, not groups'),
         ("platoon/train/tinker/config_defs.py", "EVAL_ROLLOUTS_AT_ONCE = 256"),
-        ("platoon/train/tinker/config_defs.py", 'f"{section}.every must be a number of training steps, or 0 for never'),
+        ("platoon/train/tinker/config_defs.py", 'f"{section}.every must be a number of {unit}, or 0 for never, got'),
+        ("platoon/train/tinker/config_defs.py", 'unit = "passes over the training tasks (strategy: epoch)" if'),
         ("platoon/utils/rollout_stats.py", 'REWARD_KEY_MISMATCH = "reward_key_mismatch"'),
         ("platoon/envs/service.py", 'PLATOON_ZERO_KEY = "platoon_zero"'),
         ("platoon/train/components.py", 'f"Mixture entries {by_tasks} weigh by their tasks (weight: {TASKS_WEIGHT}, '),
@@ -215,19 +222,21 @@ def test_the_quoted_messages_and_defaults_are_still_in_the_code(source, fragment
     assert fragment in (REPO / source).read_text()
 
 
-def test_the_entry_in_the_harbor_guides_one_dataset_section_builds_its_service(tmp_path):
+def test_the_entry_in_the_harbor_guides_one_dataset_section_builds_its_service(tmp_path, monkeypatch):
     """The guide's complete Harbor entry (reward names, metadata index fields, a hold-out, a size refusal) is one the
     Harbor service takes as written; building it fetches nothing."""
 
     import yaml
+    from site_cache import use_site_cache
 
     from platoon.envs.harbor import HarborEnvironmentService
 
+    use_site_cache(monkeypatch, tmp_path / "cache")
     guide = (HOW_TO / "sandboxes-and-harbor.md").read_text()
     block = re.search(r"```yaml\n# configs/environment\.yaml\n(?P<body>.*?)```", guide, re.S)
     assert block is not None
     (entry,) = yaml.safe_load(block["body"])["environments"]
-    kwargs: dict[str, Any] = {**entry["service_kwargs"], "cache": str(tmp_path / "cache")}
+    kwargs: dict[str, Any] = dict(entry["service_kwargs"])
     service = HarborEnvironmentService(**kwargs)
 
     assert service.reward.names == ("reward", "correctness") and service.reward.range == (0.0, 1.0)

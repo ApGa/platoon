@@ -97,6 +97,7 @@ The settings you will change most:
 | `train.workflow_config.rollout_isolation` | `inprocess` | `process` runs each rollout in its own killable worker process, which sees no GPU (its sandboxes get theirs from their provider) |
 | `train.workflow_config.worker_start_method` | `forkserver` | How a worker process starts: forked from a process that imported the worker's stack once (seconds), or `exec`, a new interpreter that imports it (17-24 s, about a minute with 64 at once) |
 | `eval.every` | 0 | Evaluate during training every N training steps; 0 turns it off, and the eval split is then never listed. Evaluation rolls out as training does ([Evaluate during training](#evaluate-during-training)) |
+| `eval.strategy`, `checkpoint.strategy` | unset: steps | The unit of `every`: `step`, a training step, or `epoch`, a pass over the training tasks; a section that sets it and leaves `every` out triggers every 1 of its units ([Cadences in steps or epochs](#cadences-in-steps-or-epochs)) |
 | `eval.at_start` | false | Also evaluate the starting policy, at step 0, before the first update: the point the held-out curve starts from |
 
 A run writes everything under `<log_path>/<stats.experiment_name>/<stats.trial_name>/`. A config without `log_path`
@@ -520,9 +521,8 @@ training task has the column (the default aside, which a single environment's ta
 only some have it, and of a limit or a straggler policy for a label that no task of its split has.
 
 `label_by` was called `rollout_group_key`, and straggler policies once named a column of their own,
-`workflow_config.straggler_policy_key`. Both still load until platoon 0.3.0, each with a deprecation warning, and
-`platoon config validate --strict` fails on them. A workflow config that sets `straggler_policy_key` keys its
-straggler policies on that column, as before; drop it to key them on `label_by`.
+`workflow_config.straggler_policy_key`. Platoon 0.3.0 removed both: a config that still sets one does not load (exit
+78), and the message names `train.label_by`, whose labels straggler policies key on.
 
 ## Evaluate during training
 
@@ -570,6 +570,33 @@ eval:
 `platoon config show CONFIG --defaults` prints what each evaluation runs with, and `platoon rollout CONFIG --split
 eval --task ID` runs one held-out task with its rollout settings. A config built in Python, rather than loaded, takes
 its `eval.workflow_config` as given.
+
+### Cadences in steps or epochs
+
+`every` counts training steps in `eval` and in `checkpoint`. With `strategy: epoch` it counts epochs instead, as
+`train.num_epochs` does: passes over the training tasks, in whole batches ([Train on several
+environments](#train-on-several-environments) says what an epoch draws). So `eval: {strategy: epoch, every: 1}`
+evaluates at the end of each epoch. `strategy: step` counts steps, as a section that leaves `strategy` out does.
+
+A section that sets `strategy` and leaves `every` out triggers its event every 1 of its units, as `every` did by
+default when it counted in `strategy`'s units: `eval: {strategy: step}` evaluates every step, and `checkpoint:
+{strategy: epoch}` saves a permanent checkpoint at the end of each epoch. A section that leaves out both, like a
+config without the section, never triggers it, and so does `every: 0` with either strategy.
+
+```yaml
+eval:
+  strategy: epoch     # every counts epochs
+  every: 1            # the end of each epoch
+checkpoint:
+  strategy: epoch     # every left out: 1, a permanent checkpoint at the end of each epoch
+  recovery_every: 5   # recovery checkpoints still count steps
+```
+
+A start that resumes evaluates at the steps a run that never stopped would, the multiples of the interval
+([Evaluation in a resumed run](#evaluation-in-a-resumed-run)), while it counts the interval of permanent checkpoints
+from the step it resumes at, as it counts `recovery_every` ([Checkpoints and resume](#checkpoints-and-resume)).
+`strategy: none`, which turned the event off whatever `every` said, is gone since platoon 0.3.0; set `every: 0`, which
+a config or an override that still says `none` is told to (exit 78).
 
 ### Evaluation in a resumed run
 
@@ -735,7 +762,7 @@ directory, with its `state_path` (weights and optimizer, for resuming) and `samp
 
 | Name | When |
 |---|---|
-| `000010` | Every `checkpoint.every` training steps (0, the default, saves none); kept |
+| `000010` | Every `checkpoint.every` training steps, or epochs with `checkpoint.strategy: epoch` (0, the default, saves none), counted from the step each start of the run begins at; kept |
 | `recovery-000012` | At every launch, and every `checkpoint.recovery_every` steps when that is set; disposable: `checkpoint.keep_recovery` deletes all but the newest few |
 | `000007_interrupted` | At the first SIGINT or SIGTERM, when a step completed since launch; weights and optimizer, kept |
 | `final` | When training reaches its last step, after the evaluation due at that step |
@@ -896,7 +923,7 @@ records itself in the run directory, in `process.json`: its host, pid and start 
 host, which holds its sandboxes: run it there.
 
 `python -m platoon.train.tinker.restart_wrapper`, which restarted the command on the watchdog's exit code only, is
-deprecated: it still works, with a warning, until platoon 0.3.0 removes it. Set `watchdog.max_restarts` instead.
+gone since platoon 0.3.0: it exits 78, naming `watchdog.max_restarts`, which replaces it.
 
 ## Metrics to watch
 

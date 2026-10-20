@@ -9,8 +9,7 @@ gone therefore names a worker nobody owns; :func:`sweep_orphaned_workers` kills 
 the sweep before new workers start next to the old ones:
 
 * ``platoon train`` (:mod:`platoon.train.reaping`), before it starts training, before each restart of a supervised
-  run and when it exits, for every trainer that is gone (and the deprecated restart wrapper,
-  :mod:`platoon.train.tinker.restart_wrapper`, after its trainer exited);
+  run and when it exits, for every trainer that is gone;
 * the supervisor of a new trainer, before it launches its first worker, for every trainer that is gone (a restart
   by any other means).
 

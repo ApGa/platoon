@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from site_cache import use_site_cache
 
 from platoon.envs.harbor import fetch as fetch_module
 from platoon.envs.harbor.dataset import dataset_tasks
@@ -464,23 +465,19 @@ def test_a_one_byte_change_fails_verify(tmp_path: Path):
     assert len(problems) == 1 and "the lock says" in problems[0]
 
 
-def test_fetch_config_files_resolve_paths_against_themselves(tmp_path: Path):
-    from platoon.envs.harbor.fetch import load_fetch_config
+def test_fetch_settings_resolve_relative_paths_against_the_working_directory(tmp_path: Path, monkeypatch):
+    """An entry's paths are absolute once its config loads (relative to the file that names them); the settings a
+    caller gives relative paths resolve against the working directory, and the cache is the site's Harbor cache."""
 
-    configs = tmp_path / "configs"
-    configs.mkdir()
-    (configs / "fetch.yaml").write_text(
-        "dataset: ../dataset\ncache: ../cache\nlock: ../locks/x.lock.json\nselect: {index.source_dataset: a}\n"
-        "refuse: {stack: sidecars, per_task_build: true}\n"
+    from platoon.envs.harbor.lock import default_cache
+
+    monkeypatch.chdir(tmp_path)
+    config = fetch_config(
+        "dataset", lock="locks/x.lock.json", select={"index.source_dataset": "a"}, refuse={"per_task_build": True}
     )
-    config = load_fetch_config(configs / "fetch.yaml")
-    assert config.dataset == str(tmp_path / "dataset")
-    assert config.lock == tmp_path / "locks" / "x.lock.json" and config.cache == tmp_path / "cache"
-    assert config.select == {"source_dataset": ("a",)}
-    assert config.refuse.sidecars and config.refuse.per_task_build
-    (configs / "bad.yaml").write_text("dataset: x\nmystery: 1\n")
-    with pytest.raises(FetchError, match="unknown keys"):
-        load_fetch_config(configs / "bad.yaml")
+    assert config.dataset == str(tmp_path / "dataset") and config.lock == tmp_path / "locks" / "x.lock.json"
+    assert config.cache == default_cache()
+    assert config.select == {"source_dataset": ("a",)} and config.refuse.per_task_build
     with pytest.raises(FetchError, match="flags"):
         fetch_config("x", select={"flags.verifier": "separate"})
 
@@ -1011,7 +1008,7 @@ def test_a_lock_written_before_the_new_keys_still_answers_its_config(tmp_path: P
 
 
 def test_fetching_a_pinned_dataset_again_changes_nothing_until_asked_to_repair(
-    hub: FakeHub, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """A dataset pinned to a commit cannot change: once its lock answers the entry and the cache holds its tasks,
     `platoon harbor fetch CONFIG` downloads and hashes nothing, and prints the same lock and hold-out."""
@@ -1020,13 +1017,13 @@ def test_fetching_a_pinned_dataset_again_changes_nothing_until_asked_to_repair(
 
     from platoon import cli
 
+    use_site_cache(monkeypatch, tmp_path / "cache")
     config = tmp_path / "train.yaml"
     entry = {
         "name": "science",
         "service": "harbor",
         "service_kwargs": {
             "dataset": f"hf://org/harbor-dataset@{COMMIT}",
-            "cache": str(tmp_path / "cache"),
             "select": {
                 "source_dataset": ["FineEnvs/SmolDataEnvs-harbor-train", "amphora/MathConstructOptimize-Envs-harbor"]
             },
@@ -1058,7 +1055,7 @@ def test_fetching_a_pinned_dataset_again_changes_nothing_until_asked_to_repair(
 
 
 def test_a_pinned_lock_written_before_input_files_is_fetched_again_to_record_them(
-    hub: FakeHub, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """`platoon harbor fetch` leaves a current pinned lock alone, but not one written before platoon recorded the
     tasks' input files: it says so and fetches again, and the lock it writes holds them; the hold-out is the same."""
@@ -1068,13 +1065,13 @@ def test_a_pinned_lock_written_before_input_files_is_fetched_again_to_record_the
     from platoon import cli
     from platoon.envs.harbor.lock import write_lock
 
+    use_site_cache(monkeypatch, tmp_path / "cache")
     config = tmp_path / "train.yaml"
     entry = {
         "name": "science",
         "service": "harbor",
         "service_kwargs": {
             "dataset": f"hf://org/harbor-dataset@{COMMIT}",
-            "cache": str(tmp_path / "cache"),
             "select": {"source_dataset": "amphora/MathConstructOptimize-Envs-harbor"},
             "index": [{"path": "data/tasks.jsonl", "fields": ["split_group"]}],
             "holdout": {"fraction": 0.5, "group_by": "split_group"},

@@ -40,6 +40,20 @@ def toolchain_ready(name: str) -> bool:
     return bool(TOOLCHAINS) and (Path(TOOLCHAINS or "") / name / "manifest.json").is_file()
 
 
+def toolchain_site(directory: Path) -> Path:
+    """A site profile, in ``directory``, whose toolchain root holds the toolchains under ``PLATOON_TEST_TOOLCHAINS``:
+    its cache's ``toolchains`` links there.  Name it in ``PLATOON_SITE`` for a run to find them, as a site's profile
+    makes its runs find the toolchains ``platoon prepare`` built under its cache."""
+
+    cache = directory / "site-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    if not (cache / "toolchains").exists():
+        (cache / "toolchains").symlink_to(Path(TOOLCHAINS or "").absolute())
+    profile = directory / "site.yaml"
+    profile.write_text(json.dumps({"cache": str(cache)}) + "\n")  # JSON is YAML
+    return profile
+
+
 def turn(reasoning: str, *, text: str = "", call: tuple[str, dict[str, str]] | None = None) -> str:
     """A Qwen3.5 completion as the model writes it after the generation prompt's ``<think>\\n``: its reasoning,
     optional visible text and at most one tool call, in the chat template's own layout."""
@@ -229,8 +243,8 @@ async def run_episode(
     runner = HarnessRunner(
         logs_dir=workdir / "logs", sandbox_state_root=str(workdir / "sandbox-state"), kill_grace_s=1.0
     )
-    saved = os.environ.get("PLATOON_TOOLCHAINS")
-    os.environ["PLATOON_TOOLCHAINS"] = str(TOOLCHAINS)  # where the runner resolves the specs' named toolchains
+    saved = os.environ.get("PLATOON_SITE")
+    os.environ["PLATOON_SITE"] = str(toolchain_site(workdir))  # where the runner resolves the specs' named toolchains
     gateway.interactions = {}
     token = proxy_interactions.set(gateway.interactions)
     try:
@@ -240,9 +254,9 @@ async def run_episode(
     finally:
         proxy_interactions.reset(token)
         if saved is None:
-            os.environ.pop("PLATOON_TOOLCHAINS", None)
+            os.environ.pop("PLATOON_SITE", None)
         else:
-            os.environ["PLATOON_TOOLCHAINS"] = saved
+            os.environ["PLATOON_SITE"] = saved
     return collection, gateway, policy
 
 

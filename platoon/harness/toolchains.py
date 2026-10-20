@@ -5,10 +5,9 @@ A spec names its toolchain in ``[install] toolchain``:
 
 * an absolute path, used as it is: it must exist where the harness runs (the environment service's ``mounts`` can
   put it into a sandbox);
-* a name, looked up under the toolchain root: the environment service's ``toolchain_root`` option, else
-  ``toolchains`` under the cache root (:func:`platoon.site.cache_root`: the site profile's ``cache``, else
-  ``~/.cache/platoon``), where ``platoon prepare`` builds it.  The deprecated ``toolchain_root`` option and
-  ``$PLATOON_TOOLCHAINS`` name another root until platoon 0.3.0 removes them.
+* a name, looked up under the toolchain root: ``toolchains`` under the cache root (:func:`platoon.site.cache_root`:
+  the site profile's ``cache``, else ``~/.cache/platoon``), where ``platoon prepare`` builds it (``platoon toolchain
+  build --root`` builds one elsewhere).
 
 **Building** (:func:`build_toolchain`, ``platoon prepare`` or ``platoon toolchain build``) follows the spec's
 ``[install.recipe]``
@@ -90,7 +89,6 @@ from platoon.utils.scratch import node_scratch
 if TYPE_CHECKING:
     from platoon.harness.spec import HarnessSpec, ToolchainRecipe
 
-TOOLCHAIN_ROOT_ENV = "PLATOON_TOOLCHAINS"
 TOOLCHAIN_CACHE_ENV = "PLATOON_TOOLCHAIN_CACHE"
 MANIFEST = "manifest.json"
 MANIFEST_FORMAT = 1
@@ -160,11 +158,10 @@ def check_name(toolchain: str) -> None:
 
 
 def toolchain_root(root: str | os.PathLike[str] | None = None) -> Path:
-    """The toolchain root: ``root`` when given, else the deprecated ``$PLATOON_TOOLCHAINS``, else ``toolchains`` under
-    the cache root (:func:`platoon.site.cache_root`: the site profile's ``cache``, else ``~/.cache/platoon``)."""
+    """The toolchain root: ``root`` when given, else ``toolchains`` under the cache root
+    (:func:`platoon.site.cache_root`: the site profile's ``cache``, else ``~/.cache/platoon``)."""
 
-    configured = root if root is not None else os.environ.get(TOOLCHAIN_ROOT_ENV)
-    return Path(configured).expanduser() if configured else platoon_cache_root() / "toolchains"
+    return Path(root).expanduser() if root else platoon_cache_root() / "toolchains"
 
 
 def resolve(name: str, *, root: str | os.PathLike[str] | None = None) -> Toolchain:
@@ -761,7 +758,6 @@ def _platoon_version() -> str:
 __all__ = [
     "MANIFEST",
     "TOOLCHAIN_CACHE_ENV",
-    "TOOLCHAIN_ROOT_ENV",
     "PreparedToolchain",
     "Toolchain",
     "ToolchainBuildError",

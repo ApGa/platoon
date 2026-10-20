@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from site_cache import use_site_cache
 
 from platoon.harness import toolchains
 from platoon.harness.spec import HarnessSpecError, parse_spec
@@ -77,8 +78,9 @@ def test_a_name_resolves_under_the_root_with_its_manifest(tmp_path, monkeypatch)
         name="tc-1.0", path=path, build_path="/opt/toolchains/tc-1.0", tree_hash=tree_hash(path)
     )
 
-    monkeypatch.setenv(toolchains.TOOLCHAIN_ROOT_ENV, str(tmp_path / "root"))
-    assert resolve("tc-1.0") == toolchain  # the environment variable when the service sets no root
+    use_site_cache(monkeypatch, tmp_path / "cache")
+    in_site = make_toolchain(tmp_path / "cache" / "toolchains", build_path="/opt/toolchains/tc-1.0")
+    assert resolve("tc-1.0").path == in_site  # the site's toolchain root when the caller names none
 
 
 def test_a_toolchain_without_a_manifest_is_built_where_it_is(tmp_path):
@@ -105,10 +107,10 @@ def test_a_bad_manifest_is_refused(tmp_path, manifest, message):
 
 
 def test_a_name_is_looked_up_under_the_toolchain_root(tmp_path, monkeypatch):
-    """Without a root or $PLATOON_TOOLCHAINS, a named toolchain is looked up under the cache root's toolchains,
-    where platoon prepare builds it."""
+    """Without a root, a named toolchain is looked up under the cache root's toolchains, where platoon prepare builds
+    it: the site profile's cache, else ~/.cache/platoon.  A root the caller names (platoon toolchain build --root)
+    wins."""
 
-    monkeypatch.delenv(toolchains.TOOLCHAIN_ROOT_ENV, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     assert toolchains.toolchain_root() == tmp_path / "home" / ".cache" / "platoon" / "toolchains"
@@ -116,9 +118,9 @@ def test_a_name_is_looked_up_under_the_toolchain_root(tmp_path, monkeypatch):
         resolve("tc-1.0")
     with pytest.raises(ToolchainError, match="is not under the toolchain root"):
         resolve("tc-1.0", root=tmp_path)
-    monkeypatch.setenv(toolchains.TOOLCHAIN_ROOT_ENV, str(tmp_path / "site"))
-    assert toolchains.toolchain_root() == tmp_path / "site"
-    assert toolchains.toolchain_root(tmp_path / "entry") == tmp_path / "entry"  # an entry's toolchain_root wins
+    use_site_cache(monkeypatch, tmp_path / "site")
+    assert toolchains.toolchain_root() == tmp_path / "site" / "toolchains"
+    assert toolchains.toolchain_root(tmp_path / "elsewhere") == tmp_path / "elsewhere"
 
 
 # --------------------------------------------------------------------------- staging

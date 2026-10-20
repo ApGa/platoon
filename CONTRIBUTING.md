@@ -806,9 +806,9 @@ release removes it ([RFC 0016, section 10](docs/rfcs/0016-component-configuratio
 class names its deprecated keys in a class attribute, with `DeprecatedKey` from `platoon/deprecations.py`:
 
 ```python
-# platoon/config_defs.py, in RolloutConfig
+# platoon/train/tinker/config_defs.py, in TrainConfig
 DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-    "propogate_root_success": DeprecatedKey(removed_in="0.3.0", renamed_to="propagate_root_success"),
+    "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
 }
 ```
 
@@ -816,8 +816,26 @@ The key keeps its field, which still works. The loader reports every config that
 name it once on stderr, `lock.json` records it, `platoon config validate --strict` fails on it, and the generated
 config reference marks it. A Python name warns where it is used, with
 `warnings.warn(message, PlatoonDeprecationWarning, stacklevel=2)`. Say in the release's notes what each deprecation
-replaces, and before a minor release remove the forms it is due to remove: `grep -rn 'removed_in="0.3.0"' platoon`
-lists them for 0.3.0.
+replaces, and before a minor release remove the forms it is due to remove: `grep -rn 'removed_in="0.4.0"' platoon`
+lists them for 0.4.0.
+
+Removing a form is a breaking change, in a commit marked as one (`!` and a `BREAKING CHANGE:` footer, [RFC 0017,
+section 2](docs/rfcs/0017-public-surface-and-conformance.md#2-the-version-policy)). Drop the key's field and the code
+that read it, and name the key in the class's `UNKNOWN_KEY_HINTS` with `removed_hint` from `platoon/deprecations.py`,
+so that a config that still sets it does not load (exit 78) and says what replaces it and which release removed it
+(`train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by`):
+
+```python
+# platoon/train/tinker/config_defs.py, in TrainConfig
+UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+    "rollout_group_key": removed_hint("0.3.0", "train.label_by"),
+}
+```
+
+A value that a key no longer takes goes in the class's `UNKNOWN_VALUE_HINTS` (`{key: {value: hint}}`), an option
+of an environment service in the service class's `UNKNOWN_KEY_HINTS`, which an entry's `service_kwargs` are checked
+against, and a removed command or variable fails with the same words. List each removed form with what replaces it in
+the changelog.
 
 ### Set up publishing once
 

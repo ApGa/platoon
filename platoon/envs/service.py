@@ -428,14 +428,67 @@ LISTING_KEYS = ("split_name", "shuffle_seed", "limit")
 
 def service_option_problems(name: str, options: Mapping[str, Any], *, where: str) -> list[str]:
     """What is wrong with ``options``, an entry's ``service_kwargs``, as the keyword arguments of the factory the
-    service reference ``name`` builds from, bound to its signature without building it: a key it does not take, with a
-    did-you-mean; a key the reference itself gives (an ORS URI's environment); a required argument that is missing.
-    ``where`` is the options' dotted path.  The values are the service's to check when it is built.  None for a
-    factory that does not import (the reference's own problem) or that takes any keyword."""
+    service reference ``name`` builds from, bound to its signature without building it: a key it does not take, with
+    the hint its class gives for it (``UNKNOWN_KEY_HINTS``, such as an option a release removed) or a did-you-mean; a
+    key the reference itself gives (an ORS URI's environment); a required argument that is missing.  ``where`` is the
+    options' dotted path.  The values are the service's to check when it is built.  None for a factory that does not
+    import (the reference's own problem) or that takes any keyword."""
 
-    from platoon.utils.config import unknown_key
+    from platoon.utils.config import UNKNOWN_KEY_HINTS, unknown_key
 
-    given: dict[str, Any] = {}  # the arguments the reference gives the factory itself
+    found = _factory_signature(name)
+    if found is None:
+        return []
+    factory, signature, given = found
+    parameters = signature.parameters.values()
+    takes_any = any(parameter.kind is parameter.VAR_KEYWORD for parameter in parameters)
+    keywords = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    known = [parameter.name for parameter in parameters if parameter.kind in keywords and parameter.name not in given]
+    hints = getattr(factory, UNKNOWN_KEY_HINTS, None) or {}
+    problems = []
+    for key in options:
+        if key in given:
+            problems.append(f"{where}.{key}: the service reference {name!r} gives it; leave it out of service_kwargs")
+        elif not takes_any and key not in known:
+            takes = f"the {name} service takes {', '.join(known)}"
+            problems.append(unknown_key(key, known, where, hint=hints.get(key), otherwise=takes))
+    if problems:
+        return problems
+    try:
+        signature.bind(**given, **options)
+    except TypeError as exc:  # a required argument that neither the reference nor the options give
+        problems.append(f"{where}: {exc}")
+    return problems
+
+
+def service_option_hints(name: str) -> dict[str, str]:
+    """The options that the factory the service reference ``name`` builds from does not take, but that its class says
+    what to do instead of (``UNKNOWN_KEY_HINTS``, such as an option a release removed), each with that hint; read
+    without building the service.  None for ORS environments, whose service names none, and for a factory that does
+    not import or that takes any keyword.  The config loader refuses each that an entry's ``service_kwargs`` give
+    (:class:`platoon.train.components.EnvironmentConfig`), as :func:`service_option_problems` does."""
+
+    from platoon.utils.config import UNKNOWN_KEY_HINTS
+
+    if name.startswith(_ORS_SCHEMES):
+        return {}
+    found = _factory_signature(name)
+    if found is None:
+        return {}
+    factory, signature, _ = found
+    hints = getattr(factory, UNKNOWN_KEY_HINTS, None) or {}
+    parameters = signature.parameters.values()
+    if not hints or any(parameter.kind is parameter.VAR_KEYWORD for parameter in parameters):
+        return {}
+    return {str(key): hint for key, hint in hints.items() if key not in signature.parameters}
+
+
+def _factory_signature(name: str) -> tuple[Any, inspect.Signature, dict[str, Any]] | None:
+    """The factory the service reference ``name`` builds from, its signature, and the arguments the reference gives it
+    itself (an ORS URI's environment); None for a factory that does not import, which is reported where the service
+    resolves, or whose signature Python cannot read."""
+
+    given: dict[str, Any] = {}
     if name.startswith(_ORS_SCHEMES):
         from platoon.envs.ors import OrsEnvironmentService
 
@@ -447,29 +500,12 @@ def service_option_problems(name: str, options: Mapping[str, Any], *, where: str
     else:
         try:
             factory = import_from_string(_BUILTIN_SERVICES.get(name, name))
-        except Exception:  # a reference that does not import is reported where the service resolves
-            return []
+        except Exception:
+            return None
     try:
-        signature = inspect.signature(factory)
-    except (TypeError, ValueError):  # a callable whose signature Python cannot read: nothing to check against
-        return []
-    parameters = signature.parameters.values()
-    takes_any = any(parameter.kind is parameter.VAR_KEYWORD for parameter in parameters)
-    keywords = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-    known = [parameter.name for parameter in parameters if parameter.kind in keywords and parameter.name not in given]
-    problems = []
-    for key in options:
-        if key in given:
-            problems.append(f"{where}.{key}: the service reference {name!r} gives it; leave it out of service_kwargs")
-        elif not takes_any and key not in known:
-            problems.append(unknown_key(key, known, where, otherwise=f"the {name} service takes {', '.join(known)}"))
-    if problems:
-        return problems
-    try:
-        signature.bind(**given, **options)
-    except TypeError as exc:  # a required argument that neither the reference nor the options give
-        problems.append(f"{where}: {exc}")
-    return problems
+        return factory, inspect.signature(factory), given
+    except (TypeError, ValueError):
+        return None
 
 
 def listing_option_problems(options: Mapping[str, Any], *, where: str) -> list[str]:

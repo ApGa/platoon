@@ -16,11 +16,10 @@ the sandbox runs. A task that builds from a Dockerfile but has no entry in the m
 never run on a default image. A prebuilt-image task without a Dockerfile gets its ``environment/`` directory
 uploaded into its working directory, as Harbor does.
 
-A lock-backed Harbor entry that names no image map uses its **default image map**, ``images/<provider>.json`` in
-its Harbor cache (:func:`default_image_map`), when that file exists: ``platoon prepare`` builds the entry's images for
-its sandbox provider into ``images/<provider>/`` there and records them in it. An entry that serves a directory
-(``dataset_dir``, ``task_dirs``) has no default map: its tasks run their ``docker_image`` or the service's
-``default_image``, unless it names ``image_map``.
+A lock-backed Harbor entry uses its **default image map**, ``images/<provider>.json`` in its Harbor cache
+(:func:`default_image_map`), when that file exists: ``platoon prepare`` builds the entry's images for its sandbox
+provider into ``images/<provider>/`` there and records them in it. An entry that serves a directory (``dataset_dir``,
+``task_dirs``) has no image map: its tasks run their ``docker_image`` or the service's ``default_image``.
 """
 
 from __future__ import annotations
@@ -121,7 +120,7 @@ class ImageMap:
     @classmethod
     def load(cls, source: str | Path | Mapping[str, Any]) -> ImageMap:
         if isinstance(source, Mapping):
-            return cls._from_json(source, path=None, where="image_map")
+            return cls._from_json(source, path=None, where="the image map")
         path = Path(source)
         try:
             data = json.loads(path.read_text())
@@ -181,7 +180,7 @@ def has_image_file(entry: ImageEntry) -> bool:
 
 
 def default_image_map(cache: str | Path, provider: str) -> Path:
-    """The image map of a lock-backed Harbor entry that names none: ``images/<provider>.json`` in its Harbor cache.
+    """The image map of a lock-backed Harbor entry: ``images/<provider>.json`` in its Harbor cache.
     A provider named as ``module:Class`` is written with ``-`` for the characters a file name should not hold."""
 
     return Path(cache) / IMAGES_DIR / f"{_file_name(provider)}.json"

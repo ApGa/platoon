@@ -6,11 +6,17 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
 from platoon.config_defs import RolloutConfig
-from platoon.deprecations import DeprecatedKey, deprecated_keys
+from platoon.deprecations import DeprecatedKey, deprecated_keys, removed_hint
 from platoon.train import entry_settings
-from platoon.train.components import TASK_SAMPLERS, EnvironmentConfig, TaskSampler, normalize_environment_configs
+from platoon.train.components import (
+    STRAGGLER_POLICY_KEY_REMOVED,
+    TASK_SAMPLERS,
+    EnvironmentConfig,
+    TaskSampler,
+    normalize_environment_configs,
+)
 from platoon.train.tinker.checkpoint_pruning import config_pruning_problems
-from platoon.utils.config import ConfigError
+from platoon.utils.config import ConfigError, value_hint
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
 
@@ -54,10 +60,8 @@ class WorkflowConfig:
     (or, with ``leave_one_out_baseline``, the mean of the other members).
     """
 
-    # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
-    DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-        "straggler_policy_key": DeprecatedKey(removed_in="0.3.0", instead="train.label_by"),
-    }
+    # Keys a release removed, with what replaces them (platoon.deprecations).
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {"straggler_policy_key": STRAGGLER_POLICY_KEY_REMOVED}
 
     # Rollouts per task; advantages are computed within each group.
     group_size: int = 8
@@ -101,9 +105,6 @@ class WorkflowConfig:
     # ``group_size - 1`` (the classic single-straggler policy). Requires
     # ``straggler_timeout_seconds``.
     straggler_quorum: int | None = None
-    # The dataset column straggler_policies keyed on before the run's label column (``train.label_by``) took its
-    # place; a workflow config that sets it still keys its straggler_policies on this column.
-    straggler_policy_key: str | None = None
     # Complete straggler policies by label: a task's value of the run's label column (``train.label_by``; by
     # default the mixture entry it belongs to). Unlisted labels keep the global policy above; a null timeout disables
     # the cutoff for a listed label. This keeps slow graders independent of the policy used by other environments in
@@ -181,10 +182,6 @@ class WorkflowConfig:
         if self.group_size < 1:
             raise ValueError("workflow group_size must be positive")
         StragglerPolicy(self.straggler_timeout_seconds, self.straggler_quorum).validate(self.group_size)
-        if self.straggler_policy_key is not None and (
-            not isinstance(self.straggler_policy_key, str) or not self.straggler_policy_key
-        ):
-            raise ValueError("straggler_policy_key must be a nonempty dataset column name")
         self.straggler_policies = {
             label: StragglerPolicy(**policy) if isinstance(policy, dict) else policy
             for label, policy in self.straggler_policies.items()
@@ -254,7 +251,6 @@ EVAL_OWN_KEYS = (
     "filter_zero_advantage_datums",
     "straggler_timeout_seconds",
     "straggler_quorum",
-    "straggler_policy_key",
     "straggler_policies",
     "min_successful_group_size",
 )
@@ -286,27 +282,11 @@ ENVIRONMENT_LABEL = "_platoon_environment"
 
 
 def rollouts_at_once(section: str, config: "TrainConfig | EvalConfig", *, default: int) -> int:
-    """The ``max_concurrent_rollouts`` of the ``train`` or ``eval`` section ``config``, with ``default`` for none, after
-    reading its deprecated ``num_concurrent_rollout_workflow_workers``, a number of groups, as that many groups'
-    rollouts; that key is then cleared.  A count that disagrees with the deprecated one, or that holds no whole group
-    of ``workflow_config.group_size``, is a ``ValueError``."""
+    """The ``max_concurrent_rollouts`` of the ``train`` or ``eval`` section ``config``, with ``default`` for none.  A
+    count that holds no whole group of ``workflow_config.group_size`` is a ``ValueError``."""
 
     group_size = config.workflow_config.group_size
-    rollouts, groups = config.max_concurrent_rollouts, config.num_concurrent_rollout_workflow_workers
-    if groups is not None:
-        if isinstance(groups, bool) or not isinstance(groups, int) or groups < 1:
-            raise ValueError(
-                f"{section}.num_concurrent_rollout_workflow_workers must be a positive integer, got {groups!r}"
-            )
-        if rollouts is not None and rollouts != groups * group_size:
-            raise ValueError(
-                f"{section}.max_concurrent_rollouts: {rollouts} and {section}.num_concurrent_rollout_workflow_workers, "
-                f"its deprecated count in groups: {groups} groups of {group_size} ({groups * group_size} rollouts) "
-                "disagree; set max_concurrent_rollouts alone"
-            )
-        rollouts = groups * group_size
-    config.num_concurrent_rollout_workflow_workers = None
-    rollouts = default if rollouts is None else rollouts
+    rollouts = default if config.max_concurrent_rollouts is None else config.max_concurrent_rollouts
     if isinstance(rollouts, bool) or not isinstance(rollouts, int) or rollouts < group_size:
         raise ValueError(
             f"{section}.max_concurrent_rollouts must hold one group's rollouts at least ({section}.workflow_config."
@@ -337,16 +317,19 @@ _HOSTED_HINTS = {"hosted": HOSTED_MODELS_EVALUATE_ONLY, "backend": HOSTED_MODELS
 class TrainConfig:
     """The ``train:`` section: the model, the batch, the loss, the optimizer and the rollout workflow."""
 
-    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = _HOSTED_HINTS
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+        **_HOSTED_HINTS,
+        # Keys a release removed, with what replaces them (platoon.deprecations).
+        "rollout_group_key": removed_hint("0.3.0", "train.label_by"),
+        "num_concurrent_rollout_workflow_workers": removed_hint(
+            "0.3.0",
+            "train.max_concurrent_rollouts, which counts rollouts, not groups: this value × "
+            "train.workflow_config.group_size",
+        ),
+    }
     # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
     DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-        "rollout_group_key": DeprecatedKey(removed_in="0.3.0", renamed_to="label_by"),
         "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
-        "num_concurrent_rollout_workflow_workers": DeprecatedKey(
-            removed_in="0.3.0",
-            instead="train.max_concurrent_rollouts (rollouts, not groups: this value × "
-            "train.workflow_config.group_size)",
-        ),
     }
 
     # Hugging Face model name of the base model, which the Tinker service trains.
@@ -398,9 +381,6 @@ class TrainConfig:
     # Rollouts that run at once (None: batch_size × workflow_config.group_size, every rollout of a batch). A group's
     # rollouts start together, so as many whole groups run at once as it holds, and it must hold one.
     max_concurrent_rollouts: int | None = None
-    # The former count of what runs at once, in rollout groups: read as this value × workflow_config.group_size
-    # rollouts. Setting both to different numbers of rollouts is an error.
-    num_concurrent_rollout_workflow_workers: int | None = None
     # The dataset column that labels each task (None: ``_platoon_environment``, the mixture entry it belongs to,
     # ``platoon.train.components.ENVIRONMENT_COLUMN``; a single environment's tasks have none), such as a Harbor index
     # field. A task's label is its value of the column as text, ``true`` or ``false`` for a boolean.
@@ -409,8 +389,6 @@ class TrainConfig:
     # the default column logs as ``environment``), for the 64 most frequent labels; see
     # docs/how-to/train-and-eval.md.
     label_by: str | None = None
-    # The former name of ``label_by``, read as that key is; setting both to different columns is an error.
-    rollout_group_key: str | None = None
     # Most rollout groups that may run at once for each label, for example to cap a slow environment of a mixture.
     # Groups wait for a slot before they take a rollout worker.
     rollout_group_limits: dict[str, int] = field(default_factory=dict)
@@ -464,17 +442,10 @@ class TrainConfig:
         if sampler not in TASK_SAMPLERS:
             raise ValueError(f"train.task_sampler must be one of {TASK_SAMPLERS}, got {sampler!r}")
         self.task_sampler, self.task_order = sampler, None
-        legacy = self.rollout_group_key
-        if legacy is not None and self.label_by is not None and legacy != self.label_by:
-            raise ValueError(
-                f"train.label_by names {self.label_by!r} and train.rollout_group_key, its deprecated name, names "
-                f"{legacy!r}; set label_by alone"
-            )
-        # The run's one label column: the deprecated name's value until it is resolved here, then label_by's alone.
-        label_by = self.label_by if self.label_by is not None else legacy if legacy is not None else ENVIRONMENT_LABEL
+        label_by = self.label_by if self.label_by is not None else ENVIRONMENT_LABEL
         if not isinstance(label_by, str) or not label_by:
             raise ValueError(f"train.label_by must name a dataset column, got {label_by!r}")
-        self.label_by, self.rollout_group_key = label_by, None
+        self.label_by = label_by
         if any(
             not isinstance(key, str) or not key or isinstance(value, bool) or not isinstance(value, int) or value < 1
             for key, value in self.rollout_group_limits.items()
@@ -482,50 +453,57 @@ class TrainConfig:
             raise ValueError("rollout_group_limits requires nonempty labels and positive integer capacities")
 
 
+# The units ``every`` counts in (``TrainEventTriggerConfig.strategy``): training steps, or passes over the training
+# tasks.
+STRATEGIES = ("step", "epoch")
+
+
 @dataclass
 class TrainEventTriggerConfig:
-    """When a periodic training event (a checkpoint, an evaluation) happens: every ``every`` training steps, or never
-    with ``every: 0``, the default."""
+    """When a periodic training event (a checkpoint, an evaluation) happens: every ``every`` units of ``strategy``,
+    training steps unless it says ``epoch``, or never with ``every: 0``, the default.  A config that sets ``strategy``
+    and leaves ``every`` out triggers the event every 1 of its units (:func:`default_every`)."""
 
-    # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
-    DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-        "strategy": DeprecatedKey(removed_in="0.3.0", instead="every alone, which counts training steps (0: never)"),
-    }
-
-    # Training steps between events; 0 never triggers the event (None: 0, but 1 under the deprecated ``strategy``
-    # ``epoch`` or ``step``, the default it had before it counted training steps).
+    # Units of ``strategy`` between events, training steps unless it says epoch; 0 never triggers the event (None: 0,
+    # or 1 when the config sets strategy).
     every: int | None = None
-    # The unit ``every`` had before it counted training steps: ``epoch`` (a pass over the training tasks), ``step``, or
-    # ``none``, which never triggers the event whatever ``every`` is. A config that still sets it keeps that meaning.
-    strategy: Literal["epoch", "step", "none"] | None = None
+    # The unit of ``every``: ``step``, a training step, or ``epoch``, a pass over the training tasks (None: step). A
+    # config that sets it and leaves ``every`` out triggers the event every 1 of its units.
+    strategy: Literal["step", "epoch"] | None = None
 
     def _check_every(self, section: str) -> None:
-        """Resolve an ``every`` the config leaves out (:func:`default_every`), then refuse one that is not a number of
-        steps; ``strategy: none`` ignores it, as it always did."""
+        """Refuse a ``strategy`` that names no unit (``none``, which platoon 0.3.0 removed, with what replaces it),
+        resolve an ``every`` the config leaves out (:func:`default_every`), then refuse one that is not a number of its
+        units."""
 
+        if self.strategy is not None and self.strategy not in STRATEGIES:
+            choices = ", ".join(map(repr, STRATEGIES))
+            hint = value_hint(type(self), "strategy", self.strategy)
+            raise ValueError(
+                f"{section}.strategy: {self.strategy!r} is not one of {choices}" + (f"; {hint}" if hint else "")
+            )
         if self.every is None:
             self.every = default_every(self.strategy)
-        if self.strategy == "none":
-            return
         if isinstance(self.every, bool) or not isinstance(self.every, int) or self.every < 0:
-            raise ValueError(f"{section}.every must be a number of training steps, or 0 for never, got {self.every!r}")
+            unit = "passes over the training tasks (strategy: epoch)" if self.strategy == "epoch" else "training steps"
+            raise ValueError(f"{section}.every must be a number of {unit}, or 0 for never, got {self.every!r}")
 
 
 def default_every(strategy: str | None) -> int:
-    """``every`` when a config leaves it out: 0, which never triggers the event, but 1 under the deprecated ``strategy:
-    epoch`` or ``step``, as before ``every`` counted training steps, when it defaulted to 1; so a config that still
-    sets ``strategy`` keeps its meaning (``eval: {strategy: step}`` evaluates every step until platoon 0.3.0)."""
+    """``every`` when a config leaves it out: 1 when the config sets ``strategy`` (``step`` or ``epoch``), so that the
+    event comes every step or every epoch, as when ``every`` counted in ``strategy``'s units by default; else 0, which
+    never triggers the event.  So ``eval: {strategy: step}`` evaluates every step, and ``eval: {}`` never."""
 
-    return 1 if strategy in ("epoch", "step") else 0
+    return 1 if strategy in STRATEGIES else 0
 
 
 def event_interval(config: TrainEventTriggerConfig, steps_per_epoch: int) -> int | None:
     """Training steps between the events ``config`` triggers, or None when it triggers none: ``every`` steps, or
-    ``every`` passes of ``steps_per_epoch`` steps under the deprecated ``strategy: epoch``."""
+    ``every`` passes of ``steps_per_epoch`` steps under ``strategy: epoch``."""
 
     strategy = getattr(config, "strategy", None)
     every = default_every(strategy) if config.every is None else config.every
-    if strategy == "none" or every < 1:
+    if every < 1:
         return None
     return every * steps_per_epoch if strategy == "epoch" else every
 
@@ -535,10 +513,15 @@ class CheckpointConfig(TrainEventTriggerConfig):
     """The ``checkpoint:`` section: when to save checkpoints, how many recovery checkpoints to keep, and which
     checkpoint to start from.
 
-    ``every`` saves a permanent checkpoint every that many training steps; 0, the default, saves none beside the
-    launch, recovery and final checkpoints. A run that finds checkpoints in its log directory resumes from the newest,
-    weights and optimizer state.
+    ``every`` saves a permanent checkpoint every that many training steps (epochs with ``strategy: epoch``); 0, the
+    default, saves none beside the launch, recovery and final checkpoints. A run that finds checkpoints in its log
+    directory resumes from the newest, weights and optimizer state.
     """
+
+    # Values a release removed, with what replaces them (platoon.utils.config).
+    UNKNOWN_VALUE_HINTS: ClassVar[dict[str, dict[Any, str]]] = {
+        "strategy": {"none": removed_hint("0.3.0", "checkpoint.every: 0, which saves no permanent checkpoint")}
+    }
 
     # A Tinker checkpoint (``tinker://...``) whose weights a new run starts from, with a fresh optimizer.
     load_checkpoint_path: str | None = None
@@ -570,23 +553,25 @@ class CheckpointConfig(TrainEventTriggerConfig):
 @dataclass
 class EvalConfig(TrainEventTriggerConfig):
     """The ``eval:`` section of a training config: evaluation on the eval split during training, every ``every``
-    training steps; ``every: 0``, the default, turns it off.  ``at_start: true`` also evaluates the starting policy, at
-    step 0.  Each evaluation logs the step it started at as ``eval/step``, and the run directory's ``evaluations.jsonl``
-    records each one that completed, so that a start that resumes does not run it again."""
+    training steps (epochs with ``strategy: epoch``); ``every: 0``, the default, turns it off.  ``at_start: true`` also
+    evaluates the starting policy, at step 0.  Each evaluation logs the step it started at as ``eval/step``, and the
+    run directory's ``evaluations.jsonl`` records each one that completed, so that a start that resumes does not run it
+    again."""
 
     UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
         **_HOSTED_HINTS,
         "sample_timeout_seconds": "evaluation during training samples the trained policy through training's model "
         "gateway, so train.sample_timeout_seconds bounds its sampling calls too",
-    }
-    # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
-    DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-        **TrainEventTriggerConfig.DEPRECATED_KEYS,
-        "num_concurrent_rollout_workflow_workers": DeprecatedKey(
-            removed_in="0.3.0",
-            instead="eval.max_concurrent_rollouts (rollouts, not groups: this value × eval.workflow_config.group_size, "
-            "1 unless set)",
+        # Keys a release removed, with what replaces them (platoon.deprecations).
+        "num_concurrent_rollout_workflow_workers": removed_hint(
+            "0.3.0",
+            "eval.max_concurrent_rollouts, which counts rollouts, not groups: this value × "
+            "eval.workflow_config.group_size, 1 unless set",
         ),
+    }
+    # Values a release removed, with what replaces them (platoon.utils.config).
+    UNKNOWN_VALUE_HINTS: ClassVar[dict[str, dict[Any, str]]] = {
+        "strategy": {"none": removed_hint("0.3.0", "eval.every: 0, which never evaluates")}
     }
 
     # Also evaluate the starting policy, at step 0, and apply the first update only once that evaluation has ended, so
@@ -597,9 +582,6 @@ class EvalConfig(TrainEventTriggerConfig):
     # Rollouts that run at once during an evaluation (None: 256). A group's rollouts start together, so as many whole
     # groups of workflow_config.group_size run at once as it holds, and it must hold one.
     max_concurrent_rollouts: int | None = None
-    # The former count of what runs at once, in rollout groups: read as this value × workflow_config.group_size
-    # rollouts. Setting both to different numbers of rollouts is an error.
-    num_concurrent_rollout_workflow_workers: int | None = None
     # How evaluation rollouts run. A training config that loads lays the section over ``train.workflow_config``: the
     # keys it leaves out keep training's rollout settings (``rollout_config``, whose ``inference_params`` merge key by
     # key) and rollout-worker settings (``rollout_isolation``, ``worker_start_method`` and the other ``worker_*``
@@ -682,8 +664,8 @@ class WatchdogConfig:
 
 
 def evaluates(config: "PlatoonTinkerRLTrainerConfig") -> bool:
-    """Whether training evaluates on the eval split: ``eval.every`` is at least 1 (and the deprecated
-    ``eval.strategy`` is not ``none``)."""
+    """Whether training evaluates on the eval split: ``eval.every`` is at least 1 (a config that sets
+    ``eval.strategy`` and leaves ``every`` out evaluates every step or epoch)."""
 
     return event_interval(config.eval, 1) is not None
 

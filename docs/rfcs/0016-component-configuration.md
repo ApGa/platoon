@@ -596,6 +596,15 @@ fixtures show that its subclass renders what core renders today.
   that does nothing, which warns as a deprecation does and becomes a configuration error when the deprecation ends.
   From M6: the ORS options of section 9 and `platoon viz --mode`. A TOML spec's `harness_options` are not on the
   list: specs take options (section 1).
+- **Removal** (note of 2026-10-20). Platoon 0.3.0 removed the forms that 0.2.0 deprecated: `propogate_root_success`,
+  and those of [RFC 0018](0018-configuration-only-projects.md) (its section 9). A removed config key is an unknown
+  key whose problem names what replaces it and the release that removed it, from the class's `UNKNOWN_KEY_HINTS`
+  (`platoon.deprecations.removed_hint`), a removed value is told the same way (`UNKNOWN_VALUE_HINTS`), a service's
+  removed option by its class's hints as the config loads, and a removed command or variable with the same words;
+  each is a configuration error (exit 78). One deprecated form stays, by the maintainer's decision of 2026-10-20: the
+  `strategy` of `eval` and `checkpoint`, as the unit of `every`, without a warning; only its value `none`, which
+  `every: 0` duplicates, is gone. The deprecation machinery stays for the forms that later releases remove, such as
+  `train.task_order` (0.4.0).
 
 ### 11. What changes for users
 

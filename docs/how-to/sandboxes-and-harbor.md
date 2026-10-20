@@ -193,7 +193,6 @@ platoon runs from ([Write and override configs](configs.md#2-build-on-it-with-ex
 |---|---|---|
 | `dataset_dir` or `task_dirs` | | A directory of tasks, or an explicit list of task directories (exactly one, unless a fetched dataset is named instead) |
 | `dataset`, `lock` | none | A dataset fetched by name and pinned in a lock ([Fetch a dataset by name](#fetch-a-dataset-by-name)), in the Harbor cache, `harbor` in the site profile's cache; a fetched dataset's image map is `images/<provider>.json` there ([Build task images](#build-task-images)) |
-| `cache`, `image_map` | none | Deprecated, and removed in 0.3.0: another Harbor cache and image map than the site's, relative paths against the working directory |
 | `splits` | every split holds every task | A mapping, or a JSON or TOML file (relative to `dataset_dir`), from split names to task names |
 | `holdout` | none | `{fraction, group_by, stratify_by, seed, ignore_inputs}`: hold out whole groups of the tasks as the `eval` split, the rest being `train`, instead of `splits`; tasks that share an input file are always in one group ([Hold out whole groups for evaluation](#hold-out-whole-groups-for-evaluation)) |
 | `provider`, `provider_options` | the site profile's, else `docker` | The sandbox provider and its options; an entry without a provider lays its `provider_options` over the profile's |
@@ -213,7 +212,6 @@ platoon runs from ([Write and override configs](configs.md#2-build-on-it-with-ex
 | `close_timeout_s` | 30 | How long closing waits for calls in flight before it stops the sandbox |
 | `max_artifact_bytes` | 1 GiB | The largest artifact a separate verifier receives; a larger one is left out, and the tests decide what its absence means |
 | `sandbox_start_budget_s` | 600 | What a rollout's deadline allows each sandbox start, the task's and a separate verifier's ([Run it](#4-run-it)) |
-| `toolchain_root` | `toolchains` in the site profile's cache | Deprecated, and removed in 0.3.0: another directory of the harness toolchains named by their specs than the site's ([Harness toolchains](#harness-toolchains)) |
 
 Values like `${HF_TOKEN}` or `${REGION:-us}` in a task's `env` tables are read from the host: `[environment] env`
 when a session opens (an unset variable without a default fails the session as a configuration error), and
@@ -357,9 +355,10 @@ find it without naming it:
 | Its images | `images/<provider>.json` in that Harbor cache, with the image files in `images/<provider>/` |
 | Toolchains | `toolchains` in the cache root |
 
-Until platoon 0.3.0 removes them, an entry's `cache`, `image_map` and `toolchain_root` and the variables
-`PLATOON_HARBOR_CACHE` and `PLATOON_TOOLCHAINS` still name other places, each with a deprecation warning; set
-together with a profile's `cache`, the variables must name its directories.
+The site profile's `cache` is the one place that names them. Platoon 0.3.0 removed an entry's `cache`, `image_map`
+and `toolchain_root` and the variables `PLATOON_HARBOR_CACHE` and `PLATOON_TOOLCHAINS`, which named others: a config
+that sets one of the options does not load, and a command that loads a config, or takes the cache from the site,
+refuses to run while one of the variables is set, each with exit 78 and a message that names the profile's `cache`.
 
 Runs check what prepare makes before any rollout: `platoon train`, `eval` and `rollout` stop with exit 78 and the
 `platoon prepare` command for their config, overrides included, when a harness's toolchain is not built, or when a
@@ -439,9 +438,10 @@ when the run lists its tasks. So the lock they write is the one the run reads, b
 several nodes that share it, so of two at once the second finds the first's lock current. `verify` also takes a lock
 file (with `--cache`).
 
-**Fetch config files**, the input of these commands until the run config's entry said the same, hold the keys above
-at their top level, with `lock` and `workers`, and resolve their relative paths against themselves. They still work
-where a config does, with a deprecation warning, and platoon 0.3.0 removes them: move their keys into the entry.
+**Fetch config files**, the input of these commands until the run config's entry said the same, held the keys
+above at their top level. Platoon 0.3.0 removed them, with `fetch`'s `--lock` and `--cache`, which applied to them
+alone: the commands refuse a fetch config file, and `fetch` the two options, each naming what replaces it (exit 78).
+Move the file's keys into a Harbor entry of the run's config, and its `workers` into `fetch --workers`.
 
 A fetch reads the dataset's index (`registry.json`, else `task-index.json`, else every directory with a `task.toml`),
 adds the fields of the extra index files `index` names (JSON, or JSONL rows keyed by `key`), and downloads only the
@@ -492,8 +492,7 @@ environments:
 | `lock` | The lock to read (and, with `dataset`, to write; default `<Harbor cache>/locks/<hash of the fetch settings>.lock.json`) |
 
 The Harbor cache, which holds the tasks' files, the locks and the image maps, is `harbor` in the site profile's
-`cache`, else `~/.cache/platoon/harbor` ([Write the site's profile](clusters.md#4-write-the-sites-profile-once)). An
-entry's `cache` and `image_map` (a JSON file or an inline mapping) still name others until 0.3.0 removes them.
+`cache`, else `~/.cache/platoon/harbor` ([Write the site's profile](clusters.md#4-write-the-sites-profile-once)).
 
 `platoon train` and `platoon eval` fetch a `dataset` pinned to a commit when no lock lists it yet, in the process that
 lists the tasks; a moving reference (a branch, or no revision) is fetched only by `platoon harbor fetch --update`. A
@@ -569,12 +568,12 @@ platoon harbor images plan locks/my-tasks.lock.json --image-map images/site.json
 ```
 
 Each takes a training or evaluation config, with overrides, and acts on each Harbor entry's lock (the one that
-answers its `dataset`, or the `lock` it names) with the entry's image map: its default image map,
-`images/<provider>.json` in its Harbor cache, unless it names a deprecated `image_map`. `build` uses the builder of the
-entry's sandbox provider, `oci` for `singularity` and `docker` for `docker` (`--builder` names another), and puts the
-image files in `images/<provider>/` next to a default map, else in `images/` next to the map (`--out` names another
-directory). Builds of one map at once, also on several nodes, take turns on each image and build it once. The commands
-also take a lock file, with `--image-map` (and, for `build`, `--cache`).
+answers its `dataset`, or the `lock` it names) with the entry's image map, `images/<provider>.json` in its Harbor
+cache. `build` uses the builder of the entry's sandbox provider, `oci` for `singularity` and `docker` for `docker`
+(`--builder` names another), and puts the image files in `images/<provider>/` next to the entry's map, or, for a
+lock file, in `images/` next to the map `--image-map` names (`--out` names another directory). Builds of one map at
+once, also on several nodes, take turns on each image and build it once. The commands also take a lock file, with
+`--image-map` (and, for `build`, `--cache`).
 
 `plan` lists one image per build key, with its task count, base images and whether the map has it, plus the
 prebuilt images tasks name in `docker_image`; an entry whose image file is gone, or is not the size its build
@@ -598,10 +597,11 @@ as not checked and do not fail the check.
 | `docker` | `docker build`, tagged `platoon-harbor:<key>` for the `docker` provider; with `--push REPO`, pushed and recorded by digest (enroot sites import that digest) | Docker or Podman (`PLATOON_DOCKER=podman`) |
 
 The image map is a site file; the lock stays the same everywhere. An entry with a fetched dataset (`dataset` or
-`lock`) that names no `image_map` uses its default image map, `images/<provider>.json` in its Harbor cache (with
-`provider: singularity` and no site profile, `~/.cache/platoon/harbor/images/singularity.json`), when that file
-exists; a missing file means no map. An entry that serves a directory (`dataset_dir`, `task_dirs`) has no default
-map: its tasks run their `docker_image` or `default_image` unless it names the deprecated `image_map`.
+`lock`) uses its default image map, `images/<provider>.json` in its Harbor cache (with `provider: singularity` and no
+site profile, `~/.cache/platoon/harbor/images/singularity.json`), when that file exists; a missing file means no map.
+An entry that serves a directory (`dataset_dir`, `task_dirs`) has no image map: its tasks run their `docker_image` or
+`default_image`, and a separate verifier built from `tests/Dockerfile` cannot start. To build a directory's images,
+name it as a dataset to fetch (`dataset: ./tasks`), whose images `platoon prepare` builds.
 
 ```json
 {"version": 1, "images": {"sha256:<key>": {"image": "images/<key>.sif", "sha256": "<file digest>", "builder": "oci",
@@ -963,9 +963,9 @@ toolchain = "my-agent-1.0"   # a name under the toolchain root; an absolute path
 memory_mb = 2048             # the harness's own processes: added to the sandbox's memory limit
 ```
 
-The toolchain root is `toolchains` in the site profile's `cache`, else `~/.cache/platoon/toolchains` (an entry's
-`toolchain_root` and `$PLATOON_TOOLCHAINS` name another until 0.3.0 removes them). A toolchain is a directory
-`<root>/<name>/` with a `manifest.json`:
+The toolchain root is `toolchains` in the site profile's `cache`, else `~/.cache/platoon/toolchains`
+(`platoon toolchain build --root` builds into another directory, where a run finds a toolchain only by its absolute
+path). A toolchain is a directory `<root>/<name>/` with a `manifest.json`:
 
 ```json
 {"name": "my-agent-1.0", "build_path": "/opt/toolchains/my-agent-1.0", "tree_hash": "sha256:..."}

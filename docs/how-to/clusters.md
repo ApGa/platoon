@@ -154,9 +154,10 @@ weakens isolation and never changes what trains:
 path and SHA-256 and each Harbor entry's provider and options with where they came from (`site`,
 `sandbox_providers`), and `config.resolved.yaml` holds the values and names each entry's provider, so the run
 directory loads again without the profile, and a supervised restart keeps them however the profile changes. The
-variables `PLATOON_HARBOR_CACHE` and `PLATOON_TOOLCHAINS` still name the two cache directories until
-platoon 0.3.0 removes them, with a deprecation warning; set together with a profile's `cache`, they must name the same
-directories.
+variables `PLATOON_HARBOR_CACHE` and `PLATOON_TOOLCHAINS`, which named the two cache directories before the profile's
+`cache` did, are gone since platoon 0.3.0: a command that loads a config, or takes the cache from the site, refuses
+to run while one of them is set (exit 78), so unset them in the job's environment and put the directory they named in
+the profile's `cache`.
 
 ### 5. Choose a container runtime for sandboxes
 

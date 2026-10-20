@@ -14,6 +14,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from site_cache import use_site_cache
 
 from platoon import cli
 from platoon.harness.spec import HarnessSpecError, load_spec
@@ -299,12 +300,11 @@ def test_a_failed_build_leaves_nothing_behind(tmp_path, fake_uv, monkeypatch):
 
 def test_a_build_needs_a_recipe_and_goes_under_the_toolchain_root(tmp_path, fake_uv, monkeypatch):
     spec_path = write_spec(tmp_path)
-    monkeypatch.delenv("PLATOON_TOOLCHAINS", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     default = tmp_path / "home" / ".cache" / "platoon" / "toolchains" / "agent-1.0"
-    assert toolchain_dir(load_spec(spec_path)) == default  # the cache root's, without a root or the variable
-    monkeypatch.setenv("PLATOON_TOOLCHAINS", str(tmp_path / "from-env"))
-    assert toolchain_dir(load_spec(spec_path)) == tmp_path / "from-env" / "agent-1.0"
+    assert toolchain_dir(load_spec(spec_path)) == default  # the cache root's, without a root or a site profile
+    use_site_cache(monkeypatch, tmp_path / "site")
+    assert toolchain_dir(load_spec(spec_path)) == tmp_path / "site" / "toolchains" / "agent-1.0"
     plain = tmp_path / "plain.toml"
     plain.write_text('name = "plain"\nversion = "1"\n[launch]\nargv = ["true"]\n')
     with pytest.raises(HarnessSpecError, match="has no \\[install.recipe\\]"):

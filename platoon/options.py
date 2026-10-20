@@ -125,9 +125,8 @@ def config_phases(config: Any, split: str | None = None) -> tuple[Phase, ...]:
     """The phases whose rollouts a command runs with a loaded config: with ``split``, that split's phase only (the
     one task ``platoon rollout`` runs); for an evaluation config (``inference``), the phase of its ``split`` (``eval``
     unless it evaluates the ``train`` split); for a training config, ``train``, and ``eval`` too when it evaluates
-    (``eval.every`` is at least 1, and the deprecated ``eval.strategy`` is not ``none``); for a config of
-    environments alone (:class:`~platoon.train.components.EnvironmentsConfig`), which either kind extends,
-    both."""
+    (``eval.every`` is at least 1); for a config of environments alone
+    (:class:`~platoon.train.components.EnvironmentsConfig`), which either kind extends, both."""
 
     from platoon.train.components import EnvironmentsConfig
 
@@ -137,11 +136,8 @@ def config_phases(config: Any, split: str | None = None) -> tuple[Phase, ...]:
         return PHASES
     if hasattr(config, "inference"):
         return (phase_of(str(getattr(config, "split", "eval"))),)
-    evaluation = getattr(config, "eval", None)
-    every = getattr(evaluation, "every", 0)
-    if evaluation is not None and getattr(evaluation, "strategy", None) != "none" and isinstance(every, int):
-        return ("train", "eval") if every > 0 else ("train",)
-    return ("train",)
+    every = getattr(getattr(config, "eval", None), "every", 0)
+    return ("train", "eval") if isinstance(every, int) and every > 0 else ("train",)
 
 
 def lock_record(values: Mapping[Phase, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:

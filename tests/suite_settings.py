@@ -35,9 +35,9 @@ def _ipython_dir_outside_home(tmp_path_factory: pytest.TempPathFactory) -> Itera
 
 @pytest.fixture(autouse=True, scope="session")
 def _no_site_profile(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
-    """Keep the machine's site profile (``~/.config/platoon/site.yaml``, ``$PLATOON_SITE``) and the deprecated cache
-    variables out of the suite, which runs as if the site had none: a test that wants a profile writes one and names it
-    in ``PLATOON_SITE`` (``platoon.site``)."""
+    """Keep the machine's site profile (``~/.config/platoon/site.yaml``, ``$PLATOON_SITE``) out of the suite, which runs
+    as if the site had none, and the cache variables that platoon 0.3.0 removed, with which no config loads: a test that
+    wants a profile writes one and names it in ``PLATOON_SITE`` (``platoon.site``, ``tests/site_cache.py``)."""
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg-config")))

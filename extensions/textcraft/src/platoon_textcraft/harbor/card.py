@@ -182,11 +182,13 @@ environments:
     service_kwargs:
       dataset: hf://{repo_id}@<commit>
       select: {{split: {first}, difficulty: medium}}   # the RAO training set
-      image_map: images/site.json   # `platoon harbor images build` builds the one image every task uses
       provider: singularity
       provider_options: {{allow_network_none: true}}   # the tasks run without a network
     harness: <harness>
 ```
+
+`platoon prepare` on that config fetches the tasks and builds the one image they all use, once per site, into the
+Harbor cache that the site profile names.
 
 platoon stops the agent's processes and grades each task in a verifier sandbox of its own, which gets the action log
 but not the agent's `/logs/verifier`, so the Singularity caveat above does not apply to it: a planted reward scores 0.

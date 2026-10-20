@@ -31,7 +31,9 @@ loaded config keeps ``env`` with the version it resolved to.
 
 A key that a config class names as deprecated (its ``DEPRECATED_KEYS``, :mod:`platoon.deprecations`) still loads;
 the loader finds each one the config sets, with its dotted path (:func:`find_deprecations`), keeps them on the
-:class:`ResolvedConfig` and warns of them as :class:`~platoon.deprecations.PlatoonDeprecationWarning`.
+:class:`ResolvedConfig` and warns of them as :class:`~platoon.deprecations.PlatoonDeprecationWarning`.  Once a release
+removes the key, it is an unknown key whose problem quotes the class's hint (``UNKNOWN_KEY_HINTS``): what replaces it,
+and the release that removed it; a value a release removed is told so too (``UNKNOWN_VALUE_HINTS``).
 
 Each run records what it ran: :func:`write_run_record` writes ``config.resolved.yaml`` (the merged config
 after overrides, which is also what the run loads) and ``lock.json`` (package versions and the commits of those
@@ -467,6 +469,16 @@ UNKNOWN_KEY_HINTS = "UNKNOWN_KEY_HINTS"
 # And where a required key it misses may come from instead: ``REQUIRED_KEY_HINTS = {key: hint}`` (a ClassVar), which
 # the missing-key problem quotes.
 REQUIRED_KEY_HINTS = "REQUIRED_KEY_HINTS"
+# And what to do instead of a value that one of its keys does not take, such as a value a release removed:
+# ``UNKNOWN_VALUE_HINTS = {key: {value: hint}}`` (a ClassVar), which the problem of that value quotes.
+UNKNOWN_VALUE_HINTS = "UNKNOWN_VALUE_HINTS"
+# And what to do instead of a key of a free-form mapping field that what the mapping configures does not take, such as
+# an option a release removed: ``UNKNOWN_OPTION_HINTS = {field: function}`` (a ClassVar), the function taking the
+# section that holds the field (a mapping) and returning ``{key: hint}``.  Each key the field gives that the function
+# names is an unknown key whose problem quotes its hint; the field's other keys are left to what it configures.  An
+# environment entry's ``service_kwargs`` are checked so, against the hints of the service class the entry names
+# (``platoon.train.components``).
+UNKNOWN_OPTION_HINTS = "UNKNOWN_OPTION_HINTS"
 # A config class may check a free-form mapping field against a schema of its own without building it: a class
 # attribute ``FIELD_SCHEMAS = {field: schema}`` (a ClassVar).  Validation, the reading of numbers and the parsing of
 # overrides take the field's value as a value of ``schema`` (its keys, with its UNKNOWN_KEY_HINTS, and their types),
@@ -484,6 +496,19 @@ def _field_annotation(schema: Any, name: str, field: _Field) -> Any:
 
 def _unknown_key(key: str, fields: Mapping[str, _Field], parent: str, hints: Mapping[str, str] | None = None) -> str:
     return unknown_key(key, fields, parent, hint=(hints or {}).get(key))
+
+
+def value_hint(schema: Any, key: str, value: Any) -> str | None:
+    """What ``schema``, a config class, says to do instead of ``value`` for its key ``key`` (its
+    ``UNKNOWN_VALUE_HINTS``); None when it says nothing."""
+
+    hints = (getattr(schema, UNKNOWN_VALUE_HINTS, None) or {}).get(key)
+    if not isinstance(hints, Mapping):
+        return None
+    try:
+        return hints.get(value)
+    except TypeError:  # a value that cannot be a key, such as a list
+        return None
 
 
 def unknown_key(key: Any, known: Iterable[str], parent: str, *, hint: str | None = None, otherwise: str = "") -> str:
@@ -538,9 +563,16 @@ def _problems(value: Any, annotation: Any, path: str) -> list[str]:
         problems: list[str] = []
         free_form = _free_form_model(annotation)
         hints = getattr(annotation, UNKNOWN_KEY_HINTS, None)
+        option_hints = getattr(annotation, UNKNOWN_OPTION_HINTS, None) or {}
         for key, item in value.items():
             if key in fields:
-                problems.extend(_problems(item, _field_annotation(annotation, key, fields[key]), _join(path, key)))
+                found = _problems(item, _field_annotation(annotation, key, fields[key]), _join(path, key))
+                if found and (hint := value_hint(annotation, str(key), item)) is not None:
+                    found = [f"{problem}; {hint}" for problem in found]
+                if key in option_hints and isinstance(item, Mapping):  # a free-form mapping's keys that it refuses
+                    refused, parent = option_hints[key](value), _join(path, key)
+                    found += [unknown_key(name, (), parent, hint=refused[name]) for name in item if name in refused]
+                problems.extend(found)
             elif not free_form:
                 problems.append(_unknown_key(str(key), fields, path, hints))
         required = getattr(annotation, REQUIRED_KEY_HINTS, None) or {}
@@ -876,9 +908,9 @@ def _over_default(default: Any, value: Mapping[str, Any]) -> Mapping[str, Any]:
     laid over the default's own.
 
     Only the values that differ from the class's own defaults are carried; the class fills in the rest as it
-    would.  So a default equal to its class's leaves ``value`` as given, and a value ``__post_init__``
-    normalizes (``RolloutConfig.propagate_root_success``) never collides with the deprecated key it reads: when
-    ``value`` gives a renamed key or its deprecated name, neither is carried from ``default``.
+    would.  So a default equal to its class's leaves ``value`` as given, and a value ``__post_init__`` reads from a
+    renamed key's deprecated name never collides with the name ``value`` gives: when ``value`` gives a renamed key or
+    its deprecated name, neither is carried from ``default``.
     """
 
     try:
@@ -972,6 +1004,11 @@ def _apply(data: dict[str, Any], override: Override, schema: Any) -> None:
                 item_type = item_type if is_sequence else Any
                 node[key] = [*current, _parse_value(override.value, item_type, _join(path, len(current)), override)]
             else:
+                if isinstance(node, dict) and (hint := _hinted_value(annotation, key, override.value)) is not None:
+                    # A value the key no longer takes, such as one a release removed, as the override writes it:
+                    # eval.strategy=none is the removed value, not a null.
+                    found = _problems(override.value, child_annotation, path) or [f"{path}: {override.value!r}"]
+                    raise ConfigError([f"override {override}: {problem}; {hint}" for problem in found])
                 value = _parse_value(override.value, child_annotation, path, override)
                 current = node[key] if (isinstance(node, list) or key in node) else None
                 if isinstance(value, Mapping) and isinstance(current, Mapping):
@@ -985,6 +1022,17 @@ def _apply(data: dict[str, Any], override: Override, schema: Any) -> None:
             child = {}
             node[key] = child
         node, annotation = child, child_annotation
+
+
+def _hinted_value(annotation: Any, key: Any, text: str) -> str | None:
+    """What a config class of ``annotation`` (a member of a union) says to do instead of ``text``, an override's value
+    as written, for its key ``key`` (its ``UNKNOWN_VALUE_HINTS``); None when it says nothing."""
+
+    annotation = _strip(annotation)
+    for member in _without_none(annotation) if _is_union(annotation) else [annotation]:
+        if (hint := value_hint(_strip(member), str(key), text)) is not None:
+            return hint
+    return None
 
 
 def _list_annotation(annotation: Any) -> Any:
@@ -1133,8 +1181,8 @@ def _parse_untyped(text: str) -> Any:
 @dataclass(frozen=True)
 class ResolvedConfig:
     """A config after ``extends`` and overrides: the plain data, the built object and where they came from, the
-    deprecated keys it sets (:func:`find_deprecations`) and the deprecated variables set, and what the site profile
-    gave it (``site``, :class:`platoon.site.SiteUse`)."""
+    deprecated keys it sets (:func:`find_deprecations`), and what the site profile gave it (``site``,
+    :class:`platoon.site.SiteUse`)."""
 
     data: dict[str, Any]
     config: Any
@@ -1166,14 +1214,14 @@ def resolve_config(
     was.  (An evaluation config's ``inference.output_dir`` stays unset: ``platoon eval`` makes each start a directory
     of its own under the profile's ``runs``.)
 
-    The deprecated keys the config sets go into ``deprecations``, after the deprecated site variables that are set
-    (:func:`platoon.site.variable_deprecations`), and with ``warn`` each is also warned of as a
+    The deprecated keys the config sets go into ``deprecations``, and with ``warn`` each is also warned of as a
     :class:`~platoon.deprecations.PlatoonDeprecationWarning`: an ``error`` warning filter
     (``warnings.simplefilter("error", PlatoonDeprecationWarning)``) makes the first one raise.  The command line
-    passes ``warn=False`` and reports them itself.
+    passes ``warn=False`` and reports them itself.  A cache variable that platoon 0.3.0 removed is a problem when it
+    is set (:func:`platoon.site.removed_variable_problems`).
     """
 
-    from platoon.site import apply_profile, site_profile, variable_deprecations, variable_problems
+    from platoon.site import apply_profile, removed_variable_problems, site_profile
 
     data: dict[str, Any] = {}
     sources: list[Path] = []
@@ -1198,7 +1246,7 @@ def resolve_config(
     resolve_input_paths(data, Path.cwd())
     _expand_home_in_outputs(data)
     profile = site_profile() if site is None else site
-    if problems := variable_problems(profile):
+    if problems := removed_variable_problems():
         raise ConfigError(problems, source=config_path)
     fields = _schema_fields(schema) if schema is not None else None
     use = apply_profile(
@@ -1208,7 +1256,7 @@ def resolve_config(
         log_path=fields is not None and "log_path" in fields,
         named_providers=named_providers,
     )
-    deprecations: tuple[Deprecation, ...] = tuple(variable_deprecations())
+    deprecations: tuple[Deprecation, ...] = ()
     if schema is None:
         config: Any = data
     else:

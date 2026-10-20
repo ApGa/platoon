@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import os
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +13,6 @@ import pytest
 import yaml
 
 from platoon import cli
-from platoon.deprecations import PlatoonDeprecationWarning
 from platoon.site import (
     PROVIDER_OPTIONS,
     SiteProfile,
@@ -232,35 +230,23 @@ def test_the_cache_root_is_the_profiles_and_holds_the_harbor_cache_and_the_toolc
     assert toolchain_root() == tmp_path / "cache" / "toolchains"
 
 
-def test_the_deprecated_cache_variables_still_work_and_warn(tmp_path, monkeypatch):
+def test_the_cache_variables_that_platoon_0_3_0_removed_name_nothing(tmp_path, monkeypatch):
+    """``$PLATOON_HARBOR_CACHE`` and ``$PLATOON_TOOLCHAINS`` named the Harbor cache and the toolchain root until
+    platoon 0.3.0 removed them: the cache root holds both, whatever they say, and a config does not load while one is
+    set (``tests/test_removed_forms.py``)."""
+
     from platoon.envs.harbor.lock import default_cache
+    from platoon.harness.toolchains import toolchain_root
 
-    config = _write(tmp_path / "train.yaml", {"train": TRAIN, "log_path": str(tmp_path / "runs")})
-    monkeypatch.setenv("PLATOON_HARBOR_CACHE", str(tmp_path / "old-cache"))
-
-    with pytest.warns(PlatoonDeprecationWarning) as caught:
-        resolved = resolve_config(config, (), PlatoonTinkerRLTrainerConfig)
-
-    assert default_cache() == tmp_path / "old-cache"
-    assert [deprecation.path for deprecation in resolved.deprecations] == ["$PLATOON_HARBOR_CACHE"]
-    # Among the warnings caught, which may hold another test's, such as a ResourceWarning of an event loop it left open.
-    message = next(str(item.message) for item in caught if item.category is PlatoonDeprecationWarning)
-    assert "use the site profile's cache, whose harbor directory it names" in message
-    assert "platoon 0.3.0 removes it" in message
-
-
-def test_a_cache_variable_that_disagrees_with_the_profile_is_an_error(tmp_path, monkeypatch):
-    config = _write(tmp_path / "train.yaml", {"train": TRAIN, "log_path": str(tmp_path / "runs")})
     _profile(tmp_path, monkeypatch, cache=str(tmp_path / "cache"))
-    (tmp_path / "cache" / "harbor").mkdir(parents=True)
-    monkeypatch.setenv("PLATOON_HARBOR_CACHE", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("PLATOON_HARBOR_CACHE", str(tmp_path / "old-cache"))
+    monkeypatch.setenv("PLATOON_TOOLCHAINS", str(tmp_path / "old-toolchains"))
 
-    with pytest.raises(ConfigError, match=r"\$PLATOON_HARBOR_CACHE names .*elsewhere, but the site profile"):
+    assert default_cache() == tmp_path / "cache" / "harbor"
+    assert toolchain_root() == tmp_path / "cache" / "toolchains"
+    config = _write(tmp_path / "train.yaml", {"train": TRAIN, "log_path": str(tmp_path / "runs")})
+    with pytest.raises(ConfigError, match=r"\$PLATOON_HARBOR_CACHE: platoon 0\.3\.0 removed it"):
         resolve_config(config, (), PlatoonTinkerRLTrainerConfig, warn=False)
-
-    (tmp_path / "link").symlink_to(tmp_path / "cache" / "harbor")  # the same directory by another path: no conflict
-    monkeypatch.setenv("PLATOON_HARBOR_CACHE", str(tmp_path / "link"))
-    resolve_config(config, (), PlatoonTinkerRLTrainerConfig, warn=False)
 
 
 # --- what it gives a config ----------------------------------------------------------------------------------------
@@ -578,39 +564,6 @@ def test_config_validate_names_the_site_profile_a_problem_is_in(tmp_path, monkey
     assert (
         f"FAIL {config}\n  {profile}: provider: process runs the agents' commands on this host, without isolation"
     ) in capsys.readouterr().out
-
-
-# --- the deprecated entry keys -------------------------------------------------------------------------------------
-
-
-def test_a_harbor_entrys_cache_image_map_and_toolchain_root_are_deprecated(tmp_path, capsys):
-    config = _write(
-        tmp_path / "train.yaml",
-        {
-            "train": TRAIN,
-            "log_path": str(tmp_path),
-            "environments": [_harbor(cache="c", image_map="m.json", toolchain_root="t")],
-        },
-    )
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", PlatoonDeprecationWarning)
-        resolved = resolve_config(config, (), PlatoonTinkerRLTrainerConfig)
-
-    assert [deprecation.path for deprecation in resolved.deprecations] == [
-        "environments.0.service_kwargs.cache",
-        "environments.0.service_kwargs.image_map",
-        "environments.0.service_kwargs.toolchain_root",
-    ]
-    assert resolved.deprecations[0].message == (
-        "environments.0.service_kwargs.cache: deprecated; use the site profile's cache (its harbor directory) instead "
-        "(platoon 0.3.0 removes it)"
-    )
-    assert len([item for item in caught if issubclass(item.category, PlatoonDeprecationWarning)]) == 3
-    assert resolved.data["environments"][0]["service_kwargs"]["cache"] == "c"  # still the working directory's
-
-    assert _exit_code(["config", "validate", "--strict", str(config)]) == 78
-    assert "environments.0.service_kwargs.image_map: deprecated" in capsys.readouterr().out
 
 
 # --- the commands --------------------------------------------------------------------------------------------------

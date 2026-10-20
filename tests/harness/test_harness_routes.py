@@ -17,6 +17,7 @@ from typing import Any, ClassVar
 import pytest
 from aiohttp import web
 from harness_fakes import FakeChatServer, FakeGateway, answer, bash_call
+from site_cache import use_site_cache
 from test_harness_rollout import rollout_config, runner
 
 from platoon.harness import toolchains
@@ -99,10 +100,12 @@ def _task_dir(tmp_path: Path) -> Path:
     return task_dir
 
 
-def _toolchain_root(tmp_path: Path) -> Path:
-    """A toolchain whose interpreter is this test's Python, built (as far as its manifest says) at BUILD_PATH."""
+def _toolchain_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A toolchain whose interpreter is this test's Python, built (as far as its manifest says) at BUILD_PATH, under the
+    toolchain root of the site cache of the test's own."""
 
-    root = tmp_path / "toolchains"
+    use_site_cache(monkeypatch, tmp_path / "site")
+    root = tmp_path / "site" / "toolchains"
     toolchain = root / "tc-agent-1"
     (toolchain / "bin").mkdir(parents=True)
     (toolchain / "bin" / "python3").symlink_to(sys.executable)
@@ -209,11 +212,11 @@ async def test_the_runner_starts_a_route_that_is_gone_again_before_it_launches_t
 @pytest.mark.asyncio
 async def test_a_named_toolchain_is_staged_and_mounted_at_its_build_path(tmp_path, monkeypatch):
     monkeypatch.setenv(toolchains.TOOLCHAIN_CACHE_ENV, str(tmp_path / "toolchain-cache"))
-    root = _toolchain_root(tmp_path)
+    _toolchain_root(tmp_path, monkeypatch)
     server = UnixChatServer([bash_call("echo hello > hello.txt"), answer("done")])
     gateway = UnixGateway(server)
 
-    await _run(tmp_path, gateway, harness=_toolchain_spec(tmp_path), toolchain_root=str(root))
+    await _run(tmp_path, gateway, harness=_toolchain_spec(tmp_path))
 
     ((_, outcome),) = gateway.collected
     assert outcome.status == "scored" and outcome.reward == 1.0, outcome
@@ -228,11 +231,11 @@ async def test_a_named_toolchain_is_staged_and_mounted_at_its_build_path(tmp_pat
 @pytest.mark.asyncio
 async def test_on_the_rollout_host_a_named_toolchain_runs_from_its_staged_copy(tmp_path, monkeypatch):
     monkeypatch.setenv(toolchains.TOOLCHAIN_CACHE_ENV, str(tmp_path / "toolchain-cache"))
-    root = _toolchain_root(tmp_path)
+    _toolchain_root(tmp_path, monkeypatch)
     server = UnixChatServer([answer("done")])
     gateway = UnixGateway(server)
 
-    await _run(tmp_path, gateway, harness=_toolchain_spec(tmp_path), placement="local", toolchain_root=str(root))
+    await _run(tmp_path, gateway, harness=_toolchain_spec(tmp_path), placement="local")
 
     ((_, outcome),) = gateway.collected
     assert outcome.status == "scored"  # graded: nothing was written, so a reward of 0
@@ -244,10 +247,11 @@ async def test_on_the_rollout_host_a_named_toolchain_runs_from_its_staged_copy(t
 @pytest.mark.asyncio
 async def test_a_toolchain_that_is_not_there_is_a_setup_error(tmp_path, monkeypatch):
     monkeypatch.setenv(toolchains.TOOLCHAIN_CACHE_ENV, str(tmp_path / "toolchain-cache"))
+    use_site_cache(monkeypatch, tmp_path / "empty")  # its toolchain root holds nothing
     server = UnixChatServer([answer("done")])
     gateway = UnixGateway(server)
 
-    await _run(tmp_path, gateway, harness=_toolchain_spec(tmp_path), toolchain_root=str(tmp_path / "empty"))
+    await _run(tmp_path, gateway, harness=_toolchain_spec(tmp_path))
 
     ((_, outcome),) = gateway.collected
     assert (outcome.status, outcome.failure_kind) == ("error", "harness_setup")

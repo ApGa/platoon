@@ -215,18 +215,35 @@ both phases (`ok   environments.yaml (EnvironmentsConfig)`).
 
 A key that is going away still loads, for one minor release. `config validate` lists each deprecated key a file
 sets under it, with the key that replaces it and the release that removes it, and `--strict` fails on them, so CI
-finds them before that release does. For a `train.yaml` that still sets the misspelled `propogate_root_success`:
+finds them before that release does. For a `train.yaml` that still sets `train.task_order`, the name of
+`train.task_sampler` until platoon 0.3.0:
 
 ```console
 $ uv run platoon config validate --strict train.yaml
 FAIL train.yaml
-  train.workflow_config.rollout_config.propogate_root_success: deprecated; use train.workflow_config.rollout_config.propagate_root_success instead (platoon 0.3.0 removes it)
+  train.task_order: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)
 ```
 
 `train`, `eval`, `rollout` and `config show` name each one once on stderr and run as before. In Python, loading
 such a config warns with `pt.PlatoonDeprecationWarning`, a `FutureWarning`;
 `warnings.simplefilter("error", pt.PlatoonDeprecationWarning)`, or pytest's
 `-W error::platoon.PlatoonDeprecationWarning`, turns them into errors.
+
+Once the release a deprecation names removes the key, a config that still sets it does not load (exit code 78): the
+key is unknown, and its problem says what replaces it and which release removed it. For a `train.yaml` that still
+sets `train.rollout_group_key`, which platoon 0.3.0 removed:
+
+```console
+$ uv run platoon config validate train.yaml
+FAIL train.yaml
+  train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by
+```
+
+A service option that a release removed fails the same way as the config loads, `--no-resolve` or not
+(`environments.0.service_kwargs.cache: unknown key; platoon 0.3.0 removed it; use the site profile's cache, ...`), and
+so does a value a release removed, in a file or an override: `eval.strategy=none` is the `none` that platoon 0.3.0
+removed, not a null (`eval.strategy=null` leaves `strategy` unset). The [changelog](../../CHANGELOG.md) lists what each
+release removed, with what replaces each form.
 
 ### 5. Keep keys strict
 
@@ -272,9 +289,8 @@ so the record is exactly what ran:
 Two files go there, replacing any older copies:
 
 - `config.resolved.yaml`: the merged config after `extends:` and overrides, with its input and output paths
-  absolute, so it loads from any directory (a Harbor entry's deprecated `cache`, `image_map` and `toolchain_root`
-  stay as written, relative to the working directory), and each Harbor entry's sandbox provider named. Its header
-  lists the source files in merge order and every override:
+  absolute, so it loads from any directory, and each Harbor entry's sandbox provider named. Its header lists the
+  source files in merge order and every override:
 
   ```yaml
   # Written by platoon: the merged config after extends and overrides. Loadable as a config file.

@@ -290,7 +290,8 @@ service_kwargs:
    first update only once that evaluation has ended.
    - **Cadence in steps.** `eval.every` counts training steps, and so does `checkpoint.every`; 0, the default of
      both, turns the event off. `strategy`, which made `every` count epochs by default, so that `eval: {every: 20}`
-     meant 20 epochs, is a deprecated key until 0.3.0: a config that still sets it keeps its meaning.
+     meant 20 epochs, is a deprecated key until 0.3.0: a config that still sets it keeps its meaning. (It stays after
+     all, as the unit of `every`, without the deprecation: section 9's note of 2026-10-20.)
    - **Concurrency in rollouts.** `train.max_concurrent_rollouts` and `eval.max_concurrent_rollouts` count the
      rollouts that run at once, a whole group at a time (by default every rollout of a training batch, and 256 in an
      evaluation). They replace `num_concurrent_rollout_workflow_workers`, which counted groups, so that one number
@@ -626,6 +627,16 @@ CHANGELOG lists each with its migration.
   the evaluations that completed, which a resume reads.
 
 **Unchanged:** `splits` manifests, `lock`, `select`, `overlays`, and every other entry key.
+
+**In 0.3.0** (note of 2026-10-20). Platoon 0.3.0 removed the deprecated forms above, each as its deprecation said:
+`train.rollout_group_key`, `workflow_config.straggler_policy_key`, `num_concurrent_rollout_workflow_workers`,
+`restart_wrapper`, fetch config files, and the entries' `cache`, `image_map` and `toolchain_root` with
+`PLATOON_HARBOR_CACHE` and `PLATOON_TOOLCHAINS`. A config, an override or a command that still uses one fails as a
+configuration error (exit 78) that names what replaces it and says that 0.3.0 removed it (RFC 0016, section 10).
+`strategy` is the exception, by the maintainer's decision of 2026-10-20: it stays, without a deprecation warning, as
+the unit of `every` (`step`, what a section that leaves it out counts, or `epoch`, a pass over the training tasks),
+with the meaning a config that sets it has had, an `every` it leaves out included, which is 1. Only `strategy: none`,
+which `every: 0` duplicates, is gone with the others.
 
 ## The hard parts
 

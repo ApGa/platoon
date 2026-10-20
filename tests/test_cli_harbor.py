@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from site_cache import use_site_cache
 
 from platoon import cli
 
@@ -19,7 +20,17 @@ def _exit_code(argv: list[str]) -> int:
 
 
 @pytest.fixture
-def fetch_config(tmp_path: Path) -> Path:
+def harbor_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The Harbor cache, in the site cache of the test's own (``tests/site_cache.py``)."""
+
+    return use_site_cache(monkeypatch, tmp_path / "cache")
+
+
+@pytest.fixture
+def local_config(tmp_path: Path, harbor_cache: Path) -> Path:
+    """A training config whose entry names a local dataset of two tasks that build one image, and the lock to write,
+    relative to the config file."""
+
     for name in ("alpha", "beta"):
         files = {
             "task.toml": "",
@@ -32,20 +43,26 @@ def fetch_config(tmp_path: Path) -> Path:
             path = tmp_path / "dataset" / name / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
-    config = tmp_path / "configs" / "fetch.yaml"
+    config = tmp_path / "configs" / "train.yaml"
     config.parent.mkdir()
-    config.write_text("dataset: ../dataset\ncache: ../cache\nlock: ../locks/dataset.lock.json\n")
+    config.write_text(
+        "environments:\n"
+        "  - service: harbor\n"
+        "    service_kwargs: {dataset: ../dataset, lock: ../locks/dataset.lock.json}\n"
+        "    harness: platoon-bash\n"
+        "train: {model_name: m, renderer_name: r}\n"
+    )
     return config
 
 
-def test_fetch_verify_plan_and_alias(fetch_config: Path, tmp_path: Path, capsys):
-    cli.main(["harbor", "fetch", str(fetch_config)])
+def test_fetch_verify_plan_and_alias(local_config: Path, harbor_cache: Path, tmp_path: Path, capsys):
+    cli.main(["harbor", "fetch", str(local_config)])
     printed = json.loads(capsys.readouterr().out)
     lock = tmp_path / "locks" / "dataset.lock.json"
-    assert printed == {"lock": str(lock), "tasks": 2, "runnable": 2, "fetched": True}
+    assert printed == {"environment": "default", "lock": str(lock), "tasks": 2, "runnable": 2, "fetched": True}
 
-    cli.main(["harbor", "verify", str(fetch_config)])
-    assert "2 of 2 task(s) match their digests" in capsys.readouterr().err
+    cli.main(["harbor", "verify", str(local_config)])
+    assert "environments[default]: 2 of 2 task(s) match their digests" in capsys.readouterr().err
 
     cli.main(["harbor", "images", "plan", str(lock), "--json-output"])
     plan = json.loads(capsys.readouterr().out)
@@ -54,21 +71,22 @@ def test_fetch_verify_plan_and_alias(fetch_config: Path, tmp_path: Path, capsys)
     image_map = tmp_path / "site" / "images.json"
     cli.main(["harbor", "images", "alias", str(lock), "--image-map", str(image_map), "--image", "local"])
     capsys.readouterr()
-    cli.main(["harbor", "images", "plan", str(fetch_config), "--image-map", str(image_map)])
+    cli.main(["harbor", "images", "plan", str(lock), "--image-map", str(image_map)])
     table = capsys.readouterr().out
     assert "shared" in table and "1 image(s), 0 missing from the image map" in table
 
-    entry = next((tmp_path / "cache" / "tasks").iterdir())
+    entry = next((harbor_cache / "tasks").iterdir())
     (entry / "instruction.md").write_text("tampered\n")
-    assert _exit_code(["harbor", "verify", str(lock), "--cache", str(tmp_path / "cache")]) == 1
+    assert _exit_code(["harbor", "verify", str(lock), "--cache", str(harbor_cache)]) == 1
     assert "the lock says" in capsys.readouterr().out
+    assert _exit_code(["harbor", "verify", str(lock)]) == 1  # a lock file's tasks are in the Harbor cache by default
 
 
-def test_images_verify_checks_the_image_files_against_their_sha256(fetch_config: Path, tmp_path: Path, capsys):
+def test_images_verify_checks_the_image_files_against_their_sha256(local_config: Path, tmp_path: Path, capsys):
     from platoon.envs.harbor.hashing import file_sha256
     from platoon.envs.harbor.images import ImageEntry, update_image_map
 
-    cli.main(["harbor", "fetch", str(fetch_config)])
+    cli.main(["harbor", "fetch", str(local_config)])
     lock = tmp_path / "locks" / "dataset.lock.json"
     image_map = tmp_path / "site" / "images.json"
     capsys.readouterr()
@@ -82,7 +100,7 @@ def test_images_verify_checks_the_image_files_against_their_sha256(fetch_config:
     sif.write_bytes(b"image")
     recorded = file_sha256(sif)
     update_image_map(image_map, {key: ImageEntry(image="images/shared.sif", sha256=recorded, builder="oci")})
-    verify = ["harbor", "images", "verify", str(fetch_config), "--image-map", str(image_map)]
+    verify = ["harbor", "images", "verify", str(lock), "--image-map", str(image_map)]
     cli.main(verify)
     checked = capsys.readouterr()
     assert checked.out == ""
@@ -108,19 +126,21 @@ def test_images_verify_checks_the_image_files_against_their_sha256(fetch_config:
     assert "0 match their SHA-256, 0 missing or mismatched, 1 not checked" in unchecked.err
 
 
-def test_a_local_directory_is_fetched_again_with_its_changes(fetch_config: Path, tmp_path: Path, capsys):
+def test_a_local_directory_is_fetched_again_with_its_changes(
+    local_config: Path, harbor_cache: Path, tmp_path: Path, capsys
+):
     """A local directory's files may change under the same path, so every fetch reads them again: a changed task gets
     its new digest, and a damaged cache entry is replaced, as before."""
 
-    cli.main(["harbor", "fetch", str(fetch_config)])
+    cli.main(["harbor", "fetch", str(local_config)])
     lock = tmp_path / "locks" / "dataset.lock.json"
     before = json.loads(lock.read_text())["tasks"]
     capsys.readouterr()
     (tmp_path / "dataset" / "alpha" / "instruction.md").write_text("Task alpha, revised.\n")
-    damaged = tmp_path / "cache" / next(row["path"] for row in before if row["name"] == "beta")
+    damaged = harbor_cache / next(row["path"] for row in before if row["name"] == "beta")
     (damaged / "instruction.md").write_text("damaged\n")
 
-    cli.main(["harbor", "fetch", str(fetch_config)])
+    cli.main(["harbor", "fetch", str(local_config)])
 
     assert json.loads(capsys.readouterr().out)["fetched"] is True
     after = {row["name"]: row["digest"] for row in json.loads(lock.read_text())["tasks"]}
@@ -129,9 +149,13 @@ def test_a_local_directory_is_fetched_again_with_its_changes(fetch_config: Path,
 
 
 def test_configuration_problems_exit_78(tmp_path: Path, capsys):
-    (tmp_path / "bad.yaml").write_text("dataset: x\nnope: 1\n")
+    (tmp_path / "bad.yaml").write_text("train: {model_name: m, renderer_name: r}\n")
     assert _exit_code(["harbor", "fetch", str(tmp_path / "bad.yaml")]) == 78
-    assert "unknown keys ['nope']" in capsys.readouterr().err
+    assert "is not a training or evaluation config: it lists no environments and extends no config" in (
+        capsys.readouterr().err
+    )
+    assert _exit_code(["harbor", "fetch", str(tmp_path / "missing.lock.json")]) == 78
+    assert "platoon harbor fetch takes a training or evaluation config, not a lock file" in capsys.readouterr().err
     assert _exit_code(["harbor", "verify", str(tmp_path / "missing.lock.json")]) == 78
     assert _exit_code(["harbor", "images", "build", str(tmp_path / "missing.lock.json"), "--image-map", "m.json"]) == 78
 
@@ -208,19 +232,6 @@ def test_fetch_takes_overrides_like_platoon_train(run_config: Path, tmp_path: Pa
     assert Path(json.loads(capsys.readouterr().out)["lock"]) == tmp_path / "locks" / "mine.lock.json"
 
 
-def test_the_deprecated_cache_of_an_entry_still_works_with_a_deprecation_warning(
-    run_config: Path, tmp_path: Path, capsys
-):
-    cli.main(["harbor", "fetch", str(run_config), "environments.0.service_kwargs.cache=elsewhere"])
-
-    out, err = capsys.readouterr()
-    assert Path(json.loads(out)["lock"]).parent == tmp_path / "elsewhere" / "locks"
-    assert (
-        "platoon: environments.0.service_kwargs.cache: deprecated; use the site profile's cache (its harbor directory) "
-        "instead (platoon 0.3.0 removes it)"
-    ) in err
-
-
 def test_verify_takes_a_training_config(run_config: Path, tmp_path: Path, capsys):
     assert _exit_code(["harbor", "verify", str(run_config)]) == 78  # nothing fetched: no lock answers it
     assert "no lock answers its dataset settings" in capsys.readouterr().err
@@ -263,15 +274,16 @@ def test_verify_refuses_a_hold_out_whose_lock_records_no_input_files(run_config:
 
 
 def test_run_config_problems_exit_78(run_config: Path, tmp_path: Path, capsys):
-    assert _exit_code(["harbor", "fetch", str(run_config), "--cache", str(tmp_path / "c")]) == 78
-    assert "--lock and --cache apply to fetch config files" in capsys.readouterr().err
+    assert _exit_code(["harbor", "verify", str(run_config), "--cache", str(tmp_path / "c")]) == 78
+    assert "--cache applies to a lock file; a training or evaluation config's entries keep their tasks" in (
+        capsys.readouterr().err
+    )
     assert _exit_code(["harbor", "fetch", str(run_config), "environments.0.service_kwargs.holdout.fraction=2"]) == 78
     assert "environments[science].service_kwargs: holdout.fraction must be a number between 0 and 1" in (
         capsys.readouterr().err
     )
-    (tmp_path / "configs" / "fetch.yaml").write_text("dataset: ../dataset\n")
-    assert _exit_code(["harbor", "fetch", str(tmp_path / "configs" / "fetch.yaml"), "workers=2"]) == 78
-    assert "overrides apply to training and evaluation configs" in capsys.readouterr().err
+    assert _exit_code(["harbor", "verify", str(tmp_path / "missing.lock.json"), "workers=2"]) == 78
+    assert "overrides apply to training and evaluation configs, not to a lock file" in capsys.readouterr().err
     (tmp_path / "configs" / "tables.yaml").write_text("environments: [{service: table, service_kwargs: {}}]\n")
     assert _exit_code(["harbor", "fetch", str(tmp_path / "configs" / "tables.yaml")]) == 78
     assert "has no Harbor environment entry" in capsys.readouterr().err
@@ -339,19 +351,5 @@ def test_images_take_a_training_config_and_its_entrys_default_image_map(
     assert "--image-map and --cache apply to lock files" in capsys.readouterr().err
 
 
-def test_a_fetch_config_file_still_works_with_a_deprecation_warning(fetch_config: Path, tmp_path: Path, capsys):
-    import warnings
-
-    from platoon.deprecations import PlatoonDeprecationWarning
-
-    cli.main(["harbor", "fetch", str(fetch_config)])
-    err = capsys.readouterr().err
-    assert (
-        f"platoon: {fetch_config} (a fetch config file): deprecated; use a training or evaluation config, whose "
-        "Harbor entry names the dataset and its fetch settings instead (platoon 0.3.0 removes it)"
-    ) in err
-    cli.main(["harbor", "images", "plan", str(fetch_config)])
-    assert "(a fetch config file): deprecated" in capsys.readouterr().err
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", PlatoonDeprecationWarning)
-        assert _exit_code(["harbor", "verify", str(fetch_config)]) == 78  # the release that removes it refuses it
+# The fetch config files that platoon 0.3.0 removed, and the options of an entry it removed, are refused in
+# tests/test_removed_forms.py.

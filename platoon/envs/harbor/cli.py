@@ -9,14 +9,12 @@
 
 ``CONFIG`` is a training or evaluation config, whose Harbor environment entries name their datasets (each entry's
 paths resolve as ``platoon train`` resolves them, overrides included); ``verify`` and the images commands also take
-a lock file, the images commands with ``--image-map``.  The cache defaults to the entry's, else
-``harbor`` in the site profile's cache (:mod:`platoon.site`), else ``~/.cache/platoon/harbor``, and a lock-backed
-entry's image map to
-``images/<provider>.json`` in its cache, whose images go to ``images/<provider>/``.
+a lock file, the images commands with ``--image-map``.  The cache is the Harbor cache, ``harbor`` in the site profile's
+cache (:mod:`platoon.site`), else ``~/.cache/platoon/harbor``, and a lock-backed entry's image map is
+``images/<provider>.json`` in it, whose images go to ``images/<provider>/``.
 
-A fetch config file, which names one dataset and resolves its paths against itself, still works where a config or a
-lock does, with a deprecation warning: a training or evaluation config's entry names the same, and platoon 0.3.0
-removes fetch config files.
+A fetch config file, which named one dataset at its top level, is refused (exit 78): platoon 0.3.0 removed them, and a
+training or evaluation config's entry names the same.
 """
 
 from __future__ import annotations
@@ -26,10 +24,11 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from cyclopts import App
+from cyclopts import App, Parameter
 
+from platoon.deprecations import removed_hint
 from platoon.utils.config import ConfigError
 
 if TYPE_CHECKING:
@@ -38,8 +37,17 @@ if TYPE_CHECKING:
     from platoon.envs.harbor.lock import DatasetLock
     from platoon.envs.harbor.service import HarborEnvironmentService
 
-# The release that removes fetch config files (deprecated: a training or evaluation config's entry says the same).
-FETCH_CONFIG_REMOVED_IN = "0.3.0"
+# What replaced fetch config files, which platoon 0.3.0 removed.
+FETCH_CONFIG_REMOVED = removed_hint(
+    "0.3.0",
+    "a training or evaluation config, whose Harbor entry names the dataset and its fetch settings in service_kwargs "
+    "(dataset, lock, tasks, select, overlays, refuse, index), and run this command on it",
+)
+# The options of platoon harbor fetch that applied to a fetch config file alone, gone with them: what replaces each.
+FETCH_OPTIONS_REMOVED = {
+    "--lock": removed_hint("0.3.0", "service_kwargs.lock in a Harbor entry of a training or evaluation config"),
+    "--cache": removed_hint("0.3.0", "the site profile's cache, whose harbor directory is the Harbor cache"),
+}
 
 harbor_app = App(name="harbor", help="Fetch Harbor datasets into a locked cache, verify them, and build their images.")
 images_app = App(name="images", help="Plan, build and verify the images of a lock's tasks, once per site.")
@@ -57,33 +65,29 @@ def fetch(
     *overrides: str,
     update: bool = False,
     repair: bool = False,
-    lock: Path | None = None,
-    cache: Path | None = None,
     workers: int | None = None,
+    lock: Annotated[Path | None, Parameter(show=False)] = None,
+    cache: Annotated[Path | None, Parameter(show=False)] = None,
 ) -> int:
     """Fetch the Harbor datasets a config names into the cache, and lock them.
 
-    CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched (a fetch config file,
-    deprecated, is fetched too). A dataset pinned to a commit whose lock answers the config, with a cache that holds
-    its tasks, is left as it is: nothing is downloaded or hashed, unless the lock was written before platoon recorded
-    the tasks' input files. A local directory is fetched again, since its files may have changed. Fetches of one lock
-    take turns, also on several nodes, so a second one finds the first's lock current. Each entry with a hold-out
-    prints the hold-out's report. Prints one JSON line per lock.
+    CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched. A dataset pinned to a
+    commit whose lock answers the config, with a cache that holds its tasks, is left as it is: nothing is downloaded
+    or hashed, unless the lock was written before platoon recorded the tasks' input files. A local directory is fetched
+    again, since its files may have changed. Fetches of one lock take turns, also on several nodes, so a second one
+    finds the first's lock current. Each entry with a hold-out prints the hold-out's report. Prints one JSON line per
+    lock.
 
     Parameters
     ----------
     config
-        A training or evaluation config (or a fetch config file, deprecated).
+        A training or evaluation config.
     overrides
         key=value overrides of a training or evaluation config, as platoon train takes them.
     update
         Resolve a moving reference (a branch, a tag, no revision) to its current commit, and fetch it.
     repair
         Fetch a pinned dataset even when its lock answers: hash every cache entry again, and replace a damaged one.
-    lock
-        A fetch config file's lock: write it here instead.
-    cache
-        A fetch config file's cache: use this one instead.
     workers
         Parallel downloads (default 8).
     """
@@ -92,12 +96,20 @@ def fetch(
 
     from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed, is_pinned
 
+    given = {"--lock": lock, "--cache": cache}  # hidden: refused, with what replaces them
+    removed = [
+        f"platoon harbor fetch {flag}, which applied to fetch config files alone: {FETCH_OPTIONS_REMOVED[flag]}"
+        for flag, value in given.items()
+        if value is not None
+    ]
+    if removed:
+        raise ConfigError(removed)
     if workers is not None and workers < 1:
         raise ConfigError(f"--workers must be a positive integer, got {workers}")
-    for label, settings, service in _fetch_targets(config, overrides, lock=lock, cache=cache):
+    for label, settings, service in _fetch_targets(config, overrides):
         if workers is not None:
             settings = replace(settings, workers=workers)
-        where = f"environments[{label}]: " if label is not None else ""
+        where = f"environments[{label}]: "
         remote = settings.dataset.startswith("hf://") and is_pinned(settings.dataset)  # its files cannot change
         if remote and not (update or repair) and (old := answering_lock(settings)) and not old.records_input_files:
             _say(
@@ -113,11 +125,11 @@ def fetch(
                 f"{where}the lock {settings.lock_path()} answers the config and the cache holds its "
                 f"{len(result.tasks)} task(s): nothing to fetch (--repair hashes them again)"
             )
-        line: dict[str, Any] = {} if label is None else {"environment": label}
+        line: dict[str, Any] = {"environment": label}
         line.update(
             lock=str(settings.lock_path()), tasks=len(result.tasks), runnable=len(result.runnable()), fetched=fetched
         )
-        if service is not None and (split := _split_report(service, label)) is not None:
+        if (split := _split_report(service, label)) is not None:
             first, *rest = split.report()
             _say("\n".join([f"{where}{first}", *rest]))
             line["holdout"] = {"eval": len(split.eval), "train": len(split.train), "eval_digest": split.eval_digest}
@@ -130,8 +142,8 @@ def verify(config: Path, /, *overrides: str, cache: Path | None = None, task: li
     """Check the cache entries of a lock: every task's files must hash to its digest. Exits 1 on a mismatch.
 
     CONFIG is a training or evaluation config: the lock of each Harbor entry that names a dataset (the lock that
-    answers it) or a lock; or a lock file (or a fetch config file, deprecated). An entry with a hold-out whose lock
-    records no input files (one written before platoon recorded them) exits 78, as before a fetch.
+    answers it) or a lock; or a lock file. An entry with a hold-out whose lock records no input files (one written
+    before platoon recorded them) exits 78, as before a fetch.
 
     Parameters
     ----------
@@ -140,7 +152,7 @@ def verify(config: Path, /, *overrides: str, cache: Path | None = None, task: li
     overrides
         key=value overrides of a training or evaluation config.
     cache
-        The cache a lock file's or fetch config's entries are in.
+        The cache a lock file's entries are in (default: the Harbor cache).
     task
         Check only these task ids.
     """
@@ -149,7 +161,7 @@ def verify(config: Path, /, *overrides: str, cache: Path | None = None, task: li
 
     if _is_run_config(config):
         if cache is not None:
-            raise ConfigError(_RUN_CONFIG_PATHS)
+            raise ConfigError(_RUN_CONFIG_CACHE)
         targets = _verify_targets(config, overrides)
     else:
         if overrides:
@@ -173,21 +185,21 @@ def verify(config: Path, /, *overrides: str, cache: Path | None = None, task: li
     return 1 if failed else 0
 
 
-_RUN_CONFIG_PATHS = (
-    "--lock and --cache apply to fetch config files; a training or evaluation config names its own, in an entry's "
-    "service_kwargs (override environments.N.service_kwargs.cache=...), else the site profile's"
+_RUN_CONFIG_CACHE = (
+    "--cache applies to a lock file; a training or evaluation config's entries keep their tasks in the Harbor cache, "
+    "harbor in the site profile's cache"
 )
 _RUN_CONFIG_IMAGE_PATHS = (
-    "--image-map and --cache apply to lock files; a training or evaluation config's entries name their own in "
-    "service_kwargs (image_map, cache), and a lock-backed entry's image map defaults to images/<provider>.json in its "
-    "cache"
+    "--image-map and --cache apply to lock files; a training or evaluation config's lock-backed entries use their "
+    "default image map, images/<provider>.json in the Harbor cache, harbor in the site profile's cache"
 )
-_NO_OVERRIDES = "key=value overrides apply to training and evaluation configs, not to a fetch config or a lock file"
+_NO_OVERRIDES = "key=value overrides apply to training and evaluation configs, not to a lock file"
 
 
 def _is_run_config(path: Path) -> bool:
     """Whether ``path`` is a training or evaluation config (it lists environments or extends another file) rather
-    than a fetch config file or a lock."""
+    than a lock.  A YAML file that is neither is a :class:`ConfigError`: a fetch config file (one that names a
+    ``dataset``), which platoon 0.3.0 removed, with what replaces it, or a file these commands do not take."""
 
     if path.suffix not in (".yaml", ".yml"):
         return False
@@ -197,28 +209,20 @@ def _is_run_config(path: Path) -> bool:
         data = yaml.safe_load(path.read_text())
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"{path}: {exc}") from exc
-    return isinstance(data, Mapping) and ("environments" in data or "extends" in data)
+    if isinstance(data, Mapping) and ("environments" in data or "extends" in data):
+        return True
+    if isinstance(data, Mapping) and "dataset" in data:
+        raise ConfigError(f"{path}: a fetch config file; {FETCH_CONFIG_REMOVED}")
+    raise ConfigError(f"{path} is not a training or evaluation config: it lists no environments and extends no config")
 
 
-def _fetch_targets(
-    config: Path, overrides: Sequence[str], *, lock: Path | None, cache: Path | None
-) -> list[tuple[str | None, FetchConfig, HarborEnvironmentService | None]]:
-    """What ``fetch`` fetches: each Harbor entry of a run config that names a dataset, with its service, or a fetch
-    config file's one dataset."""
-
-    from platoon.envs.harbor.fetch import FetchError, load_fetch_config
+def _fetch_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str, FetchConfig, HarborEnvironmentService]]:
+    """What ``fetch`` fetches: each Harbor entry of a training or evaluation config that names a dataset, with its
+    service."""
 
     if not _is_run_config(config):
-        if overrides:
-            raise ConfigError(_NO_OVERRIDES)
-        _warn_fetch_config(config)
-        try:
-            return [(None, load_fetch_config(config, lock=lock, cache=cache), None)]
-        except FetchError as exc:
-            raise ConfigError(str(exc)) from exc
-    if lock is not None or cache is not None:
-        raise ConfigError(_RUN_CONFIG_PATHS)
-    targets: list[tuple[str | None, FetchConfig, HarborEnvironmentService | None]] = []
+        raise ConfigError(f"{config}: platoon harbor fetch takes a training or evaluation config, not a lock file")
+    targets: list[tuple[str, FetchConfig, HarborEnvironmentService]] = []
     for label, service in _harbor_entries(config, overrides):
         if service.locked is None or service.locked.fetch is None:
             _say(f"environments[{label}]: names no dataset to fetch (dataset_dir, task_dirs or a lock alone)")
@@ -268,11 +272,12 @@ def _verify_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str | 
 def _harbor_entries(config: Path, overrides: Sequence[str]) -> list[tuple[str, HarborEnvironmentService]]:
     """The Harbor entries of a training or evaluation config, each with the service ``platoon train`` builds from its
     ``service_kwargs``: paths resolve as the run resolves them, the overrides apply, and the site profile gives an
-    entry without a provider its own.  The deprecated keys and variables it uses are named on stderr."""
+    entry without a provider its own.  The deprecated keys it uses are named on stderr, and options the service does
+    not take, such as one a release removed, are a :class:`ConfigError`."""
 
     from platoon.cli import _warn_of_deprecations
     from platoon.envs.harbor.service import HarborEnvironmentService
-    from platoon.envs.service import service_target
+    from platoon.envs.service import service_option_problems, service_target
     from platoon.registry import import_from_string
     from platoon.train.components import EnvironmentsConfig
     from platoon.utils.config import find_deprecations, resolve_config
@@ -286,7 +291,7 @@ def _harbor_entries(config: Path, overrides: Sequence[str]) -> list[tuple[str, H
     if not isinstance(environments, list) or not environments:
         raise ConfigError(f"{config} lists no environments")
     entries: list[tuple[str, HarborEnvironmentService]] = []
-    for entry in environments:
+    for index, entry in enumerate(environments):
         if not isinstance(entry, Mapping) or not isinstance(entry.get("service"), str):
             continue
         target = service_target(entry["service"])
@@ -297,8 +302,12 @@ def _harbor_entries(config: Path, overrides: Sequence[str]) -> list[tuple[str, H
         if not (isinstance(factory, type) and issubclass(factory, HarborEnvironmentService)):
             continue
         label = str(entry.get("name") or "default")  # as the entry's label in task ids and messages
+        options = dict(entry.get("service_kwargs") or {})
+        where = f"environments.{index}.service_kwargs"
+        if problems := service_option_problems(entry["service"], options, where=where):
+            raise ConfigError(problems)
         try:
-            entries.append((label, factory(**dict(entry.get("service_kwargs") or {}))))
+            entries.append((label, factory(**options)))
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"environments[{label}].service_kwargs: {exc}") from exc
     if not entries:
@@ -321,41 +330,34 @@ def _split_report(service: HarborEnvironmentService, label: str | None):
 class _ImageTarget:
     """What an images command acts on: a lock, the cache its tasks are in, and the image map of its images."""
 
-    label: str | None  # the entry of a training or evaluation config; None for a lock or fetch config file
+    label: str | None  # the entry of a training or evaluation config; None for a lock file
     lock: DatasetLock
     cache: Path
-    image_map: Path | None  # the map's file: None for an entry's inline map, or a lock file given no --image-map
-    inline: Mapping[str, Any] | None = None  # an entry's inline image map
+    image_map: Path | None  # the map's file: None for a lock file given no --image-map
     provider: str | None = None  # an entry's sandbox provider
-    default: bool = False  # an entry's default image map (images/<provider>.json in its cache)
 
     @property
     def where(self) -> str:
         return f"environments[{self.label}]: " if self.label is not None else ""
 
+    @property
+    def default(self) -> bool:
+        """Whether the map is an entry's default image map (``images/<provider>.json`` in its Harbor cache), whose
+        image files go to ``images/<provider>/`` beside it."""
+
+        return self.label is not None
+
     def current_map(self) -> ImageMap | None:
         """The image map as it is now; None before its file exists."""
 
-        from platoon.envs.harbor.images import ImageMap, ImageMapError
-
-        if self.inline is not None:
-            try:
-                return ImageMap.load(self.inline)
-            except ImageMapError as exc:
-                raise ConfigError(f"{self.where}service_kwargs.image_map: {exc}") from exc
         return _open_map(self.image_map)
 
     def map_file(self, command: str) -> Path:
-        """The map's file, which ``command`` writes or reads; a configuration error for an inline map, or a lock file
-        given no ``--image-map``."""
+        """The map's file, which ``command`` writes or reads; a configuration error for a lock file given no
+        ``--image-map``."""
 
         if self.image_map is not None:
             return self.image_map
-        if self.inline is not None:
-            raise ConfigError(
-                f"{self.where}its image map is inline in service_kwargs.image_map, which platoon harbor images "
-                f"{command} cannot write: name a JSON file there instead"
-            )
         raise ConfigError(f"platoon harbor images {command} of a lock file needs --image-map")
 
 
@@ -363,8 +365,7 @@ def _image_targets(
     config: Path, overrides: Sequence[str], *, image_map: Path | None, cache: Path | None
 ) -> list[_ImageTarget]:
     """The locks an images command acts on: each Harbor entry of a training or evaluation config that has one (with
-    its image map: the entry's ``image_map``, else its default one), or a lock file (or a fetch config file's lock)
-    with ``--image-map``."""
+    its default image map), or a lock file with ``--image-map``."""
 
     from platoon.envs.harbor.fetch import answering_lock
     from platoon.envs.harbor.lock import LockError, read_lock
@@ -394,17 +395,8 @@ def _image_targets(
                 dataset_lock = read_lock(locked.lock_path)
             except LockError as exc:
                 raise ConfigError(f"environments[{label}]: {exc}") from exc
-        images = service.task_images
         targets.append(
-            _ImageTarget(
-                label,
-                dataset_lock,
-                locked.cache,
-                images.path,
-                inline=images.inline,
-                provider=service.provider_name,
-                default=images.is_default,
-            )
+            _ImageTarget(label, dataset_lock, locked.cache, service.task_images.path, provider=service.provider_name)
         )
     if not targets:
         raise ConfigError(f"{config}: no Harbor environment entry has a lock")
@@ -416,8 +408,8 @@ def images_plan(config: Path, /, *overrides: str, image_map: Path | None = None,
     """List the images the tasks need: one per build key, with its task count, base images and whether the image map
     has it.
 
-    CONFIG is a training or evaluation config: each Harbor entry's lock, with the entry's image map (its image_map,
-    else `images/<provider>.json` in its cache); or a lock file, with --image-map.
+    CONFIG is a training or evaluation config: each Harbor entry's lock, with the entry's image map,
+    `images/<provider>.json` in the Harbor cache; or a lock file, with --image-map.
 
     Parameters
     ----------
@@ -439,13 +431,12 @@ def images_plan(config: Path, /, *overrides: str, image_map: Path | None = None,
         if len(plans) == 1 and plans[0][0].label is None:
             print(json.dumps(plans[0][1].to_json(), indent=1))
         else:
-            maps = {target.label: str(target.image_map) if target.image_map else "inline" for target, _ in plans}
-            data = {target.label: {"image_map": maps[target.label], **plan.to_json()} for target, plan in plans}
+            data = {target.label: {"image_map": str(target.image_map), **plan.to_json()} for target, plan in plans}
             print(json.dumps(data, indent=1))
         return 0
     for target, plan in plans:
         if target.label is not None:
-            print(f"{target.where}image map {target.image_map or 'inline'}")
+            print(f"{target.where}image map {target.image_map}")
         rows = [
             (
                 image.key[:19],
@@ -488,8 +479,8 @@ def images_build(
     """Build the images the image map lacks and add each to the map, with a receipt (builder, version, time,
     log, size, SHA-256). Exits 1 if any build failed.
 
-    CONFIG is a training or evaluation config: each Harbor entry's lock, into the entry's image map (its image_map,
-    else `images/<provider>.json` in its cache, with the images in `images/<provider>/`), with the builder of the
+    CONFIG is a training or evaluation config: each Harbor entry's lock, into the entry's image map,
+    `images/<provider>.json` in the Harbor cache, with the images in `images/<provider>/`, with the builder of the
     entry's sandbox provider; or a lock file, with --image-map.  Builds of one map that run at once, also on several
     nodes, build each image once.
 
@@ -601,7 +592,7 @@ def images_verify(config: Path, /, *overrides: str, image_map: Path | None = Non
 
     failed = False
     for target in _image_targets(config, overrides, image_map=image_map, cache=None):
-        if target.inline is None and not target.default:  # a default map that does not exist yet has no images
+        if not target.default:  # a default map that does not exist yet has no images
             path = target.map_file("verify")
             if not path.exists():
                 raise ConfigError(f"{target.where}image map {path} does not exist")
@@ -662,49 +653,18 @@ def images_alias(
 
 
 def _open_lock(path: Path, cache: Path | None):
-    """The lock at ``path`` (or named by the fetch config file at ``path``, which is deprecated) and its cache
-    directory."""
+    """The lock at ``path`` and its cache directory: ``cache``, else the Harbor cache, whose site refuses a cache
+    variable that platoon 0.3.0 removed (:func:`platoon.site.removed_variable_problems`)."""
 
-    from platoon.envs.harbor.fetch import FetchError, load_fetch_config
     from platoon.envs.harbor.lock import LockError, default_cache, read_lock
+    from platoon.site import removed_variable_problems
 
-    try:
-        if path.suffix in (".yaml", ".yml"):
-            _warn_fetch_config(path)
-            settings = load_fetch_config(path, cache=cache)
-            return read_lock(settings.lock_path()), settings.cache
-        if cache is None:
-            _check_site_variables()
-        return read_lock(path), cache if cache is not None else default_cache()
-    except (FetchError, LockError) as exc:
-        raise ConfigError(str(exc)) from exc
-
-
-def _check_site_variables() -> None:
-    """For a command that takes the Harbor cache from the site: refuse a deprecated cache variable that names another
-    directory than the site profile's cache gives it, and name each one that is set on stderr."""
-
-    from platoon.cli import _warn_of_deprecations
-    from platoon.site import variable_deprecations, variable_problems
-
-    if problems := variable_problems():
+    if cache is None and (problems := removed_variable_problems()):
         raise ConfigError(problems)
-    _warn_of_deprecations(variable_deprecations())
-
-
-def _warn_fetch_config(path: Path) -> None:
-    """Say, once per command, that a fetch config file is deprecated: a run config's entry says the same."""
-
-    from platoon.cli import _warn_of_deprecations
-    from platoon.deprecations import Deprecation
-
-    deprecation = Deprecation(
-        path=f"{path} (a fetch config file)",
-        replacement="a training or evaluation config, whose Harbor entry names the dataset and its fetch settings",
-        removed_in=FETCH_CONFIG_REMOVED_IN,
-    )
-    _warn_of_deprecations([deprecation])
-    _check_site_variables()  # its cache defaults to the site's
+    try:
+        return read_lock(path), cache if cache is not None else default_cache()
+    except LockError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _open_map(path: Path | None):
