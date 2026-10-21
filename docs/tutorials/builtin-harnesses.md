@@ -20,7 +20,7 @@ a policy, `platoon-oracle` and `platoon-noop`. Each is a name you put in an envi
 | `platoon-codeact` | function, runs model code | writes Python cells that call the tools as functions | the environment's tools, `finish`, `launch_subagent` | cells run in an IPython shell in the rollout process: not a sandbox | acting in code pays off (loops, arithmetic, many calls per step), or agents should delegate to subagents |
 | `platoon-bash` | TOML spec | native tool calls | `bash`, plus the environment's tools over MCP | a process in the task sandbox, or locally | the task is files in a sandbox (Harbor tasks); smoke tests; a template for your own spec |
 | `mini-swe-agent@2.4.6` | TOML spec, third party | `bash` commands | `bash` only | the task sandbox | software-engineering tasks in Harbor sandboxes |
-| `openhands@1.54.0.post1` | TOML spec, third party: the OpenHands SDK agent with platoon's thin runner | native tool calls | terminal, file editor, task tracker | the task sandbox, from a toolchain built once per site | training or evaluating an OpenHands agent on Harbor tasks; its options choose replay, timeout, retries and a condenser ([below](#openhands)) |
+| `openhands@1.54.0.post2` | TOML spec, third party: the OpenHands SDK agent with platoon's thin runner | native tool calls | terminal, file editor, task tracker | the task sandbox, from a toolchain built once per site | training or evaluating an OpenHands agent on Harbor tasks; its options choose replay, timeout, retries and a condenser ([below](#openhands)) |
 | `platoon-oracle`, `platoon-noop` | function, no model calls | runs the task's reference solution; does nothing | none | the rollout process | checking a dataset: a sound task scores 1 with the oracle and 0 with the no-op |
 
 List them:
@@ -32,7 +32,7 @@ uv run platoon harness list
 ```text
 harness                 kind      distribution   source
 mini-swe-agent@2.4.6    spec      platoon 0.3.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-openhands@1.54.0.post1  spec      platoon 0.3.0  platoon/harness/builtin/specs/openhands.toml
+openhands@1.54.0.post2  spec      platoon 0.3.0  platoon/harness/builtin/specs/openhands.toml
 platoon-bash@1          spec      platoon 0.3.0  platoon/harness/builtin/specs/platoon-bash.toml
 platoon-codeact@1       function  platoon 0.3.0  platoon.harness.builtin.codeact.harness:codeact
 platoon-noop@1          function  platoon 0.3.0  platoon.harness.builtin.oracle:noop

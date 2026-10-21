@@ -339,7 +339,7 @@ environments[science] dataset: fetched hf://my-org/science-tasks@3f1c0e9b6d2a4c8
 environments[science] hold-out: 5% of each source_dataset, grouped by kaggle_dataset_name, else split_group, joined by shared input files, seed 0
   ...
 environments[science] images: built 2 with the oci builder into the image map /shared/platoon-cache/harbor/images/singularity.json
-environments[science] toolchain openhands-1.54.0: built at /shared/platoon-cache/toolchains/openhands-1.54.0 for openhands@1.54.0.post1 (sha256:...)
+environments[science] toolchain openhands-1.54.0: built at /shared/platoon-cache/toolchains/openhands-1.54.0 for openhands@1.54.0.post2 (sha256:...)
 policy tokenizer: loaded Qwen/Qwen3.5-4B through the chat_template renderer, into the Hugging Face cache
 ready: 4 made now, 0 already current
 ```
@@ -1087,7 +1087,7 @@ uses, and otherwise stop with exit 78 and the `platoon prepare` command for thei
 
 ```text
 platoon: what the run needs is not prepared on this site:
-  environments[harbor-openhands].harness: harness openhands@1.54.0.post1 runs from the toolchain openhands-1.54.0,
+  environments[harbor-openhands].harness: harness openhands@1.54.0.post2 runs from the toolchain openhands-1.54.0,
   which a run never builds, and it is not built there (toolchain root /shared/toolchains)
   prepare it with: platoon prepare train.yaml
 ```
