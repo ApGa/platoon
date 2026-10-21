@@ -33,7 +33,7 @@ SNAPSHOT = Path(
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "openhands" / "replay.json.gz"
 # A directory holding the toolchain `platoon toolchain build openhands` built (openhands-1.54.0).
 TOOLCHAINS = os.environ.get("PLATOON_TEST_TOOLCHAINS")
-HARNESS = "openhands@1.54.0.post1"
+HARNESS = "openhands@1.54.0.post2"
 
 
 def toolchain_ready(name: str) -> bool:

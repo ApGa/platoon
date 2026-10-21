@@ -136,7 +136,7 @@ def test_budget_enforcement_defaults_to_the_harness():
 
 def test_openhands_runs_its_runner_from_its_toolchain():
     spec = get_harness_spec("openhands")
-    assert spec.ref == "openhands@1.54.0.post1" and get_harness_spec("openhands@1.54").ref == spec.ref
+    assert spec.ref == "openhands@1.54.0.post2" and get_harness_spec("openhands@1.54").ref == spec.ref
     assert spec.install.toolchain == "openhands-1.54.0" and spec.install.commands == ()
     recipe = spec.install.recipe
     assert recipe is not None and (recipe.python, recipe.cache, dict(recipe.generate)) == ("3.12.14", ("tiktoken",), {})

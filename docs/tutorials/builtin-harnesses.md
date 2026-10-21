@@ -230,6 +230,7 @@ too); reaching it, or the SDK finding the agent stuck, ends a graded episode.
 | `num_retries` | int, 0 to 10 | `0` | the SDK's `num_retries`, which counts attempts at a model call that fails transiently (0 and 1 make one); a retry may record a call twice |
 | `condenser` | `none` or `llm_summarizing` | `none` | a summarizing condenser, the SDK's with the changes below (it condenses past 240 events, or when a prompt overflows the context window); its summary calls are the agent's `aux` calls, recorded and trained on |
 | `condenser_max_tokens` | int, at least 0 | `0` | a token trigger for that condenser, which it then runs whatever `condenser` says: it condenses before a model call whose prompt would be longer than this many tokens, as the gateway counts them; `0` sets none |
+| `allow_token_count_estimate` | bool | `false` | allow approximate SDK counts when gateway counting fails; by default the rollout stops instead |
 
 The defaults are the training settings. Options change how the agent runs, never what is installed, so every
 setting runs from the same toolchain. To evaluate as Harbor's adapter does (no replay, the SDK's 300-second timeout,
@@ -276,9 +277,11 @@ the rest fits in half the trigger, and goes on from the summary. The gateway doe
 length of the prompt it renders with the policy's renderer: exactly, for a renderer that writes tool results without
 their tool's name and serializes tool-call arguments itself, as the Qwen chat templates do, and a few tokens off for
 each tool call with one that writes either as the call sent it (`kimi_k2`, `gpt_oss`). A hosted model's gateway
-passes the count on to its provider, and where that gives none, the SDK's estimate counts instead (its `cl100k_base`
-encoding runs about a tenth under a Qwen template on prose and code, and nearly half under on numbers); a prompt that
-then overflows the context window still condenses, when the gateway refuses it. The trigger is a count of tokens,
+passes the count on to its provider. If a count is unavailable, the rollout stops rather than silently switching to
+an SDK estimate. A provider without a count endpoint can opt into approximate counting with
+`harness_options: {condenser_max_tokens: 104857, allow_token_count_estimate: true}`. The runner records this option
+in its settings and warns when an estimate is used. The estimate may use `cl100k_base` for an unknown model and
+substantially undercount native tokens; it is not a native-token guarantee. The trigger is a count of tokens,
 not a share of the window, which the harness does not know. Set it well above the agent's first prompt, its system
 prompt with the tools and the task (about 8k tokens with a short task under a Qwen template): below twice that
 prompt, each condensation forgets every turn after the task, and a trigger that a prompt passes with nothing left to

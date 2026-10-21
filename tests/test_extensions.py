@@ -462,7 +462,7 @@ def test_lock_json_credits_the_harbor_harnesses_to_platoon():
     harnesses = {item["ref"]: item for item in extensions.run_components(config) if item["kind"] == "harness"}
 
     assert {ref: (item["resolved"], item["distribution"], item["entry_point"]) for ref, item in harnesses.items()} == {
-        "openhands": ("openhands@1.54.0.post1", "platoon", None),
+        "openhands": ("openhands@1.54.0.post2", "platoon", None),
         "platoon-oracle": ("platoon-oracle@1", "platoon", None),
         "platoon-noop": ("platoon-noop@1", "platoon", None),
     }
