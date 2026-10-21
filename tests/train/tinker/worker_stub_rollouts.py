@@ -357,6 +357,16 @@ class LoggingService:
         return _LoggingSession(task)
 
 
+def _parent_death_signal() -> int:
+    """The signal this thread gets when its parent dies (``prctl(PR_GET_PDEATHSIG)``), 0 for none."""
+
+    import ctypes
+
+    number = ctypes.c_int(0)
+    ctypes.CDLL(None, use_errno=True).prctl(2, ctypes.byref(number), 0, 0, 0)  # PR_GET_PDEATHSIG
+    return number.value
+
+
 async def _keep_spawning(ctx, depth: int, *, stubborn: bool) -> None:
     """Short-lived children, one after another, for as long as the agent runs; a stubborn agent also swallows
     cancellation and retries refused launches."""
@@ -390,8 +400,13 @@ async def _recursive_agent(ctx, *, stubborn: bool):
         sleeper = subprocess.Popen(["sleep", "1000"])
         facts = os.environ.get("STUB_FACTS_PATH")
         if facts:
+            noted = {
+                "sleeper_pid": sleeper.pid,
+                "worker_pid": os.getpid(),
+                "parent_death_signal": _parent_death_signal(),
+            }
             with open(facts, "w") as handle:
-                json.dump({"sleeper_pid": sleeper.pid, "worker_pid": os.getpid()}, handle)
+                json.dump(noted, handle)
     if ctx.instruction.startswith("short"):
         await ctx.chat([{"role": "user", "content": "one turn"}])
         await ctx.call_tool("look", {})
@@ -470,7 +485,7 @@ async def polite_recursive_rollout(task, config) -> dict:
 def _note(**facts) -> None:
     path = os.environ["STUB_FACTS_PATH"]
     with open(path + ".tmp", "w") as handle:
-        json.dump({"worker_pid": os.getpid(), **facts}, handle)
+        json.dump({"worker_pid": os.getpid(), "parent_death_signal": _parent_death_signal(), **facts}, handle)
     os.replace(path + ".tmp", path)
 
 

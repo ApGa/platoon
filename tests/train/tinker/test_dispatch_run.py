@@ -10,7 +10,8 @@ a full checkpoint keeps (its question 4).
 - A resume from a full checkpoint trains each group it kept once, without rolling it out again, a failed one as
   failed; from one that kept none (its file lost, or never written), it rolls them out again; pruning deletes them
   with their checkpoint.
-- A resume is exact also when the run's per-task statistics stopped, or could not be written, before its checkpoint.
+- A resume is exact also when the run's per-task statistics stopped, or could not be written, before its checkpoint;
+  a group that a step dropped as stale before the checkpoint was consumed, and the resume does not draw it again.
 - A resume whose sampling inputs changed warns, records it, and goes on; one from a checkpoint that saved no state of
   its draws (one saved before platoon 0.3.0, or whose write of it failed) draws from its batch, as before.
 - A group that fails, or whose workflow is cancelled from within, settles as failed and frees its slot; a step that an
@@ -80,12 +81,14 @@ def _datum(position: int, version: int) -> tinker.Datum:
 
 
 class _Groups:
-    """A training workflow: each group takes ``delay(row)`` seconds and returns one datum of its row's position;
-    ``on_start(row, count)`` runs as each group starts (``count`` groups started so far)."""
+    """A training workflow: each group takes ``delay(row)`` seconds, then, when ``hold(row)`` gives an event, waits for
+    it, and returns one datum of its row's position at the policy version it started at; ``on_start(row, count)`` runs
+    as each group starts (``count`` groups started so far)."""
 
-    def __init__(self, llm, *, delay=lambda row: 0.01, on_start=None) -> None:
+    def __init__(self, llm, *, delay=lambda row: 0.01, hold=None, on_start=None) -> None:
         self.llm = llm
         self.delay = delay
+        self.hold = hold
         self.on_start = on_start
         self.started: list[int] = []
         self.tasks: dict[int, str] = {}
@@ -97,6 +100,8 @@ class _Groups:
             self.on_start(data, len(self.started))
         version = self.llm.version
         await asyncio.sleep(self.delay(data))
+        if self.hold is not None and (event := self.hold(data)) is not None:
+            await event.wait()
         return [_datum(data[POSITION_COLUMN], version)]
 
 
@@ -409,6 +414,24 @@ def _state(run_dir: Path, row: dict[str, Any]) -> dict[str, Any]:
     return json.loads((run_dir / row["dispatch"]["file"]).read_bytes())
 
 
+def _published(llm, *versions: int) -> dict[int, asyncio.Event]:
+    """An event for each of ``versions``, set once ``llm`` publishes that policy version.  A start publishes step
+    ``v``'s policy only after it saves checkpoint ``recovery-<v>``, so a group that waits for it ends after that save,
+    however long the save takes."""
+
+    events = {version: asyncio.Event() for version in versions}
+    publish = llm.update_sampling_client
+
+    def update_sampling_client(client, increment_version=True):
+        publish(client, increment_version)
+        for version, event in events.items():
+            if llm.version >= version:
+                event.set()
+
+    llm.update_sampling_client = update_sampling_client
+    return events
+
+
 Q4_RUN = (
     "train.batch_size=2",
     "train.max_training_steps=4",
@@ -566,23 +589,28 @@ def test_a_resume_from_a_checkpoint_without_the_dispatchers_state_draws_from_its
 
 # --- exact resume without the statistics ----------------------------------------------------------------------------
 
+EXACT_RUN = (
+    "train.batch_size=2",
+    "train.max_training_steps=6",
+    "train.max_staleness=2",
+    "train.max_concurrent_rollouts=48",
+    "checkpoint.recovery_every=1",
+)
+
 
 @pytest.mark.parametrize("statistics", ["stopped", "not written"])
 def test_a_resume_is_exact_when_the_statistics_stopped_or_were_not_written(tmp_path, monkeypatch, statistics):
     """The state of the dispatcher's draws is a file of its own: whether the run's per-task statistics stopped after an
     error (no checkpoint names a snapshot after it) or the checkpoint's snapshot could not be written, a crash after
-    recovery-000004 resumes exactly where it stood.  Every third group takes longer than the run's first four steps, so
-    those steps consume the order out of its order, and drawing again from the checkpoint's batch would train some
-    positions twice and lose others."""
+    recovery-000004 resumes exactly where it stood.  Every third group runs until the first start has saved
+    recovery-000004, so the run's first four steps consume the order out of its order, and drawing again from the
+    checkpoint's batch would train some positions twice and lose others.
+
+    The groups wait for that save, not for a time: a group that took a fixed time could end before the steps on a
+    slow machine, and a step would then dequeue it more than ``max_staleness`` policy versions after it sampled and
+    drop it as stale.  That position is consumed exactly once all the same, as RFC 0019 has it, but not trained."""
 
     service = FakeTinkerService()
-    overrides = (
-        "train.batch_size=2",
-        "train.max_training_steps=6",
-        "train.max_staleness=2",
-        "train.max_concurrent_rollouts=48",
-        "checkpoint.recovery_every=1",
-    )
     calls: list[int] = []
     real_metrics, real_write = TaskStatsStore.step_metrics, task_records.write_snapshot
 
@@ -601,22 +629,79 @@ def test_a_resume_is_exact_when_the_statistics_stopped_or_were_not_written(tmp_p
         monkeypatch.setattr(TaskStatsStore, "step_metrics", failing_metrics)
     else:
         monkeypatch.setattr(task_records, "write_snapshot", failing_write)
-    first, _logged, first_client = _pruning_trainer(monkeypatch, tmp_path, service, *overrides)
-    _run(first, _Groups(first._model_info.llm, delay=lambda row: 0.3 if row[POSITION_COLUMN] % 3 == 0 else 0.0))
+    first, _logged, first_client = _pruning_trainer(monkeypatch, tmp_path, service, *EXACT_RUN)
+    llm = first._model_info.llm
+    saved = _published(llm, 4)[4]  # step 4's policy: recovery-000004 is saved
+    _run(first, _Groups(llm, delay=lambda row: 0.0, hold=lambda row: saved if row[POSITION_COLUMN] % 3 == 0 else None))
     run_dir = Path(first.run_log_path)
     rows = _crash_after(run_dir, "recovery-000004")
     assert "tasks" not in rows[-1] and "dispatch" in rows[-1]
+    state = _state(run_dir, rows[-1])  # every third group still running, and no settled group waiting for a step
+    assert sorted(position for *_key, position in state["outstanding"]) == [0, 3, 6, 9]
+    assert state["kept"] is None and state["next_position"] == 12
     trained = [position for step in first_client["steps"][:4] for position in step]  # the steps before the crash
-    assert set(trained) != set(range(8))  # out of the order's order: its batches would not resume it
+    assert sorted(trained) == [1, 2, 4, 5, 7, 8, 10, 11]  # out of the order's order: its batches would not resume it
     monkeypatch.setattr(TaskStatsStore, "step_metrics", real_metrics)
     monkeypatch.setattr(task_records, "write_snapshot", real_write)
 
-    second, logged, client = _pruning_trainer(monkeypatch, tmp_path, service, *overrides)
-    _run(second, _Groups(second._model_info.llm))
+    second, logged, client = _pruning_trainer(monkeypatch, tmp_path, service, *EXACT_RUN)
+    workflow = _Groups(second._model_info.llm)
+    _run(second, workflow)
 
     assert [step for step, _stats in logged] == [5, 6]
+    assert sorted(workflow.started) == [0, 3, 6, 9]  # the draws that were running, drawn again, and no other
     trained += [position for step in client["steps"] for position in step]
-    assert sorted(trained) == list(range(12))  # every position trained exactly once
+    assert sorted(trained) == list(range(12))  # every position trained exactly once: none could be stale
+
+
+@pytest.mark.parametrize("statistics", ["written", "not written"])
+def test_a_group_a_step_dropped_as_stale_before_the_checkpoint_is_not_drawn_again(tmp_path, monkeypatch, statistics):
+    """A slow machine's interleaving: position 3's group ends only once recovery-000003 is saved, three policy
+    versions after it sampled, so step 4 dequeues it, drops it as stale (``max_staleness`` 2) and trains only position
+    10 of its batch.  A position dropped as stale is consumed (RFC 0019, section 4): recovery-000004 holds it neither
+    outstanding nor kept, and the resume draws again only the draws that were still running, so every other position
+    is trained once and position 3 never, whether or not the checkpoint's per-task statistics were written."""
+
+    service = FakeTinkerService()
+    real_write = task_records.write_snapshot
+
+    def failing_write(run_dir, name, data):
+        if name == "state-s1-recovery-000004.json":
+            raise OSError(28, "No space left on device")
+        return real_write(run_dir, name, data)
+
+    if statistics == "not written":
+        monkeypatch.setattr(task_records, "write_snapshot", failing_write)
+    first, first_logged, first_client = _pruning_trainer(monkeypatch, tmp_path, service, *EXACT_RUN)
+    published = _published(first._model_info.llm, 3, 4)
+    held = {3: published[3], 0: published[4], 6: published[4], 9: published[4], 11: published[4]}
+    _run(first, _Groups(first._model_info.llm, delay=lambda row: 0.0, hold=lambda row: held.get(row[POSITION_COLUMN])))
+    run_dir = Path(first.run_log_path)
+    rows = _crash_after(run_dir, "recovery-000004")
+    state = _state(run_dir, rows[-1])
+    assert sorted(position for *_key, position in state["outstanding"]) == [0, 6, 9, 11]  # not 3: step 4 consumed it
+    assert state["kept"] is None and state["next_position"] == 12
+    assert first_client["steps"][3] == [10]  # step 4 trained position 10 alone
+    assert next(stats for step, stats in first_logged if step == 4)["train/batch/stale_groups"] == 1
+    if statistics == "written":
+        snapshot = json.loads((run_dir / rows[-1]["tasks"]["file"]).read_bytes())
+        assert sorted(position for *_key, position in snapshot["outstanding"]) == [0, 6, 9, 11]  # the statistics agree
+    else:
+        assert "tasks" not in rows[-1] and "dispatch" in rows[-1]
+    trained = [position for step in first_client["steps"][:4] for position in step]  # the steps before the crash
+    monkeypatch.setattr(task_records, "write_snapshot", real_write)
+
+    second, logged, client = _pruning_trainer(monkeypatch, tmp_path, service, *EXACT_RUN)
+    workflow = _Groups(second._model_info.llm)
+    _run(second, workflow)
+
+    assert [step for step, _stats in logged] == [5, 6]
+    assert sorted(workflow.started) == [0, 6, 9, 11]  # the draws that were running, drawn again, and not position 3
+    trained += [position for step in client["steps"] for position in step]
+    assert sorted(trained) == [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11]  # every other position trained exactly once
+    if statistics == "written":
+        _draws, _settled, fates = _positions(run_dir)
+        assert [fate for position, fate in fates if position == 3] == ["stale"]  # consumed once, as stale
 
 
 # --- groups that fail ---------------------------------------------------------------------------------------------

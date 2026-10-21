@@ -32,8 +32,9 @@ def test_a_worker_cancels_again_a_rollout_that_swallowed_the_first_cancellation(
 
 def test_a_worker_whose_rollout_holds_its_loop_is_ended_by_its_alarm_at_the_deadline(tmp_path):
     """A rollout that holds the event loop in a blocking call gets no cancellation, and the loop never starts the
-    worker's termination: the alarm that the SIGTERM handler armed ends the worker at its deadline, ahead of the
-    monitor thread's backstop."""
+    worker's termination: the alarm armed as the worker began stopping ends it at its deadline, ahead of the monitor
+    thread's backstop.  Its SIGTERM handler arms it, or the monitor thread does when its check of ``getppid()`` sees
+    the trainer gone first (``worker_shutdown_scenarios._kill_trainer_mid_rollout`` says why either can)."""
 
     run = _kill_trainer_once_ready(tmp_path, "hold_the_loop")
 
@@ -44,4 +45,5 @@ def test_a_worker_whose_rollout_holds_its_loop_is_ended_by_its_alarm_at_the_dead
     assert TERMINATION_SECONDS - 0.5 < elapsed < TERMINATION_SECONDS + 1.0, elapsed
     assert "terminating at" not in run["log"]  # the loop never ran the termination
     diag = read_diag(run["diag"])
-    assert diag is not None and (diag["phase"], diag["reason"]) == ("terminated", "SIGTERM"), diag
+    assert diag is not None and diag["phase"] == "terminated", diag
+    assert diag["reason"] in ("SIGTERM", "its parent is gone"), diag

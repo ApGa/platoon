@@ -141,6 +141,7 @@ def _kill_trainer_mid_rollout(tmp_path: Path, rollout: str) -> dict:
         worker_pid = int(pid_path.read_text())
         facts = json.loads(facts_path.read_text())
         assert facts["worker_pid"] == worker_pid
+        assert facts["parent_death_signal"] == signal.SIGTERM
         time.sleep(1.0)
 
         killed_at = time.time()
@@ -154,7 +155,11 @@ def _kill_trainer_mid_rollout(tmp_path: Path, rollout: str) -> dict:
         if worker_pid is not None and _running(worker_pid):
             os.killpg(worker_pid, signal.SIGKILL)
     log = (logs / f"{request.request_id}.log").read_text(errors="replace")
-    started = re.search(r"\[rollout-worker\] terminating at (\d+\.\d+) \(SIGTERM\)", log)
+    # The trainer's death reaches the worker twice, and either names its stop: the PDEATHSIG SIGTERM, and its monitor
+    # thread's check of getppid(), for a lost signal.  The kernel reparents the worker and sends the signal in one
+    # step, but the signal's handler runs only once the worker's main thread runs Python again, and the monitor's
+    # check (every two seconds) can come in between.
+    started = re.search(r"\[rollout-worker\] terminating at (\d+\.\d+) \((?:SIGTERM|its parent is gone)\)", log)
     assert started, log[-4000:]
     return {
         "killed_at": killed_at,
@@ -168,15 +173,15 @@ def _kill_trainer_mid_rollout(tmp_path: Path, rollout: str) -> dict:
 
 def _assert_stopped_cleanly(run: dict) -> None:
     killed_at, terminating_at = run["killed_at"], run["terminating_at"]
-    # The SIGTERM came with the trainer's death, and the worker acted on it at once.
+    # The trainer's death reached the worker (its PDEATHSIG, or its monitor thread's check), and it acted at once.
     assert 0 <= terminating_at - killed_at < 2.0, (killed_at, terminating_at)
     # Its tree was busy right up to the signal ...
     assert sum(1 for stamp, _, _ in run["calls"] if killed_at - 1.0 <= stamp <= terminating_at) >= 10
     # ... and from the moment it began terminating: no model call, no tool call, no subagent, no env session.
     late = [call for call in run["calls"] if call[0] > terminating_at]
     assert late == [], late[:10]
-    # Nothing it started outlives it.
-    assert not _running(run["sleeper_pid"])
+    # Nothing it started outlives it: its last act SIGKILLs its process group, which the sleeper may still be leaving.
+    assert _gone_soon(run["sleeper_pid"]), "the rollout's subprocess outlived its worker"
     assert "[rollout-worker] terminated:" in run["log"] and "killing the process group" in run["log"]
 
 
@@ -211,6 +216,7 @@ def _kill_trainer_once_ready(tmp_path: Path, rollout: str, **env: str) -> dict:
         worker_pid = int(pid_path.read_text())
         facts = json.loads(facts_path.read_text())
         assert facts["worker_pid"] == worker_pid
+        assert facts["parent_death_signal"] == signal.SIGTERM
         time.sleep(0.5)
 
         killed_at = time.time()
