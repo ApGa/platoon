@@ -69,11 +69,12 @@ reads its group's settings through ``self.config``.
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from types import MappingProxyType
 from typing import Callable, ClassVar
 
@@ -142,6 +143,12 @@ _group_stats: ContextVar[DeferredStats | None] = ContextVar("platoon_group_stats
 # ``GroupRolloutWorkflow.config`` reads inside the group, and the entry's label (``current_entry``).
 _group_config: ContextVar[WorkflowConfig | None] = ContextVar("platoon_group_config", default=None)
 _group_entry: ContextVar[str | None] = ContextVar("platoon_group_entry", default=None)
+# Guards each workflow's ``_RoutingIdState``, so that one rollout at a time reads it, logs what it says and records what
+# the rollout got. Only threads need this: asyncio tasks cannot interleave in that code, which never awaits, and platoon
+# reports each rollout from its event loop's thread; a custom workflow may report from threads of its own.
+_routing_id_lock = threading.Lock()
+# At most this many of the rollouts without routing ids are named when a later rollout is the first to get any.
+_NAMED_ROLLOUTS = 3
 
 
 def current_entry() -> str | None:
@@ -149,6 +156,19 @@ def current_entry() -> str | None:
     mixture entry's name; None outside a group, and for a row that names no entry of the run."""
 
     return _group_entry.get()
+
+
+@dataclass
+class _RoutingIdState:
+    """What the rollouts of one workflow, which is one stats scope of one start of training, got of routing ids (R3).
+
+    ``seen``: a rollout got a routing id for at least one of its model calls.  ``without``: how many rollouts with model
+    calls got none before one did, and ``first_without`` the request ids of the first ``_NAMED_ROLLOUTS`` of them.
+    """
+
+    seen: bool = False
+    without: int = 0
+    first_without: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1215,6 +1235,80 @@ class GroupRolloutWorkflow:
             seconds=response.rollout_seconds,
         )
 
+    def _warn_of_missing_routing_ids(self, request_id: str, present: int, calls: int) -> None:
+        """Warn about each rollout whose routing ids (R3) were dropped, and once about a service that sends none.
+
+        A server with rollout routing replay sends a routing id with each sampled sequence. A datum whose last model
+        call got none has no ``routing_handle``, which is an error nowhere in the stack: for a mixture-of-experts model,
+        only a quietly worse gradient. So a rollout that got routing ids for some of its ``calls`` model calls but not
+        all, or for none of them after the service has sent some, is warned about on its own. A service that has sent
+        none, such as a dense model's, is warned about once, at the first rollout, not for each one. The first rollout
+        to get any after rollouts without them says so and names the first few: either the service began to send
+        routing ids, or those rollouts lost theirs. A rollout logs one of these warnings at most, and the metric
+        ``rollout_worker_routing_id_coverage`` counts every rollout either way.
+
+        What the rollouts got so far is this workflow's own, and ``platoon train`` builds one workflow for each stats
+        scope (``train``, ``eval``) at each start of training, a resume or a restart (``watchdog.max_restarts``)
+        included. So each scope's rollouts are known from the current start of training on, and another run in the
+        same process keeps its own.
+        """
+
+        scope = getattr(self, "stats_scope", "train")
+        with _routing_id_lock:
+            # Made here rather than in ``__init__``, since custom workflows may build this class with ``__new__``.
+            state = self.__dict__.setdefault("_routing_id_state", _RoutingIdState())
+            if present > 0 and not state.seen and state.without:
+                named = ", ".join(state.first_without)
+                if state.without > len(state.first_without):
+                    named += f" and {state.without - len(state.first_without)} more"
+                logger.warning(
+                    "rollout worker %s got routing ids for %s/%s model calls, the first %s rollout in this start of "
+                    "training to get any, after %s rollout(s) without them (%s): either the model service began to "
+                    "send routing ids, or those rollouts lost theirs, and their datums have no routing_handle (R3). "
+                    "From now on, each rollout without routing ids is logged",
+                    request_id,
+                    present,
+                    calls,
+                    scope,
+                    state.without,
+                    named,
+                )
+            elif 0 < present < calls:
+                logger.warning(
+                    "rollout worker %s returned routing ids for only %s/%s model calls "
+                    "(R3 routing_handle coverage %.3f)",
+                    request_id,
+                    present,
+                    calls,
+                    present / calls,
+                )
+            elif present == 0 and state.seen:
+                logger.warning(
+                    "rollout worker %s returned routing ids for only 0/%s model calls (R3 routing_handle coverage "
+                    "0.000), though the model service sent routing ids to earlier %s rollouts",
+                    request_id,
+                    calls,
+                    scope,
+                )
+            elif present == 0 and not state.without:
+                logger.warning(
+                    "rollout worker %s got no routing ids for its %s model calls, nor did any %s rollout before it in "
+                    "this start of training: the model service sends none. That is expected for a dense model, but "
+                    "means no rollout routing replay (R3) for a mixture-of-experts model. This is logged once for "
+                    "each start of training, not for each rollout; the metric %s/rollout_worker_routing_id_coverage "
+                    "shows each rollout's coverage",
+                    request_id,
+                    calls,
+                    scope,
+                    scope,
+                )
+            if present > 0:
+                state.seen = True
+            elif not state.seen:
+                state.without += 1
+                if len(state.first_without) < _NAMED_ROLLOUTS:
+                    state.first_without.append(request_id)
+
     def _record_worker_telemetry(self, outcome: WorkerOutcome) -> None:
         """One scalar per disposition, plus the cost and the R3 coverage guard.
 
@@ -1249,18 +1343,6 @@ class GroupRolloutWorkflow:
                 if response.model_calls:
                     coverage = response.routing_id_present / float(response.model_calls)
                     scalars["rollout_worker_routing_id_coverage"] = coverage
-                    if coverage < 1.0:
-                        # A dropped routing_id is not an error anywhere in the
-                        # stack: the datum simply loses routing_handle and the
-                        # gradient is quietly worse.
-                        logger.warning(
-                            "rollout worker %s returned routing ids for only %s/%s model calls "
-                            "(R3 routing_handle coverage %.3f)",
-                            outcome.request_id,
-                            response.routing_id_present,
-                            response.model_calls,
-                            coverage,
-                        )
                 if not response.extra_allow_verified:
                     logger.warning(
                         "rollout worker %s did not verify the R3 extra='allow' patch",
@@ -1292,6 +1374,9 @@ class GroupRolloutWorkflow:
                 outcome.wall_seconds,
                 outcome.log_path,
             )
+            if response is not None and response.model_calls:
+                # Last, so that a failure in it costs the rollout none of the telemetry above.
+                self._warn_of_missing_routing_ids(outcome.request_id, response.routing_id_present, response.model_calls)
         except Exception:  # pragma: no cover - telemetry must never break a rollout
             logger.debug("failed to record rollout worker telemetry", exc_info=True)
 
