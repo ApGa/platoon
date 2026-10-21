@@ -243,6 +243,57 @@ assert reply.content == "Hello." and policy.calls[0].sampling_params.max_tokens 
 To run a whole episode on such a gateway (other sampling defaults, a context window), pass it to `run_episode` as
 `policy=`.
 
+## Check a task sampler
+
+A task sampler of your own ([Write a task sampler](../extending/task-samplers.md)) is checked against the sampler
+contract by `check_task_sampler`, which needs neither a model nor a training run:
+
+```python
+from platoon.testing import check_task_sampler
+
+
+def test_my_sampler_keeps_the_contract():
+    check_task_sampler("my_pkg.samplers:MySampler", options={"keep": 0.5}, levels=("entry",))
+```
+
+It builds the sampler (a class, a registered name, or `module:Class`) with `options` checked against its schema, at
+each of `levels`, over a pool of 40 tasks in two entries with synthetic per-task statistics, each context built as the
+dispatcher builds it. It asks an adaptive sampler 200 decisions under each of three eligibility patterns (every task
+eligible; one label at its limit, which leaves one entry half its tasks; nothing eligible) and 200 under the three in
+turn, and a static one 200 with every task eligible. It raises one `AssertionError` that names every check that
+failed: `protocol`, `options`, `pool-task-or-nothing`, `fast` (the median decision on a pool of 4,096 tasks within
+`budget_ms`, 20 ms by default; None skips it, as a test that shares its machine may), `deterministic`, `static`,
+`state`, `observe` and `metrics`. Given by reference, the sampler's decisions are also replayed in two processes with
+other hash seeds, so put the package on `PYTHONPATH` (an installed or editable package is). `check_task_sampler`
+checks the experimental sampler API (`platoon.experimental`), and changes with it.
+
+## Check a group admission rule
+
+A group admission rule of your own ([Write a group admission rule](../extending/group-admission.md)) is checked against
+its contract by `check_group_admission`, which needs neither a model nor a training run:
+
+```python
+from platoon.testing import check_group_admission
+
+
+def test_my_rule_keeps_the_contract():
+    check_group_admission("my_pkg.rules:MyRule", options={"limit": 4})
+```
+
+It builds the rule (a class, a registered name, or `module:Class`) with `options` checked against its schema, at each
+of `levels` (`("run", "entry")` by default; `("entry",)` for a rule only an entry may set), over `check_task_sampler`'s
+pool of 40 tasks in two entries and its synthetic per-task statistics, and asks it about 400 settled groups of every
+verdict and shape: with and without valid members, without members, without labels or an entry. It raises one
+`AssertionError` that names every check that failed: `protocol` (it builds at each level, with entries and without,
+and its `check` returns or raises `ValueError`), `options`, `answers` (an `Admission` or a `bool`, a reason of at most
+64 characters, nothing raised), `pure` (the rule keeps no state: an instance asked twice and another in reverse order
+answer alike; asked ten times over, the first answers as an instance built for each group does, and over another
+view of the statistics as a new instance does) and `fast` (the median decision on the statistics of 4,096 tasks within
+`budget_ms`, 2 ms by default; None skips it). Given by reference, the rule's answers are also replayed in two processes
+with other hash seeds, so put the package on `PYTHONPATH`. No check proves a rule pure: state that shows only after
+more calls, or on other inputs, passes. `check_group_admission` checks the experimental admission API
+(`platoon.experimental`), and changes with it.
+
 ## Reference
 
 | Name | Signature and behavior |
@@ -261,5 +312,8 @@ To run a whole episode on such a gateway (other sampling defaults, a context win
 | `EpisodeRun` | `collection`, `interactions`, `gateway`, `output_dir`, and the properties `trajectories` (the root's first), `root`, `children`, `outcome`, `reward` and `policy` |
 | `toy_tokenizer`, `toy_renderer` | `toy_tokenizer()`; `toy_renderer(name="qwen3_instruct")` |
 | `TOY_MODEL_NAME`, `TOY_RENDERER_NAME`, `TOY_TOKENIZER_DIR` | `"platoon/toy"`, `"qwen3_instruct"`, and the directory of the toy tokenizer's files |
+| `check_task_sampler` | `check_task_sampler(sampler, *, options=None, levels=("entry", "run"), budget_ms=20.0)`: raises `AssertionError` naming each check a task sampler fails ([Check a task sampler](#check-a-task-sampler)) |
+| `check_group_admission` | `check_group_admission(rule, *, options=None, levels=("run", "entry"), budget_ms=2.0)`: raises `AssertionError` naming each check a group admission rule fails ([Check a group admission rule](#check-a-group-admission-rule)) |
 
-The names `platoon.testing` exports are a stable API; its submodules are not.
+The names `platoon.testing` exports are a stable API, but for `check_task_sampler` and `check_group_admission`, which
+check the experimental sampler and admission APIs and change with them; its submodules are not.

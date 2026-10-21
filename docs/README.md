@@ -68,6 +68,10 @@ package.
 - [Renderers and tool-call parsers](extending/renderers.md): prompt and parse a model's chat format, and read its
   tool calls.
 - [Hooks, telemetry and metrics](extending/hooks-and-metrics.md): counters, error detection and where metrics go.
+- [Write a task sampler](extending/task-samplers.md) (experimental): choose which task each training group runs, by a
+  registered name or `module:Class`, and check it with `check_task_sampler`.
+- [Write a group admission rule](extending/group-admission.md) (experimental): decide which settled training groups
+  count toward the batch, and check it with `check_group_admission`.
 
 ## Reference
 
@@ -76,6 +80,8 @@ Generated from the code by `scripts/gen_reference.py`; `tests/docs/test_referenc
 - [Command line](reference/cli.md): every `platoon` command and option.
 - [Config](reference/config.md): every config section and key, with its type and default.
 - [Python API](reference/api.md): the names `platoon` exports.
+- [Experimental API](reference/experimental.md): the names `platoon.experimental` exports, which a minor release may
+  change: the task sampler API, the per-task statistics it reads, and the group admission API.
 
 ## Architecture
 

@@ -79,13 +79,26 @@ from platoon.train.components import RUN_LEVEL_FIELDS
 logger = logging.getLogger(__name__)
 
 # Keys a named environment may not set: what identifies or weighs an entry in a run (``env``, ``name``,
-# ``weight``), its staleness bound (``max_staleness``, training strategy too), the options of one harness
-# (``harness_options``: use ``harness_defaults``, keyed by harness), the tasks a run leaves out (``exclude_tasks``: an
-# entry's own list would replace the environment's, not add to it, and bring its tasks back unnoticed), and the
-# run-level settings, which are the run's to choose.  Of ``workflow_config`` it may set ``rollout_config`` only
-# (:data:`SHIPPED_SETTINGS`).
+# ``weight``), how a run draws its tasks (``task_sampler``, ``task_sampler_options``) and which of its groups count
+# (``group_admission``, ``group_admission_options``), its staleness bound (``max_staleness``, training strategy too),
+# the options of one harness (``harness_options``: use ``harness_defaults``, keyed by harness), the tasks a run leaves
+# out (``exclude_tasks``: an entry's own list would replace the environment's, not add to it, and bring its tasks back
+# unnoticed), and the run-level settings, which are the run's to choose.  Of ``workflow_config`` it may set
+# ``rollout_config`` only (:data:`SHIPPED_SETTINGS`).
 FORBIDDEN_KEYS = frozenset(
-    {"env", "name", "weight", "max_staleness", "harness_options", "exclude_tasks", *RUN_LEVEL_FIELDS}
+    {
+        "env",
+        "name",
+        "weight",
+        "task_sampler",
+        "task_sampler_options",
+        "group_admission",
+        "group_admission_options",
+        "max_staleness",
+        "harness_options",
+        "exclude_tasks",
+        *RUN_LEVEL_FIELDS,
+    }
 )
 # The keys of an entry's ``workflow_config`` a named environment may ship: the rollout settings its tasks were measured
 # with, which its evaluations inherit beneath the phase's own section. The rest is training strategy, which a run
@@ -102,11 +115,12 @@ class EnvironmentEntry:
     ``EnvironmentEntry(name, version="1", *, description="", harness_defaults=None, **keys)``, where ``keys`` are
     keys of an ``environments`` entry (``service``, ``service_kwargs``, ``harness``, ``program``,
     ``reward_processor``, ``agents``, ``dataset_kwargs``, ...), checked against the config schema when the entry
-    is built.  A run chooses the rest (:data:`FORBIDDEN_KEYS`): ``env``, ``name``, ``weight``, ``max_staleness``, the
-    run-level settings, the tasks it leaves out (``exclude_tasks``; an environment that should not offer a task leaves
-    it out of its own task lists, in a new version), ``harness_options``, for which ``harness_defaults`` maps a
-    harness name to the options the environment needs from that harness, of ``workflow_config`` all but the
-    rollout settings (``rollout_config``) its tasks were measured with, and ``eval_overrides.workflow_config``.
+    is built.  A run chooses the rest (:data:`FORBIDDEN_KEYS`): ``env``, ``name``, ``weight``, ``task_sampler`` and
+    ``task_sampler_options``, ``group_admission`` and ``group_admission_options``, ``max_staleness``, the run-level
+    settings, the tasks it leaves out (``exclude_tasks``; an environment that should not offer a task leaves it out of
+    its own task lists, in a new version), ``harness_options``, for which ``harness_defaults`` maps a harness name to
+    the options the environment needs from that harness, of ``workflow_config`` all but the rollout settings
+    (``rollout_config``) its tasks were measured with, and ``eval_overrides.workflow_config``.
     """
 
     # The environment's name, ``<owner>-<name>``.
@@ -136,8 +150,9 @@ class EnvironmentEntry:
         if forbidden:
             raise ValueError(
                 f"{what} sets {forbidden}, which a named environment may not set: a run chooses its entry's name, "
-                "weight, run-level settings and exclude_tasks (leave a task out of the environment's own task lists "
-                "instead), and harness options go in harness_defaults, keyed by harness"
+                "weight, task sampler, group admission rule, run-level settings and exclude_tasks (leave a task out of "
+                "the environment's own task lists instead), and harness options go in harness_defaults, keyed by "
+                "harness"
             )
         problems = _schema_problems(keys)
         if problems:

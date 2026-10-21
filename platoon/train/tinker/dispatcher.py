@@ -9,11 +9,28 @@ each group as a task of its own.  A group starts when three things allow it:
   ``(k + 1) × batch_size``: the lookahead the producer kept, which lets the rollouts of a step run at most ``k`` steps
   ahead of training.  The count drops back when a step starts, after its policy is published.  Without a bound there
   is no horizon.  Either way the dispatcher never starts more groups than the run's remaining steps consume, so no
-  group runs past the plan.  With ``k = 0`` a step trains exactly the groups drawn for it, as the producer had it,
-  unless a label's limit holds one of them back.
+  group runs past the plan (under a group admission rule, a step that closes short consumes fewer: see below).  With
+  ``k = 0`` a step trains exactly the groups drawn for it, as the producer had it, unless a label's limit holds one of
+  them back.
 - **Rollout permits** (``train.max_concurrent_rollouts``): a group takes its entry's group size of them at once,
   first come first served, and returns them when its workflow returns.
 - **Label capacity** (``train.rollout_group_limits``): at most that many groups of a label run at once.
+
+**The order.**  Each new position of the run's order is drawn through the run's task samplers
+(:class:`~platoon.train.sampler_runtime.SamplerSet`): the run's sampler decides position ``n`` (its decision ``n``),
+and when it hands the slot to an environment entry, as ``weighted`` does, that entry's sampler decides the task.  The
+built-in samplers draw the rows platoon 0.3.0's orders drew, position for position; an order handed to the dispatcher
+directly is drawn as it is.
+
+**Adaptive samplers.**  An adaptive sampler (one that reads the run's per-task statistics, such as ``pass_rate``)
+decides only when a group can start: within the horizon, with some label of its pool below its limit, and with the
+group's rollout permits already held, so that a decision is never made a group's duration before its group starts.
+Under ``weighted``, a slot whose entry samples adaptively consumes its position at once and waits as a **token** in
+the entry's own first-in, first-out queue until the entry can start a group (past the backlog limit it is skipped, and
+its position is used up); the token being started, which waits for its permits, is saved with the dispatcher's state
+first among its entry's, so no full save loses its position.  An adaptive run sampler decides over the whole pool,
+holding permits for the run's largest group, and its draw takes the next position when it binds.  A decision that
+finds nothing eligible decides nothing, and the dispatcher waits for a change.
 
 A draw of the order whose label is at its limit waits in the label's first-in, first-out backlog, which does not count
 toward the horizon, so the dispatcher draws on for the other labels.  Once :data:`BACKLOG_BATCHES` batches of a label's
@@ -38,15 +55,38 @@ each step.
 checkpoint saves of it (:func:`save_state`) is a file of its own, ``tasks/dispatch-s<start>-<checkpoint>.json``, which
 the checkpoint's row names (``dispatch``), so that it does not depend on the run's per-task statistics: the next
 position of the order, the outstanding draws, each label's waiting draws and a fingerprint of the sampling inputs
-(:meth:`Dispatcher.state`), and, in ``tasks/kept-s<start>-<checkpoint>.json.gz``
+(:meth:`Dispatcher.state`), with each outstanding draw's row in the run's task pool and the sampler that drew it,
+each entry's tokens, and each sampler's decision count and state, and, in ``tasks/kept-s<start>-<checkpoint>.json.gz``
 (:mod:`platoon.train.tinker.kept_groups`), the groups that settled and no committed step consumed
 (:meth:`Dispatcher.kept`).  A start that resumes reads it back
 (:func:`read_state`) and rebuilds the dispatcher from it (:func:`plan_resume`, :meth:`Dispatcher.restore`): the kept
 groups go to the result queue first, so the steps after the resume train them without running them again; every other
 outstanding draw (one that was running, waiting for its label, or whose group could not be kept) is drawn again first,
-as a new draw of this start (reason ``reissue``) at its old place in the order; and the order goes on from where the
-checkpoint left it.  So every position of the order is consumed exactly once: trained, dropped as stale, failed or
-skipped.
+as a new draw of this start (reason ``reissue``) at its old place in the order, from the row it drew; and the order
+goes on from where the checkpoint left it, every sampler at its saved count (a state of platoon 0.3.0's format 1,
+which saved none, has the counts recomputed from the position), each entry's tokens back in its queue
+(:meth:`Dispatcher.restore_tokens`).  So every position of the order is consumed exactly once: trained, dropped as
+stale, failed, skipped or rejected, or, for a token, skipped by a full queue or dropped by a resume whose entry no
+longer gets slots (a ``slot_skipped`` event each).
+
+**Group admission** (RFC 0019, section 6; :mod:`platoon.train.admissions`).  In a run where some entry's rule is not
+``all``, a group is decided when it settles: an admitted one goes to the result queue as before; a rejected or failed
+one leaves the outstanding draws, and only a marker with its statistics goes to the queue (:meth:`Dispatcher.reject`).
+A rejected group that carries datums frees its slot of the horizon at once, so that the next group starts while the
+trainer trains.  A failed group, or one that settled without a datum (``no_results`` and the like), keeps its slot
+until a step dequeues its marker, as in all mode: such groups can end at once (an outage), and freeing their slots
+would start groups as fast as they end for as long as the trainer awaits an update or a save.  The horizon then
+counts the groups that can still train: ``pipeline`` the groups running, the admitted ones waiting and the markers that
+keep their slots, ``admitted`` those the current step counted toward its batch.  A step counts each group it dequeues
+and each marker of a group rejected while it was current, up to its cap of ``ceil(refill.max_groups_per_step ×
+batch_size)`` (:meth:`Dispatcher.took`); a marker of an earlier step's passes over.  At ``max_staleness: 0``, and on
+the run's last step, no group starts that the current step could not count (what it counted, the groups in the
+pipeline and its queued markers stay below the cap), so none of the groups it starts is left running when it closes.
+The cap bounds what a step counts, not what starts while the trainer trains: at ``k >= 1`` the horizon and the rollout
+permits bound those (after a step that admitted ``a`` groups, about ``((k + 1) × batch_size - a) / p`` start during
+its update, ``p`` the share of groups admitted).  And since a step can close short of its batch, a run's last steps can
+consume fewer groups than the end-of-plan bound counts on: up to ``batch_size`` groups started before the last step can
+still be running or waiting when it closes, and the final checkpoint keeps them.
 """
 
 from __future__ import annotations
@@ -60,7 +100,8 @@ from collections.abc import Awaitable, Callable, Container, Coroutine, Iterable,
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from platoon.train.task_stats import read_tasks_file, write_tasks_file
+from platoon.train.sampler_runtime import Owed, SamplerSet
+from platoon.train.task_stats import MAIN, read_tasks_file, write_tasks_file
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +111,15 @@ BACKLOG_BATCHES = 4
 # order (its position; a reissued draw keeps the position of the draw it replaces).
 SEQ_COLUMN = "_platoon_seq"
 POSITION_COLUMN = "_platoon_position"
-# The format of the file of the dispatcher's state that a full checkpoint saves, which its row names.
-STATE_FORMAT = 1
+# The format of the file of the dispatcher's state that a full checkpoint saves, which its row names: 2 adds the
+# samplers' counts and states, each entry's tokens and each outstanding draw's pool row and sampler to platoon 0.3.0's
+# format 1, which a resume still reads.
+STATE_FORMAT = 2
+STATE_FORMATS = (1, 2)
 
 Key = tuple[int, int]
+# An entry whose tasks carry several labels: its tokens hold no label's slot.
+_NO_LABEL = object()
 
 
 class Permits(Protocol):
@@ -106,15 +152,38 @@ class DrawRecorder(Protocol):
         position: int | None,
         version: int,
         reissues: tuple[int, int] | None = None,
+        sampler: str | None = None,
+        reason: str | None = None,
+        score: float | None = None,
     ) -> None: ...
 
     def skipped(self, row: Mapping[str, Any]) -> None: ...
 
 
 @dataclass(eq=False)
-class Draw:
+class Token:
+    """A slot of the run's order owed to an entry whose sampler is adaptive: its position, the entry, and its ticket
+    among the waiting items.  The entry's sampler decides its task when the entry can start a group.  ``fallback``:
+    the run sampler's fallback handed the slot, so the draw that fills it is the run's fallback."""
+
+    position: int
+    entry: str
+    ticket: int
+    fallback: bool = False
+
+
+class _Ask:
+    """A decision of the run's adaptive sampler, over the whole pool, when a group can start."""
+
+
+ASK = _Ask()
+
+
+@dataclass(eq=False)
+class BoundDraw:
     """One drawn task: its row, stamped with its draw number and position, its key in the run's statistics
-    (``(start, seq)``), and what the dispatcher reads of it: its entry, its label and its group size."""
+    (``(start, seq)``), and what the dispatcher reads of it: its entry, its label and its group size; with its row's
+    index in the run's task pool (None for a row an order handed in) and the sampler that drew it."""
 
     row: dict[str, Any]
     start: int
@@ -127,6 +196,8 @@ class Draw:
     # Taken in the order the draws were made (or restored): of the waiting draws whose label has room, the one with the
     # smallest ticket starts first.
     ticket: int
+    index: int | None = None
+    sampler: str | None = None
 
     @property
     def key(self) -> Key:
@@ -136,25 +207,30 @@ class Draw:
 # A training group's coroutine: it runs the group of ``draw``, calls ``release`` once its workflow has returned (so that
 # the group's label slot and rollout permits are free before anything else), then hands its output to
 # :meth:`Dispatcher.settle`.
-GroupRunner = Callable[[Draw, Callable[[], None]], Awaitable[None]]
+GroupRunner = Callable[[BoundDraw, Callable[[], None]], Awaitable[None]]
 
 
 class Dispatcher:
     """Starts a training run's rollout groups as the horizon, the rollout permits and the label limits allow (see the
     module docstring).
 
-    ``rows`` reads each row's entry, label and group size and holds the run's rollout permits; ``order(position)`` is
-    the row at a position of the run's order; ``steps`` the training steps this start runs; ``labels`` every label of
-    the run's training tasks, which must be complete: the dispatcher draws only while one of them has room, and learns
-    another one only by drawing it, so a label it is not given never counts as having room before its first draw;
-    ``recorder`` the run's per-task statistics, told of each draw and skip; ``version()`` the policy version now.
-    ``start`` numbers this start's draws, and the order starts at ``next_position``."""
+    ``rows`` reads each row's entry, label and group size and holds the run's rollout permits; ``samplers`` draws
+    each position of the run's order (:class:`~platoon.train.sampler_runtime.SamplerSet`), or ``order(position)``
+    gives the row at each position, drawn as it is; ``steps`` the training steps this start runs; ``labels`` every
+    label of the run's training tasks, which must be complete: the dispatcher draws only while one of them has room, and
+    learns another one only by drawing it, so a label it is not given never counts as having room before its first
+    draw; ``recorder`` the run's per-task statistics, told of each draw and skip; ``version()`` the policy version now,
+    and ``step`` the training steps committed when this start began, which the samplers' contexts carry.  ``start``
+    numbers this start's draws, and the order starts at ``next_position``.  ``groups_per_step``, the cap of a run
+    under a group admission rule, makes it count its steps as the module docstring says (None: every group counts
+    toward the batch)."""
 
     def __init__(
         self,
         *,
         rows: RowReader,
-        order: Callable[[int], Mapping[str, Any]],
+        samplers: SamplerSet | None = None,
+        order: Callable[[int], Mapping[str, Any]] | None = None,
         batch_size: int,
         max_staleness: int | None,
         steps: int,
@@ -168,15 +244,21 @@ class Dispatcher:
         finish_batches: bool = False,
         sampler: str = "auto",
         fingerprint: Mapping[str, Any] | None = None,
+        step: int = 0,
+        groups_per_step: int | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
+        if samplers is None:
+            if order is None:
+                raise TypeError("a Dispatcher draws through samplers or an order: give one")
+            samplers = SamplerSet.of_order(order, name=sampler, batch_size=batch_size)
         if backlog_limit is not None and (
             isinstance(backlog_limit, bool) or not isinstance(backlog_limit, int) or backlog_limit < 1
         ):
             raise ValueError("backlog_limit must be a positive integer")
         self._rows = rows
-        self._order = order
+        self.samplers = samplers
         self.batch_size = batch_size
         self.max_staleness = max_staleness
         self._limits: dict[str | None, int] = {label: limit for label, limit in (limits or {}).items()}
@@ -191,6 +273,8 @@ class Dispatcher:
         self.finish_batches = finish_batches
         self.sampler = sampler
         self.fingerprint = dict(fingerprint or {})
+        # The training steps committed, which each decision's context carries.
+        self.step = step
         # The groups dispatched and not yet dequeued by a step (running, or settled and waiting in the result queue),
         # and those the current step has dequeued: together, the horizon's count.
         self.pipeline = 0
@@ -201,18 +285,30 @@ class Dispatcher:
         self._active: Counter[str | None] = Counter()
         # The draws that wait, by label, each in the order it was drawn: those a resume reissued, and those whose label
         # was at its limit (the label's backlog).
-        self._waiting: dict[str | None, deque[Draw]] = {}
+        self._waiting: dict[str | None, deque[BoundDraw]] = {}
         # The groups that settled and no committed step consumed yet, by key, in the order they settled; a full
         # checkpoint keeps them (kept).
         self._settled: dict[Key, Any] = {}
-        # Every draw no committed step consumed, by key, in the order it was drawn: its task and its position.
-        self._outstanding: dict[Key, tuple[str, int | None]] = {}
+        # Every draw no committed step consumed, by key, in the order it was drawn: its task, its position, its row's
+        # index in the task pool and the sampler that drew it.
+        self._outstanding: dict[Key, tuple[str, int | None, int | None, str | None]] = {}
         # Draws of each label skipped because its backlog was full.
         self.skipped: Counter[str | None] = Counter()
+        # Each adaptive entry's tokens, oldest first, and the token being started (waiting for its permits), which is
+        # in no queue; and the slots skipped, by a full queue or a resume.
+        self._tokens: dict[str, deque[Token]] = {}
+        self._starting: Token | None = None
+        self.skipped_slots = 0
         self._next_seq = 0
         self._next_ticket = 0
         self._changed = asyncio.Event()
         self.results: asyncio.Queue[Any] | None = None
+        # Under a group admission rule: the step's cap, what it counted toward it, and the markers of the groups
+        # rejected while it was current that wait in the result queue and freed their slots (a marker that keeps its
+        # slot counts in the pipeline instead).
+        self.groups_per_step = groups_per_step
+        self.counted = 0
+        self._markers_now = 0
 
     # --- what the train loop tells it -------------------------------------------------------------------------------
 
@@ -222,6 +318,27 @@ class Dispatcher:
         self.pipeline = max(0, self.pipeline - 1)
         self.admitted += 1
         self._changed.set()
+
+    def took(self, kind: str, window: int | None = None, *, held: bool = False) -> bool:
+        """Under a group admission rule, a step dequeued an item (instead of :meth:`dequeued`): an ``admitted`` group
+        counts toward its batch, a ``stale`` group or a kept ``failed`` one toward its cap only, and a ``marker`` of a
+        group rejected while step ``window`` was current toward its cap when that is this step.  A ``held`` marker
+        (one whose group kept its slot, :meth:`reject`) frees its slot now, whichever step's it is.  Whether the item
+        counts toward the cap."""
+
+        self._changed.set()
+        if kind == "marker":
+            if held:
+                self.pipeline = max(0, self.pipeline - 1)
+            if window != self.step:
+                return False  # an earlier step's: its slot was freed when it settled, or just now
+            if not held:
+                self._markers_now = max(0, self._markers_now - 1)
+        else:
+            self.pipeline = max(0, self.pipeline - 1)
+            self.admitted += kind == "admitted"
+        self.counted += 1
+        return True
 
     def committed(self, keys: Iterable[Key | None]) -> None:
         """The step that dequeued the groups of ``keys`` committed: they were consumed, so no checkpoint keeps them."""
@@ -235,16 +352,33 @@ class Dispatcher:
         """A new step starts, its policy published: the groups the last one dequeued no longer count."""
 
         self.admitted = 0
+        self.counted = self._markers_now = 0  # the markers still queued are an earlier step's now
         self._steps_left = max(0, self._steps_left - 1)
+        self.step += 1
         self._changed.set()
 
     # --- what a group tells it --------------------------------------------------------------------------------------
 
-    def settle(self, draw: Draw, item: Any) -> None:
+    def settle(self, draw: BoundDraw, item: Any) -> None:
         """The group of ``draw`` settled: ``item`` (what a step dequeues) goes to the result queue, and is kept until a
         committed step consumes it."""
 
         self._settled[draw.key] = item
+        if self.results is not None:
+            self.results.put_nowait(item)
+        self._changed.set()
+
+    def reject(self, draw: BoundDraw, item: Any, *, hold: bool = False) -> None:
+        """Under a group admission rule, the group of ``draw`` was rejected, or failed, when it settled: its fate is
+        final, so it leaves the outstanding draws (no checkpoint keeps or saves it), and ``item``, its marker, goes to
+        the result queue.  It frees its slot of the horizon at once, the marker counted among the current step's queued
+        markers; with ``hold`` (a group that failed or settled without a datum, which can end at once) it keeps its slot
+        until a step dequeues the marker (:meth:`took`), as a group does in all mode."""
+
+        self._outstanding.pop(draw.key, None)
+        if not hold:
+            self.pipeline = max(0, self.pipeline - 1)
+            self._markers_now += 1
         if self.results is not None:
             self.results.put_nowait(item)
         self._changed.set()
@@ -271,12 +405,16 @@ class Dispatcher:
         update must still finish (``finish_batches``)."""
 
         while not self._stopping(stop):
-            draw = self._choose()
-            if draw is None:
+            item = self._choose()
+            if item is None:
                 self._changed.clear()
                 await self._changed.wait()
                 continue
-            await self._start(draw, spawn, run_group, stop)
+            if isinstance(item, BoundDraw):
+                await self._start(item, spawn, run_group, stop)
+            elif not await self._decide(item, spawn, run_group, stop):
+                self._changed.clear()  # nothing was eligible: wait for a change
+                await self._changed.wait()
 
     def _stopping(self, stop: asyncio.Event | None) -> bool:
         return stop is not None and stop.is_set() and not self.finish_batches
@@ -285,30 +423,55 @@ class Dispatcher:
         """Whether another group may be dispatched: the run's remaining steps consume more than the groups in the
         pipeline and those the current step dequeued, and so does the horizon, ``(k + 1) × batch_size``, less the slots
         held for the capped labels' next groups (:meth:`_held`), those held for ``label`` excepted for one of its
-        ``waiting`` draws, which they are held for."""
+        ``waiting`` draws, which they are held for; and, under a group admission rule at ``k = 0`` or on the last step,
+        the current step's cap more than what it counted, the groups in the pipeline and its queued markers."""
 
         in_use = self.pipeline + self.admitted
         if in_use >= self._steps_left * self.batch_size:
             return False
+        if self.groups_per_step is not None and (self.max_staleness == 0 or self._steps_left == 1):
+            # Under a rule, at k = 0 and on the last step: no group the current step could not count.
+            if self.counted + self.pipeline + self._markers_now >= self.groups_per_step:
+                return False
         if self.max_staleness is None:
             return True
         held = self._held()
-        if waiting and held and self._waiting.get(label) and label in self._limits:
+        if waiting and held and label in self._limits and label in self._waiting_labels():
             held -= min(self._active[label], held)
         return in_use + held < (self.max_staleness + 1) * self.batch_size
 
     def _held(self) -> int:
         """The slots of the horizon held for the groups that follow the capped labels' running ones: one for each
-        running group of a capped label that has draws waiting, as far as those groups and the slots held for them fit
-        in ``k`` batches (none with ``k = 0``).  The label's oldest waiting draw takes the slot when its label has
-        room."""
+        running group of a capped label that has draws waiting (or tokens, of an entry whose tasks all carry that
+        label), as far as those groups and the slots held for them fit in ``k`` batches (none with ``k = 0``).  The
+        label's oldest waiting draw or token takes the slot when its label has room."""
 
         if not self.max_staleness or not self._limits:
             return 0
-        running = sum(
-            self._active[label] for label, waiting in self._waiting.items() if waiting and label in self._limits
-        )
+        running = sum(self._active[label] for label in self._waiting_labels() if label in self._limits)
         return min(running, max(0, self.max_staleness * self.batch_size - running))
+
+    def _waiting_labels(self) -> list[str | None]:
+        """The labels with draws waiting, or tokens of an entry of that one label."""
+
+        labels = [label for label, waiting in self._waiting.items() if waiting]
+        for entry, tokens in self._tokens.items():
+            label = self._token_label(entry)
+            if tokens and label is not _NO_LABEL and label not in labels:
+                labels.append(label)  # type: ignore[arg-type]
+        return labels
+
+    def _token_label(self, entry: str) -> str | None | object:
+        """The one label every task of ``entry`` carries, which its tokens count as waiting draws of (the default
+        label column's: the entry's own); :data:`_NO_LABEL` for an entry whose tasks carry several."""
+
+        labels = self.samplers.entry_labels(entry)
+        return labels[0] if len(labels) == 1 else _NO_LABEL
+
+    def _entry_can_start(self, entry: str) -> bool:
+        """Whether a group of ``entry`` could start: some label its tasks carry has room."""
+
+        return any(self._has_room(label) for label in self.samplers.entry_labels(entry))
 
     def _has_room(self, label: str | None) -> bool:
         return label not in self._limits or self._active[label] < self._limits[label]
@@ -321,12 +484,15 @@ class Dispatcher:
             return True
         return any(self._has_room(label) for label in self._labels)
 
-    def _choose(self) -> Draw | None:
-        """The next draw to start, its label's slot free and the horizon's room for it: the oldest waiting draw whose
-        label has room, else a new draw of the order, while some label has room (a new draw whose label is at its limit
-        waits, or past its backlog is skipped).  None when nothing can start now."""
+    def _choose(self) -> BoundDraw | Token | _Ask | None:
+        """The next item to start, the horizon's room for it: the oldest waiting draw whose label has room, or token
+        whose entry can start; else, under an adaptive run sampler, a decision over the whole pool (:data:`ASK`) while
+        some label has room; else a new draw of the order, while some label has room (a new draw whose label is at its
+        limit waits, or past its backlog is skipped; a slot owed to an adaptive entry becomes a token, which starts at
+        once when the entry can start and none of its tokens waits, else waits in its entry's queue, or past the
+        backlog limit is skipped).  None when nothing can start now."""
 
-        best: deque[Draw] | None = None
+        best: deque[Any] | None = None
         for label, waiting in self._waiting.items():
             if (
                 waiting
@@ -335,12 +501,34 @@ class Dispatcher:
                 and (best is None or waiting[0].ticket < best[0].ticket)
             ):
                 best = waiting
+        for entry, tokens in self._tokens.items():
+            if (
+                tokens
+                and (best is None or tokens[0].ticket < best[0].ticket)
+                and self._entry_can_start(entry)
+                and self._token_horizon(entry)
+            ):
+                best = tokens
         if best is not None:
             return best.popleft()
         if not self._horizon_has_room():
             return None
+        if self.samplers.adaptive():
+            return ASK if self._some_label_has_room() else None
         while self._some_label_has_room():
-            draw = self._new_draw()
+            item = self._new_draw()
+            if isinstance(item, Token):
+                tokens = self._tokens.setdefault(item.entry, deque())
+                if not tokens and self._entry_can_start(item.entry):
+                    return item
+                if len(tokens) < self.backlog_limit:
+                    tokens.append(item)  # waits until its entry can start
+                    if not self._horizon_has_room():  # its label's running groups now hold a slot for it
+                        return None
+                    continue
+                self._skip_slot(item.position, item.entry, "backlog")
+                continue
+            draw = item
             if self._has_room(draw.label):
                 return draw
             waiting = self._waiting.setdefault(draw.label, deque())
@@ -352,9 +540,18 @@ class Dispatcher:
             self._skip(draw)
         return None
 
+    def _token_horizon(self, entry: str) -> bool:
+        """Whether the horizon has room for a token of ``entry``: as for a waiting draw of its label, when all its
+        tasks carry one."""
+
+        label = self._token_label(entry)
+        if label is _NO_LABEL:
+            return self._horizon_has_room()
+        return self._horizon_has_room(label, waiting=True)  # type: ignore[arg-type]
+
     async def _start(
         self,
-        draw: Draw,
+        draw: BoundDraw,
         spawn: Callable[[Coroutine[Any, Any, None]], Any],
         run_group: GroupRunner,
         stop: asyncio.Event | None = None,
@@ -378,12 +575,95 @@ class Dispatcher:
             return
         spawn(self._group(draw, run_group))
 
-    def _unstart(self, draw: Draw) -> None:
+    async def _decide(
+        self,
+        item: Token | _Ask,
+        spawn: Callable[[Coroutine[Any, Any, None]], Any],
+        run_group: GroupRunner,
+        stop: asyncio.Event | None = None,
+    ) -> bool:
+        """Start the group of a token, or of a decision of the run's adaptive sampler: reserve the horizon's slot,
+        take the group's rollout permits (the token's entry's group size, or the run's largest for a decision over the
+        pool), then ask the sampler, bind its draw (a decision over the pool takes the next position), return the
+        permits above the drawn task's group size, take its label's slot and start the group, all at once.  The
+        token being started is saved first among its entry's while it waits for its permits; a stop request or a
+        cancellation that comes meanwhile puts it back, first in its queue, and so does a decision that finds nothing
+        eligible.  False when nothing was decided."""
+
+        token = item if isinstance(item, Token) else None
+        entry = token.entry if token is not None else None
+        size = (self.samplers.group_size(entry) if token is not None else self._ask_size()) or 1
+        self._starting = token
+        self.pipeline += 1
+        self.peak = max(self.peak, self.pipeline + self.admitted)
+        try:
+            await self._rows.permits.acquire(size)
+        except BaseException:
+            self.pipeline -= 1
+            self._put_back(token)
+            raise
+        if self._stopping(stop):
+            self._rows.permits.release(size)
+            self.pipeline -= 1
+            self._put_back(token)
+            return True
+        decided = self.samplers.decide(
+            entry,
+            room=self._has_room,
+            step=self.step,
+            versions={MAIN: self._version()},
+            fallback=token is not None and token.fallback,
+            most=None if token is not None else size,
+        )
+        if decided is None:
+            self._rows.permits.release(size)
+            self.pipeline -= 1
+            self._put_back(token)
+            return False
+        self._starting = None
+        if token is not None:
+            position = token.position
+        else:
+            position = self.next_position
+            self.next_position += 1
+        draw = self._draw(decided.row, position, index=decided.index, sampler=decided.sampler)
+        if size > draw.group_size:
+            self._rows.permits.release(size - draw.group_size)
+        if draw.label in self._limits:
+            self._active[draw.label] += 1
+        self._record(draw, reason=decided.reason, score=decided.score)
+        if size < draw.group_size:  # a group larger than the set said: its other permits, after the decision
+            try:
+                await self._rows.permits.acquire(draw.group_size - size)
+            except BaseException:
+                self._rows.permits.release(size)
+                self._unstart(draw)
+                self._waiting.setdefault(draw.label, deque()).appendleft(draw)
+                raise
+        spawn(self._group(draw, run_group))
+        return True
+
+    def _ask_size(self) -> int | None:
+        """The rollout permits a decision over the whole pool holds: the largest group of the entries that can start
+        a group now (some label of their tasks has room), so that permits a capped entry's group could not use stay
+        free for the others; its draw is one of those entries' (:meth:`SamplerSet.decide`'s ``most``)."""
+
+        sizes = [info.group_size for label, info in self.samplers.infos.items() if self._entry_can_start(label)]
+        return max(sizes) if sizes else self.samplers.group_size(None)
+
+    def _put_back(self, token: Token | None) -> None:
+        """A token whose decision was not made goes back, first in its entry's queue."""
+
+        self._starting = None
+        if token is not None:
+            self._tokens.setdefault(token.entry, deque()).appendleft(token)
+
+    def _unstart(self, draw: BoundDraw) -> None:
         if draw.label in self._limits:
             self._active[draw.label] -= 1
         self.pipeline -= 1
 
-    async def _group(self, draw: Draw, run_group: GroupRunner) -> None:
+    async def _group(self, draw: BoundDraw, run_group: GroupRunner) -> None:
         released = False
 
         def release() -> None:
@@ -402,16 +682,26 @@ class Dispatcher:
 
     # --- draws ------------------------------------------------------------------------------------------------------
 
-    def _new_draw(self) -> Draw:
+    def _new_draw(self) -> BoundDraw | Token:
+        """Draw the order's next position: the run's samplers decide its task (:meth:`SamplerSet.static`), or owe it
+        to an entry whose sampler is adaptive (a token)."""
+
         position = self.next_position
         self.next_position += 1
-        draw = self._draw(dict(self._order(position)), position)
-        self._record(draw)
+        decided = self.samplers.static(position, step=self.step, versions={MAIN: self._version()})
+        if isinstance(decided, Owed):
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            return Token(position, decided.entry, ticket, decided.fallback)
+        draw = self._draw(decided.row, position, index=decided.index, sampler=decided.sampler)
+        self._record(draw, reason=decided.reason, score=decided.score)
         return draw
 
-    def _draw(self, row: dict[str, Any], position: int | None) -> Draw:
-        """Number ``row`` as this start's next draw, at ``position`` in the order: it is outstanding until a committed
-        step consumes it, or it is skipped."""
+    def _draw(
+        self, row: dict[str, Any], position: int | None, *, index: int | None = None, sampler: str | None = None
+    ) -> BoundDraw:
+        """Number ``row`` (pool row ``index``, which ``sampler`` drew) as this start's next draw, at ``position`` in
+        the order: it is outstanding until a committed step consumes it, or it is skipped."""
 
         seq = self._next_seq
         self._next_seq += 1
@@ -421,11 +711,23 @@ class Dispatcher:
         self._labels.add(label)
         ticket = self._next_ticket
         self._next_ticket += 1
-        draw = Draw(row, self.start, seq, position, str(row.get("task_id")), entry, label, group_size, ticket)
-        self._outstanding[draw.key] = (draw.task_id, position)
+        draw = BoundDraw(
+            row, self.start, seq, position, str(row.get("task_id")), entry, label, group_size, ticket, index, sampler
+        )
+        self._outstanding[draw.key] = (draw.task_id, position, index, sampler)
         return draw
 
-    def _record(self, draw: Draw, *, reissues: Key | None = None, version: int | None = None) -> None:
+    def _record(
+        self,
+        draw: BoundDraw,
+        *,
+        reason: str = "order",
+        score: float | None = None,
+        reissues: Key | None = None,
+        version: int | None = None,
+    ) -> None:
+        reason = "reissue" if reissues is not None else reason
+        self.samplers.count(draw.sampler, reason)
         if self._recorder is not None:
             self._recorder.draw(
                 draw.row,
@@ -433,9 +735,12 @@ class Dispatcher:
                 position=draw.position,
                 version=self._version() if version is None else version,
                 reissues=reissues,
+                sampler=draw.sampler,
+                reason=reason,
+                score=score,
             )
 
-    def _skip(self, draw: Draw) -> None:
+    def _skip(self, draw: BoundDraw) -> None:
         self._outstanding.pop(draw.key, None)
         self.skipped[draw.label] += 1
         if self._recorder is not None:
@@ -450,38 +755,92 @@ class Dispatcher:
                 self._limits.get(draw.label, 0),
             )
 
+    def _skip_slot(self, position: int, entry: str, why: str) -> None:
+        """A token's position is used up without a draw: its entry's queue was full (``backlog``), or a resume found
+        that its entry no longer gets slots (``no_slots``) or left the run (``entry_left``)."""
+
+        self.skipped_slots += 1
+        slot_skipped = getattr(self._recorder, "slot_skipped", None)
+        if callable(slot_skipped):
+            slot_skipped(position=position, entry=entry, why=why)
+        if why == "backlog" and self.skipped_slots == 1:
+            logger.warning(
+                "Environment %r has %d slots waiting for its task sampler, whose labels are at their limit "
+                "(train.rollout_group_limits): its new slots are skipped, so that the other labels' rows keep the "
+                "batches full; its share of the order asks for more groups than its limit runs",
+                entry,
+                self.backlog_limit,
+            )
+
     # --- what the run's metrics read ----------------------------------------------------------------------------------
 
     def parked_by_label(self) -> Counter[str | None]:
-        """The draws that wait for their label's limit, by label."""
+        """The draws that wait for their label's limit, by label, and an adaptive entry's tokens under its label."""
 
-        return Counter(
+        parked = Counter(
             {label: len(waiting) for label, waiting in self._waiting.items() if waiting and label in self._limits}
         )
+        for entry, tokens in self._tokens.items():
+            label = self._token_label(entry)
+            if tokens and label is not _NO_LABEL and label in self._limits:
+                parked[label] += len(tokens)  # type: ignore[index]
+        return parked
+
+    def tokens_by_entry(self) -> dict[str, int]:
+        """Each adaptive entry's tokens waiting now, the one being started included."""
+
+        found = {entry: len(tokens) for entry, tokens in self._tokens.items()}
+        if self._starting is not None:
+            found[self._starting.entry] = found.get(self._starting.entry, 0) + 1
+        return found
 
     # --- checkpoints and resume ---------------------------------------------------------------------------------------
 
     def state(self) -> dict[str, Any]:
         """What a full checkpoint saves of the dispatcher, beside the groups it keeps (:meth:`kept`): this start's
         number, the sampler and the fingerprint of its inputs, the next position of the order, the outstanding draws
-        (``[start, seq, task id, position]`` each, in the order they were drawn), and each label's waiting draws
-        (``[start, seq]`` each, oldest first).  A resume draws again the outstanding draws that neither wait nor are
-        kept."""
+        (``[start, seq, task id, position]`` each, in the order they were drawn), with the row each drew and the
+        sampler that drew it (``drawn``: ``[start, seq, pool index, sampler]`` each, in the same order; the index is
+        None for a row an order handed in), each label's waiting draws (``[start, seq]`` each, oldest first), each
+        adaptive entry's tokens (``tokens``: positions, oldest first, the one waiting for its permits first), and the
+        samplers' counts and states (``samplers``), and the positions of the tokens whose slot the run sampler's
+        fallback handed (``fallback_slots``: their draws are the run's fallback).  A resume draws again the outstanding
+        draws that neither wait nor are kept, from the rows they drew."""
 
+        outstanding = self._outstanding.items()
         return {
             "start": self.start,
             "sampler": self.sampler,
             "fingerprint": self.fingerprint,
             "next_position": self.next_position,
-            "outstanding": [
-                [start, seq, task, position] for (start, seq), (task, position) in self._outstanding.items()
-            ],
+            "outstanding": [[start, seq, task, position] for (start, seq), (task, position, _, _) in outstanding],
+            "drawn": [[start, seq, index, by] for (start, seq), (_, _, index, by) in outstanding],
             "waiting": {
                 "" if label is None else label: [list(draw.key) for draw in waiting]
                 for label, waiting in self._waiting.items()
                 if waiting
             },
+            "tokens": self._token_positions(),
+            "fallback_slots": [token.position for token in self._token_list() if token.fallback],
+            "samplers": self.samplers.state(),
         }
+
+    def _token_list(self) -> list[Token]:
+        """Every token, the one being started first."""
+
+        found = [self._starting] if self._starting is not None else []
+        return found + [token for tokens in self._tokens.values() for token in tokens]
+
+    def _token_positions(self) -> dict[str, list[int]]:
+        """Each entry's tokens by position, oldest first, the token being started first among its entry's."""
+
+        found: dict[str, list[int]] = {}
+        if self._starting is not None:
+            found[self._starting.entry] = [self._starting.position]
+        for entry, tokens in self._tokens.items():
+            if tokens:
+                found.setdefault(entry, []).extend(token.position for token in tokens)
+        return found
 
     def kept(self) -> list[tuple[Key, Any]]:
         """The groups that settled and no committed step consumed, ``(key, item)`` each, in the order they settled."""
@@ -495,21 +854,65 @@ class Dispatcher:
         reissue: Sequence[tuple[Key, Mapping[str, Any], int | None]],
         waiting: Sequence[tuple[Key, Mapping[str, Any], int | None]],
         version: int,
+        drawn: Mapping[Key, tuple[int | None, str | None]] | None = None,
     ) -> None:
         """Take up what a checkpoint saved (:func:`plan_resume`): ``kept`` groups, ``(key, task id, position, item)``
         each, which the steps dequeue first and which stay outstanding until a committed step consumes them; the draws
         to draw again, ``(old key, row, position)`` each, oldest first, before any new draw (``reissue``); and the draws
         that waited for their label, in their labels' order (``waiting``).  Each draw drawn again is a new draw of this
-        start, at its old position, at policy ``version``, and replaces the old one among the outstanding draws."""
+        start, at its old position, at policy ``version``, and replaces the old one among the outstanding draws.
+        ``drawn`` gives, by old key, the pool index of the row each one is drawn from (a kept group's: of the row it
+        drew) and the sampler that drew it; the dispatcher's own sampler name stands in for one it does not give."""
 
+        drawn = drawn or {}
         for key, task_id, position, item in kept:
+            index, by = drawn.get(key, (None, None))
             self._settled[key] = item
-            self._outstanding[key] = (task_id, position)
+            self._outstanding[key] = (task_id, position, index, by)
         self.pipeline += len(kept)
         for old, row, position in [*reissue, *waiting]:
-            draw = self._draw(dict(row), position)
+            index, by = drawn.get(old, (None, None))
+            draw = self._draw(dict(row), position, index=index, sampler=by or self.sampler)
             self._record(draw, reissues=old, version=version)
             self._waiting.setdefault(draw.label, deque()).append(draw)
+
+    def restore_tokens(
+        self, tokens: Mapping[str, Sequence[int]], *, version: int, fallbacks: Container[int] = ()
+    ) -> dict[str, int]:
+        """Take up the tokens a checkpoint saved (:meth:`state`'s ``tokens``: each entry's positions, the one that
+        waited for its permits first), after the outstanding draws: an entry whose sampler is adaptive gets them back
+        in its queue, in order; one whose sampler is static now binds them by it, in order, as waiting draws of their
+        labels; and those of an entry that no longer gets slots, or left the run, are dropped, each with a
+        ``slot_skipped`` event (``no_slots``, ``entry_left``).  A token whose position is in ``fallbacks``
+        (``fallback_slots``) had its slot from the run sampler's fallback, and its draw is the run's fallback.  Returns
+        how many tokens were restored, bound and dropped."""
+
+        found = {"restored": 0, "bound": 0, "dropped": 0}
+        for entry, positions in tokens.items():
+            member = self.samplers.entries.get(entry)
+            if member is None:
+                why = "no_slots" if entry in self.samplers.infos else "entry_left"
+                for position in positions:
+                    self._skip_slot(int(position), entry, why)
+                found["dropped"] += len(positions)
+            elif member.adaptive:
+                queue = self._tokens.setdefault(entry, deque())
+                for position in positions:
+                    queue.append(Token(int(position), entry, self._next_ticket, int(position) in fallbacks))
+                    self._next_ticket += 1
+                found["restored"] += len(positions)
+            else:
+                # Its count stands at the slots its entry received, these included: they take the decisions before.
+                member.decisions = max(0, member.decisions - len(positions))
+                for position in positions:
+                    decided = self.samplers.entry_static(
+                        entry, step=self.step, versions={MAIN: version}, fallback=int(position) in fallbacks
+                    )
+                    draw = self._draw(decided.row, int(position), index=decided.index, sampler=decided.sampler)
+                    self._record(draw, reason=decided.reason, score=decided.score, version=version)
+                    self._waiting.setdefault(draw.label, deque()).append(draw)
+                found["bound"] += len(positions)
+        return found
 
 
 # --- what a full checkpoint saves of it, and what a resume takes up --------------------------------------------------
@@ -571,9 +974,59 @@ def read_state(run_dir: str | os.PathLike[str], record: Mapping[str, Any]) -> di
         data = json.loads(content)
     except ValueError as exc:
         raise ValueError(f"{record.get('file')} is not JSON: {exc}") from exc
-    if not isinstance(data, dict) or data.get("format") != STATE_FORMAT:
-        raise ValueError(f"{record.get('file')} holds no dispatcher's state of format {STATE_FORMAT}")
+    if not isinstance(data, dict) or data.get("format") not in STATE_FORMATS:
+        raise ValueError(
+            f"{record.get('file')} holds no dispatcher's state of format {' or '.join(map(str, STATE_FORMATS))}"
+        )
     return data
+
+
+def saved_draws(state: Mapping[str, Any]) -> dict[Key, tuple[int | None, str | None]]:
+    """The pool index of the row each outstanding draw of a saved state drew and the sampler that drew it, by
+    ``(start, seq)`` (``drawn``); none for a state of format 1, which saved neither.  A ``ValueError`` for data it
+    cannot read."""
+
+    try:
+        drawn: dict[Key, tuple[int | None, str | None]] = {}
+        for start, seq, index, by in state.get("drawn") or []:
+            if index is not None and (isinstance(index, bool) or not isinstance(index, int) or index < 0):
+                raise ValueError(f"pool index {index!r}")
+            drawn[(int(start), int(seq))] = (index, None if by is None else str(by))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"cannot read the outstanding draws' rows: {type(exc).__name__}: {exc}") from exc
+    return drawn
+
+
+def saved_fallback_slots(state: Mapping[str, Any]) -> frozenset[int]:
+    """The positions of a saved state's tokens whose slot the run sampler's fallback handed (``fallback_slots``); none
+    for a state that saved none.  A ``ValueError`` for data it cannot read."""
+
+    positions = state.get("fallback_slots") or []
+    if not isinstance(positions, list) or any(
+        isinstance(position, bool) or not isinstance(position, int) or position < 0 for position in positions
+    ):
+        raise ValueError(f"cannot read the slots of the run sampler's fallback: {positions!r}")
+    return frozenset(positions)
+
+
+def saved_token_positions(state: Mapping[str, Any]) -> dict[str, list[int]]:
+    """Each entry's tokens of a saved state, by position, the one that waited for its permits first (``tokens``); none
+    for a state of format 1.  A ``ValueError`` for data it cannot read."""
+
+    tokens = state.get("tokens") or {}
+    try:
+        if not isinstance(tokens, Mapping):
+            raise TypeError(f"tokens is a {type(tokens).__name__}")
+        found: dict[str, list[int]] = {}
+        for entry, positions in tokens.items():
+            if not isinstance(positions, list) or any(
+                isinstance(position, bool) or not isinstance(position, int) or position < 0 for position in positions
+            ):
+                raise ValueError(f"the positions of entry {entry!r}: {positions!r}")
+            found[str(entry)] = list(positions)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"cannot read the tokens: {exc}") from exc
+    return found
 
 
 @dataclass(frozen=True)

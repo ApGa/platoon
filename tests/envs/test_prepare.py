@@ -675,7 +675,7 @@ def opened(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, l
 
     reached: dict[str, list] = {"train": [], "eval": [], "rollout": []}
 
-    def trainer(*, config, train_dataset, eval_dataset, train_order=None):
+    def trainer(*, config, train_dataset, eval_dataset, train_order=None, train_sampling=None):
         reached["train"].append(len(train_dataset))
         raise Reached
 
@@ -961,7 +961,7 @@ def test_a_supervised_run_with_prepare_prepares_once_before_its_first_start(
                     log.write("a start\\n")
                 raise AssertionError("a start prepared")
 
-            def trainer(*, config, train_dataset, eval_dataset, train_order=None):
+            def trainer(*, config, train_dataset, eval_dataset, train_order=None, train_sampling=None):
                 path = Path({str(starts)!r})
                 n = int(path.read_text()) + 1 if path.exists() else 1
                 path.write_text(str(n))

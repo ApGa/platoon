@@ -144,6 +144,10 @@ def test_tasks_export_writes_every_task(tmp_path, capsys):
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [record["fate_stale"] for record in records] == [0, 0, 0, 1]
     assert records[3]["no_evidence_streak"] == 1 and records[3]["outstanding"] == 1
+    # The sixth fate, rejected (a group admission rule's), comes after lost: the columns after it move one place.
+    columns = list(TASK_COLUMNS)
+    assert columns[columns.index("fate_lost") + 1 :][:2] == ["fate_rejected", "group_size"]
+    assert [record["fate_rejected"] for record in records] == [0, 0, 0, 0]
 
 
 def test_tasks_show_says_why_a_run_has_no_statistics(tmp_path, capsys):

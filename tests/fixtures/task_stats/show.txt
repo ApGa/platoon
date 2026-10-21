@@ -1,5 +1,5 @@
 RUN: checkpoint recovery-000004, policy version 4: 3 of 4 tasks have a settled group
-task           groups  pass/att  E[p]  E[pass@G]  E[inf]  newest v  out  consumed/stale/failed/skipped/lost
-quick::hard         2       1/7  0.23       0.59    0.57         3    0  2/0/0/0/0
-quick::easy         2       7/8  0.80       0.99    0.53         2    0  2/0/0/0/0
-slow::partial       2       1/2  0.50       0.70    0.40         3    1  0/1/0/0/0
+task           groups  pass/att  E[p]  E[pass@G]  E[inf]  newest v  out  consumed/stale/failed/skipped/lost/rejected
+quick::hard         2       1/7  0.23       0.59    0.57         3    0  2/0/0/0/0/0
+quick::easy         2       7/8  0.80       0.99    0.53         2    0  2/0/0/0/0/0
+slow::partial       2       1/2  0.50       0.70    0.40         3    1  0/1/0/0/0/0

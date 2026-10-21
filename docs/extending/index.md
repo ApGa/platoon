@@ -42,6 +42,8 @@ version you build against.
 | A batch transform | a `BatchTransform`, run at the trainer's microbatch boundary | not from a config: `PlatoonTinkerRLTrainer(..., batch_transforms=[...])` in a training script of your own | [`platoon/train/tinker/batch_transforms.py`](../../platoon/train/tinker/batch_transforms.py) |
 | Config sections of your own | a subclass of the training config | `trainer_config: module:Class` | [Write and override configs](../how-to/configs.md#5-keep-keys-strict) |
 | A rollout function or task loaders | `fn(task, rollout_config)`, `fn(config, split, **kwargs)`, `fn(task_id) -> pt.Task` | `rollout:`, `eval_rollout:`, `dataset_loader:`, `task_loader:` | [Config reference](../reference/config.md#environmentconfig); an entry with a `service` and a `harness` needs none of them |
+| A task sampler (experimental, since 0.4.0) | a class with `next(ctx)`, `state_dict()` and `load_state_dict(state)`, registered with `@task_sampler(name)` from `platoon.experimental` | `train.task_sampler:` or an entry's `task_sampler:`, a registered name or `module:Class`, with `task_sampler_options:` | [Write a task sampler](task-samplers.md) |
+| A group admission rule (experimental, since 0.4.0) | a class with `admit(group, stats)`, registered with `@group_admission(name)` from `platoon.experimental` | `train.group_admission:` or an entry's `group_admission:`, a registered name or `module:Class`, with `group_admission_options:` | [Write a group admission rule](group-admission.md) |
 
 Some parts are not extension points: the gateway's wire dialects, how budgets are enforced, the training backend
 (any service that implements the Tinker API) and the command line. Changing them, or opening a new extension

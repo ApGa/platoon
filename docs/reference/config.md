@@ -21,6 +21,7 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 - [`WatchdogConfig`](#watchdogconfig)
 - [`AdamParams`](#adamparams)
 - [`WorkflowConfig`](#workflowconfig)
+- [`RefillConfig`](#refillconfig)
 - [`EntryWorkflowSettings`](#entryworkflowsettings)
 - [`HarnessExitPolicy`](#harnessexitpolicy)
 - [`EvalOverrides`](#evaloverrides)
@@ -89,8 +90,12 @@ The `train:` section: the model, the batch, the loss, the optimizer and the roll
 | `max_concurrent_rollouts` | int \| None | `null` | Rollouts that run at once (None: batch_size × workflow_config.group_size, every rollout of a batch). A group's rollouts start together, so as many whole groups run at once as it holds, and it must hold one. |
 | `label_by` | str \| None | `null` | The dataset column that labels each task (None: `_platoon_environment`, the mixture entry it belongs to, `platoon.train.components.ENVIRONMENT_COLUMN`; a single environment's tasks have none), such as a Harbor index field. A task's label is its value of the column as text, `true` or `false` for a boolean. `rollout_group_limits` and the workflow configs' `straggler_policies` key on labels, and each step's metrics and each evaluation's break down by them (`train/batch/<column>/<label>/...`, `eval/<column>/<label>/...`; the default column logs as `environment`), for the 64 most frequent labels; see docs/how-to/train-and-eval.md. |
 | `rollout_group_limits` | dict[str, int] | `{}` | Most rollout groups that may run at once for each label, for example to cap a slow environment of a mixture. A draw of a label at its limit waits in the label's backlog, which never holds another label's groups back; past four batches of waiting draws, the label's new draws are skipped (see docs/how-to/train-and-eval.md). |
-| `task_sampler` | "auto" \| "weighted" \| "uniform" \| None | `null` | How a run draws its training tasks (platoon.train.auto.AutoDataset; None: `auto`). `auto`: a mixture's tasks in the weighted fair order of its environments (each shuffled with its `seed`), in epochs of its tasks filled to whole batches, each epoch going on with the order where the one before it stopped; a single environment's tasks in seeded shuffled passes by the dataloader (seed 42), each epoch the whole batches they fill, its last partial batch starting the next epoch. `weighted`: a single environment's tasks too take the weighted order (shuffled with its `seed`, last batch filled). `uniform`: every training task of every entry in seeded shuffled passes (seed 42; a single environment's in the batches `auto` draws), with no entry's share, in epochs of its tasks filled to whole batches; it takes no entry's numeric `weight`. |
+| `task_sampler` | str \| None | `null` | How a run draws its training tasks (platoon.train.auto.AutoDataset; None: `auto`). `auto`: a mixture's tasks in the weighted fair order of its environments (each shuffled with its `seed`), in epochs of its tasks filled to whole batches, each epoch going on with the order where the one before it stopped; a single environment's tasks in seeded shuffled passes by the dataloader (seed 42), each epoch the whole batches they fill, its last partial batch starting the next epoch, unless the entry sets a `task_sampler` of its own (then as `weighted`). `weighted`: each slot of the order goes to an entry by weight, and the entry's own `task_sampler` (`uniform` by default: its tasks shuffled with its `seed`) chooses the task that fills it; a single environment's tasks too take this order (last batch filled). `uniform`: every training task of every entry in seeded shuffled passes (seed 42; a single environment's in the batches `auto` draws), with no entry's share, in epochs of its tasks filled to whole batches; it takes no entry's numeric `weight`. `pass_rate` (experimental): each group's task chosen among every training task of the run by its pass rate in the per-task statistics, when the group can start; it takes no numeric `weight`, and setting `pass_rate` on the entries under `weighted` keeps each entry's share instead. Also a name an entry's `package` registers with `@task_sampler`, or `module:Class`. The run's `uniform` and `pass_rate` ask no entry's sampler. See docs/how-to/train-and-eval.md. |
+| `task_sampler_options` | dict[str, Any] | `{}` | Options of task_sampler, checked against its options when the config loads (pass_rate's: explore, max_draws_per_epoch, max_outstanding_per_task, candidates, seed); `auto`, `weighted` and `uniform` take none. |
 | `task_order` | "auto" \| "weighted" \| None | `null` | **Deprecated:** use `task_sampler` instead; platoon 0.4.0 removes it. The former name of `task_sampler`, read as that key is, with the values it had (`uniform` came after it). Beside another `task_sampler`, its former default `auto` (as a dump of platoon 0.2.0's `config show --defaults` spells it) is ignored, with a warning, and `weighted` is an error. |
+| `group_admission` | str | `"all"` | Which settled training groups count toward the batch (experimental): `all` admits every group, as before; `informative` rejects the groups whose workflow's verdict says they train nothing (their rollouts scored alike, or no datum) and, with `band`, those whose pass rate is outside it. A rejected group's place is refilled (at once, unless it carried no datum), so a step trains the first batch_size admitted groups it dequeues that are not stale, within train.refill's cap, and a short step trains what it admitted. Also a name an entry's `package` registers with `@group_admission`, or `module:Class`. An environment entry may set its own (`environments[].group_admission`). Under a rule other than `all`, num_minibatches must be 1. See docs/how-to/train-and-eval.md. |
+| `group_admission_options` | dict[str, Any] | `{}` | Options of group_admission, checked against its options when the config loads (informative's: band, two numbers 0 <= lo < hi <= 1); `all` takes none. |
+| `refill` | [RefillConfig](#refillconfig) | `RefillConfig()` | How far a step under a group admission rule refills its batch. |
 | `forward_backward_timeout_seconds` | float | `5400.0` | Client-side deadline in seconds for a `forward_backward` result. The client submits every microbatch up front and the Tinker service runs them in order, so the first wait covers the whole optimizer step's training compute, not one microbatch: size it for a full step of the largest batches you train. |
 | `optim_step_timeout_seconds` | float | `300.0` | Deadline in seconds for the optimizer step itself, which is fast; it only guards against a stalled service. |
 
@@ -152,6 +157,10 @@ entry's `package` registers.
 | `eval_workflow_kwargs` | dict[str, Any] | `{}` | Keyword arguments of the evaluation workflow. |
 | `name` | str \| None | `null` | The entry's name, required and unique in a mixture; a mixture's task ids are `<name>::<task id>`. |
 | `weight` | float \| "tasks" | `"tasks"` | The entry's share of a mixture's training tasks: `tasks`, its number of training tasks (once selection, `exclude_tasks` and a hold-out have taken theirs), which draws every task of the mixture equally often; or a positive number, the entries' shares in proportion to their numbers. A mixture's weights are all numbers or all `tasks`. |
+| `task_sampler` | str \| None | `null` | How the entry's task is chosen for each slot the run's sampler hands it, under `train.task_sampler: weighted` (a mixture's default, and a single environment's with a sampler of its own): `uniform` (null: the default), the entry's tasks in seeded shuffled passes with its `seed`; `pass_rate` (experimental), the task whose next group is most likely to mix passes and failures, by its pass rate in the run's per-task statistics, decided when the entry can start a group; a name the entry's `package` registers with `@task_sampler`; or `module:Class`. The run's `uniform` and `pass_rate` ask no entry's sampler, and a named environment cannot set it. See docs/how-to/train-and-eval.md. |
+| `task_sampler_options` | dict[str, Any] | `{}` | Options of the entry's task_sampler, checked against its options when the config loads (pass_rate's: explore, max_draws_per_epoch, max_outstanding_per_task, candidates, seed); `uniform` takes none. |
+| `group_admission` | str \| None | `null` | Which of the entry's settled training groups count toward the batch (experimental; null: the run's, `train.group_admission`, with its options): `all`, `informative`, a name the entry's `package` registers with `@group_admission`, or `module:Class`. Once any entry's rule is not `all`, every entry's groups are counted as train.group_admission says (a stale or failed group of an entry at `all` no longer counts toward the batch), and train.refill's cap is the run's. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
+| `group_admission_options` | dict[str, Any] | `{}` | Options of the entry's own group_admission, which they go with (an entry that sets none inherits the run's rule and options); `all` takes none. |
 | `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's own training settings, laid over `train.workflow_config` for its training groups: the keys that act on one group or one rollout (EntryWorkflowSettings), such as `group_size`, `min_successful_group_size`, `leave_one_out_baseline` and `rollout_config.max_steps`. A key it leaves out keeps the run's; `null` unsets it. Its rollout settings are also its evaluation's defaults, below the phase's section (eval.workflow_config, inference.workflow), and `eval_overrides.workflow_config` sets what its evaluation rollouts change. `platoon config show` prints each entry's effective settings and where each came from. |
 | `max_staleness` | int \| None | `null` | How many policy versions old the entry's training groups may be and still train (null: the run's, `train.max_staleness`): the stale filter's bound for its groups. At least the run's, which stays the bound on how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning keeps the checkpoints within the largest bound of the run and its entries. |
 | `success_threshold` | float | `1.0` | The lowest reward that counts a training rollout of the entry as a pass, in the per-task statistics and their metrics (platoon.train.task_stats), judged as platoon eval judges success: on the reward the entry's environment scored, before any reward processor. A partial-credit environment sets its own. |
@@ -285,6 +294,20 @@ Each task is rolled out `group_size` times; a rollout's advantage is its reward 
 | `worker_binding_poll_seconds` | float | `5.0` | How often a worker re-checks the published sampling-client binding. |
 | `worker_unbounded_rollout_budget_seconds` | float | `86400.0` | Child budget of a rollout that no time limit bounds: rollout_config.timeout is null, and its harness has no limit of its own (neither its spec's timeout_s nor the task's own agent time limit), or the rollout is a function, or a function harness's episode program, of the environment's own, whose limits platoon cannot know, or its environment service does not say what it needs beyond the harness (rollout_overhead_s). |
 | `worker_python_env_isolation` | bool | `false` | Wrap the rollout in isolated_rollout_python_environment(). |
+
+<a id="refillconfig"></a>
+
+## RefillConfig
+
+`platoon.train.tinker.config_defs.RefillConfig`
+
+In a training config: `train.refill`.
+
+`train.refill`: how far a step under a group admission rule (`train.group_admission`) refills its batch.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_groups_per_step` | float | `3.0` | The most groups a step under a group admission rule counts, as a multiple of train.batch_size (each group it dequeues, and each marker of a group rejected while it was current): it trains the first batch_size admitted groups, and once it has counted ceil(max_groups_per_step × batch_size) it closes and trains what it admitted. A finite number of at least 1. No null: without a cap, a stretch in which every group is rejected (a pool the policy has solved) would never close a step, so set a large number instead; a step that keeps waiting warns each time its count passes another 10 batches. It bounds what a step counts, not the groups that start while the trainer trains, which the horizon and train.max_concurrent_rollouts bound. No effect when every rule is all (it is still checked when the config loads). |
 
 <a id="entryworkflowsettings"></a>
 
@@ -641,3 +664,57 @@ Prices in USD per million tokens, for the report's cost of a hosted model's call
 | `output` | float | required | Completion tokens, reasoning tokens included. |
 | `cached_input` | float \| None | `null` | Prompt tokens read from the provider's prompt cache (None: the input price). |
 | `cache_write` | float \| None | `null` | Prompt tokens written to the provider's prompt cache (None: the input price). |
+
+<a id="task-samplers"></a>
+
+## Task samplers
+
+`train.task_sampler` chooses how a run draws its training tasks, and under a run sampler that hands slots to the entries (`weighted`, and `auto` for a mixture), each entry's `task_sampler` chooses the task that fills each of its slots. Core's samplers are below; a package an entry names may register others with `@task_sampler`, and `module:Class` names one ([Write a task sampler](../extending/task-samplers.md)).
+
+| Sampler | Levels | What it draws | Options |
+|---|---|---|---|
+| `auto` | run | The default: `weighted` for a mixture, or for a single environment with a sampler of its own; else the single environment's tasks in seeded shuffled passes, each epoch the whole batches they fill. | none |
+| `weighted` | run | Each slot of the order to an entry by weight, the entry's own `task_sampler` choosing the task that fills it. | none |
+| `uniform` | run, entry | Seeded shuffled passes: at the run level every training task of every entry, with no entry's share (no numeric weights, no entry samplers); at the entry level the entry's tasks, shuffled with its `seed` (an entry's default). | none |
+| `pass_rate` | run, entry | Experimental. The task whose next group is most likely to mix passes and failures, by Thompson sampling on each task's pass rate in the run's per-task statistics, decided when its group can start. Per entry under `weighted`, each entry keeps its share; at the run level it chooses among every task (no numeric weights, no entry samplers). | [below](#pass-rate-options) |
+
+<a id="pass-rate-options"></a>
+
+### `pass_rate`'s options
+
+`platoon.train.samplers.PassRateOptions`: the keys of `task_sampler_options` under `task_sampler: pass_rate`.
+
+`pass_rate`'s options (`task_sampler_options`).  The rest is the per-task statistics' (RFC 0019, section
+3.3): a half-life of 32 policy versions, a prior of weight 2 at the entry's decayed pass rate, members without a
+valid result censored, and a task whose last 3 groups had no valid member drawn by exploration only.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `explore` | float | `0.2` | The share of decisions that go to the eligible task drawn least recently (never drawn first), from 0 to 1. |
+| `max_draws_per_epoch` | int \| None | `3` | The most draws of a task in a window of as many decisions of the sampler as its pool has tasks, from 1; lifted for a decision where every candidate is at it; null: no cap. |
+| `max_outstanding_per_task` | int \| None | `null` | A task with this many draws that no committed step has consumed yet is not drawn, from 1; when every candidate is at it, those with the fewest stay; null: no limit. |
+| `candidates` | int | `4096` | At most this many eligible tasks are scored by a decision that exploits, from 1; a seeded sample of them beyond. |
+| `seed` | int | `0` | Added to the seed its decisions' randomness follows from (at the entry level, the entry's seed). |
+
+<a id="group-admission-rules"></a>
+
+## Group admission rules
+
+`train.group_admission` decides, when each training group settles, whether it counts toward the batch, and each entry may set its own (`environments[].group_admission`, the run's by default). Under a rule other than `all`, a step trains the first `batch_size` admitted groups it dequeues that are not stale, within `train.refill.max_groups_per_step`. Core's rules are below; a package an entry names may register others with `@group_admission`, and `module:Class` names one ([Write a group admission rule](../extending/group-admission.md)).
+
+| Rule | Levels | What it admits | Options |
+|---|---|---|---|
+| `all` | run, entry | The default: every group counts toward the batch, as before admission existed. | none |
+| `informative` | run, entry | Experimental. Rejects the groups whose workflow's verdict says they train nothing (uniform, by success all-pass, all-fail or mixed, or carrying no datums) and, with a `band`, those whose pass rate is outside it; admits the rest, a group without a verdict included. A rejected group's place is refilled, at once unless it carried no datum (such a group keeps its place until a step takes it). | [below](#informative-options) |
+
+<a id="informative-options"></a>
+
+### `informative`'s options
+
+`platoon.train.admissions.InformativeOptions`: the keys of `group_admission_options` under `group_admission: informative`.
+
+`informative`'s options (`group_admission_options`).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `band` | tuple[float, float] \| None | `null` | Also reject a group whose pass rate, its passes over its valid members (passes as the per-task statistics judge them: the scored reward against the entry's success_threshold), is below lo (reason below_band) or above hi (above_band): two numbers 0 <= lo < hi <= 1, such as [0.2, 0.8]; null: no band. |

@@ -455,6 +455,10 @@ class GroupRolloutWorkflow:
     # It applies an environment entry's own settings to the entry's groups (``entry_configs``); loading refuses an
     # entry's settings beside a workflow class that does not declare this (``platoon.train.entry_settings``).
     applies_entry_settings: ClassVar[bool] = True
+    # Its groups' outputs carry a verdict (``verdict``: trained, uniform, or why the group trains nothing), which the
+    # group admission rule ``informative`` reads; resolution refuses it beside a workflow class that does not declare
+    # this (``platoon.train.admissions``).
+    gives_verdicts: ClassVar[bool] = True
     # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
     # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
     entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})

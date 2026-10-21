@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+from fractions import Fraction
 from itertools import product
 
 import pytest
@@ -136,6 +137,74 @@ def test_pass_at_k_matches_the_beta_binomial_expectation(alpha, beta, k):
     all_pass = beta_function(alpha + k, beta) / beta_function(alpha, beta)
     assert informative_at(alpha, beta, k) == pytest.approx(expected - all_pass)
     assert pass_at(alpha, beta, 1) == pytest.approx(alpha / (alpha + beta))
+
+
+def _beta_binomial(a: Fraction, b: Fraction, k: int) -> list[Fraction]:
+    """``P(X = x)`` for ``x`` from 0 to ``k``, ``X ~ BetaBinomial(k, a, b)``, exactly, for rational ``a`` and ``b``:
+    ``C(k, x) prod_{i<x} (a + i) prod_{j<k-x} (b + j) / prod_{i<k} (a + b + i)``."""
+
+    denominator = math.prod((a + b + i for i in range(k)), start=Fraction(1))
+    return [
+        math.comb(k, x)
+        * math.prod((a + i for i in range(x)), start=Fraction(1))
+        * math.prod((b + j for j in range(k - x)), start=Fraction(1))
+        / denominator
+        for x in range(k + 1)
+    ]
+
+
+# Two grids of (alpha, beta, k): fractional, decayed counts and group sizes up to 32; the second reaches the counts of
+# a near-solved entry's prior against long evidence.
+_GRIDS = [
+    (
+        [
+            Fraction(value)
+            for value in ("0.02", "0.05", "0.1", "0.28", "0.5", "1", "1.72", "2", "3.3", "7.5", "40.5", "189")
+        ],
+        range(1, 17),
+    ),
+    (
+        [Fraction(value) for value in ("0.02", "0.1", "0.5", "1", "1.72", "2", "7.5", "40.5", "189", "1/3", "12000")],
+        (1, 2, 4, 8, 16, 32),
+    ),
+]
+
+
+def test_closed_forms_match_exact_beta_binomial_sums():
+    """``pass_at`` and ``informative_at``, the closed forms the statistics and ``pass_rate`` use, against the
+    Beta-binomial summed exactly in rationals: ``1 - P(X = 0)`` and ``1 - P(X = 0) - P(X = k)``.  Every distribution
+    sums to exactly 1.  The tolerance is absolute: where ``alpha`` is tiny and ``beta`` large, ``1 - prod`` cancels, so
+    the relative error of a probability near 0 can reach 1e-7 while the absolute error stays near 1e-15."""
+
+    cases = 0
+    for values, sizes in _GRIDS:
+        for a, b in product(values, values):
+            for k in sizes:
+                probabilities = _beta_binomial(a, b, k)
+                assert sum(probabilities) == 1
+                exact_pass = 1 - probabilities[0]
+                exact_informative = 1 - probabilities[0] - probabilities[k] if k > 1 else Fraction(0)
+                assert abs(pass_at(float(a), float(b), k) - float(exact_pass)) < 1e-12, (a, b, k)
+                assert abs(informative_at(float(a), float(b), k) - float(exact_informative)) < 1e-12, (a, b, k)
+                cases += 1
+    assert cases == 12 * 12 * 16 + 11 * 11 * 6
+
+
+def test_the_designs_worked_numbers():
+    """Worked numbers of the posterior of RFC 0019, section 3.3 (a prior of strength 2 at the entry's rate):
+    ``E[informative_8]`` for an unseen task and after 0, 1, 4 and 8 passes of 8, under an entry at a pass rate of 0.5,
+    0.05 and 0.86."""
+
+    worked = {
+        0.5: [0.778, 0.471, 0.735, 0.959, 0.471],
+        0.05: [0.168, 0.059, 0.505, 0.944, 0.715],
+        0.86: [0.407, 0.676, 0.845, 0.950, 0.159],
+    }
+    evidence = [(0, 0), (0, 8), (1, 7), (4, 4), (8, 0)]
+    for rate, numbers in worked.items():
+        prior = (2 * rate, 2 * (1 - rate))
+        got = [informative_at(prior[0] + passes, prior[1] + fails, 8) for passes, fails in evidence]
+        assert [round(value, 3) for value in got] == numbers, rate
 
 
 def test_the_posterior_borrows_its_prior_from_the_entry():
@@ -386,3 +455,22 @@ def test_an_entry_s_success_threshold_is_a_finite_number_that_a_named_environmen
         with pytest.raises(ValueError, match="success_threshold must be a finite number"):
             EnvironmentConfig(name="a", rollout="x:y", success_threshold=value)
     assert named.EnvironmentEntry("acme-partial", rollout="x:y", success_threshold=0.5).keys["success_threshold"] == 0.5
+
+
+def test_a_task_s_counts_are_read_without_building_its_record_and_agree_with_it():
+    """``counts`` is the cheap read a task sampler makes of every task: the same numbers as ``task``, and the version
+    of the task's evidence (None before any)."""
+
+    stats = store()
+    assert stats.counts("quick::a") == (0, 0, 0, 0, 0, None)
+    stats.draw(1, 0, "quick::a", 0)
+    stats.draw(1, 1, "quick::a", 1)
+    stats.settle(record("quick::a", [member(1.0), member(0.0), member(None, valid=False)], "trained", seq=0))
+    stats.settle(record("quick::a", [member(None, valid=False)] * 4, "no_results", seq=1))
+    counts, task = stats.counts("quick::a"), stats.task("quick::a")
+    assert (counts.groups, counts.outstanding, counts.drawn) == (task.groups, task.outstanding, task.drawn) == (2, 2, 2)
+    assert (counts.uniform_streak, counts.no_evidence_streak) == (task.uniform_streak, task.no_evidence_streak)
+    assert counts.evidence_version == 5
+    # The record's means are copies of the store's: changing one changes nothing the store holds.
+    task.means["reward"].add(100.0, 6)
+    assert stats.task("quick::a").means["reward"].at(6) == pytest.approx(0.5)

@@ -22,8 +22,10 @@ from tinker_cookbook.rl.metrics import compute_kl_sample_train
 
 from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.train import entry_settings
+from platoon.train.admissions import AdmissionSet, choose_admissions, rule_mode
 from platoon.train.components import row_entry
 from platoon.train.labels import dataset_labels, label_column, metric_labels, metric_prefix, task_label
+from platoon.train.sampler_runtime import SamplerSet, TaskPool, TaskSampling
 from platoon.train.sampling import fingerprint_changes, planned_steps, sampling_fingerprint
 from platoon.train.task_stats import DISPATCH_KEY, next_start
 from platoon.train.tinker.batch_transforms import (
@@ -54,7 +56,16 @@ from platoon.train.tinker.config_defs import (
     event_interval,
 )
 from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN, SHUFFLE_SEED, EpochOrder, epoch_order
-from platoon.train.tinker.dispatcher import Dispatcher, Draw, plan_resume, read_state, save_state
+from platoon.train.tinker.dispatcher import (
+    BoundDraw,
+    Dispatcher,
+    plan_resume,
+    read_state,
+    save_state,
+    saved_draws,
+    saved_fallback_slots,
+    saved_token_positions,
+)
 from platoon.train.tinker.evaluation_record import EVALUATIONS_NAME, completed_evaluation_steps, record_evaluation
 from platoon.train.tinker.kept_groups import decode_group, read_kept
 from platoon.train.tinker.key_refusal import key_refusals
@@ -130,9 +141,12 @@ def _get_task_workload_payload(rollout: Any) -> _TaskWorkloadPayload | None:
     return _TaskWorkloadPayload(workload, *counts)
 
 
-def _no_update_reason(zero_objective_microbatches: int, empty_microbatches: int) -> str:
-    """Why a step took no optimizer update, for its log line."""
+def _no_update_reason(zero_objective_microbatches: int, empty_microbatches: int, *, counted: int | None = None) -> str:
+    """Why a step took no optimizer update, for its log line; ``counted``, of a step under a group admission rule that
+    admitted no group, the groups it counted."""
 
+    if counted is not None:
+        return f"it admitted no group (every one of the {counted} groups it counted was rejected, stale or failed)"
     if zero_objective_microbatches and not empty_microbatches:
         # The usual case: every group scored alike, so every advantage is zero.  No setting forces a step then.
         return (
@@ -148,6 +162,10 @@ def _no_update_reason(zero_objective_microbatches: int, empty_microbatches: int)
 # its groups' rollout statistics, beside their group and outcome counts (platoon.train.labels): the reward, and the
 # steps of each trajectory, which an entry's own step limit shapes.
 LABEL_STATS = ("task_reward", "num_steps")
+# The key of a full checkpoint row's loop_state that, under a group admission rule, records where the run's order
+# stood (the dispatcher's next position), so that a resume that cannot read the dispatcher's state goes on from there:
+# a step under a rule draws up to its cap's worth of positions, so the checkpoint's batch no longer says where.
+ORDER_POSITION_KEY = "next_position"
 
 
 @dataclass(frozen=True)
@@ -156,13 +174,67 @@ class _Settled:
     label of the row it ran: the stale filter and the label metrics read them from the row, which the group holds,
     and not from the output, which a custom workflow's plain list of datums cannot carry.  ``record`` is the group's
     record in the run's per-task statistics, when the trainer keeps them, and ``key`` its draw's ``(start, seq)``,
-    which the dispatcher keeps it by until a committed step consumes it."""
+    which the dispatcher keeps it by until a committed step consumes it.
+
+    Under a group admission rule (RFC 0019, section 6), ``admitted`` is an admitted group's reason, and a group
+    rejected or failed when it settled goes to the step as a marker: ``rejected`` its reason, ``window`` the step
+    current when it settled, no ``key``, its output without its datums (None for a failed group's), and ``held``
+    whether its group kept its slot of the horizon until a step dequeues it (a group that failed or carried no datum,
+    :meth:`~platoon.train.tinker.dispatcher.Dispatcher.reject`)."""
 
     entry: str | None
     label: str | None
     rollout: Any
     record: Any = None
     key: tuple[int, int] | None = None
+    admitted: str | None = None
+    rejected: str | None = None
+    window: int | None = None
+    held: bool = False
+
+
+def carries_datums(output: Any) -> bool:
+    """Whether a settled group's output carries a datum to train: a list (or other sized output) with one, or an output
+    whose size is unknown.  A group whose output carries none (it failed, or its verdict is ``no_results``,
+    ``no_completed_root`` and the like) can have ended at once.  Never raises."""
+
+    if output is None:
+        return False
+    try:
+        return len(output) > 0
+    except Exception:
+        return True
+
+
+def emptied(output: Any) -> Any:
+    """A rejected group's output as its marker carries it: a list (a ``GroupRolloutWorkflow`` output, any list
+    subclass) emptied of its datums in place, its other attributes kept; any other output, or a list that refuses to be
+    emptied, replaced by an empty list.  Never raises."""
+
+    if isinstance(output, list):
+        try:
+            del output[:]
+            return output
+        except Exception:
+            return []
+    return []
+
+
+def _named_samplers(config: Any) -> list[str]:
+    """The task samplers ``config`` names other than the ones a dataloader's order draws as (``auto``, ``weighted``,
+    ``uniform``, and an entry's ``uniform``), one line each."""
+
+    from platoon.train.samplers import STATIC_RUN_SAMPLERS
+
+    named = []
+    run = str(getattr(getattr(config, "train", None), "task_sampler", None) or "auto")
+    if run not in STATIC_RUN_SAMPLERS:
+        named.append(f"train.task_sampler: {run}")
+    for environment in getattr(config, "environments", None) or []:
+        own = getattr(environment, "task_sampler", None)
+        if (own is not None and own != "uniform") or getattr(environment, "task_sampler_options", None):
+            named.append(f"environments[{environment.label}].task_sampler: {own or 'uniform'}")
+    return named
 
 
 def _output_label(rollout: Any) -> str | None:
@@ -766,8 +838,11 @@ class PlatoonTinkerRLTrainer:
     # Starts the training groups of the start train() runs (platoon.train.tinker.dispatcher); None before it.
     _dispatcher: Dispatcher | None = None
     # The order training draws its tasks in, epoch by epoch, such as a mixture's weighted order; None: the dataloader
-    # shuffles train_dataset (platoon.train.tinker.dataset_order).
+    # shuffles train_dataset (platoon.train.tinker.dataset_order).  The trainer counts its epochs by it.
     train_order: EpochOrder | None = None
+    # How the run draws its training tasks through task samplers, as platoon train hands it the run's
+    # (AutoDataset.training); None: each position of the dataloader's order, as it is.
+    train_sampling: TaskSampling | None = None
 
     def __init__(
         self,
@@ -776,11 +851,13 @@ class PlatoonTinkerRLTrainer:
         eval_dataset: Dataset | None = None,
         batch_transforms: list[BatchTransform] | None = None,
         train_order: EpochOrder | None = None,
+        train_sampling: TaskSampling | None = None,
     ):
         self.config = config
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.train_order = train_order
+        self.train_sampling = train_sampling
         self.batch_transforms = self._build_batch_transforms(batch_transforms)
         self._model_info = register_tinker_llm(
             self.config.train.model_name,
@@ -1002,12 +1079,13 @@ class PlatoonTinkerRLTrainer:
         shared_state: TrainLoopSharedState,
         workflow: RolloutWorkflow,
         dispatcher: Dispatcher,
-        draw: Draw,
+        draw: BoundDraw,
         release: Callable[[], None],
     ) -> None:
         """Run the group of one of the dispatcher's draws, whose label slot and rollout permits are taken: free them
         once its workflow returns (``release``), record the group in the run's per-task statistics, and hand its output
-        to the step that dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output."""
+        to the step that dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a
+        group admission rule, the group is decided first (:meth:`_settle_under_rule`)."""
 
         start_time = time.perf_counter()
         try:
@@ -1025,7 +1103,51 @@ class PlatoonTinkerRLTrainer:
             if recorder is not None
             else None
         )
+        if (admissions := getattr(self, "_admissions", None)) is not None:
+            self._settle_under_rule(admissions, shared_state, dispatcher, draw, rollout, record)
+            return
         dispatcher.settle(draw, _Settled(draw.entry, draw.label, rollout, record, draw.key))
+
+    def _settle_under_rule(
+        self,
+        admissions: AdmissionSet,
+        shared_state: TrainLoopSharedState,
+        dispatcher: Dispatcher,
+        draw: BoundDraw,
+        rollout: Any,
+        record: Any,
+    ) -> None:
+        """Decide a settled group by the run's group admission rule (RFC 0019, section 6): an admitted group settles
+        as any group does, with its reason; a rejected or failed one gets its fate at once (with the rule and its
+        reason), leaves the outstanding draws, and only its marker goes to the result queue (:meth:`Dispatcher.reject`).
+        A rejected group with datums frees its slot at once; one that failed or carried no datum, which can have ended
+        at once, keeps it until a step dequeues its marker.  Synchronous, and never raises: nothing runs between the
+        fate and the reject, so a checkpoint finds the statistics' outstanding draws and the dispatcher's alike."""
+
+        decision, rule = admissions.at_settle(draw, rollout, record, now=shared_state.model_info.llm.version)
+        if decision.admit:
+            dispatcher.settle(
+                draw, _Settled(draw.entry, draw.label, rollout, record, draw.key, admitted=decision.reason)
+            )
+            return
+        held = not carries_datums(rollout)  # before its datums are dropped
+        marker = _Settled(
+            draw.entry,
+            draw.label,
+            emptied(rollout) if rollout is not None else None,
+            record,
+            None,
+            rejected=decision.reason,
+            window=dispatcher.step,
+            held=held,
+        )
+        fate = "failed" if rollout is None else "rejected"
+        recorder = getattr(self, "_recorder", None)
+        if recorder is not None and record is not None:
+            recorder.fate(record, fate, rule=rule, admission=decision.reason)
+        elif recorder is not None:
+            recorder.fate_of(draw.key, fate, rule=rule, admission=decision.reason)
+        dispatcher.reject(draw, marker, hold=held)
 
     @staticmethod
     def _publish_worker_binding(workflow, sampling_client, version: int, *, required: bool = False) -> None:
@@ -1101,6 +1223,10 @@ class PlatoonTinkerRLTrainer:
         run_bound = self.config.train.max_staleness
         bounds = {label: own.max_staleness for label, own in entry_settings.run_settings(self.config).items()}
         skipped_seen: Counter[str | None] = Counter()  # draws a capped label's full backlog skipped, logged so far
+        skipped_slots_seen = 0  # slots owed to adaptive entries that were skipped, logged so far
+        # A run under a group admission rule (RFC 0019, section 6): each step trains the first batch_size admitted
+        # groups it dequeues that are not stale, and closes once it has counted its cap (platoon.train.admissions).
+        admissions: AdmissionSet | None = getattr(self, "_admissions", None)
 
         while shared_state.train_step < end_batch:
             batch_start_time = time.perf_counter()
@@ -1140,11 +1266,18 @@ class PlatoonTinkerRLTrainer:
             # The draws of the groups the step dequeued: a checkpoint keeps them until the step commits.
             step_keys: list[tuple[int, int] | None] = []
             batch_kinds: dict[str, Counter[str]] = {"": Counter(), **{label: Counter() for label in labels}}
+            # Of the consumed groups a task sampler drew with a score, by the sampler's metric prefix: the sum of the
+            # scores (each the chance it predicted that the group trains), the groups, and those that trained.
+            batch_predictions: dict[str, list[float]] = {}
             batch_groups_without_stats = 0
             batch_optimizer_steps = 0
             # Microbatches that took no forward/backward: their objective was zero, or they had no datums.
             batch_zero_objective_microbatches = 0
             batch_empty_microbatches = 0
+            # Under a group admission rule: what the step counted toward its cap and toward its batch, and whether it
+            # closed on its cap.
+            step_counted = step_admitted = 0
+            closed = False
 
             # We perform num_minibatches weight updates per batch.
             for minibatch_num in range(self.config.train.num_minibatches):
@@ -1159,20 +1292,32 @@ class PlatoonTinkerRLTrainer:
                 # This is a second-level of pipelining orthogonal to the async/off-policy
                 # pipelining at the batch level.
                 for microbatch_num in range(self.config.train.num_microbatches):
+                    if closed:  # a step under a rule that counted its cap dequeues no more
+                        break
                     task_rollout_results: list[tinker.Datum] = []
+                    microbatch_groups = 0  # under a rule: its groups that count toward the batch
 
-                    for task_num in range(tasks_per_microbatch):
+                    task_num = 0
+                    while task_num < tasks_per_microbatch and not closed:
+                        # In all mode each item takes a place of the microbatch, counted first so that nothing in the
+                        # body can skip it; under a rule only an admitted group that is not stale does (at the end).
+                        place = task_num
+                        if admissions is None:
+                            task_num += 1
                         queue_wait_start = time.perf_counter()
                         logger.debug(
-                            f"Waiting for rollout {task_num + 1}/{tasks_per_microbatch} "
+                            f"Waiting for rollout {place + 1}/{tasks_per_microbatch} "
                             f"(minibatch {minibatch_num}, microbatch {microbatch_num})"
                         )
                         settled = _settled(
                             await self._next_rollout(
-                                task_rollout_result_queue, shared_state, interruptible=batch_optimizer_steps == 0
+                                task_rollout_result_queue,
+                                shared_state,
+                                interruptible=batch_optimizer_steps == 0,
+                                ready=admissions is not None,
                             )
                         )
-                        if dispatcher is not None:
+                        if dispatcher is not None and admissions is None:
                             dispatcher.dequeued()
                         step_keys.append(settled.key)
                         entry, row_label, rollout, record = (
@@ -1238,14 +1383,55 @@ class PlatoonTinkerRLTrainer:
                                 batch_label_stale[row_label if row_label is not None else _output_label(rollout)] += 1
                                 rollout = None
                                 stale = True
+                        # A marker of a group a rule rejected (or that failed) when it settled has its fate already.
+                        marker = settled.rejected is not None
+                        if admissions is not None:
+                            taken = "marker" if marker else "stale" if stale else "failed" if failed else "admitted"
+                            counts = (
+                                dispatcher.took(taken, settled.window, held=settled.held)
+                                if dispatcher is not None
+                                else True
+                            )
+                            step_counted += counts
+                            step_admitted += taken == "admitted"
+                            microbatch_groups += taken == "admitted"
+                            admissions.dequeued(
+                                row_label if row_label is not None else _output_label(settled.rollout),
+                                taken,
+                                settled,
+                            )
+                            if (
+                                marker
+                                and settled.rollout is not None
+                                and record is not None
+                                and record.score is not None
+                                and dispatcher is not None
+                                and (where := dispatcher.samplers.prefix(record.sampler)) is not None
+                            ):  # a rejected group's prediction counts, as a consumed group's does (stale, failed not)
+                                predicted = batch_predictions.setdefault(where, [0.0, 0.0, 0.0])
+                                predicted[0] += record.score
+                                predicted[1] += 1
+                                predicted[2] += record.verdict == "trained"
+                            if step_counted >= admissions.cap:
+                                closed = True
+                            elif counts:
+                                admissions.waiting(
+                                    shared_state.train_step, counted=step_counted, admitted=step_admitted
+                                )
                         fate = "stale" if stale else "failed" if failed else "consumed"
-                        if recorder is not None:
+                        if recorder is not None and not marker:
                             step_fates.append((record, settled.key, fate))
-                        if recorder is not None and record is not None and fate == "consumed":
+                        if recorder is not None and record is not None and fate == "consumed" and not marker:
                             if (kind := record.kind(recorder.threshold(record.entry))) is not None:
                                 batch_kinds[""][kind] += 1
                                 if row_label in batch_kinds:
                                     batch_kinds[row_label][kind] += 1
+                            where = dispatcher.samplers.prefix(record.sampler) if dispatcher is not None else None
+                            if record.score is not None and where is not None:
+                                predicted = batch_predictions.setdefault(where, [0.0, 0.0, 0.0])
+                                predicted[0] += record.score
+                                predicted[1] += 1
+                                predicted[2] += record.verdict == "trained"
 
                         if rollout is not None:
                             if isinstance(rollout_stats, RolloutStats):
@@ -1255,7 +1441,11 @@ class PlatoonTinkerRLTrainer:
                                     batch_label_stats[label].merge(rollout_stats.subset(LABEL_STATS))
                             task_rollout_results.extend(_step_datums(rollout))
                             total_datums += len(rollout)
+                        if admissions is not None and not marker and not stale and not failed:
+                            task_num += 1
 
+                    if len(task_rollout_results) == 0 and admissions is not None and closed:
+                        break  # a step under a rule closed on its cap with nothing more to send
                     if len(task_rollout_results) == 0:
                         logger.warning(f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num})")
                         batch_empty_microbatches += 1
@@ -1383,6 +1573,14 @@ class PlatoonTinkerRLTrainer:
                     # sum-reduced objective behaves like a mean reduction and
                     # grad_norm is not sensitive to batch size.
                     normalization_token_count = get_loss_normalization_token_count(task_rollout_results)
+                    if (
+                        admissions is not None
+                        and closed
+                        and microbatch_num > 0
+                        and microbatch_groups < tasks_per_microbatch
+                    ):
+                        # A short step's partial last microbatch, after full ones: its groups weigh as theirs do.
+                        normalization_token_count *= tasks_per_microbatch / max(1, microbatch_groups)
                     scale_factor = 1.0 / (normalization_token_count + 1e-8)
 
                     for datum in filtered_datums:
@@ -1555,6 +1753,9 @@ class PlatoonTinkerRLTrainer:
                 },
             )
 
+            if admissions is not None:  # a short step, or one that admitted nothing: warned of once each
+                admissions.step_closed(shared_state.train_step, counted=step_counted, admitted=step_admitted)
+
             # The step commits: what became of each of its groups, before a full checkpoint saves the statistics and
             # keeps the groups that settled and no step consumed.
             if recorder is not None:
@@ -1590,7 +1791,11 @@ class PlatoonTinkerRLTrainer:
                     "Batch %s (step %s) takes no optimizer update: %s; the policy stays at version %s",
                     shared_state.train_step,
                     shared_state.train_step + 1,
-                    _no_update_reason(batch_zero_objective_microbatches, batch_empty_microbatches),
+                    _no_update_reason(
+                        batch_zero_objective_microbatches,
+                        batch_empty_microbatches,
+                        counted=step_counted if admissions is not None and not step_admitted else None,
+                    ),
                     shared_state.model_info.llm.version,
                 )
             update_elapsed = time.perf_counter() - update_start
@@ -1619,6 +1824,8 @@ class PlatoonTinkerRLTrainer:
                 shared_state.train_tracker.scalar(
                     **{f"batch/{metric_prefix(column, label)}/stale_groups": float(batch_label_stale[label])}
                 )
+            if recorder is not None:
+                recorder.flush()  # every settled group taken in first: a store that fails to stops the statistics
             if recorder is not None and not recorder.stopped:
                 # The kinds of the groups the step trained on, and what each label's tasks' groups say so far; nothing
                 # once the statistics stopped, rather than zeros that read as no informative groups.
@@ -1628,6 +1835,34 @@ class PlatoonTinkerRLTrainer:
                         shared_state.train_tracker.scalar(**{f"{where}{kind}_groups": float(kinds[kind])})
                 shared_state.train_tracker.scalar(
                     **recorder.step_metrics(now=shared_state.model_info.llm.version, prefixes=prefixes)
+                )
+            if dispatcher is not None:
+                # What the task samplers drew since the last step and why, how long their decisions took, their own
+                # metrics, the slots waiting for an adaptive entry's sampler and those skipped; and, of the groups the
+                # step consumed, the share each sampler predicted would train against the share that did.
+                version = shared_state.model_info.llm.version
+                sampler_metrics = dispatcher.samplers.step_metrics(version)
+                shared_state.train_tracker.scalar(**sampler_metrics)
+                for entry, count in dispatcher.tokens_by_entry().items():
+                    where = dispatcher.samplers.prefix(dispatcher.samplers.entries[entry].name)
+                    shared_state.train_tracker.scalar(**{f"{where}tokens": float(count)})
+                skipped_slots = dispatcher.skipped_slots - skipped_slots_seen
+                skipped_slots_seen = dispatcher.skipped_slots
+                shared_state.train_tracker.scalar(**{"sampler/skipped_slots": float(skipped_slots)})
+                for where, (scores, groups, trained) in batch_predictions.items():
+                    shared_state.train_tracker.scalar(
+                        **{
+                            f"{where}predicted_informative": scores / groups,
+                            f"{where}informative_share": trained / groups,
+                        }
+                    )
+            if admissions is not None:
+                # What the step admitted, rejected and dropped, by label and reason, and what it counted.
+                draws = sampler_metrics.get("sampler/draws") if dispatcher is not None else None
+                shared_state.train_tracker.scalar(
+                    **admissions.step_metrics(
+                        prefixes=prefixes, counted=step_counted, admitted=step_admitted, draws=draws
+                    )
                 )
             if group_limits and dispatcher is not None:
                 # Draws a capped label's full backlog skipped since the last step: its share of the order asks for
@@ -1684,13 +1919,22 @@ class PlatoonTinkerRLTrainer:
         await self.shutdown_loops(shared_state)
 
     @staticmethod
-    async def _next_rollout(queue: asyncio.Queue, shared_state: TrainLoopSharedState, *, interruptible: bool):
+    async def _next_rollout(
+        queue: asyncio.Queue, shared_state: TrainLoopSharedState, *, interruptible: bool, ready: bool = False
+    ):
         """The next rollout result; with ``interruptible`` (no update of the current batch applied yet),
         ``TrainInterrupted`` once a shutdown is requested instead, since the feeders stop on it and the batch
         may never complete.  The batch is then dropped whole: a resume from the last completed step redoes it.
+        With ``ready`` (a step under a group admission rule), a result already queued is taken without letting
+        other tasks run first: a step takes the queued markers in one go, so that groups that end at once cannot start
+        again in the slots those markers free and queue more markers between two of them.
         """
 
         shutdown_event = getattr(shared_state, "shutdown_event", None)
+        if ready and not queue.empty():
+            if interruptible and shutdown_event is not None and shutdown_event.is_set():
+                raise TrainInterrupted()
+            return queue.get_nowait()
         if not interruptible or shutdown_event is None:
             return await queue.get()
         if shutdown_event.is_set():
@@ -2040,7 +2284,8 @@ class PlatoonTinkerRLTrainer:
         committed step consumed (``dispatch``, :func:`~platoon.train.tinker.dispatcher.save_state`).  Both are taken
         at the same point, before anything else runs; the dispatcher's files are written in a thread, since the groups
         they keep can take seconds to encode.  Each record is left out when it was not written: the statistics are not
-        kept or stopped, or a file could not be written."""
+        kept or stopped, or a file could not be written.  Under a group admission rule, the row also records where the
+        order stands (``next_position``), which a resume that cannot read the dispatcher's state goes on from."""
 
         loop_state = dict(loop_state)
         recorder = getattr(self, "_recorder", None)
@@ -2049,6 +2294,8 @@ class PlatoonTinkerRLTrainer:
         dispatcher = getattr(self, "_dispatcher", None)
         if dispatcher is not None:
             state, kept = dispatcher.state(), dispatcher.kept()
+            if getattr(self, "_admissions", None) is not None:  # under a rule: where the order stands, in the row too
+                loop_state[ORDER_POSITION_KEY] = state["next_position"]
             if (record := await asyncio.to_thread(save_state, self.run_log_path, checkpoint, state, kept)) is not None:
                 loop_state[DISPATCH_KEY] = record
         return loop_state
@@ -2073,7 +2320,7 @@ class PlatoonTinkerRLTrainer:
             dispatcher = self._dispatcher = self._new_dispatcher(shared_state.train_dataloader, start_batch, end_batch)
         dispatcher.bind(results)
 
-        async def run_group(draw: Draw, release: Callable[[], None]) -> None:
+        async def run_group(draw: BoundDraw, release: Callable[[], None]) -> None:
             await self._run_training_group(shared_state, train_workflow, dispatcher, draw, release)
 
         def spawn(coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
@@ -2086,8 +2333,10 @@ class PlatoonTinkerRLTrainer:
         return dispatcher
 
     def _new_dispatcher(self, train_dataloader: Any, start_batch: int, end_batch: int) -> Dispatcher:
-        """The dispatcher of this start's training groups, from ``start_batch`` to ``end_batch``, over the order the
-        dataloader draws (its batch ``b`` is positions ``b × batch_size`` on), starting at the checkpoint's batch."""
+        """The dispatcher of this start's training groups, from ``start_batch`` to ``end_batch``, over the run's order
+        (:meth:`_samplers`), starting at the checkpoint's batch; and, for a run under a group admission rule, its rules
+        beside it (``_admissions``, :class:`~platoon.train.admissions.AdmissionSet`), whose cap the dispatcher counts
+        its steps by."""
 
         config = self.config
         batch_size = config.train.batch_size
@@ -2095,17 +2344,23 @@ class PlatoonTinkerRLTrainer:
         column = label_column(config)
         recorder = getattr(self, "_recorder", None)
         rows, _ = _rows(config, "train", config.train.max_concurrent_rollouts)
-        batches: dict[int, list[dict]] = {}
-
-        def order(position: int) -> dict:
-            batch, index = divmod(position, batch_size)
-            if batch not in batches:
-                batches.clear()  # the dispatcher reads the order forward: one batch at a time
-                batches[batch] = train_dataloader.get_batch(batch)
-            return batches[batch][index]
-
+        sampler = str(getattr(config.train, "task_sampler", None) or "auto")
+        samplers = self._samplers(train_dataloader, sampler)
+        if recorder is not None:
+            samplers.attach(recorder)  # adaptive samplers read the statistics, and observe settled groups
+        # The group admission rules (RFC 0019, section 6), resolved as platoon train resolved them, whose resolution
+        # ran each rule's check with the run's workflow (run_components): none in a run whose every rule is all, which
+        # trains as before.
+        choices = choose_admissions(config, check=False) if rule_mode(config) else None
+        self._admissions = (
+            AdmissionSet(choices, samplers=samplers, batch_size=batch_size, label_column=column)
+            if choices is not None and choices.active
+            else None
+        )
         try:
-            fingerprint = sampling_fingerprint(config, tasks or [])
+            fingerprint = sampling_fingerprint(
+                config, tasks or [], getattr(self, "train_sampling", None), admission=choices
+            )
         except Exception:  # what a resume compares never stops training
             logger.warning("Could not take the fingerprint of the run's sampling inputs", exc_info=True)
             fingerprint = {}
@@ -2115,7 +2370,7 @@ class PlatoonTinkerRLTrainer:
             start = next_start(read_checkpoint_records(self.run_log_path))
         return Dispatcher(
             rows=rows,
-            order=order,
+            samplers=samplers,
             batch_size=batch_size,
             max_staleness=config.train.max_staleness,
             steps=max(0, end_batch - start_batch),
@@ -2126,25 +2381,94 @@ class PlatoonTinkerRLTrainer:
             recorder=recorder,
             version=lambda: self.model_info.llm.version,
             finish_batches=getattr(config.train, "num_minibatches", 1) > 1,
-            sampler=str(getattr(config.train, "task_sampler", None) or "auto"),
+            sampler=sampler,
             fingerprint=fingerprint,
+            step=start_batch,
+            groups_per_step=self._admissions.cap if self._admissions is not None else None,
         )
+
+    def _samplers(self, train_dataloader: Any, sampler: str) -> SamplerSet:
+        """The task samplers the run draws through: those of ``train_sampling``, as platoon train hands them the
+        trainer; else one that draws each position of the dataloader's order (its batch ``b`` is positions ``b ×
+        batch_size`` on) as it is, over the training tasks (:meth:`_training_tasks`), whose first row of a task a
+        resume draws again."""
+
+        config = self.config
+        batch_size = config.train.batch_size
+        column = label_column(config)
+        sampling = getattr(self, "train_sampling", None)
+        if sampling is not None:
+            return SamplerSet.build(sampling, batch_size=batch_size, label_column=column)
+        if named := _named_samplers(config):
+            raise ValueError(
+                f"{'; '.join(named)}: a trainer given no train_sampling draws its dataloader's order, so it runs no "
+                "other task sampler: entry and adaptive samplers need AutoDataset.training's sampling, which platoon "
+                "train hands the trainer (train_sampling=AutoDataset.training(config).sampling)"
+            )
+        batches: dict[int, list[dict]] = {}
+
+        def order(position: int) -> dict:
+            batch, index = divmod(position, batch_size)
+            if batch not in batches:
+                batches.clear()  # the dispatcher reads the order forward: one batch at a time
+                batches[batch] = train_dataloader.get_batch(batch)
+            return batches[batch][index]
+
+        tasks = self._training_tasks()
+        entries = tuple(entry_settings.run_settings(config))
+        drop = (PRESERVE_DATASET_ORDER_COLUMN,)
+        pool = None
+        try:
+            if hasattr(tasks, "column_names"):  # a dataset: its rows are converted only when a resume reads them
+                pool = TaskPool.from_dataset(tasks, entries=entries, column=column, drop_columns=drop)
+            elif tasks is not None:
+                pool = TaskPool.from_rows(tasks, entries=entries, column=column, drop_columns=drop)
+        except Exception:  # a resume then cannot draw the outstanding draws again, as with no training tasks
+            logger.warning("Could not list the training tasks that a resume draws again", exc_info=True)
+        return SamplerSet.of_order(order, pool=pool, name=sampler, batch_size=batch_size, label_column=column)
+
+    @staticmethod
+    def _resume_position(dispatcher: Dispatcher, extra: Mapping[str, Any]) -> bool:
+        """For a resume that cannot read the dispatcher's state: move the order to where the checkpoint's row says it
+        stood (``next_position``, which a checkpoint saved under a group admission rule records), so that the resume
+        draws no position again that the run had consumed (a step under a rule draws up to its cap's worth of
+        positions, so the checkpoint's batch lags behind).  Whether the row said, and the order moved."""
+
+        position = extra.get(ORDER_POSITION_KEY)
+        if isinstance(position, bool) or not isinstance(position, int) or position < dispatcher.next_position:
+            return False
+        dispatcher.next_position = position
+        return True
 
     def _restore_dispatch(self, dispatcher: Dispatcher, resume_info: Any, policy_version: int) -> None:
         """Take up the draws that the checkpoint this start resumes from (``resume_info``) left outstanding, from the
         dispatcher's state its row names (``dispatch``): the groups it kept go to the steps first, the draws that waited
-        for their label back to their backlogs, and the rest are drawn again; the order goes on where it stopped.  A
+        for their label back to their backlogs, and the rest are drawn again, each from the row it drew (the pool's
+        first row of its task when that row no longer holds it, or a state of platoon 0.3.0 named none); the order goes
+        on where it stopped, each task sampler at its saved count, else at the count the position implies.  A
         change of the sampling inputs is warned of and recorded in ``lock.json`` (``sampling_changed``), and the run
         goes on with it: the order goes on at the same position, and a draw whose task left the pool counts as lost.
         A checkpoint without that state (one saved before platoon 0.3.0, or one whose write failed), or a state that
         cannot be read, has the outstanding draws the per-task statistics hold counted as lost, and the order goes on
-        from the checkpoint's batch, as the producer had it."""
+        from the checkpoint's batch, as the producer had it; or, from a checkpoint saved under a group admission rule,
+        from where its row says the order stood (:meth:`_resume_position`)."""
 
         checkpoint = str(resume_info.name)
         recorder = getattr(self, "_recorder", None)
-        record = (getattr(resume_info, "extra", None) or {}).get(DISPATCH_KEY)
+        extra = getattr(resume_info, "extra", None) or {}
+        record = extra.get(DISPATCH_KEY)
         if not isinstance(record, Mapping):
             lost = recorder.lose_outstanding() if recorder is not None else 0
+            if self._resume_position(dispatcher, extra):
+                logger.info(
+                    "Checkpoint %s saved no state of the run's draws (its write failed): the run draws from where its "
+                    "order stood, position %d, which its row records, and %d draws that no committed step had trained "
+                    "count as lost",
+                    checkpoint,
+                    dispatcher.next_position,
+                    lost,
+                )
+                return
             logger.info(
                 "Checkpoint %s saved no state of the run's draws (a platoon before 0.3.0 saved none, or its write "
                 "failed): the run draws from the order where the checkpoint's batch begins, and %d draws that no "
@@ -2153,31 +2477,44 @@ class PlatoonTinkerRLTrainer:
                 lost,
             )
             return
+        pool = dispatcher.samplers.pool
         try:
             state = read_state(self.run_log_path, record)
             position = state.get("next_position")
             if isinstance(position, bool) or not isinstance(position, int) or position < 0:
                 raise ValueError(f"next_position {position!r} is no position")
             kept = self._read_kept_groups(state.get("kept"))
-            pool: dict[str, dict] = {}
-            for row in self._training_tasks() or []:
-                pool.setdefault(
-                    str(row["task_id"]), {k: v for k, v in row.items() if k != PRESERVE_DATASET_ORDER_COLUMN}
-                )
+            drawn, saved_tokens, fallback_slots = self._saved_samplings(state, checkpoint)
             plan = plan_resume(
                 outstanding=state.get("outstanding") or [],
                 waiting=state.get("waiting") or {},
                 kept=kept,
                 pool=pool,
             )
+            # Each draw drawn again takes the row it drew: its pool row while that row still holds its task, else the
+            # pool's first row of the task (the pool changed, or a state of format 1 saved no row).
+            rows: dict[tuple[int, int], dict[str, Any]] = {}
+            taken: dict[tuple[int, int], tuple[int | None, str | None]] = {}
+            for key, task_id, _place in [*plan.reissue, *plan.waiting]:
+                index, by = drawn.get(key, (None, None))
+                found = pool.reissue_row(task_id, index)
+                if found is None:
+                    raise ValueError(f"no row of the training tasks holds task {task_id!r}")
+                rows[key], taken[key] = found[0], (found[1], by)
+            for key, _task_id, _place in plan.kept:
+                taken[key] = drawn.get(key, (None, None))
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             if recorder is not None:
                 recorder.lose_outstanding()
+            moved = self._resume_position(dispatcher, extra)
             logger.warning(
                 "The state of the run's draws that checkpoint %s saved cannot be read (%s): the draws it left "
-                "outstanding are lost, and the order goes on from the checkpoint's batch",
+                "outstanding are lost, and the order goes on from %s",
                 checkpoint,
                 exc,
+                f"position {dispatcher.next_position}, where its row says it stood"
+                if moved
+                else "the checkpoint's batch",
             )
             return
         if recorder is not None:
@@ -2197,12 +2534,22 @@ class PlatoonTinkerRLTrainer:
                 self.run_log_path, {"start": dispatcher.start, "checkpoint": checkpoint, "changes": changes}
             )
         dispatcher.next_position = position
+        dispatcher.samplers.restore(state.get("samplers"), next_position=position)
         dispatcher.restore(
             kept=[(key, task_id, place, kept[key]) for key, task_id, place in plan.kept],
-            reissue=[(key, pool[task_id], place) for key, task_id, place in plan.reissue],
-            waiting=[(key, pool[task_id], place) for key, task_id, place in plan.waiting],
+            reissue=[(key, rows[key], place) for key, _task_id, place in plan.reissue],
+            waiting=[(key, rows[key], place) for key, _task_id, place in plan.waiting],
             version=policy_version,
+            drawn=taken,
         )
+        tokens = dispatcher.restore_tokens(saved_tokens, version=policy_version, fallbacks=fallback_slots)
+        if tokens["dropped"]:
+            logger.warning(
+                "Resuming from checkpoint %s: %d slots that waited for an entry's task sampler are dropped, since "
+                "their entry no longer gets slots (each logged as slot_skipped in tasks/events.jsonl)",
+                checkpoint,
+                tokens["dropped"],
+            )
         logger.info(
             "Resuming from checkpoint %s: %d groups that had settled and no step had trained train first, %d draws "
             "that had not trained are drawn again first%s, and the order goes on at position %d",
@@ -2212,6 +2559,36 @@ class PlatoonTinkerRLTrainer:
             f" ({len(plan.lost)} lost: their tasks left the run)" if plan.lost else "",
             position,
         )
+
+    @staticmethod
+    def _saved_samplings(
+        state: Mapping[str, Any], checkpoint: str
+    ) -> tuple[dict[tuple[int, int], tuple[int | None, str | None]], dict[str, list[int]], frozenset[int]]:
+        """What a dispatcher's state of format 2 adds to platoon 0.3.0's: the row each outstanding draw drew and the
+        sampler that drew it, each entry's tokens, and those whose slot the run sampler's fallback handed.  A part that
+        cannot be read is left out with a warning, the rest of the state taken up: without the rows, each draw drawn
+        again takes the first row of its task, as from a state of format 1; without the tokens, their slots are
+        lost."""
+
+        try:
+            drawn = saved_draws(state)
+        except ValueError as exc:
+            logger.warning(
+                "Resuming from checkpoint %s: %s; each draw drawn again takes the first row of its task instead",
+                checkpoint,
+                exc,
+            )
+            drawn = {}
+        try:
+            tokens, fallbacks = saved_token_positions(state), saved_fallback_slots(state)
+        except ValueError as exc:
+            logger.warning(
+                "Resuming from checkpoint %s: %s; the slots that waited for an entry's task sampler are lost",
+                checkpoint,
+                exc,
+            )
+            tokens, fallbacks = {}, frozenset()
+        return drawn, tokens, fallbacks
 
     def _read_kept_groups(self, record: Any) -> dict[tuple[int, int], "_Settled"]:
         """The groups the checkpoint a start resumes from kept, as the steps dequeue them, by draw, in the order they
