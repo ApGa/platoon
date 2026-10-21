@@ -4,6 +4,21 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
 
+## 0.3.1 (unreleased)
+
+### Fixes
+
+- **A model service that sends no routing ids is warned about once, not for each rollout.** With
+  `rollout_isolation: process`, the trainer warned about every rollout whose model calls did not all get a routing
+  id, which a server with rollout routing replay (R3) sends with each sampled sequence. With a service that sends
+  none, as a dense model's does, the trainer logged a warning for each rollout: 18,125 in one 70-step run. Now it
+  warns once for each start of training, about training and about evaluation rollouts each, that the service sends no
+  routing ids: expected for a dense model, but no rollout routing replay for a mixture-of-experts model. It still
+  warns about each rollout that got routing ids for some of its model calls but not all, or for none after the service
+  has sent some, and it reports the first rollout to get any after rollouts without them, naming the first few of
+  those. The metrics `train/rollout_worker_routing_id_coverage` and `eval/rollout_worker_routing_id_coverage` are
+  logged as before.
+
 ## 0.3.0 (2026-10-20)
 
 Each environment of a training mixture can set the training settings of its own groups, training keeps per-task
