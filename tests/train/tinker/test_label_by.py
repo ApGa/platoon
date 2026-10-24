@@ -19,9 +19,9 @@ import yaml
 
 from platoon.train.components import ENVIRONMENT_COLUMN, task_ids_to_dataset
 from platoon.train.labels import check_labels, dataset_labels, label_text, task_label
-from platoon.train.tinker import rl
 from platoon.train.tinker.config_defs import ENVIRONMENT_LABEL, PlatoonTinkerRLTrainerConfig, TrainConfig
 from platoon.train.tinker.dispatcher import Dispatcher
+from platoon.train.tinker.permits import PermitPool
 from platoon.utils.config import ConfigError, resolve_config
 
 
@@ -109,7 +109,7 @@ def test_group_limits_apply_to_a_columns_values_as_labels():
 
         class Rows:
             def __init__(self) -> None:
-                self.permits = rl._GroupPermits(100)
+                self.permits = PermitPool(100)
 
             def of(self, data: Mapping[str, Any]) -> tuple[str | None, str | None, int]:
                 return None, task_label(data, "level"), 1

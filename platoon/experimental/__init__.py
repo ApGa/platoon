@@ -15,6 +15,11 @@ in its load-time ``check`` (:class:`AdmissionCheckContext`), is registered with 
 ``module:Class``, and ``platoon.testing.check_group_admission`` checks it.  ``docs/extending/group-admission.md`` is the
 guide.
 
+And rollout leases (RFC 0020): a training workflow runs each of its rollouts on one of its draw's rollout permits, in
+a block of the draw's lease (:class:`RolloutLease`, which :func:`rollout_lease` reads in the workflow's task), so that
+under ``train.permit_release: rollout`` each permit comes back as its rollout ends.
+``docs/extending/rollout-leases.md`` is the guide.
+
 This module imports neither ``tinker`` nor ``datasets``.
 """
 
@@ -26,6 +31,7 @@ from platoon.train.admission_api import (
     GroupAdmission,
     group_admission,
 )
+from platoon.train.leases import RolloutLease, rollout_lease
 from platoon.train.sampler_api import (
     Draw,
     Sampler,
@@ -75,4 +81,7 @@ __all__ = [
     "AdmissionSetup",
     "GroupAdmission",
     "group_admission",
+    # rollout leases (RFC 0020)
+    "RolloutLease",
+    "rollout_lease",
 ]

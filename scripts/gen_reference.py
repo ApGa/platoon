@@ -989,10 +989,15 @@ def render_experimental() -> str:
             "The group admission API: a rule's answer, its base class and protocol, what it is built with, what its "
             "check sees, and the decorator that registers it.",
         ),
+        (
+            "Rollout leases",
+            "The lease a training workflow runs each of its rollouts on, and how it reads it "
+            "([Run rollouts on the lease](../extending/rollout-leases.md)).",
+        ),
     )
     names = experimental.__all__
-    statistics, admission = names.index("EntryInfo"), names.index("Admission")
-    groups = (names[:statistics], names[statistics:admission], names[admission:])
+    statistics, admission, leases = names.index("EntryInfo"), names.index("Admission"), names.index("RolloutLease")
+    groups = (names[:statistics], names[statistics:admission], names[admission:leases], names[leases:])
     lines = [
         GENERATED,
         "",

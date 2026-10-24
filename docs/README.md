@@ -72,6 +72,8 @@ package.
   registered name or `module:Class`, and check it with `check_task_sampler`.
 - [Write a group admission rule](extending/group-admission.md) (experimental): decide which settled training groups
   count toward the batch, and check it with `check_group_admission`.
+- [Run rollouts on the lease](extending/rollout-leases.md) (experimental): return each rollout's permit as it ends,
+  from a workflow of your own, under `train.permit_release: rollout`.
 
 ## Reference
 

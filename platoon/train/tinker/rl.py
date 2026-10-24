@@ -7,7 +7,7 @@ import os
 import signal
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -25,6 +25,7 @@ from platoon.train import entry_settings
 from platoon.train.admissions import AdmissionSet, choose_admissions, rule_mode
 from platoon.train.components import row_entry
 from platoon.train.labels import dataset_labels, label_column, metric_labels, metric_prefix, task_label
+from platoon.train.leases import holding
 from platoon.train.sampler_runtime import SamplerSet, TaskPool, TaskSampling
 from platoon.train.sampling import fingerprint_changes, planned_steps, sampling_fingerprint
 from platoon.train.task_stats import DISPATCH_KEY, next_start
@@ -43,6 +44,7 @@ from platoon.train.tinker.batch_transforms import (
     set_loss_normalization_token_counts,
     summarize_depths,
 )
+from platoon.train.tinker.censoring import Censoring
 from platoon.train.tinker.checkpoint_pruning import (
     RECOVERY_CHECKPOINT_PREFIX,
     RecoveryCheckpointPruner,
@@ -69,9 +71,11 @@ from platoon.train.tinker.dispatcher import (
 from platoon.train.tinker.evaluation_record import EVALUATIONS_NAME, completed_evaluation_steps, record_evaluation
 from platoon.train.tinker.kept_groups import decode_group, read_kept
 from platoon.train.tinker.key_refusal import key_refusals
+from platoon.train.tinker.permits import DrawLease, PermitPool
 from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
+from platoon.train.tinker.staleness import StaleWatch
 from platoon.train.tinker.task_records import TaskRecorder, record_lost_state, record_sampling_changed, resume_record
 from platoon.train.tinker.workflows.base import RolloutWorkflow
 from platoon.utils.rollout_stats import REWARD_KEY_MISMATCH, REWARD_KEY_PREFIX, RolloutStats, outcome_counts
@@ -252,57 +256,17 @@ def _settled(item: Any) -> _Settled:
     return _Settled(getattr(item, "entry", None), getattr(item, "label", None), item)
 
 
-class _GroupPermits:
-    """Rollout permits that groups of different sizes share (``max_concurrent_rollouts``): a group takes its entry's
-    group size in permits at once, first come first served, before it starts, and returns them when its workflow
-    returns, so that the rollouts running at once never exceed the budget, and a large group waiting first is not
-    overtaken by small ones."""
-
-    def __init__(self, permits: int) -> None:
-        self._free = permits
-        self._waiting: deque[tuple[int, asyncio.Future[None]]] = deque()
-
-    async def acquire(self, count: int) -> None:
-        if not self._waiting and self._free >= count:
-            self._free -= count
-            return
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._waiting.append((count, future))
-        try:
-            await future
-        except asyncio.CancelledError:
-            if future.done() and not future.cancelled():
-                self.release(count)  # granted as it was cancelled: give the permits back
-            else:
-                with contextlib.suppress(ValueError):
-                    self._waiting.remove((count, future))
-                self._grant()
-            raise
-
-    def release(self, count: int) -> None:
-        self._free += count
-        self._grant()
-
-    def _grant(self) -> None:
-        while self._waiting and self._free >= self._waiting[0][0]:
-            count, future = self._waiting.popleft()
-            if future.done():
-                continue
-            self._free -= count
-            future.set_result(None)
-
-
 @dataclass(frozen=True)
 class _Rows:
     """What the dispatcher, and an evaluation's rollout workers, read from each row they run: the row's environment
     entry (one of ``entries``), its label (its ``column`` value) and its entry's group size (``group_sizes``, else
-    ``group_size``), whose rollout permits (``permits``) the group takes before it starts."""
+    ``group_size``), whose rollout permits (``permits``) the group reserves before it starts."""
 
     entries: tuple[str, ...]
     column: str
     group_sizes: Mapping[str, int]
     group_size: int
-    permits: _GroupPermits
+    permits: PermitPool
 
     def of(self, data: Mapping[str, Any]) -> tuple[str | None, str | None, int]:
         entry = row_entry(data, self.entries)
@@ -342,7 +306,7 @@ def _rows(config: Any, phase: str, budget: int | None) -> tuple[_Rows, int]:
         column=label_column(config),
         group_sizes=sizes,
         group_size=group_size,
-        permits=_GroupPermits(budget),
+        permits=PermitPool(budget),
     )
     return rows, groups
 
@@ -350,10 +314,13 @@ def _rows(config: Any, phase: str, budget: int | None) -> tuple[_Rows, int]:
 def _rollouts_at_once(config: Any, phase: str, budget: int | None) -> float:
     """The most rollouts of a phase of a run that run at once, which the client metrics compare the rollouts in flight
     with: its budget, or as many groups of the largest entry's size as it holds groups of the smallest's, when that
-    is fewer."""
+    is fewer; the budget itself under ``train.permit_release: rollout``, whose rollouts return their permits as they
+    end."""
 
     sizes, group_size = _group_sizes(config, phase)
     budget, groups = _groups_at_once(config, phase, budget)
+    if phase == "train" and getattr(config.train, "permit_release", "group") == "rollout":
+        return float(budget)
     return float(min(budget, groups * max([*sizes.values(), group_size])))
 
 
@@ -1059,16 +1026,15 @@ class PlatoonTinkerRLTrainer:
         while not shared_state.shutdown_event.is_set():
             data = await task_data_queue.get()
             entry, label, group_size = rows.of(data) if rows is not None else (None, None, 0)
-            granted = 0
+            reservation = rows.permits.reserve(group_size) if rows is not None else None
             try:
-                if rows is not None:
-                    await rows.permits.acquire(group_size)
-                    granted = group_size
+                if reservation is not None:
+                    await reservation.ready()
                 start_time = time.perf_counter()
                 rollout = await self._run_group(workflow, data, watchdog=shared_state.watchdog, tracker=tracker)
             finally:
-                if granted and rows is not None:
-                    rows.permits.release(granted)
+                if reservation is not None:
+                    reservation.withdraw()
 
             task_id = data.get("task_id", "unknown")
             _group_done(rollout, time.perf_counter() - start_time, task_id, tracker, shared_state.watchdog)
@@ -1080,20 +1046,22 @@ class PlatoonTinkerRLTrainer:
         workflow: RolloutWorkflow,
         dispatcher: Dispatcher,
         draw: BoundDraw,
-        release: Callable[[], None],
+        lease: DrawLease,
     ) -> None:
-        """Run the group of one of the dispatcher's draws, whose label slot and rollout permits are taken: free them
-        once its workflow returns (``release``), record the group in the run's per-task statistics, and hand its output
-        to the step that dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a
-        group admission rule, the group is decided first (:meth:`_settle_under_rule`)."""
+        """Run the group of one of the dispatcher's draws, whose label slot and rollout permits are taken, with the
+        draw's ``lease`` as its workflow's :func:`~platoon.train.leases.rollout_lease`: release them once its workflow
+        returns (calling ``lease``), record the group in the run's per-task statistics, and hand its output to the step
+        that dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group
+        admission rule, the group is decided first (:meth:`_settle_under_rule`)."""
 
         start_time = time.perf_counter()
         try:
-            rollout = await self._run_group(
-                workflow, draw.row, watchdog=shared_state.watchdog, tracker=shared_state.train_tracker
-            )
+            with holding(lease):
+                rollout = await self._run_group(
+                    workflow, draw.row, watchdog=shared_state.watchdog, tracker=shared_state.train_tracker
+                )
         finally:
-            release()
+            lease()
         _group_done(
             rollout, time.perf_counter() - start_time, draw.task_id, shared_state.train_tracker, shared_state.watchdog
         )
@@ -1199,15 +1167,17 @@ class PlatoonTinkerRLTrainer:
         # Publish the initial sampling-client binding before any group can
         # start, then declare the concurrency ceiling the metrics compare
         # against: max_concurrent_rollouts is a budget of rollouts, of which
-        # a group takes its size in permits.
+        # a group takes its size in permits, and the monitor warns once when
+        # more rollouts run at once.
         self._publish_worker_binding(
             train_workflow,
             shared_state.sampling_client,
             shared_state.model_info.llm.version,
             required=True,
         )
+        budget = self.config.train.max_concurrent_rollouts
         client_monitor("train").set_configured_concurrency(
-            _rollouts_at_once(self.config, "train", self.config.train.max_concurrent_rollouts)
+            _rollouts_at_once(self.config, "train", budget), budget=budget
         )
 
         # Start training loop.
@@ -1221,12 +1191,17 @@ class PlatoonTinkerRLTrainer:
         recorder = getattr(self, "_recorder", None)
         prefixes = {label: metric_prefix(column, label) for label in labels}
         run_bound = self.config.train.max_staleness
-        bounds = {label: own.max_staleness for label, own in entry_settings.run_settings(self.config).items()}
+        settings = entry_settings.run_settings(self.config)
+        bounds = {label: own.max_staleness for label, own in settings.items()}
         skipped_seen: Counter[str | None] = Counter()  # draws a capped label's full backlog skipped, logged so far
         skipped_slots_seen = 0  # slots owed to adaptive entries that were skipped, logged so far
         # A run under a group admission rule (RFC 0019, section 6): each step trains the first batch_size admitted
         # groups it dequeues that are not stale, and closes once it has counted its cap (platoon.train.admissions).
         admissions: AdmissionSet | None = getattr(self, "_admissions", None)
+        # What the straggler policy censors of the groups each step dequeues, and the warning of stale groups.
+        threshold = recorder.threshold if recorder is not None else None
+        censoring = Censoring(settings, self.config.train.workflow_config, threshold=threshold)
+        stale_watch = StaleWatch(run_bound)
 
         while shared_state.train_step < end_batch:
             batch_start_time = time.perf_counter()
@@ -1385,6 +1360,9 @@ class PlatoonTinkerRLTrainer:
                                 stale = True
                         # A marker of a group a rule rejected (or that failed) when it settled has its fate already.
                         marker = settled.rejected is not None
+                        censoring.add(row_label if row_label is not None else _output_label(settled.rollout), record)
+                        if not marker:
+                            stale_watch.dequeued(stale)
                         if admissions is not None:
                             taken = "marker" if marker else "stale" if stale else "failed" if failed else "admitted"
                             counts = (
@@ -1889,6 +1867,10 @@ class PlatoonTinkerRLTrainer:
                     "optim/updates_total": float(getattr(shared_state, "optimizer_steps", 0)),
                 }
             )
+            # What held the dispatcher back from starting groups, and what the straggler policy censored.
+            blocked = dispatcher.blocked_shares() if dispatcher is not None else {}
+            shared_state.train_tracker.scalar(**blocked, **censoring.step_metrics(prefixes))
+            stale_watch.step_ended(blocked)
             step_stats = shared_state.train_tracker.export(reset=True)
             step_stats["train/step"] = shared_state.train_step
             step_stats["train/epoch"] = shared_state.train_step // shared_state.num_train_batches_per_epoch
@@ -2319,9 +2301,16 @@ class PlatoonTinkerRLTrainer:
         if dispatcher is None:
             dispatcher = self._dispatcher = self._new_dispatcher(shared_state.train_dataloader, start_batch, end_batch)
         dispatcher.bind(results)
+        dispatcher.rolling = bool(getattr(train_workflow, "runs_rollouts_on_lease", False))  # rolling starts
+        if dispatcher.permit_release == "rollout":
+            logger.info(
+                "Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts "
+                "start %s",
+                "as permits free" if dispatcher.rolling else "together (its workflow sets no runs_rollouts_on_lease)",
+            )
 
-        async def run_group(draw: BoundDraw, release: Callable[[], None]) -> None:
-            await self._run_training_group(shared_state, train_workflow, dispatcher, draw, release)
+        async def run_group(draw: BoundDraw, lease: DrawLease) -> None:
+            await self._run_training_group(shared_state, train_workflow, dispatcher, draw, lease)
 
         def spawn(coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
             return task_group.create_task(coroutine)
@@ -2344,6 +2333,7 @@ class PlatoonTinkerRLTrainer:
         column = label_column(config)
         recorder = getattr(self, "_recorder", None)
         rows, _ = _rows(config, "train", config.train.max_concurrent_rollouts)
+        rows.permits.on_held = client_monitor("train").set_permits_held  # rollout_client/permits_held_mean
         sampler = str(getattr(config.train, "task_sampler", None) or "auto")
         samplers = self._samplers(train_dataloader, sampler)
         if recorder is not None:
@@ -2385,6 +2375,7 @@ class PlatoonTinkerRLTrainer:
             fingerprint=fingerprint,
             step=start_batch,
             groups_per_step=self._admissions.cap if self._admissions is not None else None,
+            permit_release=config.train.permit_release,
         )
 
     def _samplers(self, train_dataloader: Any, sampler: str) -> SamplerSet:

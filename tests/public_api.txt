@@ -245,6 +245,9 @@ platoon.experimental.MemberResult.steps: field int | None
 platoon.experimental.MemberResult.to_json: def to_json() -> dict[str, Any]
 platoon.experimental.MemberResult.valid: field bool
 platoon.experimental.MemberResult.versions: field Mapping[str, tuple[int, int]] = <factory dict>
+platoon.experimental.RolloutLease: class RolloutLease(Protocol)
+platoon.experimental.RolloutLease.rollout: def rollout(index: int) -> AbstractAsyncContextManager[float]
+platoon.experimental.RolloutLease.size: property int
 platoon.experimental.Sampler: class Sampler
 platoon.experimental.Sampler.__init__: def __init__(setup: SamplerSetup, options: Any = None) -> None
 platoon.experimental.Sampler.adaptive: constant bool = False
@@ -349,6 +352,7 @@ platoon.experimental.TaskStatsView.threshold: def threshold(entry: str | None) -
 platoon.experimental.group_admission: def group_admission(name: str, *, options: Any = None, check: Callable[[Any, AdmissionCheckContext], None] | None = None) -> Callable[[R], R]
 platoon.experimental.informative_at: def informative_at(alpha: float, beta: float, k: int) -> float
 platoon.experimental.pass_at: def pass_at(alpha: float, beta: float, k: int) -> float
+platoon.experimental.rollout_lease: def rollout_lease() -> RolloutLease
 platoon.experimental.task_sampler: def task_sampler(name: str, *, options: Any = None, check: Callable[[Any, SamplerCheckContext], None] | None = None) -> Callable[[S], S]
 platoon.get_harness: def get_harness(ref: str) -> Harness
 platoon.gym: module platoon.gym

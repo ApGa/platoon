@@ -18,7 +18,6 @@ from platoon.train.labels import task_label
 from platoon.train.sampler_runtime import SamplerSet, TaskPool, TaskSampling
 from platoon.train.samplers import SamplerChoice, UniformSampler, WeightedSampler
 from platoon.train.task_stats import EntryInfo
-from platoon.train.tinker import rl as rl_module
 from platoon.train.tinker.dispatcher import (
     STATE_FORMAT,
     BoundDraw,
@@ -27,13 +26,14 @@ from platoon.train.tinker.dispatcher import (
     save_state,
     saved_draws,
 )
+from platoon.train.tinker.permits import PermitPool
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "resume-0.3.0"
 
 
 class _Rows:
     def __init__(self, permits: int = 1000) -> None:
-        self.permits = rl_module._GroupPermits(permits)
+        self.permits = PermitPool(permits)
 
     def of(self, data: Mapping[str, Any]) -> tuple[str | None, str | None, int]:
         label = task_label(data, ENVIRONMENT_COLUMN)
@@ -204,7 +204,7 @@ class _SizedRows:
     """Rows by entry (their ENVIRONMENT_COLUMN), labelled by ``column``, each entry's group ``sizes``."""
 
     def __init__(self, permits: int, sizes: Mapping[str, int], column: str = ENVIRONMENT_COLUMN) -> None:
-        self.permits = rl_module._GroupPermits(permits)
+        self.permits = PermitPool(permits)
         self.sizes = dict(sizes)
         self.column = column
 

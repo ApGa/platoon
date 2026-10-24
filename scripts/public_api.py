@@ -6,9 +6,9 @@
 The public modules (:data:`PUBLIC_MODULES`) are the ones the documentation makes public: ``platoon`` itself
 (``import platoon as pt``) and ``pt.gym``, which ``docs/reference/api.md`` documents, ``platoon.testing``, whose
 guide (``docs/how-to/test-extensions.md``) makes its exports a stable API, and ``platoon.experimental``, whose names
-are documented (``docs/reference/experimental.md``, which covers both of its APIs, and the guides
-``docs/extending/task-samplers.md`` and ``docs/extending/group-admission.md``) but may change in a minor release: the
-snapshot shows every such change too.  A module's public names are its ``__all__``.
+are documented (``docs/reference/experimental.md``, which covers each of its APIs, and the guides
+``docs/extending/task-samplers.md``, ``docs/extending/group-admission.md`` and ``docs/extending/rollout-leases.md``) but
+may change in a minor release: the snapshot shows every such change too.  A module's public names are its ``__all__``.
 
 The snapshot has one line per item, sorted: a function's signature; a class's bases and its public members (fields
 with their types and defaults, attributes, properties, and methods with their signatures); a type alias's value; a

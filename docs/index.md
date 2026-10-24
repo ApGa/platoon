@@ -115,7 +115,8 @@ platoon train my_run.yaml
 [judges and verifiers](extending/judges-and-verifiers.md), [sandbox providers](extending/sandbox-providers.md),
 [renderers and tool-call parsers](extending/renderers.md),
 [hooks, telemetry and metrics](extending/hooks-and-metrics.md) and, experimental,
-[task samplers](extending/task-samplers.md) and [group admission rules](extending/group-admission.md).
+[task samplers](extending/task-samplers.md), [group admission rules](extending/group-admission.md) and
+[rollout leases](extending/rollout-leases.md).
 
 **Reference**: [CLI](reference/cli.md), [config](reference/config.md), [Python API](reference/api.md),
 [experimental API](reference/experimental.md).

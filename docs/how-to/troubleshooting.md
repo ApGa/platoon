@@ -421,6 +421,20 @@ What `platoon train` with `watchdog.max_restarts`, and the reaping of the sandbo
 | `environments[<name>]'s <n> training tasks are each drawn about <ratio> times as often as environments[<other>]'s <m> ...` | The weights give a small entry as large a share as a big one: set `weight: tasks` on every entry to draw every task equally often, or weights in proportion to the tasks you want each entry to stand for |
 | `environments[<name>]: its weight (...) gives it about <k> of the run's <slots> task slots (...), fewer than its <n> training tasks, so about <n - k> of them never train; ...` | The entry's share of the run is smaller than its tasks: set `weight: tasks` on every entry, raise the entry's weight, or train longer |
 
+## Rollout permits
+
+What a run warns of about rollout permits and staleness, under either `train.permit_release`, and what the metrics say
+([Rollout permits](train-and-eval.md#rollout-permits-experimental)):
+
+| Message or symptom | Fix |
+|---|---|
+| `3.1% of the groups the last 10 steps consumed (31 of 1000) were dropped as stale, older than their bound (train.max_staleness: 3, or their entry's own); what held the dispatcher back most was the rollout permits (train.max_concurrent_rollouts) (95%). The horizon had room ..., so train.max_staleness: 4 changes only the stale filter ...` (logged once per start of training, from its tenth step on) | Long groups outlasted more steps than their bound allows, and those are the hard, mixed ones; under `permit_release: rollout` more do, since more groups are open at once and steps are shorter. Raise `train.max_staleness` by one, which with the horizon free changes only the stale filter (the message says when the horizon held the dispatcher back, and a larger bound also lets rollouts run further ahead). `train/batch/<column>/<label>/stale_groups` says whose groups go stale; an entry's own `max_staleness` raises its bound alone |
+| `<n> rollouts ran at once, more than train.max_concurrent_rollouts (<m>): a workflow returned a rollout's permit while the rollout still ran ...` (logged once per start) | A `GroupRolloutWorkflow` subclass ran a member outside its lease block, or more members than its entry's group size: keep each rollout's whole life in its block ([Run rollouts on the lease](../extending/rollout-leases.md)). Only `GroupRolloutWorkflow`'s members count as rollouts in flight, and an evaluation's `GroupRolloutWorkflow` left on the default `stats_scope`, `train`, counts with them: give it `stats_scope="eval"`, as `platoon train` does |
+| `IndexError: rollout <i> of task <id> is outside its draw's lease, of size <n> ...` or `RuntimeError: rollout <i> of task <id> entered a second lease block ...` (the group fails) | A workflow ran more rollouts than its entry's group size, or ran an index twice, such as a retry in a block of its own or a whole group run again: run each index once, from 0 to the lease's size less one, and retry a rollout inside its block ([The rules a workflow keeps](../extending/rollout-leases.md#the-rules-a-workflow-keeps)) |
+| `Rollout <i> of task <id> entered its lease block after its draw was released ...` or `... was waiting for its permit when its draw was released ...` (logged once per draw) | A rollout outlived its workflow's `arun_episode`, so it ran on no permit: await every rollout, a failed sibling's included, before the workflow returns |
+| `train/dispatch/blocked_share/permits` near 1, `rollout_client/permits_held_mean` well above `rollouts_in_flight_mean`, and `rollout_client/startup_gate_waiting_mean` above 0 | Groups wait for a worker-startup slot while they hold their permits, as they can with `worker_start_method: exec`: raise `train.workflow_config.worker_launch_concurrent_groups`, or start workers from the fork server, the default |
+| `train/dispatch/blocked_share/permits` near 1 and `permits_held_mean` close to `rollouts_in_flight_mean` | The budget binds: raise `train.max_concurrent_rollouts` while the inference engines have room |
+
 ## The training service
 
 | Symptom | Cause and fix |

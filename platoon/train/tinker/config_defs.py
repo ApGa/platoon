@@ -100,7 +100,11 @@ class WorkflowConfig:
     # Straggler policy. Once ``straggler_quorum`` group members have settled (completed, failed,
     # or been interrupted), wait at most this many additional seconds for the
     # rest, then cancel them. None keeps every member until its own rollout
-    # timeout.
+    # timeout. A member that started late (train.permit_release: rollout starts
+    # a group's members as permits free) gets its start delay on top. It is a
+    # deadline against runaway members, not a way to start groups sooner: a
+    # cancelled member is censored (neither a pass nor a failure), and slow
+    # members fail more often, so a tight cut biases what trains.
     straggler_timeout_seconds: float | None = None
     # Number of settled members that starts the tail-grace clock. None means
     # ``group_size - 1`` (the classic single-straggler policy). Requires
@@ -144,9 +148,10 @@ class WorkflowConfig:
     # Seconds between SIGTERM and SIGKILL when a worker is stopped; keep it short
     # so that shutdown stays fast.  0.0 means SIGKILL immediately.
     worker_termination_grace_seconds: float = 10.0
-    # Groups -- not rollouts -- allowed to be starting up at once.  A group is
-    # admitted atomically so its members never skew against the straggler
-    # quorum clock, which has no notion of when each member began.
+    # Groups -- not rollouts -- allowed to be starting up at once.  A group holds
+    # its slot until every member is up or has exited; when its members start
+    # as permits free (train.permit_release: rollout), until its last member has
+    # a permit and is up.
     worker_launch_concurrent_groups: int = 2
     # Per-worker resident-memory (RSS) soft limit in bytes.  Above it the worker
     # writes a diagnostic marker and exits with a distinct code, so an
@@ -429,9 +434,19 @@ class TrainConfig:
     # Rank of the LoRA adapter that is trained.
     lora_rank: int = 32
     workflow_config: WorkflowConfig = field(default_factory=WorkflowConfig)
-    # Rollouts that run at once (None: batch_size × workflow_config.group_size, every rollout of a batch). A group's
-    # rollouts start together, so as many whole groups run at once as it holds, and it must hold one.
+    # Rollouts that run at once (None: batch_size × workflow_config.group_size, every rollout of a batch): the rollout
+    # permits the groups share, first come first served, each group reserving its group size of them, and it must hold
+    # one group. Under permit_release: group a group holds its permits until its slowest rollout ends, so as many whole
+    # groups run at once as it holds; under rollout each permit comes back as its rollout ends, so it counts the
+    # rollouts running.
     max_concurrent_rollouts: int | None = None
+    # When a group's rollout permits come back (experimental): ``group``, when its workflow returns, so a finished
+    # rollout's permit waits for the group's slowest; or ``rollout``, each as its rollout ends, so that the next group
+    # starts on the permits that come back. Under ``rollout``, with a workflow that runs its rollouts on the lease
+    # (``GroupRolloutWorkflow`` does), a group starts on its first free permit and its rollouts start as the rest free,
+    # each given its start delay on its straggler deadline. More groups are then open at once, so more long groups can
+    # go stale: a warning names the fix (see docs/how-to/train-and-eval.md).
+    permit_release: Literal["group", "rollout"] = "group"
     # The dataset column that labels each task (None: ``_platoon_environment``, the mixture entry it belongs to,
     # ``platoon.train.components.ENVIRONMENT_COLUMN``; a single environment's tasks have none), such as a Harbor index
     # field. A task's label is its value of the column as text, ``true`` or ``false`` for a boolean.
@@ -547,6 +562,8 @@ class TrainConfig:
             for key, value in self.rollout_group_limits.items()
         ):
             raise ValueError("rollout_group_limits requires nonempty labels and positive integer capacities")
+        if self.permit_release not in ("group", "rollout"):
+            raise ValueError(f"train.permit_release must be 'group' or 'rollout', got {self.permit_release!r}")
 
 
 # The units ``every`` counts in (``TrainEventTriggerConfig.strategy``): training steps, or passes over the training

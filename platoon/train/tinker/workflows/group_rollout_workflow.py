@@ -64,6 +64,13 @@ the subclass with ``environments[0].workflow: "package.module.MyWorkflow"`` or
 construct it in a train script. Advantages are always computed in the trainer
 process, so an override never crosses the rollout-worker boundary. An override
 reads its group's settings through ``self.config``.
+
+Each member runs in a block of its draw's rollout lease
+(``platoon.train.leases``) in ``_run_group_member``, around its whole rollout,
+so under ``train.permit_release: rollout`` its permit comes back as it ends and
+a group's members start as permits free, each member's straggler deadline
+carrying its own start delay; ``runs_rollouts_on_lease`` says which subclasses
+keep this.
 """
 
 import asyncio
@@ -92,6 +99,7 @@ from platoon.train.components import (
     row_entry,
 )
 from platoon.train.labels import task_label
+from platoon.train.leases import holding, rollout_lease
 from platoon.train.task_stats import MAIN, MemberResult
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo
@@ -143,6 +151,8 @@ _group_stats: ContextVar[DeferredStats | None] = ContextVar("platoon_group_stats
 # ``GroupRolloutWorkflow.config`` reads inside the group, and the entry's label (``current_entry``).
 _group_config: ContextVar[WorkflowConfig | None] = ContextVar("platoon_group_config", default=None)
 _group_entry: ContextVar[str | None] = ContextVar("platoon_group_entry", default=None)
+# The methods through which a ``GroupRolloutWorkflow`` runs its members on the lease (``runs_rollouts_on_lease``).
+_LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
 # Guards each workflow's ``_RoutingIdState``, so that one rollout at a time reads it, logs what it says and records what
 # the rollout got. Only threads need this: asyncio tasks cannot interleave in that code, which never awaits, and platoon
 # reports each rollout from its event loop's thread; a custom workflow may report from threads of its own.
@@ -396,13 +406,15 @@ def _filter_positive_centered_error_tokens(
 
 
 class _GroupAdmission:
-    """One startup permit held for a whole group until its members are up.
+    """What a group's members share: one startup permit held for the whole
+    group until its members are up, and when each member started (``starts``).
 
-    Released when every member has signalled readiness or exited, or after
-    ``timeout_seconds`` -- whichever comes first -- and never released twice.
+    The permit is released when every member has signalled readiness or exited,
+    or after ``timeout_seconds`` -- whichever comes first -- and never twice.
     """
 
     def __init__(self, semaphore: asyncio.Semaphore | None, expected: int, timeout_seconds: float):
+        self.starts = _MemberStarts()
         self._semaphore = semaphore
         self._pending = max(0, int(expected))
         self._released = semaphore is None
@@ -439,6 +451,41 @@ class _GroupAdmission:
             self._semaphore.release()
 
 
+class _MemberStarts:
+    """When each member of a group started: the seconds its lease block waited for a permit, its start delay (the
+    members' tasks are created together).  Exactly 0 for every member whose permit came with the group's, whose
+    straggler deadline is then the group's, as before; with rolling starts a late member's deadline carries its delay
+    behind the group's first start.  A member that never entered a block (an override of ``_run_group_member`` that
+    does not call it) counts as started with the group."""
+
+    def __init__(self) -> None:
+        self.created = asyncio.get_running_loop().time()
+        self.waiting: set[int] = set()  # members whose block waits for a permit
+        self._waited: dict[int, float] = {}
+
+    def started(self, index: int, waited: float) -> None:
+        self.waiting.discard(index)
+        self._waited[index] = waited
+
+    def offset(self, index: int) -> float | None:
+        """Member ``index``'s start delay behind the group's first start; None while its block waits."""
+
+        if index in self.waiting:
+            return None
+        waited = self._waited.get(index)
+        return 0.0 if waited is None else waited - min(self._waited.values())
+
+    def together(self) -> bool:
+        """Whether every member started with the group: none waits for its permit, and none waited."""
+
+        return not self.waiting and not any(self._waited.values())
+
+    def least_offset(self, now: float) -> float:
+        """The least start delay a member whose block still waits can have, at loop time ``now``."""
+
+        return max(0.0, now - self.created - min(self._waited.values(), default=0.0))
+
+
 class GroupRolloutWorkflow:
     """Workflow that runs multiple rollouts per task and computes group-centered advantages.
 
@@ -459,9 +506,31 @@ class GroupRolloutWorkflow:
     # group admission rule ``informative`` reads; resolution refuses it beside a workflow class that does not declare
     # this (``platoon.train.admissions``).
     gives_verdicts: ClassVar[bool] = True
+    # It runs each member in a block of its draw's rollout lease (``_run_group_member``), around the member's whole
+    # rollout, so under ``train.permit_release: rollout`` its groups start on their first free permit and their members
+    # as the rest free. A subclass that overrides ``arun_episode``, ``_run_group_rollouts`` or ``_run_group_member``
+    # (``_LEASE_METHODS``) may start members some other way: it reads as False, its groups starting once their whole
+    # size of permits is free, unless its own class body sets the flag. A flag set in a class body covers the overrides
+    # of that class and its bases, not those of a mixin or of another branch of a diamond (``__init_subclass__``).
+    runs_rollouts_on_lease: ClassVar[bool] = True
     # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
     # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
     entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """The flag of a subclass whose own body does not set it: that of the class that sets it nearest in its method
+        resolution order, unless one of :data:`_LEASE_METHODS` comes from a class other than this one that the
+        declaring class does not derive from (the subclass itself, a mixin, another branch of a diamond): False."""
+
+        super().__init_subclass__(**kwargs)
+        if "runs_rollouts_on_lease" in cls.__dict__:
+            return
+        declared = next(klass for klass in cls.__mro__ if "runs_rollouts_on_lease" in klass.__dict__)
+        for name in _LEASE_METHODS:
+            owner = next(klass for klass in cls.__mro__ if name in klass.__dict__)
+            if owner is not GroupRolloutWorkflow and not issubclass(declared, owner):
+                cls.runs_rollouts_on_lease = False
+                return
 
     def __init__(
         self,
@@ -933,33 +1002,55 @@ class GroupRolloutWorkflow:
         returns in well under a millisecond while the child then spends 20-30 s
         importing, so the gate must be readiness, not launch.  But a
         *per-rollout* readiness gate would then inject start-time skew inside a
-        group, and the straggler policy has no per-member reference point -- it
-        starts its tail-grace clock when the quorum settles.  With FIFO
-        admission and tasks created in group order, the same rollout numbers
-        would deterministically start last and be cancelled having had a
-        fraction of their budget, biasing the leave-one-out baseline toward
-        whichever members launch early.  Admitting whole groups removes
-        intra-group skew entirely; inter-group skew is harmless because each
-        group has its own clock.  One acquire per group also cannot deadlock.
+        group, and the straggler policy starts its tail-grace clock when the
+        quorum settles.  With FIFO admission and tasks created in group order,
+        the same rollout numbers would deterministically start last and be
+        cancelled having had a fraction of their budget, biasing the
+        leave-one-out baseline toward whichever members launch early.  Admitting
+        whole groups removes intra-group skew from startup; inter-group skew is
+        harmless because each group has its own clock.  One acquire per group
+        also cannot deadlock.
+
+        Under rolling starts (``train.permit_release: rollout``) a group's
+        members start as its permits are granted: the group holds its slot until
+        the last of them is up, and each member's straggler deadline carries its
+        own start delay (``_MemberStarts``).  With ``worker_start_method: exec``
+        the gate can then bind, which ``rollout_client/startup_gate_waiting_mean``
+        shows.
         """
 
         if self._isolation != "process":
             return _GroupAdmission(None, group_size, 0.0)
         semaphore = self._admission_semaphore()
-        await semaphore.acquire()
+        with self._monitor().startup_gate_wait():  # rollout_client/startup_gate_waiting_mean
+            await semaphore.acquire()
         budget = float(getattr(self.config, "worker_startup_budget_seconds", 300.0)) + 60.0
         return _GroupAdmission(semaphore, group_size, budget)
 
     async def _run_group_member(
         self, data: dict, rollout_number: int, admission: "_GroupAdmission"
     ) -> _SingleRolloutOutcome:
-        """Run one member, reporting its readiness to the group's permit."""
+        """Run one member on one of its draw's rollout permits, reporting its readiness to the group's startup permit.
+
+        The lease block covers the member's whole rollout: with ``rollout_isolation: process``, ``arun_episode_single``
+        returns only once the member's worker process tree is reaped and the env sessions and sandboxes it left are
+        deleted; in process, once its rollout coroutine, its subagents and their grading have ended, though a sandbox or
+        session teardown that a cancellation or an early close left to finish in the background (``let_finish``) can
+        outlive the block.  A cancelled member's block exits once its cancellation has unwound.  Its value, the seconds
+        the member waited for its permit, is its start delay (:class:`_MemberStarts`).  The rollout runs with no lease
+        (``holding(None)``), so a group it runs in turn takes no permits of its own, as its child agents take none."""
 
         slot = admission.member_slot()
         token = _group_ready_callback.set(slot)
+        starts = admission.starts
+        starts.waiting.add(rollout_number)
         try:
-            return await self.arun_episode_single(data, rollout_number)
+            async with rollout_lease().rollout(rollout_number) as waited:
+                starts.started(rollout_number, waited)
+                with holding(None):
+                    return await self.arun_episode_single(data, rollout_number)
         finally:
+            starts.waiting.discard(rollout_number)
             _group_ready_callback.reset(token)
             slot()
 
@@ -971,6 +1062,10 @@ class GroupRolloutWorkflow:
         (default ``group_size - 1``) have settled, the remaining members get at
         most ``straggler_timeout_seconds`` more; leftovers are cancelled and
         reported as unobserved outcomes plus the ``straggler_cancelled`` scalar.
+        A member that started after waiting for its rollout permit (rolling
+        starts, ``train.permit_release: rollout``) gets its start delay on top
+        of that deadline, and one that has not started when the quorum settles
+        gets it when it starts, so a late start never shortens a member's grace.
         """
         group_size = self.config.group_size
         straggler_timeout = getattr(self.config, "straggler_timeout_seconds", None)
@@ -991,11 +1086,17 @@ class GroupRolloutWorkflow:
         if quorum is None:
             quorum = max(group_size - 1, 1)
         pending: set[asyncio.Future] = set(tasks)
+        late: list[asyncio.Future] = []  # cancelled at their own deadlines
         try:
             while pending and len(pending) > group_size - quorum:
                 _done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            if pending:
+            if pending and admission.starts.together():
+                # Every member started with the group: one deadline, the quorum's plus the grace, for all of them.
                 _done, pending = await asyncio.wait(pending, timeout=straggler_timeout)
+            elif pending:
+                deadline = asyncio.get_running_loop().time() + straggler_timeout
+                late = await self._cancel_late_members(data, tasks, pending, admission.starts, deadline, quorum)
+                pending = set()
         except BaseException:
             for task in tasks:
                 task.cancel()
@@ -1020,7 +1121,7 @@ class GroupRolloutWorkflow:
             # run_rollout's own cancellation cleanup marks trajectories as
             # interrupted; leaked environment sessions are reaped server-side.
             await asyncio.gather(*stragglers, return_exceptions=True)
-        self.tracker.scalar(straggler_cancelled=float(len(stragglers)))
+        self.tracker.scalar(straggler_cancelled=float(len(stragglers) + len(late)))
         admission.release()
 
         outcomes: list = []
@@ -1038,6 +1139,49 @@ class GroupRolloutWorkflow:
                 # Propagates a legacy override's exception like gather did.
                 outcomes.append(task.result())
         return outcomes
+
+    async def _cancel_late_members(
+        self,
+        data: dict,
+        tasks: Sequence[asyncio.Future],
+        pending: set[asyncio.Future],
+        starts: _MemberStarts,
+        deadline: float,
+        quorum: int,
+    ) -> list[asyncio.Future]:
+        """Once the quorum settled, wait for the members still running, each until ``deadline`` (loop time: the
+        quorum's plus the grace) plus its own start delay, and cancel each that runs past its own; a member whose block
+        still waits gets its delay when it starts.  Returns once every member has ended, the cancelled ones unwound,
+        with those it cancelled."""
+
+        loop = asyncio.get_running_loop()
+        number = {task: index for index, task in enumerate(tasks)}
+        cut: list[asyncio.Future] = []
+        while pending:
+            now = loop.time()
+            due: list[asyncio.Future] = []
+            wake: float | None = None
+            for task in pending.difference(cut):
+                offset = starts.offset(number[task])
+                # One whose block still waits cannot pass its deadline before the least start delay it can have.
+                at = deadline + (starts.least_offset(now) if offset is None else offset)
+                if offset is not None and at <= now:
+                    due.append(task)
+                else:
+                    wake = at if wake is None else min(wake, at)
+            if due and not cut:
+                logger.warning(
+                    "Cancelling straggler rollout(s) for task %s past their grace from their own starts (quorum %s/%s)",
+                    data["task_id"],
+                    quorum,
+                    len(tasks),
+                )
+            for task in due:
+                task.cancel()
+            cut += due
+            timeout = None if wake is None else max(0.0, wake - now)
+            _done, pending = await asyncio.wait(pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        return cut
 
     def _slug(self, value: str) -> str:
         return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(value)).strip("-") or "task"

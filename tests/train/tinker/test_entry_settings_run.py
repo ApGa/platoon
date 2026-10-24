@@ -21,9 +21,9 @@ from trainer_fakes import TrainingClient, make_trainer
 from platoon.task import Task
 from platoon.train import entry_settings
 from platoon.train.components import ENVIRONMENT_COLUMN
-from platoon.train.tinker import rl as rl_module
 from platoon.train.tinker import train as train_module
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.tinker.permits import DrawLease, PermitPool
 from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
 from platoon.train.tinker.workflows import group_rollout_workflow as workflow_module
@@ -394,13 +394,19 @@ def test_a_capped_slow_label_never_stalls_the_other_label_under_a_staleness_boun
 
 def test_rollout_permits_admit_whole_groups_first_come_first_served():
     async def run():
-        permits = rl_module._GroupPermits(12)
+        permits = PermitPool(12)
         order: list[str] = []
-        await permits.acquire(8)
+        first = permits.reserve(8)
 
-        async def take(name: str, count: int) -> None:
-            await permits.acquire(count)
+        async def take(name: str, count: int) -> DrawLease:
+            reservation = permits.reserve(count)
+            try:
+                await reservation.ready()
+            except BaseException:
+                reservation.withdraw()
+                raise
             order.append(name)
+            return reservation
 
         large = asyncio.create_task(take("large", 8))
         await asyncio.sleep(0)
@@ -411,12 +417,12 @@ def test_rollout_permits_admit_whole_groups_first_come_first_served():
         await asyncio.sleep(0)
         cancelled.cancel()
         await asyncio.gather(cancelled, return_exceptions=True)
-        permits.release(8)
-        await asyncio.gather(large, small)
+        first.withdraw()
+        granted = await asyncio.gather(large, small)
         assert order == ["large", "small"]
-        permits.release(8)
-        permits.release(4)
-        await asyncio.wait_for(permits.acquire(12), 1)  # nothing was lost to the cancelled waiter
+        for reservation in granted:
+            reservation.withdraw()
+        assert permits.reserve(12).startable  # nothing was lost to the cancelled waiter
 
     asyncio.run(run())
 
