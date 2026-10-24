@@ -42,7 +42,8 @@ A sampler's class says which it is, with `adaptive`:
   position, as the built-ins always were, and its draw may wait for its label (`train.rollout_group_limits`). It sees
   no statistics: its context's `stats` is None.
 - **Adaptive** (`adaptive = True`): it reads the run's per-task statistics, so it decides only when a group can start:
-  within the horizon, with its group's rollout permits held, and with some label of its pool below its limit. Its
+  within the horizon, with its group's rollout permits held (the first of them, under `train.permit_release: rollout`
+  with rolling starts), and with some label of its pool below its limit. Its
   context's `eligible(task_id)` says which tasks' labels have room, and it must choose among those. Under `weighted`, a
   slot owed to an adaptive entry waits as a token in the entry's queue until the entry can start a group.
 

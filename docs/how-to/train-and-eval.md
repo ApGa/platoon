@@ -92,7 +92,8 @@ The settings you will change most:
 | `train.optimizer.learning_rate` | 3e-5 | Adam learning rate (`beta1`, `beta2`, `eps`, `weight_decay`, `grad_clip_norm` sit beside it) |
 | `train.loss_fn`, `train.loss_fn_config` | `cispo`, clip thresholds 0.0 and 5.0 | The loss the service computes in `forward_backward`; a `loss_fn_config` replaces the default whole, so it names every key its loss takes |
 | `train.max_staleness` | none | How many steps rollouts may run ahead of training, and how many policy versions old their data may be before it is dropped; none sets no limit. An environment may raise its own groups' bound ([Settings per environment](#settings-per-environment)) |
-| `train.max_concurrent_rollouts` | `batch_size × group_size` | Rollouts in flight at once, started a whole group at a time (`eval.max_concurrent_rollouts`, 256 by default, for an evaluation) |
+| `train.max_concurrent_rollouts` | `batch_size × group_size` | Rollouts in flight at once, the permits the groups share: a group holds its size of them until it ends, or under `permit_release: rollout` each until its rollout ends (`eval.max_concurrent_rollouts`, 256 by default, for an evaluation) |
+| `train.permit_release` | `group` | Experimental: `rollout` returns each rollout's permit as the rollout ends, so the next group starts on them ([Rollout permits](#rollout-permits-experimental)) |
 | `train.workflow_config.rollout_config.max_steps`, `.timeout` | none | Step budget per agent, and time limit of each rollout's root agent in seconds; without one, a harness stops at its own limits (its spec's `timeout_s`, a Harbor task's `[agent] timeout_sec`), which also set a Harbor rollout's deadline ([Harness timeouts](sandboxes-and-harbor.md#harness-timeouts-and-crashes)) |
 | `train.workflow_config.rollout_isolation` | `inprocess` | `process` runs each rollout in its own killable worker process, which sees no GPU (its sandboxes get theirs from their provider) |
 | `train.workflow_config.worker_start_method` | `forkserver` | How a worker process starts: forked from a process that imported the worker's stack once (seconds), or `exec`, a new interpreter that imports it (17-24 s, about a minute with 64 at once) |
@@ -688,8 +689,9 @@ it. Recovery pruning keeps the checkpoints within the largest bound of the run a
 too (`rollout_group_limits`): its groups count toward the horizon below for as long as they run, and enough of them
 slow every step to their pace; `platoon train` warns of an entry that raises its bound without one.
 
-**The horizon.** A group starts only when it can: within the horizon, with rollout permits for its whole group, and
-with room in its label's limit. With `train.max_staleness: k`, the horizon holds `(k + 1) × train.batch_size` groups:
+**The horizon.** A group starts only when it can: within the horizon, with rollout permits for its whole group (under
+`train.permit_release: rollout`, a group of `GroupRolloutWorkflow` with the first of them), and with room in its
+label's limit. With `train.max_staleness: k`, the horizon holds `(k + 1) × train.batch_size` groups:
 those started and not yet taken by a step, and those the current step has taken; a step that starts, its policy
 published, frees one batch more. So rollouts run at most `k` steps ahead of training, as before, and with `k = 0` each
 step trains exactly the groups of its batch, so it waits for each of them, a slow entry's too, unless a label's limit
@@ -697,9 +699,11 @@ holds one of them back (below). Without a bound the rollout permits alone limit 
 the run starts no group past those its last step trains (under a group admission rule, a step can close short of its
 batch: up to `batch_size` groups may then outlive the run).
 
-**Concurrency.** `train.max_concurrent_rollouts` counts rollouts: a group takes its entry's group size of them at once,
-first come first served, so groups of different sizes share it and it is never exceeded. It must hold a group of the
-largest entry, in training and in evaluation (`eval.max_concurrent_rollouts`). With `rollout_group_limits`, it should
+**Concurrency.** `train.max_concurrent_rollouts` counts rollouts: a group reserves its entry's group size of them,
+first come first served, and starts once they are granted, so groups of different sizes share it and it is never
+exceeded (under `train.permit_release: rollout`, a group of `GroupRolloutWorkflow` starts on the first and its members
+as the rest free: [Rollout permits](#rollout-permits-experimental)). It must hold a group of the largest entry, in
+training and in evaluation (`eval.max_concurrent_rollouts`). With `rollout_group_limits`, it should
 also hold the capped labels' groups at their limits and a group of the largest other entry: otherwise a larger group
 waits for a capped one to end, and every group behind it waits too, which `platoon config validate` and `platoon
 train` warn of.
@@ -1253,6 +1257,81 @@ host, which holds its sandboxes: run it there.
 `python -m platoon.train.tinker.restart_wrapper`, which restarted the command on the watchdog's exit code only, is
 gone since platoon 0.3.0: it exits 78, naming `watchdog.max_restarts`, which replaces it.
 
+## Rollout permits (experimental)
+
+A training run's groups share its budget of rollout permits, `train.max_concurrent_rollouts`. By default
+(`train.permit_release: group`) a group holds its permits until its workflow returns, so a rollout that has finished
+keeps its permit until its group's slowest rollout ends: on long agentic tasks that leaves a quarter to a third of the
+budget idle while the trainer waits for data. With `permit_release: rollout`, each rollout's permit comes back as the
+rollout ends, and the next group starts on the permits that come back:
+
+```yaml
+train:
+  permit_release: rollout
+  max_concurrent_rollouts: 256  # the rollouts that run at once
+  max_staleness: 4              # one more than before, if the run warns of stale groups (below)
+```
+
+- **Rolling starts.** `GroupRolloutWorkflow` runs each member on its group's lease, so a group starts on its first free
+  permit and its members start as the rest free, over about `(group_size - 1) × (a rollout's time) /
+  max_concurrent_rollouts` (10 to 12 s in long agentic runs). Each member's straggler deadline then carries its own
+  start delay, so a late start never shortens its grace. A workflow of your own does the same by running its rollouts
+  on the lease ([Run rollouts on the lease](../extending/rollout-leases.md)); any other workflow's groups start once
+  their whole size of permits is free, as before.
+- **When a permit comes back.** Under process isolation, once the rollout's worker process tree is reaped and the
+  sandboxes and env sessions it left are deleted. In process (the default), once the rollout's coroutine, its
+  subagents and their grading have ended; a sandbox or session teardown that platoon finishes in the background can
+  outlive that: one a straggler cut interrupts, much as it outlives a group's release under `group`, and one a
+  rollout leaves running as it ends, which `rollout` lets overlap the next rollout (with every teardown left behind,
+  a test with a budget of 4 had 11 sandboxes alive at once under `rollout` and 6 under `group`).
+- **What stays.** Groups are drawn, decided by task samplers, admitted, credited, filtered for staleness, kept by
+  checkpoints and resumed as before, and evaluation is unchanged. A partly finished group counts as a whole group
+  toward the horizon, and label limits count groups, so `max_staleness` keeps its meaning. A run at `max_staleness: 0`
+  with the default budget trains the same datums in the same order under either setting.
+- **What it costs.** More groups are open at once and steps get shorter, so trained data is older, and more long groups
+  cross the staleness bound; those are the hard, mixed ones. When more than 2% of the groups the last 10 steps
+  consumed went stale, the run warns, once per start of training and under either setting (from its tenth step on,
+  so a shorter run never does), naming what held the dispatcher back. If the horizon had room
+  (`train/dispatch/blocked_share/horizon` near 0), raising `train.max_staleness` by one changes only the stale filter:
+  a group may then be one more policy version old and still train, and recovery pruning keeps one more checkpoint. A
+  per-datum stale filter, which would keep the part of a long rollout within the bound instead, is planned for a later
+  release (RFC 0020). A restart also redoes more rollouts (every open group's), and more finished rollouts wait in
+  the trainer for their siblings.
+- **Where it helps.** Where the permits decide when groups start (`blocked_share/permits` near 1). Where the horizon
+  does (`blocked_share/horizon` near 1), freed permits have nothing to start: there only a larger `max_staleness` or a
+  faster trainer helps.
+
+**`max_concurrent_rollouts`** then counts the rollouts that run at once, and
+`rollout_client/concurrency_achieved_fraction` reads as the permits' busy share, close to 1 where the permits bind;
+`groups_in_flight` can exceed the budget over the group size. Raise the budget while the inference engines have room
+and `blocked_share/permits` stays near 1. The run warns, once per start, when `rollout_client/rollouts_in_flight_max`
+exceeds the budget: a workflow returned a permit while its rollout still ran. Only `GroupRolloutWorkflow`'s members
+count as rollouts in flight, so a workflow of your own is not checked, and an evaluation's `GroupRolloutWorkflow`
+left on the default `stats_scope`, `train`, counts too (a train script's; `platoon train` gives evaluation its own).
+
+**Straggler settings** (`straggler_timeout_seconds`, `straggler_quorum`, `straggler_policies`) stay as they are, off by
+default. They are a deadline against runaway rollouts, not a throughput lever: once a finished rollout no longer holds
+its permit while its group waits, a cut buys only the straggler's own remaining time and slightly fresher data, and it
+censors slow rollouts, which fail more often, so the sample that trains leans optimistic. `train/batch/censoring/*`
+shows what a cut selects.
+
+**The startup gate** (`worker_launch_concurrent_groups`, process isolation only) still admits groups, not rollouts: a
+group holds its slot until its last member is up, which under rolling starts includes the time its permits take to
+free. With the fork server (the default) a worker is up in a fraction of a second, and at most one group is partly
+granted at a time, so the gate's second slot serves the next group. With `worker_start_method: exec` (17-24 s a
+worker) the gate can hold groups back while they hold their permits, which `rollout_client/startup_gate_waiting_mean`
+shows: then raise `worker_launch_concurrent_groups`.
+
+| Metric | What it says |
+|---|---|
+| `rollout_client/permits_held_mean` | The permits granted to groups, time-weighted. Held minus `rollouts_in_flight_mean` (`GroupRolloutWorkflow`'s members) is permit time no rollout used: under `group`, mostly finished rollouts waiting for their siblings; under `rollout`, close to 0 |
+| `train/dispatch/blocked_share/<reason>` | The share of the step in which the dispatcher could not start a group, by reason: `permits` (raise `max_concurrent_rollouts`, or return permits as rollouts end), `horizon` (only `max_staleness` or a faster trainer helps), `labels` (every label it could start was at its `rollout_group_limits`), `plan` (the run's remaining steps need no more groups), `sampler` (an adaptive task sampler found no eligible task) |
+| `rollout_client/startup_gate_waiting_mean` | The groups waiting for a worker-startup slot, time-weighted (process isolation) |
+| `train/batch/censoring/censored_share`, `.../mixed_groups`, `.../slowest_pass_rate`, `.../others_pass_rate`, and each label's under `train/batch/<column>/<label>/censoring/` | Over every group the step dequeued that a straggler policy applies to (none without one): the share of rollouts the policy cancelled, and over the groups whose valid rollouts both passed and failed, the pass rate of each group's slowest valid rollout against that of the others. A slowest rate well below the others' means a cut drops failures more than successes |
+
+The default stays `group` until a GPU comparison confirms the gain; `group` keeps the behavior of earlier releases
+event for event, so it is the way back.
+
 ## Metrics to watch
 
 Each step prints its metrics and logs them to W&B. Start with these:
@@ -1281,6 +1360,8 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/admission/groups_admitted`, `.../short`, `.../rejected/<reason>`, `.../draws_per_admitted`, `.../errors` | `errors` 0 | In a run with a group admission rule: what each step admitted and rejected and why, whether it was short, and the draws per admitted group ([Train only on groups that carry signal](#train-only-on-groups-that-carry-signal-experimental)). Short steps at every step: raise `train.refill.max_groups_per_step`, or choose tasks with `pass_rate` |
 | `train/sampler/decision_ms`, `.../decision_ms_max` | A few ms | The mean and longest time a sampler's decisions took since the last step; long ones hold up the event loop. An adaptive entry's `.../tokens` counts its slots waiting for a group to start, and `train/sampler/skipped_slots` those a full queue skipped. `pass_rate`'s own metrics: [Choose tasks by their pass rates](#choose-tasks-by-their-pass-rates-experimental) |
 | `rollout_client/trainer_queue_wait_seconds_total` | Small next to `timing/batch_total` | The trainer waits on rollouts: raise rollout concurrency or speed up the environment |
+| `train/dispatch/blocked_share/permits`, `.../horizon` | One of them near 1 says what decides when groups start | `permits`: the rollout budget binds; try `train.permit_release: rollout`, or a larger `max_concurrent_rollouts` while the engines have room. `horizon`: only `max_staleness` or a faster trainer helps ([Rollout permits](#rollout-permits-experimental)) |
+| `rollout_client/permits_held_mean` against `rollout_client/rollouts_in_flight_mean` | Close under `permit_release: rollout`; under `group` the gap is the straggler idle that `rollout` returns | Permits held while no rollout ran: finished rollouts waiting for their group's slowest (`permit_release: group`), or groups waiting at the startup gate |
 | `rollout_client/cpu_saturation` | Below 1 | The client machine is out of CPU: use fewer concurrent rollouts or a bigger node |
 | `rollout_client/agent_step_tool_fraction` | Depends on the environment | Most of each step is spent in tools and the environment, not the model |
 

@@ -12,8 +12,11 @@ each group as a task of its own.  A group starts when three things allow it:
   group runs past the plan (under a group admission rule, a step that closes short consumes fewer: see below).  With
   ``k = 0`` a step trains exactly the groups drawn for it, as the producer had it, unless a label's limit holds one of
   them back.
-- **Rollout permits** (``train.max_concurrent_rollouts``): a group takes its entry's group size of them at once,
-  first come first served, and returns them when its workflow returns.
+- **Rollout permits** (``train.max_concurrent_rollouts``, :mod:`platoon.train.tinker.permits`): a group reserves its
+  entry's group size of them, first come first served, and starts once the permits can grant it something: all of
+  them at once, or, under ``train.permit_release: rollout`` with a workflow that runs its rollouts on the lease, the
+  first, its members starting as the rest free.  It returns them when its workflow returns, or, under ``rollout``,
+  each as its rollout ends (:class:`~platoon.train.leases.RolloutLease`).
 - **Label capacity** (``train.rollout_group_limits``): at most that many groups of a label run at once.
 
 **The order.**  Each new position of the run's order is drawn through the run's task samplers
@@ -39,7 +42,8 @@ once.  The dispatcher draws only while some label of the run has room, so it nev
 always leaves the slot to a label that can use it.  Each draw it starts is, in this order: the oldest waiting draw whose
 label has room (the draws a resume reissued come first), then the next position of the order.  It wakes when something
 it waits for changes, never by polling: a group's release of its label and permits, a step that dequeues a group, a step
-that starts.
+that starts.  Each step's metrics say how long it was held back from starting a group, and by what
+(:meth:`Dispatcher.blocked_shares`).
 
 **Slots held for a capped label.**  The horizon's slots free when a step starts, and the draws that start then take
 them, so a capped label whose group ends in the middle of a step would wait for the next step to start its next group:
@@ -95,13 +99,15 @@ import asyncio
 import json
 import logging
 import os
-from collections import Counter, deque
+import time
+from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Container, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from platoon.train.sampler_runtime import Owed, SamplerSet
 from platoon.train.task_stats import MAIN, read_tasks_file, write_tasks_file
+from platoon.train.tinker.permits import DrawLease
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +126,16 @@ STATE_FORMATS = (1, 2)
 Key = tuple[int, int]
 # An entry whose tasks carry several labels: its tokens hold no label's slot.
 _NO_LABEL = object()
+# What held the dispatcher back from starting a group (blocked_shares): it awaited rollout permits; the horizon was
+# full; every label it could start was at its limit; the run's remaining steps needed no more groups; an adaptive
+# sampler found nothing eligible.
+BLOCKED_REASONS = ("permits", "horizon", "labels", "plan", "sampler")
 
 
 class Permits(Protocol):
-    """Rollout permits that a group takes whole before it starts and returns when its workflow returns."""
+    """Rollout permits that a group reserves before it starts (:class:`~platoon.train.tinker.permits.PermitPool`)."""
 
-    async def acquire(self, count: int) -> None: ...
-
-    def release(self, count: int) -> None: ...
+    def reserve(self, count: int, *, rolling: bool = False, active: bool = False) -> DrawLease: ...
 
 
 class RowReader(Protocol):
@@ -204,10 +212,10 @@ class BoundDraw:
         return (self.start, self.seq)
 
 
-# A training group's coroutine: it runs the group of ``draw``, calls ``release`` once its workflow has returned (so that
-# the group's label slot and rollout permits are free before anything else), then hands its output to
-# :meth:`Dispatcher.settle`.
-GroupRunner = Callable[[BoundDraw, Callable[[], None]], Awaitable[None]]
+# A training group's coroutine: it runs the group of ``draw`` on its lease (``DrawLease``), calls the lease once its
+# workflow has returned (so that the group's label slot and the rollout permits it still holds are free before anything
+# else), then hands its output to :meth:`Dispatcher.settle`.
+GroupRunner = Callable[[BoundDraw, DrawLease], Awaitable[None]]
 
 
 class Dispatcher:
@@ -223,7 +231,7 @@ class Dispatcher:
     and ``step`` the training steps committed when this start began, which the samplers' contexts carry.  ``start``
     numbers this start's draws, and the order starts at ``next_position``.  ``groups_per_step``, the cap of a run
     under a group admission rule, makes it count its steps as the module docstring says (None: every group counts
-    toward the batch)."""
+    toward the batch).  ``permit_release`` is ``train.permit_release``."""
 
     def __init__(
         self,
@@ -246,6 +254,7 @@ class Dispatcher:
         fingerprint: Mapping[str, Any] | None = None,
         step: int = 0,
         groups_per_step: int | None = None,
+        permit_release: str = "group",
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
@@ -309,6 +318,17 @@ class Dispatcher:
         self.groups_per_step = groups_per_step
         self.counted = 0
         self._markers_now = 0
+        # Under permit_release: rollout each group's lease returns a rollout's permit as the rollout ends, and with
+        # rolling (the trainer sets it for a workflow that runs its rollouts on the lease) a group is granted its
+        # permits one at a time as they free.
+        self.permit_release = permit_release
+        self.rolling = False
+        # The seconds it was held back since the metrics last read them, by reason (BLOCKED_REASONS), and the wait in
+        # progress: its reason and when it began.
+        self._held_back: defaultdict[str, float] = defaultdict(float)
+        self._held_back_reason: str | None = None
+        self._held_back_since = 0.0
+        self._shares_since = time.monotonic()
 
     # --- what the train loop tells it -------------------------------------------------------------------------------
 
@@ -404,20 +424,63 @@ class Dispatcher:
         group), ``run_group`` runs one group, and ``stop`` asks to stop starting groups, unless a step that applied an
         update must still finish (``finish_batches``)."""
 
+        self._held_back.clear()
+        self._shares_since = time.monotonic()  # the first step's shares count from here
         while not self._stopping(stop):
             item = self._choose()
             if item is None:
                 self._changed.clear()
-                await self._changed.wait()
+                await self._held_back_while(self._held_back_by(), self._changed.wait())
                 continue
             if isinstance(item, BoundDraw):
                 await self._start(item, spawn, run_group, stop)
             elif not await self._decide(item, spawn, run_group, stop):
                 self._changed.clear()  # nothing was eligible: wait for a change
-                await self._changed.wait()
+                await self._held_back_while("sampler", self._changed.wait())
 
     def _stopping(self, stop: asyncio.Event | None) -> bool:
         return stop is not None and stop.is_set() and not self.finish_batches
+
+    async def _held_back_while(self, reason: str, waiting: Awaitable[Any]) -> None:
+        """Await ``waiting``, the time counting as held back by ``reason`` (:meth:`blocked_shares`)."""
+
+        self._hold_back(reason)
+        try:
+            await waiting
+        finally:
+            self._hold_back(None)
+
+    def _hold_back(self, reason: str | None) -> None:
+        """Count the time since what holds it back last changed, and note what does now (None: nothing)."""
+
+        now = time.monotonic()
+        if self._held_back_reason is not None:
+            self._held_back[self._held_back_reason] += now - self._held_back_since
+        self._held_back_reason, self._held_back_since = reason, now
+
+    def _held_back_by(self) -> str:
+        """What holds it back when :meth:`_choose` found nothing to start: the end of the plan (under a group admission
+        rule, the last step's cap too), the horizon (at ``k = 0`` under a rule, the step's cap too), else the labels'
+        limits."""
+
+        if self.pipeline + self.admitted >= self._steps_left * self.batch_size:
+            return "plan"
+        if self._horizon_has_room():
+            return "labels"
+        return "plan" if self.groups_per_step is not None and self._steps_left == 1 else "horizon"
+
+    def blocked_shares(self) -> dict[str, float]:
+        """The step's ``dispatch/blocked_share/<reason>`` metrics: the share of the time since the last call (the run's
+        last step) in which it was held back from starting a group, by reason (:data:`BLOCKED_REASONS`).  A wait in
+        progress counts up to now, and on in the next window."""
+
+        now = time.monotonic()
+        self._hold_back(self._held_back_reason)
+        window = max(1e-9, now - self._shares_since)
+        shares = {f"dispatch/blocked_share/{why}": min(1.0, self._held_back[why] / window) for why in BLOCKED_REASONS}
+        self._held_back.clear()
+        self._shares_since = now
+        return shares
 
     def _horizon_has_room(self, label: str | None = None, *, waiting: bool = False) -> bool:
         """Whether another group may be dispatched: the run's remaining steps consume more than the groups in the
@@ -556,24 +619,35 @@ class Dispatcher:
         run_group: GroupRunner,
         stop: asyncio.Event | None = None,
     ) -> None:
-        """Take the draw's label slot and its group's permits (whole, first come first served), and start its group;
-        a stop request that came while it waited for permits puts the draw back, first in line."""
+        """Take the draw's label slot, reserve its group's permits (first come first served) and start its group once
+        it can start (:meth:`_reserve`); a stop request that came while it waited for permits puts the draw back, first
+        in line."""
 
         if draw.label in self._limits:
             self._active[draw.label] += 1
         self.pipeline += 1
         self.peak = max(self.peak, self.pipeline + self.admitted)
+        lease = self._reserve(draw.group_size)
         try:
-            await self._rows.permits.acquire(draw.group_size)
+            await self._held_back_while("permits", lease.ready())
         except BaseException:
+            lease.withdraw()
             self._unstart(draw)
             raise
         if self._stopping(stop):
-            self._rows.permits.release(draw.group_size)
+            lease.withdraw()
             self._unstart(draw)
             self._waiting.setdefault(draw.label, deque()).appendleft(draw)
             return
-        spawn(self._group(draw, run_group))
+        spawn(self._group(draw, run_group, lease))
+
+    def _reserve(self, size: int) -> DrawLease:
+        """Reserve a group's permits: whole, or under ``permit_release: rollout`` one at a time for a ``rolling``
+        workflow, whose group can then start on the first; under ``rollout`` its lease returns each rollout's permit
+        as the rollout ends."""
+
+        leases = self.permit_release == "rollout"
+        return self._rows.permits.reserve(size, rolling=leases and self.rolling, active=leases)
 
     async def _decide(
         self,
@@ -582,13 +656,13 @@ class Dispatcher:
         run_group: GroupRunner,
         stop: asyncio.Event | None = None,
     ) -> bool:
-        """Start the group of a token, or of a decision of the run's adaptive sampler: reserve the horizon's slot,
-        take the group's rollout permits (the token's entry's group size, or the run's largest for a decision over the
-        pool), then ask the sampler, bind its draw (a decision over the pool takes the next position), return the
-        permits above the drawn task's group size, take its label's slot and start the group, all at once.  The
-        token being started is saved first among its entry's while it waits for its permits; a stop request or a
-        cancellation that comes meanwhile puts it back, first in its queue, and so does a decision that finds nothing
-        eligible.  False when nothing was decided."""
+        """Start the group of a token, or of a decision of the run's adaptive sampler: reserve the horizon's slot and
+        the group's rollout permits (the token's entry's group size, or the run's largest for a decision over the
+        pool), and once the group can start (:meth:`_reserve`) ask the sampler, bind its draw (a decision over the pool
+        takes the next position), resize the reservation to the drawn task's group size, take its label's slot and
+        start the group, all at once.  The token being started is saved first among its entry's while it waits for its
+        permits; a stop request or a cancellation that comes meanwhile puts it back, first in its queue, and so does a
+        decision that finds nothing eligible.  False when nothing was decided."""
 
         token = item if isinstance(item, Token) else None
         entry = token.entry if token is not None else None
@@ -596,14 +670,16 @@ class Dispatcher:
         self._starting = token
         self.pipeline += 1
         self.peak = max(self.peak, self.pipeline + self.admitted)
+        lease = self._reserve(size)
         try:
-            await self._rows.permits.acquire(size)
+            await self._held_back_while("permits", lease.ready())
         except BaseException:
+            lease.withdraw()
             self.pipeline -= 1
             self._put_back(token)
             raise
         if self._stopping(stop):
-            self._rows.permits.release(size)
+            lease.withdraw()
             self.pipeline -= 1
             self._put_back(token)
             return True
@@ -616,7 +692,7 @@ class Dispatcher:
             most=None if token is not None else size,
         )
         if decided is None:
-            self._rows.permits.release(size)
+            lease.withdraw()
             self.pipeline -= 1
             self._put_back(token)
             return False
@@ -628,19 +704,20 @@ class Dispatcher:
             self.next_position += 1
         draw = self._draw(decided.row, position, index=decided.index, sampler=decided.sampler)
         if size > draw.group_size:
-            self._rows.permits.release(size - draw.group_size)
+            lease.resize(draw.group_size)
         if draw.label in self._limits:
             self._active[draw.label] += 1
         self._record(draw, reason=decided.reason, score=decided.score)
         if size < draw.group_size:  # a group larger than the set said: its other permits, after the decision
+            lease.resize(draw.group_size)
             try:
-                await self._rows.permits.acquire(draw.group_size - size)
+                await self._held_back_while("permits", lease.ready())
             except BaseException:
-                self._rows.permits.release(size)
+                lease.withdraw()
                 self._unstart(draw)
                 self._waiting.setdefault(draw.label, deque()).appendleft(draw)
                 raise
-        spawn(self._group(draw, run_group))
+        spawn(self._group(draw, run_group, lease))
         return True
 
     def _ask_size(self) -> int | None:
@@ -663,22 +740,20 @@ class Dispatcher:
             self._active[draw.label] -= 1
         self.pipeline -= 1
 
-    async def _group(self, draw: BoundDraw, run_group: GroupRunner) -> None:
-        released = False
+    async def _group(self, draw: BoundDraw, run_group: GroupRunner, lease: DrawLease) -> None:
+        """Run the group of ``draw`` on its lease, whose release (calling it) frees the group's label slot too, and
+        which is called again here, so that a runner that raises or is cancelled still frees what it holds."""
 
-        def release() -> None:
-            nonlocal released
-            if not released:
-                released = True
-                self._rows.permits.release(draw.group_size)
-                if draw.label in self._limits:
-                    self._active[draw.label] -= 1
-                self._changed.set()
+        def free_label_slot() -> None:
+            if draw.label in self._limits:
+                self._active[draw.label] -= 1
+            self._changed.set()
 
+        lease.on_release, lease.name = free_label_slot, draw.task_id
         try:
-            await run_group(draw, release)
+            await run_group(draw, lease)
         finally:
-            release()
+            lease()
 
     # --- draws ------------------------------------------------------------------------------------------------------
 

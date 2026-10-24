@@ -46,6 +46,33 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   experimental: it becomes the recommendation only after a GPU comparison ([Train only on groups that carry
   signal](docs/how-to/train-and-eval.md#train-only-on-groups-that-carry-signal-experimental), [Write a group admission
   rule](docs/extending/group-admission.md)).
+- **Rollout permits that come back as each rollout ends (experimental).** With `train.permit_release: rollout`, a
+  training rollout returns its permit (`train.max_concurrent_rollouts`) as soon as it ends rather than when its group's
+  workflow returns, so the next group starts on the permits a group's finished rollouts give back instead of waiting for
+  its slowest one; on long agentic tasks a quarter to a third of the budget sat idle that way. `GroupRolloutWorkflow`
+  runs each member on its group's lease, so a group starts on its first free permit and its members as the rest free
+  (rolling starts), each member's straggler deadline shifted by its own start delay; a workflow that does not say it
+  runs its rollouts on the lease gets each group's permits whole, as before. Groups are drawn, decided, credited,
+  admitted and resumed as before, a partly finished group counts whole toward the horizon, and a run at
+  `max_staleness: 0` with the default budget trains the same datums in the same order. More groups are open at once, so
+  more long groups can go stale: the run warns when they do, and raising `max_staleness` by one is the documented
+  answer. `group` stays the default, with the behavior of earlier releases event for event, until a GPU comparison
+  (RFC 0020; [Rollout permits](docs/how-to/train-and-eval.md#rollout-permits-experimental)).
+- **Run a workflow's own rollouts on the lease (experimental).** `platoon.experimental` exports `rollout_lease()` and
+  `RolloutLease`: a workflow runs each rollout in `async with rollout_lease().rollout(i):`, whose permit comes back
+  when the block exits, and declares `runs_rollouts_on_lease = True` for rolling starts. In a training draw a block for
+  an index outside the draw's size raises `IndexError`, and a second block for an index `RuntimeError`, under either
+  setting; outside a training draw, as in an evaluation, the lease is a no-op ([Run rollouts on the
+  lease](docs/extending/rollout-leases.md)).
+- **See what keeps groups from starting.** Every training run logs, each step, the share of the step in which the
+  dispatcher could not start a group and why (`train/dispatch/blocked_share/{permits,horizon,labels,plan,sampler}`),
+  the permits held (`rollout_client/permits_held_mean`), the groups waiting for a worker-startup slot under process
+  isolation (`rollout_client/startup_gate_waiting_mean`), and, where a straggler policy applies, what it censors
+  (`train/batch/censoring/*`, and each label's: the share of rollouts it cancelled, and over mixed groups the pass
+  rate of each group's slowest valid rollout against the others'). It warns, once per start of training, when more
+  than 2% of the groups the last 10 steps consumed went stale (so from the tenth step on), naming what held the
+  dispatcher back and the fixes, and when more of `GroupRolloutWorkflow`'s rollouts ran at once than
+  `max_concurrent_rollouts`.
 
 ### Changes
 
@@ -78,6 +105,16 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
 - A full checkpoint of a run under a group admission rule records in its row of `checkpoints.jsonl` where the order
   stood (`next_position`): a resume that cannot read the checkpoint's state of the draws draws on from there, since
   such a run's steps draw more positions than their batch.
+- `GroupRolloutWorkflow` declares `runs_rollouts_on_lease = True` and runs each member in a block of its group's
+  lease; a subclass that overrides `arun_episode`, `_run_group_rollouts` or `_run_group_member`, itself or through a
+  mixin, reads as `False` unless its own class body sets it. Under the default `permit_release: group` the blocks hold
+  nothing, but a training group of a subclass that runs a member index twice, as a retry of the whole group in
+  `arun_episode` does, now fails with `RuntimeError` under either setting: a retry stays inside the member's block.
+  A member's rollout sees no lease, so a group that it runs in turn takes no permits of its own and runs as before.
+- Under `train.permit_release: rollout`, `rollout_client/rollouts_in_flight_configured` is `max_concurrent_rollouts`
+  itself, so `concurrency_achieved_fraction` reads as the permits' busy share, and `groups_in_flight` can exceed the
+  budget over the group size. The straggler settings' documentation calls them a deadline against runaway rollouts,
+  not a throughput lever.
 
 ### Fixes
 

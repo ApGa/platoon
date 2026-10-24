@@ -18,7 +18,6 @@ import tinker
 
 from platoon.train.labels import task_label
 from platoon.train.tinker import dispatcher as dispatcher_module
-from platoon.train.tinker import rl as rl_module
 from platoon.train.tinker.dispatcher import (
     POSITION_COLUMN,
     SEQ_COLUMN,
@@ -29,6 +28,7 @@ from platoon.train.tinker.dispatcher import (
     save_state,
 )
 from platoon.train.tinker.kept_groups import decode_group, read_kept
+from platoon.train.tinker.permits import PermitPool
 
 
 class _Rows:
@@ -36,7 +36,7 @@ class _Rows:
     rollout permits to share."""
 
     def __init__(self, permits: int = 1000, column: str = "env") -> None:
-        self.permits = rl_module._GroupPermits(permits)
+        self.permits = PermitPool(permits)
         self.column = column
 
     def of(self, data: Mapping[str, Any]) -> tuple[str | None, str | None, int]:

@@ -612,3 +612,67 @@ def test_the_group_admission_guide_s_config_resolves_as_platoon_train_resolves_i
         ("acme-quota", "entry", ["hard"]),
         ("informative", "run", ["easy"]),
     ]
+
+
+# --------------------------------------------------------------------------- rollout-leases.md
+
+
+def test_the_worked_workflow_runs_each_attempt_on_a_permit_of_its_own(snippets) -> None:
+    """The guide's ``Attempts``, written out as its package, its attempts ending one at a time: under a lease that
+    grants its permits as they free, each attempt's permit comes back as the attempt ends; outside a training draw the
+    same workflow runs as it is."""
+
+    from platoon.train.leases import holding
+    from platoon.train.tinker.permits import PermitPool
+
+    snippets("rollout-leases.md", "# acme_workflows/attempts.py")
+    attempts = importlib.import_module("acme_workflows.attempts")
+    assert attempts.Attempts.runs_rollouts_on_lease is True
+
+    async def run() -> None:
+        gates = [asyncio.Event() for _ in range(3)]
+
+        class Gated(attempts.Attempts):
+            async def run_attempt(self, row: dict, index: int) -> list[str]:
+                await gates[index].wait()
+                return [f"{row['task_id']}:{index}"]
+
+        workflow = Gated(config=SimpleNamespace(group_size=3), rollout_fn=None, model_info=None)
+        pool = PermitPool(3)
+        lease = pool.reserve(3, rolling=True, active=True)
+        with holding(lease):
+            episode = asyncio.ensure_future(workflow.arun_episode({"task_id": "t"}))
+        for index, gate in enumerate(gates):
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert pool.free == index  # the attempts still running hold theirs
+            gate.set()
+        assert await episode == ["t:0", "t:1", "t:2"] and pool.free == 3
+        lease()
+        assert await workflow.arun_episode({"task_id": "u"}) == ["u:0", "u:1", "u:2"]  # the no-op lease
+
+    asyncio.run(run())
+
+
+def test_the_lease_guide_s_table_of_subclasses_says_which_keep_rolling_starts() -> None:
+    """Each method the guide's table names: a ``GroupRolloutWorkflow`` subclass that overrides one of the first row's
+    keeps ``runs_rollouts_on_lease``, one that overrides one of the second row's reads as False unless its own class
+    body sets it."""
+
+    from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow
+
+    text = (GUIDES / "rollout-leases.md").read_text(encoding="utf-8")
+    rows = [line for line in text.splitlines() if line.startswith("| `")]
+    assert len(rows) == 2
+    keep, lose = (re.findall(r"`(\w+)`", row.split("|")[1]) for row in rows)
+    assert {"compute_baselines", "arun_episode_single"} <= set(keep) and "_run_group_rollouts" in lose
+
+    def subclass(name: str, *, declared: bool = False) -> type[GroupRolloutWorkflow]:
+        body: dict[str, Any] = {name: getattr(GroupRolloutWorkflow, name)}
+        if declared:
+            body["runs_rollouts_on_lease"] = True
+        return type(f"Overrides{name}", (GroupRolloutWorkflow,), body)
+
+    assert all(subclass(name).runs_rollouts_on_lease for name in keep)
+    assert not any(subclass(name).runs_rollouts_on_lease for name in lose)
+    assert all(subclass(name, declared=True).runs_rollouts_on_lease for name in lose)
