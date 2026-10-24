@@ -1,0 +1,264 @@
+{
+ "description": "The pass_rate task sampler on the run's one entry, under the weighted run sampler",
+ "request_settings": [
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": null,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "<fakes>:unused_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "startup_budget_seconds": 300.0,
+   "task": {"fork_strategy": "subtask", "goal": null, "max_steps": null, "misc": {}}
+  }
+ ],
+ "scenario": "pass-rate",
+ "starts": [
+  {
+   "events": [
+    {"batch": 0, "checkpoint": null, "event": "start", "loaded": null, "start": 1, "state_lost": null},
+    {"event": "draw", "position": 0, "reason": "explore", "sampler": "pass_rate@pool", "score": 0.6000000000000001, "seq": 0, "start": 1, "task_id": "t0", "version": 0},
+    {"event": "draw", "position": 1, "reason": "exploit", "sampler": "pass_rate@pool", "score": 0.6000000000000001, "seq": 1, "start": 1, "task_id": "t5", "version": 0},
+    {"event": "settle", "passes": 0, "seq": 1, "start": 1, "task_id": "t5", "valid": 4, "verdict": "uniform", "version": 0},
+    {"event": "settle", "passes": 3, "seq": 0, "start": 1, "task_id": "t0", "valid": 4, "verdict": "trained", "version": 0},
+    {"event": "fate", "fate": "consumed", "seq": 1, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 0, "start": 1},
+    {"event": "draw", "position": 2, "reason": "exploit", "sampler": "pass_rate@pool", "score": 0.7110404653034121, "seq": 2, "start": 1, "task_id": "t0", "version": 1},
+    {"event": "draw", "position": 3, "reason": "exploit", "sampler": "pass_rate@pool", "score": 0.576843500695053, "seq": 3, "start": 1, "task_id": "t3", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 3, "start": 1, "task_id": "t3", "valid": 3, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 3, "seq": 2, "start": 1, "task_id": "t0", "valid": 4, "verdict": "trained", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 2, "start": 1},
+    {"event": "draw", "position": 4, "reason": "explore", "sampler": "pass_rate@pool", "score": 0.5820654473137683, "seq": 4, "start": 1, "task_id": "t1", "version": 2},
+    {"event": "draw", "position": 5, "reason": "exploit", "sampler": "pass_rate@pool", "score": 0.5820654473137683, "seq": 5, "start": 1, "task_id": "t2", "version": 2},
+    {"event": "settle", "passes": 3, "seq": 4, "start": 1, "task_id": "t1", "valid": 3, "verdict": "uniform", "version": 2},
+    {"event": "settle", "passes": 1, "seq": 5, "start": 1, "task_id": "t2", "valid": 4, "verdict": "trained", "version": 2},
+    {"event": "fate", "fate": "consumed", "seq": 4, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 5, "start": 1}
+   ],
+   "files": [
+    "checkpoints.jsonl",
+    "identity.json",
+    "tasks/dispatch-s1-final.json",
+    "tasks/dispatch-s1-recovery-000000.json",
+    "tasks/events.jsonl",
+    "tasks/state-s1-final.json",
+    "tasks/state-s1-recovery-000000.json"
+   ],
+   "messages": [
+    "INFO Loading config from <tmp>/train.yaml",
+    "INFO Sampling timeout: 600 s (train.sample_timeout_seconds)",
+    "INFO training tasks: 6, drawn in epochs of 6 (3 batches of 2), 3 steps planned",
+    "INFO environments[pool]: 6 tasks, weight tasks, 100.0% of the slots, each filled by pass_rate (experimental) when its group can start: its tasks drawn about 1 times each over the run's 3 steps on average",
+    "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
+    "INFO Created new training client for test/model with rank 32",
+    "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Starting training from batch 0 to 3",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
+    "INFO Saving weights only after completing batch 0 (steps_completed=1, save_every=None, recovery_every=None)",
+    "INFO Step 1/3 | Epoch 0 | Batch time: <t>s | Datums: 8",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 1",
+    "INFO Saving weights only after completing batch 1 (steps_completed=2, save_every=None, recovery_every=None)",
+    "INFO Step 2/3 | Epoch 0 | Batch time: <t>s | Datums: 7",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 2",
+    "INFO Saving weights only after completing batch 2 (steps_completed=3, save_every=None, recovery_every=None)",
+    "INFO Step 3/3 | Epoch 1 | Batch time: <t>s | Datums: 7",
+    "INFO Saving permanent checkpoint final at step 3...",
+    "INFO Training complete successfully!",
+    "INFO Training complete. Total time: <t>s"
+   ],
+   "outcome": "completed",
+   "requests": {
+    "train": [
+     ["t0", 0, 0, 0, 0],
+     ["t0", 1, 0, 0, 0],
+     ["t0", 2, 0, 0, 0],
+     ["t0", 3, 0, 0, 0],
+     ["t5", 0, 0, 0, 0],
+     ["t5", 1, 0, 0, 0],
+     ["t5", 2, 0, 0, 0],
+     ["t5", 3, 0, 0, 0],
+     ["t0", 0, 1, 0, 1],
+     ["t0", 1, 1, 0, 1],
+     ["t0", 2, 1, 0, 1],
+     ["t0", 3, 1, 0, 1],
+     ["t3", 0, 1, 0, 1],
+     ["t3", 1, 1, 0, 1],
+     ["t3", 2, 1, 0, 1],
+     ["t3", 3, 1, 0, 1],
+     ["t1", 0, 2, 0, 2],
+     ["t1", 1, 2, 0, 2],
+     ["t1", 2, 2, 0, 2],
+     ["t1", 3, 2, 0, 2],
+     ["t2", 0, 2, 0, 2],
+     ["t2", 1, 2, 0, 2],
+     ["t2", 2, 2, 0, 2],
+     ["t2", 3, 2, 0, 2]
+    ]
+   },
+   "saves": [
+    {
+     "batch": 0,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000000.json",
+      "format": 2,
+      "sha256": "bc6ce937d4f3f988cb9ab84769fe3eb309a33fd43808d2cd2c6d024374efebcf",
+      "start": 1
+     },
+     "name": "recovery-000000",
+     "optimizer_steps": 0,
+     "policy_version": 0,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000000",
+     "state_path": "tinker://run-1/weights/recovery-000000",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000000.json",
+      "format": 1,
+      "sha256": "74d7d8681c9918dd72a8fd5c8e3b8b5d414bf72917b305305ac2503f4498864f",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 3,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-final.json",
+      "format": 2,
+      "sha256": "f59d29959e48a14e2fdbe9e59bad7f7070b9e7f61425701e0467419a723dca25",
+      "start": 1
+     },
+     "name": "final",
+     "optimizer_steps": 3,
+     "policy_version": 3,
+     "sampler_path": "tinker://run-1/sampler_weights/final",
+     "state_path": "tinker://run-1/weights/final",
+     "tasks": {
+      "file": "tasks/state-s1-final.json",
+      "format": 1,
+      "sha256": "3bc63107b2e7f9f0f255d5fd87534d33953d0c29c8c3895702980293ffb24a8a",
+      "start": 1
+     },
+     "wandb_run_id": null
+    }
+   ],
+   "tinker": [
+    ["create_lora_training_client", "test/model", 32],
+    ["save_state", "recovery-000000"],
+    ["save_weights_for_sampler", "recovery-000000"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000000"],
+    ["set_version", 0],
+    ["publish", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    ["publish_binding", "train", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.0125, 0.0125, 0.0125], "logprobs": [-0.6875, -0.5625, -0.3125, -0.4375], "target_tokens": [700, 885, 49, 212], "tokens": [19, 700, 885, 49]},
+       {"advantages": [0.0, 0.0125], "logprobs": [-0.875, -0.6875], "target_tokens": [587, 567], "tokens": [7, 587]},
+       {"advantages": [0.0, -0.0375, -0.0375, -0.0375], "logprobs": [-0.1875, -0.5625, -0.25, -0.875], "target_tokens": [847, 721, 223, 762], "tokens": [756, 847, 721, 223]},
+       {"advantages": [0.0, 0.0125, 0.0125, 0.0125], "logprobs": [-0.375, -0.875, -0.5625, -0.375], "target_tokens": [366, 308, 6, 509], "tokens": [458, 366, 308, 6]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 1, "sampler:run-1/weights-only-1"],
+    ["publish_binding", "train", 1, "sampler:run-1/weights-only-1"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.014705882, 0.014705882], "logprobs": [-0.125, -0.25, 0.0], "target_tokens": [386, 448, 838], "tokens": [614, 386, 448]},
+       {"advantages": [0.0, 0.014705882], "logprobs": [-0.75, -0.4375], "target_tokens": [1, 232], "tokens": [157, 1]},
+       {"advantages": [0.0, 0.014705882, 0.014705882, 0.014705882], "logprobs": [0.0, -0.25, -0.25, -0.25], "target_tokens": [710, 288, 857, 120], "tokens": [331, 710, 288, 857]},
+       {"advantages": [0.0, -0.04411765, -0.04411765, -0.04411765], "logprobs": [-0.1875, -0.375, -0.1875, -0.0625], "target_tokens": [895, 758, 351, 639], "tokens": [604, 895, 758, 351]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 2, "sampler:run-1/weights-only-2"],
+    ["publish_binding", "train", 2, "sampler:run-1/weights-only-2"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, -0.025, -0.025], "logprobs": [-0.5, -0.4375, -0.5], "target_tokens": [461, 113, 132], "tokens": [662, 461, 113]},
+       {"advantages": [0.0, -0.025, -0.025], "logprobs": [-0.875, -0.4375, -0.625], "target_tokens": [341, 138, 511], "tokens": [194, 341, 138]},
+       {"advantages": [0.0, 0.075], "logprobs": [-0.625, -0.375], "target_tokens": [938, 353], "tokens": [840, 938]},
+       {"advantages": [0.0, -0.025], "logprobs": [-0.8125, -0.75], "target_tokens": [554, 303], "tokens": [295, 554]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 3, "sampler:run-1/weights-only-3"],
+    ["publish_binding", "train", 3, "sampler:run-1/weights-only-3"],
+    ["save_state", "final"],
+    ["save_weights_for_sampler", "final"]
+   ]
+  }
+ ]
+}
