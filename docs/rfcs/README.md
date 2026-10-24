@@ -30,6 +30,7 @@ For how platoon is built today, read the [architecture overview](../architecture
 | [0017](0017-public-surface-and-conformance.md) | Public surface and conformance | Draft |
 | [0018](0018-configuration-only-projects.md) | Configuration-only projects | Draft |
 | [0019](0019-training-mixtures.md) | Training mixtures: per-environment settings, task statistics and samplers | Draft |
+| [0020](0020-rollout-permits.md) | Rollout permits that return as each rollout ends | Draft |
 
 `tests/test_rfc_index.py` checks that this table lists every RFC file with the title and status the RFC itself
 gives, so add the row in the same pull request as the RFC.
