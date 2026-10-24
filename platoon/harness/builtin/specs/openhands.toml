@@ -13,7 +13,7 @@
 # The version is the SDK's; a change to the runner alone bumps a .postN suffix, and so does an option whose new
 # default changes the launch.
 name = "openhands"
-version = "1.54.0.post1"  # .post1: the runner's summarizing condenser changed
+version = "1.54.0.post2"  # .post2: gateway token counts are required unless estimates are explicitly allowed
 dialect = "openai_chat"
 timeout_s = 3600
 max_steps = 30  # used when the run sets no step budget; the run's max_steps wins
@@ -56,6 +56,11 @@ default = 0
 min = 0
 description = "Condense when a prompt would pass this many tokens, as the gateway counts them (0: none); above 0 runs llm_summarizing"
 
+[options.allow_token_count_estimate]
+type = "bool"
+default = false
+description = "Allow approximate SDK token counts if gateway counting fails (false: stop the rollout)"
+
 [resources]
 memory_mb = 2048  # the SDK and its terminal, on top of the task's own memory
 
@@ -70,6 +75,7 @@ argv = [
     "--num-retries", "{options.num_retries}",
     "--condenser", "{options.condenser}",
     "--condenser-max-tokens", "{options.condenser_max_tokens}",
+    "--allow-token-count-estimate", "{options.allow_token_count_estimate}",
 ]
 files = { "instruction.md" = "{instruction}" }
 assets = { "run_openhands.py" = "../openhands/run_openhands.py" }

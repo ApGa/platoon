@@ -339,7 +339,7 @@ environments[science] dataset: fetched hf://my-org/science-tasks@3f1c0e9b6d2a4c8
 environments[science] hold-out: 5% of each source_dataset, grouped by kaggle_dataset_name, else split_group, joined by shared input files, seed 0
   ...
 environments[science] images: built 2 with the oci builder into the image map /shared/platoon-cache/harbor/images/singularity.json
-environments[science] toolchain openhands-1.54.0: built at /shared/platoon-cache/toolchains/openhands-1.54.0 for openhands@1.54.0.post1 (sha256:...)
+environments[science] toolchain openhands-1.54.0: built at /shared/platoon-cache/toolchains/openhands-1.54.0 for openhands@1.54.0.post2 (sha256:...)
 policy tokenizer: loaded Qwen/Qwen3.5-4B through the chat_template renderer, into the Hugging Face cache
 ready: 4 made now, 0 already current
 ```
@@ -1011,6 +1011,7 @@ any other setting (`platoon harness show openhands` lists them):
 | `num_retries` | `0` | The SDK's `num_retries`, which counts attempts at a model call that fails transiently: 0 and 1 make one, 5 up to five. A retry may send a call the gateway already recorded, so training keeps 0 |
 | `condenser` | `none` | `llm_summarizing` adds a summarizing condenser, the SDK's with the changes below, which condenses past 240 events, or when the gateway answers that a prompt overflows the context window |
 | `condenser_max_tokens` | `0` | Above 0, a token trigger for the summarizing condenser, which it then runs whatever `condenser` says: it also condenses before a model call whose prompt would be longer than this many tokens, as the gateway counts them |
+| `allow_token_count_estimate` | `false` | Allow approximate SDK counts when gateway counting fails; by default the rollout stops instead |
 
 The defaults are the training settings. The step limit is the run's `max_steps` (default 30), the runner's
 `--max-iterations`: one model call of the agent each, and with the condenser, one for each condensation (below).
@@ -1043,12 +1044,12 @@ count: it sends the messages and tools of the next call to the gateway's token c
 the count is the length of the prompt the gateway renders, and nothing is recorded. That length is exact for a
 renderer that writes tool results without their tool's name and serializes tool-call arguments itself, as the Qwen
 chat templates do; one that writes either as the call sent it (`kimi_k2`, `gpt_oss`) counts a few tokens off for each
-tool call. A hosted model's gateway forwards the count to its provider. Where the answer is no count (a provider
-without that route answers 404, and the runner says so once in its log), the SDK's own estimate counts: litellm's
-token counter, with the `cl100k_base` encoding for a model it does not know. That estimate runs below a Qwen chat
-template's count by about a tenth on prose and code, and by nearly half on numbers, which Qwen's tokenizers split
-into single digits, so a prompt the estimate undercounts can pass the trigger; the gateway's refusal of a prompt that
-overflows the window still condenses it. Without the option nothing counts tokens.
+tool call. A hosted model's gateway forwards the count to its provider. A missing count, failed request or
+unsupported message stops the rollout by default, so a native-token trigger cannot silently become an SDK estimate.
+For providers without a count endpoint, explicitly set `harness_options.allow_token_count_estimate: true` to retain
+approximate counting. The runner records this opt-in in its settings and warns when it uses an estimate. The SDK
+may use `cl100k_base` for an unknown model, substantially undercounting native tokens; this option does not guarantee
+the native-token threshold. Without a token trigger nothing counts tokens.
 
 ### 1. Build the toolchain
 
@@ -1086,7 +1087,7 @@ uses, and otherwise stop with exit 78 and the `platoon prepare` command for thei
 
 ```text
 platoon: what the run needs is not prepared on this site:
-  environments[harbor-openhands].harness: harness openhands@1.54.0.post1 runs from the toolchain openhands-1.54.0,
+  environments[harbor-openhands].harness: harness openhands@1.54.0.post2 runs from the toolchain openhands-1.54.0,
   which a run never builds, and it is not built there (toolchain root /shared/toolchains)
   prepare it with: platoon prepare train.yaml
 ```

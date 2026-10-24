@@ -45,6 +45,7 @@ DEFAULTS = {
     "num_retries": 0,
     "condenser": "none",
     "condenser_max_tokens": 0,
+    "allow_token_count_estimate": False,
 }
 ADAPTER = {"reasoning_replay": False, "request_timeout_s": 300, "num_retries": 5}  # Harbor's openhands-sdk adapter
 
@@ -103,6 +104,7 @@ async def test_the_adapters_options_send_no_reasoning_back_and_are_graded(tmp_pa
         "num_retries": 5,
         "condenser": "none",
         "condenser_max_tokens": 0,
+        "allow_token_count_estimate": False,
     }
     # Without replay the SDK drops each turn's reasoning, as Harbor's adapter sends it: no prompt extends the last.
     last = gateway.requests[-1]["messages"]

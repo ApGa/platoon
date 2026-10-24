@@ -32,6 +32,8 @@ class LLM:
 
     def __init__(self, **settings: Any) -> None:
         self.settings = settings
+        self.allow_token_count_estimate = settings.get("allow_token_count_estimate", False)
+        self._estimate_reported = False
         self.base_url, self.api_key = settings.get("base_url"), settings.get("api_key")
 
     def model_copy(self, *, update: dict[str, Any] | None = None) -> LLM:
@@ -194,6 +196,7 @@ def test_the_defaults_are_the_training_settings(runner, tmp_path):
         "num_retries": 0,
         "condenser": "none",
         "condenser_max_tokens": 0,
+        "allow_token_count_estimate": False,
     }
 
 
@@ -299,6 +302,7 @@ def test_main_reports_its_settings_first_and_runs_the_conversation_with_them(run
             "num_retries": 2,
             "condenser": "none",
             "condenser_max_tokens": 0,
+            "allow_token_count_estimate": False,
         }
     )
     assert json.loads(lines[-1].removeprefix("openhands: "))["status"] == "finished"
@@ -508,6 +512,77 @@ def test_a_call_the_messages_count_cannot_carry_is_reported_once(runner, capsys)
     assert capsys.readouterr().out.count("the gateway gave no token count for a call") == 1
 
 
+@pytest.mark.parametrize("llm_class", ["CountedLLM", "CountedReplayLLM"])
+def test_missing_native_count_never_silently_uses_the_sdk_estimate(runner, llm_class):
+    llm = getattr(runner, llm_class)(
+        model="openai/meta-models/Muse-Glimmer-30B", base_url="http://127.0.0.1:9/v1", api_key="agent-key"
+    )
+    with pytest.raises(RuntimeError, match="Gateway token count unavailable"):
+        llm.get_token_count(CHAT, [ToolDefinition(tool) for tool in TOOLS])
+
+
+@pytest.mark.asyncio
+async def test_strict_count_uses_native_gateway_tokens_without_estimate(runner, served):
+    gateway, base_url, agent = served
+    llm = runner.CountedReplayLLM(model="openai/policy", base_url=base_url, api_key=agent.api_key)
+    tools = [ToolDefinition(tool) for tool in TOOLS]
+    expected = len(rendered(gateway, CHAT, TOOLS))
+    assert expected != ESTIMATE
+    assert await asyncio.to_thread(llm.get_token_count, CHAT, tools) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing-route", "unauthorized", "unsupported-message", "serialization"])
+async def test_count_failures_require_explicit_opt_in(runner, served, failure):
+    _, base_url, agent = served
+    key, messages = agent.api_key, CHAT
+    tools = [ToolDefinition(tool) for tool in TOOLS]
+    if failure == "missing-route":
+        base_url += "/no-such-route"
+    elif failure == "unauthorized":
+        key = "a-key-of-no-agent"
+    elif failure == "unsupported-message":
+        messages = [{"role": "developer", "content": "not supported by the count dialect"}]
+    else:
+        tools = [ToolDefinition({"type": "function", "function": {"parameters": {"bad": object()}}})]
+    llm = runner.CountedLLM(model="openai/policy", base_url=base_url, api_key=key)
+    with pytest.raises(RuntimeError, match="Gateway token count unavailable"):
+        await asyncio.to_thread(llm.get_token_count, messages, tools)
+    llm.allow_token_count_estimate = True
+    assert await asyncio.to_thread(llm.get_token_count, messages, tools) == ESTIMATE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [{"input_tokens": True}, {"input_tokens": -1}, {}, {"input_tokens": "42"}])
+async def test_invalid_count_responses_are_not_sdk_estimates(runner, answer):
+    from aiohttp import web
+
+    async def count(request):
+        return web.json_response(answer)
+
+    app = web.Application()
+    app.router.add_post("/v1/messages/count_tokens", count)
+    server = web.AppRunner(app)
+    await server.setup()
+    site = web.TCPSite(server, "127.0.0.1", 0)
+    await site.start()
+    try:
+        host, port = server.addresses[0]
+        llm = runner.CountedLLM(model="openai/policy", base_url=f"http://{host}:{port}/v1", api_key="key")
+        with pytest.raises(RuntimeError, match="Gateway token count unavailable"):
+            await asyncio.to_thread(llm.get_token_count, CHAT)
+    finally:
+        await server.cleanup()
+
+
+def test_estimate_opt_in_reaches_agent_and_summarizer(runner, tmp_path):
+    args = runner.parse_args(required(tmp_path) + ["--allow-token-count-estimate", "true"])
+    assert runner.settings(args)["allow_token_count_estimate"] is True
+    agent = runner.build_agent(3600, condenser_max_tokens=1000, allow_token_count_estimate=True)
+    assert agent.kwargs["llm"].allow_token_count_estimate is True
+    assert agent.kwargs["condenser"].kwargs["llm"].allow_token_count_estimate is True
+
+
 # --------------------------------------------------------------------------- what the summary call reads
 
 
@@ -560,18 +635,22 @@ def test_a_context_reset_cuts_the_events_to_the_length_that_fits_its_budget(runn
 async def test_the_counted_llm_counts_at_its_own_gateway_and_else_takes_the_sdks_estimate(runner, served, capsys):
     gateway, base_url, agent = served
     tools = [ToolDefinition(tool) for tool in TOOLS]
-    llm = runner.CountedReplayLLM(model="openai/policy", base_url=base_url, api_key=agent.api_key)
+    llm = runner.CountedReplayLLM(
+        model="openai/policy", base_url=base_url, api_key=agent.api_key, allow_token_count_estimate=True
+    )
 
     assert await asyncio.to_thread(llm.get_token_count, CHAT, tools, True) == len(rendered(gateway, CHAT, TOOLS))
     image = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]}]
     assert await asyncio.to_thread(llm.get_token_count, image, tools) == ESTIMATE
-    offline = runner.CountedLLM(model="openai/policy", base_url="http://127.0.0.1:9/v1", api_key=agent.api_key)
+    offline = runner.CountedLLM(
+        model="openai/policy", base_url="http://127.0.0.1:9/v1", api_key=agent.api_key, allow_token_count_estimate=True
+    )
     assert await asyncio.to_thread(offline.get_token_count, CHAT, tools) == ESTIMATE
 
     broken = [types.SimpleNamespace(to_openai_tool=lambda **_: 1 / 0)]
     assert llm.get_token_count(CHAT, broken) == ESTIMATE == llm.get_token_count(CHAT, broken)
     out = capsys.readouterr().out
-    assert out.count("a token count at the gateway failed") == 1 and "ZeroDivisionError" in out
+    assert out.count("using the SDK's approximate token estimate by explicit opt-in") == 2
 
 
 def test_the_messages_count_of_each_recorded_openhands_call_is_its_prompt(runner):

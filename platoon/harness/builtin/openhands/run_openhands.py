@@ -53,11 +53,11 @@ the gateway reads back into the same chat messages (:func:`messages_count_body`)
 Tinker policy answers with the length of the prompt it would render with the policy's renderer.  That length is
 exact for a renderer that writes tool results without their tool's name and serializes tool-call arguments itself,
 as the Qwen chat templates do; one that writes either as the call sent it (the ``kimi_k2`` and ``gpt_oss``
-renderers) counts a few tokens off for each tool call.  Where the gateway gives no count (a hosted model's provider
-without that route), the SDK's own estimate counts: litellm's token counter, with the ``cl100k_base`` encoding for a
-model it does not know, which is below a Qwen chat template's count by about a tenth on prose and code and by nearly
-half on numbers (Qwen's tokenizers split numbers into single digits).  A prompt the estimate undercounts can then
-pass N, and the overflow fallback still condenses.  Without a token trigger nothing counts tokens, as before.
+renderers) counts a few tokens off for each tool call. A missing count stops the rollout rather than substituting
+the SDK's estimate, which may use cl100k_base for an unknown model and substantially undercount its native tokens.
+Hosted providers without a count endpoint can opt
+into that approximation with ``--allow-token-count-estimate true``; the runner reports the opt-in in its settings
+and warns when it actually uses an estimate. Without a token trigger nothing counts tokens, as before.
 
 Model endpoint: ``LLM_MODEL``, ``LLM_BASE_URL`` and ``LLM_API_KEY`` (the agent key).  Exit codes: 0 the agent
 finished, 3 it reached ``--max-iterations``, 4 the SDK found it stuck in a loop (both policy outcomes, which the
@@ -77,7 +77,7 @@ import traceback
 import urllib.error
 import urllib.request
 import uuid
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 from openhands.sdk import LLM, Agent, AgentContext, Conversation, TextContent, Tool
 from openhands.sdk.context.condenser import LLMSummarizingCondenser
@@ -228,8 +228,7 @@ class GatewayTokenCount:
         if status in NO_COUNT_STATUSES:
             self.unsupported = f"HTTP {status}"
             print(
-                f"openhands: the gateway counts no tokens ({self.unsupported}), so the condenser counts with the "
-                "SDK's estimate",
+                f"openhands: the gateway counts no tokens ({self.unsupported})",
                 flush=True,
             )
             return None
@@ -246,7 +245,7 @@ class GatewayTokenCount:
         if self.uncounted is None:
             self.uncounted = why
             print(
-                f"openhands: the gateway gave no token count for a call ({why}), so the SDK's estimate counts it; "
+                f"openhands: the gateway gave no token count for a call ({why}); "
                 "later calls without a count are not reported",
                 flush=True,
             )
@@ -267,11 +266,10 @@ def gateway_token_count(llm: LLM) -> GatewayTokenCount:
 
 
 class GatewayCounted(LLM):
-    """The agent's LLM when the condenser has a token trigger: :meth:`get_token_count`, which the condenser counts
-    the agent's prompts with, is the gateway's count of the call the LLM would make with the same messages and tools,
-    and the SDK's own estimate where the gateway gives none (see the module docstring)."""
+    """Count the rendered prompt at the gateway; SDK estimates require an explicit opt-in."""
 
-    failure_reported: ClassVar[bool] = False  # a count that raised is reported once, with its traceback
+    allow_token_count_estimate: bool = False
+    _estimate_reported: bool = PrivateAttr(default=False)
 
     def get_token_count(
         self,
@@ -279,18 +277,31 @@ class GatewayCounted(LLM):
         tools: Sequence[ToolDefinition] | None = None,
         add_security_risk_prediction: bool = False,
     ) -> int:
-        risk = add_security_risk_prediction
+        reason = "mocked tool calls cannot be counted at the gateway"
         try:
-            functions = [tool.to_openai_tool(add_security_risk_prediction=risk) for tool in tools or []]
+            functions = [
+                tool.to_openai_tool(add_security_risk_prediction=add_security_risk_prediction) for tool in tools or []
+            ]
             if not self.should_mock_tool_calls(functions):
-                counted = gateway_token_count(self).count(self.format_messages_for_llm(messages), functions)
+                counter = gateway_token_count(self)
+                counted = counter.count(self.format_messages_for_llm(messages), functions)
                 if counted is not None:
                     return counted
-        except Exception:  # a count never stops the agent: the estimate takes over
-            if not GatewayCounted.failure_reported:
-                GatewayCounted.failure_reported = True
-                print("openhands: a token count at the gateway failed; the SDK's estimate counts instead:", flush=True)
-                traceback.print_exc(file=sys.stdout)
+                reason = counter.unsupported or counter.uncounted or "no count returned"
+        except Exception as error:
+            reason = type(error).__name__
+        if not self.allow_token_count_estimate:
+            raise RuntimeError(
+                f"Gateway token count unavailable ({reason}); refusing an SDK estimate for the condenser. "
+                "Restore gateway counting, or explicitly set allow_token_count_estimate=true for approximate counting."
+            )
+        if not self._estimate_reported:
+            print(
+                "openhands: WARNING: using the SDK's approximate token estimate by explicit opt-in; "
+                "the condenser threshold may undercount native tokens",
+                flush=True,
+            )
+            self._estimate_reported = True
         return super().get_token_count(messages, tools, add_security_risk_prediction)
 
 
@@ -471,6 +482,7 @@ def build_agent(
     num_retries: int = 0,
     condenser: str = "none",
     condenser_max_tokens: int = 0,
+    allow_token_count_estimate: bool = False,
 ) -> Agent:
     if condenser_max_tokens:  # the trigger counts prompts as the gateway renders them
         llm_class = CountedReplayLLM if replay else CountedLLM
@@ -487,6 +499,7 @@ def build_agent(
         # Replay sends each turn as text, as it was sampled: list content would change the prefix.  Without replay,
         # the SDK serializes the messages as it does for Harbor's adapter (text parts as a list).
         force_string_serializer=True if replay else None,
+        **({"allow_token_count_estimate": allow_token_count_estimate} if condenser_max_tokens else {}),
     )
     tools = [Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name), Tool(name=TaskTrackerTool.name)]
     context = AgentContext(skills=[], load_user_skills=False, load_public_skills=False)
@@ -560,6 +573,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="condense when the next prompt would be longer than this many tokens, as the gateway counts them "
         "(runs the summarizing condenser); 0: no token trigger",
     )
+    parser.add_argument(
+        "--allow-token-count-estimate",
+        type=_boolean,
+        default=False,
+        metavar="{true,false}",
+        help="allow the SDK's approximate token count when gateway counting fails (default: stop the rollout)",
+    )
     args = parser.parse_args(argv)
     if args.max_iterations < 1:
         parser.error("--max-iterations must be at least 1")
@@ -581,6 +601,7 @@ def settings(args: argparse.Namespace) -> dict[str, object]:
         "num_retries": args.num_retries,
         "condenser": "llm_summarizing" if args.condenser_max_tokens else args.condenser,
         "condenser_max_tokens": args.condenser_max_tokens,
+        "allow_token_count_estimate": args.allow_token_count_estimate,
     }
 
 
@@ -598,6 +619,7 @@ def main(argv: list[str] | None = None) -> int:
             num_retries=args.num_retries,
             condenser=args.condenser,
             condenser_max_tokens=args.condenser_max_tokens,
+            allow_token_count_estimate=args.allow_token_count_estimate,
         ),
         workspace=os.getcwd(),
         max_iteration_per_run=args.max_iterations,
