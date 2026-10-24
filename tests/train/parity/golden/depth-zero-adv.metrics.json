@@ -1,0 +1,541 @@
+{
+ "scenario": "depth-zero-adv",
+ "starts": [
+  {
+   "train": {
+    "steps": [1, 2],
+    "values": {
+     "optim": {
+      "lr": 3e-05
+     },
+     "progress": {
+      "done_frac": [0.5, 1.0]
+     },
+     "rollout_client": {
+      "concurrency_achieved_fraction": "timing",
+      "cpu_cores_busy": "timing",
+      "cpu_percent": "timing",
+      "cpu_saturation": "timing",
+      "groups_in_flight_max": 4.0,
+      "groups_in_flight_mean": "timing",
+      "rollouts_in_flight_configured": 16.0,
+      "rollouts_in_flight_max": 16.0,
+      "rollouts_in_flight_mean": "timing",
+      "rss_bytes": "timing",
+      "threads": "timing",
+      "total_cpu_percent": "timing",
+      "trainer_queue_dequeues": 4.0,
+      "trainer_queue_ready_fraction": "timing",
+      "trainer_queue_wait_seconds_max": "timing",
+      "trainer_queue_wait_seconds_mean": "timing",
+      "trainer_queue_wait_seconds_total": "timing",
+      "window_seconds": "timing",
+      "worker_cpu_percent": "timing"
+     },
+     "timing": {
+      "batch_total": "timing"
+     },
+     "train": {
+      "epoch": [0, 1],
+      "step": [1, 2],
+      "total_datums_per_batch": 21.0,
+      "update_weights_time": "timing"
+     },
+     "train/batch": {
+      "all_fail_groups": 0.0,
+      "all_pass_groups": [0.0, 2.0],
+      "groups": 4,
+      "groups_dequeued": 4.0,
+      "groups_without_stats": 0.0,
+      "informative_groups": [4.0, 2.0],
+      "optimizer_updates": 1.0,
+      "reward_key_mismatch": 0,
+      "skipped_optimizer": 0.0,
+      "stale_groups": 0.0,
+      "uniform_mixed_groups": 0.0
+     },
+     "train/batch/avg_input_tokens_per_step": {
+      "avg": [2.0568181818181817, 1.725],
+      "count": [22, 20],
+      "max": [7.0, 5.0],
+      "min": 0.5
+     },
+     "train/batch/avg_output_tokens_per_step": {
+      "avg": [1.3636363636363635, 1.1375],
+      "count": [22, 20],
+      "max": [5.0, 3.0],
+      "min": 0.25
+     },
+     "train/batch/num_input_tokens": {
+      "avg": [3.3181818181818183, 3.3],
+      "count": [22, 20],
+      "max": [8.0, 7.0],
+      "min": 2.0
+     },
+     "train/batch/num_output_tokens": {
+      "avg": [2.1818181818181817, 2.2],
+      "count": [22, 20],
+      "max": [6.0, 5.0],
+      "min": 1.0
+     },
+     "train/batch/num_recovered_tool_calls": {
+      "avg": 0.0,
+      "count": [22, 20],
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/batch/num_steps": {
+      "avg": [2.1818181818181817, 2.55],
+      "count": [22, 20],
+      "max": 4.0,
+      "min": 1.0
+     },
+     "train/batch/num_tool_calls": {
+      "avg": 0.0,
+      "count": [22, 20],
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/batch/num_unparsed_tool_calls": {
+      "avg": 0.0,
+      "count": [22, 20],
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/batch/outcome": {
+      "cancelled": 0,
+      "error": [3, 1],
+      "invalid": 0,
+      "none": 0,
+      "scored": [13, 15],
+      "timeout": 0
+     },
+     "train/batch/reward_key": {
+      "reward": [13, 15]
+     },
+     "train/batch/rollout_time": {
+      "avg": "timing",
+      "count": 4,
+      "max": "timing",
+      "min": "timing"
+     },
+     "train/batch/task_reward": {
+      "avg": [0.5, 0.625],
+      "count": 16,
+      "max": 1.0,
+      "min": 0.0
+     },
+     "train/batch/task_reward_at_k_max": {
+      "avg": [1.0, 0.75],
+      "count": 4,
+      "max": 1.0,
+      "min": [1.0, 0.0]
+     },
+     "train/batch/task_reward_at_k_mean": {
+      "avg": [0.5, 0.625],
+      "count": 4,
+      "max": [0.75, 1.0],
+      "min": [0.25, 0.0]
+     },
+     "train/batch/task_reward_at_k_min": {
+      "avg": [0.0, 0.5],
+      "count": 4,
+      "max": [0.0, 1.0],
+      "min": 0.0
+     },
+     "train/batch/task_reward_valid": {
+      "avg": [0.8125, 0.9375],
+      "count": 16,
+      "max": 1.0,
+      "min": 0.0
+     },
+     "train/credit": {
+      "max_depth": 1.0,
+      "max_depth__count": 2
+     },
+     "train/credit/baseline": {
+      "avg": [0.5, 0.625],
+      "avg__count": 4,
+      "spread": 0.0,
+      "spread__count": 4
+     },
+     "train/credit/depth0": {
+      "datums": [6.5, 7.5],
+      "datums__count": 2,
+      "trajectories": [6.5, 7.5],
+      "trajectories__count": 2,
+      "weight": [0.6126822683782804, 0.5],
+      "weight__count": [2, 1]
+     },
+     "train/credit/depth1": {
+      "datums": [4.0, 3.0],
+      "datums__count": 2,
+      "trajectories": [2.5, 2.0],
+      "trajectories__count": 2,
+      "weight": [1.5881573387554715, 2.0555556],
+      "weight__count": 2
+     },
+     "train/credit/root_advantage": {
+      "abs_avg": [0.3125, 0.125],
+      "abs_avg__count": 4
+     },
+     "train/optim": {
+      "clip_frac_high": [0.2571428571428571, 0.4375],
+      "clip_frac_low": 0.0,
+      "clip_frac_total": [0.2571428571428571, 0.4375],
+      "entropy": [0.5080357, 0.421875],
+      "grad_norm": [18.0, 7.0],
+      "importance_weight_max": "inexact",
+      "importance_weight_mean": "inexact",
+      "importance_weight_min": "inexact",
+      "importance_weight_std": "inexact",
+      "kl_sample_train_v1": [-0.5142857283353806, -0.875],
+      "kl_sample_train_v2": [0.5142857283353806, 0.875],
+      "updates_total": [1.0, 2.0]
+     },
+     "train/policy": {
+      "version": [1.0, 2.0]
+     },
+     "train/rollout_completion": {
+      "groups": 4,
+      "reward_key_mismatch": 0,
+      "rollout_time": "timing",
+      "rollout_time__count": 4
+     },
+     "train/rollout_completion/avg_input_tokens_per_step": {
+      "avg": [2.0568181818181817, 1.725],
+      "count": [22, 20],
+      "max": [7.0, 5.0],
+      "min": 0.5
+     },
+     "train/rollout_completion/avg_output_tokens_per_step": {
+      "avg": [1.3636363636363635, 1.1375],
+      "count": [22, 20],
+      "max": [5.0, 3.0],
+      "min": 0.25
+     },
+     "train/rollout_completion/num_input_tokens": {
+      "avg": [3.3181818181818183, 3.3],
+      "count": [22, 20],
+      "max": [8.0, 7.0],
+      "min": 2.0
+     },
+     "train/rollout_completion/num_output_tokens": {
+      "avg": [2.1818181818181817, 2.2],
+      "count": [22, 20],
+      "max": [6.0, 5.0],
+      "min": 1.0
+     },
+     "train/rollout_completion/num_recovered_tool_calls": {
+      "avg": 0.0,
+      "count": [22, 20],
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/rollout_completion/num_steps": {
+      "avg": [2.1818181818181817, 2.55],
+      "count": [22, 20],
+      "max": 4.0,
+      "min": 1.0
+     },
+     "train/rollout_completion/num_tool_calls": {
+      "avg": 0.0,
+      "count": [22, 20],
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/rollout_completion/num_unparsed_tool_calls": {
+      "avg": 0.0,
+      "count": [22, 20],
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/rollout_completion/outcome": {
+      "cancelled": 0,
+      "error": [3, 1],
+      "invalid": 0,
+      "none": 0,
+      "scored": [13, 15],
+      "timeout": 0
+     },
+     "train/rollout_completion/reward_key": {
+      "reward": [13, 15]
+     },
+     "train/rollout_completion/task_reward": {
+      "avg": [0.5, 0.625],
+      "count": 16,
+      "max": 1.0,
+      "min": 0.0
+     },
+     "train/rollout_completion/task_reward_at_k_max": {
+      "avg": [1.0, 0.75],
+      "count": 4,
+      "max": 1.0,
+      "min": [1.0, 0.0]
+     },
+     "train/rollout_completion/task_reward_at_k_mean": {
+      "avg": [0.5, 0.625],
+      "count": 4,
+      "max": [0.75, 1.0],
+      "min": [0.25, 0.0]
+     },
+     "train/rollout_completion/task_reward_at_k_min": {
+      "avg": [0.0, 0.5],
+      "count": 4,
+      "max": [0.0, 1.0],
+      "min": 0.0
+     },
+     "train/rollout_completion/task_reward_valid": {
+      "avg": [0.8125, 0.9375],
+      "count": 16,
+      "max": 1.0,
+      "min": 0.0
+     },
+     "train/sampler": {
+      "decision_ms": "timing",
+      "decision_ms_max": "timing",
+      "draws": 4.0,
+      "skipped_slots": 0.0
+     },
+     "train/sampler/draws": {
+      "order": 4.0
+     },
+     "train/tasks": {
+      "coverage": [0.5, 1.0],
+      "no_evidence": 0.0,
+      "pass_at_1": [0.47843319363370806, 0.5458094476627142],
+      "pass_at_G": [0.8108386043490242, 0.8337920709390698]
+     },
+     "train/tasks/bands": {
+      "high": [0.0, 3.0],
+      "low": [0.0, 1.0],
+      "mid": 4.0,
+      "solved": 0.0,
+      "zero": 0.0
+     },
+     "train/workload/batch": {
+      "total_candidate_non_trainable_datums": [4.0, 1.0],
+      "total_candidate_trainable_datums": 21.0,
+      "total_environment_steps": [48.0, 51.0],
+      "total_input_tokens": [73.0, 66.0],
+      "total_model_calls": [48.0, 51.0],
+      "total_observed_rollouts": 16.0,
+      "total_output_tokens": [48.0, 44.0],
+      "total_policy_eligible_datums": 21.0,
+      "total_policy_excluded_datums": [4.0, 1.0],
+      "total_post_sampling_datums": 21.0,
+      "total_postmerge_datums": [25.0, 22.0],
+      "total_requested_rollouts": 16.0,
+      "total_sampling_dropped_datums": 0.0,
+      "total_task_filter_dropped_datums": 0.0,
+      "total_task_retained_datums": 21.0,
+      "total_task_workflow_non_trainable_datums": [4.0, 1.0],
+      "total_task_workflow_trainable_datums": 21.0,
+      "total_tasks": 4.0,
+      "total_tasks_with_workload_metadata": 4.0,
+      "total_tokens": [121.0, 110.0],
+      "total_trajectories": [22.0, 20.0],
+      "total_workflow_trainable_rollouts": [11.0, 5.0]
+     },
+     "train/workload/rollout": {
+      "count": 16
+     },
+     "train/workload/rollout/total_candidate_non_trainable_datums": {
+      "avg": [0.25, 0.0625],
+      "max": [2.0, 1.0],
+      "min": 0.0
+     },
+     "train/workload/rollout/total_candidate_trainable_datums": {
+      "avg": 1.3125,
+      "max": 3.0,
+      "min": 0.0
+     },
+     "train/workload/rollout/total_environment_steps": {
+      "avg": [3.0, 3.1875],
+      "max": 8.0,
+      "min": 1.0
+     },
+     "train/workload/rollout/total_input_tokens": {
+      "avg": [4.5625, 4.125],
+      "max": 11.0,
+      "min": 2.0
+     },
+     "train/workload/rollout/total_model_calls": {
+      "avg": [3.0, 3.1875],
+      "max": 8.0,
+      "min": 1.0
+     },
+     "train/workload/rollout/total_output_tokens": {
+      "avg": [3.0, 2.75],
+      "max": 8.0,
+      "min": 1.0
+     },
+     "train/workload/rollout/total_policy_eligible_datums": {
+      "avg": 1.3125,
+      "max": 3.0,
+      "min": 0.0
+     },
+     "train/workload/rollout/total_policy_excluded_datums": {
+      "avg": [0.25, 0.0625],
+      "max": [2.0, 1.0],
+      "min": 0.0
+     },
+     "train/workload/rollout/total_post_sampling_datums": {
+      "avg": 1.3125,
+      "max": 3.0,
+      "min": 0.0
+     },
+     "train/workload/rollout/total_postmerge_datums": {
+      "avg": [1.5625, 1.375],
+      "max": 3.0,
+      "min": 1.0
+     },
+     "train/workload/rollout/total_sampling_dropped_datums": {
+      "avg": 0.0,
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/workload/rollout/total_tokens": {
+      "avg": [7.5625, 6.875],
+      "max": 19.0,
+      "min": 3.0
+     },
+     "train/workload/rollout/total_trajectories": {
+      "avg": [1.375, 1.25],
+      "max": 2.0,
+      "min": 1.0
+     },
+     "train/workload/task": {
+      "count": 4
+     },
+     "train/workload/task/observed_rollouts": {
+      "avg": 4.0,
+      "max": 4.0,
+      "min": 4.0
+     },
+     "train/workload/task/requested_rollouts": {
+      "avg": 4.0,
+      "max": 4.0,
+      "min": 4.0
+     },
+     "train/workload/task/total_candidate_non_trainable_datums": {
+      "avg": [1.0, 0.25],
+      "max": [3.0, 1.0],
+      "min": 0.0
+     },
+     "train/workload/task/total_candidate_trainable_datums": {
+      "avg": 5.25,
+      "max": 6.0,
+      "min": 4.0
+     },
+     "train/workload/task/total_environment_steps": {
+      "avg": [12.0, 12.75],
+      "max": [17.0, 18.0],
+      "min": 9.0
+     },
+     "train/workload/task/total_input_tokens": {
+      "avg": [18.25, 16.5],
+      "max": 22.0,
+      "min": 14.0
+     },
+     "train/workload/task/total_model_calls": {
+      "avg": [12.0, 12.75],
+      "max": [17.0, 18.0],
+      "min": 9.0
+     },
+     "train/workload/task/total_output_tokens": {
+      "avg": [12.0, 11.0],
+      "max": [15.0, 16.0],
+      "min": 8.0
+     },
+     "train/workload/task/total_policy_eligible_datums": {
+      "avg": 5.25,
+      "max": 6.0,
+      "min": 4.0
+     },
+     "train/workload/task/total_policy_excluded_datums": {
+      "avg": [1.0, 0.25],
+      "max": [3.0, 1.0],
+      "min": 0.0
+     },
+     "train/workload/task/total_post_sampling_datums": {
+      "avg": 5.25,
+      "max": 6.0,
+      "min": 4.0
+     },
+     "train/workload/task/total_postmerge_datums": {
+      "avg": [6.25, 5.5],
+      "max": [7.0, 6.0],
+      "min": [6.0, 5.0]
+     },
+     "train/workload/task/total_sampling_dropped_datums": {
+      "avg": 0.0,
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/workload/task/total_task_filter_dropped_datums": {
+      "avg": 0.0,
+      "max": 0.0,
+      "min": 0.0
+     },
+     "train/workload/task/total_task_retained_datums": {
+      "avg": 5.25,
+      "max": 6.0,
+      "min": 4.0
+     },
+     "train/workload/task/total_task_workflow_non_trainable_datums": {
+      "avg": [1.0, 0.25],
+      "max": [3.0, 1.0],
+      "min": 0.0
+     },
+     "train/workload/task/total_task_workflow_trainable_datums": {
+      "avg": 5.25,
+      "max": 6.0,
+      "min": 4.0
+     },
+     "train/workload/task/total_tokens": {
+      "avg": [30.25, 27.5],
+      "max": [37.0, 38.0],
+      "min": 22.0
+     },
+     "train/workload/task/total_trajectories": {
+      "avg": [5.5, 5.0],
+      "max": [6.0, 5.0],
+      "min": 5.0
+     },
+     "train/workload/task/workflow_trainable_rollouts": {
+      "avg": [2.75, 1.25],
+      "max": 4.0,
+      "min": [1.0, 0.0]
+     },
+     "train/workload/training_batch": {
+      "total_action_tokens": [36.0, 18.0],
+      "total_attention_tokens": [54.0, 25.0],
+      "total_non_submitted_datums": [7.0, 15.0],
+      "total_submitted_datums": [18.0, 7.0]
+     },
+     "train/zero_advantage_filter": {
+      "eligible_attention_tokens": [31.0, 32.0],
+      "eligible_attention_tokens__count": 2,
+      "eligible_datums": 10.5,
+      "eligible_datums__count": 2,
+      "eligible_loss_tokens": [20.5, 21.5],
+      "eligible_loss_tokens__count": 2,
+      "filtered_attention_tokens": [4.0, 19.5],
+      "filtered_attention_tokens__count": 2,
+      "filtered_datums": [1.5, 7.0],
+      "filtered_datums__count": 2,
+      "filtered_loss_tokens": [2.5, 12.5],
+      "filtered_loss_tokens__count": 2,
+      "retained_attention_tokens": [27.0, 12.5],
+      "retained_attention_tokens__count": 2,
+      "retained_datums": [9.0, 3.5],
+      "retained_datums__count": 2,
+      "retained_loss_tokens": [18.0, 9.0],
+      "retained_loss_tokens__count": 2
+     }
+    }
+   }
+  }
+ ]
+}

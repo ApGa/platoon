@@ -195,6 +195,7 @@ tokenizer. Prefer it in new tests. The suite also has fakes of its own:
 | `tests/inline/conftest.py`, `tests/harness/builtin/builtin_fixtures.py` | The `make_gateway(policy)` fixture: a real `ModelGateway` with the toy tokenizer and a policy you write as a function of the prompt |
 | `tests/harness/builtin/inline_runs.py` | `run_tree`: runs a function harness and its subagents on a gateway, then grades the session; `open_service_task` opens a task of an environment service |
 | `tests/harness/builtin/codeact_golden.py`, `tests/harness/builtin/golden_scenarios.py` | Golden fixtures: record a scripted rollout in full and compare later runs with it; the scenarios' scaffolding and the differences they allow, with why |
+| `tests/train/parity/` | The training loop's golden trace: a few training steps per scenario on a fake Tinker service and fake rollouts, compared in full with golden files. A training setting gets a scenario there (its README says how). Its fakes are its own: a change to them changes every golden |
 | `tests/envs/scripted_trees.py` | Scripted agent trees on a live ORS session: calls, gathers and spawns, without model calls |
 | `tests/harness/harness_fakes.py` | A scripted OpenAI Chat server, a process-backed sandbox and an environment service that grades files in it, for TOML spec harnesses |
 

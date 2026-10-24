@@ -1,0 +1,385 @@
+{
+ "description": "The mixture labelled by another column (train.label_by), with a straggler policy for one label",
+ "request_settings": [
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": null,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "platoon.train.auto:mixture_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "startup_budget_seconds": 300.0,
+   "task": {
+    "fork_strategy": "subtask",
+    "goal": null,
+    "max_steps": null,
+    "misc": {
+     "platoon_environment": {
+      "agents": {
+       "budget": "linear",
+       "child_access": "full",
+       "child_grading": "none",
+       "child_max_steps": 15,
+       "child_timeout_s": null,
+       "fork": null,
+       "max_depth": null,
+       "verifier": {"access": "read_only", "enabled": true, "max_steps": 20}
+      },
+      "builtins": "default",
+      "eval_rollout": "<fakes>:unused_rollout",
+      "harness": null,
+      "harness_options": {},
+      "name": "quick",
+      "on_context_overflow": "grade",
+      "on_harness_exit": {"crash": "exclude", "timeout": "exclude"},
+      "placement": "auto",
+      "program": "single",
+      "resolve_task": false,
+      "reward_processor": null,
+      "rollout": "<fakes>:unused_rollout",
+      "service": null,
+      "service_kwargs": {}
+     }
+    }
+   }
+  },
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": null,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "platoon.train.auto:mixture_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "startup_budget_seconds": 300.0,
+   "task": {
+    "fork_strategy": "subtask",
+    "goal": null,
+    "max_steps": null,
+    "misc": {
+     "platoon_environment": {
+      "agents": {
+       "budget": "linear",
+       "child_access": "full",
+       "child_grading": "none",
+       "child_max_steps": 15,
+       "child_timeout_s": null,
+       "fork": null,
+       "max_depth": null,
+       "verifier": {"access": "read_only", "enabled": true, "max_steps": 20}
+      },
+      "builtins": "default",
+      "eval_rollout": "<fakes>:unused_rollout",
+      "harness": null,
+      "harness_options": {},
+      "name": "slow",
+      "on_context_overflow": "grade",
+      "on_harness_exit": {"crash": "exclude", "timeout": "exclude"},
+      "placement": "auto",
+      "program": "single",
+      "resolve_task": false,
+      "reward_processor": null,
+      "rollout": "<fakes>:unused_rollout",
+      "service": null,
+      "service_kwargs": {}
+     }
+    }
+   }
+  }
+ ],
+ "scenario": "mix-label-by",
+ "starts": [
+  {
+   "events": [
+    {"batch": 0, "checkpoint": null, "event": "start", "loaded": null, "start": 1, "state_lost": null},
+    {"event": "draw", "position": 0, "reason": "order", "sampler": "uniform@quick", "seq": 0, "start": 1, "task_id": "quick::t2", "version": 0},
+    {"event": "draw", "position": 1, "reason": "order", "sampler": "uniform@slow", "seq": 1, "start": 1, "task_id": "slow::t3", "version": 0},
+    {"event": "draw", "position": 2, "reason": "order", "sampler": "uniform@quick", "seq": 2, "start": 1, "task_id": "quick::t0", "version": 0},
+    {"event": "draw", "position": 3, "reason": "order", "sampler": "uniform@slow", "seq": 3, "start": 1, "task_id": "slow::t0", "version": 0},
+    {"event": "settle", "passes": 1, "seq": 2, "start": 1, "task_id": "quick::t0", "valid": 3, "verdict": "trained", "version": 0},
+    {"event": "settle", "passes": 0, "seq": 1, "start": 1, "task_id": "slow::t3", "valid": 4, "verdict": "uniform", "version": 0},
+    {"event": "settle", "passes": 3, "seq": 3, "start": 1, "task_id": "slow::t0", "valid": 4, "verdict": "trained", "version": 0},
+    {"event": "settle", "passes": 2, "seq": 0, "start": 1, "task_id": "quick::t2", "valid": 4, "verdict": "trained", "version": 0},
+    {"event": "fate", "fate": "consumed", "seq": 2, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 1, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 0, "start": 1},
+    {"event": "draw", "position": 4, "reason": "order", "sampler": "uniform@quick", "seq": 4, "start": 1, "task_id": "quick::t1", "version": 1},
+    {"event": "draw", "position": 5, "reason": "order", "sampler": "uniform@slow", "seq": 5, "start": 1, "task_id": "slow::t1", "version": 1},
+    {"event": "draw", "position": 6, "reason": "order", "sampler": "uniform@quick", "seq": 6, "start": 1, "task_id": "quick::t3", "version": 1},
+    {"event": "draw", "position": 7, "reason": "order", "sampler": "uniform@slow", "seq": 7, "start": 1, "task_id": "slow::t2", "version": 1},
+    {"event": "settle", "passes": 4, "seq": 4, "start": 1, "task_id": "quick::t1", "valid": 4, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 2, "seq": 7, "start": 1, "task_id": "slow::t2", "valid": 3, "verdict": "trained", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 6, "start": 1, "task_id": "quick::t3", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 2, "seq": 5, "start": 1, "task_id": "slow::t1", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 4, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 7, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 6, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 5, "start": 1}
+   ],
+   "files": [
+    "checkpoints.jsonl",
+    "identity.json",
+    "tasks/dispatch-s1-final.json",
+    "tasks/dispatch-s1-recovery-000000.json",
+    "tasks/events.jsonl",
+    "tasks/state-s1-final.json",
+    "tasks/state-s1-recovery-000000.json"
+   ],
+   "messages": [
+    "INFO Loading config from <tmp>/train.yaml",
+    "INFO Sampling timeout: 600 s (train.sample_timeout_seconds)",
+    "INFO training tasks: 8, drawn in epochs of 8 (2 batches of 4), 2 steps planned",
+    "INFO environments[quick]: 4 tasks, weight tasks, 50.0% of the slots: each task drawn about 1 times over the run's 2 steps",
+    "INFO environments[slow]: 4 tasks, weight tasks, 50.0% of the slots: each task drawn about 1 times over the run's 2 steps",
+    "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
+    "INFO Created new training client for test/model with rank 32",
+    "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Starting training from batch 0 to 2",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
+    "INFO Saving weights only after completing batch 0 (steps_completed=1, save_every=None, recovery_every=None)",
+    "INFO Step 1/2 | Epoch 0 | Batch time: <t>s | Datums: 15",
+    "WARNING Cancelling 1 straggler rollout(s) for task quick::t3 after 600s grace (quorum 1/4)",
+    "WARNING Rollout for task quick::t3 took <t>s (very slow)",
+    "WARNING Waited <t>s for rollout from queue (slow)",
+    "WARNING Cancelling 1 straggler rollout(s) for task slow::t1 after 600s grace (quorum 1/4)",
+    "WARNING Rollout for task slow::t1 took <t>s (very slow)",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 1",
+    "INFO Saving weights only after completing batch 1 (steps_completed=2, save_every=None, recovery_every=None)",
+    "INFO Step 2/2 | Epoch 1 | Batch time: <t>s | Datums: 11",
+    "INFO Saving permanent checkpoint final at step 2...",
+    "INFO Training complete successfully!",
+    "INFO Training complete. Total time: <t>s"
+   ],
+   "outcome": "completed",
+   "requests": {
+    "train": [
+     ["quick::t2", 0, 0, 0, 0],
+     ["quick::t2", 1, 0, 0, 0],
+     ["quick::t2", 2, 0, 0, 0],
+     ["quick::t2", 3, 0, 0, 0],
+     ["slow::t3", 0, 0, 1, 0],
+     ["slow::t3", 1, 0, 1, 0],
+     ["slow::t3", 2, 0, 1, 0],
+     ["slow::t3", 3, 0, 1, 0],
+     ["quick::t0", 0, 0, 0, 0],
+     ["quick::t0", 1, 0, 0, 0],
+     ["quick::t0", 2, 0, 0, 0],
+     ["quick::t0", 3, 0, 0, 0],
+     ["slow::t0", 0, 0, 1, 0],
+     ["slow::t0", 1, 0, 1, 0],
+     ["slow::t0", 2, 0, 1, 0],
+     ["slow::t0", 3, 0, 1, 0],
+     ["quick::t1", 0, 1, 0, 1],
+     ["quick::t1", 1, 1, 0, 1],
+     ["quick::t1", 2, 1, 0, 1],
+     ["quick::t1", 3, 1, 0, 1],
+     ["slow::t1", 0, 1, 1, 1],
+     ["slow::t1", 1, 1, 1, 1],
+     ["slow::t1", 2, 1, 1, 1],
+     ["slow::t1", 3, 1, 1, 1],
+     ["quick::t3", 0, 1, 0, 1],
+     ["quick::t3", 1, 1, 0, 1],
+     ["quick::t3", 2, 1, 0, 1],
+     ["quick::t3", 3, 1, 0, 1],
+     ["slow::t2", 0, 1, 1, 1],
+     ["slow::t2", 1, 1, 1, 1],
+     ["slow::t2", 2, 1, 1, 1],
+     ["slow::t2", 3, 1, 1, 1]
+    ]
+   },
+   "saves": [
+    {
+     "batch": 0,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000000.json",
+      "format": 2,
+      "sha256": "337e6c3552f11b9008a83ccaaaa691487ee01682d37b822f65f25949fde93186",
+      "start": 1
+     },
+     "name": "recovery-000000",
+     "optimizer_steps": 0,
+     "policy_version": 0,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000000",
+     "state_path": "tinker://run-1/weights/recovery-000000",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000000.json",
+      "format": 1,
+      "sha256": "9f5cc20953f93ca78356ab40f7d583d3ce567efe8a8cc1225812d60a2de1df2d",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 2,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-final.json",
+      "format": 2,
+      "sha256": "86940b1a240f5cc9fb0fdfa20fb90ea422f486108d1a501a9aada7e499b904fb",
+      "start": 1
+     },
+     "name": "final",
+     "optimizer_steps": 2,
+     "policy_version": 2,
+     "sampler_path": "tinker://run-1/sampler_weights/final",
+     "state_path": "tinker://run-1/weights/final",
+     "tasks": {
+      "file": "tasks/state-s1-final.json",
+      "format": 1,
+      "sha256": "ca2b8ac78b398a56c6a02588f4a613a624aad4a8aa28cb0746da88e8d29e0482",
+      "start": 1
+     },
+     "wandb_run_id": null
+    }
+   ],
+   "tinker": [
+    ["create_lora_training_client", "test/model", 32],
+    ["save_state", "recovery-000000"],
+    ["save_weights_for_sampler", "recovery-000000"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000000"],
+    ["set_version", 0],
+    ["publish", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    ["publish_binding", "train", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.022988504, 0.022988504, 0.022988504], "logprobs": [-0.125, -0.8125, 0.0, -0.1875], "target_tokens": [430, 312, 970, 449], "tokens": [38, 430, 312, 970]},
+       {"advantages": [0.0, -0.011494253, -0.011494253, -0.011494253], "logprobs": [-0.375, -0.9375, -0.3125, -0.625], "target_tokens": [401, 224, 896, 986], "tokens": [742, 401, 224, 896]},
+       {"advantages": [0.0, -0.011494253], "logprobs": [-0.125, -0.625], "target_tokens": [388, 907], "tokens": [266, 388]},
+       {"advantages": [0.0, 0.00862069], "logprobs": [-0.4375, -0.5], "target_tokens": [22, 322], "tokens": [596, 22]},
+       {"advantages": [0.0, -0.025862068], "logprobs": [-0.5, -0.6875], "target_tokens": [492, 882], "tokens": [598, 492]},
+       {"advantages": [0.0, 0.00862069, 0.00862069, 0.00862069], "logprobs": [-0.625, -0.125, -0.5625, -0.9375], "target_tokens": [386, 267, 701, 222], "tokens": [190, 386, 267, 701]},
+       {"advantages": [0.0, 0.00862069, 0.00862069], "logprobs": [-0.875, -0.3125, -0.0625], "target_tokens": [905, 66, 375], "tokens": [632, 905, 66]},
+       {"advantages": [0.0, 0.01724138, 0.01724138], "logprobs": [-0.5, -0.875, -0.125], "target_tokens": [796, 14, 444], "tokens": [1000, 796, 14]},
+       {"advantages": [0.0, -0.01724138, -0.01724138, -0.01724138], "logprobs": [-0.625, 0.0, -0.75, -0.6875], "target_tokens": [986, 421, 183, 709], "tokens": [16, 986, 421, 183]},
+       {"advantages": [0.0, 0.01724138], "logprobs": [-0.3125, -0.5], "target_tokens": [357, 138], "tokens": [590, 357]},
+       {"advantages": [0.0, -0.01724138, -0.01724138], "logprobs": [-0.875, -0.75, -0.1875], "target_tokens": [684, 897, 36], "tokens": [407, 684, 897]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 1, "sampler:run-1/weights-only-1"],
+    ["publish_binding", "train", 1, "sampler:run-1/weights-only-1"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, -0.041666668, -0.041666668, -0.041666668], "logprobs": [-0.8125, -0.4375, -0.3125, -0.5], "target_tokens": [245, 217, 135, 709], "tokens": [117, 245, 217, 135]},
+       {"advantages": [0.0, 0.020833332, 0.020833332], "logprobs": [-0.875, -0.875, -0.1875], "target_tokens": [468, 785, 114], "tokens": [834, 468, 785]},
+       {"advantages": [0.0, 0.020833332], "logprobs": [-0.3125, -0.75], "target_tokens": [775, 759], "tokens": [116, 775]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 2, "sampler:run-1/weights-only-2"],
+    ["publish_binding", "train", 2, "sampler:run-1/weights-only-2"],
+    ["save_state", "final"],
+    ["save_weights_for_sampler", "final"]
+   ]
+  }
+ ]
+}
