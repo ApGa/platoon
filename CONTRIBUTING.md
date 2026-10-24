@@ -769,10 +769,12 @@ The process (how to number an RFC, how it is reviewed, its lifecycle from `Draft
 
 Two tests make every change to the public API a deliberate one:
 
-- `tests/test_public_api.py` compares the names the public modules export (`platoon`, with `pt.gym`, and
-  `platoon.testing`), with their signatures, to the snapshot in `tests/public_api.txt`. When you change the public
-  API on purpose, run `python scripts/public_api.py` to rewrite the snapshot, commit it with the change, and say in
-  the pull request what changed and why. Removing or renaming a public name needs an RFC first.
+- `tests/test_public_api.py` compares the names the public modules export (`platoon`, with `pt.gym`,
+  `platoon.testing` and `platoon.experimental`), with their signatures, to the snapshot in `tests/public_api.txt`.
+  When you change the public API on purpose, run `python scripts/public_api.py` to rewrite the snapshot, commit it
+  with the change, and say in the pull request what changed and why. Removing or renaming a public name needs an RFC
+  first, but for the names of `platoon.experimental` (and `platoon.testing.check_task_sampler`, which checks them):
+  they are experimental, so a minor release may change them (RFC 0017, section 2), and its CHANGELOG says how.
 - `tests/test_import_boundaries.py` reads the imports in the source. Core never imports the first-party extensions
   in `extensions/` or an installed extension, neither by an import nor by an import string such as
   `python://pkg.mod:Class`, and the extensions' code and the examples import only the public names. The private

@@ -485,6 +485,14 @@ UNKNOWN_OPTION_HINTS = "UNKNOWN_OPTION_HINTS"
 # while the field keeps the mapping as given, so that a key it leaves out stays told apart from one it sets, null
 # included.  An environment entry's ``workflow_config`` is checked so (``platoon.train.components``).
 FIELD_SCHEMAS = "FIELD_SCHEMAS"
+# And check a field's value by a rule of its own that the field's type cannot state, in the same report: a class
+# attribute ``VALUE_PROBLEMS = {field: function}`` (a ClassVar), each function taking the field's value, the section
+# that holds it (a mapping), the whole config as given and the field's dotted path, and returning problem lines.
+# Validation calls it right after the field's own checks find nothing, so its lines take their place in the one
+# report; it reads raw data, skips what has the wrong type, and never raises.  ``train.task_sampler`` and an
+# environment entry's ``task_sampler`` are checked so: a name that nothing could register is refused when the config
+# loads (``platoon.train.samplers``).
+VALUE_PROBLEMS = "VALUE_PROBLEMS"
 
 
 def _field_annotation(schema: Any, name: str, field: _Field) -> Any:
@@ -529,10 +537,13 @@ def validate_config(data: Any, schema: Any, *, path: str = "") -> list[str]:
     """Every problem with ``data`` as a value of ``schema``: unknown keys, wrong types, missing required keys, each
     with its dotted path, under ``path`` when ``data`` sits there in a config."""
 
-    return _problems(data, schema, path)
+    return _problems(data, schema, path, data if isinstance(data, Mapping) else None)
 
 
-def _problems(value: Any, annotation: Any, path: str) -> list[str]:
+def _problems(value: Any, annotation: Any, path: str, root: Mapping[str, Any] | None = None) -> list[str]:
+    """``value``'s problems as a value of ``annotation`` at dotted ``path``; ``root`` is the whole config as given,
+    which a class's ``VALUE_PROBLEMS`` read (None: they are not run, as for an override's value alone)."""
+
     annotation = _strip(annotation)
     where = path or "config"
     if annotation in (Any, object) or isinstance(annotation, TypeVar):
@@ -542,13 +553,13 @@ def _problems(value: Any, annotation: Any, path: str) -> list[str]:
     if _is_union(annotation):
         members = _without_none(annotation)
         if (choice := _optional_choice(members)) is not None:
-            return _problems(value, choice, path)
+            return _problems(value, choice, path, root)
         if any(not _problems(value, member, path) for member in members):
             return []
         # Report the member whose shape matches (a mapping for a model, say); otherwise the union as a whole.
         shaped = [member for member in members if _same_shape(value, member)]
         if len(shaped) == 1:
-            return _problems(value, shaped[0], path)
+            return _problems(value, shaped[0], path, root)
         return [f"{where}: {value!r} is not a {_type_name(annotation)}"]
     if typing.get_origin(annotation) is Literal:
         allowed = typing.get_args(annotation)
@@ -564,14 +575,17 @@ def _problems(value: Any, annotation: Any, path: str) -> list[str]:
         free_form = _free_form_model(annotation)
         hints = getattr(annotation, UNKNOWN_KEY_HINTS, None)
         option_hints = getattr(annotation, UNKNOWN_OPTION_HINTS, None) or {}
+        value_checks = (getattr(annotation, VALUE_PROBLEMS, None) or {}) if root is not None else {}
         for key, item in value.items():
             if key in fields:
-                found = _problems(item, _field_annotation(annotation, key, fields[key]), _join(path, key))
+                found = _problems(item, _field_annotation(annotation, key, fields[key]), _join(path, key), root)
                 if found and (hint := value_hint(annotation, str(key), item)) is not None:
                     found = [f"{problem}; {hint}" for problem in found]
                 if key in option_hints and isinstance(item, Mapping):  # a free-form mapping's keys that it refuses
                     refused, parent = option_hints[key](value), _join(path, key)
                     found += [unknown_key(name, (), parent, hint=refused[name]) for name in item if name in refused]
+                if not found and key in value_checks:  # the field's own rule, in its place in the report
+                    found = list(value_checks[key](item, value, root, _join(path, key)))
                 problems.extend(found)
             elif not free_form:
                 problems.append(_unknown_key(str(key), fields, path, hints))
@@ -588,13 +602,17 @@ def _problems(value: Any, annotation: Any, path: str) -> list[str]:
         if not isinstance(value, (list, tuple)):
             return [f"{where}: expected a list, got {value!r}"]
         return [
-            problem for index, item in enumerate(value) for problem in _problems(item, item_type, _join(path, index))
+            problem
+            for index, item in enumerate(value)
+            for problem in _problems(item, item_type, _join(path, index), root)
         ]
     is_mapping, value_type = _mapping_value(annotation)
     if is_mapping:
         if not isinstance(value, Mapping):
             return [f"{where}: expected a mapping, got {value!r}"]
-        return [problem for key, item in value.items() for problem in _problems(item, value_type, _join(path, key))]
+        return [
+            problem for key, item in value.items() for problem in _problems(item, value_type, _join(path, key), root)
+        ]
     return _scalar_problems(value, annotation, where)
 
 

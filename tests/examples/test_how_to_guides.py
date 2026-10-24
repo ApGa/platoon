@@ -216,6 +216,113 @@ def test_links_and_anchors_resolve(guide):
         ("platoon/train/sampling.py", "f\"environments[{most.label}]'s {most.tasks} training tasks are each drawn"),
         ("platoon/train/sampling.py", "f\"slots) gives it about {reached:.0f} of the run's {slots} task slots"),
         ("platoon/train/sampling.py", 'f"{entry.tasks - reached:.0f} of them never train; {_FIX}"'),
+        ("platoon/train/samplers.py", "is not one of {', '.join(map(repr, core))}, a name an environment's package"),
+        ("platoon/train/samplers.py", "shares a run's slots among its entries; an entry's sampler chooses among the"),
+        ("platoon/train/samplers.py", 'f"explore: must be between 0 and 1, got {explore!r}"'),
+        (
+            "platoon/train/samplers.py",
+            '"run itself, with no entry slots, so it asks no entry\'s sampler; leave it out, or set "',
+        ),
+        ("platoon/train/samplers.py", "hands no slots to entries (its entry_slots is "),
+        (
+            "platoon/train/samplers.py",
+            "every training task of the run by its statistics, with no entry's share, so it takes no weights",
+        ),
+        (
+            "platoon/train/samplers.py",
+            "chooses the tasks whose next group is likely to mix passes and failures, which a group",
+        ),
+        ("platoon/train/samplers.py", 'f"{where}: {name} hands slots to entries, which only the run\'s sampler does"'),
+        (
+            "platoon/train/samplers.py",
+            "the run's per-task statistics are not available (they stopped, or never started)",
+        ),
+        ("platoon/options.py", "f\"{where}: {self.name} takes no options; leave {where.rsplit('.', 1)[-1]} out\""),
+        ("platoon/train/sampler_api.py", 'f"unknown task sampler {ref!r}"'),
+        ("platoon/train/sampler_api.py", 'f"{ref} does not import ({type(exc).__name__}: {exc})"'),
+        ("platoon/train/sampler_api.py", 'f"{ref} is not a task sampler: a class with next(ctx), state_dict() and'),
+        ("platoon/train/sampler_api.py", 'f"{ref} hands slots to entries and is adaptive; in this release only a'),
+        (
+            "platoon/train/sampler_runtime.py",
+            '"Task sampler %s raised at decision %d (%s: %s): the run draws a fallback',
+        ),
+        ("platoon/train/sampler_runtime.py", 'f"decision {decision} answered {_brief(answer)}, which it may not"'),
+        ("platoon/train/sampler_runtime.py", '"The state that task sampler %s saved does not load (%s: %s): it starts'),
+        ("platoon/train/sampler_api.py", 'f"task sampler {sampler}: {message}"'),
+        ("platoon/train/auto.py", '"environments[%s]: task ids repeat (%s%s): %s draws by task id, so only the first'),
+        (
+            "platoon/train/sampling.py",
+            "f\"environments[{label}].task_sampler: {old.get('task_sampler', 'uniform')} -> \"",
+        ),
+        ("platoon/train/tinker/rl.py", "entry and adaptive samplers need AutoDataset.training's sampling, which"),
+        ("platoon/train/sampler_runtime.py", "its metric %r is one the dispatcher writes itself under the sampler's"),
+        ("platoon/train/tinker/rl.py", '"Resuming from checkpoint %s: %s; each draw drawn again takes the first row'),
+        (
+            "platoon/train/tinker/dispatcher.py",
+            'f"cannot read the outstanding draws\' rows: {type(exc).__name__}: {exc}"',
+        ),
+        ("platoon/train/tinker/dispatcher.py", 'f"cannot read the tokens: {exc}"'),
+        # Group admission (RFC 0019's M5): troubleshooting.md's rows.
+        (
+            "platoon/train/admissions.py",
+            "is not one of {', '.join(map(repr, RULES))}, a name an environment's package registers, or",
+        ),
+        ("platoon/train/admission_api.py", 'f"unknown group admission rule {ref!r}"'),
+        ("platoon/train/admissions.py", 'f"band: must be two numbers lo < hi between 0 and 1, got {shown!r}"'),
+        ("platoon/train/admissions.py", "an entry's options go with the rule it sets: set {where}.group_admission"),
+        (
+            "platoon/train/admission_api.py",
+            '"must be a finite number of at least 1 (a step under a group admission rule counts at most this many "',
+        ),
+        (
+            "platoon/train/admissions.py",
+            'f"train.num_minibatches: {minibatches} takes {minibatches} optimizer steps a batch, and a group admission',
+        ),
+        (
+            "platoon/train/tinker/config_defs.py",
+            '"when_short": "not in this release: a short step trains the groups it admitted"',
+        ),
+        (
+            "platoon/train/tinker/config_defs.py",
+            '"on_stale": "not in this release: a stale group is dropped, and under a group admission rule the step',
+        ),
+        (
+            "platoon/train/admissions.py",
+            'f"{where}: {choice.name} rejects the groups whose workflow\'s verdict says they train nothing; the "',
+        ),
+        ("platoon/train/admission_api.py", 'f"{ref} does not import ({type(exc).__name__}: {exc})"'),
+        ("platoon/train/admission_api.py", 'f"{ref} is not a group admission rule: a class with admit(group, stats)"'),
+        (
+            "platoon/train/admissions.py",
+            'f"train.loss_fn: {loss} with loss_fn_config keys {keys} may train terms that do not depend on the',
+        ),
+        (
+            "platoon/train/admissions.py",
+            '"Group admission rule %s failed on the group of task %s (%s: %s): the group is admitted, and "',
+        ),
+        (
+            "platoon/train/admissions.py",
+            '"Group admission rule %s admits the groups of environments[%s] whose output carries no verdict "',
+        ),
+        (
+            "platoon/train/admissions.py",
+            '"Batch %s trains %d admitted groups, fewer than train.batch_size (%d): it counted %d groups, its cap "',
+        ),
+        (
+            "platoon/train/admissions.py",
+            '"Batch %s admitted no group: of the groups it dequeued, %s, and it counted %d toward its cap, so it "',
+        ),
+        (
+            "platoon/train/admissions.py",
+            'f"{total.rejected} were rejected, {total.stale} stale and {total.failed} failed"',
+        ),
+        ("platoon/train/admissions.py", '"Most of them failed: see the failed groups\' errors, which no rule decides"'),
+        (
+            "platoon/train/admissions.py",
+            '"Batch %s has counted %d groups and admitted %d of train.batch_size (%d); it waits for more, up to %d "',
+        ),
+        ("platoon/train/sampling.py", "f\"{where}.group_admission: {old.get('rule')} -> {new.get('rule')}\""),
+        ("platoon/train/tinker/rl.py", 'f"position {dispatcher.next_position}, where its row says it stood"'),
     ],
 )
 def test_the_quoted_messages_and_defaults_are_still_in_the_code(source, fragment):

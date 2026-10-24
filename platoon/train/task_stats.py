@@ -58,7 +58,7 @@ from collections import Counter, deque
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +75,10 @@ VERDICTS = (
     "unknown",
 )
 # What becomes of a draw: a committed step consumed its group, dropped it as stale, or found that its workflow failed;
-# a capped label's full backlog skipped its row; or a resume found it outstanding and could not draw it again (its task
-# left the pool, or the checkpoint saved no state of the dispatcher's draws).
-FATES = ("consumed", "stale", "failed", "skipped", "lost")
+# a capped label's full backlog skipped its row; a resume found it outstanding and could not draw it again (its task
+# left the pool, or the checkpoint saved no state of the dispatcher's draws); or a group admission rule rejected its
+# group when it settled (platoon.train.admissions), the last so that the other fates keep their places.
+FATES = ("consumed", "stale", "failed", "skipped", "lost", "rejected")
 # Policy versions after which a group's evidence weighs half.
 HALF_LIFE_VERSIONS = 32.0
 # The total weight of a task's prior, centered on its entry's pass rate.
@@ -122,9 +123,11 @@ class MemberResult:
     disposition: str
     # The reward key its root trained, if any.
     reward_key: str | None
-    # Its root's steps and output tokens, and its rollout's seconds, when known.
+    # Its root's steps, when known.
     steps: int | None
+    # Its root's output tokens, when known.
     output_tokens: int | None
+    # Its rollout's seconds, when known.
     seconds: float | None
     # The oldest and newest policy version its datums sampled, by policy.
     versions: Mapping[str, tuple[int, int]] = field(default_factory=dict)
@@ -139,6 +142,8 @@ class MemberResult:
         return self.valid and self.scored is not None and self.scored >= (1.0 if self.flag else threshold)
 
     def to_json(self) -> dict[str, Any]:
+        """The member as JSON data, as its group's record keeps it (:meth:`from_json` reads it back)."""
+
         return {
             "reward": self.reward,
             "scored": self.scored,
@@ -180,23 +185,34 @@ def _number(value: Any) -> float | None:
 class GroupRecord:
     """One settled group: which draw it was, and what its members did."""
 
-    # Which start of the run drew it, and its draw's number within that start: (start, seq) is unique in a run.
+    # Which start of the run drew it: (start, seq) is unique in a run.
     start: int
+    # Its draw's number within that start.
     seq: int
+    # The task it ran.
     task_id: str
-    # The environment entry it ran (its label), and its labels: {label column: label}.
+    # The environment entry it ran (its label).
     entry: str | None
+    # Its labels: {label column: label}.
     labels: Mapping[str, str]
     # The harness it ran, when known.
     harness: str | None
+    # How many rollouts the group ran.
     group_size: int
-    # What drew it (the run's task sampler) and why, with the draw's score and its place in a static order.
+    # The task sampler that drew it: the run's sampler as the config names it (train.task_sampler, "auto" by
+    # default), or an entry's, "<sampler>@<entry>" ("uniform@quick", "pass_rate@hard").
     sampler: str
+    # Why it was drawn: "order" for a static order's draw, "explore" or "exploit" for pass_rate's, "fallback" for one
+    # the dispatcher drew after the sampler's decision failed, "reissue" for a draw a resume drew again, or a custom
+    # sampler's own.
     reason: str
+    # The sampler's score of the draw, None without one (pass_rate's: the chance it predicted that the group trains).
     score: float | None
+    # The draw's place in the run's order; a reissued draw keeps its old one.
     position: int | None
     # The policy versions when it was drawn, by policy.
     drawn_at: Mapping[str, int]
+    # What each of its rollouts did.
     members: tuple[MemberResult, ...]
     # The workflow's verdict (VERDICTS).
     verdict: str
@@ -235,6 +251,8 @@ class GroupRecord:
         return "uniform_mixed"
 
     def to_json(self) -> dict[str, Any]:
+        """The record as JSON data, as a checkpoint's kept groups keep it (:meth:`from_json` reads it back)."""
+
         return {
             "start": self.start,
             "seq": self.seq,
@@ -278,14 +296,23 @@ class GroupRecord:
 class GroupSummary:
     """One of a task's newest groups, as its history keeps it."""
 
+    # Which start of the run drew it.
     start: int
+    # Its draw's number within that start.
     seq: int
+    # The policy version of its oldest datum, None without one.
     version: int | None
+    # Its valid members.
     valid: int
+    # Its members that passed.
     passes: int
+    # The mean of its valid members' trained rewards, None without one.
     reward_mean: float | None
+    # The workflow's verdict (VERDICTS).
     verdict: str
+    # The mean of its members' steps, when known.
     steps: float | None
+    # The mean of its members' seconds, when known.
     seconds: float | None
 
 
@@ -312,6 +339,8 @@ class DecayedCounts:
         self.version = version
 
     def add(self, passes: float, fails: float, version: int) -> None:
+        """Count ``passes`` and ``fails`` of policy version ``version``."""
+
         if self.version is None or version >= self.version:
             weight = decay(version - self.version, self.half_life) if self.version is not None else 1.0
             self.passes, self.fails = self.passes * weight + passes, self.fails * weight + fails
@@ -330,10 +359,14 @@ class DecayedCounts:
         return self.passes * weight, self.fails * weight
 
     def to_json(self) -> list[Any]:
+        """``[passes, fails, version]``, as a snapshot keeps them."""
+
         return [self.passes, self.fails, self.version]
 
     @classmethod
     def from_json(cls, data: Sequence[Any], half_life: float | None) -> DecayedCounts:
+        """The counts :meth:`to_json` wrote, decaying with ``half_life``."""
+
         passes, fails, version = data
         return cls(half_life, float(passes), float(fails), None if version is None else int(version))
 
@@ -345,17 +378,31 @@ class DecayedMean:
         self._counts = DecayedCounts(half_life, total, weight, version)
 
     def add(self, value: float, version: int) -> None:
+        """Count a term ``value`` of policy version ``version``."""
+
         self._counts.add(value, 1.0, version)
 
     def at(self, now: int) -> float | None:
+        """The mean as its terms weigh at policy version ``now``; None before any."""
+
         total, weight = self._counts.at(now)
         return total / weight if weight > 0 else None
 
     def to_json(self) -> list[Any]:
+        """``[total, weight, version]``, as a snapshot keeps them."""
+
         return self._counts.to_json()
+
+    def copy(self) -> DecayedMean:
+        """A mean of its own with the same terms."""
+
+        counts = self._counts
+        return DecayedMean(counts.half_life, counts.passes, counts.fails, counts.version)
 
     @classmethod
     def from_json(cls, data: Sequence[Any], half_life: float | None) -> DecayedMean:
+        """The mean :meth:`to_json` wrote, decaying with ``half_life``."""
+
         counts = DecayedCounts.from_json(data, half_life)
         return cls(half_life, counts.passes, counts.fails, counts.version)
 
@@ -400,10 +447,23 @@ _METRICS = ("steps", "output_tokens", "seconds", "reward")
 
 @dataclass(frozen=True)
 class EntryInfo:
-    """What the store reads of an environment entry: its group size and the reward that counts as a pass."""
+    """What platoon knows of an environment entry: the store reads its group size and the reward that counts as a
+    pass, and task samplers the rest (``SamplerSetup.entries``)."""
 
+    # Its training groups' size.
     group_size: int
+    # The reward at or above which a rollout passes.
     success_threshold: float = 1.0
+    # Its label (the entry's name).
+    name: str | None = None
+    # Its weight as a number: weight: tasks reads as its training tasks' number.
+    weight: float | None = None
+    # Its seed.
+    seed: int = 0
+    # Its index among the run's entries with training tasks.
+    index: int | None = None
+    # Its training tasks' ids, in listing order.
+    task_ids: tuple[str, ...] = ()
 
 
 class _Totals:
@@ -530,19 +590,49 @@ class _Task(_Totals):
 _SUMMARY_FIELDS = tuple(GroupSummary.__dataclass_fields__)
 
 
+_new_tuple = tuple.__new__
+
+
+class TaskCounts(NamedTuple):
+    """A training task's counts, read without building its :class:`TaskStats` (:meth:`TaskStatsStore.counts`): a
+    tuple, whose fields a decision over every task of a large pool reads and lets go, rather than keeping one per
+    task."""
+
+    # Its settled groups.
+    groups: int
+    # Its draws not yet consumed by a committed step.
+    outstanding: int
+    # All its draws.
+    drawn: int
+    # Groups in a row, up to the newest, whose verdict was uniform.
+    uniform_streak: int
+    # Groups in a row, up to the newest, that had no valid member.
+    no_evidence_streak: int
+    # The policy version its decayed evidence stands at (that of its newest evidence); None before any.
+    evidence_version: int | None
+
+
 @dataclass(frozen=True)
 class GroupTotals:
     """What an entry's or a label's groups add up to."""
 
+    # The settled groups.
     groups: int
     # The groups whose workflow said what each member did: a custom workflow's plain list of datums says nothing.
     reported_groups: int
+    # Their valid members.
     attempts: int
+    # Their members that passed.
     passes: int
+    # The sum of their valid members' trained rewards.
     reward_sum: float
+    # The groups that trained (their verdict was trained).
     informative_groups: int
+    # The groups whose rewards were all alike (their verdict was uniform), every valid member of which passed.
     all_pass_groups: int
+    # The uniform groups no valid member of which passed.
     all_fail_groups: int
+    # The other uniform groups: their members mixed passes and failures, yet their rewards were all alike.
     uniform_mixed_groups: int
     # Decayed (passes, fails) and their version.
     decayed: DecayedCounts
@@ -555,20 +645,28 @@ class GroupTotals:
 
 @dataclass(frozen=True)
 class TaskStats(GroupTotals):
-    """One training task's statistics, read-only."""
+    """One training task's statistics, read-only: what its groups add up to (the fields of :class:`GroupTotals`), and
+    the rest below."""
 
+    # The task.
     task_id: str
+    # Its environment entry's label.
     entry: str | None
+    # Its label, its value of the run's label column.
     label: str | None
-    # Groups in a row, up to the newest, whose verdict was uniform; and that had no valid member.
+    # Groups in a row, up to the newest, whose verdict was uniform.
     uniform_streak: int
+    # Groups in a row, up to the newest, that had no valid member.
     no_evidence_streak: int
-    # Draws not yet consumed by a committed step, all its draws, and what became of them (FATES).
+    # Its draws not yet consumed by a committed step.
     outstanding: int
+    # All its draws.
     drawn: int
+    # What became of its draws, by fate (FATES).
     fates: Mapping[str, int]
     # Its newest groups, oldest first.
     history: tuple[GroupSummary, ...]
+    # The decayed means of its members' steps, output_tokens, seconds and trained reward, by name (metric).
     means: Mapping[str, DecayedMean]
 
     def metric(self, name: str, *, now: int) -> float | None:
@@ -598,7 +696,8 @@ def _totals(totals: _Totals) -> dict[str, Any]:
 
 
 class TaskStatsStore:
-    """The per-task statistics of a run's training tasks (see the module docstring).
+    """The per-task statistics of a run's training tasks: what each task's groups add up to, its streaks and newest
+    groups, its evidence decayed by policy version, and what became of each of its draws (RFC 0019, section 3.3).
 
     ``tasks`` are the run's training tasks, in pool order: ``(task id, entry, label)`` each, the entry its environment
     entry's label and the label its value of the run's label column.  ``entries`` say each entry's group size and
@@ -632,6 +731,8 @@ class TaskStatsStore:
             if task.label is not None:
                 self._label_totals.setdefault(task.label, _Totals(half_life))
         self._run_totals = _Totals(half_life)
+        # Each entry's prior pass rate at a policy version, (version, rate), until a group settles (posterior).
+        self._rates: dict[str | None, tuple[int, float]] = {}
         # Draws no committed step has consumed: (start, seq) -> (task id, position).
         self._outstanding: dict[tuple[int, int], tuple[str, int | None]] = {}
 
@@ -649,6 +750,7 @@ class TaskStatsStore:
     def settle(self, record: GroupRecord) -> None:
         """Count a settled group: its task's record, its entry's totals and its label's."""
 
+        self._rates.clear()
         task = self._tasks.get(record.task_id)
         threshold = self.threshold(task.entry if task is not None else record.entry)
         version = record.oldest_version()
@@ -698,10 +800,14 @@ class TaskStatsStore:
         return lost
 
     def threshold(self, entry: str | None) -> float:
+        """The reward at or above which a rollout of entry ``entry`` passes (1.0 for a task of no entry)."""
+
         info = self.entries.get(entry) if entry is not None else None
         return info.success_threshold if info is not None else 1.0
 
     def group_size(self, entry: str | None) -> int:
+        """Entry ``entry``'s training group size (the run's for a task of no entry)."""
+
         info = self.entries.get(entry) if entry is not None else None
         return info.group_size if info is not None else self.default_group_size
 
@@ -714,9 +820,14 @@ class TaskStatsStore:
         return [(start, seq, task_id, position) for (start, seq), (task_id, position) in self._outstanding.items()]
 
     def task_ids(self) -> list[str]:
+        """Every training task, in pool order."""
+
         return list(self._tasks)
 
     def task(self, task_id: str) -> TaskStats:
+        """The task's whole record, built afresh (:meth:`counts` is the cheap read).  ``KeyError`` for a task the
+        store does not hold."""
+
         task = self._tasks[task_id]
         return TaskStats(
             **_totals(task),
@@ -729,16 +840,40 @@ class TaskStatsStore:
             drawn=task.drawn,
             fates=dict(task.fates),
             history=tuple(task.history),
-            means={name: DecayedMean.from_json(mean.to_json(), self.half_life) for name, mean in task.metrics.items()},
+            means={name: mean.copy() for name, mean in task.metrics.items()},
+        )
+
+    def counts(self, task_id: str) -> TaskCounts:
+        """The task's counts and streaks, read from its record without building anything: the cheap read of a task,
+        which a task sampler makes for every task of its pool (:meth:`task` builds the whole record)."""
+
+        task = self._tasks[task_id]
+        # Built as TaskCounts._make builds it, without the call of its __new__: a decision reads every task's.
+        return _new_tuple(
+            TaskCounts,
+            (
+                task.groups,
+                task.outstanding,
+                task.drawn,
+                task.uniform_streak,
+                task.no_evidence_streak,
+                task.evidence.version,
+            ),
         )
 
     def entry(self, name: str) -> GroupTotals:
+        """What the groups of entry ``name`` add up to."""
+
         return GroupTotals(**_totals(self._entry_totals[name]))
 
     def label(self, label: str) -> GroupTotals:
+        """What the groups of the tasks labelled ``label`` add up to."""
+
         return GroupTotals(**_totals(self._label_totals[label]))
 
     def labels(self) -> list[str]:
+        """The labels of the training tasks."""
+
         return list(self._label_totals)
 
     def posterior(self, task_id: str, *, now: int) -> tuple[float, float]:
@@ -746,9 +881,14 @@ class TaskStatsStore:
         failures over a prior centered on its entry's decayed pass rate (the run's, for a task of no entry)."""
 
         task = self._tasks[task_id]
-        prior = self._entry_totals.get(task.entry) if task.entry is not None else None
-        passes, fails = (prior if prior is not None else self._run_totals).evidence.at(now)
-        rate = (1.0 + passes) / (2.0 + passes + fails)
+        cached = self._rates.get(task.entry)
+        if cached is not None and cached[0] == now:
+            rate = cached[1]
+        else:  # the entry's rate, read once per version and settle: a decision reads every task's posterior
+            prior = self._entry_totals.get(task.entry) if task.entry is not None else None
+            passes, fails = (prior if prior is not None else self._run_totals).evidence.at(now)
+            rate = (1.0 + passes) / (2.0 + passes + fails)
+            self._rates[task.entry] = (now, rate)
         own_passes, own_fails = task.evidence.at(now)
         return self.prior_strength * rate + own_passes, self.prior_strength * (1.0 - rate) + own_fails
 
@@ -847,6 +987,7 @@ class TaskStatsStore:
         outstanding draws.  A task the snapshot does not hold starts empty; one that left the pool is dropped.  A
         ``ValueError`` for data it cannot read."""
 
+        self._rates.clear()
         try:
             if data.get("format") != SNAPSHOT_FORMAT:
                 raise ValueError(f"format {data.get('format')!r}, not {SNAPSHOT_FORMAT}")

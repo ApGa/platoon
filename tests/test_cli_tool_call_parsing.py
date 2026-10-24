@@ -149,10 +149,13 @@ def test_the_parser_joins_the_components_in_each_lock(tmp_path, no_tinker, choic
     cli.main(["rollout", str(evaluation), "--task", "solved", "--output-dir", str(tmp_path / "debug")])
 
     components = {(kind, ENVIRONMENT[kind]) for kind in ("dataset_loader", "task_loader", "rollout")}
-    for lock_path in (tmp_path / "logs/exp/trial/lock.json", tmp_path / "out/lock.json", tmp_path / "debug/lock.json"):
+    # A training run also records the task sampler it draws its tasks with.
+    trains = {**dict.fromkeys(("out", "debug"), components), "logs/exp/trial": components | {("task_sampler", "auto")}}
+    for where, expected in trains.items():
+        lock_path = tmp_path / where / "lock.json"
         lock = json.loads(lock_path.read_text())
         assert lock["tool_call_parsing"]["parser"] == "hermes", lock_path
-        assert {(component["kind"], component["ref"]) for component in lock["components"]} == components, lock_path
+        assert {(component["kind"], component["ref"]) for component in lock["components"]} == expected, lock_path
         assert "extensions" in lock, lock_path
 
 

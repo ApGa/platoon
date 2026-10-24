@@ -15,6 +15,7 @@ import importlib
 import inspect
 import io
 import json
+import os
 import re
 import sys
 import tomllib
@@ -100,10 +101,14 @@ def snippets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callab
 
 
 def _unregister(packages: set[str]) -> None:
-    """Drop the function harnesses and programs that the snippet ``packages`` registered, and nothing else."""
+    """Drop the function harnesses, programs, task samplers and group admission rules that the snippet ``packages``
+    registered, and nothing else."""
 
     from platoon import programs
     from platoon.harness import function
+    from platoon.registry import get_registry
+    from platoon.train.admission_api import REGISTRY_KIND as ADMISSION_KIND
+    from platoon.train.sampler_api import REGISTRY_KIND
 
     def ours(fn: Any) -> bool:
         return str(getattr(fn, "__module__", "")).split(".")[0] in packages
@@ -114,6 +119,9 @@ def _unregister(packages: set[str]) -> None:
     with programs._lock:
         for name in [name for name, fn in programs._programs.items() if ours(fn)]:
             del programs._programs[name]
+    for kind in (REGISTRY_KIND, ADMISSION_KIND):
+        registry = get_registry(kind)
+        registry._items = {name: item for name, item in registry._items.items() if not ours(item.value)}
 
 
 def run_test_functions(code: str, name: str) -> list[str]:
@@ -530,3 +538,77 @@ def test_the_tool_call_parser_interface_the_renderer_guide_names_exists() -> Non
     assert "`parse(text, *, tools=None, in_reasoning=False)`" in text
     parameters = inspect.signature(tool_parsers.ToolCallParser.parse).parameters
     assert {"text", "tools", "in_reasoning"} <= set(parameters)
+
+
+# --------------------------------------------------------------------------- task-samplers.md
+
+
+def test_the_worked_task_sampler_passes_the_conformance_check(snippets, monkeypatch, tmp_path) -> None:
+    """The guide's ``SkipSolved``, written out as its package, passes ``check_task_sampler`` at the entry level, by
+    ``module:Class`` (so that its decisions are replayed in processes with other hash seeds too) and by the name its
+    decorator registers; and the guide's test of it runs."""
+
+    from platoon.testing import check_task_sampler
+    from platoon.train.sampler_api import resolve_task_sampler
+
+    snippets("task-samplers.md", "# acme_curricula/samplers.py")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(tmp_path), *sys.path]))
+    check_task_sampler("acme_curricula.samplers:SkipSolved", options={"keep": 0.5}, levels=("entry",))
+    importlib.import_module("acme_curricula.samplers")
+    assert resolve_task_sampler("acme-skip-solved").__name__ == "SkipSolved"
+    check_task_sampler("acme-skip-solved", levels=("entry", "run"))
+    test = next(code for code in blocks("task-samplers.md", "python") if code.startswith("from platoon.testing"))
+    assert run_test_functions(test, "test_skip_solved") == ["test_skip_solved_keeps_the_contract"]
+
+
+# --------------------------------------------------------------------------- group-admission.md
+
+
+def test_the_worked_group_admission_rule_passes_the_conformance_check(snippets, monkeypatch, tmp_path) -> None:
+    """The guide's ``Quota``, written out as its package, passes ``check_group_admission`` by ``module:Class`` (so that
+    its answers are replayed in processes with other hash seeds too) and by the name its decorator registers; and the
+    guide's test of it runs."""
+
+    from platoon.testing import check_group_admission
+    from platoon.train.admission_api import resolve_group_admission
+
+    snippets("group-admission.md", "# acme_rules/quota.py")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(tmp_path), *sys.path]))
+    check_group_admission("acme_rules.quota:Quota", options={"limit": 4})
+    importlib.import_module("acme_rules.quota")
+    assert resolve_group_admission("acme-quota").__name__ == "Quota"
+    check_group_admission("acme-quota")
+    test = next(code for code in blocks("group-admission.md", "python") if code.startswith("from platoon.testing"))
+    assert run_test_functions(test, "test_quota") == ["test_the_quota_keeps_the_contract"]
+
+
+def _guide_tasks(config: Any, split: str) -> list[dict[str, Any]]:
+    """The tasks of the group admission guide's entries, as their dataset loader and rollout."""
+
+    return [{"task_id": f"t{index}"} for index in range(6)]
+
+
+def test_the_group_admission_guide_s_config_resolves_as_platoon_train_resolves_it(snippets, tmp_path) -> None:
+    """The guide's config, with its quota package written out (and each entry given tasks), loads and resolves as
+    ``platoon train`` resolves it: the run's ``informative`` decides ``easy``'s groups, ``hard``'s own ``acme-quota``
+    resolves from the entry's package, and both rules' options and checks pass."""
+
+    from platoon.extensions import run_components
+    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.utils.config import resolve_config
+
+    snippets("group-admission.md", "# acme_rules/quota.py")
+    [guide] = [code for code in blocks("group-admission.md", "yaml") if "acme-quota" in code]
+    data = yaml.safe_load(guide)
+    for entry in data["environments"]:
+        entry.update({"dataset_loader": f"{__name__}:_guide_tasks", "rollout": f"{__name__}:_guide_tasks"})
+    data["train"].update({"model_name": "m", "renderer_name": "r", "max_training_steps": 3})
+    data.update({"eval": {"every": 0}, "watchdog": {"enabled": False}, "log_path": str(tmp_path / "logs")})
+    path = tmp_path / "train.yaml"
+    path.write_text(yaml.safe_dump(data))
+    config = resolve_config(path, [], PlatoonTinkerRLTrainerConfig).config
+    records = [record for record in run_components(config) if record["kind"] == "group_admission"]
+    assert sorted((record["ref"], record["level"], record["environments"]) for record in records) == [
+        ("acme-quota", "entry", ["hard"]),
+        ("informative", "run", ["easy"]),
+    ]

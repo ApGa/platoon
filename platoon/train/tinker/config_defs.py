@@ -1,19 +1,19 @@
 import copy
 import dataclasses
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
 from platoon.config_defs import RolloutConfig
 from platoon.deprecations import DeprecatedKey, deprecated_keys, removed_hint
 from platoon.train import entry_settings
+from platoon.train.admission_api import DEFAULT_MAX_GROUPS_PER_STEP, max_groups_problem
 from platoon.train.components import (
     STRAGGLER_POLICY_KEY_REMOVED,
-    TASK_SAMPLERS,
-    TASKS_WEIGHT,
     EnvironmentConfig,
-    TaskSampler,
+    _admission_checks,
+    _sampler_checks,
     normalize_environment_configs,
 )
 from platoon.train.tinker.checkpoint_pruning import config_pruning_problems
@@ -315,6 +315,35 @@ _HOSTED_HINTS = {"hosted": HOSTED_MODELS_EVALUATE_ONLY, "backend": HOSTED_MODELS
 
 
 @dataclass
+class RefillConfig:
+    """``train.refill``: how far a step under a group admission rule (``train.group_admission``) refills its batch."""
+
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+        "when_short": "not in this release: a short step trains the groups it admitted"
+    }
+    # Its cap's checks, when the config loads beside its other problems (platoon.train.admissions).
+    VALUE_PROBLEMS: ClassVar[dict[str, Callable[[Any, Mapping[str, Any], Mapping[str, Any], str], list[str]]]] = {
+        "max_groups_per_step": lambda value, refill, root, path: _admission_checks().max_groups_problems(
+            value, refill, root, path
+        ),
+    }
+
+    # The most groups a step under a group admission rule counts, as a multiple of train.batch_size (each group it
+    # dequeues, and each marker of a group rejected while it was current): it trains the first batch_size admitted
+    # groups, and once it has counted ceil(max_groups_per_step × batch_size) it closes and trains what it admitted. A
+    # finite number of at least 1. No null: without a cap, a stretch in which every group is rejected (a pool the policy
+    # has solved) would never close a step, so set a large number instead; a step that keeps waiting warns each time its
+    # count passes another 10 batches. It bounds what a step counts, not the groups that start while the trainer
+    # trains, which the horizon and train.max_concurrent_rollouts bound. No effect when every rule is all (it is still
+    # checked when the config loads).
+    max_groups_per_step: float = DEFAULT_MAX_GROUPS_PER_STEP
+
+    def __post_init__(self) -> None:
+        if (problem := max_groups_problem(self.max_groups_per_step)) is not None:
+            raise ValueError(f"train.refill.max_groups_per_step: {problem}")
+
+
+@dataclass
 class TrainConfig:
     """The ``train:`` section: the model, the batch, the loss, the optimizer and the rollout workflow."""
 
@@ -327,10 +356,30 @@ class TrainConfig:
             "train.max_concurrent_rollouts, which counts rollouts, not groups: this value × "
             "train.workflow_config.group_size",
         ),
+        "on_stale": "not in this release: a stale group is dropped, and under a group admission rule the step takes "
+        "another in its place",
     }
     # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
     DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
         "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
+    }
+    # The task sampler's name and options, checked when the config loads beside its other problems: a name that no
+    # package could register, options for a built-in sampler that takes none, and pass_rate's options
+    # (platoon.train.samplers).
+    VALUE_PROBLEMS: ClassVar[dict[str, Callable[[Any, Mapping[str, Any], Mapping[str, Any], str], list[str]]]] = {
+        "task_sampler": lambda value, train, root, path: _sampler_checks().run_sampler_problems(
+            value, train, root, path
+        ),
+        "task_sampler_options": lambda value, train, root, path: _sampler_checks().run_options_problems(
+            value, train, root, path
+        ),
+        # The group admission rule's name and options likewise (platoon.train.admissions).
+        "group_admission": lambda value, train, root, path: _admission_checks().run_rule_problems(
+            value, train, root, path
+        ),
+        "group_admission_options": lambda value, train, root, path: _admission_checks().run_options_problems(
+            value, train, root, path
+        ),
     }
 
     # Hugging Face model name of the base model, which the Tinker service trains.
@@ -399,15 +448,40 @@ class TrainConfig:
     # tasks in the weighted fair order of its environments (each shuffled with its ``seed``), in epochs of its tasks
     # filled to whole batches, each epoch going on with the order where the one before it stopped; a single
     # environment's tasks in seeded shuffled passes by the dataloader (seed 42), each epoch the whole batches they
-    # fill, its last partial batch starting the next epoch.  ``weighted``: a single environment's tasks too take the
-    # weighted order (shuffled with its ``seed``, last batch filled).  ``uniform``: every training task of every entry
-    # in seeded shuffled passes (seed 42; a single environment's in the batches ``auto`` draws), with no entry's share,
-    # in epochs of its tasks filled to whole batches; it takes no entry's numeric ``weight``.
-    task_sampler: TaskSampler | None = None
+    # fill, its last partial batch starting the next epoch, unless the entry sets a ``task_sampler`` of its own (then
+    # as ``weighted``).  ``weighted``: each slot of the order goes to an entry by weight, and the entry's own
+    # ``task_sampler`` (``uniform`` by default: its tasks shuffled with its ``seed``) chooses the task that fills it; a
+    # single environment's tasks too take this order (last batch filled).  ``uniform``: every training task of every
+    # entry in seeded shuffled passes (seed 42; a single environment's in the batches ``auto`` draws), with no entry's
+    # share, in epochs of its tasks filled to whole batches; it takes no entry's numeric ``weight``.  ``pass_rate``
+    # (experimental): each group's task chosen among every training task of the run by its pass rate in the per-task
+    # statistics, when the group can start; it takes no numeric ``weight``, and setting ``pass_rate`` on the entries
+    # under ``weighted`` keeps each entry's share instead.  Also a name an entry's ``package`` registers with
+    # ``@task_sampler``, or ``module:Class``.  The run's ``uniform`` and ``pass_rate`` ask no entry's sampler.  See
+    # docs/how-to/train-and-eval.md.
+    task_sampler: str | None = None
+    # Options of task_sampler, checked against its options when the config loads (pass_rate's: explore,
+    # max_draws_per_epoch, max_outstanding_per_task, candidates, seed); ``auto``, ``weighted`` and ``uniform`` take
+    # none.
+    task_sampler_options: dict[str, Any] = field(default_factory=dict)
     # The former name of ``task_sampler``, read as that key is, with the values it had (``uniform`` came after it).
     # Beside another ``task_sampler``, its former default ``auto`` (as a dump of platoon 0.2.0's ``config show
     # --defaults`` spells it) is ignored, with a warning, and ``weighted`` is an error.
     task_order: Literal["auto", "weighted"] | None = None
+    # Which settled training groups count toward the batch (experimental): ``all`` admits every group, as before;
+    # ``informative`` rejects the groups whose workflow's verdict says they train nothing (their rollouts scored alike,
+    # or no datum) and, with ``band``, those whose pass rate is outside it. A rejected group's place is refilled (at
+    # once, unless it carried no datum), so a step trains the first batch_size admitted groups it dequeues that are not
+    # stale, within train.refill's cap, and a short step trains what it admitted. Also a name an entry's ``package``
+    # registers with ``@group_admission``, or ``module:Class``. An environment entry may set its own
+    # (``environments[].group_admission``). Under a rule other than ``all``, num_minibatches must be 1. See
+    # docs/how-to/train-and-eval.md.
+    group_admission: str = "all"
+    # Options of group_admission, checked against its options when the config loads (informative's: band, two numbers
+    # 0 <= lo < hi <= 1); ``all`` takes none.
+    group_admission_options: dict[str, Any] = field(default_factory=dict)
+    # How far a step under a group admission rule refills its batch.
+    refill: RefillConfig = field(default_factory=RefillConfig)
 
     # Client-side deadline in seconds for a ``forward_backward`` result.  The client submits every microbatch up
     # front and the Tinker service runs them in order, so the first wait covers the whole optimizer step's
@@ -430,7 +504,7 @@ class TrainConfig:
                 f"train.sample_timeout_seconds must be a positive number of seconds or null, got {seconds!r}"
             )
         sampler, legacy = self.task_sampler, self.task_order
-        if legacy in TASK_SAMPLERS and legacy not in ("auto", "weighted"):  # a sampler that came after the rename
+        if legacy is not None and legacy not in ("auto", "weighted"):  # it takes the values it had before the rename
             raise ValueError(
                 f"train.task_order, the deprecated name of train.task_sampler, takes 'auto' or 'weighted', got "
                 f"{legacy!r}: set train.task_sampler instead"
@@ -449,9 +523,21 @@ class TrainConfig:
             )
         # The run's one sampler: the deprecated name's value until it is resolved here, then task_sampler's alone.
         sampler = sampler if sampler is not None else legacy if legacy is not None else "auto"
-        if sampler not in TASK_SAMPLERS:
-            raise ValueError(f"train.task_sampler must be one of {TASK_SAMPLERS}, got {sampler!r}")
+        if not isinstance(sampler, str) or not sampler:  # which names a sampler is the trainer config's to say
+            raise ValueError(f"train.task_sampler must name a task sampler, got {sampler!r}")
         self.task_sampler, self.task_order = sampler, None
+        if not isinstance(self.task_sampler_options, Mapping):
+            raise ValueError(f"train.task_sampler_options must be a mapping, got {self.task_sampler_options!r}")
+        self.task_sampler_options = copy.deepcopy(dict(self.task_sampler_options))
+        if not isinstance(self.group_admission, str) or not self.group_admission:
+            raise ValueError(f"train.group_admission must name a group admission rule, got {self.group_admission!r}")
+        if not isinstance(self.group_admission_options, Mapping):
+            raise ValueError(f"train.group_admission_options must be a mapping, got {self.group_admission_options!r}")
+        self.group_admission_options = copy.deepcopy(dict(self.group_admission_options))
+        if isinstance(self.refill, Mapping):  # a section built in Python from a mapping
+            self.refill = RefillConfig(**self.refill)
+        elif not isinstance(self.refill, RefillConfig):
+            raise ValueError(f"train.refill must be a mapping, got {self.refill!r}")
         label_by = self.label_by if self.label_by is not None else ENVIRONMENT_LABEL
         if not isinstance(label_by, str) or not label_by:
             raise ValueError(f"train.label_by must name a dataset column, got {label_by!r}")
@@ -706,24 +792,28 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
     problems.extend(entry_settings.problems(config))
     problems.extend(config_pruning_problems(config))
     problems.extend(task_sampler_problems(config))
+    problems.extend(admission_problems(config))
     return problems
 
 
 def task_sampler_problems(config: Any) -> list[str]:
-    """What ``train.task_sampler`` would leave unread, one entry each: under ``uniform``, an environment entry's
-    numeric ``weight``, since it draws every training task equally often whatever the entries' shares (``weight:
-    tasks``, every entry's default, is uniform's own share)."""
+    """What the config's task samplers refuse, one entry each (platoon.train.samplers): what ``train.task_sampler``
+    would leave unread (under ``uniform`` or ``pass_rate``, an entry's numeric ``weight``, since they draw among
+    every training task with no entry's share, and an entry's own ``task_sampler`` or ``task_sampler_options``, since
+    they hand no slots to the entries), and for a config built in code, which never passes the loader's checks, the
+    names and options the loader refuses."""
 
-    if getattr(getattr(config, "train", None), "task_sampler", None) != "uniform":
-        return []
-    return [
-        f"environments[{environment.label}].weight: {environment.weight}: train.task_sampler: uniform draws every "
-        "training task of every entry equally often, with no entry's share, so it takes no weights; leave weight out "
-        "(weight: tasks, the default, is uniform's own share), or set train.task_sampler: weighted to share the slots "
-        "by weight"
-        for environment in getattr(config, "environments", None) or []
-        if environment.weight != TASKS_WEIGHT
-    ]
+    from platoon.train.samplers import config_sampler_problems
+
+    return config_sampler_problems(config)
+
+
+def admission_problems(config: Any) -> list[str]:
+    """What the config's group admission keys refuse, one entry each (platoon.train.admissions): ``num_minibatches``
+    above 1 beside a rule other than ``all``, and for a config built in code, which never passes the loader's checks,
+    the names and options the loader refuses."""
+
+    return _admission_checks().config_admission_problems(config)
 
 
 @dataclass
@@ -762,5 +852,10 @@ class PlatoonTinkerRLTrainerConfig:
         self.environments = normalize_environment_configs(self.environments)
         # Each entry's own training settings, laid over the run's (platoon.train.entry_settings), and recovery
         # pruning, which keeps the checkpoints within the largest staleness bound of the run and its entries.
-        if problems := [*entry_settings.problems(self), *config_pruning_problems(self), *task_sampler_problems(self)]:
+        if problems := [
+            *entry_settings.problems(self),
+            *config_pruning_problems(self),
+            *task_sampler_problems(self),
+            *admission_problems(self),
+        ]:
             raise ConfigError(problems)

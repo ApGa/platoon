@@ -1,0 +1,1 @@
+{"format":1,"start":1,"sampler":"auto","fingerprint":{"task_sampler":"auto","batch_size":3,"label_by":"_platoon_environment","order":["quick","slow"],"entries":{"quick":{"weight":2,"tasks":6,"pool":"7f5e8a59137954c8","seed":3},"slow":{"weight":1,"tasks":4,"pool":"68fdc57760b3c155","seed":5}}},"next_position":0,"outstanding":[],"waiting":{},"kept":null}

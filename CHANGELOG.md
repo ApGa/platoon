@@ -4,6 +4,86 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
 
+## 0.4.0 (unreleased)
+
+### New features
+
+- **Task samplers you choose per environment, and an adaptive one (experimental).** Each environment entry may set
+  `task_sampler` and `task_sampler_options`: under `train.task_sampler: weighted` (a mixture's default), the run hands
+  each slot to an entry by weight, as before, and the entry's sampler chooses which of its tasks fills it. `uniform`,
+  the default, draws the entry's tasks in the seeded passes it always has; `pass_rate` chooses the task whose next
+  group is most likely to mix passes and failures, so that more groups train, from the per-task statistics: Thompson
+  sampling on each task's pass rate, with a fifth of the draws going to the tasks drawn least recently and at most
+  three draws of a task per pool-sized window. `train.task_sampler: pass_rate` chooses over every task of the run
+  instead. Each step logs what it drew and why, the informative share it predicted and the one it got, how
+  concentrated its draws are, and how long it took to decide (`train/sampler/...`). It is experimental: it becomes the
+  recommendation only after a GPU comparison with `uniform` shows more informative groups at an unchanged held-out
+  pass@1
+  ([Choose tasks by their pass rates](docs/how-to/train-and-eval.md#choose-tasks-by-their-pass-rates-experimental)).
+- **Write your own task sampler (experimental).** A sampler is a small class, registered with
+  `@task_sampler(name, options=...)` from an entry's `package`, or named as `module:Class`, at the run level or an
+  entry's, with typed options (`train.task_sampler_options`, or the entry's `task_sampler_options`) checked against its
+  schema before the run starts (core's samplers' already when the config loads) and recorded in `lock.json`. A sampler
+  that reads no statistics draws when the order reaches it, as the built-ins always have; one that reads them decides
+  when its group can start, among the tasks whose label has room, reproducibly from its seed and its decision count.
+  The API and the per-task statistics types it reads are in the new `platoon.experimental` module, and
+  `platoon.testing.check_task_sampler` checks a sampler against the contract
+  ([Write a task sampler](docs/extending/task-samplers.md)).
+- **Train only on the groups that carry signal, with refill (experimental).** `train.group_admission: informative` (or
+  an environment's own `group_admission`) decides when each training group settles whether it counts toward the batch: a
+  group whose workflow says it trains nothing (its rollouts scored alike, or it carried no datums) is rejected, and one
+  whose rollouts scored alike frees its place at once, so that another group starts while the trainer works (one without
+  datums, which can end at once, keeps its place until a step takes it). A step trains the first `batch_size` admitted
+  groups that are not stale, and stops waiting once it has counted `refill.max_groups_per_step` (3.0) times `batch_size`
+  groups, training what it admitted. `group_admission_options: {band: [lo, hi]}` also rejects groups whose pass rate is
+  outside the band. `all`, the default, admits every group, as before. A step then trains up to several times the
+  informative groups, and only those, at more rollouts a step: up to the cap's multiple of the groups it counts, and
+  where the trainer bounds the run, the groups that start while it trains, which the horizon and the rollout permits
+  bound, not the cap; each step logs what it admitted and rejected, and why (`train/admission/...`). Under a loss whose
+  objective is not zero at zero advantages, a rejected group's advantage-independent terms go too, and loading warns;
+  beside a rule, `num_minibatches` must be 1. Custom rules register with `@group_admission` or are named as
+  `module:Class`; the API is in `platoon.experimental`, and `platoon.testing.check_group_admission` checks a rule. It is
+  experimental: it becomes the recommendation only after a GPU comparison ([Train only on groups that carry
+  signal](docs/how-to/train-and-eval.md#train-only-on-groups-that-carry-signal-experimental), [Write a group admission
+  rule](docs/extending/group-admission.md)).
+
+### Changes
+
+- `train.task_sampler` takes registered names and `module:Class`. An unknown name is still refused when the config
+  loads, in the same report as the file's other problems, with a longer message that begins as before, unless an
+  entry names a `package` that could register it; it is then refused before the run starts.
+- A full checkpoint's `tasks/dispatch-*.json` is format 2: it adds the row each outstanding draw drew, the count and
+  state of each task sampler, the run's and each environment's under `weighted` (and `auto` for a mixture), and the
+  slots waiting for an environment's adaptive sampler. A resume reads platoon 0.3.0's format 1 as before, and goes on
+  exactly where its run stood; platoon 0.3.0 cannot resume exactly from a checkpoint that 0.4.0 wrote (it draws from
+  the checkpoint's batch, as from a checkpoint of 0.2)
+  ([Checkpoints and resume](docs/how-to/train-and-eval.md#checkpoints-and-resume)).
+- The per-task statistics record which task sampler drew each group, and why: `GroupRecord.sampler` names the
+  sampler that chose the task (the run's sampler as the config names it, or an entry's as `<sampler>@<entry>`, such as
+  `uniform@<entry>` for an environment's `uniform` under `weighted`), with the draw's `reason` and `score`, and so do
+  the draw events of `tasks/events.jsonl`, every one of them.
+- Every training run's `lock.json` records its task samplers, the run's and each entry's it asks, as components of
+  `kind: task_sampler` with their options, defaults included; and every run logs what its samplers drew since the last
+  step, by reason, and how long their decisions took (`train/sampler/draws`, `train/sampler/draws/<reason>`,
+  `train/sampler/decision_ms`, and an entry's under `train/sampler/environment/<entry>/`).
+- The per-task statistics take in settled groups in the order they were drawn, at each step's metrics, each full
+  checkpoint and each adaptive decision, not in the order they completed, so their values no longer depend on
+  completion order within a step.
+- The per-task statistics have a sixth fate, `rejected`, a group admission rule's: `platoon tasks show` prints it
+  after `lost`, and `platoon tasks export` has a `fate_rejected` column after `fate_lost`, so the five columns after it
+  (`group_size` to `newest_version`) move one place right. A rejection's `fate` event in `tasks/events.jsonl` names the
+  rule and its reason (`rule`, `admission`).
+- `GroupRolloutWorkflow` declares `gives_verdicts = True`; a workflow class of your own that gives each group a
+  verdict declares it too, so that `group_admission: informative` loads beside it.
+- A full checkpoint of a run under a group admission rule records in its row of `checkpoints.jsonl` where the order
+  stood (`next_position`): a resume that cannot read the checkpoint's state of the draws draws on from there, since
+  such a run's steps draw more positions than their batch.
+
+### Fixes
+
+- A resume under `train.task_sampler: uniform` draws again exactly the row it had drawn; it could take the listing's
+  form of the row, whose nested values differ in their empty keys.
+
 ## 0.3.1 (unreleased)
 
 ### Fixes

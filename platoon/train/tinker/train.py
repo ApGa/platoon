@@ -109,7 +109,11 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
         raise ConfigError(problems)
 
     trainer = PlatoonTinkerRLTrainer(
-        config=config, train_dataset=train_dataset, eval_dataset=eval_dataset, train_order=training.order
+        config=config,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        train_order=training.order,  # the epochs the trainer counts
+        train_sampling=training.sampling,  # the task samplers it draws through, which draw the order's rows
     )
     async with trainer:
         group_kwargs = {**worker_package_kwargs(workflow_cls, config), **label_kwargs(workflow_cls, config)}

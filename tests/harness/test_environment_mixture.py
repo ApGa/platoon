@@ -479,13 +479,24 @@ def test_uniform_takes_no_entry_weights(tmp_path):
 
 
 def test_an_unknown_task_sampler_is_refused():
-    from platoon.train.tinker.config_defs import TrainConfig
+    """A name that is neither core's nor ``module:Class``, while no entry names a package that could register it: the
+    trainer config refuses it with the line the loader reports, and AutoDataset, which resolves the run's sampler,
+    with resolution's message.  ``TrainConfig`` alone takes any name, which a package may register."""
 
-    with pytest.raises(ValueError, match="task_sampler must be one of"):
+    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, TrainConfig
+    from platoon.utils.config import ConfigError
+
+    with pytest.raises(ConfigError, match="unknown task sampler 'shuffled'"):
         AutoDataset.from_config(config(environment("a"), task_sampler="shuffled"), "train")
-    with pytest.raises(ValueError, match="task_sampler must be one of"):
-        TrainConfig(model_name="m", renderer_name="r", task_sampler="shuffled")
-    with pytest.raises(ValueError, match="task_sampler must be one of"):  # the deprecated name's value too
+    train = TrainConfig(model_name="m", renderer_name="r", task_sampler="shuffled")
+    assert train.task_sampler == "shuffled"
+    with pytest.raises(ConfigError) as error:
+        PlatoonTinkerRLTrainerConfig(train=train, log_path="runs")
+    assert error.value.problems == [
+        "train.task_sampler: 'shuffled' is not one of 'auto', 'weighted', 'uniform', 'pass_rate', a name an "
+        "environment's package registers, or module:Class"
+    ]
+    with pytest.raises(ValueError, match="takes 'auto' or 'weighted', got 'shuffled'"):  # the deprecated name's
         TrainConfig(model_name="m", renderer_name="r", task_order="shuffled")
     assert TrainConfig(model_name="m", renderer_name="r").task_sampler == "auto"
     # The deprecated name takes only the values it had: uniform came after it.
@@ -495,11 +506,21 @@ def test_an_unknown_task_sampler_is_refused():
 
 
 @pytest.mark.parametrize(
-    ("key", "values"), [("task_sampler", "'auto', 'weighted', 'uniform'"), ("task_order", "'auto', 'weighted'")]
+    ("key", "line"),
+    [
+        (
+            "task_sampler",
+            "train.task_sampler: 'random' is not one of 'auto', 'weighted', 'uniform', 'pass_rate', a name an "
+            "environment's package registers, or module:Class",
+        ),
+        ("task_order", "train.task_order: 'random' is not one of 'auto', 'weighted'"),
+    ],
 )
-def test_a_config_file_s_unknown_sampler_names_the_samplers_under_either_name(tmp_path, key, values):
-    """The message platoon gave for ``train.task_order`` before 0.3.0, also for its new name, whose null is ``auto``,
-    in a file and in an override; the deprecated name lists the values it takes, which ``uniform`` is not."""
+def test_a_config_file_s_unknown_sampler_names_the_samplers_under_either_name(tmp_path, key, line):
+    """An unknown sampler, in the config's one report, in a file and in an override: ``task_sampler``'s line names
+    core's samplers, a package's and ``module:Class``, for an override too, which parses it as any name; the deprecated
+    ``task_order`` lists the values it takes, which ``uniform`` is not, and its override keeps the parser's
+    message."""
 
     import warnings
 
@@ -511,10 +532,15 @@ def test_a_config_file_s_unknown_sampler_names_the_samplers_under_either_name(tm
     with warnings.catch_warnings(), pytest.raises(ConfigError) as error:
         warnings.simplefilter("ignore")  # task_order's deprecation
         resolve_config(path, [], PlatoonTinkerRLTrainerConfig)
-    assert f"train.{key}: 'random' is not one of {values}" in error.value.problems
+    assert line in error.value.problems
     path.write_text("train: {model_name: m, renderer_name: r}\nlog_path: runs\n")
-    with pytest.raises(ConfigError, match=rf"train\.{key} must be one of {values}, got 'random'"):
-        resolve_config(path, [f"train.{key}=random"], PlatoonTinkerRLTrainerConfig)
+    if key == "task_sampler":
+        with pytest.raises(ConfigError) as error:
+            resolve_config(path, [f"train.{key}=random"], PlatoonTinkerRLTrainerConfig)
+        assert line in error.value.problems
+    else:
+        with pytest.raises(ConfigError, match=rf"train\.{key} must be one of 'auto', 'weighted', got 'random'"):
+            resolve_config(path, [f"train.{key}=random"], PlatoonTinkerRLTrainerConfig)
 
 
 def test_task_order_is_the_deprecated_name_of_task_sampler():

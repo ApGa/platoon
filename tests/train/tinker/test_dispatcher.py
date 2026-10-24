@@ -22,8 +22,8 @@ from platoon.train.tinker import rl as rl_module
 from platoon.train.tinker.dispatcher import (
     POSITION_COLUMN,
     SEQ_COLUMN,
+    BoundDraw,
     Dispatcher,
-    Draw,
     plan_resume,
     read_state,
     save_state,
@@ -50,7 +50,7 @@ class _Recorder:
         self.draws: list[dict[str, Any]] = []
         self.skips: list[int] = []
 
-    def draw(self, row, *, seq, position, version, reissues=None) -> None:
+    def draw(self, row, *, seq, position, version, reissues=None, sampler=None, reason=None, score=None) -> None:
         self.draws.append({"seq": seq, "position": position, "version": version, "reissues": reissues})
 
     def skipped(self, row) -> None:
@@ -74,7 +74,7 @@ class _Harness:
         )
         self.results: asyncio.Queue[Any] = asyncio.Queue()
         self.dispatcher.bind(self.results)
-        self.started: list[Draw] = []
+        self.started: list[BoundDraw] = []
         self.gates: dict[tuple[int, int], asyncio.Event] = {}
         self.tasks: list[asyncio.Task] = []
         self.version = 0
@@ -91,7 +91,7 @@ class _Harness:
         self.tasks.append(task)
         return task
 
-    async def _group(self, draw: Draw, release) -> None:
+    async def _group(self, draw: BoundDraw, release) -> None:
         self.started.append(draw)
         self.versions[draw.key] = self.version  # what the group binds when it starts
         try:
@@ -102,7 +102,7 @@ class _Harness:
             release()
         self.dispatcher.settle(draw, draw)
 
-    def end(self, *draws: Draw) -> None:
+    def end(self, *draws: BoundDraw) -> None:
         for draw in draws:
             self.gates.setdefault(draw.key, asyncio.Event()).set()
 

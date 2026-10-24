@@ -454,7 +454,7 @@ class _Trainer:
 
     built: list[_Trainer] = []
 
-    def __init__(self, *, config, train_dataset, eval_dataset, train_order) -> None:
+    def __init__(self, *, config, train_dataset, eval_dataset, train_order, train_sampling=None) -> None:
         self.config = config
         self.model_info = SimpleNamespace(model_name="m", llm=SimpleNamespace(version=0))
         self.run_log_path = str(Path(config.log_path, config.stats.experiment_name, config.stats.trial_name))
