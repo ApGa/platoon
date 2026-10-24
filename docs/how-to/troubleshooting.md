@@ -454,6 +454,42 @@ What a run warns of about rollout permits and staleness, under either `train.per
 | `rollout worker <id> returned routing ids for only 2/4 model calls (R3 routing_handle coverage 0.500)` (or `... 0/4 ..., though the model service sent routing ids to earlier train rollouts`) | The service sends routing ids, but this rollout's model calls, or some of them, got none. A datum whose last model call got none has no `routing_handle`, so with a mixture-of-experts model it trains without routing replay, on a worse gradient that nothing else reports |
 | `rollout worker <id> got routing ids for 4/4 model calls, the first train rollout in this start of training to get any, after 3 rollout(s) without them (...)` | Either the service began to send routing ids, or the rollouts without them, the first three of which the line names, lost theirs. Their datums have no `routing_handle`; from then on, each rollout without routing ids is logged |
 
+## Rollouts are slow to start
+
+A rollout's start, from its group's start to its first model call, holds one-time work that platoon now does before
+the first rollout, and work that each rollout does again:
+
+- **The harness toolchain.** A CLI harness (`openhands`) runs from a toolchain, tens of thousands of files that are
+  copied once per node from the shared filesystem to node-local disk
+  ([Harness toolchains](sandboxes-and-harbor.md#harness-toolchains)). `platoon train` stages its toolchains while it
+  opens the training service and saves at launch, and starts no rollout, training's or an evaluation's, before that
+  is done; `platoon eval` does so while it lists its tasks. So the copy overlaps the launch save and the fork
+  server's start, and the first rollouts wait only for what it takes beyond those: the `Staged the toolchains` line
+  gives how long that was. The trainer waits ten minutes at most, and not past a shutdown request; the rollouts then
+  start and wait for the copy themselves, as before. A node that runs rollouts without such a start stages its copy
+  at its first rollout, as before.
+- **The rollout workers' fork server** (`rollout_isolation: process` with the default `worker_start_method:
+  forkserver`) starts as soon as the training client is open. Besides the worker's stack it imports what each
+  environment and harness imports when a rollout opens it, derived from the config: an ORS environment's module and
+  the openreward SDK (which pulls in anthropic, openai and opentelemetry), each function harness's module (CodeAct's
+  pulls in IPython), the programs and what `harness_rollout` imports. It also builds what each worker built: the
+  harness and program lookups, and an in-process ORS environment's task lists for the run's splits. A worker then
+  starts with all of it, instead of importing it again; with a hundred workers starting at once on a shared
+  filesystem that was most of a rollout's start. Workers started by `exec`, in-process rollouts and rollouts under
+  `worker_python_env_isolation` (which import their environments inside a Python overlay of their own) preload
+  nothing.
+
+| Message | Cause and fix |
+|---|---|
+| `Staging the toolchains openhands-1.54.0 on this node ahead of the first rollout`, then `toolchain openhands-1.54.0 at <copy>: copied (81.4s)` and `Staged the toolchains in 81.4s, 43.4s of it after the rest of the start-up: the rollouts start now` | The copy, once per node, and how long the trainer waited for it after its own start-up (the launch save, the fork server): the first rollouts started that much later. Each start and each resume in a new job copies again when the copy lives in the job's scratch (`$PBS_LOCALDIR`, `$SLURM_TMPDIR`). To keep it across jobs, set `PLATOON_TOOLCHAIN_CACHE` to a node-local directory that outlives the job: the next job's first staging then checks the copy (`... was staged by an earlier job, and its files still match its manifest (1.3s)`), hashing it again against the manifest's tree hash, instead of copying it. Old versions are not removed: delete them while no job uses them |
+| `Starting the rollouts before the toolchains openhands-1.54.0 are staged (after 600s): ...` (or `(a shutdown was asked for)`) | The staging took longer than the trainer waits for it, or the run is stopping: the rollouts start, and each that needs the toolchain waits for the copy under its lock, within its own time limit. A later line says when the staging ended (`Staged the toolchains in ..., after the rollouts started`). A copy that takes minutes points at a slow or busy shared filesystem |
+| `toolchain ... was staged by an earlier job, but its files no longer matched its manifest: copied again`, and `the old copy is set aside at <cache>/.<copy>.<hex>.stale, since rollouts of other jobs may still run from it: remove it once none does` | Files of a kept copy were removed or changed (a node's cleanup of old files, say): it was copied again beside it, and the fresh copy took its place. The old copy is kept whole, for the rollouts of other jobs on the node that run from it; delete it once none does. A cache that a cleanup prunes is better left in the job's scratch |
+| `the staged toolchain <copy> is used without being checked against its manifest: no stamp can be written beside it (...)` (or `its lock file cannot be opened (...)`) | `PLATOON_TOOLCHAIN_CACHE` is read-only, another user's, or on a full disk, so platoon cannot record that it checked the kept copy, and uses it as it is, as platoon 0.3 did. Make the cache writable to have each job check it once |
+| `could not stage the toolchain <name> ahead of the rollouts; each rollout stages it itself: ...` | The toolchain could not be staged (not built, unreadable, not matching its manifest): each rollout tries again, and fails as `harness_setup` with the same reason. Fix what the message says, usually with `platoon prepare` |
+| `rollout worker fork server <pid> imported the worker's stack and 9 module(s) the environments open with in 15.0s` | The fork server is ready; the count is of the modules it imported for the environments that the worker's stack had not. It takes a few seconds more than before, once per run, while the trainer saves at launch, and its workers start with all of it |
+| `the rollout worker fork server left <module> out of what it imports ahead of its workers, which then import or build it themselves: it started threads: ...` (or `it left file descriptors open: ...`, `it started processes: ...`, `it drew 1 seed(s) from the OS ...`, `it does not import: ...`) | Importing the module, or the build named, is not fork-safe: a worker forked next to a running thread can deadlock, one that inherits a file, socket or event loop shares it with every other worker, and every worker would draw the numbers of a numpy generator seeded at import. The server started over without it, once for all such items, and the workers import it themselves, as before. Nothing to fix in platoon; the module's maker could defer the thread, file, socket or generator to its first use |
+| Each rollout still spends seconds before its first model call, on an idle node | An environment or harness imports more only when a rollout opens it, which the config does not show. List those modules in `train.workflow_config.worker_preload` (evaluation inherits it), and the fork server imports them too, each only when it is fork-safe. Leave out a module that makes a value of its own process when it is imported, such as an id or a temporary directory, which every worker would share. It applies to workers forked from the fork server only; elsewhere a warning says it has no effect |
+
 ## Still stuck
 
 Open the trajectory in the viewer (`platoon viz show-dump .../trajectory_collection.json`) to see each step the

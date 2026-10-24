@@ -2787,6 +2787,17 @@ class PlatoonTinkerRLTrainer:
         if training_client is None:
             return  # stopped before training began: nothing to save
 
+        # Ahead of the first rollout, while the trainer saves at launch: the toolchains the environments' harnesses run
+        # from are staged on this node, and the rollout workers' fork servers start importing (platoon.train.startup).
+        # No rollout starts before the staging is done (startup.ready() below).
+        from platoon.train.components import normalize_environment_configs
+        from platoon.train.startup import RolloutStartup
+
+        startup = await RolloutStartup.begin(
+            normalize_environment_configs(getattr(self.config, "environments", None)),
+            [train_workflow, eval_workflow if self.eval_dataset is not None and evaluates(self.config) else None],
+        )
+
         # The run's per-task statistics, those of the checkpoint it resumes from loaded before the launch save, which
         # saves them: a crash before the next full save loses none of them.
         self._begin_task_records(resume_info, start_batch)
@@ -2851,6 +2862,12 @@ class PlatoonTinkerRLTrainer:
             eval_dataloader = PlatoonTinkerDataloader(
                 self.eval_dataset, batch_size=1, shuffle_seed=None, drop_last=False
             )
+
+        # The first rollouts, training's and an evaluation's, start only once the toolchains are staged, or once
+        # startup.STAGING_WAIT_S passed or a shutdown was asked for (the rollouts then stage them themselves).
+        await self._await_with_heartbeat(
+            startup.ready(stop=shutdown_event), name="the staging of the harness toolchains"
+        )
 
         # Initialize watchdog if enabled
         watchdog = None

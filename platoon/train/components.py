@@ -251,6 +251,7 @@ _ENTRY_REFUSED_KEYS = {
         for name in (
             "rollout_isolation",
             "worker_start_method",
+            "worker_preload",
             "worker_startup_budget_seconds",
             "worker_finalize_grace_seconds",
             "worker_parent_grace_seconds",

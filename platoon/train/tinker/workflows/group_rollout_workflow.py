@@ -100,6 +100,7 @@ from platoon.train.components import (
 )
 from platoon.train.labels import task_label
 from platoon.train.leases import holding, rollout_lease
+from platoon.train.startup import WorkerPreload
 from platoon.train.task_stats import MAIN, MemberResult
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo
@@ -1326,6 +1327,12 @@ class GroupRolloutWorkflow:
     def _isolation(self) -> str:
         return getattr(self, "rollout_isolation", "inprocess")
 
+    # What the rollout workers' fork server imports and builds ahead of them, each when it is fork-safe: what the run's
+    # environments and harnesses import and build when a rollout opens them, and the run's workflow_config
+    # .worker_preload (platoon.train.startup).  platoon train sets it after construction, before the
+    # supervisor is built.
+    worker_preload: WorkerPreload = WorkerPreload()
+
     @property
     def supervisor(self) -> RolloutWorkerSupervisor:
         """Lazily built so ``inprocess`` runs never touch node-local scratch."""
@@ -1337,8 +1344,42 @@ class GroupRolloutWorkflow:
                 parent_grace_seconds=float(getattr(self.config, "worker_parent_grace_seconds", 60.0)),
                 mem_available_floor_bytes=int(getattr(self.config, "worker_mem_available_floor_bytes", 0)),
                 start_method=str(getattr(self.config, "worker_start_method", "forkserver")),
+                preload=getattr(self, "worker_preload", None),
             )
         return self._supervisor
+
+    async def warm_up(self) -> None:
+        """Start what this workflow's rollouts need before the first one: with ``rollout_isolation: process`` and the
+        fork server, the fork server, which imports the worker's stack (and :attr:`worker_preload`) while the trainer
+        gets ready to train, instead of when the first rollouts ask for it.  Nothing for in-process rollouts or exec'd
+        workers."""
+
+        if (
+            self._isolation != "process"
+            or str(getattr(self.config, "worker_start_method", "forkserver")) != "forkserver"
+        ):
+            return
+        await self.supervisor.warm(self._warm_up_request())
+
+    def _warm_up_request(self) -> RolloutWorkerRequest:
+        """A request like each of this workflow's rollouts', for what plans a fork server: the environments' packages,
+        the model the workers sample (whose renderer the server builds) and the startup budget.  It runs nowhere."""
+
+        return RolloutWorkerRequest(
+            protocol_version=PROTOCOL_VERSION,
+            request_id=f"{getattr(self, 'stats_scope', 'train')}-warm-up",
+            task_id="",
+            rollout_number=0,
+            task=Task(id="warm-up"),
+            rollout_config={},
+            rollout_fn_ref=getattr(self, "rollout_fn_ref", None) or "",
+            model=self._model_binding(0),
+            conversion=ConversionPolicy(),
+            response_path="",
+            ready_path="",
+            startup_budget_seconds=float(getattr(self.config, "worker_startup_budget_seconds", 300.0)),
+            packages=tuple(getattr(self, "packages", ())),
+        )
 
     def publish_model_binding(self, sampling_client, version: int) -> None:
         """Republish the trainer's sampling client for its rollout workers."""

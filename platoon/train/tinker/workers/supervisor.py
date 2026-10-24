@@ -44,7 +44,11 @@ How a worker starts
 ``worker_start_method`` default) forks it from a fork server (:mod:`platoon.utils.forkserver`) that has imported the
 worker's stack once (:data:`WORKER_PRELOAD`, and the run's environment packages) and built the run's tokenizer and
 renderer: an exec'd worker spends most of its start importing that stack, 17-24 s alone and about a minute with 64
-starting at once on one node, then a few seconds of CPU building those.  A forked worker is
+starting at once on one node, then a few seconds of CPU building those.  The server also imports and builds, when
+that is fork-safe, what the run's environments and harnesses import and build when a rollout opens them (``preload``,
+:mod:`platoon.train.startup`), which each worker would otherwise do again after its fork; an item that
+is not fork-safe is left out, and logged with the reason.  :meth:`RolloutWorkerSupervisor.warm` starts the server
+ahead of the first worker, as ``platoon train`` does while it gets ready to train.  A forked worker is
 the process an exec'd one would be (its own session, ``/dev/null`` as stdin, its log file, this process's working
 directory and the environment :meth:`RolloutWorkerSupervisor._child_env` gives it, the worker invariants and the
 startup alarm), and is signalled, waited for and classified the same way.  The fork server dies with the trainer
@@ -92,6 +96,7 @@ from typing import Callable
 from platoon.envs.ors.cleanup import delete_orphaned_sessions, read_mirror
 from platoon.sandbox.cleanup import read_mirror as read_sandbox_mirror
 from platoon.sandbox.cleanup import reap_records
+from platoon.train.startup import WorkerPreload
 from platoon.train.tinker.worker_env import DIAG_PATH_ENV, NO_CUDA_DRIVER, STARTUP_BUDGET_ENV
 from platoon.train.tinker.workers.binding import publish_binding
 from platoon.train.tinker.workers.protocol import (
@@ -222,12 +227,20 @@ class RolloutWorkerSupervisor:
         orphaned_session_timeout_seconds: float = 10.0,
         orphaned_sandbox_timeout_seconds: float = 120.0,
         start_method: str = "exec",
+        preload: WorkerPreload | None = None,
     ) -> None:
         if start_method not in START_METHODS:
             raise ValueError(f"start_method must be one of {START_METHODS}, not {start_method!r}")
         self.python_executable = python_executable or sys.executable
         self.module = module
         self.start_method = start_method
+        # What the fork server imports and builds beyond the worker's stack, each when it is fork-safe: what the run's
+        # environments import and build when a rollout opens them (platoon.train.startup).
+        self.preload = preload or WorkerPreload()
+        # What an earlier fork server left out of that (each {"item": ..., "reason": ...}): a later one leaves it out
+        # at once, instead of trying it and starting over; and the items already warned about.
+        self._fork_server_skipped: list[dict[str, str]] = []
+        self._fork_server_warned: set[str] = set()
         self._fork_server: ForkServer | None = None
         self._fork_server_lock: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
         self._fork_server_starts = 0
@@ -359,26 +372,42 @@ class RolloutWorkerSupervisor:
 
     # -- the fork server --------------------------------------------------------
     def _fork_server_preload(self, request: RolloutWorkerRequest) -> list[str]:
+        """What the server imports before anything else, which it needs to serve: the worker's stack and the
+        environments' packages."""
+
         if self.module != WORKER_MODULE:
             return []
         return [*WORKER_PRELOAD, *request.packages]
+
+    def _fork_server_optional(self, request: RolloutWorkerRequest) -> list[str]:
+        """What the server imports next, each module only when it is fork-safe: what the run's environments and
+        harnesses import when a rollout opens them (:attr:`preload`)."""
+
+        if self.module != WORKER_MODULE:
+            return []
+        return list(self.preload.modules)
 
     def _fork_server_child_init(self) -> list[str]:
         return [WORKER_PACKAGE_INIT] if self.module.startswith("platoon.train.tinker.") else []
 
     def _fork_server_prepare(self, request: RolloutWorkerRequest) -> list[dict]:
-        """The run's tokenizer and renderer, built once in the server: every worker it forks takes its own copy
-        instead of building them (a few seconds of CPU each, :func:`platoon.train.tinker.proxy.prepare_renderer`)."""
+        """What the server builds once, each only when it is fork-safe, and each worker it forks takes its own copy of
+        instead of building it: the run's tokenizer and renderer (a few seconds of CPU each,
+        :func:`platoon.train.tinker.proxy.prepare_renderer`), then what the run's environments build when a rollout
+        opens them (:attr:`preload`)."""
 
-        binding = request.model
-        if self.module != WORKER_MODULE or not binding.model_name:
+        if self.module != WORKER_MODULE:
             return []
+        binding = request.model
+        steps = [dict(step) for step in self.preload.prepare]
+        if not binding.model_name:
+            return steps
         kwargs = {
             "model_name": binding.model_name,
             "renderer_name": binding.renderer_name,
             "renderer_kwargs": dict(binding.renderer_kwargs),
         }
-        return [{"ref": "platoon.train.tinker.proxy:prepare_renderer", "kwargs": kwargs}]
+        return [{"ref": "platoon.train.tinker.proxy:prepare_renderer", "kwargs": kwargs}, *steps]
 
     async def _fork_server_for(self, request: RolloutWorkerRequest) -> ForkServer | None:
         """The fork server to start ``request``'s worker, started on first use; None to start it by exec.
@@ -438,26 +467,9 @@ class RolloutWorkerSupervisor:
             if server is None:
                 if self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
                     return None
-                self._fork_server_starts += 1
-                self._fork_server_log = os.path.join(
-                    self.scratch_dir, f"forkserver-{os.getpid()}-{self._fork_server_starts}.log"
-                )
-                self._fork_server_late = self._fork_server_announced = False
-                try:
-                    server = ForkServer.launch(
-                        python=self.python_executable,
-                        module=self.module,
-                        preload=self._fork_server_preload(request),
-                        child_init=self._fork_server_child_init(),
-                        prepare=self._fork_server_prepare(request),
-                        env=env,
-                        cwd=cwd,
-                        log_path=self._fork_server_log,
-                    )
-                except Exception as exc:  # noqa: BLE001 - workers then start by exec
-                    self._warn_exec(exc)
+                server = self._launch_fork_server(request, env, cwd)
+                if server is None:
                     return None
-                self._fork_server = server
             if not server.serving:
                 try:
                     await server.ready(request.startup_budget_seconds)
@@ -481,14 +493,73 @@ class RolloutWorkerSupervisor:
                     return None
             return self._use(server)
 
+    def _launch_fork_server(self, request: RolloutWorkerRequest, env: dict[str, str], cwd: str) -> ForkServer | None:
+        """Start a fork server for workers like ``request``'s, counted against :data:`MAX_FORK_SERVER_STARTS`; None
+        when it could not start (workers then start by exec).  It imports the worker's stack meanwhile."""
+
+        self._fork_server_starts += 1
+        self._fork_server_log = os.path.join(
+            self.scratch_dir, f"forkserver-{os.getpid()}-{self._fork_server_starts}.log"
+        )
+        self._fork_server_late = self._fork_server_announced = False
+        try:
+            server = ForkServer.launch(
+                python=self.python_executable,
+                module=self.module,
+                preload=self._fork_server_preload(request),
+                child_init=self._fork_server_child_init(),
+                prepare=self._fork_server_prepare(request),
+                optional=self._fork_server_optional(request),
+                skipped=self._fork_server_skipped,
+                env=env,
+                cwd=cwd,
+                log_path=self._fork_server_log,
+            )
+        except Exception as exc:  # noqa: BLE001 - workers then start by exec
+            self._warn_exec(exc)
+            return None
+        self._fork_server = server
+        return server
+
+    async def warm(self, request: RolloutWorkerRequest) -> None:
+        """Start the fork server for workers like ``request``'s now, ahead of the first one, without waiting for its
+        imports: the first worker asked for then finds it importing, or serving.  Nothing when workers start by exec,
+        a server runs already, or the supervisor started as many as it starts."""
+
+        if self.start_method != "forkserver":
+            return
+        loop = asyncio.get_running_loop()
+        if self._fork_server_lock is None or self._fork_server_lock[0] is not loop:
+            self._fork_server_lock = (loop, asyncio.Lock())
+        async with self._fork_server_lock[1]:
+            if self._fork_server is not None or self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
+                return
+            self._launch_fork_server(request, self._child_env(), os.getcwd())
+
     def _use(self, server: ForkServer) -> ForkServer:
-        """``server``, which serves; the first time, say so, and what it could not build ahead."""
+        """``server``, which serves; the first time, say so, what it imported beyond the worker's stack, and what it
+        left out or could not build ahead."""
 
         if not self._fork_server_announced:
             self._fork_server_announced = True
+            preloaded = getattr(server, "preloaded", 0)
             logger.info(
-                "rollout worker fork server %s imported the worker's stack in %.1fs", server.pid, server.seconds
+                "rollout worker fork server %s imported the worker's stack%s in %.1fs",
+                server.pid,
+                f" and {preloaded} module(s) the environments open with" if preloaded else "",
+                server.seconds,
             )
+            self._fork_server_skipped = [dict(entry) for entry in getattr(server, "skipped", ())]
+            for entry in self._fork_server_skipped:
+                if entry.get("item") in self._fork_server_warned:
+                    continue
+                self._fork_server_warned.add(str(entry.get("item")))
+                logger.warning(
+                    "the rollout worker fork server left %s out of what it imports ahead of its workers, which then "
+                    "import or build it themselves: %s",
+                    entry.get("item"),
+                    entry.get("reason"),
+                )
             for problem in server.prepare_errors:
                 logger.warning("the rollout worker fork server could not build ahead (workers build it): %s", problem)
         return server

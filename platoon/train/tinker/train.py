@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from platoon.options import Phase
 from platoon.train import entry_settings
 from platoon.train.auto import (
     AutoDataset,
@@ -24,6 +25,7 @@ from platoon.train.exclusion import TaskExclusion, record_exclusions
 from platoon.train.identity import check_training_run
 from platoon.train.labels import check_labels, label_column
 from platoon.train.sampling import log_sampling_plan
+from platoon.train.startup import worker_preload
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, evaluates, training_problems
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
@@ -146,6 +148,12 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
             # Each group runs with its entry's settings (GroupRolloutWorkflow.config inside the group).
             train_workflow.entry_configs = {label: own.train for label, own in settings.items()}
             eval_workflow.entry_configs = {label: own.eval for label, own in settings.items() if own.eval is not None}
+        # What the fork server of each workflow's rollout workers imports and builds ahead of them.
+        environments = AutoEnvironment.environments(config)
+        set_worker_preload(train_workflow, environments, phase="train", tasks=training.tasks)
+        set_worker_preload(
+            eval_workflow, environments, phase="eval", tasks=eval_dataset if eval_dataset is not None else ()
+        )
 
         await trainer.train(train_workflow=train_workflow, eval_workflow=eval_workflow)
 
@@ -157,6 +165,42 @@ def worker_package_kwargs(workflow_cls: type, config: Any) -> dict[str, Any]:
     if not (isinstance(workflow_cls, type) and issubclass(workflow_cls, GroupRolloutWorkflow)):
         return {}
     return {"packages": AutoEnvironment.packages(config)}
+
+
+def set_worker_preload(workflow: Any, environments: Any, *, phase: Phase, tasks: Any) -> None:
+    """Give a workflow whose rollouts run in workers forked from a fork server (a ``GroupRolloutWorkflow`` with
+    ``rollout_isolation: process`` and ``worker_start_method: forkserver``) what that server imports and builds ahead
+    of them: what ``phase``'s rollouts of ``environments`` import and build when they open, and its settings'
+    ``worker_preload`` (:func:`~platoon.train.startup.worker_preload`).  ``tasks`` are the phase's task rows.
+    Nothing for any other workflow, nor under ``worker_python_env_isolation``, whose rollouts import their
+    environments and harnesses inside a Python overlay of their own (its interpreter, ``PATH`` and packages), which
+    an import in the server would not see; a ``worker_preload`` that has no effect is warned about."""
+
+    if not isinstance(workflow, GroupRolloutWorkflow):
+        return
+    settings = workflow.config
+    extra = tuple(getattr(settings, "worker_preload", ()) or ())
+    rollouts = "training" if phase == "train" else "evaluation"
+    if (
+        getattr(settings, "rollout_isolation", "inprocess") != "process"
+        or getattr(settings, "worker_start_method", "forkserver") != "forkserver"
+    ):
+        if extra:
+            logger.warning(
+                "workflow_config.worker_preload has no effect on the %s rollouts: only rollout workers forked from a "
+                "fork server import it ahead (rollout_isolation: process, worker_start_method: forkserver)",
+                rollouts,
+            )
+        return
+    if getattr(settings, "worker_python_env_isolation", False):
+        if extra:
+            logger.warning(
+                "workflow_config.worker_preload has no effect on the %s rollouts: under worker_python_env_isolation "
+                "each rollout imports its environment and harness inside its own Python overlay",
+                rollouts,
+            )
+        return
+    workflow.worker_preload = worker_preload(environments, phase=phase, tasks=tasks, extra=extra)
 
 
 def label_kwargs(workflow_cls: type, config: Any) -> dict[str, Any]:
