@@ -122,6 +122,24 @@ async def slow_but_finite(_task, _config) -> dict:
     return {"trajectories": {}}
 
 
+async def call_then_meet(task, _config) -> dict:
+    """Tell the rollout's timeline that its first model call is issued, as the model gateway does as it issues one (the
+    trainer's start limit then takes the rollout's start slot back), then wait, 60 s at most, until ``task.misc``'s
+    ``count`` rollouts have done so, each leaving a file in its ``meet`` directory."""
+
+    from platoon.train.tinker.rollout_metrics import current_timeline
+
+    meeting, count = task.misc["meet"], int(task.misc["count"])
+    timeline = current_timeline()
+    assert timeline is not None  # bound by the rollout's session
+    timeline.call_started()
+    Path(meeting, f"called-{os.getpid()}").touch()
+    deadline = time.monotonic() + 60.0
+    while len(os.listdir(meeting)) < count and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    return {"trajectories": {}}
+
+
 def _claim_slot(output_dir: str, slots: int = 8) -> int:
     """Take a distinct index for this rollout, whichever process runs it.
 

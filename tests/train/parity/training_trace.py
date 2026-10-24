@@ -358,6 +358,7 @@ def run_start(run: FakeRun, scenario: Scenario, path: Path, start: Start) -> dic
         "metrics": metric_tables(run.logged),
         "messages": run.messages,
         "files": sorted(str(item.relative_to(run_dir)) for item in run_dir.rglob("*") if item.is_file()),
+        **({"start_ups": dict(run.start_ups)} if run.start_ups else {}),  # under a start limit only
     }
 
 

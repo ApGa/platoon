@@ -432,8 +432,35 @@ What a run warns of about rollout permits and staleness, under either `train.per
 | `<n> rollouts ran at once, more than train.max_concurrent_rollouts (<m>): a workflow returned a rollout's permit while the rollout still ran ...` (logged once per start) | A `GroupRolloutWorkflow` subclass ran a member outside its lease block, or more members than its entry's group size: keep each rollout's whole life in its block ([Run rollouts on the lease](../extending/rollout-leases.md)). Only `GroupRolloutWorkflow`'s members count as rollouts in flight, and an evaluation's `GroupRolloutWorkflow` left on the default `stats_scope`, `train`, counts with them: give it `stats_scope="eval"`, as `platoon train` does |
 | `IndexError: rollout <i> of task <id> is outside its draw's lease, of size <n> ...` or `RuntimeError: rollout <i> of task <id> entered a second lease block ...` (the group fails) | A workflow ran more rollouts than its entry's group size, or ran an index twice, such as a retry in a block of its own or a whole group run again: run each index once, from 0 to the lease's size less one, and retry a rollout inside its block ([The rules a workflow keeps](../extending/rollout-leases.md#the-rules-a-workflow-keeps)) |
 | `Rollout <i> of task <id> entered its lease block after its draw was released ...` or `... was waiting for its permit when its draw was released ...` (logged once per draw) | A rollout outlived its workflow's `arun_episode`, so it ran on no permit: await every rollout, a failed sibling's included, before the workflow returns |
-| `train/dispatch/blocked_share/permits` near 1, `rollout_client/permits_held_mean` well above `rollouts_in_flight_mean`, and `rollout_client/startup_gate_waiting_mean` above 0 | Groups wait for a worker-startup slot while they hold their permits, as they can with `worker_start_method: exec`: raise `train.workflow_config.worker_launch_concurrent_groups`, or start workers from the fork server, the default |
+| `train/dispatch/blocked_share/permits` near 1, `rollout_client/permits_held_mean` well above `rollouts_in_flight_mean`, and `rollout_client/startup_gate_waiting_mean` above 0 | Groups wait for a worker-startup slot while they hold their permits, as they can with `worker_start_method: exec`: raise `train.workflow_config.worker_launch_concurrent_groups`, or start workers from the fork server, the default. Or, with `train.max_starting_rollouts` set and `rollout_client/start_limit/waiting_mean` above 0, the start limit binds and most of its queue waits at that gate: raise the limit, or turn it off |
 | `train/dispatch/blocked_share/permits` near 1 and `permits_held_mean` close to `rollouts_in_flight_mean` | The budget binds: raise `train.max_concurrent_rollouts` while the inference engines have room |
+
+## The first rollouts of a run take minutes to reach the model
+
+At a run's start, or a resume in a new job, the first rollouts can take a minute or more to their first model call,
+where later ones take seconds. In the runs measured that was one-time work the first rollouts on each node pay, in
+this order, not their sandboxes starting together:
+
+1. **The fork server's import** of the rollout worker's stack, under process isolation: the run logs `rollout worker
+   fork server <pid> imported the worker's stack in 19.5s`. Every worker waits for it once, at the run's start.
+2. **A harness toolchain's copy to the node.** The first rollout of a CLI harness on a node copies the harness's
+   toolchain to node-local storage, and the node's other rollouts wait for it: about a minute for a large toolchain,
+   again in each new job, whose node-local storage starts empty.
+3. **What each worker imports after its fork**: the modules of an environment's service or of a harness that the fork
+   server did not import, read from shared storage by every worker that starts, again at every step. The fork server
+   imports the environments' packages (`environments[].package`), so a package that imports what its rollouts use has
+   it imported once.
+
+`train.max_starting_rollouts` shortens none of these: it orders start-ups, so with any value the whole first wave
+reaches the model later, though its first rollouts can reach it sooner. It is for start-ups that contend for a shared
+capacity ([Rollout start-ups](train-and-eval.md#rollout-start-ups-experimental)), and the run says when it bounds more
+than start-ups:
+
+| Message | Cause and fix |
+|---|---|
+| `A rollout held its start slot for 600s without a model call, so the start limit released it on its timer: ...` (logged once per start) | A rollout made no model call through platoon's gateway in `workflow_config.worker_startup_budget_seconds` + 300 s: its harness calls no model there (`platoon-oracle`, `platoon-noop`, a rollout function of your own), or its start-up takes longer. The limit stays live, letting another rollout start; raise the budget if start-ups are that slow |
+| `Most rollouts returned their start slot only at their end or on its timer (40 of 64): ...` (logged once per start) | The rollouts make no model call through platoon's gateway, or fail before one (see `train/batch/outcome/error` and their logs), so `train.max_starting_rollouts` bounds whole rollouts, not start-ups: turn it off for this workload, or fix what fails |
+| `train.max_starting_rollouts (4) is below the largest group size (8): a group's members start in waves; ...` | Each member keeps its full straggler grace, so this only costs time: set it to at least the group size unless start-up is what bounds the run |
 
 ## The training service
 

@@ -70,7 +70,8 @@ Each member runs in a block of its draw's rollout lease
 so under ``train.permit_release: rollout`` its permit comes back as it ends and
 a group's members start as permits free, each member's straggler deadline
 carrying its own start delay; ``runs_rollouts_on_lease`` says which subclasses
-keep this.
+keep this.  Inside its block a member takes a start slot of the run's start limit
+(``start_limit``, :mod:`platoon.train.tinker.start_limit`).
 """
 
 import asyncio
@@ -83,7 +84,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from types import MappingProxyType
-from typing import Callable, ClassVar
+from typing import Any, Callable, ClassVar
 
 import tinker
 import torch
@@ -105,6 +106,7 @@ from platoon.train.task_stats import MAIN, MemberResult
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
+from platoon.train.tinker.start_limit import NO_START_SLOT, START_SLOT_GRACE_SECONDS, StartLimit, StartSlot, held_slot
 from platoon.train.tinker.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
@@ -453,15 +455,16 @@ class _GroupAdmission:
 
 
 class _MemberStarts:
-    """When each member of a group started: the seconds its lease block waited for a permit, its start delay (the
-    members' tasks are created together).  Exactly 0 for every member whose permit came with the group's, whose
-    straggler deadline is then the group's, as before; with rolling starts a late member's deadline carries its delay
-    behind the group's first start.  A member that never entered a block (an override of ``_run_group_member`` that
-    does not call it) counts as started with the group."""
+    """When each member of a group started: the seconds it waited for its permit and then for its start slot, its start
+    delay (the members' tasks are created together).  Exactly 0 for every member whose permit came with the group's and
+    that took a slot at once (or needs none), whose straggler deadline is then the group's, as before; with rolling
+    starts or a binding start limit a late member's deadline carries its delay behind the group's first start.  A member
+    that never entered a block (an override of ``_run_group_member`` that does not call it) counts as started with the
+    group."""
 
     def __init__(self) -> None:
         self.created = asyncio.get_running_loop().time()
-        self.waiting: set[int] = set()  # members whose block waits for a permit
+        self.waiting: set[int] = set()  # members that wait for a permit or a start slot
         self._waited: dict[int, float] = {}
 
     def started(self, index: int, waited: float) -> None:
@@ -469,7 +472,7 @@ class _MemberStarts:
         self._waited[index] = waited
 
     def offset(self, index: int) -> float | None:
-        """Member ``index``'s start delay behind the group's first start; None while its block waits."""
+        """Member ``index``'s start delay behind the group's first start; None while it waits."""
 
         if index in self.waiting:
             return None
@@ -477,12 +480,12 @@ class _MemberStarts:
         return 0.0 if waited is None else waited - min(self._waited.values())
 
     def together(self) -> bool:
-        """Whether every member started with the group: none waits for its permit, and none waited."""
+        """Whether every member started with the group: none waits for its permit or slot, and none waited."""
 
         return not self.waiting and not any(self._waited.values())
 
     def least_offset(self, now: float) -> float:
-        """The least start delay a member whose block still waits can have, at loop time ``now``."""
+        """The least start delay a member that still waits can have, at loop time ``now``."""
 
         return max(0.0, now - self.created - min(self._waited.values(), default=0.0))
 
@@ -517,6 +520,9 @@ class GroupRolloutWorkflow:
     # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
     # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
     entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})
+    # The run's limit on rollouts starting at once (platoon.train.tinker.start_limit), which the trainer sets on its
+    # training and evaluation workflows as training starts; None: no limit. _run_group_member takes the slots.
+    start_limit: StartLimit | None = None
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         """The flag of a subclass whose own body does not set it: that of the class that sets it nearest in its method
@@ -1037,23 +1043,37 @@ class GroupRolloutWorkflow:
         returns only once the member's worker process tree is reaped and the env sessions and sandboxes it left are
         deleted; in process, once its rollout coroutine, its subagents and their grading have ended, though a sandbox or
         session teardown that a cancellation or an early close left to finish in the background (``let_finish``) can
-        outlive the block.  A cancelled member's block exits once its cancellation has unwound.  Its value, the seconds
-        the member waited for its permit, is its start delay (:class:`_MemberStarts`).  The rollout runs with no lease
-        (``holding(None)``), so a group it runs in turn takes no permits of its own, as its child agents take none."""
+        outlive the block.  A cancelled member's block exits once its cancellation has unwound.  Inside it the member
+        takes its start slot (:meth:`_member_start_slot`), which ``arun_episode_single`` hands to the rollout's host to
+        give back at the first model call.  The seconds it waited for its permit and then for its slot are its start
+        delay (:class:`_MemberStarts`).  The rollout runs with no lease (``holding(None)``), so a group it runs in turn
+        takes no permits of its own, as its child agents take none, and no start slots."""
 
-        slot = admission.member_slot()
-        token = _group_ready_callback.set(slot)
+        ready = admission.member_slot()
+        token = _group_ready_callback.set(ready)
         starts = admission.starts
         starts.waiting.add(rollout_number)
         try:
-            async with rollout_lease().rollout(rollout_number) as waited:
-                starts.started(rollout_number, waited)
+            async with rollout_lease().rollout(rollout_number) as waited, self._member_start_slot() as start:
+                starts.started(rollout_number, waited + start.waited)
                 with holding(None):
                     return await self.arun_episode_single(data, rollout_number)
         finally:
             starts.waiting.discard(rollout_number)
             _group_ready_callback.reset(token)
-            slot()
+            ready()
+
+    def _member_start_slot(self) -> StartSlot:
+        """A member's start slot of the run's start limit (``start_limit``), whose timer gives it back after the group's
+        ``worker_startup_budget_seconds`` plus :data:`~platoon.train.tinker.start_limit.START_SLOT_GRACE_SECONDS`
+        without a model call; the null slot without a limit, and for a member of a group that another member's rollout
+        runs, which would wait for the slot that member holds."""
+
+        limit = self.start_limit
+        if limit is None or held_slot() is not None:
+            return NO_START_SLOT
+        budget = float(getattr(self.config, "worker_startup_budget_seconds", 300.0))
+        return limit.slot(timeout_seconds=budget + START_SLOT_GRACE_SECONDS, monitor=self._monitor())
 
     async def _run_group_rollouts(self, data: dict) -> list:
         """Run ``group_size`` rollouts concurrently with the straggler policy.
@@ -1279,6 +1299,7 @@ class GroupRolloutWorkflow:
             python_env_isolation=bool(getattr(self.config, "worker_python_env_isolation", False)),
             packages=tuple(getattr(self, "packages", ())),
             sandbox_labels=sandbox_cleanup.labels(),
+            signal_first_call=held_slot() is not None,
         )
 
     def _rollout_budget_seconds(self, rollout_config: RolloutConfig, task: Task | None = None) -> float:
@@ -1590,6 +1611,8 @@ class GroupRolloutWorkflow:
         try:
             request = self._build_worker_request(data, rollout_number)
             monitor = self._monitor()
+            start = held_slot()  # its host gives it back at the first model call; none without a limit
+            first_call: dict[str, Any] = {} if start is None else {"on_first_call": start.first_call}
             if self._isolation != "process":
                 with monitor.rollout_in_flight():
                     response = await run_rollout_request(
@@ -1597,6 +1620,7 @@ class GroupRolloutWorkflow:
                         self.model_info.llm,
                         rollout_fn=self.rollout_fn,
                         reward_processor=self.reward_processor,
+                        **first_call,
                     )
                 monitor.record_rollout_timing(response.timing)
                 return self._outcome_from_response(response, response.status)
@@ -1609,6 +1633,7 @@ class GroupRolloutWorkflow:
                     on_ready=ready,
                     on_launch=monitor.register_worker,
                     on_reap=monitor.unregister_worker,
+                    **first_call,
                 )
             self._record_worker_telemetry(outcome)
             return self._outcome_from_response(outcome.response, outcome.disposition)

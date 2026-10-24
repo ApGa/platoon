@@ -200,6 +200,7 @@ async def run_rollout_request(
     extra_allow: bool = False,
     rollout_fn: Callable | None = None,
     reward_processor: Callable[[dict], tuple[float, dict]] | None = None,
+    on_first_call: Callable[[], None] | None = None,
 ) -> RolloutWorkerResponse:
     """Run one rollout and convert it, returning a serializable outcome.
 
@@ -214,6 +215,9 @@ async def run_rollout_request(
     make a run whose reward processor is a closure or a ``__main__``-defined
     function fail in in-process mode, which supports them.  The rest of the
     body -- every branch and its order -- is identical either way.
+
+    ``on_first_call`` becomes the session timeline's: it is called once, as the
+    rollout tree's first model call is issued (``RolloutTimeline``).
     """
 
     started = time.monotonic()
@@ -288,6 +292,8 @@ async def run_rollout_request(
         try:
             async with TinkerLLMProxySession() as session:
                 timeline = getattr(session, "timeline", timeline)
+                if on_first_call is not None:
+                    timeline.on_first_call = on_first_call
                 try:
                     trajectory_collection = await asyncio.create_task(rollout_fn(task, config))
                 finally:

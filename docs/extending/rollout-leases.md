@@ -119,6 +119,16 @@ fork server a worker is up in a fraction of a second and at most one group is pa
 second slot serves the next group; with `worker_start_method: exec` it can hold groups back, which
 `rollout_client/startup_gate_waiting_mean` shows.
 
+**The start limit** (`train.max_starting_rollouts`, [Rollout
+start-ups](../how-to/train-and-eval.md#rollout-start-ups-experimental)) gates `GroupRolloutWorkflow`'s members only:
+each takes a start slot inside its lease block, in `_run_group_member`, and gives it back at its rollout's first model
+call, at its end or on the slot's timer, its wait added to its start delay. `arun_episode_single` passes the slot on to
+the rollout's host, `run_rollout_request` or the worker supervisor, which give it back at the first call; an override
+of it that does not gives the slot back only at the rollout's end or on the timer. A subclass that starts its members
+some other way, and a workflow of your own, take no start slots. Whatever takes them, a start-up must not wait for
+another rollout of the run: a rollout holding a slot waits for nothing, and one waiting for its group-mates would hold
+its slot until the timer while they wait for slots.
+
 ## Recursive agents and swarms
 
 An episode is one rollout on one permit, however many agents it runs: a recursive tree (its root, every child agent and

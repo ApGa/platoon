@@ -24,6 +24,7 @@ import platoon.train.tinker  # noqa: F401
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
 from platoon.train.tinker.config_defs import WorkflowConfig
+from platoon.train.tinker.start_limit import StartLimit, held_slot
 from platoon.train.tinker.workers.protocol import RefResolutionError
 from platoon.train.tinker.workflows import group_rollout_workflow as grw
 from platoon.utils.stats_tracker import get as get_tracker
@@ -300,7 +301,8 @@ def test_construction_resolves_a_main_defined_reward_processor(tmp_path, monkeyp
     assert workflow._reward_processor_is_default is False
 
 
-def test_group_atomic_admission_admits_whole_groups(tmp_path):
+@pytest.mark.parametrize("limit", [None, 3], ids=["no-start-limit", "start-limit-of-a-group"])
+def test_group_atomic_admission_admits_whole_groups(tmp_path, limit):
     """Members of a group must start together, and groups must not overlap.
 
     A per-rollout readiness gate would inject start-time skew inside a group,
@@ -308,6 +310,9 @@ def test_group_atomic_admission_admits_whole_groups(tmp_path):
     tail-grace clock when the quorum settles.  The same rollout numbers would
     then deterministically start last and be cancelled having had a fraction of
     their budget, biasing the leave-one-out baseline.
+
+    So also with a start limit of a group's size (``train.max_starting_rollouts``), each member's first model call
+    following its readiness.
     """
 
     events: list[tuple[str, str]] = []
@@ -321,6 +326,8 @@ def test_group_atomic_admission_admits_whole_groups(tmp_path):
             events.append(("ready", group))
             if slot is not None:
                 slot()
+            if (start := held_slot()) is not None:
+                start.first_call()
             await asyncio.sleep(0.15)
             events.append(("done", group))
             return grw._SingleRolloutOutcome(result=None, workload=grw.RolloutWorkload(), observed=False)
@@ -338,6 +345,7 @@ def test_group_atomic_admission_admits_whole_groups(tmp_path):
         model_info=_model_info(),
         stats_scope="iso_admission",
     )
+    workflow.start_limit = StartLimit(limit) if limit else None
 
     async def scenario():
         await asyncio.gather(

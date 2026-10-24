@@ -54,7 +54,8 @@ class Rollouts:
     ``slowdown``: multiplies the seconds of the tasks whose id contains a key.
     ``follow``: a rollout's datums carry the policy version current at its first sample, as a client that follows the
     published weights stamps them, so a group can carry several; ``first_share`` bounds the share of a rollout's
-    seconds before that sample.
+    seconds before that sample.  Under a start limit (``train.max_starting_rollouts``) a rollout makes its first model
+    call at that sample, which gives its start slot back.
     """
 
     invalid_one_in: int | None = 8
@@ -376,7 +377,8 @@ def _response(request: Any, plan: _Plan, version: int) -> RolloutWorkerResponse:
 
 class FakeRun:
     """The fakes of one run of a scenario, and what they record of the start that runs (:meth:`begin`): its Tinker
-    calls, its rollout requests, its logged metrics and its log messages."""
+    calls, its rollout requests, its logged metrics and its log messages, and under a start limit its rollouts'
+    start-ups."""
 
     def __init__(self, rollouts: Rollouts, masks: Masks) -> None:
         self.rollouts = rollouts
@@ -397,6 +399,10 @@ class FakeRun:
         self.full_saves = 0
         self.updates_applied = 0
         self.stopped = False
+        # Under a start limit: the rollouts between their request and their first model call now, and the first calls
+        # made and the most rollouts starting at once (``start_ups``, empty without a limit).
+        self.starting = 0
+        self.start_ups: dict[str, int] = {}
 
     def call(self, name: str, *arguments: Any) -> None:
         self.calls.append([name, *(self.masks.strings(argument) for argument in arguments)])
@@ -449,9 +455,19 @@ class FakeRun:
 
         self.call("publish_binding", workflow.stats_scope, version, sampling_client)
 
-    async def rollout(self, request: Any, llm: Any, *, rollout_fn: Any = None, reward_processor: Any = None):
+    async def rollout(
+        self,
+        request: Any,
+        llm: Any,
+        *,
+        rollout_fn: Any = None,
+        reward_processor: Any = None,
+        on_first_call: Callable[[], None] | None = None,
+    ):
         """``run_rollout_request``: record the request, with the updates the service had applied when it came, then
-        answer it after the rollout's virtual seconds."""
+        answer it after the rollout's virtual seconds.  Under a start limit, which passes ``on_first_call``, the rollout
+        is starting until its first model call, at its first sample, and calls ``on_first_call`` then, as the model
+        gateway tells the rollout's timeline (:meth:`_start_up`)."""
 
         # rollout_config.train is true in evaluation too: the directory names the workflow (rollouts/<scope>/...).
         scope = PurePath(request.rollout_config["output_dir"]).parent.name
@@ -460,16 +476,33 @@ class FakeRun:
         self.requests[scope].append(row)
         plan = _plan(self.rollouts, request.task_id, request.rollout_number, version)
         response = _response(request, plan, version)
-        if not self.rollouts.follow:
+        if not self.rollouts.follow and on_first_call is None:
             await asyncio.sleep(plan.seconds)
             return response
         first = plan.seconds * plan.first_sample
-        await asyncio.sleep(first)
-        row.append(int(llm.version))  # the version its datums carry
-        for datum in response.result.datums if response.result is not None else []:
-            datum.loss_fn_inputs["checkpoint_version"] = _tensor([row[-1]])
+        if on_first_call is None:
+            await asyncio.sleep(first)
+        else:
+            await self._start_up(first)
+            on_first_call()
+        if self.rollouts.follow:
+            row.append(int(llm.version))  # the version its datums carry
+            for datum in response.result.datums if response.result is not None else []:
+                datum.loss_fn_inputs["checkpoint_version"] = _tensor([row[-1]])
         await asyncio.sleep(plan.seconds - first)
         return response
+
+    async def _start_up(self, seconds: float) -> None:
+        """A rollout's start-up under a start limit: the ``seconds`` from its request to its first model call, counted
+        in ``start_ups``: the most rollouts starting at once, and the first call once it comes."""
+
+        self.starting += 1
+        self.start_ups["most_at_once"] = max(self.start_ups.get("most_at_once", 0), self.starting)
+        try:
+            await asyncio.sleep(seconds)
+        finally:
+            self.starting -= 1
+        self.start_ups["first_calls"] = self.start_ups.get("first_calls", 0) + 1
 
     def _settings(self, request: Any) -> int:
         """The index in ``request_settings`` of what ``request`` carries beside its task, number and version."""

@@ -350,7 +350,7 @@ def _trace_changes(name: str, old: dict[str, Any], new: dict[str, Any]) -> list[
                 at = _first(was, now)
                 change = _change(was[at], now[at]) if at < min(len(was), len(now)) else "an item more or fewer"
                 lines.append(f"{where}[{at}], the first that differs ({len(was)} -> {len(now)} in all): {change}")
-            elif isinstance(was, dict) and isinstance(now, dict):  # requests, by scope
+            elif part == "requests" and isinstance(was, dict) and isinstance(now, dict):  # by scope
                 for scope in sorted(set(was) | set(now)):
                     rows, new_rows = was.get(scope, []), now.get(scope, [])
                     if rows != new_rows:

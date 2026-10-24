@@ -65,8 +65,11 @@ class WorkflowConfig:
     (or, with ``leave_one_out_baseline``, the mean of the other members).
     """
 
-    # Keys a release removed, with what replaces them (platoon.deprecations).
-    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {"straggler_policy_key": STRAGGLER_POLICY_KEY_REMOVED}
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+        "max_starting_rollouts": "a key of train, not of a workflow config: train.max_starting_rollouts",
+        # Keys a release removed, with what replaces them (platoon.deprecations).
+        "straggler_policy_key": STRAGGLER_POLICY_KEY_REMOVED,
+    }
 
     # Rollouts per task; advantages are computed within each group.
     group_size: int = 8
@@ -466,6 +469,12 @@ class TrainConfig:
     # each given its start delay on its straggler deadline. More groups are then open at once, so more long groups can
     # go stale: a warning names the fix (see docs/how-to/train-and-eval.md).
     permit_release: Literal["group", "rollout"] = "group"
+    # Rollouts that may be starting at once (experimental; None: no limit), training's and evaluation's together,
+    # first come, first served. A GroupRolloutWorkflow rollout is starting from its start slot, taken after its permit,
+    # until its first model call, its end or workflow_config.worker_startup_budget_seconds + 300 s, whichever is first.
+    # For start-ups that contend for a shared capacity, such as sandboxes that each extract a root filesystem; it cannot
+    # shorten one-time work such as copying a harness toolchain to each node (see docs/how-to/train-and-eval.md).
+    max_starting_rollouts: int | None = None
     # The dataset column that labels each task (None: ``_platoon_environment``, the mixture entry it belongs to,
     # ``platoon.train.components.ENVIRONMENT_COLUMN``; a single environment's tasks have none), such as a Harbor index
     # field. A task's label is its value of the column as text, ``true`` or ``false`` for a boolean.
@@ -583,6 +592,11 @@ class TrainConfig:
             raise ValueError("rollout_group_limits requires nonempty labels and positive integer capacities")
         if self.permit_release not in ("group", "rollout"):
             raise ValueError(f"train.permit_release must be 'group' or 'rollout', got {self.permit_release!r}")
+        limit = self.max_starting_rollouts
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValueError(
+                f"train.max_starting_rollouts must be a whole number, 1 or more, or null for no limit, got {limit!r}"
+            )
 
 
 # The units ``every`` counts in (``TrainEventTriggerConfig.strategy``): training steps, or passes over the training
@@ -694,6 +708,8 @@ class EvalConfig(TrainEventTriggerConfig):
         **_HOSTED_HINTS,
         "sample_timeout_seconds": "evaluation during training samples the trained policy through training's model "
         "gateway, so train.sample_timeout_seconds bounds its sampling calls too",
+        "max_starting_rollouts": "train.max_starting_rollouts limits evaluation's start-ups too: one limit for the "
+        "run's rollouts",
         # Keys a release removed, with what replaces them (platoon.deprecations).
         "num_concurrent_rollout_workflow_workers": removed_hint(
             "0.3.0",
