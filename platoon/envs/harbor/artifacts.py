@@ -3,8 +3,9 @@
 
 Each path a task declares in ``artifacts``, and the directory every agent may publish files in
 (``/logs/artifacts``), is copied from ``main`` to the host when grading starts, and put back at the same path in
-the verifier's sandbox.  A path that does not exist is skipped: the tests decide what its absence means.  A path
-that exists but cannot be copied is an infrastructure failure (:class:`ArtifactError`), never a silent skip.
+the verifier's sandbox; an artifact of a stack's sidecar (``service``) is copied from that service's own files.  A
+path that does not exist is skipped: the tests decide what its absence means.  A path that exists but cannot be
+copied is an infrastructure failure (:class:`ArtifactError`), never a silent skip.
 
 Only directories and regular files reach the verifier, never a symlink, which would read whatever it points to:
 a host file wherever the host reads the copy, the verifier's own files (its tests, its reward files) in the
@@ -97,17 +98,21 @@ async def collect_artifacts(
     into: Path,
     skipped: dict[str, str] | None = None,
     max_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
+    convention: bool = True,
 ) -> list[CollectedArtifact]:
-    """Copy the declared artifacts and ``/logs/artifacts`` from ``sandbox`` into ``into`` (a new or empty directory:
-    ValueError otherwise), as directories and regular files only; ``skipped`` (when given) receives each sandbox path
-    left out and why: ``symlink``, ``special`` (a device, FIFO or socket), ``link`` (a hard link to something else)
-    or ``too_large`` (an archive of it would exceed ``max_bytes``)."""
+    """Copy the declared artifacts and ``/logs/artifacts`` (unless ``convention`` is false: a stack's sidecar, whose
+    artifacts are only those declared) from ``sandbox`` into ``into`` (a new or empty directory: ValueError otherwise),
+    as directories and regular files only; ``skipped`` (when given) receives each sandbox path left out and why:
+    ``symlink``, ``special`` (a device, FIFO or socket), ``link`` (a hard link to something else) or ``too_large`` (an
+    archive of it would exceed ``max_bytes``)."""
 
     into.mkdir(parents=True, exist_ok=True)
     if held := sorted(entry.name for entry in into.iterdir()):
         raise ValueError(f"Artifacts are collected into a new or empty directory; {into} holds {held[:5]}")
     skipped = {} if skipped is None else skipped
-    entries = [(artifact, False) for artifact in artifacts] + [(Artifact(source=ARTIFACTS_DIR), True)]
+    entries = [(artifact, False) for artifact in artifacts]
+    if convention:
+        entries.append((Artifact(source=ARTIFACTS_DIR), True))
     stage = f"/tmp/platoon-artifacts-{uuid.uuid4().hex[:12]}"
     collected = []
     try:

@@ -199,6 +199,25 @@ echo "$pid:${20}"
 """
 )
 
+#: ``sh -c STATUS_START_SCRIPT platoon-start LOG STATUS ARGV...``: as :data:`START_SCRIPT`, but a subshell runs ``ARGV``
+#: and writes its exit status to ``STATUS`` once it ends; the process printed is that subshell, which ends with it.
+STATUS_START_SCRIPT = (
+    _READ_STAT
+    + r"""
+log=$1; status=$2; shift 2
+mkdir -p "${log%/*}" "${status%/*}" 2>/dev/null
+rm -f "$status" "$status.tmp"
+( "$@" </dev/null >"$log" 2>&1; echo "$?" >"$status.tmp"; mv -f "$status.tmp" "$status" ) </dev/null >/dev/null 2>&1 &
+pid=$!
+if ! read_stat "$pid"; then
+  echo "platoon: the command is gone already" >&2
+  exit 1
+fi
+set -f; set -- $stat; set +f
+echo "$pid:${20}"
+"""
+)
+
 #: ``sh -c ALIVE_SCRIPT platoon-alive ENTRY...``: print the ``ENTRY`` processes ("<pid>:<start time>") still alive.
 ALIVE_SCRIPT = (
     _READ_STAT
@@ -214,15 +233,23 @@ done
 
 
 async def start_background(
-    sandbox: Sandbox, argv: list[str], *, log: str, cwd: str, env: dict[str, str] | None = None
+    sandbox: Sandbox,
+    argv: list[str],
+    *,
+    log: str,
+    cwd: str,
+    env: dict[str, str] | None = None,
+    status: str | None = None,
 ) -> str:
     """Start ``argv`` in ``sandbox`` in the background (in ``cwd``, its output in the sandbox file ``log``) and return
     "<pid>:<start time>" of it; RuntimeError when it could not start.  A command that exits soon after it started may
-    still be returned: :func:`alive_processes` tells."""
+    still be returned: :func:`alive_processes` tells.  With ``status`` (a sandbox file), a subshell runs it and writes
+    its exit status there once it ends, and the process returned is that subshell (:data:`STATUS_START_SCRIPT`)."""
 
-    result = await sandbox.exec(
-        ["/bin/sh", "-c", START_SCRIPT, "platoon-start", log, *argv], cwd=cwd, env=env, timeout_s=60.0
-    )
+    script = ["/bin/sh", "-c", START_SCRIPT, "platoon-start", log]
+    if status is not None:
+        script = ["/bin/sh", "-c", STATUS_START_SCRIPT, "platoon-start", log, status]
+    result = await sandbox.exec([*script, *argv], cwd=cwd, env=env, timeout_s=60.0)
     entry = result.stdout.strip().splitlines()[-1:] if result.stdout.strip() else []
     if result.exit_code != 0 or result.timed_out or not entry or not _ENTRY.fullmatch(entry[0]):
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.exit_code}"

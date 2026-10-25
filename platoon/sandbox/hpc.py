@@ -216,6 +216,13 @@ class HpcProvider:
 
         return None
 
+    @classmethod
+    def stack_refusal(cls, options: Mapping[str, Any]) -> str | None:
+        """Why a provider built with ``options`` would start no stack (:func:`platoon.sandbox.stack_refusal`): the
+        adapter starts no hpc-sandbox pods."""
+
+        return f"the {cls.name} provider runs no multi-container stacks"
+
     async def start(self, spec: SandboxSpec) -> HpcSandbox:
         return await self._open(spec, lambda inner_spec: self.inner.start(inner_spec))
 

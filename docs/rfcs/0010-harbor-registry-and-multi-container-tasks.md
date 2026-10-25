@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The Harbor service (`platoon/envs/harbor/`), sandboxes (`platoon/sandbox/`), the harness runner (`platoon/harness/runner.py`) and the gateway (`platoon/gateway/server.py`); [Architecture](../architecture.md) (the Harbor backend, sandboxes, the native-tools rule); [RFC 0001](0001-native-multi-agent.md) (per-agent grading, `snapshot_async`), [RFC 0004](0004-sandweave-integration.md) (capabilities and routes), [RFC 0005](0005-gateway-dialects-and-tito.md) (dialects), [RFC 0008](0008-config-and-cli.md) (`platoon eval`), [RFC 0009](0009-gateway-step-budgets.md) (step budgets) |
 | Discussion | The pull request that adds this revision |
-| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources (no `harbor://`, `git+https://`, adapters or `ls`); M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider; sidecar stacks stay refused. Not yet: M5, the rest of M6 (stacks on Docker, sidecar probes, task MCP servers), M7–M9, `network_policy`, `stacks`, and trajectories recording the kill mode |
+| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources (no `harbor://`, `git+https://`, adapters or `ls`); M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. Not yet: M5, the rest of M6 (stacks on Docker, task MCP servers), M7–M9, and trajectories recording the kill mode |
 
 ## Summary
 
@@ -456,37 +456,60 @@ tasks are planned when they load.  Stacks run from it as a stack spec:
 ```python
 @dataclass
 class ServiceSpec:
-    sandbox: SandboxSpec
+    sandbox: SandboxSpec  # image, workdir, env, binds, resources; main's carries the harness's upstreams
     command: list[str] | None = None  # the final argv, by compose's rules over the image's ENTRYPOINT and CMD
-    entrypoint: list[str] | None = None
-    healthcheck: Healthcheck | None = None
-    depends_on: dict[str, Literal["started", "healthy"]] = field(default_factory=dict)
-    shm_mb: int | None = None
-    ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
-    privileged: bool = False  # only for providers that declare PRIVILEGED
-    external: str | None = None  # served by a node service instead of a sandbox (§8)
-    listen: dict[int, str] = field(default_factory=dict)  # host-network fallback only: port -> the env var that sets it
+    healthcheck: Healthcheck | None = None  # an argv, with Docker's interval, timeout, start period and retries
+    depends_on: dict[str, Dependency] = field(default_factory=dict)  # started, healthy, completed_successfully
+    volumes: list[Volume] = field(default_factory=list)  # named (shared by name), anonymous, tmpfs; a caller's fill
+    ports: tuple[int, ...] = ()  # the TCP ports it declares
+    aliases: tuple[str, ...] = ()
+    network_of: str | None = None  # network_mode: service:<x>
+    run_as: Literal["root", "caller", "subids"] | None = None
+    shm_mb: int | None = None  # with ulimits, cap_add and stop_signal: what the provider applies where it can
+    setup: Callable[[Sandbox], Awaitable[None]] | None = None  # once its sandbox runs, before its command
+    timeout_s: float | None = None  # an init job's longest run
 
 
 @dataclass
 class StackSpec:
     services: dict[str, ServiceSpec]  # "main" is the agents' sandbox
-    networks: dict[str, set[str]]
+    network: Literal["egress", "none"] = "egress"
     labels: dict[str, str] = field(default_factory=dict)
 
 
 class Stack(Protocol):
     main: Sandbox  # carries routes["gateway"]
     services: Mapping[str, Sandbox]
+    network: Literal["egress", "none"]
+    run_modes: Mapping[str, str]
 
-    async def unhealthy(self) -> list[str]: ...
-    async def stop(self) -> None: ...  # every service and holder; idempotent
-    def rewrite(self, value: str, *, service: str | None = None) -> str: ...  # host-network fallback only
+    async def health(self, services=None) -> dict[str, ServiceState]: ...
+    async def logs(self, service: str, *, max_bytes: int = 2000) -> str: ...
+    async def set_network(self, network) -> None: ...
+    async def connect(self, service: str, port: int) -> str: ...  # a host endpoint (§6, task MCP servers)
+    def rewrite(self, value: str, *, service: str | None = None) -> str: ...  # the identity but on the host network
+    def volume_path(self, name: str) -> Path: ...  # a named volume's directory on this host (a sidecar's log directory)
+    async def stop(self) -> None: ...  # every service, and what the stack holds; idempotent
 
 
-class StackProvider(Protocol):
+class StackProvider(Protocol):  # a provider with the "stacks" capability
     async def start_stack(self, spec: StackSpec) -> Stack: ...
 ```
+
+`platoon/sandbox/stacks.py` defines them, with a generic driver (`drive_stack`) over a backend that starts one service
+at a time: it starts each service once its dependencies reach their conditions, waits as `docker compose up --wait`
+does (every service running, each healthcheck passed, each init job completed within its bound), probes every service
+once more before the agents act, and on a failure or a cancellation stops what it started before it raises
+(`StackStartError`, naming the service, with its log), waiting for a service caught in the middle of its start to roll
+back; each stop is a cleanup that a stopping worker lets finish, inside the rollout's cleanup scope.  The Harbor side
+(`platoon/envs/harbor/sidecars.py`) builds the spec from the plan, starting nothing, so a run also checks before any
+rollout that its stacks can start: `main` is the sandbox a main-only file would give the task, prepared (its
+directories, its image's deferred files, its init) once its dependencies are up; each sidecar runs its image as
+compose runs it (a registry reference, the image map's image of a build context's whole key, or `main`'s), with
+compose's command over its image's (a registry image's configuration is not recorded yet, so such a service needs a
+command of compose's, and nothing builds a sidecar's build context yet).  Copies of the task's files that services
+bind writable (or masked, or from a missing source) are volumes of the stack, filled before any service starts, one
+per path and masks for every service that binds it, as compose shares the host directory.
 
 **The compose subset:**
 - **Accepted:** `image`, `build` (`context` in `environment/`, `dockerfile`, `args`; a service's context is planned
@@ -543,7 +566,7 @@ refused, since a restore brings back files, not processes.  What one sandbox can
 | `docker`, `podman` | `docker compose -p <rollout id>` over Harbor's base files; `down --volumes --remove-orphans` at stop | compose DNS | compose networks |
 | `singularity`, `enroot` on sites with unprivileged user namespaces (the default) | a **pod**: one rootless user and network namespace per stack, with each service a container inside it | `/etc/hosts` in each service's root filesystem maps every service name to `127.0.0.1`; ports stay as written | a private network namespace per stack: no stack reaches another stack's services or the host's loopback |
 | `singularity`, `enroot` without unprivileged user namespaces (fallback) | one sandbox per service on the host network, with ports allocated and service URLs rewritten per rollout (`HostNetworkStackProvider`, below) | rewritten to `127.0.0.1:<port>` | none: sidecars must be authenticated by the overlay, or bound to node services |
-| `process` | sidecars as host processes, for CPU tests | rewritten | none |
+| `process` (implemented) | each service a process sandbox on the host, its command in the background, for CPU tests; each declared port a port outside the kernel's ephemeral range that the stack holds for its life (a kernel-arbitrated claim, so no other stack is given it), which the service learns from its listen variable, `PLATOON_PORT_<declared port>` | `scheme://<service>:<port>` in environment values, healthchecks and collect hooks rewritten to `127.0.0.1:<its port>` | none |
 
 **Pods:**
 
@@ -583,12 +606,27 @@ rollout and rewrites service names in env values, healthchecks and MCP URLs, inc
 its own loopback ports. It enforces listen rules and scans task files for literal service names. It refuses
 sidecars that the overlay does not authenticate or bind to a node service.
 
-**Forks and probes.**
-- `shared` forks share the stack.
-- `copy` forks, and RFC 0001's `snapshot_async`, are refused on stacks whose sidecars hold state, until stack
+**Forks, probes and grading** (implemented, but for task MCP servers).
+- `shared` forks share the stack; `copy` forks, and RFC 0001's `snapshot_async`, are refused on stacks, until stack
   snapshots exist.
-- Before and after the tests, every sidecar must be alive and pass its healthcheck, or the outcome is
-  `Outcome.infra("sidecar_unhealthy")`, whatever the reward file says.
+- A sidecar that fails to start, exits or never turns healthy fails the session's start: `error` (`sidecar_start`),
+  with its log.
+- Before and after the tests (`shared`), or before and after a separate verifier's artifacts are collected, every
+  sidecar must be up: an init job completed, any other running and passing its healthcheck.  Else the outcome is
+  `invalid` (`sidecar_unhealthy`, with the sidecar's name, state and log), whatever the reward file says, unless the
+  environment sets `on_sidecar_down: grade`, for datasets whose sidecars the policy can stop and should own.
+- `[[verifier.collect]]` hooks run in their services once the agents are done, `main`'s first, best effort, as
+  Harbor runs them, and a separate verifier receives the artifacts of the sidecars that `artifacts[].service` names,
+  from their own files; a verifier that is itself a stack (`tests/docker-compose.yaml`) stays refused.
+- A sidecar's bind of a session log directory (`${HOST_VERIFIER_LOGS_PATH}`, ...) is a volume of the stack, one per log
+  directory for the sidecars that bind it, whose regular files grading copies (never through a link) into the tests'
+  sandbox once it made that directory afresh, so the agents can neither erase nor forge what a sidecar records there;
+  a sidecar's read-only bind of one, which would read `main`'s, is refused.
+- A sidecar that is down when the start's last probe runs fails the start too (`sidecar_start`), and an init job that
+  does not complete within `sandbox_start_budget_s`.
+- A rollout's deadlines count `sandbox_start_budget_s` per service start and per init job's run, and each health
+  wait's worst case (compose's healthcheck, else its image's), along the services' dependencies' longest path, three
+  probes, and the collect hooks' timeouts.
 - Task MCP servers (`[[environment.mcp_servers]]`) are proxied through the tool plane.
 
 ### 7. Resources, users and network policy
@@ -599,8 +637,9 @@ sidecars that the overlay does not authenticate or bind to a node service.
   honored there.
   - `agent_user: refuse`, the default, refuses such tasks at fetch.
   - `ignore` runs them as the single uid and records that in the trajectory.
-- **Network policy.** `network_policy: task`, the default, honors the task's `network_mode`. `none` forces no
-  network, for datasets whose answers can be found on the web.
+- **Network policy** (implemented). `network_policy: task`, the default, honors the task's `network_mode` per phase
+  (a stack graded in its own `main` gets the verifier's). `none` forces no network on every sandbox and stack, in
+  every phase, for datasets whose answers can be found on the web.
 - **Agent processes and memory.** A harness shares `main` with the policy's commands (§3, §5.4).
 
 ### 8. Frontier-CS on the Harbor path
@@ -625,10 +664,11 @@ What changes is the default HPC provider:
 
 | Change | Compatible? |
 |---|---|
-| New `service_kwargs`: `dataset`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy`, `stacks` (`refuse`, `trivial`, `pods`, `host_network`), `agent_user` | additive |
+| New `service_kwargs`: `dataset`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy` (`task`, `none`), `stacks` (`auto`, `refuse`; `host_network` with the fallback), `on_sidecar_down` (`invalid`, `grade`), `agent_user` | additive |
 | New environment-entry key `on_harness_exit`; new rollout-config key `sampling_precedence` (`request`, today's behavior, or `config`, under which policy calls sample with the temperature, top_p and top_k of `inference_params`, never a harness's own) and `inference_params.top_k` | additive; defaults keep today's behavior |
 | Spec keys `[install.recipe]`, `[resources]`, `[budget]`; `[install].toolchain` may be a name | additive |
 | Overlay keys `[[compose]]` and `compose_host_env`; the lock's `compose` and `compose_rule`, and `flags.stack: main_only`; `Sandbox.keep_processes` (optional) | additive |
+| The `stacks` capability and `StackProvider.start_stack` (`platoon.sandbox.stacks`); multi-container tasks run where a provider runs stacks, `[[verifier.collect]]` hooks and sidecars' artifacts run | additive; tasks platoon refused now run |
 | Main-only compose files run; a task with `compose.yaml`, `compose.yml` or `docker-compose.yml` runs as one container, as in Harbor, which reads none of them | behavior change, intended |
 | `EnvironmentService.open` takes `needs`; `Sandbox.routes`, `Sandbox.kill_processes`, `SandboxSpec.upstreams`, `SandboxProvider.reap` | services and providers outside platoon must accept the new keyword and fields (a public protocol change) |
 | Commands `platoon harbor fetch\|verify\|images\|check\|ls`, `platoon toolchain build\|ls` | new |
@@ -712,7 +752,7 @@ Effort is EST, for one implementer plus review.
 | M3 Gateway routes | The gateway's Unix socket; `SessionNeeds`; `upstreams` and `routes` on every built-in provider; the forwarder; route-bound keys; mint and call caps. 2.5 days | CPU tests (process, and docker in CI): a harness in a no-network sandbox finishes an episode through the route; the host's loopback is unreachable from it; a key presented on another rollout's socket is refused || the Harbor fast-path pull request |
 | M4 Grading | Separate verifiers with artifacts; reward contracts; opt-in classifiers; `on_harness_exit`; the task's agent timeout; `Sandbox.kill_processes` before grading. 3.5 days | CPU fixtures: separate-verifier tasks score oracle 1.0 and no-op 0.0; a background process cannot shadow `reward.txt`; a crash after a gateway error is `error`, a crash without one is graded || the Harbor fast-path pull request |
 | M5 An offline training pool | An offline, separate-verifier pool through M0–M4 on Singularity, with a CLI harness in the task sandbox. 2 days plus the run | oracle at least 0.98 and no-op 0 on at least 100 tasks per source through the training path; `error` plus `invalid` under 5% with a base model; 5 training steps with no leaked sandboxes | |
-| M6 Stacks on Docker | The compose parser and subset; the `docker compose` provider; sidecar probes; task MCP servers through the tool plane. 3.5 days | Harbor's `hello-mcp` oracle scores 1.0; a killed sidecar gives `invalid`, not 0; nothing is left after teardown | the compose parser and subset, with main-only compose files: the compose-subset pull request |
+| M6 Stacks on Docker | The compose parser and subset; the `docker compose` provider; sidecar probes; task MCP servers through the tool plane. 3.5 days | Harbor's `hello-mcp` oracle scores 1.0; a killed sidecar gives `invalid`, not 0; nothing is left after teardown | the compose parser and subset, with main-only compose files: the compose-subset pull request; the stack layer, sidecar probes and stacks on `process` (on CPU: a toy app with a key-value sidecar scores its oracle 1.0 and its no-op 0.0, a killed sidecar gives `invalid`, a sidecar that cannot start an `error`, nothing is left after 200 stacks, some cancelled while they start): the stack-layer pull request |
 | M7 Pods | hpc-sandbox pods (holder, anchors, exec services, relays, `/etc/hosts`, egress per phase, janitor); stacks on Singularity and Apptainer; enroot pods at a Slurm site. 6 days, plus site time | a two-service toy stack and `hello-mcp` score their oracles; name resolution, the relay and teardown pass; one stack cannot reach another's services; nothing leaks after 200 stacks; setup p50 and p99 at 16 and 64 stacks per node | |
 | M8 Host-network fallback | `HostNetworkStackProvider` for sites without unprivileged user namespaces: port allocation, rewriting, listen rules, the literal scan, refusals. 4 days | CPU tests over `process` cover a healthcheck that names its own loopback port; with user namespaces disabled, a two-service toy stack scores its oracle, an unauthenticated sidecar is refused, and nothing leaks after 200 stacks | |
 | M9 Frontier-CS | Adapter sources at the pinned commit; the overlay (verifier and judge patches, host-data pins, file-staging mounts); the shared judge-pool binding for the algorithmic track; the image map. 6 days plus compute | fetching both adapters yields the ORS server's 188 + 13 task ids; reference solutions and fixed submissions score as on the ORS server; a judge killed mid-grade gives `invalid`; a 4B run on the 2.0 tasks plus 40 algorithmic tasks takes 20 steps with no leaked sandboxes and `error` plus `invalid` under 5% | |

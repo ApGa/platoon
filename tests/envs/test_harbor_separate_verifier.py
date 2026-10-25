@@ -121,7 +121,8 @@ async def test_grading_releases_main_and_regrades_from_the_kept_artifacts(record
     second = await session.grade()
     assert (first.reward, second.reward) == (1.0, 1.0)
     assert len(recording.verifiers()) == 2
-    kept = session._kept_artifacts[0]
+    assert session._kept_artifacts is not None
+    kept = session._kept_artifacts.directory
     await session.close()
     assert not main.root.exists() and not kept.exists()
     await session.close()  # idempotent

@@ -356,4 +356,32 @@ def test_get_provider_resolves_names_and_import_paths(tmp_path: Path):
     assert isinstance(get_provider("process", root=tmp_path), ProcessProvider)
     provider = get_provider("platoon.sandbox.process:ProcessProvider", root=tmp_path)
     assert provider.root == tmp_path
-    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback"})
+    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback", "stacks"})
+
+
+@pytest.mark.asyncio
+async def test_a_start_cancelled_while_its_directory_is_made_leaves_nothing(
+    provider: ProcessProvider, monkeypatch: pytest.MonkeyPatch
+):
+    """The thread that makes a sandbox's directory runs on when its start is cancelled: the directory it makes is
+    deleted once it is made, never left behind (a stack's start cancelled midway cancels its services' starts)."""
+
+    made = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    create = ProcessSandbox.create
+
+    def slow_create(cls, base_dir: Path, spec: SandboxSpec, source: Path | None = None) -> ProcessSandbox:
+        time.sleep(0.3)
+        sandbox = create(base_dir, spec, source)
+        loop.call_soon_threadsafe(made.set)
+        return sandbox
+
+    monkeypatch.setattr(ProcessSandbox, "create", classmethod(slow_create))
+    starting = asyncio.ensure_future(_start(provider))
+    await asyncio.sleep(0.05)
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    await asyncio.wait_for(made.wait(), timeout=5.0)
+    await asyncio.sleep(0.1)  # the deletion, once the thread is done
+    assert list(provider.root.iterdir()) == []

@@ -331,13 +331,18 @@ async def test_open_failures_are_classified_and_clean_up(provider: ProcessProvid
 
 
 @pytest.mark.parametrize("image", [None, "ubuntu:24.04"])
-async def test_a_multi_container_task_is_never_started_or_scored(provider: ProcessProvider, make_task, image):
+async def test_a_multi_container_task_is_never_started_or_scored_where_no_stack_runs(
+    provider: ProcessProvider, make_task, image
+):
     """RFC 0010 P0: a compose task's main container alone would run without its judge, and its verifier would
-    write 0.  Whether its image comes from the task or the service's default, the session never opens."""
+    write 0.  Whether its image comes from the task or the service's default, the session never opens on a provider
+    that runs no stacks."""
 
     started: list[SandboxSpec] = []
 
     class Recording(ProcessProvider):
+        capabilities = ProcessProvider.capabilities - {"stacks"}
+
         async def start(self, spec: SandboxSpec):
             started.append(spec)
             return await super().start(spec)

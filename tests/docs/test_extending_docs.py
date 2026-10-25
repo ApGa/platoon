@@ -447,7 +447,8 @@ def test_the_audited_provider_keeps_the_inner_provider_s_capabilities(snippets, 
 
     assert isinstance(provider, SandboxProvider)
     assert provider.name == "audited-process"
-    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback"})  # the process provider's
+    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback"})  # the process provider's, but
+    # stacks: the wrapper has no start_stack
     [entry] = environment_entries("sandbox-providers.md")
     assert entry.service == "harbor" and entry.service_kwargs["provider"] == "my_sandboxes.audited:AuditedProvider"
 

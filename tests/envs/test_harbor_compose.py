@@ -25,6 +25,7 @@ from platoon.envs.harbor.compose import (
     ComposeError,
     ComposePlan,
     MainService,
+    ServiceHealthcheck,
     interpolate,
     is_idle,
     plan_compose,
@@ -36,7 +37,7 @@ from platoon.envs.harbor.fetch import FetchError, Overlay, fetch, fetch_config
 from platoon.envs.harbor.holdout import HoldoutRow, HoldoutRule, hold_out
 from platoon.envs.harbor.inputs import input_files
 from platoon.envs.harbor.lock import DatasetLock, LockedTask, LockError, read_lock, write_lock
-from platoon.envs.harbor.service import _bind_mounts
+from platoon.envs.harbor.sidecars import bind_mounts
 from platoon.envs.harbor.task import HarborTask, HarborTaskError
 from platoon.sandbox.process import ProcessProvider, ProcessSandbox
 
@@ -209,7 +210,7 @@ def test_a_listed_host_variable_binds_its_path_or_one_below_it_read_only(tmp_pat
     monkeypatch.setenv("PLATOON_TEST_DATA", str(data))
 
     assert task.main is not None and plan.deferred == ("host:PLATOON_TEST_DATA",)
-    mounts = _bind_mounts(task, task.main)
+    mounts = bind_mounts(task, task.main.binds)
 
     assert [(mount.source, mount.target, mount.read_only) for mount in mounts] == [
         (str(data / "sub"), "/data", True),
@@ -530,8 +531,15 @@ def test_hello_mcp_plans_its_mcp_server_with_a_whole_build_key(tmp_path: Path):
         "start_interval_s": 5.0,
         "retries": 15,
     }
+    # A fetched dataset's task, whose lock holds this plan, is a stack where a provider runs stacks (whose session
+    # finds the sidecar's image in the image map); refused where none does, and in a dataset directory, which has no
+    # image map for a sidecar's image.
+    task = HarborTask.load(task_dir, compose=plan)
+    assert task.is_stack and task.main is not None and task.main.unsupported == ()
     with pytest.raises(HarborTaskError, match="makes the environment a multi-container stack"):
-        HarborTask.load(task_dir)  # sidecar stacks stay refused until platoon runs them
+        HarborTask.load(task_dir, compose=plan, stack_refusal="the docker provider runs no multi-container stacks")
+    with pytest.raises(HarborTaskError, match="builds its image from environment/mcp-server/Dockerfile, and a dataset"):
+        HarborTask.load(task_dir)
 
 
 @pytest.mark.parametrize(
@@ -651,6 +659,29 @@ def test_database_sidecar_stacks_are_within_the_subset(tmp_path: Path):
 
     assert plan.kind == "sidecars" and plan.services["postgres"]["image"] == "postgres:11"
     assert plan.services["main"]["environment"] == {"DB_HOST": "postgres", "DB_PORT": "5432"}
+
+
+def test_healthcheck_durations_of_0_are_docker_s_defaults(tmp_path: Path):
+    """Docker reads 0 as its default for a healthcheck's interval, timeout, start interval and retries (a start period
+    of 0 is its default), so a check of 0s neither times out at once nor runs without a pause."""
+
+    compose = (
+        "services:\n  main:\n    depends_on:\n      db:\n        condition: service_healthy\n"
+        "  db:\n    image: postgres:16\n    command: [postgres]\n    healthcheck:\n"
+        "      test: [CMD, pg_isready]\n      interval: 0s\n      timeout: 0s\n      start_interval: 0s\n"
+        "      start_period: 0s\n      retries: 0\n"
+    )
+    check = _plan(_task(tmp_path, "zeros", compose)).services["db"]["healthcheck"]
+    assert check == {
+        "test": ["CMD", "pg_isready"],
+        "interval_s": 30.0,
+        "timeout_s": 30.0,
+        "start_period_s": 0.0,
+        "start_interval_s": 5.0,
+        "retries": 3,
+    }
+    recorded = {**check, "interval_s": 0.0, "timeout_s": 0.0, "start_interval_s": 0.0, "retries": 0}  # an older lock's
+    assert ServiceHealthcheck.from_json(recorded) == ServiceHealthcheck.from_json(check)
 
 
 def test_static_addresses_are_refused(tmp_path: Path):

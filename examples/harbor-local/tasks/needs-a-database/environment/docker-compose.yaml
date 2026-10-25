@@ -1,6 +1,6 @@
-# A sidecar database next to Harbor's main container. platoon cannot run multi-container tasks yet, so it
-# refuses this task instead of starting main alone, where the verifier would score 0 for a policy that may
-# have done the task.
+# A sidecar database next to Harbor's main container. platoon runs a multi-container task only on a sandbox
+# provider that runs stacks; elsewhere it refuses this task instead of starting main alone, where the verifier
+# would score 0 for a policy that may have done the task.
 services:
   main:
     environment:

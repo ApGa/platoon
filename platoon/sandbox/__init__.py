@@ -2,7 +2,8 @@
 
 The singularity and enroot providers adapt the ``hpc-sandbox`` package (the ``hpc`` extra), imported when one is
 built.  :mod:`platoon.sandbox.routes` says how a sandbox reaches a service on the host (``SandboxSpec.upstreams``
-and ``Sandbox.routes``), and :mod:`platoon.sandbox.cleanup` how the sandboxes a process leaves behind are reaped.
+and ``Sandbox.routes``), :mod:`platoon.sandbox.cleanup` how the sandboxes a process leaves behind are reaped, and
+:mod:`platoon.sandbox.stacks` how a provider with the ``stacks`` capability runs a task's services together.
 """
 
 from __future__ import annotations
@@ -25,6 +26,18 @@ from platoon.sandbox.base import (
     SandboxSpec,
     SupportsReap,
     cwd_error,
+)
+from platoon.sandbox.stacks import (
+    STACKS,
+    Dependency,
+    Healthcheck,
+    ServiceSpec,
+    ServiceState,
+    Stack,
+    StackProvider,
+    StackSpec,
+    StackStartError,
+    Volume,
 )
 
 _BUILTIN_PROVIDERS = {
@@ -95,6 +108,31 @@ def rootfs_layout_refusal(provider: str | SandboxProvider, options: Mapping[str,
     return refusal(dict(options or {})) if callable(refusal) else None
 
 
+def stack_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | None = None) -> str | None:
+    """Why ``provider`` (a name with its ``options``, or a built provider) would start no stack, a task's services
+    together (:mod:`platoon.sandbox.stacks`), read without building it; None when it starts stacks, or cannot tell
+    before it is built.  A built provider tells by its capabilities (``stacks``, with a ``start_stack`` method); a
+    provider class by a ``stack_refusal(options)`` class method, else by capabilities it declares on the class."""
+
+    if not isinstance(provider, str):
+        if STACKS in provider.capabilities and callable(getattr(provider, "start_stack", None)):
+            return None
+        return f"the {provider.name!r} sandbox provider runs no multi-container stacks"
+    try:
+        kind = provider_class(provider)
+    except (ImportError, AttributeError, ValueError):
+        return None  # building the provider reports it
+    refusal = getattr(kind, "stack_refusal", None)
+    if callable(refusal):
+        return refusal(dict(options or {}))
+    capabilities = getattr(kind, "capabilities", None)
+    if not isinstance(capabilities, frozenset | set):
+        return None  # set when it is built: the session's opening checks it
+    if STACKS in capabilities and callable(getattr(kind, "start_stack", None)):
+        return None
+    return f"the {provider!r} sandbox provider runs no multi-container stacks"
+
+
 def root_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | None = None) -> str | None:
     """Why ``provider`` (a name with its ``options``, or a built provider) could not run a sandbox's commands as root
     with other users to switch to, as a Harbor verifier that runs as root needs (it may run the agent's code as
@@ -117,15 +155,25 @@ __all__ = [
     "CWD_ERROR_EXIT_CODE",
     "CWD_ERROR_PREFIX",
     "CWD_ERROR_REASONS",
+    "STACKS",
+    "Dependency",
     "DownloadReport",
     "DroppedLink",
     "ExecResult",
+    "Healthcheck",
     "Mount",
     "Sandbox",
     "SandboxProvider",
     "SandboxSnapshot",
     "SandboxSpec",
+    "ServiceSpec",
+    "ServiceState",
+    "Stack",
+    "StackProvider",
+    "StackSpec",
+    "StackStartError",
     "SupportsReap",
+    "Volume",
     "cwd_error",
     "get_provider",
     "network_none_refusal",
@@ -133,4 +181,5 @@ __all__ = [
     "provider_unavailable",
     "root_refusal",
     "rootfs_layout_refusal",
+    "stack_refusal",
 ]

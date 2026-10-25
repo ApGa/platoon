@@ -195,6 +195,47 @@ class TaskImages:
             default_image=default_image,
         )
 
+    def for_service(
+        self, task_dir: Path, service: str, build: Mapping[str, Any], *, task: str | None = None
+    ) -> SessionImage:
+        """The image of a stack's service that builds from a context of the task (its plan's ``build``): the image
+        map's image for the context's whole build key, with what its Dockerfile sets over its base (``config``), and
+        nothing deferred, since a service's command starts with its sandbox.  An ``ImageMapError`` when the map has
+        none, as for a dataset directory's task, whose plan has no key; ``task`` is the task's name, which errors
+        give (else its directory's)."""
+
+        task_dir = Path(task_dir)
+        name = task or task_dir.name
+        context = f"{build.get('context', 'environment')}/{build.get('dockerfile', 'Dockerfile')}"
+        key = build.get("key")
+        if not key:
+            raise ImageMapError(
+                f"Harbor task {name!r}: the service {service} builds its image from {context}, and a dataset "
+                "directory has no image map: serve the directory as a dataset to fetch (service_kwargs.dataset), "
+                "whose image map can hold the image of its build key"
+            )
+        image_map = self.image_map
+        entry = image_map.get(key) if image_map is not None else None
+        if entry is None:
+            missing = f"which the image map {self._path} lacks" if image_map is not None else "and no image map exists"
+            raise ImageMapError(
+                f"Harbor task {name!r}: the service {service} builds its image from {context} (build key {key}), "
+                f"{missing}; nothing builds a sidecar's image in this release (platoon prepare builds the tasks' own)"
+            )
+        config = build.get("config") or {}
+        entrypoint = config.get("entrypoint", entry.entrypoint)
+        cmd = config.get("cmd", entry.cmd)
+        return SessionImage(
+            image=entry.image,
+            env=dict(entry.env),
+            workdir=entry.workdir,
+            user=config.get("user", entry.user),
+            key=key,
+            entrypoint=tuple(entrypoint) if entrypoint is not None else None,
+            cmd=tuple(cmd) if cmd is not None else None,
+            healthcheck=config.get("healthcheck", entry.healthcheck),
+        )
+
     def for_verifier(self, task_dir: Path, *, docker_image: str | None = None) -> SessionImage | None:
         """The image of a separate verifier built from ``tests/Dockerfile`` (the lock row's ``verifier_image``,
         else planned now), with its deferred steps read from ``tests/``; None for a verifier without one (it runs

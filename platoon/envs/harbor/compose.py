@@ -13,8 +13,8 @@ bump.
 **Kinds** (``flags.stack`` in a lock): ``single`` (no compose file), ``trivial`` (only ``main``, with nothing
 platoon applies, as some converters write for every task), ``main_only`` (only ``main``, with settings: an
 environment, binds, a command) and ``sidecars`` (services besides ``main``).  ``main_only`` tasks run on every
-provider as one sandbox (:class:`MainService`); ``sidecars`` stay refused when a task loads until platoon runs stacks
-(RFC 0010).
+provider as one sandbox (:class:`MainService`); ``sidecars`` run as stacks on providers that run them
+(:mod:`platoon.envs.harbor.sidecars`), and are refused elsewhere.
 
 **Interpolation** follows compose: ``$NAME``, ``${NAME}``, ``${NAME:-default}``, ``${NAME-default}``,
 ``${NAME:?error}``, ``${NAME?error}``, ``${NAME:+value}``, ``${NAME+value}`` (defaults may nest), and ``$$`` for a
@@ -63,6 +63,7 @@ from typing import Any, Literal
 import yaml
 
 from platoon.envs.harbor.dockerfile import DockerfileError, plan_dockerfile
+from platoon.sandbox.stacks import dependency_cycle
 
 COMPOSE_FILE = "docker-compose.yaml"
 # Names compose itself reads, which Harbor does not: plain files of a Harbor task (a fetch warns of them).
@@ -209,6 +210,8 @@ _BUILD_KEYS = frozenset({"context", "dockerfile", "args"})
 _HEALTHCHECK_KEYS = frozenset({"test", "interval", "timeout", "retries", "start_period", "start_interval", "disable"})
 _DEPLOY_KEYS = frozenset({"resources", "restart_policy", "labels", "replicas"})
 _DURATION = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|\u00b5s|ms|s|m|h)")
+# Docker's healthcheck defaults, which a value of 0 also means.
+_DEFAULT_INTERVAL_S, _DEFAULT_TIMEOUT_S, _DEFAULT_START_INTERVAL_S, _DEFAULT_RETRIES = 30.0, 30.0, 5.0, 3
 _DURATION_UNITS = {"ns": 1e-9, "us": 1e-6, "\u00b5s": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
 _SIZE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([kmgtp]?)b?\s*$", re.IGNORECASE)
 _SIZE_UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40, "p": 1 << 50}
@@ -305,7 +308,8 @@ class Bind:
 @dataclass(frozen=True)
 class ServiceHealthcheck:
     """A compose healthcheck (or an image's ``HEALTHCHECK``): ``test`` as compose writes it (``["CMD", ...]``,
-    ``["CMD-SHELL", text]``), with Docker's defaults."""
+    ``["CMD-SHELL", text]``), with Docker's defaults, which a value of 0 also means (but for ``start_period``, whose
+    default is 0)."""
 
     test: tuple[str, ...]
     interval_s: float = 30.0
@@ -342,22 +346,22 @@ class ServiceHealthcheck:
     def from_json(cls, data: Mapping[str, Any]) -> ServiceHealthcheck:
         return cls(
             test=tuple(data["test"]),
-            interval_s=float(data.get("interval_s", 30.0)),
-            timeout_s=float(data.get("timeout_s", 30.0)),
+            interval_s=float(data.get("interval_s") or _DEFAULT_INTERVAL_S),
+            timeout_s=float(data.get("timeout_s") or _DEFAULT_TIMEOUT_S),
             start_period_s=float(data.get("start_period_s", 0.0)),
-            start_interval_s=float(data.get("start_interval_s", 5.0)),
-            retries=int(data.get("retries", 3)),
+            start_interval_s=float(data.get("start_interval_s") or _DEFAULT_START_INTERVAL_S),
+            retries=int(data.get("retries") or _DEFAULT_RETRIES),
         )
 
 
 @dataclass(frozen=True)
 class MainService:
-    """What a main-only compose file gives ``main``, the one sandbox of a main-only task.
+    """What a compose file gives ``main``: the one sandbox of a main-only task, or the agents' sandbox of a stack.
 
     ``command`` is compose's (Harbor's base ``sh -c "sleep infinity"`` when the file sets none), ``entrypoint``
     compose's (None: the image's; ``()``: cleared); :meth:`argv` combines them with the image's ``ENTRYPOINT`` as
     compose does.  ``healthcheck`` is compose's (None: the image's, if it has one, unless ``healthcheck_disabled``).
-    ``unsupported`` lists the keys that one sandbox cannot apply yet, which the task loader refuses."""
+    ``unsupported`` lists the keys that platoon cannot apply to ``main`` yet, which the task loader refuses."""
 
     command: tuple[str, ...] = BASE_COMMAND
     entrypoint: tuple[str, ...] | None = None
@@ -417,11 +421,34 @@ class ComposePlan:
         return cls(dict(data))
 
     def main(self) -> MainService | None:
-        """``main``'s settings, for a main-only plan; None for the other kinds."""
+        """``main``'s settings, for a main-only plan or a stack's (``sidecars``); None for the other kinds.  In a stack,
+        what one sandbox cannot apply but a stack provider does (``cap_add``, ``shm_size``, ``ulimits``, ``tmpfs``, a
+        shared network, internal networks) goes to the stack, not to :attr:`MainService.unsupported`."""
 
-        if self.kind != "main_only":
+        if self.kind not in ("main_only", "sidecars"):
             return None
-        return _main_service(self.services.get(MAIN) or {}, egress=self.data.get("egress", True))
+        return _main_service(
+            self.services.get(MAIN) or {}, egress=self.data.get("egress", True), stack=self.kind == "sidecars"
+        )
+
+    @property
+    def egress(self) -> bool:
+        """Whether the stack's networks reach beyond it: False when every network its services join is
+        ``internal``."""
+
+        return bool(self.data.get("egress", True))
+
+    @property
+    def external(self) -> dict[str, str]:
+        """The services an overlay marks as served by a node service (``external``), with that node service."""
+
+        return {name: str(service["external"]) for name, service in self.services.items() if service.get("external")}
+
+    def dependency_cycle(self) -> list[str] | None:
+        """Services that depend on one another in a cycle, as the names along it (the first again at its end), which
+        compose refuses to start; None when there is none."""
+
+        return dependency_cycle({name: set(service.get("depends_on") or {}) for name, service in self.services.items()})
 
 
 # --- the compose file ------------------------------------------------------------------------------------------
@@ -1505,33 +1532,42 @@ def _check_ports(services: Mapping[str, Mapping[str, Any]]) -> None:
                 )
 
 
-def _main_service(data: Mapping[str, Any], *, egress: bool = True) -> MainService:
-    binds = []
-    volumes = []
-    for mount in data.get("volumes") or ():
-        if mount["type"] == "bind":
-            binds.append(
-                Bind(
-                    target=mount["target"],
-                    read_only=bool(mount.get("read_only")),
-                    task=mount.get("task"),
-                    logs=mount.get("logs"),
-                    host=mount.get("host"),
-                    masks=tuple(mount.get("masks") or ()),
-                    missing=bool(mount.get("missing")),
-                )
-            )
-        elif not mount.get("masks"):
-            volumes.append(mount["target"])
-    planned = {"cap_add": "cap_add", "shm_size": "shm_mb", "ulimits": "ulimits", "network_mode": "network_mode"}
-    unsupported = [key for key, field in planned.items() if data.get(field)]  # as the compose file names them
-    if any(mount["type"] == "tmpfs" for mount in data.get("volumes") or ()):
-        unsupported.append("tmpfs")
+def service_binds(data: Mapping[str, Any]) -> tuple[Bind, ...]:
+    """The binds of a planned service (a plan's ``services[name]``), in the file's order."""
+
+    return tuple(
+        Bind(
+            target=mount["target"],
+            read_only=bool(mount.get("read_only")),
+            task=mount.get("task"),
+            logs=mount.get("logs"),
+            host=mount.get("host"),
+            masks=tuple(mount.get("masks") or ()),
+            missing=bool(mount.get("missing")),
+        )
+        for mount in data.get("volumes") or ()
+        if mount["type"] == "bind"
+    )
+
+
+def _main_service(data: Mapping[str, Any], *, egress: bool = True, stack: bool = False) -> MainService:
+    binds = list(service_binds(data))
+    volumes = [
+        mount["target"]
+        for mount in data.get("volumes") or ()
+        if mount["type"] == "volume" and not mount.get("masks")  # one that masks a bind is part of its copy
+    ]
+    unsupported = []
+    if not stack:  # a stack provider applies these, where its runtime can
+        planned = {"cap_add": "cap_add", "shm_size": "shm_mb", "ulimits": "ulimits", "network_mode": "network_mode"}
+        unsupported += [key for key, field in planned.items() if data.get(field)]  # as the compose file names them
+        if any(mount["type"] == "tmpfs" for mount in data.get("volumes") or ()):
+            unsupported.append("tmpfs")
     if any(bind.logs and bind.target != LOG_DIRS[bind.logs] for bind in binds):
         unsupported.append("volumes (a log directory bound at another path)")
     if any(_below(inner.target, outer.target) for inner in binds for outer in binds):
         unsupported.append("volumes (a bind inside another)")
-    if not egress:
+    if not egress and not stack:
         unsupported.append("networks (internal only)")
     healthcheck = data.get("healthcheck")
     resources = data.get("resources") or {}
@@ -1695,14 +1731,16 @@ def _healthcheck(raw: Any, where: str) -> dict[str, Any]:
     retries = raw.get("retries", 3)
     if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
         raise ComposeError(f"{where}.retries", f"must be a number of retries, got {retries!r}")
-    retries = retries or 3  # Docker's default, for 0 too
+    # Docker reads 0 as its default, for the durations as for the retries.
     return ServiceHealthcheck(
         test=tuple(test),
-        interval_s=_duration(raw.get("interval", "30s"), f"{where}.interval"),
-        timeout_s=_duration(raw.get("timeout", "30s"), f"{where}.timeout"),
+        interval_s=_duration(raw.get("interval", "30s"), f"{where}.interval") or _DEFAULT_INTERVAL_S,
+        timeout_s=_duration(raw.get("timeout", "30s"), f"{where}.timeout") or _DEFAULT_TIMEOUT_S,
         start_period_s=_duration(raw.get("start_period", "0s"), f"{where}.start_period"),
-        start_interval_s=_duration(raw.get("start_interval", "5s"), f"{where}.start_interval"),
-        retries=retries,
+        start_interval_s=(
+            _duration(raw.get("start_interval", "5s"), f"{where}.start_interval") or _DEFAULT_START_INTERVAL_S
+        ),
+        retries=retries or _DEFAULT_RETRIES,
     ).to_json()
 
 

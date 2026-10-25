@@ -351,9 +351,11 @@ is an `error`, a verifier timeout is `invalid`, and a `reward.json` may declare 
 also offers generic `bash`, `view`, `write` and `edit` tools on its sandbox, for harnesses that do not act
 natively. A task's compose file (`environment/docker-compose.yaml`) is read into a stack plan
 (`platoon/envs/harbor/compose.py`): one that names only `main` gives the task's sandbox its environment, binds,
-resources and command, an init the kill before grading spares; tasks that need several containers (sidecar
-services) are refused rather than run without their services, and
-[RFC 0010](rfcs/0010-harbor-registry-and-multi-container-tasks.md) proposes support for them.
+resources and command, an init the kill before grading spares; a task that needs several containers (sidecar
+services) runs as a stack on a provider with the `stacks` capability (`platoon/sandbox/stacks.py`,
+`platoon/envs/harbor/sidecars.py`), which starts its services in dependency order, and grading probes its sidecars,
+whose being down makes the outcome `invalid`; elsewhere such a task is refused rather than run without its services
+([RFC 0010](rfcs/0010-harbor-registry-and-multi-container-tasks.md)).
 
 **Grading** (`HarborSession.grade`, `platoon/envs/harbor/session.py`) takes the sandbox the tests run in away from
 the agents. It runs alone on the session's gate, after the calls in flight, and kills every process the agents left
