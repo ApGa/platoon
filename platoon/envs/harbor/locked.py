@@ -1,10 +1,10 @@
 """The Harbor service's view of a fetched dataset: task ids from a lock, task directories from the Harbor cache, and the
 images sessions run (the dataset's default image map plus each task's deferred Dockerfile steps).
 
-A service configured with ``dataset`` (a source to fetch) or ``lock`` (a lock to read) lists and finds its tasks
-here instead of scanning a directory. The trainer, which lists the tasks, fetches a pinned ``dataset`` whose lock
-does not exist yet; rollout workers only read the lock, and check a task's cache entry against its digest once per
-node before its first session.
+A service configured with ``dataset`` (a source to fetch), ``adapter`` (an adapter that generates the tasks) or
+``lock`` (a lock to read) lists and finds its tasks here instead of scanning a directory. The trainer, which lists
+the tasks, fetches a pinned ``dataset`` whose lock does not exist yet; rollout workers only read the lock, and check a
+task's cache entry against its digest once per node before its first session.
 """
 
 from __future__ import annotations
@@ -36,6 +36,8 @@ class LockedTasks:
         self,
         *,
         dataset: str | None = None,
+        adapter: Mapping[str, Any] | None = None,
+        registry: str | Path | None = None,
         lock: str | Path | None = None,
         tasks: str | Path | Sequence[str | Path] = (),
         select: Mapping[str, Any] | None = None,
@@ -44,11 +46,13 @@ class LockedTasks:
         index: Sequence[str | Mapping[str, Any]] = (),
         splits: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
-        if dataset is None and lock is None:
-            raise ValueError("LockedTasks needs a dataset or a lock")
+        if dataset is None and adapter is None and lock is None:
+            raise ValueError("LockedTasks needs a dataset, an adapter or a lock")
         self.fetch: FetchConfig | None = (
             fetch_config(
                 dataset,
+                adapter=adapter,
+                registry=registry,
                 lock=lock,
                 tasks=tasks,
                 select=select,
@@ -56,11 +60,13 @@ class LockedTasks:
                 refuse=refuse,
                 index=index,
             )
-            if dataset is not None
+            if dataset is not None or adapter is not None
             else None
         )
-        if self.fetch is None and (tasks or select or overlays or refuse or index):
-            raise ValueError("tasks, select, overlays, refuse and index choose what a fetch of `dataset` locks")
+        if self.fetch is None and (tasks or select or overlays or refuse or index or registry):
+            raise ValueError(
+                "tasks, select, overlays, refuse, index and registry choose what a fetch of `dataset` locks"
+            )
         if self.fetch is not None:
             self.lock_path = self.fetch.lock_path()
         else:

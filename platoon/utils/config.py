@@ -175,6 +175,7 @@ def _load_with_bases(path: Path, chain: tuple[Path, ...]) -> tuple[dict[str, Any
 
 # A value that names a URL rather than a local path: ``scheme://...`` (``hf://``, ``harbor://``, ``git+https://``).
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_GIT_ADDRESS = re.compile(r"^[\w.-]+@[\w.-]+:")  # git's scp-like address of a repository: git@host:org/repo
 
 
 def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path | None = None) -> list[str]:
@@ -214,15 +215,20 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
             continue
         rules: Mapping[str, PathOption] = service_path_options(service)
         for option, rule in rules.items():
-            name, _, key = option.partition("[].")
+            name, listed, key = option.partition("[].")
+            if not listed:
+                name, _, key = option.partition(".")
             value = options.get(name)
             if value is None or (rule.relative_to is not None and options.get(rule.relative_to) is not None):
                 continue
             at = f"{where}.service_kwargs.{name}"
-            if key:  # a key of each mapping in a list
+            if key and listed:  # a key of each mapping in a list
                 for item_index, item in enumerate(value if isinstance(value, list) else ()):
                     if isinstance(item, dict) and key in item:
                         item[key] = resolver.path(item[key], f"{at}.{item_index}.{key}", rule)
+            elif key:  # a key of a mapping
+                if isinstance(value, dict) and key in value:
+                    value[key] = resolver.path(value[key], f"{at}.{key}", rule)
             elif isinstance(value, list):
                 options[name] = [
                     resolver.path(item, f"{at}.{item_index}", rule) for item_index, item in enumerate(value)
@@ -269,6 +275,8 @@ class _InputPaths:
     def path(self, value: Any, where: str, rule: Any) -> Any:
         if not isinstance(value, str) or not value or _URL.match(value) or value.startswith("git+"):
             return value  # a mapping, a URL or nothing: not a local path
+        if _GIT_ADDRESS.match(value):
+            return value  # git@host:org/repo, a repository
         expanded = os.path.expanduser(value)
         if os.path.isabs(expanded):
             return expanded

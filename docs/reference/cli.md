@@ -488,12 +488,12 @@ platoon harbor fetch [OPTIONS] CONFIG [ARGS...]
 
 Fetch the Harbor datasets a config names into the cache, and lock them.
 
-CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched. A dataset pinned to a
-commit whose lock answers the config, with a cache that holds its tasks, is left as it is: nothing is downloaded
-or hashed, unless the lock was written before platoon recorded the tasks' input files. A local directory is fetched
-again, since its files may have changed. Fetches of one lock take turns, also on several nodes, so a second one
-finds the first's lock current. Each entry with a hold-out prints the hold-out's report. Prints one JSON line per
-lock.
+CONFIG is a training or evaluation config, whose Harbor entries with a dataset (or an adapter) are fetched. A
+dataset pinned to a commit, revision or digest whose lock answers the config, with a cache that holds its tasks,
+is left as it is: nothing is downloaded or hashed, unless the lock was written before platoon recorded the tasks'
+input files. A local directory is fetched again, since its files may have changed. Fetches of one lock take
+turns, also on several nodes, so a second one finds the first's lock current. Each entry with a hold-out prints
+the hold-out's report. Prints one JSON line per lock.
 
 **Arguments**:
 
@@ -502,7 +502,8 @@ lock.
 
 **Parameters**:
 
-* `--update, --no-update`: Resolve a moving reference (a branch, a tag, no revision) to its current commit, and fetch it. *[default: False]*
+* `--update, --no-update`: Resolve a moving reference (a branch, a tag, no revision; a Harbor Hub tag; a registry task at HEAD) to what it
+    names now, and fetch it. *[default: False]*
 * `--repair, --no-repair`: Fetch a pinned dataset even when its lock answers: hash every cache entry again, and replace a damaged one. *[default: False]*
 * `--workers INT`: Parallel downloads (default 8).
 

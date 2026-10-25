@@ -53,7 +53,7 @@ An environment entry in a config names its service with the `service` key:
 | `python://pkg.module:EnvClass` | An OpenReward (ORS) `Environment` class, run in the rollout process. |
 | `ors+http://HOST:PORT[,...]/EnvName` | ORS environment servers over HTTP (or `ors+https`); a pool is sharded by rollout. `?variant=<Env>` selects one environment of a server that serves several. |
 | `ors+http:///EnvName` | ORS environment servers listed in `OPENREWARD_SESSION_URLS_<LABEL>`. |
-| `harbor` | A Harbor dataset, fetched by name (`hf://<org>/<name>@<commit>`) or read from a directory of task directories, each task graded by its own tests in a sandbox. |
+| `harbor` | A Harbor dataset, fetched by name (`hf://<org>/<name>@<commit>`, `harbor://<org>/<name>@<ref>` from the Harbor Hub, a git repository, or an adapter) or read from a directory of task directories, each task graded by its own tests in a sandbox. |
 | `table` | Rows of tasks with no tools and no grader, for harnesses that grade themselves. |
 | `pkg.module:Class` | Any other `EnvironmentService` class, built with `service_kwargs`. |
 

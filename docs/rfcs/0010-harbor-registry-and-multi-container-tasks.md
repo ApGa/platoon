@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The Harbor service (`platoon/envs/harbor/`), sandboxes (`platoon/sandbox/`), the harness runner (`platoon/harness/runner.py`) and the gateway (`platoon/gateway/server.py`); [Architecture](../architecture.md) (the Harbor backend, sandboxes, the native-tools rule); [RFC 0001](0001-native-multi-agent.md) (per-agent grading, `snapshot_async`), [RFC 0004](0004-sandweave-integration.md) (capabilities and routes), [RFC 0005](0005-gateway-dialects-and-tito.md) (dialects), [RFC 0008](0008-config-and-cli.md) (`platoon eval`), [RFC 0009](0009-gateway-step-budgets.md) (step budgets) |
 | Discussion | The pull request that adds this revision |
-| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources (no `harbor://`, `git+https://`, adapters or `ls`); M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. Not yet: M5, the rest of M6 (stacks on Docker, task MCP servers), M7–M9, and trajectories recording the kill mode |
+| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources; M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. The sources pull request: the rest of M1, the Harbor Hub, Harbor's legacy registry, git repositories and adapters (no `ls`, and no `service: harbor://...` shorthand). Not yet: M5, the rest of M6 (stacks on Docker, task MCP servers), M7–M9, and trajectories recording the kill mode |
 
 ## Summary
 
@@ -19,8 +19,8 @@ platoon runs Harbor tasks only:
 
 This RFC lets platoon take Harbor datasets as their authors publish them, and train any harness on them:
 - **Datasets by name.** A config names a dataset (`hf://org/name@rev`, `harbor://org/name@ref`,
-  `git+https://…@commit`). platoon fetches it once into a content-addressed cache and pins it with a lock that
-  workers read offline.
+  `git+https://…@commit`), or the adapter that generates it. platoon fetches it once into a content-addressed cache and
+  pins it with a lock that workers read offline.
 - **Images.** They are built once per site from the tasks' Dockerfiles, with many tasks per image: trailing `COPY`,
   `WORKDIR` and `ENV` steps are applied when a session opens.
 - **Toolchains.** A harness's toolchain is mounted read-only into the task sandbox.
@@ -100,16 +100,16 @@ tools inside the task container.
 
 ### 1. Dataset sources, cache and lock
 
-A Harbor environment names its dataset in `service_kwargs.dataset`. `service: harbor://org/name@ref` is shorthand,
-like the `ors+http://` service strings.
+A Harbor environment names its dataset in `service_kwargs.dataset`, or the adapter that generates it in
+`service_kwargs.adapter`. `service: harbor://org/name@ref` is shorthand, like the `ors+http://` service strings.
 
 | Source | Spelling | Resolved by | Index |
 |---|---|---|---|
 | Hugging Face dataset repository | `hf://org/name@revision[#subdir]` | `huggingface_hub`, in two passes: the index files, then only the selected task directories. The second pass lists those directories and downloads each distinct file once (`hf_hub_download`), hard-linking it into every task that has it; `snapshot_download` lists the whole repository and filters `allow_patterns` per file, which is slow for thousands of tasks | the repository's `registry.json` (Harbor's `DatasetSpec`), else a recursive `task.toml` scan |
-| Harbor Hub package | `harbor://org/name@ref` (a tag, a revision or a `sha256:` digest) | the pinned Harbor CLI in an isolated environment: `uvx --from harbor==<pin> harbor download org/name@ref --export` | the export |
-| Legacy or JSON registry | `harbor://name@version`, plus `registry: <path or URL>` | the same CLI, with `--registry-path` or `--registry-url` | the export |
-| Git repository | `git+https://host/org/repo@<commit>#<path>` | platoon, by sparse checkout | `registry.json`, else a recursive scan |
-| Upstream adapter | `adapter: {repo, commit, path, args}` | the adapter module from a pinned checkout, run as its own project runs it (Frontier-CS, §8) | its output |
+| Harbor Hub package (a dataset, or a single task) | `harbor://org/name@ref` (a tag, a revision or a `sha256:` digest) | the pinned Harbor CLI (`harbor==0.24.0`) in an isolated environment: `uvx --from harbor==<pin> harbor version show org/name@ref --json` resolves the reference to the package's digest and its tasks' digests, then `harbor download org/name@<digest> --export` downloads that digest; each task's files must hash to the Hub's digest | the Hub's list of the version's tasks, named by their names |
+| Legacy or JSON registry | `harbor://name@version`, plus `registry: <file, directory or URL>` (default: Harbor's own `registry.json`) | platoon reads the registry itself and takes each selected task from its `git_url` at its `git_commit_id` and `path` through the git path below (a Hugging Face repository's through the `hf://` path), rather than the CLI's clone of whole repositories | the registry's tasks |
+| Git repository | `git+https://host/org/repo@<commit>#<path>` | platoon: a shallow, blobless fetch of the commit, then a sparse checkout of the selected tasks | `registry.json`, else `task-index.json`, else a recursive scan of the commit's tree |
+| Upstream adapter | `adapter: {repo, commit, path, command, args, env, sparse}` | a checkout of the repository at the commit (whole, or the `sparse` patterns), where `command` (default: the adapter project's own script through `uv run --project`) runs with `args` (Frontier-CS, §8) | its output, as a local directory |
 | Local directory | a path; `dataset_dir` and `task_dirs` keep working | platoon | `registry.json` when present, else a recursive scan |
 
 ```python
@@ -129,6 +129,7 @@ class DatasetLock:
     dataset: str  # as written in the config
     resolved: str  # commit, revision or Hub digest
     fetched_with: str  # e.g. "huggingface_hub==1.10.1" or "harbor==0.24.0 (cli)"
+    source: Mapping[str, Any]  # how a Hub, registry, git or adapter source resolved: digests, commits, the command
     hash_rule: str  # "harbor-packager-v1"
     overlay_hash: str | None  # §2: dataset overlays, hashed with any host-data pins
     tasks: tuple[LockedTask, ...]
@@ -148,11 +149,18 @@ def verify(lock: DatasetLock, *, cache: Path) -> None: ...  # offline; raises on
 - **Automatically for pinned references.** `platoon train` and `platoon eval` fetch a reference pinned to a commit,
   revision or digest at startup, in the trainer process, if no lock lists it. Pointing a config at a dataset is then
   enough.
-- **Moving references** (`@latest`, a branch, a Hub tag) resolve only through `platoon harbor fetch --update`, which
-  rewrites the lock.
+- **Moving references** (`@latest`, a branch, a Hub tag, a registry task at `HEAD`, the default registry itself)
+  resolve only through `platoon harbor fetch --update`, which rewrites the lock with what they resolved to. A Hub
+  revision or digest, a full git commit, an adapter's commit and a version in a registry file (or at a URL with a commit
+  in its path) are pinned.
 - **Workers read the lock and the cache, never the network.** They look a task up by its id in the lock, never by
   scanning a directory. Each cache entry's hash is checked once per node before its first session, not once per
   process, because task directories can carry large input data. A mismatch fails with `env_config`.
+- **What a source downloads stays inside each task.** A symbolic link in a Hub export, a git checkout or a registry's
+  checkout is taken as the file it names when that file is in the same task, as the content hash takes it, and fails
+  the fetch when it leaves the task (absolute, climbing out, a linked `solution/`, a task behind a link): it would
+  bring the fetching host's files into the cache and every sandbox. A URL with credentials is refused, since the lock
+  and the logs record URLs as written.
 
 **Ids and selection:**
 - **Ids** never contain cache paths or content hashes, so a content update moves neither the harness draw
@@ -174,10 +182,23 @@ def verify(lock: DatasetLock, *, cache: Path) -> None: ...  # offline; raises on
   by the task's `.gitignore` or Harbor's default ignores. platoon computes it without Harbor.
 - **The Harbor CLI, not the library.** Harbor 0.24.0 needs Python 3.12 or later, litellm 1.92 or later and
   supabase, and its core closure is about 92 packages. Its minor releases change agent, trial and environment APIs.
-  So platoon runs its download command in a `uvx` environment and never imports it.
+  So platoon runs its `version show` and `download` commands in a `uvx` environment and never imports it
+  (`PLATOON_HARBOR_CLI` names another CLI's command line), with its dependencies as PyPI had them at its release
+  (`--exclude-newer`), so that every host installs the same closure; its telemetry is off unless the fetching host
+  turns it on.
   - The command has no task filter, so a `harbor://` source downloads the whole dataset; Terminal-Bench-Science is
-    70 tasks and 727 MB.
-  - Fetches retry, since a transient HTTP/2 stream reset has been seen.
+    70 tasks and 727 MB, Terminal-Bench 4 66 tasks and 324 MB.
+  - The download is by the digest the reference resolved to, so a tag that moves meanwhile cannot change the tasks.
+  - Fetches retry what may pass (a transient HTTP/2 stream reset has been seen), and not what the CLI's or git's own
+    error lines report as not found or no access; a dataset named like an error does not count as one.
+- **Git without whole clones.** A git source (and each repository a legacy registry names) is fetched shallow and
+  without blobs (harbor-datasets' tree at one commit is 41 MB of about 926,000 paths), and only the selected tasks'
+  files are checked out, with a sparse index. git cannot fetch an abbreviated commit, so a pinned one is named in full.
+  Files in Git LFS need `git lfs` where the fetch runs, and a pointer left in a task fails the fetch.
+- **Adapters run code at fetch.** An adapter source runs its repository's code on the fetching host, with its network,
+  never in a rollout. Adapters differ in how they run (Harbor's are `uv` projects with a script; Frontier-CS's expect
+  Harbor's tree and run as modules), so the command is configurable; the lock records the repository, commit, command,
+  arguments and the digest of the adapter's `uv.lock`.
 - **Hugging Face sources do not go through Harbor's HF git path**, which needs git-lfs and credentials and clones
   the whole repository. The Hub's HTTP downloads keep no file modes, so the fetch restores the executable bit on
   `*.sh` files and files with a shebang, and records that in the lock. Only the files the content hash covers are
@@ -664,7 +685,7 @@ What changes is the default HPC provider:
 
 | Change | Compatible? |
 |---|---|
-| New `service_kwargs`: `dataset`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy` (`task`, `none`), `stacks` (`auto`, `refuse`; `host_network` with the fallback), `on_sidecar_down` (`invalid`, `grade`), `agent_user` | additive |
+| New `service_kwargs`: `dataset`, `adapter`, `registry`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy` (`task`, `none`), `stacks` (`auto`, `refuse`; `host_network` with the fallback), `on_sidecar_down` (`invalid`, `grade`), `agent_user` | additive |
 | New environment-entry key `on_harness_exit`; new rollout-config key `sampling_precedence` (`request`, today's behavior, or `config`, under which policy calls sample with the temperature, top_p and top_k of `inference_params`, never a harness's own) and `inference_params.top_k` | additive; defaults keep today's behavior |
 | Spec keys `[install.recipe]`, `[resources]`, `[budget]`; `[install].toolchain` may be a name | additive |
 | Overlay keys `[[compose]]` and `compose_host_env`; the lock's `compose` and `compose_rule`, and `flags.stack: main_only`; `Sandbox.keep_processes` (optional) | additive |
@@ -747,7 +768,7 @@ Effort is EST, for one implementer plus review.
 | Milestone | Scope | Exit check | Pull requests |
 |---|---|---|---|
 | M0 Fail closed | Compose tasks refused (merged). Accept trivial compose files. Parse separate-verifier tables and `artifacts`. Refuse `gpus > 0` without a `gpu` provider, and `[agent].user` unless `agent_user: ignore`. No `docker://` prefix on `.sif`, `.sqsh` and absolute paths. Recursive scans. 0.5 day | CPU tests: each refusal names its reason; the 8 toy tasks still score oracle 1.0 and no-op 0.0 | compose refusal: merged; the rest: the Harbor fast-path pull request |
-| M1 Sources and lock | `hf://`, `harbor://` through the pinned CLI, `git+https://`, local; the cache; the lock with ids, index and flags; `fetch`, `verify`, `ls`; auto-fetch of pinned references; lock-based lookups. 3 days | CPU tests: a local Hub fixture, a JSON-registry fixture and a git fixture resolve, lock and verify offline; a one-byte change fails `verify`; platoon's hash equals `uvx harbor==0.24.0`'s on fixtures with a `README.md`, a `.gitignore` and `__pycache__` || the Harbor fast-path pull request: `hf://` and local sources, the cache, the lock, `fetch`, `verify`, auto-fetch, lock-based lookups |
+| M1 Sources and lock | `hf://`, `harbor://` through the pinned CLI, `git+https://`, local; the cache; the lock with ids, index and flags; `fetch`, `verify`, `ls`; auto-fetch of pinned references; lock-based lookups. 3 days | CPU tests: a local Hub fixture, a JSON-registry fixture and a git fixture resolve, lock and verify offline; a one-byte change fails `verify`; platoon's hash equals `uvx harbor==0.24.0`'s on fixtures with a `README.md`, a `.gitignore` and `__pycache__` || the Harbor fast-path pull request: `hf://` and local sources, the cache, the lock, `fetch`, `verify`, auto-fetch, lock-based lookups; the sources pull request: `harbor://` (the Hub and the legacy registry), `git+https://` and adapters, checked offline against a fake Harbor CLI and local git repositories, and online on the Hub's and harbor-datasets' datasets and Frontier-CS's two adapters (`ls` not built) |
 | M2 Images and toolchains | Build plans and deferred steps; the image map; `oci`, `def` and `docker` builders with receipts; named toolchains, recipes, per-node staging, binds at the build path; `[resources]`. 4 days | CPU tests on plans and deferred steps; a site job builds a fixture Dockerfile through `oci` and `def`, and a sandbox from each runs with the recorded env and workdir; a toolchain mounts read-only and its interpreter runs || the Harbor fast-path pull request |
 | M3 Gateway routes | The gateway's Unix socket; `SessionNeeds`; `upstreams` and `routes` on every built-in provider; the forwarder; route-bound keys; mint and call caps. 2.5 days | CPU tests (process, and docker in CI): a harness in a no-network sandbox finishes an episode through the route; the host's loopback is unreachable from it; a key presented on another rollout's socket is refused || the Harbor fast-path pull request |
 | M4 Grading | Separate verifiers with artifacts; reward contracts; opt-in classifiers; `on_harness_exit`; the task's agent timeout; `Sandbox.kill_processes` before grading. 3.5 days | CPU fixtures: separate-verifier tasks score oracle 1.0 and no-op 0.0; a background process cannot shadow `reward.txt`; a crash after a gateway error is `error`, a crash without one is graded || the Harbor fast-path pull request |

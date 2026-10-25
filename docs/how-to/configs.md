@@ -111,12 +111,12 @@ The merge rules (`platoon/utils/config.py`):
   is not a mapping is a configuration error.
 - **Input paths are relative to the file that names them,** as `extends:` is, so a config runs the same from any
   directory: an environment's harness `.toml` spec, and the options its service reads files from (a Harbor entry's
-  `dataset`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`, `overlays` and `mounts[].source`, a task table's
-  `path`). A relative input that names nothing beside its file is a configuration error, never looked up anywhere
-  else; when the path exists relative to the working directory, where such paths resolved before, the error names
-  that path too. A split manifest named relative to a `dataset_dir` that the same file names stays relative to it,
-  a `lock` that a fetch will write need not exist yet, and paths inside a dataset (`index[].path`) stay relative to
-  the dataset.
+  `dataset`, `registry`, `adapter.repo`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`, `overlays` and
+  `mounts[].source`, a task table's `path`). A relative input that names nothing beside its file is a configuration
+  error, never looked up anywhere else; when the path exists relative to the working directory, where such paths
+  resolved before, the error names that path too. A split manifest named relative to a `dataset_dir` that the same
+  file names stays relative to it, a `lock` that a fetch will write need not exist yet, and paths inside a dataset
+  (`index[].path`) stay relative to the dataset.
 - **Overrides and outputs are relative to the working directory:** a path given on the command line (step 3), and
   where a run writes, `log_path` and `inference.output_dir`, in which a leading `~` names the home directory. The
   run's record holds these paths absolute (step 6).
