@@ -132,16 +132,26 @@ def test_eval_solves_the_runnable_task_in_a_process_sandbox(tmp_path, capsys, sc
     )
 
 
-def test_a_task_with_a_compose_file_is_refused_with_the_reason():
+@pytest.mark.parametrize(
+    ("provider", "reason"),
+    [
+        # Docker runs stacks, but not one whose sidecar runs its registry image's own command, which is not recorded.
+        (
+            "docker",
+            r" whose service db runs the command of its registry image postgres:16, which platoon does not know",
+        ),
+        ("singularity", r", and the singularity provider runs no multi-container stacks"),
+    ],
+)
+def test_a_task_with_a_compose_file_is_refused_with_the_reason(provider: str, reason: str, monkeypatch):
     from platoon.envs.harbor import HarborEnvironmentService
+    from platoon.sandbox import compose
 
-    service = HarborEnvironmentService(dataset_dir=TASKS, provider="docker")  # never built: listing needs no Docker
+    monkeypatch.setattr(compose, "compose_refusal", lambda binary: None)  # a docker CLI with compose, if there is one
+    service = HarborEnvironmentService(dataset_dir=TASKS, provider=provider)  # never built: listing runs nothing
 
     assert asyncio.run(service.list_tasks("eval")) == ["write-greeting"]
-    with pytest.raises(
-        ValueError,
-        match=r"multi-container stack \(sidecar services\), and the 'docker' sandbox provider runs no multi-container",
-    ):
+    with pytest.raises(ValueError, match=r"multi-container stack \(sidecar services\)" + reason):
         asyncio.run(service.get_task("needs-a-database"))
 
 

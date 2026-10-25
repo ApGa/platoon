@@ -46,7 +46,7 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 - **Sandboxes can keep a task's processes through `kill_processes`.** `Sandbox.keep_processes(entries)`, optional, spares
   processes a session started for the task before any agent ran, with their descendants; the built-in providers have
   it ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
-- **Harbor tasks that are multi-container stacks run, on the `process` provider for now.** A task whose compose file
+- **Harbor tasks that are multi-container stacks run, on the `process` provider and Docker.** A task whose compose file
   names services besides `main` (a database, a judge, an MCP server) runs as a stack on a sandbox provider with the
   new `stacks` capability: `main` is the sandbox a main-only file would give the task, and each sidecar a sandbox of
   its own, with its image, command (compose's over its image's), environment, healthcheck, volumes (named ones shared
@@ -67,11 +67,11 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   that the grade's probes found (`services`). On the `process` provider, which isolates nothing, each declared port is
   a port outside the kernel's ephemeral range that the stack holds for its life, which a service learns from
   `PLATOON_PORT_<port>`, and `scheme://<service>:<port>` in environment values, healthchecks and collect hooks reaches
-  it. `stacks: refuse` refuses every stack; on a provider without the capability (`docker`, `singularity` and `enroot`
-  for now) stacks stay refused, and a fetch still refuses them unless its `refuse` sets `sidecars: false`. Stacks that
-  no rollout could start in this release (a registry sidecar that its compose file gives no command, a sidecar whose
-  build context nothing builds) are skipped by a dataset directory and stop a run when a fetched dataset's tasks are
-  listed ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
+  it. `stacks: refuse` refuses every stack; on a provider without the capability (`singularity` and `enroot` for now)
+  stacks stay refused, and a fetch still refuses them unless its `refuse` sets `sidecars: false`. Stacks that no
+  rollout could start in this release (a registry sidecar that its compose file gives no command) are skipped by a
+  dataset directory and stop a run when a fetched dataset's tasks are listed
+  ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
 - **A Harbor environment can run every sandbox without a network.** `network_policy: none` gives every sandbox and
   stack of the environment no network, in every phase, for datasets whose answers the web holds; `task`, the default,
   gives each phase the network its task asks for, and a stack graded in its own `main` gets the verifier's
@@ -82,6 +82,35 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   generic driver, `drive_stack`, that starts a stack's services in dependency order over a backend that starts one at a
   time, rolls back on a failure or a cancellation, and probes them
   ([Write a sandbox provider](docs/extending/sandbox-providers.md#run-multi-container-stacks)).
+- **Harbor stacks run on Docker, each a `docker compose` project of its own.** The `docker` provider has the `stacks`
+  capability: it writes each stack's project file from the stack's spec, as JSON (which compose reads as YAML, so no
+  value changes its type), into a directory below its new `stack_root` option, which must be a directory of the
+  user's own, with no `:` in its path, and each service is a container that compose creates once the service's
+  dependencies hold, running its command (compose's over its image's) as its image's user, which platoon starts in
+  order, health-checks and probes as on every provider. The services share an `internal` network of the project's,
+  which gives the host no address, so that the host's own services are out of their reach too, and on which each
+  answers to its name and aliases; a bridge network is connected for the phases with egress and disconnected for
+  those without; `main` reaches the model gateway through a route, as a container without a network does. Volumes are
+  directories of the project, filled before any service starts. A start that fails or is given up waits for the
+  docker commands it ran, which the daemon carries out whatever becomes of their CLI, and teardown removes the
+  containers and networks that carry the stack's label, with the containers' anonymous volumes, then the directory,
+  what services wrote there as other users through a container of `main`'s image; a reap by label removes a killed
+  worker's stacks, and a stack whose teardown failed stays registered for that. Stacks need the CLI's compose plugin,
+  which the provider checks when a run lists its tasks, warning of a daemon older than 25.0.5, whose internal
+  networks let DNS queries out ([Stacks on Docker](docs/how-to/sandboxes-and-harbor.md#stacks-on-docker)).
+- **`platoon prepare` builds the images of stacks' sidecars.** A sidecar that builds from a context of the task
+  (`build:`, planned whole) is built by `platoon prepare` and `platoon harbor images build` with the provider's
+  builder, with its build arguments (the `docker` builder's `--build-arg`; the others refuse an image that has any),
+  and recorded in the image map, so that no rollout builds one; `platoon harbor images plan` lists it, with the role
+  `service`. A run whose sidecars' images the map lacks stops when it lists its tasks, naming the `platoon prepare`
+  command, as for the tasks' own images ([Build task images](docs/how-to/sandboxes-and-harbor.md#build-task-images)).
+- **Privileges for the stacks of datasets you trust, on Docker alone.** A fetch with `refuse: {privileges: false}` keeps
+  the compose services that ask for `privileged`, or for a `cap_add` that a rootless service's root does not hold
+  (`NET_ADMIN`; `DAC_READ_SEARCH`, with which a root that is the host's, as on a rootful Docker, reads any of the
+  host's files; ...), which a fetch refuses by default, and plans them as the stack's privileges; such a stack runs
+  only on a provider with the new `privileged` capability, `docker`, and every other refuses it when a run lists its
+  tasks. `platoon.sandbox.privilege_refusal` says why a provider would not give them
+  ([Stacks on Docker](docs/how-to/sandboxes-and-harbor.md#stacks-on-docker)).
 
 ### Changes
 
@@ -109,6 +138,15 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 - Image map entries record an image's `HEALTHCHECK`, `EXPOSE` ports, `VOLUME`s and `STOPSIGNAL` too, and a
   Dockerfile's build plan what its deferred suffix sets in the image's configuration (`config`: `CMD`, `ENTRYPOINT`,
   `HEALTHCHECK`, ...), which a main-only task's init and healthcheck use. The build keys of task images do not change.
+- The `docker` provider removes a sandbox's anonymous volumes with it (`docker rm --volumes`), which those of an
+  image's `VOLUME`s outlived, also when it reaps; its `reap` removes the labelled stacks first, and counts them with
+  the containers. Its sandboxes are reaped through a record that names its `stack_root` too.
+- `platoon.sandbox.stack_refusal` asks a built provider's class too (its `stack_refusal(options)`, with the provider's
+  `options`), as it asks a provider named by its name.
+- A dataset directory's stack whose sidecar builds from a context is refused saying that a fetched dataset's image map
+  can hold that image (serve the directory as a dataset to fetch). `examples/harbor-local`'s `needs-a-database` is
+  still refused on Docker, which runs stacks now, for its `postgres:16` sidecar, which runs its image's own command,
+  which platoon does not record yet.
 
 ## 0.4.0 (2026-10-25)
 

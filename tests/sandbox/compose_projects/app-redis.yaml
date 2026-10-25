@@ -1,0 +1,50 @@
+outcome: opened and closed
+project:
+  name: <project>
+  services:
+    main:
+      image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+      container_name: <project>-main
+      entrypoint: [sleep, infinity]
+      working_dir: /app
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-redis, platoon.task: platoon/app-redis, platoon.stack: <project>, platoon.service: main}
+      environment: {REDIS_HOST: cache, REDIS_PORT: '6379'}
+      networks:
+        internal: {}
+      cpus: 1
+      mem_limit: 512m
+    cache:
+      image: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+      container_name: <project>-cache
+      entrypoint: [docker-entrypoint.sh, redis-server, --save, '', --appendonly, 'no']
+      working_dir: /data
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-redis, platoon.task: platoon/app-redis, platoon.stack: <project>, platoon.service: cache}
+      networks:
+        internal: {}
+  networks:
+    internal:
+      name: <project>-internal
+      internal: true
+      driver_opts: {com.docker.network.bridge.inhibit_ipv4: 'true'}
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-redis, platoon.task: platoon/app-redis, platoon.stack: <project>}
+commands:
+  <project>:
+  - [compose, version]
+  - [version, --format, '{{.Server.Version}}']
+  - [ps, --all, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, ls, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, rm, <project>-internal]
+  cache:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, cache]
+  - [start, <project>-cache]
+  - [exec, --workdir, /data, --env=PLATOON_EXEC=<marker>, <project>-cache, redis-cli, -p, '6379', ping]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-cache]
+  - [exec, --workdir, /data, --env=PLATOON_EXEC=<marker>, <project>-cache, redis-cli, -p, '6379', ping]
+  - [rm, --force, --volumes, <project>-cache]
+  main:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, main]
+  - [start, <project>-main]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, /bin/sh, -c, <script>, platoon-list]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /logs/agent, /logs/verifier, /logs/artifacts, /app]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-main]
+  - [rm, --force, --volumes, <project>-main]

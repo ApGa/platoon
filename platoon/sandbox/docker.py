@@ -15,7 +15,11 @@ A container without a network (``--network none``) reaches a Unix-socket
 upstream through its directory, bound at ``/run/platoon/<name>``, and a
 forwarder on port 18080 of its own loopback (:mod:`platoon.sandbox.routes`).
 Every container carries the sandbox's labels, so :meth:`DockerProvider.reap`
-removes the containers a process that is gone left running.
+removes the containers a process that is gone left running, with their
+anonymous volumes.
+
+The provider also runs stacks, each a docker compose project of its own
+(:meth:`DockerProvider.start_stack`, :mod:`platoon.sandbox.compose`).
 """
 
 from __future__ import annotations
@@ -23,19 +27,24 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import posixpath
 import shutil
 import uuid
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from platoon.sandbox import cleanup
 from platoon.sandbox._exec import run_command
 from platoon.sandbox._processes import KILL_TIMEOUT_S, kill_marked_command, kill_other_processes, own_processes
 from platoon.sandbox.base import ExecResult, SandboxSnapshot, SandboxSpec
 from platoon.sandbox.routes import SandboxRoutes
+from platoon.utils.scratch import node_scratch
 from platoon.utils.stopping import let_finish
+
+if TYPE_CHECKING:
+    from platoon.sandbox.stacks import DrivenStack, StackSpec
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +81,22 @@ def run_arguments(spec: SandboxSpec, *, name: str, image: str) -> list[str]:
 
 
 class DockerSandbox:
-    def __init__(self, container: str, spec: SandboxSpec, *, binary: str, cli_timeout_s: float) -> None:
+    def __init__(
+        self,
+        container: str,
+        spec: SandboxSpec,
+        *,
+        binary: str,
+        cli_timeout_s: float,
+        routes: SandboxRoutes | None = None,
+    ) -> None:
         self.id = container
         self.spec = spec
         self._binary = binary
         self._cli_timeout_s = cli_timeout_s
         self._snapshot_images: list[str] = []
         self._stopped = False
-        self._routes: SandboxRoutes | None = None
+        self._routes = routes
         self._token: int | None = None
         self._own_processes: frozenset[str] | None = None  # the container's own, listed when it starts
         self._kept: frozenset[str] = frozenset()  # what kill_processes spares too, with descendants (keep_processes)
@@ -168,6 +185,12 @@ class DockerSandbox:
             target.parent.mkdir(parents=True, exist_ok=True)
             await self._docker("cp", f"{self.id}:{source}", str(target))
 
+    async def note_own_processes(self) -> None:
+        """Note what runs in the container now as its own, which :meth:`kill_processes` spares: once, as it starts,
+        before any command or route forwarder runs."""
+
+        self._own_processes = await own_processes(self)
+
     def keep_processes(self, entries: Iterable[str]) -> None:
         """Spare the processes ``entries`` ("<pid>:<start time>" in the container) and their descendants from
         :meth:`kill_processes`."""
@@ -190,7 +213,7 @@ class DockerSandbox:
         if self._stopped:
             return
         self._stopped = True
-        await run_command([self._binary, "rm", "--force", self.id], timeout_s=self._cli_timeout_s)
+        await run_command([self._binary, "rm", "--force", "--volumes", self.id], timeout_s=self._cli_timeout_s)
         if self._snapshot_images:
             # Best effort: an image that a restored sandbox still runs stays until that sandbox is removed.
             await run_command([self._binary, "rmi", *self._snapshot_images], timeout_s=self._cli_timeout_s)
@@ -214,8 +237,13 @@ class DockerSandbox:
 
 
 class DockerProvider:
+    """A container per sandbox, and a compose project per stack (:mod:`platoon.sandbox.compose`), whose directories
+    go below ``stack_root`` (default: ``platoon-docker-stacks-<uid>`` in node scratch)."""
+
     name = "docker"
-    capabilities = frozenset({"snapshot", "network_none", "isolation", "routes", "host_loopback"})
+    capabilities = frozenset(
+        {"snapshot", "network_none", "isolation", "routes", "host_loopback", "stacks", "privileged"}
+    )
     # A container per sandbox: a site profile may choose it (platoon.site).
     isolates = True
 
@@ -226,15 +254,47 @@ class DockerProvider:
         binary = options.get("binary") or "docker"
         return None if shutil.which(str(binary)) else f"the docker CLI ({binary}) is not on PATH"
 
-    def __init__(self, binary: str = "docker", cli_timeout_s: float = DEFAULT_CLI_TIMEOUT_S) -> None:
+    @classmethod
+    def stack_refusal(cls, options: Mapping[str, Any]) -> str | None:
+        """Why the provider built with ``options`` runs no stack: a docker CLI without the compose plugin
+        (:func:`platoon.sandbox.stack_refusal`); None when it has it, and when there is no CLI, which building the
+        provider reports."""
+
+        from platoon.sandbox.compose import compose_refusal
+
+        binary = shutil.which(str(options.get("binary") or "docker"))
+        return compose_refusal(binary) if binary is not None else None
+
+    def __init__(
+        self,
+        binary: str = "docker",
+        cli_timeout_s: float = DEFAULT_CLI_TIMEOUT_S,
+        stack_root: str | Path | None = None,
+    ) -> None:
         resolved = shutil.which(binary)
         if resolved is None:
             raise RuntimeError(f"The docker provider needs the {binary!r} CLI on PATH")
         self.binary = resolved
         self.cli_timeout_s = cli_timeout_s
+        # In node-local scratch, which a node's users may share: a directory of this user's own.
+        default_root = node_scratch() / f"platoon-docker-stacks-{os.getuid()}"
+        self.stack_root = Path(stack_root) if stack_root is not None else default_root
+
+    @property
+    def options(self) -> dict[str, Any]:
+        """The options that build this provider again, as a reap of what it started does."""
+
+        return {"binary": self.binary, "cli_timeout_s": self.cli_timeout_s, "stack_root": str(self.stack_root)}
 
     async def start(self, spec: SandboxSpec) -> DockerSandbox:
         return await self._run(spec, image_reference(spec.image))
+
+    async def start_stack(self, spec: StackSpec) -> DrivenStack:
+        """Start a stack as a docker compose project (:mod:`platoon.sandbox.compose`)."""
+
+        from platoon.sandbox.compose import start_compose_stack
+
+        return await start_compose_stack(self, spec)
 
     async def restore(self, snapshot: SandboxSnapshot, spec: SandboxSpec) -> DockerSandbox:
         if snapshot.provider != self.name:
@@ -242,17 +302,22 @@ class DockerProvider:
         return await self._run(spec, snapshot.path)
 
     async def reap(self, labels: Mapping[str, str]) -> int:
-        """Remove every container whose labels include ``labels``, and the snapshot images committed from them;
-        returns how many containers.  Docker cannot tell which process a container belongs to, so ``labels`` must
-        select only sandboxes nobody uses any more (a stopped rollout worker's ``platoon.worker`` label)."""
+        """Remove every stack whose labels include ``labels`` (:func:`platoon.sandbox.compose.reap_compose_stacks`),
+        then every container whose labels include them, with its anonymous volumes, and the snapshot images committed
+        from them; returns how many stacks and containers.  Docker cannot tell which process a container belongs to,
+        so ``labels`` must select only sandboxes nobody uses any more (a stopped rollout worker's ``platoon.worker``
+        label)."""
+
+        from platoon.sandbox.compose import reap_compose_stacks
 
         if not labels:
             raise ValueError("Reaping needs labels: an empty set would select every container")
+        stacks = await reap_compose_stacks(self, labels)
         filters = [f"--filter=label={key}={value}" for key, value in labels.items()]
         listed = await run_command([self.binary, "ps", "--all", "--quiet", *filters], timeout_s=self.cli_timeout_s)
         containers = listed.stdout.split() if listed.exit_code == 0 else []
         if containers:
-            await run_command([self.binary, "rm", "--force", *containers], timeout_s=self.cli_timeout_s)
+            await run_command([self.binary, "rm", "--force", "--volumes", *containers], timeout_s=self.cli_timeout_s)
         images = await run_command(
             [self.binary, "images", "--quiet", "--filter=reference=platoon-snapshot", *filters],
             timeout_s=self.cli_timeout_s,
@@ -261,13 +326,12 @@ class DockerProvider:
             await run_command([self.binary, "rmi", "--force", *images.stdout.split()], timeout_s=self.cli_timeout_s)
         if containers:
             logger.info("Removed %d container(s) labelled %s", len(containers), dict(labels))
-        return len(containers)
+        return stacks + len(containers)
 
     async def _run(self, spec: SandboxSpec, image: str) -> DockerSandbox:
         routes = SandboxRoutes(spec, own_network=True)
         labels = {**spec.labels, **cleanup.labels()}
-        options = {"binary": self.binary, "cli_timeout_s": self.cli_timeout_s}
-        token = cleanup.register(provider=cleanup.provider_ref(self), options=options, labels=labels)
+        token = cleanup.register(provider=cleanup.provider_ref(self), options=self.options, labels=labels)
         container = f"platoon-{uuid.uuid4().hex[:12]}"
         try:
             run_spec = dataclasses.replace(spec, mounts=[*spec.mounts, *routes.mounts()], labels=labels)
@@ -281,11 +345,12 @@ class DockerProvider:
             # by name, to the end also when this start is cancelled.
             await asyncio.shield(let_finish(asyncio.ensure_future(self._remove_unstarted(container, token))))
             raise
-        sandbox = DockerSandbox(container, run_spec, binary=self.binary, cli_timeout_s=self.cli_timeout_s)
-        sandbox._routes, sandbox._token = routes, token
+        sandbox = DockerSandbox(
+            container, run_spec, binary=self.binary, cli_timeout_s=self.cli_timeout_s, routes=routes
+        )
+        sandbox._token = token
         try:
-            # Before any route's forwarder starts: what runs in the container now keeps it alive.
-            sandbox._own_processes = await own_processes(sandbox)
+            await sandbox.note_own_processes()  # before any route's forwarder starts
             await routes.start(sandbox)
         except BaseException:  # cancelled too: the container must not outlive the start
             await asyncio.shield(sandbox.stop())
@@ -298,7 +363,9 @@ class DockerProvider:
         container that cannot be removed stays registered, so a reap by its labels still finds it."""
 
         try:
-            result = await run_command([self.binary, "rm", "--force", container], timeout_s=self.cli_timeout_s)
+            result = await run_command(
+                [self.binary, "rm", "--force", "--volumes", container], timeout_s=self.cli_timeout_s
+            )
         except Exception:
             logger.warning("Cannot remove container %s, whose start failed", container, exc_info=True)
             return

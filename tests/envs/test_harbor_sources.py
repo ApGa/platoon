@@ -1139,7 +1139,7 @@ async def test_a_fetched_stack_locks_as_a_local_one_and_runs_only_where_stacks_r
     assert error.value.failure_kind == "env_config"
     refusing = {
         "the environment sets stacks: refuse": HarborEnvironmentService(provider=provider, stacks="refuse", **settings),
-        "the 'docker' sandbox provider runs no": HarborEnvironmentService(provider="docker", **settings),
+        "the singularity provider runs no": HarborEnvironmentService(provider="singularity", **settings),
     }
     for why, service in refusing.items():
         with pytest.raises(EnvSetupError, match=rf"1 of the 1 tasks of split 'train' are multi-container .*{why}"):

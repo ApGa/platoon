@@ -1,9 +1,11 @@
 """Build the images a lock's tasks need, once per site: ``platoon harbor images plan``, ``build`` and ``verify``.
 
-:func:`plan_images` groups a lock's runnable tasks by build key (:mod:`platoon.envs.harbor.dockerfile`) and says
-which keys a site's image map lacks; an entry whose image file is gone counts as missing. :func:`build_images`
-builds those from a representative task's Dockerfile prefix and records each image in the map with a receipt
-(builder, version, time, log, size, SHA-256, and the digest of each base image; for ``oci``, the builder's revision,
+:func:`plan_images` groups a lock's runnable tasks by build key (:mod:`platoon.envs.harbor.dockerfile`) and says which
+keys a site's image map lacks; an entry whose image file is gone counts as missing. The keys are those of the tasks' own
+images, their separate verifiers' and their stacks' sidecars' that build from a context of the task (``build:`` in the
+compose file, planned whole). :func:`build_images` builds those from a representative task's Dockerfile prefix (a
+sidecar's whole Dockerfile, with its build arguments) and records each image in the map with a receipt (builder,
+version, time, log, size, SHA-256, and the digest of each base image; for ``oci``, the builder's revision,
 :data:`~platoon.envs.harbor.images.OCI_BUILDER_REVISION`). :func:`verify_images` checks the map's image files against
 the SHA-256 their entries record.
 
@@ -32,7 +34,8 @@ Builders:
   here-documents, ``ADD`` of a URL, a git repository or an archive), naming the ``oci`` builder, and never falls
   back to the base image.
 - ``docker``: ``docker build`` (or ``podman`` with ``PLATOON_DOCKER=podman``) tagged ``platoon-harbor:<key>``, for
-  the docker provider; with ``push``, pushed and recorded by digest (enroot sites import that digest).
+  the docker provider; with ``push``, pushed and recorded by digest (enroot sites import that digest).  It alone passes
+  a sidecar's build arguments (``--build-arg``); the others refuse an image that has any.
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from platoon.envs.harbor.dockerfile import (
+    DOCKERFILE,
     DockerfilePlan,
     expand,
     parse_assignments,
@@ -111,12 +115,16 @@ class PlannedImage:
     """One build key of a lock: the tasks that use it and whether the image map has it."""
 
     key: str
-    role: str  # "environment" or "verifier" (the first role that needs the key)
+    role: str  # "environment", "verifier" or "service" (a stack's sidecar): the first role that needs the key
     tasks: list[str] = field(default_factory=list)
     base: list[str] = field(default_factory=list)
     present: bool = False  # the map has an entry, and its image file exists if the image is a local file
     example: LockedTask | None = None  # the task whose Dockerfile builds it (the first by name)
     notes: list[str] = field(default_factory=list)
+    # A service's build context and Dockerfile in the example task, and its build arguments.
+    context: str | None = None
+    dockerfile: str = DOCKERFILE
+    build_args: dict[str, str] = field(default_factory=dict)
 
     @property
     def kind(self) -> str:
@@ -131,6 +139,7 @@ class PlannedImage:
             "base": self.base,
             "present": self.present,
             "example": self.example.name if self.example else None,
+            **({"context": f"{self.context}/{self.dockerfile}"} if self.context else {}),
             **({"notes": self.notes} if self.notes else {}),
         }
 
@@ -157,8 +166,9 @@ class ImagePlan:
 
 
 def plan_images(lock: DatasetLock, image_map: ImageMap | None = None) -> ImagePlan:
-    """The build keys the lock's runnable tasks need, most-used first, and which the image map has. An entry whose
-    image is a local file (``.sif``, ``.sqsh``, ...) counts only while the file exists."""
+    """The build keys the lock's runnable tasks need (their own images', their separate verifiers' and their stacks'
+    sidecars'), most-used first, and which the image map has. An entry whose image is a local file (``.sif``,
+    ``.sqsh``, ...) counts only while the file exists."""
 
     images: dict[str, PlannedImage] = {}
     prebuilt: dict[str, int] = {}
@@ -183,6 +193,15 @@ def plan_images(lock: DatasetLock, image_map: ImageMap | None = None) -> ImagePl
                     image.notes = list(plan.get("notes") or [])
             elif role == "environment":
                 default_image += 1
+        for build in task.service_builds():
+            image = images.setdefault(build["key"], PlannedImage(key=build["key"], role="service"))
+            if not image.tasks or image.tasks[-1] != task.name:  # two sidecars of one task may share an image
+                image.tasks.append(task.name)
+            if image.example is None or task.name < image.example.name:
+                image.example = task
+                image.base = list(build.get("base") or [])
+                image.context, image.dockerfile = build["context"], build.get("dockerfile") or DOCKERFILE
+                image.build_args = dict(build.get("args") or {})
     for image in images.values():
         entry = image_map.get(image.key) if image_map is not None else None
         image.present = entry is not None and has_image_file(entry)
@@ -291,6 +310,9 @@ def build_images(
                     Path(cache) / image.example.path,
                     image.key,
                     role=image.role,
+                    context=image.context,
+                    dockerfile=image.dockerfile,
+                    build_args=image.build_args,
                     builder=builder,
                     out_dir=out,
                     scratch=scratch_root,
@@ -341,6 +363,9 @@ def build_image(
     key: str,
     *,
     role: str = "environment",
+    context: str | None = None,
+    dockerfile: str = DOCKERFILE,
+    build_args: Mapping[str, str] | None = None,
     builder: str = "oci",
     out_dir: Path,
     scratch: Path,
@@ -351,13 +376,20 @@ def build_image(
     resolve_digest: DigestResolver | None = None,
 ) -> ImageEntry:
     """Build the image of ``key`` from the Dockerfile prefix of the cached task at ``task_dir``, its base images
-    named by the digests ``resolve_digest`` (default :func:`registry_digest`) resolves them to."""
+    named by the digests ``resolve_digest`` (default :func:`registry_digest`) resolves them to.  A stack's sidecar
+    (``role="service"``) builds its whole Dockerfile, ``dockerfile`` in its build ``context`` (relative to the task),
+    with its ``build_args``; the task's own image builds from ``environment/``, a verifier's from ``tests/``."""
 
-    context_name = "tests" if role == "verifier" else "environment"
-    context = task_dir / context_name
-    plan = plan_dockerfile(context / "Dockerfile", context)
+    context_name = context or ("tests" if role == "verifier" else "environment")
+    source = task_dir / context_name
+    plan = plan_dockerfile(source / dockerfile, source, whole=role == "service", build_args=build_args)
     if plan.key != key:
-        raise BuildError(f"{task_dir}/{context_name}/Dockerfile plans build key {plan.key}, not {key}")
+        raise BuildError(f"{task_dir}/{context_name}/{dockerfile} plans build key {plan.key}, not {key}")
+    if build_args and builder != "docker":
+        raise BuildError(
+            f"{context_name}/{dockerfile} is built with the build arguments {sorted(build_args)}, which only the "
+            "docker builder passes (--builder docker)"
+        )
     digests = _base_digests(plan, resolve_digest or registry_digest)
     hexkey = key.removeprefix("sha256:")
     # Private (0700): the oci builder unpacks the image there with its own modes, files any user may write included.
@@ -380,7 +412,7 @@ def build_image(
                     f"left out {frontend!r}: SingularityCE's BuildKit cannot load a frontend image, and builds the "
                     "Dockerfile with its built-in frontend, which implements that syntax"
                 )
-        _stage_context(plan, context, build_context, _pinned_dockerfile(plan, digests, directives))
+        _stage_context(plan, source, build_context, _pinned_dockerfile(plan, digests, directives))
         if builder == "oci":
             sif, config = _build_oci(runner, build_context, work, out_dir / f"{hexkey}.sif")
             entry = _entry_from_config(str(sif), config, builder="oci", sha256=file_sha256(sif))
@@ -389,7 +421,7 @@ def build_image(
             env = _sif_environment(runner, sif)
             entry = ImageEntry(image=str(sif), sha256=file_sha256(sif), builder="def", env=env, workdir=workdir)
         else:
-            entry = _build_docker(runner, build_context, hexkey, push=push)
+            entry = _build_docker(runner, build_context, hexkey, push=push, build_args=build_args or {})
     except BuildError:
         raise
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
@@ -815,10 +847,13 @@ def _sif_environment(runner: _Runner, sif: Path) -> dict[str, str]:
     return env
 
 
-def _build_docker(runner: _Runner, context: Path, hexkey: str, *, push: str | None) -> ImageEntry:
+def _build_docker(
+    runner: _Runner, context: Path, hexkey: str, *, push: str | None, build_args: Mapping[str, str]
+) -> ImageEntry:
     docker = _docker_binary()
     tag = f"{push}:{hexkey[:32]}" if push else f"platoon-harbor:{hexkey[:32]}"
-    runner.run([docker, "build", "-t", tag, "-f", "Dockerfile", "."], cwd=context)
+    arguments = [f"--build-arg={name}={value}" for name, value in build_args.items()]
+    runner.run([docker, "build", "-t", tag, *arguments, "-f", "Dockerfile", "."], cwd=context)
     config = json.loads(runner.run([docker, "image", "inspect", "--format", "{{json .Config}}", tag]) or "{}")
     image = tag
     if push:

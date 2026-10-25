@@ -1,0 +1,23 @@
+# Written for platoon: main stores a value in a Redis sidecar, over RESP, which the tests read back.
+services:
+  main:
+    environment:
+      REDIS_HOST: cache
+      REDIS_PORT: "6379"
+    depends_on:
+      cache:
+        condition: service_healthy
+  cache:
+    image: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    # The image's own ENTRYPOINT, CMD and WORKDIR, spelled out, since platoon does not record a registry image's
+    # configuration yet. As root, the entrypoint takes the data directory and runs the server as the redis user.
+    entrypoint: ["docker-entrypoint.sh"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    working_dir: /data
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 500ms
+      timeout: 3s
+      retries: 60

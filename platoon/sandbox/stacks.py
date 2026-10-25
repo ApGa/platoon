@@ -14,7 +14,8 @@ dependencies with their conditions, its volumes (directories the stack owns: a n
 names it, an anonymous one or a ``tmpfs`` the service's own; a caller may have one filled before any service mounts it,
 such as with a copy of files it binds, which the stack then owns and deletes), the TCP ports it declares, the names it
 answers to besides its own, and what only some runtimes apply (its run mode, ``shm_size``, ``ulimits``, added
-capabilities, its stop signal: the driver passes them to the backend, and the ``process`` provider's applies none).  A
+capabilities, ``privileged``, its stop signal: the driver passes them to the backend, and the ``process`` provider's
+applies none; a provider with the ``privileged`` capability grants every privilege and capability a spec asks for).  A
 ``setup`` coroutine, when given, runs once the service's sandbox runs and before its command starts: the Harbor service
 prepares ``main`` that way (its directories, its image's deferred files, its init).
 
@@ -68,6 +69,9 @@ logger = logging.getLogger(__name__)
 STACKS = "stacks"
 #: The service that is the agents' sandbox; every stack has it.
 MAIN = "main"
+#: The label of every sandbox of a stack: the stack's id; ``platoon.service`` names the service.
+STACK_LABEL = "platoon.stack"
+SERVICE_LABEL = "platoon.service"
 Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
 CONDITIONS: tuple[Condition, ...] = ("service_started", "service_healthy", "service_completed_successfully")
 #: A stack's network: ``egress`` reaches beyond the stack (the web), ``none`` only the stack's own services.
@@ -154,6 +158,7 @@ class ServiceSpec:
     shm_mb: int | None = None
     ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
     cap_add: tuple[str, ...] = ()
+    privileged: bool = False  # every privilege of the host: only a provider with the privileged capability grants it
     stop_signal: str | None = None
     # Awaited with the service's sandbox once it runs, before its command starts; its exception fails the start.
     setup: Callable[[Sandbox], Awaitable[None]] | None = None
@@ -422,6 +427,8 @@ class DrivenStack:
         self.spec = spec
         self._backend = backend
         self._network: StackNetwork = spec.network
+        # False after a switch that failed midway, which may have switched some services: the next one runs in full.
+        self._network_settled = True
         self._jobs = spec.init_jobs()
         self._handles: dict[str, ServiceHandle] = {}
         self._checks: dict[str, Healthcheck] = {}  # each service's healthcheck as it runs there (rewritten)
@@ -462,9 +469,10 @@ class DrivenStack:
     async def set_network(self, network: StackNetwork) -> None:
         if network not in ("egress", "none"):
             raise ValueError(f"A stack's network is egress or none, not {network!r}")
-        if network != self._network:
+        if network != self._network or not self._network_settled:
+            self._network_settled = False
             await self._backend.set_network(network)
-            self._network = network
+            self._network, self._network_settled = network, True
 
     async def connect(self, service: str, port: int) -> str:
         if service not in self._handles:
@@ -708,7 +716,9 @@ def _exited(code: int | None) -> str:
 __all__ = [
     "CONDITIONS",
     "MAIN",
+    "SERVICE_LABEL",
     "STACKS",
+    "STACK_LABEL",
     "Condition",
     "Dependency",
     "DrivenStack",

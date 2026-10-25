@@ -5,9 +5,10 @@ are paths inside the sandbox; local paths are host paths. A string command runs
 through ``bash -c``; a list runs as an argv.
 
 What platoon may ask of a provider's sandboxes are its capabilities (:data:`CAPABILITIES`), a
-subset of {"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback", "stacks"}.  ``stacks`` says that
-the provider also starts stacks, a task's services each in a sandbox of its own (``start_stack``,
-:mod:`platoon.sandbox.stacks`).
+subset of {"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback", "stacks", "privileged"}.
+``stacks`` says that the provider also starts stacks, a task's services each in a sandbox of its own (``start_stack``,
+:mod:`platoon.sandbox.stacks`), and ``privileged`` that it gives a stack's service every privilege, or any capability,
+that its spec asks for (``ServiceSpec.privileged``, ``cap_add``), as Docker does.
 ``host_loopback`` says that a sandbox on the host network (``network: host``) shares this host's network namespace,
 so its processes reach a service on the host's loopback, such as the model gateway, as they are.  A provider whose
 sandboxes run elsewhere (on another node, in a cloud) must not declare it: a harness placed in one of its sandboxes
@@ -51,7 +52,9 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 #: Every capability a provider may declare (docs/extending/sandbox-providers.md says what each means).
-CAPABILITIES = frozenset({"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback", "stacks"})
+CAPABILITIES = frozenset(
+    {"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback", "stacks", "privileged"}
+)
 
 
 @dataclass

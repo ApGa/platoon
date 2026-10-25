@@ -104,6 +104,17 @@ class LockedTask:
             data["compose"] = dict(self.compose)
         return data
 
+    def service_builds(self) -> list[Mapping[str, Any]]:
+        """The build plans of its stack's services that build their images from a context of the task (``build``,
+        with its whole build key: ``context``, ``dockerfile``, ``args``, ``key``, ``base``), in the plan's order."""
+
+        services = (self.compose or {}).get("services") or {}
+        return [
+            service["build"]
+            for service in services.values()
+            if isinstance(service.get("build"), Mapping) and service["build"].get("key")
+        ]
+
 
 @dataclass(frozen=True)
 class DatasetLock:

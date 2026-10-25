@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import textwrap
 import threading
@@ -1007,3 +1008,68 @@ def test_a_supervised_start_that_is_not_prepared_names_a_prepare_command_that_pr
     assert "toolchain agent-1.0, which a run never" in err and f"prepare it with: {prepare_command(snapshot)}" in err
     cli.main(["prepare", str(snapshot)])
     assert capfd.readouterr().out.splitlines()[-1].startswith("ready: ")
+
+
+# --- the images of a stack's sidecars --------------------------------------------------------------------------------
+
+STACKS = Path(__file__).parent / "fixtures" / "harbor-stacks" / "tasks"
+
+
+def _stack_config(tmp_path: Path, provider: str) -> tuple[Path, dict]:
+    """A config of one fetched stack task, app-kv's copy whose sidecar builds its image from ./kv; and its entry's
+    service_kwargs."""
+
+    task = tmp_path / "stacks" / "app-kv-built"
+    shutil.copytree(STACKS / "app-kv", task)
+    compose = task / "environment" / "docker-compose.yaml"
+    compose.write_text(compose.read_text().replace("    image: python:3.12-slim\n", "    build: ./kv\n"))
+    (task / "environment" / "kv" / "Dockerfile").write_text("FROM python:3.12-slim\nCOPY kv.py /srv/kv/kv.py\n")
+    toml = task / "task.toml"
+    toml.write_text(toml.read_text().replace("platoon/app-kv", "platoon/app-kv-built"))
+    kwargs = {"dataset": str(task.parent), "refuse": {"sidecars": False}, "provider": provider}
+    config = tmp_path / "configs" / f"stacks-{provider}.yaml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(
+        yaml.safe_dump({"environments": [{"name": "stacks", "service": "harbor", "service_kwargs": kwargs}]})
+    )
+    return config, kwargs
+
+
+def test_prepare_builds_the_images_of_a_stacks_sidecars_with_the_providers_builder(site, tmp_path: Path):
+    config, _ = _stack_config(tmp_path, "docker")
+
+    steps, lines, code = _run(config)
+
+    assert code == 0 and [(step.step, step.status) for step in steps] == [("dataset", "done"), ("images", "done")]
+    (lock_path,) = (tmp_path / "site" / "harbor" / "locks").iterdir()
+    (build,) = read_lock(lock_path).get("app-kv-built").service_builds()
+    assert site["builds"] == [(build["key"], "docker")]  # main's image is prebuilt: the sidecar's alone
+    assert "built 1 with the docker builder" in lines[-2]
+    steps, lines, code = _run(config)
+    assert code == 0 and [step.status for step in steps] == ["done", "current"]  # a directory is fetched again
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_that_builds_its_image_runs_once_prepare_recorded_it(
+    site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Where the process provider runs it: prepare records the sidecar's image as local, the run lists the task, and
+    its stack scores its oracle."""
+
+    from platoon.envs.harbor import HarborEnvironmentService
+
+    monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
+    config, kwargs = _stack_config(tmp_path, "process")
+
+    steps, lines, code = _run(config)
+
+    assert code == 0 and "recorded 1 of the 1 image(s) the runnable tasks build as local" in lines[-2]
+    service = HarborEnvironmentService(**kwargs, provider_options={"root": str(tmp_path / "sandboxes")})
+    await service.check_tasks("train", ["app-kv-built"])  # before, it is not prepared (test_harbor_stacks.py)
+    session = await service.open(await service.get_task("app-kv-built"), rollout_id="built")
+    try:
+        assert (await session.run_solution()).exit_code == 0
+        outcome = await session.grade()
+        assert (outcome.status, outcome.reward) == ("scored", 1.0)
+    finally:
+        await session.close()

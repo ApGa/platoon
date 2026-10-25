@@ -33,7 +33,7 @@ never `process`, and only the options that do not weaken that isolation.
 | Provider | Isolation | Images | Needs | Options |
 |---|---|---|---|---|
 | `process` | None: a host directory, commands run as you | ignored | nothing | `root` (where sandbox directories go; default `<tmp>/platoon-sandboxes`) |
-| `docker` | One long-lived container per sandbox | `docker://repo:tag` or a plain reference | the `docker` CLI (`binary: podman` for Podman) | `binary`, `cli_timeout_s` (600; bounds `docker run` including the pull) |
+| `docker` | One long-lived container per sandbox, and a `docker compose` project per multi-container task ([Stacks on Docker](#stacks-on-docker)) | `docker://repo:tag` or a plain reference | the `docker` CLI (`binary: podman` for Podman), with its compose plugin for stacks | `binary`, `cli_timeout_s` (600; bounds `docker run` including the pull), `stack_root` (where stacks' project directories go; default `platoon-docker-stacks-<uid>` in node scratch) |
 | `singularity` | Rootless SingularityCE or Apptainer instances: private PID and IPC namespaces, root filesystem, `/tmp` and environment | `docker://` references, also pinned by digest (`docker://repo@sha256:<digest>`), or local `.sif` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `allow_network_none`, `gpu`, `rootfs_layout` ([below](#the-singularity-providers-root-filesystem)), `fakeroot` (since 0.3.0, with hpc-sandbox 0.4: [root in a verifier](#verifiers-that-run-as-root)), ... |
 | `enroot` | Rootless enroot containers in their own user, mount, PID and IPC namespaces | `docker://` references, also pinned by digest, or local `.sqsh` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `gpus`, `remap_root`, ...; the singularity names also work (below) |
 
@@ -323,10 +323,10 @@ For each entry of the config (a training or evaluation config, or a file of envi
 
 1. **The dataset.** A Harbor entry's `dataset` is fetched into its lock, as `platoon harbor fetch` fetches it
    ([Fetch a dataset by name](#fetch-a-dataset-by-name)), and an entry with a hold-out prints its report.
-2. **The images** that its tasks build from Dockerfiles, and its image map lacks, are built with the builder of its
-   sandbox provider and recorded in its image map ([Build task images](#build-task-images)): `oci` for
-   `singularity`, `docker` for `docker`. The `process` provider runs no image, so their keys are recorded as
-   `local`. For any other provider, which pulls its images from a registry, the step fails and names the command
+2. **The images** that its tasks, their separate verifiers and their stacks' sidecars build from Dockerfiles, and
+   its image map lacks, are built with the builder of its sandbox provider and recorded in its image map ([Build task
+   images](#build-task-images)): `oci` for `singularity`, `docker` for `docker`. The `process` provider runs no
+   image, so their keys are recorded as `local`. For any other provider, which pulls its images from a registry, the step fails and names the command
    that builds and pushes them. An entry that serves a directory builds nothing: its tasks run their own images.
 3. **The toolchains** its harness specs run from, under the toolchain root ([Harness toolchains](#harness-toolchains)).
    One built from another recipe is left as it is, since a run of another config, or of another platoon, may be
@@ -436,7 +436,8 @@ environments:
       select: {source_dataset: [data-analysis]}  # filters on the dataset index's fields
       tasks: [splits/phase0.json]          # optional allowlists of task ids (a JSON list or split manifest)
       overlays: [overlays/install-first]   # optional edits of task files, hashed into the lock
-      refuse: {sidecars: true, gpus: true, agent_user: true, per_task_build: true, uploads_over_mb: 100}
+      refuse: {sidecars: true, gpus: true, agent_user: true, privileges: true, per_task_build: true,
+               uploads_over_mb: 100}
       index:                               # more index fields: from the dataset's files, and from task.toml
         - {path: data/tasks.jsonl, key: task_id, fields: [split_group]}
         - {metadata: [kaggle_dataset_name]}
@@ -484,9 +485,11 @@ if it does: a compose file outside the subset platoon runs (`compose`, [Compose 
 loader cannot run (`task_config`: a bad `network_mode`, a separate verifier built from `tests/docker-compose.yaml`, an
 artifact path with `..` or of a compose service the task does not start, and the rest of [What platoon
 refuses](#what-platoon-refuses)), which would fail every rollout. With `sidecars: false`, a stack is locked as
-runnable, and runs where the provider runs stacks ([Multi-container tasks](#multi-container-tasks)). A refused task
-stays in the lock with its reason: it is never listed, and a split manifest that names it is an error. `refuse`'s
-switches take `true` or `false`; anything else is an error.
+runnable, and runs where the provider runs stacks ([Multi-container tasks](#multi-container-tasks)); with
+`privileges: false`, so is a stack whose compose services ask for `privileged` or for a `cap_add` that a rootless
+service does not hold, which runs on the `docker` provider alone ([Stacks on Docker](#stacks-on-docker)). A refused
+task stays in the lock with its reason: it is never listed, and a split manifest that names it is an error.
+`refuse`'s switches take `true` or `false`; anything else is an error.
 
 **Tasks that upload too much.** When a session opens, platoon copies a task's inputs into its sandbox: the sources of
 its Dockerfile's deferred `COPY` steps ([Build task images](#build-task-images)), or, for a task with a prebuilt
@@ -742,6 +745,13 @@ A separate verifier gets its image the same way. One built from `tests/Dockerfil
 Dockerfile's key, with its own deferred steps (`platoon harbor images build` builds it too); one that runs the task's
 own image gets the task's image and deferred steps, as Harbor's verifier would run the task's built image.
 
+So does a stack's sidecar that builds from a context of the task (`build:` in its compose file,
+[Multi-container tasks](#multi-container-tasks)): its Dockerfile is planned whole, deferring nothing, since a service's
+command starts with its container, so its build key covers every file it copies, and the image is built with its
+`build.args` (`--build-arg`, which only the `docker` builder passes yet: the others refuse such an image). `plan`
+lists it with the role `service` (and, with `--json-output`, its context, such as `environment/mcp-server/Dockerfile`),
+and one image serves every sidecar, of every task, whose key is the same.
+
 ## Compose files
 
 *Since 0.5.0.* A Harbor task may ship `environment/docker-compose.yaml`, the only compose file Harbor reads: a
@@ -831,9 +841,10 @@ does not start.
 
 *Since 0.5.0.* A task whose compose file names services besides `main` (`flags.stack: sidecars`) runs as a **stack**:
 `main`, the agents' sandbox, and its sidecars, each in a sandbox of its own, started and stopped together. Only a
-provider that declares the `stacks` capability runs stacks: in this release `process`, for tests and for checking a
-dataset with a policy you trust ([below](#stacks-on-the-process-provider)); stacks on Docker and as rootless pods on
-Singularity, Apptainer and enroot are the next steps of [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md).
+provider that declares the `stacks` capability runs stacks: in this release `docker`, each stack a `docker compose`
+project of its own ([below](#stacks-on-docker)), and `process`, for tests and for checking a dataset with a policy you
+trust ([below](#stacks-on-the-process-provider)); stacks as rootless pods on Singularity, Apptainer and enroot are the
+next step of [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md).
 Elsewhere such a task is refused, never started without its services: a dataset directory skips it with a warning,
 and a fetched dataset's stacks stop a run when its tasks are listed. A fetch refuses stacks by default (`stack`); to
 lock them, set `refuse: {sidecars: false}`:
@@ -842,7 +853,7 @@ lock them, set `refuse: {sidecars: false}`:
     service_kwargs:
       dataset: ./tasks
       refuse: {sidecars: false}  # lock the stacks
-      provider: process          # which runs them
+      provider: docker           # which runs them
 ```
 
 **What each service gets.** `main` is the sandbox a main-only file would give the task ([Compose files](#compose-files)):
@@ -850,14 +861,16 @@ its image, environment, working directory, resources, binds, command and healthc
 and gateway route. Each sidecar gets, as compose gives it:
 
 - its image: a registry reference as written (`postgres:16`, or pinned by digest), the image map's image of its build
-  context (`build:`, planned whole, so that its build key covers every file it copies), or `main`'s image
-  (`${MAIN_IMAGE_NAME}`). A registry image's `ENTRYPOINT`, `CMD` and `HEALTHCHECK` are not recorded yet, so such a
-  service runs compose's `command` (and `entrypoint`) alone, and one whose compose file gives it neither cannot run:
-  give it one with an overlay's `[[compose]]` `replace`. Nor does anything build a sidecar's build context yet
-  (`platoon prepare` builds the tasks' own images), so a `build:` sidecar runs only where the image map holds the
-  image of its build key. A dataset directory skips such stacks with a warning, and a fetched dataset's stop a run
-  when its tasks are listed, as do stacks that no rollout could start for another reason (a `service_healthy`
-  dependency on a service without a healthcheck, say), never failing rollout after rollout;
+  context (`build:`, planned whole, so that its build key covers every file it copies), which `platoon prepare`
+  builds with the provider's builder like the tasks' own ([Prepare a config](#prepare-a-config-once-per-site)), or
+  `main`'s image (`${MAIN_IMAGE_NAME}`). A registry image's `ENTRYPOINT`, `CMD`, `WORKDIR` and `HEALTHCHECK` are not
+  recorded yet, so such a service runs compose's `command` (and `entrypoint`) alone, in compose's `working_dir` (else
+  `/`), and one whose compose file gives it no command cannot run: give it one with an overlay's `[[compose]]`
+  `replace`. A dataset directory, which has no image map, skips a stack with such a sidecar or one that builds from a
+  context, with a warning. A fetched dataset's stacks stop a run when its tasks are listed: those whose sidecars'
+  images the image map lacks as not prepared, naming the `platoon prepare` command, and those that no rollout could
+  start for another reason (a registry sidecar without a command, a `service_healthy` dependency on a service without
+  a healthcheck), never failing rollout after rollout;
 - its `command` and `entrypoint` over its image's, as compose combines them; its `environment` and `env_file` over its
   image's and the service's `env`; its `healthcheck`, else its image's;
 - its `volumes`: read-only binds of the task's files from the cache; writable, masked and missing ones as copies that
@@ -907,6 +920,54 @@ restore brings back `main`'s files, not its services.
 | `stacks` | `auto` | `auto` runs a stack on a provider that runs stacks, and refuses it elsewhere; `refuse` refuses every stack |
 | `network_policy` | `task` | `task` gives each phase the network the task asks for (`network_mode`, `[agent]`'s and `[verifier]`'s); `none` gives every sandbox and stack none, in every phase, for datasets whose answers the web holds (a provider that cannot run a sandbox without a network refuses the tasks then) |
 | `on_sidecar_down` | `invalid` | What a sidecar that is down at grading makes the outcome: `invalid` (`sidecar_unhealthy`), or `grade`, which runs the tests anyway |
+
+### Stacks on Docker
+
+The `docker` provider runs each stack as a `docker compose` project of its own, `platoon-stack-<id>`, whose directory
+below the provider's `stack_root` holds the project's `compose.yaml`, written from the stack's spec, and its volumes.
+The file is JSON, which compose reads as the YAML it also is, so that no value changes its type on the way (YAML reads a
+plain `1e3` or `0o17` as a number). `stack_root` must be a directory of your own: a symlink, or a directory of another
+user's, is refused, since on a node's shared scratch whoever made it could change a project's file before compose reads
+it; and so is a path with a `:`, which ends a bind's source where Docker reads one. Stacks need the CLI's compose plugin
+(`docker compose version`); without it, they are refused when a run lists its tasks. Each service is a container,
+`<project>-<service>`, that compose creates once its dependencies hold, and that runs its command (compose's over its
+image's) as its `entrypoint`, as its image's user; `main` idles, as a single sandbox does. platoon starts the services
+in order, runs their healthchecks in them (`docker exec`) and probes them, as on every provider; the project's file
+leaves dependencies and healthchecks out.
+
+- **Networks.** The services share a network of their own, `<project>-internal`, which is `internal` and gives the
+  host no address on it (`com.docker.network.bridge.inhibit_ipv4`): on it each answers to its name and aliases at the
+  ports it declares, as in compose, and nothing beyond the stack answers, the host's own services included. A daemon
+  before 25.0.5 passes an internal network's DNS queries on to the host's resolvers (CVE-2024-29018), through which a
+  stack could send data out in a phase without egress: platoon warns of one when a run lists its tasks. While the
+  stack has egress, each service is also connected to `<project>-egress`, a bridge network that reaches the web, and
+  disconnected from it for a phase without. A bridge network also reaches the host's own addresses (not its
+  loopback), so keep services that must stay out of the agents' reach, such as an inference engine, on `127.0.0.1`.
+  `main` reaches the model gateway through its socket's directory and a forwarder on `127.0.0.1:18080`, as a
+  container without a network does. Each stack takes a network of Docker's address pools, and one more while it has
+  egress, and the default pools hold about 30, so about 15 stacks with egress at once: a host that runs more needs
+  them widened (`default-address-pools` in Docker's `daemon.json`), and a start that finds none left fails
+  (`sidecar_start`).
+- **Volumes** are directories of the project (a named one shared by every service that names it), made and filled
+  before any service starts, which any user of the services may write; `tmpfs` ones are Docker's. They start empty, as
+  on every provider: Docker fills a new volume with what an image has at its path only where the image declares a
+  `VOLUME` that compose leaves alone (`redis`' `/data`, say), and removes those volumes with the stack.
+- **Privileges.** A `cap_add` of a capability that a rootless service's root holds (Docker's defaults, such as
+  `SYS_CHROOT`, and `SYS_PTRACE` over the service's own processes) applies as written. `privileged`, and a `cap_add` of
+  another (`NET_ADMIN`; `DAC_READ_SEARCH`, with which a root that is the host's, as on a rootful Docker, reads any of
+  the host's files by its handle; ...), are refused when the dataset is fetched, unless the fetch keeps them with
+  `refuse: {privileges: false}`: then such a stack runs on `docker` alone, the one provider with the `privileged`
+  capability, and every other refuses it when a run lists its tasks. Grant them only to datasets you trust with them: a
+  privileged container can take the host.
+- **Teardown.** The containers that carry the stack's label go, with their anonymous volumes, then its networks: what
+  the stack made, and also what a docker command that failed or timed out left the daemon to make. Since the daemon
+  carries out a request whatever becomes of the CLI that sent it, a start that is given up waits for its docker commands
+  rather than kill them, and removes what they made once they are done. Then the project's directory goes, what the
+  services wrote there as root or as another user through a container of `main`'s image that runs `rm` as root, and its
+  record last. A reap by label (a killed worker's,
+  [Sandboxes left by stopped rollouts](#sandboxes-left-by-stopped-rollouts)) removes the stacks whose containers or
+  directories carry the label, with their networks and directories, and a stack whose teardown failed stays registered
+  for that reap.
 
 ### Stacks on the process provider
 
@@ -1553,9 +1614,9 @@ id>`, and keeps a file next to its other worker files that says how to reap them
   sandbox from then on, lets its sessions' teardowns run, and then stops whatever sandbox its rollout still holds.
 - **A worker that is killed** (SIGKILL, its hard-timeout alarm, its memory limit), or that ran out of time while
   stopping, leaves its sandboxes behind. Its supervisor reaps them by the worker's label as soon as the worker is
-  gone: hpc-sandbox's janitor stops the sessions whose owner process is gone, Docker removes the labelled containers
-  (and snapshot images), and the `process` provider kills the labelled sandboxes' commands and deletes their
-  directories.
+  gone: hpc-sandbox's janitor stops the sessions whose owner process is gone, Docker removes the labelled stacks (their
+  compose projects, networks and directories), then the labelled containers with their anonymous volumes (and snapshot
+  images), and the `process` provider kills the labelled sandboxes' commands and deletes their directories.
 
 `platoon eval` with `use_subprocesses: true` does the same for its worker processes. Each labels its sandboxes with
 `platoon.worker: eval-<id>` and lists how to reap them in a private file.
@@ -1613,8 +1674,9 @@ dataset skips such a task with a warning; naming it directly (as a task id, in a
 |---|---|
 | A multi-container environment (`environment/docker-compose.yaml` with sidecar services) on a provider that runs no stacks, or with `stacks: refuse` (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. Where a provider runs stacks, they run ([Multi-container tasks](#multi-container-tasks)); a compose file that names only `main` runs as one sandbox on every provider ([Compose files](#compose-files)); the other compose names (`compose.yaml`, ...) are plain files, as in Harbor |
 | A stack with a service that a node service serves (an overlay's `external`), whose services depend on one another in a cycle, with a sidecar's read-only bind of a log directory, or with binds of one path of the task that services would share in Docker and platoon would copy apart (when the task loads) | platoon runs no node services yet, compose refuses a cycle, a sidecar does not see `main`'s log directories, and the services must see one another's writes as in Docker |
-| A stack that no rollout could start: a sidecar of a registry image that its compose file gives no command, one that builds from a context whose image the image map lacks, a `service_healthy` dependency on a service without a healthcheck (a dataset directory's when the task loads, for the first two; a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78) | A registry image's own command is not recorded yet, and nothing builds a sidecar's image yet ([Multi-container tasks](#multi-container-tasks)) |
-| A compose file outside the subset platoon runs (when the dataset is fetched, as `compose`), or one that gives `main` what platoon cannot apply to it yet, such as `cap_add` or `shm_size` in a main-only file (when the task loads) | platoon runs a compose file as written or not at all ([Compose files](#compose-files)): a dataset's overlay may drop or replace what it refuses |
+| A stack that no rollout could start: a sidecar of a registry image that its compose file gives no command, one that builds from a context whose image the image map lacks, a `service_healthy` dependency on a service without a healthcheck (a dataset directory's when the task loads, for the first two; a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, as not prepared for a missing image) | A registry image's own command is not recorded yet, a dataset directory has no image map for a sidecar's image, and `platoon prepare` builds a fetched dataset's ([Multi-container tasks](#multi-container-tasks)) |
+| A fetched stack whose services ask for privileges (`refuse: {privileges: false}` kept them) on a provider other than `docker` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | Only Docker gives a service every privilege, or a capability such as `NET_ADMIN` over its stack's network ([Stacks on Docker](#stacks-on-docker)) |
+| A compose file outside the subset platoon runs (when the dataset is fetched, as `compose`; `privileged` and a `cap_add` of `NET_ADMIN` included, unless the fetch keeps them for Docker), or one that gives `main` what platoon cannot apply to it yet, such as `cap_add`, `privileged` or `shm_size` in a main-only file (when the task loads) | platoon runs a compose file as written or not at all ([Compose files](#compose-files)): a dataset's overlay may drop or replace what it refuses |
 | A separate verifier built from `tests/docker-compose.yaml`; `[[verifier.collect]]` hooks or artifacts of a service the task does not start | A verifier that is itself a stack is not supported; the others name nothing that runs |
 | `[agent].user` or `[verifier].user`, unless the service sets `agent_user: ignore` (or, for `[verifier].user`, `verifier_user: ignore` or `honor`) | Rootless sandboxes run every process as one user |
 | With `verifier_user: honor`: a `[verifier].user` other than root, or a root one of a task graded in its agents' own sandbox (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | platoon runs a verifier as root or as the sandbox's own user, and only in a separate verifier's sandbox, whose agents do not run as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
@@ -1630,8 +1692,8 @@ The warning names the reason:
 
 ```text
 WARNING | platoon.envs.harbor.dataset | Skipping Harbor task .../tasks/needs-a-database: .../tasks/needs-a-database:
-environment/docker-compose.yaml makes the environment a multi-container stack (sidecar services), and the 'docker'
-sandbox provider runs no multi-container stacks; the task is refused, never started without them
+environment/docker-compose.yaml makes the environment a multi-container stack (sidecar services), and the singularity
+provider runs no multi-container stacks; the task is refused, never started without them
 ```
 
 Some task settings are read but not enforced: an allowlist network runs with the host network, and `storage_mb`
@@ -1642,11 +1704,11 @@ an absolute path, is used as written; any other reference without a scheme gets 
 ## What comes next
 
 [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md) is the design behind this page. What it proposes
-beyond what is described here: running multi-container tasks through `docker compose` where Docker exists and as
-rootless pods on Singularity, Apptainer and enroot. Until then, multi-container tasks run on the `process` provider only
-([Multi-container tasks](#multi-container-tasks)), and main-only compose files on every provider ([Compose
-files](#compose-files)). The [RFC index](../rfcs/README.md) lists every proposal and explains how one moves from draft
-to implemented; comment on the RFC, or open a new one, to shape what gets built.
+beyond what is described here: running multi-container tasks as rootless pods on Singularity, Apptainer and enroot.
+Until then, multi-container tasks run on the `docker` and `process` providers ([Multi-container
+tasks](#multi-container-tasks)), and main-only compose files on every provider ([Compose files](#compose-files)). The
+[RFC index](../rfcs/README.md) lists every proposal and explains how one moves from draft to implemented; comment on
+the RFC, or open a new one, to shape what gets built.
 
 ## Next steps
 

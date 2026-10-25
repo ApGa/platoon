@@ -12,6 +12,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -677,3 +678,116 @@ def test_a_relative_image_map_records_its_images_where_it_finds_them(
         built = build_images(lock, cache=tmp_path / "cache", image_map=image_map, out_dir=out_dir, scratch=Path("s"))
         assert len(built) == 2 and all(Path(entry.image).is_absolute() for entry in built.values())
         assert plan_images(lock, ImageMap.load(image_map)).missing == []
+
+
+# --- a stack's sidecars that build from a context ------------------------------------------------------------------
+
+STACK = """\
+services:
+  main:
+    depends_on:
+      api:
+        condition: service_healthy
+  api:
+    build:
+      context: ./api
+      args:
+        GREETING: hello
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "true"]
+  replica:
+    build:
+      context: ./api
+      args:
+        GREETING: hello
+    expose: ["8001"]
+"""
+API = 'FROM python:3.12-slim\nARG GREETING=hi\nCOPY server.py /srv/server.py\nCMD ["python", "/srv/server.py"]\n'
+# Records each call with the directory it ran in and what that holds; answers image inspect as Docker would.
+FAKE_DOCKER_BUILD = f"""#!{sys.executable}
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps({{"args": args, "files": sorted(os.listdir("."))}}) + "\\n")
+if args[:2] == ["image", "inspect"]:
+    print(json.dumps({{"Cmd": ["python", "/srv/server.py"], "WorkingDir": "/srv", "Env": ["PATH=/usr/bin"]}}))
+"""
+
+
+@pytest.fixture
+def stack_lock(tmp_path: Path):
+    """A fetched lock of one task whose two sidecars build one image from ./api, with a build argument."""
+
+    files = {
+        "task.toml": '[environment]\ndocker_image = "python:3.12"\n',
+        "instruction.md": "Do it.\n",
+        "tests/test.sh": "echo 1\n",
+        "environment/docker-compose.yaml": STACK,
+        "environment/api/Dockerfile": API,
+        "environment/api/server.py": "print('serving')\n",
+    }
+    for relative, text in files.items():
+        path = tmp_path / "stacks" / "with-api" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return fetch(
+        fetch_config(
+            str(tmp_path / "stacks"), cache=tmp_path / "cache", lock=tmp_path / "stack.json", refuse={"sidecars": False}
+        )
+    )
+
+
+def test_a_stacks_sidecars_that_build_from_a_context_are_planned_whole(stack_lock):
+    (image,) = plan_images(stack_lock).images  # the task's own image is prebuilt
+    (task,) = stack_lock.tasks
+    assert image.key == task.compose["services"]["api"]["build"]["key"] == task.service_builds()[1]["key"]
+    assert (image.role, image.context, image.dockerfile, image.build_args) == (
+        "service",
+        "environment/api",
+        "Dockerfile",
+        {"GREETING": "hello"},
+    )
+    assert image.tasks == ["with-api"] and image.base == ["python:3.12-slim"]  # two sidecars, one image
+    assert image.to_json()["context"] == "environment/api/Dockerfile" and image.to_json()["kind"] == "per_task"
+    assert plan_images(stack_lock).prebuilt == {"python:3.12": 1}
+
+
+def test_the_docker_builder_builds_a_sidecars_whole_context_with_its_build_arguments(
+    stack_lock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install(bin_dir, "docker", FAKE_DOCKER_BUILD)
+    monkeypatch.setenv("PLATOON_DOCKER", str(bin_dir / "docker"))
+    monkeypatch.setenv("FAKE_LOG", str(tmp_path / "calls.log"))
+    image_map = tmp_path / "images.json"
+
+    (key,) = build_images(
+        stack_lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "s", builder="docker"
+    )
+
+    tag = f"platoon-harbor:{key.removeprefix('sha256:')[:32]}"
+    calls = [json.loads(line) for line in (tmp_path / "calls.log").read_text().splitlines()]
+    build = next(call for call in calls if call["args"][0] == "build")
+    assert build == {
+        "args": ["build", "-t", tag, "--build-arg=GREETING=hello", "-f", "Dockerfile", "."],
+        "files": ["Dockerfile", "server.py"],  # the context it reads, staged with its Dockerfile pinned by digest
+    }
+    entry = ImageMap.load(image_map).get(key)
+    assert entry is not None
+    assert (entry.image, entry.builder, entry.cmd, entry.workdir) == (
+        tag,
+        "docker",
+        ("python", "/srv/server.py"),
+        "/srv",
+    )
+    assert entry.receipt["role"] == "service" and entry.receipt["base"] == ["python:3.12-slim"]
+
+
+@pytest.mark.parametrize("builder", ["oci", "def"])
+def test_only_the_docker_builder_passes_a_sidecars_build_arguments(stack_lock, tmp_path: Path, builder: str):
+    with pytest.raises(BuildError, match=r"build arguments \['GREETING'\], which only the docker builder passes"):
+        build_images(
+            stack_lock, cache=tmp_path / "cache", image_map=tmp_path / "m.json", scratch=tmp_path / "s", builder=builder
+        )

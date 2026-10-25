@@ -172,7 +172,7 @@ async def test_sandbox_lifecycle_drives_the_cli(fake_docker: Path, tmp_path: Pat
 
     await sandbox.stop()
     await sandbox.stop()
-    assert _calls(fake_docker) == [["rm", "--force", container], ["rmi", snapshot.path]]
+    assert _calls(fake_docker) == [["rm", "--force", "--volumes", container], ["rmi", snapshot.path]]
     with pytest.raises(RuntimeError, match="stopped"):
         await sandbox.exec("true")
     await restored.stop()
@@ -198,7 +198,7 @@ async def test_failed_starts_clean_up_and_raise(fake_docker: Path, monkeypatch):
     with pytest.raises(RuntimeError, match="simulated failure"):
         await provider.start(SandboxSpec(image="docker://python:3.12"))
     run, remove = _calls(fake_docker)
-    assert remove == ["rm", "--force", run[3]]
+    assert remove == ["rm", "--force", "--volumes", run[3]]
 
 
 @pytest.mark.asyncio
@@ -221,7 +221,7 @@ async def test_a_start_cancelled_during_docker_run_removes_its_container(
         await starting
 
     run, remove = _calls(fake_docker)  # `docker run` may have created the container before it was killed
-    assert remove == ["rm", "--force", run[3]]
+    assert remove == ["rm", "--force", "--volumes", run[3]]
     assert sandbox_cleanup.read_mirror(str(mirror)) == []
 
 
@@ -244,7 +244,7 @@ async def test_a_failed_start_stays_listed_for_reaping_until_its_container_is_go
         await DockerProvider().start(SandboxSpec(image="docker://python:3.12"))
 
     run, remove = _calls(fake_docker)
-    assert remove == ["rm", "--force", run[3]]
+    assert remove == ["rm", "--force", "--volumes", run[3]]
     assert [record.labels for record in sandbox_cleanup.read_mirror(str(mirror))] == listed
 
 

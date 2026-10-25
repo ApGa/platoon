@@ -50,15 +50,20 @@ from typing import TYPE_CHECKING
 from platoon.sandbox import cleanup
 from platoon.sandbox._processes import start_background
 from platoon.sandbox.base import Mount
-from platoon.sandbox.stacks import DrivenStack, ServiceSpec, StackNetwork, StackSpec, drive_stack
+from platoon.sandbox.stacks import (
+    SERVICE_LABEL,
+    STACK_LABEL,
+    DrivenStack,
+    ServiceSpec,
+    StackNetwork,
+    StackSpec,
+    drive_stack,
+)
 from platoon.utils.stopping import let_finish, process_start_time
 
 if TYPE_CHECKING:
     from platoon.sandbox.process import ProcessProvider, ProcessSandbox
 
-#: The label of every sandbox of a stack: the stack's id; ``platoon.service`` names the service.
-STACK_LABEL = "platoon.stack"
-SERVICE_LABEL = "platoon.service"
 #: The record a stack's directory holds: its labels and its owner, which reaping reads.
 STACK_RECORD = "stack.json"
 STACK_PREFIX = "stack-"

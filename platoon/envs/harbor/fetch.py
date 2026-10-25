@@ -5,7 +5,8 @@
     tasks: [splits/phase0-smoldata.json]         # allowlists of task ids: only these are downloaded
     select: {source_dataset: [FineEnvs/SmolDataEnvs-harbor-train]}   # filters on the dataset index's fields
     overlays: [overlays/smoldata-run-before-copy]
-    refuse: {sidecars: true, gpus: true, agent_user: true, per_task_build: false, uploads_over_mb: 100}
+    refuse: {sidecars: true, gpus: true, agent_user: true, privileges: true, per_task_build: false,
+             uploads_over_mb: 100}
     index: [{path: data/tasks.jsonl, fields: [split_group]}, {metadata: [kaggle_dataset_name]}]
 
 These are keys of a Harbor entry's ``service_kwargs`` (:func:`fetch_config`). The cache is the Harbor cache,
@@ -69,9 +70,11 @@ as ``upstream_digest`` and the overlays' own hash as ``overlay``.
 **Compose files.** A task's ``environment/docker-compose.yaml`` is planned at fetch
 (:mod:`platoon.envs.harbor.compose`): the lock records its kind (``flags.stack``: ``single``, ``trivial``, ``main_only``
 or ``sidecars``) and its stack plan (``compose``), and refuses a file outside the subset platoon runs (``compose``,
-naming the service and key).  Compose's other names (``compose.yaml``, ...) are plain files of the task, as in Harbor:
-the fetch warns of them (``flags.unread_compose``).  An overlay may edit a task's compose services, and list the host
-variables its file may name, which a session resolves when it opens (they never enter the lock)::
+naming the service and key); with ``refuse: {privileges: false}`` it plans what only the docker provider grants
+(``privileged``, a ``cap_add`` of ``NET_ADMIN``, ...) instead, as the plan's ``privileges``.  Compose's other names
+(``compose.yaml``, ...) are plain files of the task, as in Harbor: the fetch warns of them (``flags.unread_compose``).
+An overlay may edit a task's compose services, and list the host variables its file may name, which a session
+resolves when it opens (they never enter the lock)::
 
     compose_host_env = ["SCICODE_TEST_DATA"]  # ${SCICODE_TEST_DATA} in the compose file names this host variable
     [[compose]]
@@ -181,11 +184,14 @@ class RefusePolicy:
     gpus: bool = True  # tasks that ask for GPUs
     agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix
     per_task_build: bool = False  # Dockerfiles whose build prefix no other task shares
+    # Compose services that ask for privileged, or for a cap_add beyond what a rootless service holds (compose); with
+    # false they are planned as the stack's privileges, which only the docker provider grants.
+    privileges: bool = True
     # Tasks whose sessions would upload more than this many MiB into one of their sandboxes (flags.upload_bytes);
     # None: no limit.
     uploads_over_mb: float | None = None
 
-    _SWITCHES = ("sidecars", "gpus", "agent_user", "per_task_build")
+    _SWITCHES = ("sidecars", "gpus", "agent_user", "per_task_build", "privileges")
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> RefusePolicy:
@@ -210,10 +216,12 @@ class RefusePolicy:
         return cls(**data)
 
     def inputs(self) -> dict[str, Any]:
-        """What the lock's inputs digest hashes: the switches, and the size limit only when it is set, so that a lock
-        written before the limit existed still answers a config that sets none."""
+        """What the lock's inputs digest hashes: the switches, and ``privileges`` and the size limit only when they are
+        not their defaults, so that a lock written before they existed still answers a config that sets neither."""
 
-        payload: dict[str, Any] = {key: getattr(self, key) for key in self._SWITCHES}
+        payload: dict[str, Any] = {key: getattr(self, key) for key in self._SWITCHES if key != "privileges"}
+        if not self.privileges:
+            payload["privileges"] = False
         if self.uploads_over_mb is not None:
             payload["uploads_over_mb"] = self.uploads_over_mb
         return payload
@@ -1289,7 +1297,9 @@ def _inspect(
     )
     artifacts = config.get("artifacts") or []
     gpus = environment.get("gpus")
-    compose, compose_problem = _plan_compose(task_dir, name, environment, edits, host_env)
+    compose, compose_problem = _plan_compose(
+        task_dir, name, environment, edits, host_env, privileges=not refuse.privileges
+    )
     flags: dict[str, Any] = {
         "verifier": "separate" if verifier.get("environment_mode") == "separate" or verifier_environment else "shared",
         "artifacts": len(artifacts) if isinstance(artifacts, list) else 0,
@@ -1341,10 +1351,17 @@ def _inspect(
 
 
 def _plan_compose(
-    task_dir: Path, name: str, environment: Mapping[str, Any], edits: Sequence[ComposeEdit], host_env: Sequence[str]
+    task_dir: Path,
+    name: str,
+    environment: Mapping[str, Any],
+    edits: Sequence[ComposeEdit],
+    host_env: Sequence[str],
+    *,
+    privileges: bool = False,
 ) -> tuple[ComposePlan | None, str | None]:
     """The task's stack plan (None without a compose file), and the refusal of a file outside the subset
-    (``compose: <service>.<key>: why``) or that an overlay edits wrongly (``overlay: ...``)."""
+    (``compose: <service>.<key>: why``) or that an overlay edits wrongly (``overlay: ...``); ``privileges`` plans what
+    only the docker provider grants rather than refusing it."""
 
     if compose_path(task_dir) is None:
         if edits:
@@ -1365,6 +1382,7 @@ def _plan_compose(
             memory_mb=settings.get("memory_mb"),
             edits=edits,
             host_env=host_env,
+            privileges=privileges,
         )
     except ComposeEditError as exc:
         return None, f"overlay: {_without_paths(str(exc), task_dir, name)}"

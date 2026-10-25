@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -100,6 +100,7 @@ class FakeBackend:
     services: dict[str, FakeService] = field(default_factory=dict)
     specs: dict[str, ServiceSpec] = field(default_factory=dict)
     networks: list[str] = field(default_factory=list)
+    failing_switches: int = 0  # how many set_network calls fail midway
     closed: bool = False
 
     async def start_service(self, name: str, spec: ServiceSpec) -> FakeService:
@@ -121,6 +122,9 @@ class FakeBackend:
 
     async def set_network(self, network: str) -> None:
         self.networks.append(network)
+        if self.failing_switches:
+            self.failing_switches -= 1
+            raise RuntimeError("the switch failed midway")
 
     async def connect(self, service: str, port: int) -> str:
         return f"tcp://fake-{service}:{port}"
@@ -334,6 +338,22 @@ async def test_the_driver_rewrites_environment_values_and_healthchecks_for_the_s
     assert backend.networks == ["none"] and stack.network == "none"
     with pytest.raises(ValueError, match="egress or none"):
         await stack.set_network(cast(Any, "host"))
+    await stack.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_network_switch_that_failed_midway_is_made_again_whichever_way_it_goes():
+    """As for the verifier's egress, then the agents' next phase without: the switch back reaches the backend, since
+    the failed one may have moved some services already."""
+
+    backend = FakeBackend(failing_switches=1)
+    stack = await drive_stack(backend, replace(_spec(), network="none"), id="s")
+
+    with pytest.raises(RuntimeError, match="midway"):
+        await stack.set_network("egress")
+    await stack.set_network("none")
+    await stack.set_network("none")  # settled now: nothing to change
+    assert backend.networks == ["egress", "none"] and stack.network == "none"
     await stack.stop()
 
 

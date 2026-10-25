@@ -79,6 +79,7 @@ Capabilities tell platoon what it may ask for, instead of checking provider name
 | `routes` | The provider implements `spec.upstreams` and `Sandbox.routes` |
 | `host_loopback` | A sandbox on the host network shares this host's network namespace, so its processes reach the model gateway on this host's loopback as they are. A provider whose sandboxes run elsewhere (another node, a cloud) must not declare it: platoon then places a harness in one of its sandboxes only through a route to the gateway |
 | `stacks` | *Since 0.5.0.* The provider also starts stacks, a task's services each in a sandbox of its own (`start_stack`, [below](#run-multi-container-stacks)): a Harbor task whose compose file names services besides `main` runs only on such a provider |
+| `privileged` | *Since 0.5.0.* The provider's stacks give a service every privilege of the host, or any capability, when its spec asks for it (`ServiceSpec.privileged`, `cap_add`), as Docker does: a Harbor stack fetched with `refuse: {privileges: false}` whose services ask for them runs only on such a provider. Declare it only when the provider grants exactly that |
 
 Two optional class attributes concern a site's profile, which can choose a provider for every config run on the
 site ([Write the site's profile](../how-to/clusters.md#4-write-the-sites-profile-once)):
@@ -328,7 +329,12 @@ command runs in the background there, and its declared ports are ports outside t
 stack holds for its life (a claim the kernel arbitrates between processes), which it learns from its listen variable,
 `PLATOON_PORT_<declared port>`. A service that must also run there listens on
 `${PLATOON_PORT_6379:-6379}`, as a script writes below `${PLATOON_SANDBOX_ROOT:-}`, both of which real stacks leave
-unset.
+unset. The `docker` provider's stacks use it too (`platoon/sandbox/compose.py`): each stack a `docker compose` project
+whose file it writes from the spec, each service a container that `docker compose create` makes once its dependencies
+hold and `docker start` starts, on a network of the project's own (so `rewrite` is the identity), with its volumes
+directories of the project's, which `volume_path` names. A provider class whose stacks need something of the host says
+why it has none in a `stack_refusal(options)` class method, which `platoon.sandbox.stack_refusal` asks also of a built
+provider, with its `options` (the `docker` provider's: the CLI's compose plugin).
 
 ## Test it like the built-ins
 
