@@ -23,6 +23,7 @@ from inline_fakes import PolicySampler  # noqa: E402
 
 from platoon.gateway import core as gateway_core  # noqa: E402
 from platoon.harness import function as function_harnesses  # noqa: E402
+from platoon.harness import registry as harness_registry  # noqa: E402
 from platoon.testing import toy_tokenizer  # noqa: E402
 
 # A number-search tool call, as Qwen3-4B-Instruct-2507 writes it.
@@ -91,4 +92,7 @@ def isolate_example(monkeypatch: pytest.MonkeyPatch, directory: Path, modules: t
     monkeypatch.syspath_prepend(str(directory))
     for module in modules:
         monkeypatch.delitem(sys.modules, module, raising=False)
+    # Core's built-ins register on the process's first harness lookup: make it here, before the copy, or a first
+    # lookup inside the example registers them in the copy alone and the tests after it no longer find them.
+    harness_registry.available_harnesses()
     monkeypatch.setattr(function_harnesses, "_function_harnesses", dict(function_harnesses._function_harnesses))
