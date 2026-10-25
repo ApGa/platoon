@@ -1,8 +1,15 @@
-"""A group's datums as a step trains them: copies whose loss inputs the step's batch transforms set in place."""
+"""A group's datums as a step trains them, by their loss inputs: the copies a step collects, whose loss inputs its
+batch transforms set in place (:func:`_step_datums`, the first stage of a step), and the scale of a microbatch's
+advantages by the action tokens its datums represent, as the step prepares it to send (:func:`advantage_scale`,
+:func:`scale_advantages`, the second stage).
+"""
 
 from collections.abc import Sequence
 
 import tinker
+from tinker import TensorData
+
+from platoon.train.step.batch_transforms import get_loss_normalization_token_count
 
 
 def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:
@@ -11,3 +18,23 @@ def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:
     step had dequeued then keeps it as it settled, and the step after the resume transforms it once."""
 
     return [tinker.Datum(model_input=datum.model_input, loss_fn_inputs=dict(datum.loss_fn_inputs)) for datum in rollout]
+
+
+def advantage_scale(datums: list[tinker.Datum], weight: float | None = None) -> float:
+    """What a microbatch's advantages are multiplied by: one over the action tokens its datums represent (their
+    normalization tokens, else their mask), times ``weight``, a short last microbatch's; so that Tinker's sum-reduced
+    objective behaves like a mean reduction and grad_norm is not sensitive to batch size."""
+
+    normalization_token_count = get_loss_normalization_token_count(datums)
+    if weight is not None:
+        normalization_token_count *= weight
+    return 1.0 / (normalization_token_count + 1e-8)
+
+
+def scale_advantages(datums: list[tinker.Datum], scale_factor: float) -> None:
+    """Multiply the advantages of ``datums``, the copies a microbatch sends, by ``scale_factor``, in place."""
+
+    for datum in datums:
+        datum.loss_fn_inputs["advantages"] = TensorData.from_torch(
+            datum.loss_fn_inputs["advantages"].to_torch() * scale_factor
+        )

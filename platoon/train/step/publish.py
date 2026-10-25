@@ -1,12 +1,44 @@
-"""After a step's update: the sampling client published to the rollout workers, and why a step took no update.
+"""Publishing a step's policy, the fifth stage of a step, after its updates and its commit (:func:`publish_policy`):
+the save (weights for the sampler, or a checkpoint when one is due), the new sampling client, which the policy samples
+from and the rollout workers are given (:func:`_publish_worker_binding`); and why a step took no update
+(:func:`_no_update_reason`).
 
-``_publish_worker_binding`` is a static method of :class:`~platoon.train.trainer.rl.PlatoonTinkerRLTrainer` still,
-which keeps it under its name: to replace it, replace the method, not the function.
+The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, publishes after a step that stepped the optimizer,
+and logs why a step that did not keeps its policy.  ``_publish_worker_binding`` is a static method of
+:class:`~platoon.train.trainer.rl.PlatoonTinkerRLTrainer` still, which keeps it under its name: to replace it, replace
+the method, not the function.
 """
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from platoon.train.trainer.loops import StepContext
 
 logger = logging.getLogger(__name__)
+
+
+async def publish_policy(context: "StepContext") -> None:
+    """Publish the policy that a step's updates made, through the trainer's seams: save it, and a checkpoint when one
+    is due (``_save_checkpoint_and_get_sampling_client``), then give its sampling client to the policy, which counts
+    one more version, and to the rollout workers (``_publish_worker_binding``)."""
+
+    trainer, state = context.trainer, context.state
+    logger.info(f"Calling _save_checkpoint_and_get_sampling_client for batch {state.train_step}")
+    sampling_client = await trainer._save_checkpoint_and_get_sampling_client(
+        training_client=state.training_client,
+        i_batch=state.train_step,
+        save_every=state.save_every,
+        start_batch=context.start_batch,
+        watchdog=state.watchdog,
+        recovery_every=trainer.config.checkpoint.recovery_every,
+        policy_version=context.version() + 1,
+        optimizer_steps=state.optimizer_steps,
+    )
+    state.model_info.llm.update_sampling_client(sampling_client)
+    trainer._publish_worker_binding(context.workflow, sampling_client, context.version())
+    state.sampling_client = sampling_client
+    state.sampling_client_step += 1
 
 
 def _no_update_reason(zero_objective_microbatches: int, empty_microbatches: int, *, counted: int | None = None) -> str:

@@ -1,16 +1,27 @@
-"""The staleness warning (RFC 0020): when more than 2% of the groups the last 10 steps consumed went stale.
+"""Staleness, as a step collects its groups (the first stage of a step): the stale filter, which drops a group whose
+oldest datum is more policy versions old than its entry's bound (:class:`StaleFilter`; the version a datum carries,
+:func:`datum_version`), and the staleness warning (RFC 0020, :class:`StaleWatch`): when more than 2% of the groups the
+last 10 steps consumed went stale.
 
 Stale groups are the long ones, which are harder and more often mixed, so dropping them biases what trains.  The
 warning names what held the dispatcher back most over those steps (its ``dispatch/blocked_share/<reason>`` metrics)
 and the fixes: ``train.max_staleness + 1``, which changes only the stale filter where the horizon had room, and the
 per-datum stale filter that RFC 0020 plans.
+
+The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, asks the filter of each group it dequeues, and
+logs, counts and drops the stale ones.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import Counter, deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import tinker
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +38,51 @@ _HELD_BACK_BY = {
     "plan": "the end of the run's plan",
     "sampler": "a task sampler that found no eligible task",
 }
+
+
+@dataclass(frozen=True)
+class StaleVerdict:
+    """What the stale filter found of a group: ``stale``, and of a stale one, the version of its oldest datum
+    (``version``), the policy's (``now``) and the bound it is beyond (``bound``)."""
+
+    stale: bool
+    version: int | None = None
+    now: int | None = None
+    bound: int | None = None
+
+
+_NOT_STALE = StaleVerdict(stale=False)
+
+
+def datum_version(datum: tinker.Datum) -> int | None:
+    """The policy version a datum's tokens were sampled at (its ``checkpoint_version`` loss input), if it has one."""
+
+    version = datum.loss_fn_inputs.get("checkpoint_version")
+    return int(version.to_torch().item()) if version is not None else None
+
+
+class StaleFilter:
+    """The stale filter's bound for each entry's groups: its own ``max_staleness`` (``bounds``), else the run's
+    (``run_bound``; None: no bound)."""
+
+    def __init__(self, run_bound: int | None, bounds: Mapping[str, int | None]) -> None:
+        self.run_bound = run_bound
+        self.bounds = bounds
+
+    def check(self, entry: str | None, output: Sequence[Any] | None, now: int) -> StaleVerdict:
+        """Whether a group of ``entry`` whose output is ``output`` (None: it failed) is stale at policy version
+        ``now``: more versions old than its bound.  Group members can begin sampling at different versions after
+        environment setup, so a group is as old as its oldest datum, and is kept or dropped whole, its advantages
+        intact; a datum without a version is as new as the policy."""
+
+        max_staleness = self.bounds.get(entry, self.run_bound) if entry is not None else self.run_bound
+        if max_staleness is not None and output is not None and len(output) > 0:
+            versions = [version for datum in output if (version := datum_version(datum)) is not None]
+            rollout_checkpoint_version = min(versions, default=now)
+
+            if now - rollout_checkpoint_version > max_staleness:
+                return StaleVerdict(stale=True, version=rollout_checkpoint_version, now=now, bound=max_staleness)
+        return _NOT_STALE
 
 
 class StaleWatch:
