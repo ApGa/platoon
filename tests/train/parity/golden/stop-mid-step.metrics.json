@@ -16,9 +16,9 @@
       "cpu_cores_busy": "timing",
       "cpu_percent": "timing",
       "cpu_saturation": "timing",
-      "groups_in_flight_max": 2.0,
+      "groups_in_flight_max": 4.0,
       "groups_in_flight_mean": "timing",
-      "permits_held_mean": 7.0954590783511975,
+      "permits_held_mean": 5.424563703259039,
       "rollouts_in_flight_configured": 8.0,
       "rollouts_in_flight_max": 8.0,
       "rollouts_in_flight_mean": "timing",
@@ -161,9 +161,9 @@
       "abs_avg__count": 4
      },
      "train/dispatch/blocked_share": {
-      "horizon": 0.502713538671068,
+      "horizon": 0.6232869177598972,
       "labels": 0.0,
-      "permits": 0.4972864613289319,
+      "permits": 0.37671308224010286,
       "plan": 0.0,
       "sampler": 0.0
      },
@@ -551,9 +551,9 @@
       "cpu_cores_busy": "timing",
       "cpu_percent": "timing",
       "cpu_saturation": "timing",
-      "groups_in_flight_max": 2.0,
+      "groups_in_flight_max": 4.0,
       "groups_in_flight_mean": "timing",
-      "permits_held_mean": [7.297677066672095, 7.285551804321297, 7.263408127098306],
+      "permits_held_mean": [5.891606364704556, 5.549968047666819, 5.207965761195866],
       "rollouts_in_flight_configured": 8.0,
       "rollouts_in_flight_max": 8.0,
       "rollouts_in_flight_mean": "timing",
@@ -696,10 +696,10 @@
       "abs_avg__count": 4
      },
      "train/dispatch/blocked_share": {
-      "horizon": [0.5271526272371906, 0.5109398599277889, 0.0],
+      "horizon": [0.5910686310059771, 0.578926100279208, 0.0],
       "labels": 0.0,
-      "permits": [0.4728473727628094, 0.4890601400722111, 0.46469953832722655],
-      "plan": [0.0, 0.0, 0.5353004616727735],
+      "permits": [0.408931368994023, 0.42107389972079207, 0.38589033149737384],
+      "plan": [0.0, 0.0, 0.6141096685026262],
       "sampler": 0.0
      },
      "train/optim": {

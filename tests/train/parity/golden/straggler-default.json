@@ -88,6 +88,7 @@
     "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
     "INFO Created new training client for test/model with rank 32",
     "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
     "INFO Starting training from batch 0 to 2",
     "WARNING Cancelling 1 straggler rollout(s) for task train:3 after 600s grace (quorum 2/3)",
     "WARNING Rollout for task train:3 took <t>s (very slow)",

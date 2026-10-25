@@ -230,6 +230,12 @@ class _Block:
     def __init__(self, lease: DrawLease, index: int) -> None:
         self._lease, self._index, self._holds = lease, index, False
 
+    @property
+    def holds(self) -> bool:
+        """Whether it runs on a permit, which it returns as it exits: inside the block of an active lease."""
+
+        return self._holds
+
     async def __aenter__(self) -> float:
         lease, index = self._lease, self._index
         if index in lease._used:

@@ -67,14 +67,17 @@ reads its group's settings through ``self.config``.
 
 Each member runs in a block of its draw's rollout lease
 (``platoon.train.leases``) in ``_run_group_member``, around its whole rollout,
-so under ``train.permit_release: rollout`` its permit comes back as it ends and
-a group's members start as permits free, each member's straggler deadline
-carrying its own start delay; ``runs_rollouts_on_lease`` says which subclasses
-keep this.  Inside its block a member takes a start slot of the run's start limit
-(``start_limit``, :mod:`platoon.train.tinker.start_limit`).
+so under ``train.permit_release: rollout`` its permit comes back as it ends (in
+process, once the teardowns it left running in the background have ended too,
+at most ``CLEANUP_WAIT_SECONDS`` later) and a group's members start as permits
+free, each member's straggler deadline carrying its own start delay;
+``runs_rollouts_on_lease`` says which subclasses keep this.  Inside its block a
+member takes a start slot of the run's start limit (``start_limit``,
+:mod:`platoon.train.tinker.start_limit`).
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import threading
@@ -135,6 +138,7 @@ from platoon.utils.rollout_workload import (
 )
 from platoon.utils.stats_tracker import DeferredStats, StatsTracker
 from platoon.utils.stats_tracker import get as get_tracker
+from platoon.utils.stopping import CleanupScope
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.tinker_data_processing import (
     SubagentDatumSamplingStats,
@@ -162,6 +166,10 @@ _LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
 _routing_id_lock = threading.Lock()
 # At most this many of the rollouts without routing ids are named when a later rollout is the first to get any.
 _NAMED_ROLLOUTS = 3
+#: How long, at most, an in-process member's lease block that holds a permit waits for the teardowns its rollout left
+#: running in the background before the permit comes back (``_run_group_member``): an env session's teardown at its
+#: default ``close_timeout_s`` (30 s) waits that long for its calls in flight and as long again to close its env.
+CLEANUP_WAIT_SECONDS = 60.0
 
 
 def current_entry() -> str | None:
@@ -406,6 +414,24 @@ def _filter_positive_centered_error_tokens(
         "retained_nonpositive_action_tokens": float((error_actions & ~suppressed).sum().item()),
         "emptied_datums": float(not keep and bool(action_tokens.any())),
     }
+
+
+async def _finish_cleanups(cleanups: CleanupScope | None, data: dict, rollout_number: int) -> None:
+    """Wait, at most :data:`CLEANUP_WAIT_SECONDS`, for the teardowns that a member's rollout left running in the
+    background, and warn when some still run then."""
+
+    if cleanups is None or not cleanups.running():
+        return
+    unfinished = await cleanups.finish(CLEANUP_WAIT_SECONDS)
+    if unfinished:
+        logger.warning(
+            "Rollout %d of task %s returns its permit with %d of its teardowns still running after %gs: until they "
+            "end, more sandboxes and env sessions can be alive than train.max_concurrent_rollouts",
+            rollout_number,
+            data.get("task_id"),
+            unfinished,
+            CLEANUP_WAIT_SECONDS,
+        )
 
 
 class _GroupAdmission:
@@ -1041,23 +1067,38 @@ class GroupRolloutWorkflow:
 
         The lease block covers the member's whole rollout: with ``rollout_isolation: process``, ``arun_episode_single``
         returns only once the member's worker process tree is reaped and the env sessions and sandboxes it left are
-        deleted; in process, once its rollout coroutine, its subagents and their grading have ended, though a sandbox or
-        session teardown that a cancellation or an early close left to finish in the background (``let_finish``) can
-        outlive the block.  A cancelled member's block exits once its cancellation has unwound.  Inside it the member
-        takes its start slot (:meth:`_member_start_slot`), which ``arun_episode_single`` hands to the rollout's host to
-        give back at the first model call.  The seconds it waited for its permit and then for its slot are its start
-        delay (:class:`_MemberStarts`).  The rollout runs with no lease (``holding(None)``), so a group it runs in turn
-        takes no permits of its own, as its child agents take none, and no start slots."""
+        deleted; in process, once its rollout coroutine, its subagents and their grading have ended, and a block that
+        holds a permit (``train.permit_release: rollout``) then waits, at most :data:`CLEANUP_WAIT_SECONDS`, for the
+        sandbox and env session teardowns that a cancellation or an early close left to finish in the background (the
+        rollout's :class:`~platoon.utils.stopping.CleanupScope`).  A cancellation ends that wait, and no teardown; a
+        member whose rollout had ended keeps its outcome.  Under ``permit_release: group`` the blocks hold nothing and
+        no member waits, as before.  A cancelled member's block exits once its cancellation has unwound.  Inside it the
+        member takes its start slot (:meth:`_member_start_slot`), which ``arun_episode_single`` hands to the rollout's
+        host to give back at the first model call, and at the latest before that wait.  The seconds it waited for its
+        permit and then for its slot are its start delay (:class:`_MemberStarts`).  The rollout runs with no lease
+        (``holding(None)``), so a group it runs in turn takes no permits of its own, as its child agents take none, and
+        no start slots."""
 
         ready = admission.member_slot()
         token = _group_ready_callback.set(ready)
         starts = admission.starts
         starts.waiting.add(rollout_number)
         try:
-            async with rollout_lease().rollout(rollout_number) as waited, self._member_start_slot() as start:
-                starts.started(rollout_number, waited + start.waited)
-                with holding(None):
-                    return await self.arun_episode_single(data, rollout_number)
+            block = rollout_lease().rollout(rollout_number)
+            async with block as waited:
+                cleanups = CleanupScope() if getattr(block, "holds", False) else None
+                try:
+                    with cleanups if cleanups is not None else contextlib.nullcontext():
+                        async with self._member_start_slot() as start:
+                            starts.started(rollout_number, waited + start.waited)
+                            with holding(None):
+                                outcome = await self.arun_episode_single(data, rollout_number)
+                except (Exception, asyncio.CancelledError):
+                    await _finish_cleanups(cleanups, data, rollout_number)
+                    raise
+                with contextlib.suppress(asyncio.CancelledError):  # its rollout has ended: its outcome stands
+                    await _finish_cleanups(cleanups, data, rollout_number)
+                return outcome
         finally:
             starts.waiting.discard(rollout_number)
             _group_ready_callback.reset(token)

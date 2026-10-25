@@ -83,11 +83,12 @@ flowchart LR
 
 1. The trainer's dispatcher draws the next task of the order and starts its group when the group can start: within
    the horizon of `train.max_staleness` (at most `max_staleness + 1` batches of groups started and not yet trained),
-   with rollout permits for the whole group (`train.max_concurrent_rollouts`), and with room in its label's
+   with rollout permits (`train.max_concurrent_rollouts`), and with room in its label's
    `train.rollout_group_limits`; a draw whose label is at its limit waits in the label's backlog, outside the horizon,
-   for the slot the label's running groups hold for it. Under `train.permit_release: rollout` each rollout returns its
-   permit as it ends, and a group whose workflow runs its rollouts on the lease starts on its first permit, its
-   rollouts starting as the rest free.
+   for the slot the label's running groups hold for it. Each rollout returns its permit as it ends
+   (`train.permit_release: rollout`, the default), and a group whose workflow runs its rollouts on the lease starts on
+   its first permit, its rollouts starting as the rest free; any other group starts on its whole size of permits, as
+   every group does under `train.permit_release: group`, which returns them when the group ends.
 2. For each task, `GroupRolloutWorkflow` runs `group_size` rollouts, with the settings of the task's environment
    entry (its own `workflow_config` laid over `train.workflow_config`). With
    `train.workflow_config.rollout_isolation: process`, each rollout runs in its own worker process, which

@@ -1,5 +1,5 @@
 {
- "description": "Rollout permits for two groups of four, at max_staleness 2 so that groups run ahead of the step, under permit_release group (the default): a group holds its permits until its slowest rollout ends",
+ "description": "Rollout permits for two groups of four, at max_staleness 2 so that groups run ahead of the step, under permit_release group, the default before 0.4.0: a group holds its permits until its slowest rollout ends",
  "request_settings": [
   {
    "conversion": {

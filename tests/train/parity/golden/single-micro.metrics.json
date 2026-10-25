@@ -16,9 +16,9 @@
       "cpu_cores_busy": "timing",
       "cpu_percent": "timing",
       "cpu_saturation": "timing",
-      "groups_in_flight_max": 2.0,
+      "groups_in_flight_max": 4.0,
       "groups_in_flight_mean": "timing",
-      "permits_held_mean": [6.952022374343572, 7.090487650208533],
+      "permits_held_mean": [5.587130290598754, 4.972130107305051],
       "rollouts_in_flight_configured": 8.0,
       "rollouts_in_flight_max": 8.0,
       "rollouts_in_flight_mean": "timing",
@@ -161,10 +161,10 @@
       "abs_avg__count": 4
      },
      "train/dispatch/blocked_share": {
-      "horizon": [0.555345235621894, 0.0],
+      "horizon": [0.5498897596941144, 0.0],
       "labels": 0.0,
-      "permits": [0.44465476437810597, 0.45486747319247695],
-      "plan": [0.0, 0.5451325268075231],
+      "permits": [0.45011024030588564, 0.3886371194012543],
+      "plan": [0.0, 0.6113628805987457],
       "sampler": 0.0
      },
      "train/optim": {

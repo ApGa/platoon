@@ -128,7 +128,7 @@ The golden trace does not cover:
 |---|---|
 | `single-loo` | One environment, no environments list: leave-one-out baselines and a minimum group size |
 | `single-entry` | One named environment entry with settings of its own (`rollout_config.max_steps`), in training and evaluation |
-| `single-micro` | Two minibatches of two microbatches, two groups at once, the zero-advantage filter off |
+| `single-micro` | Two minibatches of two microbatches on rollout permits for two groups, the zero-advantage filter off |
 | `straggler-default` | A run-level straggler timeout with the default quorum, in groups of three |
 | `depth-zero-adv` | Depth-level weighting of subagent datums, then the zero-advantage filter, in microbatches of two groups |
 | `mix-default` | A mixture of two entries that set nothing of their own |

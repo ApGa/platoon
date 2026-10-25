@@ -146,6 +146,7 @@
     "INFO Created new training client for test/model with rank 32",
     "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
     "INFO Evaluating the starting policy at step 0, before the first update (eval.at_start), then every 1 steps",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
     "INFO Starting training from batch 0 to 2",
     "INFO Starting evaluation at step 0",
     "INFO Evaluation completed in <t>s for 6 tasks",

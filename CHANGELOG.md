@@ -46,18 +46,20 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   experimental: it becomes the recommendation only after a GPU comparison ([Train only on groups that carry
   signal](docs/how-to/train-and-eval.md#train-only-on-groups-that-carry-signal-experimental), [Write a group admission
   rule](docs/extending/group-admission.md)).
-- **Rollout permits that come back as each rollout ends (experimental).** With `train.permit_release: rollout`, a
-  training rollout returns its permit (`train.max_concurrent_rollouts`) as soon as it ends rather than when its group's
-  workflow returns, so the next group starts on the permits a group's finished rollouts give back instead of waiting for
-  its slowest one; on long agentic tasks a quarter to a third of the budget sat idle that way. `GroupRolloutWorkflow`
-  runs each member on its group's lease, so a group starts on its first free permit and its members as the rest free
-  (rolling starts), each member's straggler deadline shifted by its own start delay; a workflow that does not say it
-  runs its rollouts on the lease gets each group's permits whole, as before. Groups are drawn, decided, credited,
-  admitted and resumed as before, a partly finished group counts whole toward the horizon, and a run at
-  `max_staleness: 0` with the default budget trains the same datums in the same order. More groups are open at once, so
-  more long groups can go stale: the run warns when they do, and raising `max_staleness` by one is the documented
-  answer. `group` stays the default, with the behavior of earlier releases event for event, until a GPU comparison
-  (RFC 0020; [Rollout permits](docs/how-to/train-and-eval.md#rollout-permits-experimental)).
+- **Rollout permits that come back as each rollout ends, by default.** A training rollout returns its permit
+  (`train.max_concurrent_rollouts`) as soon as it ends rather than when its group's workflow returns
+  (`train.permit_release: rollout`, the default), so the next group starts on the permits a group's finished rollouts
+  give back instead of waiting for its slowest one; on long agentic tasks a quarter to a third of the budget sat idle
+  that way. `GroupRolloutWorkflow` runs each member on its group's lease, so a group starts on its first free permit
+  and its members as the rest free (rolling starts), each member's straggler deadline shifted by its own start delay; a
+  workflow that does not say it runs its rollouts on the lease gets each group's permits whole, as before. Groups are
+  drawn, decided, credited, admitted and resumed as before, a partly finished group counts whole toward the horizon,
+  and a run at `max_staleness: 0` with the default budget trains the same datums in the same order. More groups are
+  open at once, so more long groups can go stale: the run warns when they do, and raising `max_staleness` by one is the
+  documented answer. The default changes ahead of a GPU comparison of the two settings; `train.permit_release: group`
+  keeps the behavior of earlier releases, event for event (RFC 0020;
+  [Rollout permits](docs/how-to/train-and-eval.md#rollout-permits); what changes for a config that sets nothing is
+  under Changes, below).
 - **Run a workflow's own rollouts on the lease (experimental).** `platoon.experimental` exports `rollout_lease()` and
   `RolloutLease`: a workflow runs each rollout in `async with rollout_lease().rollout(i):`, whose permit comes back
   when the block exits, and declares `runs_rollouts_on_lease = True` for rolling starts. In a training draw a block for
@@ -137,14 +139,32 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   such a run's steps draw more positions than their batch.
 - `GroupRolloutWorkflow` declares `runs_rollouts_on_lease = True` and runs each member in a block of its group's
   lease; a subclass that overrides `arun_episode`, `_run_group_rollouts` or `_run_group_member`, itself or through a
-  mixin, reads as `False` unless its own class body sets it. Under the default `permit_release: group` the blocks hold
-  nothing, but a training group of a subclass that runs a member index twice, as a retry of the whole group in
+  mixin, reads as `False` unless its own class body sets it. Under `permit_release: group` the blocks hold nothing,
+  but a training group of a subclass that runs a member index twice, as a retry of the whole group in
   `arun_episode` does, now fails with `RuntimeError` under either setting: a retry stays inside the member's block.
   A member's rollout sees no lease, so a group that it runs in turn takes no permits of its own and runs as before.
+- **Breaking: rollout permits come back as each rollout ends, unless `train.permit_release: group`.** The default of
+  `train.permit_release` is `rollout`, so `train.max_concurrent_rollouts` counts the rollouts running, no longer the
+  whole groups it holds. Where the permits bound a run, more groups run at once and start sooner, steps get shorter, and
+  more long groups can be dropped as stale: when more than 2% of the groups the last 10 steps consumed went stale, the
+  run warns and advises `max_staleness + 1`. There its rollouts are requested in another order, some on a newer policy,
+  and a restart redoes more of them. In process, a rollout's permit also waits, at most 60 s, for the sandbox and env
+  session teardowns that platoon finishes in the background, so that no more sandboxes are alive at once than the budget
+  (under `group` such a teardown can still outlive its group, as before). A run whose permits never bind, as at
+  `max_staleness: 0` with the default budget, trains as before. Each start of training under `rollout` says so in a line
+  of its log (`Each rollout returns its permit as it ends (train.permit_release: rollout) ...`). `train.permit_release:
+  group` restores the behavior of earlier releases ([The previous
+  behavior](docs/how-to/train-and-eval.md#the-previous-behavior)).
 - Under `train.permit_release: rollout`, `rollout_client/rollouts_in_flight_configured` is `max_concurrent_rollouts`
   itself, so `concurrency_achieved_fraction` reads as the permits' busy share, and `groups_in_flight` can exceed the
   budget over the group size. The straggler settings' documentation calls them a deadline against runaway rollouts,
   not a throughput lever.
+- Under `train.permit_release: rollout`, an in-process rollout's permit comes back once the sandbox and env session
+  teardowns that platoon finishes in the background have ended too, such as one that a straggler cut interrupts or an
+  ORS environment's that waits for its code to end, so that no more sandboxes are alive at once than
+  `max_concurrent_rollouts`. The permit waits for them at most 60 s, and the run warns of a teardown that runs longer;
+  a cancellation ends the wait and no teardown, and a rollout that had ended keeps its outcome. Under `group` nothing
+  waits for them, as before ([Rollout permits](docs/how-to/train-and-eval.md#rollout-permits)).
 - A staged harness toolchain has a stamp beside it, `.<copy>.staged`, that records the tree hash it was checked
   against and the jobs that checked it. Where the copy outlives its job (`PLATOON_TOOLCHAIN_CACHE` on node-local disk
   that persists), the first staging of each later job hashes the copy again and keeps it when it matches its

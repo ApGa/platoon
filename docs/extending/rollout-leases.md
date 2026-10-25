@@ -1,12 +1,12 @@
 # Run rollouts on the lease (experimental)
 
-A training run's rollouts share a budget of rollout permits, `train.max_concurrent_rollouts`. With
-`train.permit_release: rollout`, each rollout's permit comes back as that rollout ends, so the next group starts on
-the permits that come back instead of waiting for a group's slowest rollout. A workflow gets this by running each of
-its rollouts in a block of its draw's **lease**. `GroupRolloutWorkflow`, the default, already does: this page is for
-the authors of a workflow of their own, and of a `GroupRolloutWorkflow` subclass that starts its members itself. What
-the setting does to a run (the speed, the staleness it costs, the metrics) is in
-[Rollout permits](../how-to/train-and-eval.md#rollout-permits-experimental).
+A training run's rollouts share a budget of rollout permits, `train.max_concurrent_rollouts`. Under
+`train.permit_release: rollout`, the default since platoon 0.4.0, each rollout's permit comes back as that rollout
+ends, so the next group starts on the permits that come back instead of waiting for a group's slowest rollout. A
+workflow gets this by running each of its rollouts in a block of its draw's **lease**. `GroupRolloutWorkflow`, the
+default, already does: this page is for the authors of a workflow of their own, and of a `GroupRolloutWorkflow`
+subclass that starts its members itself. What the setting does to a run (the speed, the staleness it costs, the
+metrics) is in [Rollout permits](../how-to/train-and-eval.md#rollout-permits).
 
 The lease lives in `platoon.experimental` and is **experimental**: it is documented, and its names are in the public
 API's snapshot, but a minor release may change it, and its CHANGELOG then says how. Pin the platoon version you build
@@ -16,7 +16,7 @@ against. The [experimental API reference](../reference/experimental.md) lists bo
 
 ```yaml
 train:
-  permit_release: rollout            # each rollout's permit comes back as the rollout ends (default: group)
+  permit_release: rollout            # the default: each rollout's permit comes back as the rollout ends
   max_concurrent_rollouts: 256       # the rollouts that run at once
   workflow_config: {group_size: 8}
 ```
@@ -87,11 +87,13 @@ the budget counts only `GroupRolloutWorkflow`'s members, and an evaluation's `Gr
 `GroupRolloutWorkflow` runs each member in its block in `_run_group_member`, the one method every member passes
 through, around `arun_episode_single`. With `rollout_isolation: process` the block exits only once the member's worker
 process tree is reaped and the env sessions and sandboxes it left are deleted. In process, the default, it exits once
-the member's rollout coroutine, its subagents and their grading have ended, and a sandbox or env session teardown that
-platoon finishes in the background can outlive it: one a cancellation interrupts (a straggler cut), much as it outlives
-the group's release under `permit_release: group`, and one a rollout leaves running as it ends (an env torn down once
-the code still running in it ends), whose permit `rollout` hands to the next rollout meanwhile. With every teardown
-left behind, a test with a budget of 4 had 11 sandboxes alive at once under `rollout` and 6 under `group`.
+the member's rollout coroutine, its subagents and their grading have ended, and under `permit_release: rollout` once
+the sandbox and env session teardowns that platoon finishes in the background have ended too: one a cancellation
+interrupts (a straggler cut), and one a rollout leaves running as it ends (an env torn down once the code still
+running in it ends). The block waits for them at most 60 s, and the run warns of a teardown that runs longer; a
+cancellation ends the wait and no teardown, and a member whose rollout had ended keeps its outcome. Under
+`permit_release: group` the blocks hold nothing and wait for nothing, as before, so such a teardown can outlive the
+group's release.
 
 It declares `runs_rollouts_on_lease = True`. A subclass keeps rolling starts unless it may start members some other
 way:

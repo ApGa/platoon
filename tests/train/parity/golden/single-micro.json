@@ -1,5 +1,5 @@
 {
- "description": "Two minibatches of two microbatches, two groups at once, the zero-advantage filter off",
+ "description": "Two minibatches of two microbatches on rollout permits for two groups, the zero-advantage filter off",
  "request_settings": [
   {
    "conversion": {
@@ -66,20 +66,20 @@
     {"event": "draw", "position": 0, "reason": "order", "sampler": "auto", "seq": 0, "start": 1, "task_id": "train:3", "version": 0},
     {"event": "draw", "position": 1, "reason": "order", "sampler": "auto", "seq": 1, "start": 1, "task_id": "train:4", "version": 0},
     {"event": "draw", "position": 2, "reason": "order", "sampler": "auto", "seq": 2, "start": 1, "task_id": "train:2", "version": 0},
-    {"event": "settle", "passes": 3, "seq": 1, "start": 1, "task_id": "train:4", "valid": 3, "verdict": "uniform", "version": 0},
     {"event": "draw", "position": 3, "reason": "order", "sampler": "auto", "seq": 3, "start": 1, "task_id": "train:7", "version": 0},
+    {"event": "settle", "passes": 3, "seq": 1, "start": 1, "task_id": "train:4", "valid": 3, "verdict": "uniform", "version": 0},
     {"event": "settle", "passes": 1, "seq": 0, "start": 1, "task_id": "train:3", "valid": 4, "verdict": "trained", "version": 0},
-    {"event": "settle", "passes": 1, "seq": 3, "start": 1, "task_id": "train:7", "valid": 2, "verdict": "trained", "version": 0},
     {"event": "settle", "passes": 1, "seq": 2, "start": 1, "task_id": "train:2", "valid": 4, "verdict": "trained", "version": 0},
+    {"event": "settle", "passes": 1, "seq": 3, "start": 1, "task_id": "train:7", "valid": 2, "verdict": "trained", "version": 0},
     {"event": "fate", "fate": "consumed", "seq": 1, "start": 1},
     {"event": "fate", "fate": "consumed", "seq": 0, "start": 1},
-    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1},
     {"event": "fate", "fate": "consumed", "seq": 2, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1},
     {"event": "draw", "position": 4, "reason": "order", "sampler": "auto", "seq": 4, "start": 1, "task_id": "train:6", "version": 1},
     {"event": "draw", "position": 5, "reason": "order", "sampler": "auto", "seq": 5, "start": 1, "task_id": "train:1", "version": 1},
     {"event": "draw", "position": 6, "reason": "order", "sampler": "auto", "seq": 6, "start": 1, "task_id": "train:5", "version": 1},
-    {"event": "settle", "passes": 3, "seq": 4, "start": 1, "task_id": "train:6", "valid": 3, "verdict": "uniform", "version": 1},
     {"event": "draw", "position": 7, "reason": "order", "sampler": "auto", "seq": 7, "start": 1, "task_id": "train:0", "version": 1},
+    {"event": "settle", "passes": 3, "seq": 4, "start": 1, "task_id": "train:6", "valid": 3, "verdict": "uniform", "version": 1},
     {"event": "settle", "passes": 4, "seq": 5, "start": 1, "task_id": "train:1", "valid": 4, "verdict": "uniform", "version": 1},
     {"event": "settle", "passes": 0, "seq": 6, "start": 1, "task_id": "train:5", "valid": 4, "verdict": "uniform", "version": 1},
     {"event": "settle", "passes": 2, "seq": 7, "start": 1, "task_id": "train:0", "valid": 4, "verdict": "trained", "version": 1},
@@ -100,6 +100,7 @@
     "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
     "INFO Created new training client for test/model with rank 32",
     "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
     "INFO Starting training from batch 0 to 2",
     "INFO Zero policy-gradient objective for microbatch 0 (minibatch 0): every advantage is exactly zero, so it takes no forward/backward and adds nothing to an optimizer step",
     "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
@@ -227,8 +228,10 @@
      "forward_backward",
      {
       "datums": [
-       {"advantages": [0.0, -0.125, -0.125, -0.125], "logprobs": [-0.375, -0.8125, -0.8125, -0.875], "target_tokens": [646, 446, 343, 657], "tokens": [655, 646, 446, 343]},
-       {"advantages": [0.0, 0.125], "logprobs": [-0.0625, -0.5], "target_tokens": [65, 20], "tokens": [357, 65]}
+       {"advantages": [0.0, 0.125, 0.125], "logprobs": [-0.3125, -0.4375, -0.125], "target_tokens": [615, 647, 718], "tokens": [183, 615, 647]},
+       {"advantages": [0.0, -0.041666668], "logprobs": [-0.75, -0.1875], "target_tokens": [336, 832], "tokens": [926, 336]},
+       {"advantages": [0.0, -0.041666668], "logprobs": [-0.375, -0.6875], "target_tokens": [933, 243], "tokens": [560, 933]},
+       {"advantages": [0.0, -0.041666668, -0.041666668], "logprobs": [-0.0625, -0.5, -0.3125], "target_tokens": [901, 143, 560], "tokens": [172, 901, 143]}
       ],
       "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
       "loss_fn": "cispo",
@@ -239,10 +242,8 @@
      "forward_backward",
      {
       "datums": [
-       {"advantages": [0.0, 0.125, 0.125], "logprobs": [-0.3125, -0.4375, -0.125], "target_tokens": [615, 647, 718], "tokens": [183, 615, 647]},
-       {"advantages": [0.0, -0.041666668], "logprobs": [-0.75, -0.1875], "target_tokens": [336, 832], "tokens": [926, 336]},
-       {"advantages": [0.0, -0.041666668], "logprobs": [-0.375, -0.6875], "target_tokens": [933, 243], "tokens": [560, 933]},
-       {"advantages": [0.0, -0.041666668, -0.041666668], "logprobs": [-0.0625, -0.5, -0.3125], "target_tokens": [901, 143, 560], "tokens": [172, 901, 143]}
+       {"advantages": [0.0, -0.125, -0.125, -0.125], "logprobs": [-0.375, -0.8125, -0.8125, -0.875], "target_tokens": [646, 446, 343, 657], "tokens": [655, 646, 446, 343]},
+       {"advantages": [0.0, 0.125], "logprobs": [-0.0625, -0.5], "target_tokens": [65, 20], "tokens": [357, 65]}
       ],
       "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
       "loss_fn": "cispo",
