@@ -143,7 +143,11 @@ async def test_adapts_hpc_sandbox_types_and_calls(monkeypatch, tmp_path: Path, n
     assert type(report) is DownloadReport and type(report.dropped_links[0]) is DroppedLink
     assert calls[4:6] == [("upload", "local", "/tests"), ("download", "/logs", "out")]
     await sandbox.kill_processes()
-    assert calls[6][1][3:] == ["platoon-kill", "100", "0.05", "14:12", "1:10"]  # every process but these dies
+    assert calls[6][1][3:] == ["platoon-kill", "100", "0.05", "", "14:12", "1:10"]  # every process but these dies
+    del calls[6]
+    sandbox.keep_processes(["30:40"])  # a task's init: it lives on, with its descendants
+    await sandbox.kill_processes()
+    assert calls[6][1][3:] == ["platoon-kill", "100", "0.05", "30:40", "14:12", "1:10"]
     del calls[6]
 
     snapshot = await sandbox.snapshot()

@@ -24,6 +24,15 @@ Deferred steps are JSON lists: ``["WORKDIR", path]``, ``["ENV", name, value]``, 
 a ``WORKDIR`` or an ``ENV`` value are expanded when the session opens, against the image's environment, as a build
 would; a source must be literal. ``USER`` in the suffix is reported (``suffix_user``), never applied: rootless
 sandboxes run as one uid. Anything the planner cannot defer safely stays in the prefix.
+
+**Image configuration.** The metadata of the suffix (``CMD``, ``ENTRYPOINT``, ``HEALTHCHECK``, ``USER``, ``EXPOSE``,
+``STOPSIGNAL``, ``VOLUME``) is never built, so the plan records what it sets (``config``,
+:func:`image_config`) for the session to lay over the prefix image's own: Docker's rules, such as an
+``ENTRYPOINT`` resetting a ``CMD`` that the stage did not set itself, and a shell form running under the stage's
+``SHELL``.  A **whole** plan (``whole=True``, a compose service's build context) defers nothing: its key also hashes
+the files the suffix copies, since nothing can be uploaded into a service before its command starts, and its
+``config`` is what the last stage sets over its base image.  Build arguments (``build_args``, a compose service's
+``build.args``) override the ``ARG`` defaults and enter the key.
 """
 
 from __future__ import annotations
@@ -114,6 +123,10 @@ class DockerfilePlan:
     suffix_user: str | None = None  # a USER in the deferred suffix: rootless sandboxes cannot honor it
     context_files: tuple[str, ...] = ()  # context paths the prefix reads ("." for the whole context)
     notes: tuple[str, ...] = field(default=())  # why steps stayed in the prefix, for `images plan`
+    # What the suffix's metadata sets in the image configuration (a whole plan: what the last stage sets over its
+    # base), as image_config gives it; empty when it sets nothing.
+    config: Mapping[str, Any] = field(default_factory=dict)
+    whole: bool = False  # nothing deferred: a compose service's image
 
     @property
     def copied(self) -> tuple[str, ...]:
@@ -135,6 +148,8 @@ class DockerfilePlan:
             "deferred": [list(step) for step in self.deferred],
             "base": list(self.base_images),
             **({"suffix_user": self.suffix_user} if self.suffix_user else {}),
+            **({"config": dict(self.config)} if self.config else {}),
+            **({"whole": True} if self.whole else {}),
         }
 
 
@@ -212,12 +227,18 @@ def parse_dockerfile(text: str) -> Dockerfile:
 
 
 def plan_dockerfile(
-    dockerfile: str | Path, context: str | Path | None = None, *, with_key: bool = True
+    dockerfile: str | Path,
+    context: str | Path | None = None,
+    *,
+    with_key: bool = True,
+    whole: bool = False,
+    build_args: Mapping[str, str] | None = None,
 ) -> DockerfilePlan:
     """The build plan of ``dockerfile`` with build context ``context`` (default: the Dockerfile's directory).
 
     ``with_key=False`` leaves the build key empty, and so reads no file of the context: for what the plan copies
-    (:attr:`DockerfilePlan.copied`) alone.
+    (:attr:`DockerfilePlan.copied`) alone.  ``whole=True`` defers nothing (a compose service's image), and
+    ``build_args`` override the ``ARG`` defaults, as ``docker build --build-arg`` does; both enter the key.
     """
 
     dockerfile = Path(dockerfile)
@@ -230,11 +251,12 @@ def plan_dockerfile(
         raise DockerfileError(
             f"{dockerfile}: the first instruction must be FROM (or ARG), got {instructions[0].keyword}"
         )
+    args = dict(build_args or {})
     has_ignore = (context / DOCKERIGNORE).is_file()
-    scoped = list(variables_in_scope(instructions))
+    scoped = list(variables_in_scope(instructions, build_args=args))
     split = len(instructions)
     notes: list[str] = []
-    while split > 0:
+    while split > 0 and not whole:
         why = _not_deferrable(*scoped[split - 1], context, has_ignore)
         if why is not None:
             if why:
@@ -242,7 +264,7 @@ def plan_dockerfile(
             break
         split -= 1
     prefix, suffix = instructions[:split], instructions[split:]
-    scope = _Scope.of(prefix)
+    scope = _Scope.of(prefix, build_args=args)
     deferred: list[tuple[str, ...]] = [("ARG", name, value) for name, value in scope.stage_args.items()]
     suffix_user = None
     for instruction in suffix:
@@ -250,17 +272,136 @@ def plan_dockerfile(
         deferred += steps
         suffix_user = user or suffix_user
     context_files = _prefix_context(scoped[:split], context, has_ignore)
-    key = _build_key(parsed.directives, prefix, context, context_files, has_ignore) if with_key else ""
+    key = _build_key(parsed.directives, prefix, context, context_files, has_ignore, args) if with_key else ""
     return DockerfilePlan(
         key=key,
         directives=parsed.directives,
         prefix=tuple(prefix),
-        deferred=tuple(deferred),
+        deferred=tuple(deferred) if not whole else (),
         base_images=tuple(scope.bases),
         suffix_user=suffix_user,
         context_files=tuple(context_files),
         notes=tuple(notes),
+        config=image_config(scoped, start=0 if whole else split),
+        whole=whole,
     )
+
+
+#: The shell of a shell-form ``CMD``, ``ENTRYPOINT`` or ``RUN`` in a Linux image without a ``SHELL`` instruction.
+DEFAULT_SHELL = ("/bin/sh", "-c")
+
+
+def image_config(scoped: Sequence[tuple[Instruction, Mapping[str, str]]], *, start: int = 0) -> dict[str, Any]:
+    """What the metadata instructions of ``scoped[start:]`` (each with the variables in scope at it,
+    :func:`variables_in_scope`) set in the image configuration of the last stage, by Docker's rules.
+
+    The keys are those set: ``entrypoint`` and ``cmd`` (argv lists; a shell form under the stage's ``SHELL``, else
+    ``/bin/sh -c``), ``healthcheck`` (``{"test": [...], "interval": ...}`` with Docker's option names, ``test``
+    ``["NONE"]`` for ``HEALTHCHECK NONE``), ``user``, ``expose`` (ports added, as ``"8000/tcp"``),
+    ``stop_signal`` and ``volumes`` (added).  An ``ENTRYPOINT`` empties the ``CMD`` the stage inherits unless the stage
+    sets one before it (Docker's ``cmdSet``), which ``cmd`` records as ``[]``.  ``start`` is where a deferred suffix
+    starts: what the stage set before it is the built prefix's own configuration, but a ``CMD`` there still keeps a
+    later ``ENTRYPOINT`` from emptying it, and a ``SHELL`` there still holds."""
+
+    configs: dict[str, dict[str, Any]] = {}  # stage name -> what it set, for a stage built FROM it
+    shells: dict[str, tuple[str, ...]] = {}  # stage name -> its SHELL at its end
+    config: dict[str, Any] = {}
+    shell = DEFAULT_SHELL
+    stage: str | None = None
+    cmd_set = False  # the stage set a CMD itself (Docker's cmdSet)
+    for index, (instruction, variables) in enumerate(scoped):
+        keyword = instruction.keyword
+        applies = index >= start
+        if keyword == "FROM":
+            if stage is not None:
+                configs[stage], shells[stage] = config, shell
+            _, operands = instruction.flags_and_operands()
+            parent = operands[0].lower() if operands else ""
+            # A stage built FROM an earlier one inherits its configuration; a suffix never holds a FROM, so a plan
+            # with a suffix records the suffix's own settings alone.
+            config = json.loads(json.dumps(configs.get(parent, {}))) if applies else {}
+            shell = shells.get(parent, DEFAULT_SHELL)
+            stage = operands[2].lower() if len(operands) >= 3 and operands[1].lower() == "as" else None
+            cmd_set = False
+        elif keyword == "SHELL":
+            shell = _shell_operands(instruction)
+        elif keyword == "CMD":
+            cmd_set = True
+            if applies:
+                config["cmd"] = _command_form(instruction.arguments, shell)
+        elif not applies:
+            continue
+        elif keyword == "ENTRYPOINT":
+            config["entrypoint"] = _command_form(instruction.arguments, shell)
+            if not cmd_set:
+                config["cmd"] = []
+        elif keyword == "HEALTHCHECK":
+            config["healthcheck"] = _healthcheck(instruction)
+        elif keyword == "USER":
+            config["user"] = expand(instruction.arguments.strip(), variables)
+        elif keyword == "EXPOSE":
+            ports = [expand(word, variables) for word in instruction.arguments.split()]
+            config.setdefault("expose", []).extend(port if "/" in port else f"{port}/tcp" for port in ports)
+        elif keyword == "STOPSIGNAL":
+            config["stop_signal"] = expand(instruction.arguments.strip(), variables)
+        elif keyword == "VOLUME":
+            _, operands = instruction.flags_and_operands()
+            config.setdefault("volumes", []).extend(expand(path, variables) for path in operands)
+    return config
+
+
+def _exec_form(text: str) -> list[str] | None:
+    """An instruction's exec form, a JSON array of strings; None for its shell form."""
+
+    text = text.strip()
+    if not text.startswith("["):
+        return None
+    try:
+        words = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return words if isinstance(words, list) and all(isinstance(word, str) for word in words) else None
+
+
+def _command_form(text: str, shell: Sequence[str]) -> list[str]:
+    """A ``CMD`` or ``ENTRYPOINT``: its exec form, else its text under ``shell``.  Docker expands no variable in
+    either: a shell form's shell does, when it runs."""
+
+    words = _exec_form(text)
+    return words if words is not None else [*shell, text.strip()]
+
+
+def _shell_operands(instruction: Instruction) -> tuple[str, ...]:
+    words = _exec_form(instruction.arguments)
+    if not words:
+        raise DockerfileError(f"line {instruction.line}: SHELL takes a JSON array of strings")
+    return tuple(words)
+
+
+_HEALTHCHECK_OPTIONS = frozenset({"interval", "timeout", "start-period", "start-interval", "retries"})
+
+
+def _healthcheck(instruction: Instruction) -> dict[str, Any]:
+    """A ``HEALTHCHECK [OPTIONS] CMD command`` (or ``NONE``) as compose writes a healthcheck: ``test`` (``["CMD",
+    ...]``, ``["CMD-SHELL", text]`` or ``["NONE"]``) and the options given, in compose's spelling (``start_period``)."""
+
+    rest = instruction.arguments.strip()
+    flags: dict[str, str] = {}
+    while match := _FLAG.match(rest):
+        flags[match.group(1).lower()] = match.group(2) or ""
+        rest = rest[match.end() :]
+    if unknown := sorted(set(flags) - _HEALTHCHECK_OPTIONS):
+        raise DockerfileError(f"line {instruction.line}: HEALTHCHECK has no option --{unknown[0]}")
+    word, _, command = rest.partition(" ")
+    if word.upper() == "NONE":
+        return {"test": ["NONE"]}
+    if word.upper() != "CMD" or not command.strip():
+        raise DockerfileError(f"line {instruction.line}: HEALTHCHECK takes NONE, or CMD and a command")
+    words = _exec_form(command)
+    healthcheck: dict[str, Any] = {"test": ["CMD", *words] if words is not None else ["CMD-SHELL", command.strip()]}
+    for name, value in flags.items():
+        healthcheck[name.replace("-", "_")] = int(value) if name == "retries" and value.isdigit() else value
+    return healthcheck
 
 
 def expand(value: str, variables: Mapping[str, str]) -> str:
@@ -343,13 +484,18 @@ def remote_source(source: str, variables: Mapping[str, str] | None = None) -> Li
     return "url" if source.startswith(("http://", "https://")) else None
 
 
-def variables_in_scope(instructions: Sequence[Instruction]) -> Iterator[tuple[Instruction, dict[str, str]]]:
+def variables_in_scope(
+    instructions: Sequence[Instruction], *, build_args: Mapping[str, str] | None = None
+) -> Iterator[tuple[Instruction, dict[str, str]]]:
     """Each instruction, with the values the Dockerfile gives the variables in scope after it, scoped as BuildKit
     scopes them: an ``ARG`` before the first ``FROM`` holds in a stage only once the stage declares it again (without
     a value); a stage's ``ARG`` and ``ENV`` values hold in it and in the stages built ``FROM`` it; an ``ENV`` value
     wins over an ``ARG`` of the same name, and the values of one ``ENV`` step see the variables as they were before
     it.  A variable whose value only the base image knows is left out: one the Dockerfile never sets, one an ``ARG``
-    declares without a value, and one set to a value that names such a variable."""
+    declares without a value, and one set to a value that names such a variable.  ``build_args`` give declared
+    ``ARG``\\ s their values instead of their defaults, as ``--build-arg`` does."""
+
+    overrides = dict(build_args or {})
 
     global_args: dict[str, str | None] = {}
     stages: dict[str, tuple[dict[str, str | None], dict[str, str | None]]] = {}
@@ -378,7 +524,9 @@ def variables_in_scope(instructions: Sequence[Instruction]) -> Iterator[tuple[In
                 stages[operands[2].lower()] = (args, env)
         elif keyword == "ARG":
             for name, value in parse_assignments(instruction.arguments, "ARG"):
-                if not seen_from:
+                if name in overrides:
+                    (args if seen_from else global_args)[name] = overrides[name]
+                elif not seen_from:
                     global_args[name] = None if value is None else resolved(value, known(global_args))
                 elif value is not None:
                     args[name] = resolved(value, known(args, env))
@@ -433,8 +581,9 @@ class _Scope:
     stages: set[str] = field(default_factory=set)
 
     @classmethod
-    def of(cls, instructions: Sequence[Instruction]) -> _Scope:
+    def of(cls, instructions: Sequence[Instruction], *, build_args: Mapping[str, str] | None = None) -> _Scope:
         scope = cls()
+        overrides = dict(build_args or {})
         seen_from = False
         for instruction in instructions:
             if instruction.keyword == "FROM":
@@ -449,7 +598,9 @@ class _Scope:
             elif instruction.keyword == "ARG":
                 for name, value in parse_assignments(instruction.arguments, "ARG"):
                     if not seen_from:
-                        scope.global_args[name] = value or ""
+                        scope.global_args[name] = overrides.get(name, value or "")
+                    elif name in overrides:
+                        scope.stage_args[name] = overrides[name]
                     else:
                         default = scope.global_args.get(name, "") if value is None else value
                         scope.stage_args[name] = expand(default, {**scope.stage_args, **scope.env})
@@ -569,19 +720,22 @@ def _build_key(
     context: Path,
     context_files: Sequence[str],
     has_ignore: bool,
+    build_args: Mapping[str, str] | None = None,
 ) -> str:
     files = []
     for relative in context_files:
         for path in _walk(context.resolve() / relative if relative != "." else context.resolve()):
             name = path.relative_to(context.resolve()).as_posix()
             files.append([name, file_sha256(path), bool(path.stat().st_mode & 0o111)])
-    payload = {
+    payload: dict[str, Any] = {
         "rule": BUILD_KEY_RULE,
         "directives": list(directives),
         "prefix": [instruction.normalized for instruction in prefix],
         "context": sorted(files),
         "dockerignore": file_sha256(context / DOCKERIGNORE) if has_ignore else None,
     }
+    if build_args:  # only then, so that every key planned before build arguments existed stays as it was
+        payload["build_args"] = dict(sorted(build_args.items()))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 

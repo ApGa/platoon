@@ -12,7 +12,7 @@ from platoon.sandbox import Mount, SandboxSnapshot, SandboxSpec, get_provider
 from platoon.sandbox import process as process_module
 from platoon.sandbox._exec import run_command
 from platoon.sandbox.process import SANDBOX_ROOT_ENV, PathMap, ProcessProvider, ProcessSandbox
-from platoon.utils.stopping import registered_process_groups
+from platoon.utils.stopping import process_start_time, registered_process_groups
 
 
 @pytest.fixture
@@ -168,6 +168,34 @@ async def test_kill_processes_ends_what_commands_left_and_keeps_the_sandbox(prov
 
 
 @pytest.mark.asyncio
+async def test_kept_processes_outlive_kill_processes_until_the_sandbox_stops(provider: ProcessProvider):
+    """A task's init, started by a command, and what it started (a child, a daemon in a session of its own) are spared
+    by ``kill_processes`` once kept, with their group; ``stop`` ends them."""
+
+    sandbox = await _start(provider)
+    try:
+        started = await sandbox.exec(
+            'sh -c \'echo $$ > /tmp/init.pid; setsid sh -c "echo \\$$ > /tmp/daemon.pid; exec sleep 30" '
+            "</dev/null >/dev/null 2>&1 & exec sleep 30' </dev/null >/dev/null 2>&1 & sleep 0.3",
+            timeout_s=10,
+        )
+        assert started.exit_code == 0
+        init = int((sandbox.root / "tmp" / "init.pid").read_text())
+        daemon = int((sandbox.root / "tmp" / "daemon.pid").read_text())
+        start = process_start_time(init)
+        sandbox.keep_processes([f"{init}:{start}", f"{daemon}:{process_start_time(daemon)}"])
+        group, detached = await _plant(sandbox)
+
+        await sandbox.kill_processes()
+
+        assert await _wait_group_gone(group) and await _wait_gone(detached)
+        assert _running(init) and _running(daemon)
+    finally:
+        await sandbox.stop()
+    assert await _wait_gone(init) and await _wait_gone(daemon)
+
+
+@pytest.mark.asyncio
 async def test_stop_also_ends_processes_that_left_their_group(provider: ProcessProvider):
     sandbox = await _start(provider)
     group, detached = await _plant(sandbox)
@@ -307,9 +335,9 @@ async def test_mounts_and_custom_workdirs_are_mapped(provider: ProcessProvider, 
     data = tmp_path / "data"
     data.mkdir()
     (data / "input.txt").write_text("mounted\n")
-    sandbox = await _start(provider, workdir="/workspace", mounts=[Mount(source=str(data), target="/mnt/data")])
+    sandbox = await _start(provider, workdir="/workspace", mounts=[Mount(source=str(data), target="/srv/inputs")])
     try:
-        result = await sandbox.exec("pwd; cat /mnt/data/input.txt")
+        result = await sandbox.exec("pwd; cat /srv/inputs/input.txt")
         assert result.stdout.splitlines() == [str(sandbox.root / "workspace"), "mounted"]
     finally:
         await sandbox.stop()

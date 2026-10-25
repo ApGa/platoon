@@ -20,7 +20,15 @@ from platoon.envs.harbor.task import COMPOSE_FILENAMES, VERIFIER_BUILD_FILES, Ha
 
 SAMPLES = os.environ.get("PLATOON_HARBOR_SAMPLES")
 # Refusals that published tasks may meet on purpose: platoon cannot run them as written.
-NAMED_REFUSALS = ("multi-container", "[[verifier.collect]]", "compose service", "only Linux", "multi-step")
+NAMED_REFUSALS = (
+    "multi-container",
+    "which platoon cannot run (RFC 0010)",  # a compose file outside the subset
+    "does not apply to the one sandbox of a main-only task yet",
+    "[[verifier.collect]]",
+    "compose service",
+    "only Linux",
+    "multi-step",
+)
 
 pytestmark = pytest.mark.skipif(not SAMPLES, reason="set PLATOON_HARBOR_SAMPLES to a directory of Harbor sample tasks")
 

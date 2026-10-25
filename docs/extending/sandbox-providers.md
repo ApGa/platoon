@@ -63,6 +63,7 @@ class SandboxProvider(Protocol):
 | `snapshot()` | Capture the filesystem (not the processes) as a `SandboxSnapshot`; only when the provider declares `snapshot`. The snapshot stays valid until the sandbox it came from stops |
 | `restore(snapshot, spec)` | Start a new sandbox from a snapshot this provider made; refuse another provider's |
 | `kill_processes()` | Kill every process the commands left running, ones that left their process group or session included, and keep the sandbox running with its files. Raise `RuntimeError` when one survives, or when the sandbox cannot tell them from the processes that keep it alive. Harbor grading calls it before the tests and after them, and its grade is an untrainable `error` (`verifier_isolation`) when it raises; a sandbox without it is graded with a warning, while what the agents left running runs on |
+| `keep_processes(entries)` | Optional (*since 0.5.0*): spare the processes `entries` ("<pid>:<start time>" as `/proc` in the sandbox lists them) and their descendants from `kill_processes()`, until the sandbox stops. A session keeps what it started for the task before any agent ran: the init a main-only compose file gives `main`, and what that started. `platoon.sandbox._processes` has the scripts the built-in providers use. A Harbor task whose compose file gives `main` a command is refused on a sandbox without it |
 | `stop()` | Kill everything running in the sandbox and release it. Idempotent |
 | `routes` | For each of `spec.upstreams` that a process in the sandbox cannot reach as it is, the URL that reaches it from inside, such as a loopback port forwarded to the model gateway's Unix socket in a sandbox without a network (`platoon/sandbox/routes.py` implements them for the built-in providers). Optional: platoon reads it with `getattr(sandbox, "routes", {})`, and an `ensure_routes()` method, when there is one, starts a route's forwarder again after `kill_processes()` ended it |
 | `reap(labels)` | Optional, on the provider: stop the sandboxes whose labels include `labels`, also those a process that died without stopping them left behind, and return how many. A training worker's supervisor and `platoon eval` call it for what a killed worker left. The built-in providers put this process's labels (`platoon.sandbox.cleanup.labels()`: a run's `platoon.run`, a rollout worker's `platoon.worker`) on every sandbox beside `spec.labels`; do the same, and a run's label finds your sandboxes too |
@@ -262,6 +263,8 @@ has a reference solution:
 - `stop()` twice is fine, and after it the sandbox's processes are gone.
 - `kill_processes()` ends a process a command left running in the background, also one that moved to a session of
   its own (`setsid`), and the sandbox runs commands and keeps its files afterwards.
+- With `keep_processes()`: a kept process, its children and a daemon it detached survive `kill_processes()`, and
+  `stop()` ends them.
 - With `snapshot`: a file written before `snapshot()` is in a sandbox `restore`d from it, and a file written in that
   restored sandbox is not in the original.
 - With `network_none`: a sandbox started with `network="none"` cannot open a connection.

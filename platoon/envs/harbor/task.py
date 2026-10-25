@@ -4,17 +4,23 @@ Only the parts of Harbor's task schema that a platoon session uses are read, wit
 graded in its own sandbox (``shared``) or in a separate verifier sandbox that receives the paths the task declares
 in ``artifacts`` (``[verifier] environment_mode = "separate"``, or a ``[verifier.environment]`` table).
 
-Refused: multi-step and non-Linux tasks; multi-container environments (a compose file with sidecar services; one
-that only names ``main`` is a single container); verifier collect hooks and artifacts of other services; a
-compose file in ``tests/``; and ``[agent].user`` or ``[verifier].user`` unless the caller ignores them, since
-rootless sandboxes run every process as one user.  A caller may instead honor a ``[verifier].user`` of root
-(``verifier_user="honor"``): the task's tests then run as root in its separate verifier's sandbox, where they may run
-the agent's code as another user (:attr:`HarborTask.verifier_root`).  It honors no other user, and no root verifier
-of a task graded in its agents' own sandbox, whose agents would run as root too: those tasks are refused.
+A compose file (``environment/docker-compose.yaml``, the only one Harbor reads) is read into a stack plan
+(:mod:`platoon.envs.harbor.compose`): one that names only ``main`` runs as the task's one sandbox, with what it gives
+``main`` (an environment, binds, a working directory, resources, a command, a healthcheck: :attr:`HarborTask.main`).
+
+Refused: multi-step and non-Linux tasks; multi-container environments (a compose file with sidecar services), and
+compose files outside the subset platoon runs, or that give ``main`` what one sandbox cannot apply yet; verifier collect
+hooks and artifacts of other services; a compose file in ``tests/``; and ``[agent].user`` or ``[verifier].user`` unless
+the caller ignores them, since rootless sandboxes run every process as one user.  A caller may instead honor a
+``[verifier].user`` of root (``verifier_user="honor"``): the task's tests then run as root in its separate verifier's
+sandbox, where they may run the agent's code as another user (:attr:`HarborTask.verifier_root`).  It honors no other
+user, and no root verifier of a task graded in its agents' own sandbox, whose agents would run as root too: those tasks
+are refused.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tomllib
@@ -23,18 +29,27 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, get_args
 
-import yaml
-
+from platoon.envs.harbor.compose import (
+    COMPOSE_FILE,
+    ComposeError,
+    ComposePlan,
+    MainService,
+    plan_compose,
+    unread_compose_files,
+)
 from platoon.task import Task
+
+logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "task.toml"
 INSTRUCTION_FILENAME = "instruction.md"
 TEST_SCRIPT = Path("tests") / "test.sh"
 ENVIRONMENT_DIR = "environment"
 TESTS_DIR = "tests"
-# A compose file makes the environment a stack: the task's services (a judge, a database, an MCP server) layered over
-# Harbor's base, which defines ``main`` (harbor: src/harbor/environments/docker/docker.py).
-COMPOSE_FILENAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
+# The compose file Harbor reads, which may make the environment a stack: the task's services (a judge, a database, an
+# MCP server) layered over Harbor's base, which defines ``main`` (harbor: src/harbor/environments/docker/docker.py).
+# Compose's other names (compose.yaml, ...) are plain files of a Harbor task.
+COMPOSE_FILENAMES = (COMPOSE_FILE,)
 # The files in tests/ that give a separate verifier its own image (harbor 0.24: models/task/verifier_mode.py).
 VERIFIER_BUILD_FILES = ("Dockerfile", "docker-compose.yaml")
 # The directory every agent may publish files in for a separate verifier, collected besides ``artifacts``.
@@ -69,6 +84,9 @@ _MCP_TRANSPORTS: dict[str, McpTransport] = {
     "streamable-http": "streamable-http",
     "http": "streamable-http",
 }
+
+
+_PLANNED_HERE: Any = object()  # HarborTask.load plans the task's compose file itself
 
 
 class HarborTaskError(ValueError):
@@ -166,6 +184,14 @@ class HarborTask:
     verifier_root: bool = False
     # The task's row in its dataset's own index files (task-index.json, a lock), e.g. {"source_dataset": ...}.
     index: dict[str, Any] = field(default_factory=dict)
+    # Its compose file's stack plan, None without one (platoon.envs.harbor.compose).
+    compose: ComposePlan | None = None
+
+    @property
+    def main(self) -> MainService | None:
+        """What a main-only compose file gives the task's sandbox, ``main``; None for a task without one."""
+
+        return self.compose.main() if self.compose is not None else None
 
     @property
     def tests_dir(self) -> Path:
@@ -183,6 +209,7 @@ class HarborTask:
         agent_user: AgentUserPolicy = "refuse",
         verifier_user: VerifierUserPolicy | None = None,
         index: Mapping[str, Any] | None = None,
+        compose: ComposePlan | Mapping[str, Any] | None | object = _PLANNED_HERE,
     ) -> HarborTask:
         """Read a task directory; ``HarborTaskError`` says why platoon cannot run it.
 
@@ -190,7 +217,9 @@ class HarborTask:
         ``verifier_user`` decides for ``[verifier].user`` instead, when given: ``honor`` accepts a separate verifier
         whose user is root and sets ``verifier_root``, and refuses any other user, and a root verifier of a task
         graded in its agents' sandbox.  ``index`` is the task's row in its dataset's index, kept as
-        ``HarborTask.index``.
+        ``HarborTask.index``.  ``compose`` is the task's stack plan as its lock records it (None: the task has no
+        compose file), which a dataset's overlays may have edited; without it, the task's compose file is planned
+        here.
         """
 
         if agent_user not in AGENT_USER_POLICIES:
@@ -211,15 +240,8 @@ class HarborTask:
         verifier = _value(config, "verifier", dict, "task.toml") or {}
         agent = _value(config, "agent", dict, "task.toml") or {}
         _check_linux(environment, f"{config_path}")
-        compose = compose_file(task_dir)
-        if compose is not None and not is_trivial_compose(compose):
-            # Fail closed (RFC 0010, P0): started from its image (docker_image or the service's default_image), the
-            # main container would run alone, without its services or the files and variables compose gives it, and
-            # its verifier would write 0 for a policy that may have done the task: a silent reward 0 in training.
-            raise HarborTaskError(
-                f"{task_dir}: {compose.relative_to(task_dir)} makes the environment a multi-container stack (sidecar "
-                "services), which platoon cannot run yet (RFC 0010); the task is refused, never started without them"
-            )
+        settings = _environment_settings(environment, "[environment]")
+        plan = _compose_plan(task_dir, environment, settings, compose)
         if _value(verifier, "collect", list, "[verifier]"):
             raise HarborTaskError(
                 f"{config_path}: [[verifier.collect]] hooks run commands in compose services before artifacts are "
@@ -268,7 +290,6 @@ class HarborTask:
             raise HarborTaskError(f"{task_dir} has no {TEST_SCRIPT}")
 
         verifier_timeout_s = _value(verifier, "timeout_sec", (int, float), "[verifier]")
-        settings = _environment_settings(environment, "[environment]")
         healthcheck = _value(environment, "healthcheck", dict, "[environment]")
         return cls(
             task_dir=task_dir,
@@ -295,6 +316,7 @@ class HarborTask:
             ignored_users={phase: user for phase, user in users.items() if policies[phase] == "ignore"},
             verifier_root=verifier_root,
             index=dict(index or {}),
+            compose=plan,
         )
 
     def to_task(self, task_id: str) -> Task:
@@ -319,23 +341,68 @@ def is_root(user: str) -> bool:
 
 
 def compose_file(task_dir: Path) -> Path | None:
-    """The task's compose file (``environment/docker-compose.yaml`` and its aliases), or None."""
+    """The task's compose file, ``environment/docker-compose.yaml``, or None: Harbor reads no other name."""
 
-    return next((path for name in COMPOSE_FILENAMES if (path := task_dir / ENVIRONMENT_DIR / name).is_file()), None)
+    path = Path(task_dir) / ENVIRONMENT_DIR / COMPOSE_FILE
+    return path if path.is_file() else None
 
 
-def is_trivial_compose(path: Path) -> bool:
-    """A compose file that only names ``main``, with no keys (``services: {main: {}}``), as some converters write
-    for every task: the environment is one container.  An unreadable file is not trivial."""
+_WARNED_UNREAD: set[str] = set()  # the compose file names that Harbor does not read, warned about by this process
 
-    try:
-        document = yaml.safe_load(path.read_text())
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return False
-    if not isinstance(document, dict) or set(document) - {"services", "version"}:
-        return False
-    services = document.get("services")
-    return isinstance(services, dict) and list(services) == ["main"] and not services["main"]
+
+def _compose_plan(
+    task_dir: Path, environment: dict[str, Any], settings: dict[str, Any], compose: Any
+) -> ComposePlan | None:
+    """The task's stack plan: ``compose`` when the caller has it (a lock's), else planned from the task's files; a
+    plan that one sandbox cannot run yet refuses the task."""
+
+    if compose is _PLANNED_HERE:
+        for name in unread_compose_files(task_dir):
+            if name not in _WARNED_UNREAD:
+                _WARNED_UNREAD.add(name)
+                logger.warning(
+                    "Harbor task %s has %s, which Harbor does not read (it reads only %s/%s): platoon treats it as a "
+                    "plain file of the task, as Harbor does",
+                    task_dir.name,
+                    name,
+                    ENVIRONMENT_DIR,
+                    COMPOSE_FILE,
+                )
+        try:
+            plan = plan_compose(
+                task_dir,
+                docker_image=_value(environment, "docker_image", str, "[environment]"),
+                env=settings["env"],
+                cpus=settings["cpus"],
+                memory_mb=settings["memory_mb"],
+                with_keys=False,
+            )
+        except ComposeError as exc:
+            raise HarborTaskError(
+                f"{task_dir}: {ENVIRONMENT_DIR}/{COMPOSE_FILE}: {exc}, which platoon cannot run (RFC 0010); the task "
+                "is refused"
+            ) from exc
+    elif compose is None or isinstance(compose, ComposePlan):
+        plan = compose
+    else:
+        plan = ComposePlan.from_json(compose)  # type: ignore[arg-type]
+    if plan is None:
+        return None
+    if plan.kind == "sidecars":
+        # Fail closed (RFC 0010, P0): started from its image (docker_image or the service's default_image), the
+        # main container would run alone, without its services or the files and variables compose gives it, and
+        # its verifier would write 0 for a policy that may have done the task: a silent reward 0 in training.
+        raise HarborTaskError(
+            f"{task_dir}: {ENVIRONMENT_DIR}/{COMPOSE_FILE} makes the environment a multi-container stack (sidecar "
+            "services), which platoon cannot run yet (RFC 0010); the task is refused, never started without them"
+        )
+    main = plan.main()
+    if main is not None and main.unsupported:
+        raise HarborTaskError(
+            f"{task_dir}: {ENVIRONMENT_DIR}/{COMPOSE_FILE} gives main {', '.join(main.unsupported)}, which platoon "
+            "does not apply to the one sandbox of a main-only task yet (RFC 0010); the task is refused"
+        )
+    return plan
 
 
 def strip_canary(text: str) -> str:

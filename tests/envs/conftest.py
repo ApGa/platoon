@@ -16,6 +16,9 @@ from platoon.envs.harbor import HarborEnvironmentService
 from platoon.sandbox.process import ProcessProvider
 
 HARBOR_FIXTURES = Path(__file__).parent / "fixtures" / "harbor"
+# Fixture tasks are data, never platoon's tests: a task's own tests (Harbor's hello-mcp runs pytest in its sandbox) must
+# not be collected here.
+collect_ignore = ["fixtures"]
 VERIFIER_DIR = '"${PLATOON_SANDBOX_ROOT:-}/logs/verifier"'
 
 MakeTask = Callable[..., Path]

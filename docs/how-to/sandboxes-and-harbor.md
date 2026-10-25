@@ -466,10 +466,11 @@ an absolute path or one with `..` fails the fetch. The lock records, for every t
 metadata, the flags platoon reads from `task.toml` (verifier mode, network, GPUs, users, stacks) and the bytes a
 session uploads into one of its sandboxes (`upload_bytes`), its image build plan (below), the digest of each of its
 input files (`input_files`, which a [hold-out](#shared-input-files) joins groups by), and why platoon refuses it,
-if it does: what `refuse` names (`stack`, `gpus`, `agent_user`, `per_task_build`, `uploads_over_mb`), and anything
-platoon's task loader cannot run (`task_config`: a bad `network_mode`, a separate
-verifier built from `tests/docker-compose.yaml`, an artifact path with `..` or from another compose service, and the
-rest of [What platoon refuses](#what-platoon-refuses)), which would fail every rollout. Sidecar stacks stay refused
+if it does: a compose file outside the subset platoon runs (`compose`, [Compose files](#compose-files)), what
+`refuse` names (`stack`, `gpus`, `agent_user`, `per_task_build`, `uploads_over_mb`), and anything platoon's task
+loader cannot run (`task_config`: a bad `network_mode`, a separate verifier built from `tests/docker-compose.yaml`, an
+artifact path with `..` or from another compose service, and the rest of [What platoon refuses](#what-platoon-refuses)),
+which would fail every rollout. Sidecar stacks stay refused
 with `sidecars: false` too, as `task_config`, until platoon runs stacks. A refused task stays in the lock with its
 reason: it is never listed, and a split manifest that names it is an error. `refuse`'s switches take `true` or
 `false`; anything else is an error.
@@ -629,6 +630,91 @@ tests on the `process` provider, which runs no image, point the keys at `local`:
 A separate verifier gets its image the same way. One built from `tests/Dockerfile` runs the map's image for that
 Dockerfile's key, with its own deferred steps (`platoon harbor images build` builds it too); one that runs the task's
 own image gets the task's image and deferred steps, as Harbor's verifier would run the task's built image.
+
+## Compose files
+
+*Since 0.5.0.* A Harbor task may ship `environment/docker-compose.yaml`, the only compose file Harbor reads: a
+`compose.yaml`, `compose.yml` or `docker-compose.yml` is a plain file of the task, as in Harbor, and a fetch warns of
+it (`flags.unread_compose` in the lock). platoon reads the file as Harbor layers it, over a `main` service that is the
+task's own sandbox (its image from `environment/Dockerfile` or its `docker_image`, idling on `sh -c "sleep
+infinity"`), and a fetch records what it found in the lock: the kind (`flags.stack`) and the file's stack plan
+(`compose`).
+
+| `flags.stack` | The compose file | platoon runs |
+|---|---|---|
+| `single` | none | one sandbox |
+| `trivial` | names only `main`, with nothing platoon applies (`services: {main: {}}`, or Harbor's base restated) | one sandbox |
+| `main_only` | names only `main`, and gives it settings | one sandbox, with what the file gives `main` (below) |
+| `sidecars` | names services besides `main`: a database, a judge, an MCP server | nothing yet: the task is refused (`stack`, or `task_config` with `refuse: {sidecars: false}`), never started without its services ([RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md)) |
+
+**A main-only file** gives the task's sandbox:
+
+- `environment` and `env_file`: its environment, over the image's and the service's `env`, under the task's
+  `[environment].env`;
+- `working_dir`: its working directory, unless `[environment].workdir` names one;
+- `cpus`, `mem_limit` and `deploy.resources.limits`: its resources, over the task's;
+- `volumes`: a bind of the task's own files (`./data:/data:ro`, `${CONTEXT_DIR}/..:/opt/task-src:ro`) binds the
+  cached task, read-only as written, and a writable one binds a copy of its files, so that the cache is never
+  written; a source the task does not have binds an empty directory, as Docker creates one; anonymous and named
+  volumes below a bind mask what it binds there: the bind is of a filtered copy in which they are empty directories,
+  so a task that hides its `solution/` and `tests/` that way never puts them in the sandbox; a bind of
+  `${HOST_VERIFIER_LOGS_PATH}` (or of the agent's or the artifacts' log directory) at its own path changes nothing; a
+  named volume elsewhere is a directory of the sandbox's own;
+- `command` and `entrypoint`: main's **init**, which the session starts once the sandbox runs, as compose runs a
+  service's command (under the image's `ENTRYPOINT` where the image map knows it), unless it only idles (`sleep
+  infinity`, `tail -f /dev/null`). The kill before grading spares it and what it started, daemons it detached
+  included; an init that is gone by grading, which in Docker would have ended the container, makes the attempt an
+  `error` (`main_exited`), never scored; and a `copy` fork of such a task is refused, since a restore brings back
+  files, not processes;
+- `healthcheck`: waited for once the init has started (else the image's `HEALTHCHECK`), before
+  `[environment.healthcheck]`; one that keeps failing is `env_healthcheck`, as that one is.
+
+Published `ports` are kept as `expose`, since nothing is published on the host, and `container_name`, `restart`,
+`init`, `stdin_open`, `tty`, `labels`, `logging`, `stop_grace_period`, `pull_policy` and a `platform` that is this
+host's are ignored. What one sandbox cannot apply yet (`cap_add`, `shm_size`, `ulimits`, `tmpfs`, a log directory
+bound at another path, a bind inside another, networks that are all `internal`) refuses the task when it loads, as
+`task_config`.
+
+**Variables.** `${NAME}`, `${NAME:-default}`, `${NAME-default}`, `${NAME:?error}`, `${NAME:+value}` and `$$` (a
+literal `$`) work as in compose, and an unset variable without a default is blank, as compose makes it (the lock
+notes it). The variables are Harbor's, with platoon's meaning: `CONTEXT_DIR` (the task's `environment/`, which only
+binds and build contexts may name), `HOST_VERIFIER_LOGS_PATH` and `ENV_VERIFIER_LOGS_PATH` and their agent and
+artifacts counterparts, `MAIN_IMAGE_NAME`, `PREBUILT_IMAGE_NAME`, `CPUS` and `MEMORY` (the task's resources); then
+the task's `[environment].env`. The host's environment counts only for the variables an overlay lists in
+`compose_host_env`, so a file that names an API key gets a blank one otherwise. A listed variable, and a task
+variable that is a host template (`${TOKEN}`), are resolved when a session opens, never written into the lock, under
+the form the file gives them (`${OPENAI_API_KEY:-}` is blank when the host has none); one that the file names without
+a default must be set then, or the session fails as `env_config`. Environment values may name both, and a read-only
+bind the path that a listed variable names, or a path below it
+(`${SCICODE_TEST_DATA}/test_data.h5:/app/test_data.h5:ro`): never a task variable's, which the task, not you, chose.
+
+**What the subset refuses**, when the dataset is fetched, as `compose: <service>.<key>: <why>`: keys outside the
+subset; security-relevant ones (`privileged`, `devices`, `pid`, `ipc`, `security_opt`, `sysctls`, `user`, a
+`cap_add` beyond the capabilities a service's root holds over its own processes and files, such as `NET_ADMIN`,
+`network_mode: host`, ...); binds of host paths; static addresses, and networks that keep a service from `main`; two
+services that declare one port, since a stack's services share one loopback where they run as a pod; GPU requests (a
+task asks for GPUs with `[environment].gpus`); external volumes and networks; a file whose YAML aliases expand it
+beyond 100,000 values; the private-use characters U+E000 to U+E007 anywhere a task writes (platoon marks the
+variables a session resolves with them); and what compose itself would reject, such as an invalid interpolation, an
+env file it cannot read or a dependency on a service that does not start. A dataset's overlay may edit the services:
+
+```toml
+# overlays/drop-net-admin/overlay.toml
+compose_host_env = ["SCICODE_TEST_DATA"]  # host variables the compose file may name
+[match]
+source_dataset = "cybergym"
+[[compose]]
+service = "main"
+unset = ["cap_add"]                    # dotted for a nested key: "deploy.resources.reservations"
+set = {environment = {MODE = "eval"}}  # merged into the service's mappings; other values replace
+[[compose]]
+service = "task-server"
+replace = {command = ["serve", "--port", "9111"]}  # keys set whole
+```
+
+The lock records the edits with the stack plan, and the overlay's hash with the lock's inputs, as for any overlay.
+An entry may also mark a service `external = "<node service>"`: a service that a node service serves, which platoon
+does not start.
 
 ## Verifiers that run as root
 
@@ -876,8 +962,10 @@ a NUL byte among its first 8000 bytes, compares by its bytes.
 A task's input files are what its agents' sandbox takes from the task: the files of `environment/` that its
 Dockerfile's `COPY` and `ADD` steps take, whether a build bakes them into the image or a session uploads them
 ([Build task images](#build-task-images)), or the whole `environment/` of a task with a prebuilt image and no
-Dockerfile. A file that no step takes, the `Dockerfile` itself, the tests and the solution are not inputs, and an
-empty file (or one of blank lines) joins nothing. A fetch records each task's input files in the lock
+Dockerfile, and the task's files that a main-only compose file binds into its sandbox, but for what its volumes mask
+([Compose files](#compose-files)). A file that no step takes, the `Dockerfile` and the compose file, `task.toml` and
+`instruction.md`, the tests and the solution are not inputs, bound or not, and an empty file (or one of blank lines)
+joins nothing. A fetch records each task's input files in the lock
 (`input_files`), and a `dataset_dir`'s are hashed when its tasks are listed. A refused task's files join groups too,
 so that a refusal never moves one.
 
@@ -1316,7 +1404,8 @@ dataset skips such a task with a warning; naming it directly (as a task id, in a
 
 | Task | Why |
 |---|---|
-| A multi-container environment: `environment/docker-compose.yaml` (or `.yml`, `compose.yaml`, `compose.yml`) with sidecar services | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. A compose file that only names `main`, with no keys (`services: {main: {}}`), is one container and runs |
+| A multi-container environment: `environment/docker-compose.yaml` with sidecar services | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. A compose file that names only `main` runs as one sandbox, with what it gives `main` ([Compose files](#compose-files)); the other compose names (`compose.yaml`, ...) are plain files, as in Harbor |
+| A compose file outside the subset platoon runs (when the dataset is fetched, as `compose`), or one that gives `main` what one sandbox cannot apply yet, such as `cap_add` or `shm_size` (when the task loads) | platoon runs a compose file as written or not at all ([Compose files](#compose-files)): a dataset's overlay may drop or replace what it refuses |
 | A separate verifier built from `tests/docker-compose.yaml`, `[[verifier.collect]]` hooks, or artifacts of another compose service | They need multi-container stacks |
 | `[agent].user` or `[verifier].user`, unless the service sets `agent_user: ignore` (or, for `[verifier].user`, `verifier_user: ignore` or `honor`) | Rootless sandboxes run every process as one user |
 | With `verifier_user: honor`: a `[verifier].user` other than root, or a root one of a task graded in its agents' own sandbox (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | platoon runs a verifier as root or as the sandbox's own user, and only in a separate verifier's sandbox, whose agents do not run as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
@@ -1346,7 +1435,8 @@ an absolute path, is used as written; any other reference without a scheme gets 
 [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md) is the design behind this page. What it proposes
 beyond what is described here: fetching datasets from the Harbor registry (`harbor://`) and from git repositories, and
 running multi-container tasks, through `docker compose` where Docker exists and as rootless pods on Singularity,
-Apptainer and enroot. Until then, multi-container tasks stay refused. The [RFC index](../rfcs/README.md) lists every
+Apptainer and enroot. Until then, multi-container tasks stay refused; main-only compose files run already
+([Compose files](#compose-files)). The [RFC index](../rfcs/README.md) lists every
 proposal and explains how one moves from draft to implemented; comment on the RFC, or open a new one, to shape what gets
 built.
 

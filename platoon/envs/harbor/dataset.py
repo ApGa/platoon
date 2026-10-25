@@ -109,7 +109,7 @@ class HarborDataset:
         (:func:`~platoon.envs.harbor.inputs.input_files`, hashed now): what a hold-out splits."""
 
         rows = [
-            HoldoutRow(name, dict(task.index or {}), input_files=input_files(self._dirs[name]))
+            HoldoutRow(name, dict(task.index or {}), input_files=input_files(self._dirs[name], compose=task.compose))
             for name, task in self._tasks.items()
         ]
         rows += [

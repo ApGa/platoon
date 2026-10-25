@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from platoon.envs.harbor import task as task_module
 from platoon.envs.harbor.task import (
     HARBOR_MISC_KEY,
     Artifact,
@@ -122,14 +123,31 @@ COMPOSE = """services:
 """
 
 
-@pytest.mark.parametrize("compose", ["docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"])
 @pytest.mark.parametrize("task_toml", ["", '[environment]\ndocker_image = "ubuntu:24.04"\n'], ids=["default", "image"])
-def test_refuses_multi_container_tasks_whatever_their_image_source(make_task, compose: str, task_toml: str):
+def test_refuses_multi_container_tasks_whatever_their_image_source(make_task, task_toml: str):
     task_dir = make_task("stack", task_toml=task_toml)
-    (task_dir / "environment" / compose).write_text(COMPOSE)
+    (task_dir / "environment" / "docker-compose.yaml").write_text(COMPOSE)
 
-    with pytest.raises(HarborTaskError, match=rf"environment/{compose} makes the environment a multi-container"):
+    with pytest.raises(
+        HarborTaskError, match=r"environment/docker-compose.yaml makes the environment a multi-container"
+    ):
         HarborTask.load(task_dir)
+
+
+@pytest.mark.parametrize("compose", ["docker-compose.yml", "compose.yaml", "compose.yml"])
+def test_compose_names_that_harbor_does_not_read_are_plain_files(make_task, compose: str, caplog):
+    """Harbor reads only environment/docker-compose.yaml: a task with another compose name runs as one container in
+    Harbor, and so in platoon, which warns of it."""
+
+    task_dir = make_task(f"plain-{compose}", task_toml='[environment]\ndocker_image = "ubuntu:24.04"\n')
+    (task_dir / "environment" / compose).write_text(COMPOSE)
+    task_module._WARNED_UNREAD.discard(f"environment/{compose}")
+
+    with caplog.at_level("WARNING", logger="platoon.envs.harbor.task"):
+        task = HarborTask.load(task_dir)
+
+    assert task.compose is None and task.docker_image == "ubuntu:24.04"
+    assert f"has environment/{compose}, which Harbor does not read" in caplog.text
 
 
 # ------------------------------------------------------------------------------------------- separate verifiers
@@ -271,22 +289,41 @@ def test_a_compose_file_that_only_names_main_is_one_container(make_task, compose
 
 
 @pytest.mark.parametrize(
-    "compose",
+    ("compose", "message"),
     [
-        "services:\n  main:\n    environment: [A=1]\n",
-        "services:\n  main: {}\nnetworks:\n  private: {}\n",
-        "services:\n  app: {}\n",
-        "services: [main]\n",
-        "{not: yaml: at all",
+        ("services:\n  app:\n    image: redis:7-alpine\n", "makes the environment a multi-container stack"),
+        ("services:\n  app: {}\n", "app: has neither an image nor a build"),
+        ("services: [main]\n", "services: must map service names"),
+        ("{not: yaml: at all", "the file is not YAML"),
+        ("services:\n  main:\n    privileged: true\n", "main.privileged: gives the service every privilege"),
     ],
-    ids=["main-with-keys", "networks", "other-service", "list", "unparsable"],
+    ids=["other-service", "service-without-image", "list", "unparsable", "privileged"],
 )
-def test_any_other_compose_file_stays_refused(make_task, compose: str):
+def test_other_compose_files_stay_refused_with_the_reason(make_task, compose: str, message: str):
     task_dir = make_task("stack")
-    (task_dir / "environment" / "compose.yaml").write_text(compose)
+    (task_dir / "environment" / "docker-compose.yaml").write_text(compose)
 
-    with pytest.raises(HarborTaskError, match="makes the environment a multi-container stack"):
+    with pytest.raises(HarborTaskError, match=message):
         HarborTask.load(task_dir)
+
+
+@pytest.mark.parametrize(
+    ("compose", "kind"),
+    [
+        ("services:\n  main:\n    environment: [A=1]\n", "main_only"),
+        ("services:\n  main: {}\nnetworks:\n  private: {}\n", "trivial"),
+        ("services:\n  main:\n    stdin_open: true\n    tty: true\n", "trivial"),
+    ],
+    ids=["main-with-keys", "unused-network", "ignored-keys"],
+)
+def test_compose_files_that_name_only_main_run_as_one_sandbox(make_task, compose: str, kind: str):
+    task_dir = make_task("main-only", task_toml='[environment]\ndocker_image = "ubuntu:24.04"\n')
+    (task_dir / "environment" / "docker-compose.yaml").write_text(compose)
+
+    task = HarborTask.load(task_dir)
+
+    assert task.compose is not None and task.compose.kind == kind
+    assert (task.main is not None) == (kind == "main_only")
 
 
 def test_users_are_refused_unless_ignored(make_task):

@@ -972,7 +972,28 @@ def _entry_from_config(image: str, blob: Mapping[str, Any], *, builder: str, sha
         user=config.get("User") or None,
         entrypoint=tuple(config["Entrypoint"]) if config.get("Entrypoint") else None,
         cmd=tuple(config["Cmd"]) if config.get("Cmd") else None,
+        healthcheck=_healthcheck_of(config.get("Healthcheck")),
+        exposed_ports=tuple(sorted(config.get("ExposedPorts") or ())),
+        volumes=tuple(sorted(config.get("Volumes") or ())),
+        stop_signal=config.get("StopSignal") or None,
     )
+
+
+def _healthcheck_of(healthcheck: Any) -> dict[str, Any] | None:
+    """An image configuration's ``Healthcheck`` as compose writes a healthcheck, durations (nanoseconds there) in
+    seconds; None for none."""
+
+    if not isinstance(healthcheck, Mapping) or not healthcheck.get("Test"):
+        return None
+    data: dict[str, Any] = {"test": list(healthcheck["Test"])}
+    for name, key in (("interval", "Interval"), ("timeout", "Timeout"), ("start_period", "StartPeriod")):
+        if healthcheck.get(key):
+            data[name] = healthcheck[key] / 1e9
+    if healthcheck.get("StartInterval"):
+        data["start_interval"] = healthcheck["StartInterval"] / 1e9
+    if healthcheck.get("Retries"):
+        data["retries"] = int(healthcheck["Retries"])
+    return data
 
 
 def _exec_form(command: str) -> list[str] | None:
