@@ -2,9 +2,9 @@
 
 What each release of platoon changes. Platoon's version is below 1.0: a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
-release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
+release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
-## 0.4.0 (unreleased)
+## 0.4.0 (2026-10-25)
 
 ### New features
 
@@ -194,20 +194,6 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   form of the row, whose nested values differ in their empty keys.
 - A rollout worker that is cancelled, as by a straggler cut or a stop, no longer leaves its readiness and diagnostics
   files in node-local scratch, where they stayed until a later run found them a day old.
-
-### Removed
-
-- **Breaking: `train.task_order` is gone.** Platoon 0.3.0 renamed it `train.task_sampler` and deprecated the old name
-  for removal in 0.4.0. A config or an override that still sets it fails as a configuration error (exit 78), with
-  `train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`; so does a config copied from
-  platoon 0.2.0's `config show --defaults`, which spells `task_order: auto`, even beside a `task_sampler`, where 0.3.0
-  ignored it. Set `train.task_sampler` instead: it takes the old name's values, `auto` and `weighted`, which draw as
-  they did ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
-
-## 0.3.1 (unreleased)
-
-### Fixes
-
 - **A model service that sends no routing ids is warned about once, not for each rollout.** With
   `rollout_isolation: process`, the trainer warned about every rollout whose model calls did not all get a routing
   id, which a server with rollout routing replay (R3) sends with each sampled sequence. With a service that sends
@@ -218,6 +204,41 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   has sent some, and it reports the first rollout to get any after rollouts without them, naming the first few of
   those. The metrics `train/rollout_worker_routing_id_coverage` and `eval/rollout_worker_routing_id_coverage` are
   logged as before.
+
+### Removed
+
+- **Breaking: `train.task_order` is gone.** Platoon 0.3.0 renamed it `train.task_sampler` and deprecated the old name
+  for removal in 0.4.0. A config or an override that still sets it fails as a configuration error (exit 78), with
+  `train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`; so does a config copied from
+  platoon 0.2.0's `config show --defaults`, which spells `task_order: auto`, even beside a `task_sampler`, where 0.3.0
+  ignored it. Set `train.task_sampler` instead: it takes the old name's values, `auto` and `weighted`, which draw as
+  they did ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+
+### Install and upgrade
+
+```bash
+pip install -U 'platoon[tinker,ors]>=0.4,<0.5'
+# with the TextCraft extension, name it too:
+pip install -U 'platoon[tinker,ors]>=0.4,<0.5' 'platoon-textcraft[platoon]'
+```
+
+- **To upgrade a project that pins one minor release**, move its range to 0.4, such as `platoon[tinker,ors]>=0.4,<0.5`.
+  Platoon 0.4 refuses the components of an installed extension whose requirement on platoon excludes it, such as
+  `platoon>=0.3,<0.4`, with an error that names both versions, until a release of the extension admits 0.4;
+  meanwhile, `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` loads them anyway
+  ([Compatibility and provenance](docs/extending/index.md#compatibility-and-provenance)).
+- **A config that sets `train.task_order` no longer loads:** use `train.task_sampler`, which takes its values
+  (`platoon config validate` names the key).
+- **`train.permit_release` now defaults to `rollout`.** Where the permits bound a run, more groups run at once and
+  steps get shorter, and more long groups can be dropped as stale: if the run warns, raise `train.max_staleness` by
+  one. `train.permit_release: group` trains as 0.3 did
+  ([The previous behavior](docs/how-to/train-and-eval.md#the-previous-behavior)).
+- **The TextCraft extension's release for platoon 0.4 is `platoon-textcraft` 0.3.0**, whose `platoon` extra requires
+  `platoon[ors]>=0.4,<0.5`. Its code and data are those of 0.2.0. The release for platoon 0.3 stays 0.2.0: there, keep
+  the extension within 0.2 (`platoon-textcraft>=0.2,<0.3`), since platoon 0.3 refuses the components of 0.3.0, also
+  when it is installed without its extra. An upgrade of platoon alone leaves 0.2.0 installed, which pip does not flag
+  and platoon 0.4 refuses: upgrade the two together, as above
+  ([The TextCraft extension](docs/getting-started/install.md#the-textcraft-extension)).
 
 ## 0.3.0 (2026-10-20)
 

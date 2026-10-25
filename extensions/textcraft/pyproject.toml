@@ -1,6 +1,6 @@
 [project]
 name = "platoon-textcraft"
-version = "0.2.0"
+version = "0.3.0"
 description = "TextCraft and TextCraft-Synth: crafting environments for LLM agents (ORS), with platoon's named environments and a Harbor export."
 # PyPI shows README.md with its relative links pointed at the repository (fancy-pypi-readme, below).
 dynamic = ["readme"]
@@ -21,7 +21,7 @@ dependencies = [
 # The prompt builders, the named environments and the task generators import platoon; platoon reads this range
 # before it loads the named environments.
 platoon = [
-    "platoon[ors]>=0.3,<0.4",
+    "platoon[ors]>=0.4,<0.5",
 ]
 
 [project.entry-points."platoon.environments"]

@@ -349,7 +349,7 @@ def test_lock_json_records_every_component_with_its_distribution(acme, tmp_path,
     assert lock["extensions"] == {
         "acme-platoon": {
             "version": "1.4.0",
-            "requires": ["platoon>=0.3,<0.4"],
+            "requires": ["platoon>=0.4,<0.5"],
             "direct_url": {"url": "file:///src/acme-platoon", "dir_info": {"editable": True}},
         }
     }
