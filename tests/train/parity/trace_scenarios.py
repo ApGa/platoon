@@ -172,6 +172,46 @@ def _check_stale(trace: Trace) -> None:
     assert any(len(found) > 1 for found in stamps.values()), "no group whose rollouts sampled different policies"
 
 
+def _rollout_starts(trace: Trace) -> list[set[tuple[int, int]]]:
+    """For each training group in turn, the policy versions and updates applied that its rollouts' requests carry, as
+    pairs: one pair when its rollouts started together.  The permits go to one draw at a time, so a group's rollouts
+    are requested one after another, number 0 first."""
+
+    groups: list[set[tuple[int, int]]] = []
+    for row in requests(trace):
+        if row[1] == 0 or not groups:
+            groups.append(set())
+        groups[-1].add((row[2], row[4]))
+    return groups
+
+
+def _check_permits_bind(trace: Trace) -> None:
+    """That the rollout permits (8) held the dispatcher back, that each step's mean of the permits held stayed within
+    them, and that no more rollouts than that ever ran at once."""
+
+    assert any(series(trace, "train/dispatch/blocked_share/permits")), "the permits never held the dispatcher back"
+    held = series(trace, "rollout_client/permits_held_mean")
+    assert held and max(held) <= 8, f"the permits held are not logged, or their mean exceeds the 8 there are: {held}"
+    running = series(trace, "rollout_client/rollouts_in_flight_max")
+    assert max(running) <= 8, f"more rollouts at once than the 8 permits: {running}"
+
+
+def _check_permits_group(trace: Trace) -> None:
+    _check_permits_bind(trace)
+    most = max(series(trace, "rollout_client/groups_in_flight_max"), default=0)
+    assert most == 2, f"at most {most:g} groups at once, not the two whose permits the 8 hold whole"
+    assert all(len(starts) == 1 for starts in _rollout_starts(trace)), "a group's rollouts did not start together"
+
+
+def _check_permits_rollout(trace: Trace) -> None:
+    _check_permits_bind(trace)
+    assert any("rollouts start as permits free" in message for message in messages(trace)), "no rolling starts"
+    most = max(series(trace, "rollout_client/groups_in_flight_max"), default=0)
+    assert most > 2, f"at most {most:g} groups at once: none started while two others still ran"
+    versions = [{version for version, _ in starts} for starts in _rollout_starts(trace)]
+    assert any(len(found) > 1 for found in versions), "no group whose rollouts started on either side of a publication"
+
+
 def _check_rule_short(trace: Trace) -> None:
     assert any(series(trace, "train/admission/short")), "the rule never closed a step short on its cap"
 
@@ -340,6 +380,36 @@ SCENARIOS: dict[str, Scenario] = {
         },
         rollouts=Rollouts(slowdown={"slow::": 5.0}, follow=True, first_share=0.5),
         check=_check_stale,
+    ),
+    # ------------------------------------------------------------------- rollout permits
+    "permits-group": Scenario(
+        "Rollout permits for two groups of four, at max_staleness 2 so that groups run ahead of the step, under "
+        "permit_release group (the default): a group holds its permits until its slowest rollout ends",
+        {
+            "train": {
+                "max_training_steps": 4,
+                "max_staleness": 2,
+                "max_concurrent_rollouts": 8,
+                "permit_release": "group",
+            }
+        },
+        tasks=8,
+        check=_check_permits_group,
+    ),
+    "permits-rollout": Scenario(
+        "Rollout permits for two groups of four, at max_staleness 2 so that groups run ahead of the step, under "
+        "permit_release rollout: each rollout returns its permit as it ends, and a group's rollouts start as permits "
+        "free, some after the next policy is published",
+        {
+            "train": {
+                "max_training_steps": 4,
+                "max_staleness": 2,
+                "max_concurrent_rollouts": 8,
+                "permit_release": "rollout",
+            }
+        },
+        tasks=8,
+        check=_check_permits_rollout,
     ),
     # ------------------------------------------------------------------- task selection
     "rule-informative": Scenario(

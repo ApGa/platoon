@@ -135,6 +135,7 @@ The golden trace does not cover:
 | `capped-k1` | A limit on the slow entry at `max_staleness: 1`, where draws hold their label's slots |
 | `mix-label-by` | The mixture labelled by another column (`train.label_by`), with a straggler policy for one label |
 | `stale-follow` | Groups dropped as stale, the slow entry by its own bound, with datums stamped by the policy they sampled |
+| `permits-group`, `permits-rollout` | Rollout permits for two groups, under each `train.permit_release` at `max_staleness: 2`: a group holds its permits until its slowest rollout ends, or its rollouts start as permits free, some on the next policy |
 | `rule-informative` | Group admission by the `informative` rule, whose rejected places are refilled, under the scoring `pass_rate` sampler |
 | `rule-k1`, `rule-k1-held`, `rule-k1-stale` | The rule at `max_staleness: 1`: short steps, rejected groups without datums that hold their slots, stale groups |
 | `pass-rate` | The `pass_rate` task sampler on the run's one entry, under the `weighted` run sampler |

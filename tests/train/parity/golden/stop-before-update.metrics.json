@@ -18,6 +18,7 @@
       "cpu_saturation": "timing",
       "groups_in_flight_max": 2.0,
       "groups_in_flight_mean": "timing",
+      "permits_held_mean": 6.821072789946783,
       "rollouts_in_flight_configured": 8.0,
       "rollouts_in_flight_max": 8.0,
       "rollouts_in_flight_mean": "timing",
@@ -178,6 +179,13 @@
      "train/credit/root_advantage": {
       "abs_avg": 0.4548611111111111,
       "abs_avg__count": 4
+     },
+     "train/dispatch/blocked_share": {
+      "horizon": 0.5220061200063147,
+      "labels": 0.0,
+      "permits": 0.47799387999368526,
+      "plan": 0.0,
+      "sampler": 0.0
      },
      "train/optim": {
       "clip_frac_high": 0.24747474747474746,
@@ -554,6 +562,7 @@
       "cpu_saturation": "timing",
       "groups_in_flight_max": 2.0,
       "groups_in_flight_mean": "timing",
+      "permits_held_mean": [5.944293316001009, 7.018787413964253, 6.970279993261492],
       "rollouts_in_flight_configured": 8.0,
       "rollouts_in_flight_max": 8.0,
       "rollouts_in_flight_mean": "timing",
@@ -714,6 +723,13 @@
      "train/credit/root_advantage": {
       "abs_avg": [0.4548611111111111, 0.375, 0.3472222222222222],
       "abs_avg__count": 4
+     },
+     "train/dispatch/blocked_share": {
+      "horizon": [1.0, 0.5288470594945961, 0.0],
+      "labels": 0.0,
+      "permits": [0.0, 0.47115294050540385, 0.4459457376208484],
+      "plan": [0.0, 0.0, 0.5540542623791516],
+      "sampler": 0.0
      },
      "train/optim": {
       "clip_frac_high": [0.2583333333333333, 0.3508771929824561, 0.34259259259259256],
