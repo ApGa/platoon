@@ -278,7 +278,7 @@ def _dataset(
     """Fetch the entry's dataset into its lock (``platoon harbor fetch``'s rules), or read the lock it names; with
     the lock, the lines of its hold-out's report, if it has one."""
 
-    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed, is_pinned
+    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed
     from platoon.envs.harbor.lock import LockError, read_lock
 
     locked = service.locked
@@ -292,8 +292,8 @@ def _dataset(
         detail = f"current: the lock {locked.lock_path}, {_tasks(lock)} (it names no dataset to fetch)"
         return PrepareStep(where, "dataset", "current", detail), lock, _report(where, service)
     settings = locked.fetch
-    local = not settings.dataset.startswith(("hf://", "harbor://", "git+"))
-    moving = not local and not is_pinned(settings.dataset)  # resolved by platoon harbor fetch --update, never here
+    local = settings.local
+    moving = not local and not settings.pinned  # resolved by platoon harbor fetch --update, never here
     if dry_run or moving:
         lock, gap = _current(settings)
         if lock is None and moving:

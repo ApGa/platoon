@@ -227,6 +227,8 @@ def test_a_split_manifest_is_relative_to_a_dataset_directory_only_one_the_same_f
 def test_values_that_are_no_local_paths_stay_as_they_are(tmp_path, monkeypatch):
     configs = tmp_path / "configs"
     configs.mkdir()
+    (configs / "registry.json").write_text("[]")
+    registry_url = "https://example.com/registry.json"
     config = _write(
         configs / "env.yaml",
         {
@@ -235,6 +237,8 @@ def test_values_that_are_no_local_paths_stay_as_they_are(tmp_path, monkeypatch):
                 {"service": "harbor", "service_kwargs": {"dataset": "harbor://org/name@1.0"}},
                 {"service": "no.such.module:Service", "service_kwargs": {"dataset_dir": "anything"}},
                 {"service": "harbor", "service_kwargs": {"dataset_dir": "~/datasets/ds"}, "harness": "platoon-bash"},
+                {"service": "harbor", "service_kwargs": {"dataset": "harbor://kumo@1.0", "registry": registry_url}},
+                {"service": "harbor", "service_kwargs": {"dataset": "harbor://kumo@1.0", "registry": "registry.json"}},
             ]
         },
     )
@@ -247,6 +251,36 @@ def test_values_that_are_no_local_paths_stay_as_they_are(tmp_path, monkeypatch):
     assert _kwargs(data, 2)["dataset_dir"] == "anything"  # a service that does not import: its own error later
     assert _kwargs(data, 3)["dataset_dir"] == os.path.expanduser("~/datasets/ds")
     assert data["environments"][3]["harness"] == "platoon-bash"
+    assert _kwargs(data, 4)["registry"] == registry_url
+    assert _kwargs(data, 5)["registry"] == str(configs / "registry.json")  # a legacy registry file, like any input
+
+
+def test_an_adapters_local_repository_is_relative_to_the_config_file(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    (configs / "adapters" / "repo").mkdir(parents=True)
+    repos = ["adapters/repo", "https://example.com/org/repo.git", "git@example.com:org/repo.git", "~/repo"]
+    config = _write(
+        configs / "env.yaml",
+        {
+            "environments": [
+                {"service": "harbor", "service_kwargs": {"adapter": {"repo": repo, "commit": COMMIT}}} for repo in repos
+            ]
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    data = resolve_config(config).data
+
+    assert _kwargs(data, 0)["adapter"] == {"repo": str(configs / "adapters" / "repo"), "commit": COMMIT}
+    assert _kwargs(data, 1)["adapter"]["repo"] == "https://example.com/org/repo.git"
+    assert _kwargs(data, 2)["adapter"]["repo"] == "git@example.com:org/repo.git"  # git's address, no path
+    assert _kwargs(data, 3)["adapter"]["repo"] == os.path.expanduser("~/repo")
+    missing = _write(
+        configs / "missing.yaml",
+        {"environments": [{"service": "harbor", "service_kwargs": {"adapter": {"repo": "nowhere", "commit": COMMIT}}}]},
+    )
+    with pytest.raises(ConfigError, match=r"environments\.0\.service_kwargs\.adapter\.repo: nowhere names"):
+        resolve_config(missing)
 
 
 def test_harness_spec_paths_resolve_in_a_reference_and_in_a_weighted_mapping(tmp_path, monkeypatch):
@@ -315,6 +349,8 @@ def test_services_declare_their_path_options():
     harbor = service_path_options("harbor")
     assert set(harbor) == {
         "dataset",
+        "registry",
+        "adapter.repo",
         "dataset_dir",
         "task_dirs",
         "splits",
