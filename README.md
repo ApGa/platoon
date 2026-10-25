@@ -361,7 +361,8 @@ their modules are imported, and harnesses, programs and environment services are
 
 Platoon is released under the MIT License; see [`LICENSE`](LICENSE). Its tool-call parsers follow SGLang's, which
 are licensed under the Apache License 2.0; see their
-[`NOTICE`](platoon/train/tinker/renderers/tool_parsers/NOTICE).
+[`NOTICE`](platoon/train/tinker/renderers/tool_parsers/NOTICE). Some test fixtures are copies of Harbor's files,
+which are licensed under the Apache License 2.0 too; see their [`NOTICE`](tests/envs/fixtures/harbor-compose/NOTICE).
 
 ## Citation
 

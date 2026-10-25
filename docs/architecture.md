@@ -349,9 +349,11 @@ sits deeper; a fetched dataset's ids come from its lock (`platoon harbor fetch`)
 error, even when one of them is refused. Each session gets its own sandbox. A missing or malformed reward file
 is an `error`, a verifier timeout is `invalid`, and a `reward.json` may declare itself `invalid`. A Harbor session
 also offers generic `bash`, `view`, `write` and `edit` tools on its sandbox, for harnesses that do not act
-natively. Tasks that need several containers (`environment/docker-compose.yaml` with sidecar services) are refused
-rather than run without their services; [RFC 0010](rfcs/0010-harbor-registry-and-multi-container-tasks.md) proposes
-support for them.
+natively. A task's compose file (`environment/docker-compose.yaml`) is read into a stack plan
+(`platoon/envs/harbor/compose.py`): one that names only `main` gives the task's sandbox its environment, binds,
+resources and command, an init the kill before grading spares; tasks that need several containers (sidecar
+services) are refused rather than run without their services, and
+[RFC 0010](rfcs/0010-harbor-registry-and-multi-container-tasks.md) proposes support for them.
 
 **Grading** (`HarborSession.grade`, `platoon/envs/harbor/session.py`) takes the sandbox the tests run in away from
 the agents. It runs alone on the session's gate, after the calls in flight, and kills every process the agents left

@@ -343,7 +343,10 @@ def test_local_directories_keep_directory_ids_and_refuse_what_cannot_run(tmp_pat
     _task(
         root / "stack",
         dockerfile=MCO_DOCKERFILE,
-        files={"environment/instance.json": "{}", "environment/docker-compose.yaml": "services:\n  db: {}\n"},
+        files={
+            "environment/instance.json": "{}",
+            "environment/docker-compose.yaml": "services:\n  db: {image: postgres:16}\n",
+        },
     )
     _task(
         root / "trivial",
@@ -427,7 +430,7 @@ def test_copy_overlays_and_their_digest(tmp_path: Path):
     assert (entry / "tests" / "test.sh").read_text().endswith("patched again\n")
     assert os.access(entry / "tests" / "test.sh", os.X_OK)
     assert (root / "alpha" / "tests" / "test.sh").read_text().startswith("#!/bin/bash\necho 1")  # source untouched
-    with pytest.raises(FetchError, match="no \\[\\[edit\\]\\] or \\[\\[copy\\]\\]"):
+    with pytest.raises(FetchError, match=r"no \[\[edit\]\], \[\[copy\]\], \[\[compose\]\] or compose_host_env"):
         (directory / "overlay.toml").write_text("description = 'empty'\n")
         Overlay.load(directory)
 
@@ -586,7 +589,7 @@ def test_sidecar_stacks_stay_refused_when_the_policy_lets_them_through(tmp_path:
     _task(
         root / "with-db",
         dockerfile=MCO_DOCKERFILE,
-        files={**INSTANCE, "environment/docker-compose.yaml": "services:\n  db: {}\n"},
+        files={**INSTANCE, "environment/docker-compose.yaml": "services:\n  db: {image: postgres:16}\n"},
     )
     by_policy = fetch(fetch_config(str(root), cache=tmp_path / "cache", lock=tmp_path / "a.json"))
     assert by_policy.get("with-db").refused.startswith("stack: ")

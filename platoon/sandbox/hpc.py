@@ -42,7 +42,7 @@ import asyncio
 import importlib
 import logging
 import shutil
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -75,7 +75,8 @@ class HpcSandbox:
     ``sinit``, the instance's keep-alive startscript and its ``sleep``; enroot's keep-alive loop as the namespace's
     init and its ``sleep``.  The adapter lists them when the sandbox starts, before its routes' forwarders, and
     :meth:`kill_processes` kills every other process from inside the sandbox (:mod:`platoon.sandbox._processes`),
-    or refuses to in a sandbox that shares platoon's PID namespace.
+    but those :meth:`keep_processes` keeps and their descendants, or refuses to in a sandbox that shares platoon's PID
+    namespace.
     """
 
     def __init__(self, provider: HpcProvider, inner: Any, *, routes: SandboxRoutes | None = None) -> None:
@@ -86,6 +87,7 @@ class HpcSandbox:
         self._routes = routes
         self._token: int | None = None
         self._own_processes: frozenset[str] | None = None
+        self._kept: frozenset[str] = frozenset()  # what kill_processes spares too, with descendants (keep_processes)
 
     @property
     def routes(self) -> dict[str, str]:
@@ -127,8 +129,14 @@ class HpcSandbox:
             dropped_total=report.dropped_total,
         )
 
+    def keep_processes(self, entries: Iterable[str]) -> None:
+        """Spare the processes ``entries`` ("<pid>:<start time>" in the sandbox) and their descendants from
+        :meth:`kill_processes`."""
+
+        self._kept = self._kept | frozenset(entries)
+
     async def kill_processes(self) -> None:
-        await kill_other_processes(self, self._own_processes)
+        await kill_other_processes(self, self._own_processes, self._kept)
 
     async def snapshot(self) -> SandboxSnapshot:
         snapshot = await self._inner.snapshot()

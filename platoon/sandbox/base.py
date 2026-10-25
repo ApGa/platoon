@@ -23,7 +23,10 @@ given ones, also those a process that died without stopping them left behind (:m
 
 ``kill_processes`` ends what commands left running without stopping the sandbox, so that nothing they started runs
 alongside a verifier.  Every built-in provider has it; a sandbox of a provider written before it existed may lack it,
-and callers check.
+and callers check.  ``keep_processes(entries)``, optional too, spares processes from it, each with its descendants:
+those a session started for the task before any agent ran ("<pid>:<start time>", as ``/proc`` in the sandbox lists
+them), such as a main-only compose file's command, the task's init.  The Harbor service refuses such a task on a
+sandbox without it.
 
 **A working directory that cannot be entered.**  A command whose working directory (``cwd``, else the spec's
 ``workdir``) is gone, is not a directory or cannot be entered never starts, and fails like a command: the docker and

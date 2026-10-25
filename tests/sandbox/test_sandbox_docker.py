@@ -152,7 +152,11 @@ async def test_sandbox_lifecycle_drives_the_cli(fake_docker: Path, tmp_path: Pat
     await sandbox.kill_processes()
     (kill,) = _calls(fake_docker)
     assert kill[:6] == ["exec", "--workdir", "/", container, "/bin/sh", "-c"]
-    assert kill[7:] == ["platoon-kill", "100", "0.05", "1:1000", "7:1003"]  # all but these die
+    assert kill[7:] == ["platoon-kill", "100", "0.05", "", "1:1000", "7:1003"]  # all but these die
+    sandbox.keep_processes(["9:900", "20:2000"])  # a task's init, and what it started: they live on, with descendants
+    await sandbox.kill_processes()
+    (kill,) = _calls(fake_docker)
+    assert kill[7:] == ["platoon-kill", "100", "0.05", "20:2000 9:900", "1:1000", "7:1003"]
     monkeypatch.setenv("FAKE_DOCKER_KILL_FAILS", "1")
     with pytest.raises(RuntimeError, match="still alive after SIGKILL: 12"):
         await sandbox.kill_processes()

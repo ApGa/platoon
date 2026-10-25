@@ -18,7 +18,9 @@ records its labels, its owner and its commands' process groups, so
 Every command runs in a process group of its own, which the sandbox kills when
 it stops or :meth:`ProcessSandbox.kill_processes` is called; a process that
 left its group (``setsid``) is found by the ``PLATOON_SANDBOX_ROOT`` in its
-environment, and one that also dropped that variable escapes both.
+environment, and one that also dropped that variable escapes both.  The
+processes :meth:`ProcessSandbox.keep_processes` keeps (a task's init) are
+spared with their descendants and their groups, until the sandbox stops.
 """
 
 from __future__ import annotations
@@ -96,12 +98,13 @@ def _is_within(path: str, directory: str) -> bool:
     return path == directory or path.startswith(directory + "/")
 
 
-def _kill_marked(entry: bytes) -> list[int]:
-    """SIGKILL every process of this user whose environment holds ``entry`` (``NAME=value``), looking again until
-    none is left; the ones still there after the last look."""
+def _kill_marked(entry: bytes, spare: frozenset[str] = frozenset()) -> list[int]:
+    """SIGKILL every process of this user whose environment holds ``entry`` (``NAME=value``), but the ``spare`` ones
+    ("<pid>:<start time>") and their descendants, looking again until none is left; the ones still there after the
+    last look."""
 
     for _ in range(_KILL_PASSES):
-        marked = _marked(entry)
+        marked = _marked(entry, spare)
         if not marked:
             return []
         for pid in marked:
@@ -110,11 +113,12 @@ def _kill_marked(entry: bytes) -> list[int]:
             except OSError:
                 pass
         time.sleep(_KILL_PAUSE_S)
-    return _marked(entry)
+    return _marked(entry, spare)
 
 
-def _marked(entry: bytes) -> list[int]:
-    """The processes of this user but this one whose environment holds ``entry`` (a dead one's reads as empty)."""
+def _marked(entry: bytes, spare: frozenset[str] = frozenset()) -> list[int]:
+    """The processes of this user but this one whose environment holds ``entry`` (a dead one's reads as empty), but
+    the ``spare`` ones and their descendants."""
 
     pids = []
     for name in os.listdir("/proc"):
@@ -126,7 +130,32 @@ def _marked(entry: bytes) -> list[int]:
                     pids.append(int(name))
         except OSError:  # gone, or another user's
             continue
-    return pids
+    return [pid for pid in pids if not (spare and _descends(pid, spare))]
+
+
+def _descends(pid: int, roots: frozenset[str]) -> bool:
+    """Whether the process ``pid``, or one of its ancestors, is one of ``roots`` ("<pid>:<start time>")."""
+
+    while pid > 1:
+        stat = _stat(pid)
+        if stat is None:
+            return False
+        parent, start = stat
+        if f"{pid}:{start}" in roots:
+            return True
+        pid = parent
+    return False
+
+
+def _stat(pid: int) -> tuple[int, int] | None:
+    """The parent pid and start time of process ``pid``, None when it is gone."""
+
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            fields = handle.read().rsplit(b") ", 1)[1].split()
+        return int(fields[1]), int(fields[19])
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 def _root_marker(root: Path) -> bytes:
@@ -153,6 +182,8 @@ class ProcessSandbox:
         self._base_dir = base_dir
         self._paths = PathMap(self.root, (*DEFAULT_MAPPED_ROOTS, spec.workdir, *(m.target for m in spec.mounts)))
         self._process_groups: set[int] = set()
+        self._kept: frozenset[str] = frozenset()  # processes kill_processes spares, with their descendants
+        self._kept_groups: set[int] = set()  # their process groups, which only stop kills
         self._stopped = False
         self._routes: SandboxRoutes | None = None
         self._token: int | None = None
@@ -245,14 +276,31 @@ class ProcessSandbox:
         self._check_running()
         await asyncio.to_thread(_copy, self.host_path(src), Path(dst))
 
+    def keep_processes(self, entries: Iterable[str]) -> None:
+        """Spare the processes ``entries`` ("<pid>:<start time>", host pids) and their descendants from
+        :meth:`kill_processes`, and their process groups too, until the sandbox stops."""
+
+        self._check_running()
+        entries = tuple(entries)
+        self._kept = self._kept | frozenset(entries)
+        for entry in entries:
+            try:
+                group = os.getpgid(int(entry.split(":", 1)[0]))
+            except (OSError, ValueError):
+                continue
+            if group in self._process_groups:
+                self._process_groups.discard(group)
+                self._kept_groups.add(group)
+
     async def kill_processes(self) -> None:
         """SIGKILL the process group of every command, and every process left of them that carries this sandbox's
-        ``PLATOON_SANDBOX_ROOT`` (one that moved to a group of its own); the sandbox's files stay.  Raises
-        RuntimeError when such a process is still there after the last look."""
+        ``PLATOON_SANDBOX_ROOT`` (one that moved to a group of its own), but the kept processes
+        (:meth:`keep_processes`); the sandbox's files stay.  Raises RuntimeError when such a process is still there
+        after the last look."""
 
         self._check_running()
         self._kill_groups()
-        if left := await asyncio.to_thread(_kill_marked, _root_marker(self.root)):
+        if left := await asyncio.to_thread(_kill_marked, _root_marker(self.root), self._kept):
             pids = " ".join(map(str, left))
             raise RuntimeError(
                 f"Could not kill the processes left in sandbox {self.id}: still alive after SIGKILL: {pids}"
@@ -269,13 +317,16 @@ class ProcessSandbox:
         if self._stopped:
             return
         self._stopped = True
-        self._kill_groups()
+        self._kill_groups(kept=True)
         await asyncio.to_thread(self._remove)  # one thread: it finishes even when the caller stops waiting
         cleanup.unregister(self._token)
 
-    def _kill_groups(self) -> None:
+    def _kill_groups(self, *, kept: bool = False) -> None:
         groups = list(self._process_groups)
         self._process_groups.clear()
+        if kept:
+            groups += self._kept_groups
+            self._kept_groups.clear()
         for pgid in groups:
             kill_process_group(pgid)
 

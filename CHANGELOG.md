@@ -4,6 +4,44 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
+## 0.5.0 (unreleased)
+
+### New features
+
+- **Harbor compose files are planned when a dataset is fetched, and those that name only `main` run.** A task's
+  `environment/docker-compose.yaml` is read as Harbor layers it, with compose's interpolation and Harbor's variables in
+  platoon's meaning (`CONTEXT_DIR`, the log directories' `HOST_*_PATH`, `CPUS`, `MEMORY`), into a stack plan that the
+  lock records with each task (`compose`, under the lock's `compose_rule`), and its kind in `flags.stack`: `single`,
+  `trivial`, the new `main_only`, or `sidecars`. A file that names only `main` and gives it settings runs as the task's
+  one sandbox on every provider: its environment, working directory, resources and binds (the task's own files,
+  read-only from the cache, a writable bind as a copy; volumes below a bind keep what they mask out of the sandbox), its
+  healthcheck, and its command, started as `main`'s init, which the kill before grading spares with what it started;
+  an init that is gone by grading makes the attempt an `error` (`main_exited`), and a `copy` fork of such a task is
+  refused. A file outside the subset platoon runs, security-relevant keys such as `privileged` or a `cap_add` of
+  `NET_ADMIN` included, is refused at fetch, naming the service and key (`compose: <service>.<key>: ...`). A dataset's
+  overlay may edit compose services (`[[compose]]`: set, replace or unset their keys, or mark one external) and list
+  the host variables a compose file may name (`compose_host_env`), which sessions resolve when they open, so that no
+  host value enters a lock; a read-only bind may name the path a listed variable names, and no other host path.
+  Stacks with services besides `main` stay refused until platoon runs them (RFC 0010)
+  ([Compose files](docs/how-to/sandboxes-and-harbor.md#compose-files)).
+- **Sandboxes can keep a task's processes through `kill_processes`.** `Sandbox.keep_processes(entries)`, optional, spares
+  processes a session started for the task before any agent ran, with their descendants; the built-in providers have
+  it ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
+
+### Changes
+
+- Harbor reads only `environment/docker-compose.yaml`, and so does platoon now: a task whose compose file is named
+  `compose.yaml`, `compose.yml` or `docker-compose.yml` runs as one container without it, as in Harbor, where platoon
+  refused it (or ran it, when it only named `main`), and the fetch warns of it (`flags.unread_compose`); a task with a
+  prebuilt image, no Dockerfile and such a file gets its `environment/` uploaded, as Harbor does.
+- A lock records each task's stack plan. A dataset pinned to a commit whose lock platoon 0.4.0 wrote keeps answering
+  its config, with its main-only tasks refused as 0.4.0 refused them (`stack`): fetch it again to run them
+  (`platoon harbor fetch CONFIG --repair`). A lock whose plans follow another compose rule (`compose_rule`) is not
+  read: fetch the dataset again.
+- Image map entries record an image's `HEALTHCHECK`, `EXPOSE` ports, `VOLUME`s and `STOPSIGNAL` too, and a
+  Dockerfile's build plan what its deferred suffix sets in the image's configuration (`config`: `CMD`, `ENTRYPOINT`,
+  `HEALTHCHECK`, ...), which a main-only task's init and healthcheck use. The build keys of task images do not change.
+
 ## 0.4.0 (2026-10-25)
 
 ### New features

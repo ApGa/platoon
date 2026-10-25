@@ -62,6 +62,22 @@ Moving references (a branch, no revision) resolve only with ``update=True`` (``p
 
 An overlay changes the cached task, so its digest is the overlaid content's; the lock keeps the upstream digest
 as ``upstream_digest`` and the overlays' own hash as ``overlay``.
+
+**Compose files.** A task's ``environment/docker-compose.yaml`` is planned at fetch
+(:mod:`platoon.envs.harbor.compose`): the lock records its kind (``flags.stack``: ``single``, ``trivial``, ``main_only``
+or ``sidecars``) and its stack plan (``compose``), and refuses a file outside the subset platoon runs (``compose``,
+naming the service and key).  Compose's other names (``compose.yaml``, ...) are plain files of the task, as in Harbor:
+the fetch warns of them (``flags.unread_compose``).  An overlay may edit a task's compose services, and list the host
+variables its file may name, which a session resolves when it opens (they never enter the lock)::
+
+    compose_host_env = ["SCICODE_TEST_DATA"]  # ${SCICODE_TEST_DATA} in the compose file names this host variable
+    [[compose]]
+    service = "main"
+    unset = ["cap_add"]                    # keys to remove (dotted for nested ones: "deploy.resources.reservations")
+    set = {environment = {MODE = "eval"}}  # merged into the service's mappings; other values replace
+    [[compose]]
+    service = "judge"
+    replace = {command = ["judge", "--port", "8081"]}  # keys set whole
 """
 
 from __future__ import annotations
@@ -91,6 +107,19 @@ from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from platoon.envs.harbor.compose import (
+    COMPOSE_FILE,
+    COMPOSE_RULE,
+    ComposeEdit,
+    ComposeEditError,
+    ComposeError,
+    ComposePlan,
+    compose_path,
+    plan_compose,
+    read_document,
+    stack_kind,
+    unread_compose_files,
+)
 from platoon.envs.harbor.dataset import dataset_tasks
 from platoon.envs.harbor.dockerfile import BUILD_KEY_RULE, DockerfileError, plan_dockerfile
 from platoon.envs.harbor.hashing import (
@@ -105,14 +134,13 @@ from platoon.envs.harbor.hashing import (
 )
 from platoon.envs.harbor.inputs import input_digest, input_files
 from platoon.envs.harbor.lock import TASKS_DIR, DatasetLock, LockedTask, LockError, default_cache, read_lock, write_lock
-from platoon.envs.harbor.task import HarborTask, compose_file, is_trivial_compose
+from platoon.envs.harbor.task import HarborTask, HarborTaskError, _environment_settings
 
 logger = logging.getLogger(__name__)
 
 REGISTRY = "registry.json"
 TASK_INDEX = "task-index.json"
 OVERLAY_FILE = "overlay.toml"
-COMPOSE_FILENAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
 MODES_RULE = "executable bit restored on *.sh files and files starting with #!"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _HF = re.compile(
@@ -428,6 +456,7 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
         tasks=tuple(sorted(tasks, key=lambda task: task.name)),
         hash_rule=HASH_RULE,
         build_key_rule=BUILD_KEY_RULE,
+        compose_rule=COMPOSE_RULE,
         overlay=_overlays_digest(overlays),
         inputs=config.inputs_digest(),
         selection={
@@ -440,6 +469,18 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
     write_lock(lock, config.lock_path())
+    unread = [task for task in lock.tasks if task.flags.get("unread_compose")]
+    if unread:
+        names = sorted({name for task in unread for name in task.flags["unread_compose"]})
+        logger.warning(
+            "%d Harbor task(s) of %s hold %s, which Harbor does not read (it reads only environment/%s), such as %s: "
+            "platoon treats them as plain files of the task and runs each task without them, as Harbor does",
+            len(unread),
+            config.dataset,
+            " or ".join(names),
+            COMPOSE_FILE,
+            unread[0].name,
+        )
     refused = Counter(task.refused.split(":")[0] for task in lock.tasks if task.refused)
     say(
         f"Locked {len(lock.tasks)} tasks ({len(lock.runnable())} runnable"
@@ -987,10 +1028,14 @@ def _cache_task(
         upstream = hashes.content_hash(staging)
         applied: list[str] = []
         refused: str | None = None
+        edits: list[ComposeEdit] = []
+        host_env: list[str] = []
         for overlay in overlays:
             if overlay.matches(candidate.name, candidate.index):
                 problem = overlay.apply(staging)
                 applied.append(overlay.name)
+                edits += overlay.compose
+                host_env += overlay.compose_host_env
                 if problem is not None:
                     refused = f"overlay: {problem}"
                     break
@@ -998,8 +1043,10 @@ def _cache_task(
             hashes.forget_moved()  # the files the overlays replaced
         digest = hashes.content_hash(staging) if applied else upstream
         index = _with_metadata(candidate, staging, config.metadata_fields)
-        files_in = input_files(staging, digest=hashes.input_digest)  # binary files hashed already, for the digest
-        flags, image, verifier_image, problem = _inspect(staging, candidate.name, config.refuse)
+        inspected = _inspect(staging, candidate.name, config.refuse, edits=edits, host_env=host_env)
+        flags, image, verifier_image, problem, compose = inspected
+        # Binary files are hashed already, for the digest; the files main's compose binds are inputs too.
+        files_in = input_files(staging, digest=hashes.input_digest, compose=compose)
         refused = refused or problem
         entry = config.cache / TASKS_DIR / digest
         with _flock(config.cache / ".locks" / "tasks.lock"):
@@ -1024,6 +1071,7 @@ def _cache_task(
         overlays=tuple(applied),
         refused=refused,
         input_files=files_in,
+        compose=compose.to_json() if compose is not None else None,
     )
 
 
@@ -1089,22 +1137,29 @@ def _install(staging: Path, entry: Path) -> None:
 
 
 def _inspect(
-    task_dir: Path, name: str, refuse: RefusePolicy
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str | None]:
-    """A task's flags, build plans and refusal, from its ``task.toml`` and files in ``task_dir``, a temporary
-    directory that messages never name (they name ``name``, the task's id, and paths relative to the task).
+    task_dir: Path,
+    name: str,
+    refuse: RefusePolicy,
+    *,
+    edits: Sequence[ComposeEdit] = (),
+    host_env: Sequence[str] = (),
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str | None, ComposePlan | None]:
+    """A task's flags, build plans, refusal and stack plan, from its ``task.toml`` and files in ``task_dir``, a
+    temporary directory that messages never name (they name ``name``, the task's id, and paths relative to the task).
+    ``edits`` and ``host_env`` are what the overlays that match the task give its compose file.
 
-    The refusal is the first of: what ``refuse`` refuses (``stack``, ``gpus``, ``agent_user``); anything that keeps
-    :meth:`HarborTask.load` from loading the task (``task_config``), which every rollout of it would fail on; a
-    Dockerfile that cannot be planned (``image``); and uploads over ``refuse.uploads_over_mb``
-    (``uploads_over_mb``).  ``flags["upload_bytes"]`` records what a session copies into one of the task's
-    sandboxes (:func:`_upload_bytes`).
+    The refusal is the first of: a compose file outside the subset platoon runs (``compose``); what ``refuse``
+    refuses (``stack``, ``gpus``, ``agent_user``); anything that keeps :meth:`HarborTask.load` from loading the task
+    (``task_config``), which every rollout of it would fail on; a Dockerfile that cannot be planned (``image``); and
+    uploads over ``refuse.uploads_over_mb`` (``uploads_over_mb``).  ``flags["upload_bytes"]`` records what a session
+    copies into one of the task's sandboxes (:func:`_upload_bytes`).
     """
 
     try:
         config = tomllib.loads((task_dir / "task.toml").read_text())
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        return {}, {"kind": "none"}, None, f"task_config: task.toml: {_without_paths(str(exc), task_dir, name)}"
+        problem = f"task_config: task.toml: {_without_paths(str(exc), task_dir, name)}"
+        return {}, {"kind": "none"}, None, problem, None
     environment = _table(config, "environment")
     verifier = _table(config, "verifier")
     agent = _table(config, "agent")
@@ -1114,10 +1169,11 @@ def _inspect(
     )
     artifacts = config.get("artifacts") or []
     gpus = environment.get("gpus")
+    compose, compose_problem = _plan_compose(task_dir, name, environment, edits, host_env)
     flags: dict[str, Any] = {
         "verifier": "separate" if verifier.get("environment_mode") == "separate" or verifier_environment else "shared",
         "artifacts": len(artifacts) if isinstance(artifacts, list) else 0,
-        "stack": _stack_kind(task_dir),
+        "stack": compose.kind if compose is not None else _stack_kind(task_dir),
         "network": network,
         "gpus": gpus if isinstance(gpus, int) and not isinstance(gpus, bool) else 0,  # the loader refuses the others
         "agent_user": agent.get("user"),
@@ -1126,6 +1182,8 @@ def _inspect(
     }
     if verifier_environment is not None and verifier_environment.get("network_mode"):
         flags["verifier_network"] = verifier_environment["network_mode"]
+    if unread := unread_compose_files(task_dir):
+        flags["unread_compose"] = unread
     image = _image_plan(task_dir, environment, "environment")
     verifier_image = None
     if flags["verifier"] == "separate":
@@ -1140,7 +1198,9 @@ def _inspect(
     flags["upload_bytes"] = _upload_bytes(task_dir, image, verifier_image, separate=flags["verifier"] == "separate")
     suffix_users = [plan["suffix_user"] for plan in plans if plan.get("suffix_user")]
     errors = [plan["error"] for plan in plans if plan.get("error")]
-    if flags["stack"] == "sidecars" and refuse.sidecars:
+    if compose_problem is not None:
+        problem = compose_problem
+    elif flags["stack"] == "sidecars" and refuse.sidecars:
         problem = "stack: the compose file adds sidecar services, which platoon cannot run yet"
     elif flags["gpus"] > 0 and refuse.gpus:
         problem = f"gpus: the task asks for {flags['gpus']} GPU(s)"
@@ -1150,14 +1210,47 @@ def _inspect(
         user = suffix_users[0]
         problem = f"agent_user: the Dockerfile ends with USER {user}, which rootless sandboxes cannot honor"
     else:
-        problem = _load_problem(task_dir, name) or (f"image: {errors[0]}" if errors else None)
+        problem = _load_problem(task_dir, name, compose) or (f"image: {errors[0]}" if errors else None)
     limit = refuse.uploads_over_mb
     if problem is None and limit is not None and flags["upload_bytes"] > limit * MIB:
         problem = (
             f"uploads_over_mb: a session uploads {flags['upload_bytes'] / MIB:,.1f} MiB into one of the task's "
             f"sandboxes, over the limit of {limit:g} MiB"
         )
-    return flags, image, verifier_image, problem
+    return flags, image, verifier_image, problem, compose
+
+
+def _plan_compose(
+    task_dir: Path, name: str, environment: Mapping[str, Any], edits: Sequence[ComposeEdit], host_env: Sequence[str]
+) -> tuple[ComposePlan | None, str | None]:
+    """The task's stack plan (None without a compose file), and the refusal of a file outside the subset
+    (``compose: <service>.<key>: why``) or that an overlay edits wrongly (``overlay: ...``)."""
+
+    if compose_path(task_dir) is None:
+        if edits:
+            return None, f"overlay: {edits[0].overlay}: edits compose services, and the task has no {COMPOSE_FILE}"
+        return None, None
+    settings: dict[str, Any] = {}
+    try:
+        settings = _environment_settings(dict(environment), "[environment]")
+    except HarborTaskError:  # the task is refused for it (task_config): plan without its settings
+        pass
+    image = environment.get("docker_image")
+    try:
+        plan = plan_compose(
+            task_dir,
+            docker_image=image if isinstance(image, str) and image else None,
+            env=settings.get("env") or {},
+            cpus=settings.get("cpus"),
+            memory_mb=settings.get("memory_mb"),
+            edits=edits,
+            host_env=host_env,
+        )
+    except ComposeEditError as exc:
+        return None, f"overlay: {_without_paths(str(exc), task_dir, name)}"
+    except ComposeError as exc:
+        return None, f"compose: {_without_paths(str(exc), task_dir, name)}"
+    return plan, None
 
 
 def _upload_bytes(
@@ -1217,14 +1310,15 @@ def _tree_bytes(path: Path) -> int:
     return total
 
 
-def _load_problem(task_dir: Path, name: str) -> str | None:
-    """Why :meth:`HarborTask.load` refuses the task, as a refusal (``task_config: ...``), or None when it loads.
+def _load_problem(task_dir: Path, name: str, compose: ComposePlan | None = None) -> str | None:
+    """Why :meth:`HarborTask.load` refuses the task, as a refusal (``task_config: ...``), or None when it loads, with
+    its stack plan ``compose`` as the lock records it.
 
     Users to run as are let through (``agent_user="ignore"``): the refuse policy decides about them.
     """
 
     try:
-        HarborTask.load(task_dir, agent_user="ignore")
+        HarborTask.load(task_dir, agent_user="ignore", compose=compose)
     except (OSError, ValueError) as exc:  # HarborTaskError, and files that cannot be read or decoded
         return f"task_config: {_without_paths(str(exc), task_dir, name)}"
     return None
@@ -1244,7 +1338,7 @@ def _image_plan(task_dir: Path, environment: Mapping[str, Any], context: str) ->
     if docker_image:
         plan: dict[str, Any] = {"kind": "prebuilt", "ref": docker_image}
         directory = task_dir / context
-        compose = any((directory / name).is_file() for name in COMPOSE_FILENAMES)
+        compose = (directory / COMPOSE_FILE).is_file()  # the one compose file Harbor reads
         if not dockerfile.is_file() and not compose and directory.is_dir() and any(directory.iterdir()):
             plan["upload_environment"] = True  # Harbor uploads environment/ into the workdir of prebuilt tasks
         return plan
@@ -1289,13 +1383,16 @@ def _with_kind(plan: Mapping[str, Any], counts: Counter[str]) -> dict[str, Any]:
 
 
 def _stack_kind(task_dir: Path) -> str:
-    """``single`` (no compose file), ``trivial`` (one that only names ``main``) or ``sidecars``, as the loader
-    decides it."""
+    """``single`` (no compose file), else the kind its services make as written (``trivial``, ``main_only``,
+    ``sidecars``): for a task whose compose file has no plan, since it is refused."""
 
-    compose = compose_file(task_dir)
-    if compose is None:
+    path = compose_path(task_dir)
+    if path is None:
         return "single"
-    return "trivial" if is_trivial_compose(compose) else "sidecars"
+    try:
+        return stack_kind(read_document(path))
+    except ComposeError:
+        return "sidecars"
 
 
 def _restore_executable(path: Path) -> None:
@@ -1339,6 +1436,8 @@ class Overlay:
     edits: tuple[Mapping[str, Any], ...]
     copies: tuple[Mapping[str, Any], ...]
     digest: str
+    compose: tuple[ComposeEdit, ...] = ()  # edits of compose services ([[compose]])
+    compose_host_env: tuple[str, ...] = ()  # host variables the compose file may name
 
     @classmethod
     def load(cls, root: str | Path) -> Overlay:
@@ -1349,9 +1448,21 @@ class Overlay:
             data = tomllib.loads(raw.decode())
         except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
             raise FetchError(f"overlay {root}: cannot read {OVERLAY_FILE}: {exc}") from exc
-        unknown = sorted(set(data) - {"name", "description", "match", "edit", "copy"})
+        unknown = sorted(set(data) - {"name", "description", "match", "edit", "copy", "compose", "compose_host_env"})
         if unknown:
             raise FetchError(f"overlay {path}: unknown keys {unknown}")
+        name = str(data.get("name") or root.name)
+        if not isinstance(data.get("compose", []), list):
+            raise FetchError(f"overlay {path}: [[compose]] must be an array of tables")
+        try:
+            compose = tuple(ComposeEdit.parse(name, entry) for entry in data.get("compose") or ())
+        except ValueError as exc:
+            raise FetchError(f"overlay {path}: {exc}") from exc
+        host_env = data.get("compose_host_env") or []
+        if not isinstance(host_env, list) or not all(
+            isinstance(variable, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) for variable in host_env
+        ):
+            raise FetchError(f"overlay {path}: compose_host_env must list variable names, got {host_env!r}")
         match = {
             str(key): tuple(str(v) for v in (value if isinstance(value, list) else [value]))
             for key, value in (data.get("match") or {}).items()
@@ -1373,15 +1484,17 @@ class Overlay:
             if not source.is_file():
                 raise FetchError(f"overlay {path}: {source} does not exist")
             digest.update(f"\0{copy['source']}\0{file_sha256(source)}".encode())
-        if not edits and not copies:
-            raise FetchError(f"overlay {path} has no [[edit]] or [[copy]]")
+        if not edits and not copies and not compose and not host_env:
+            raise FetchError(f"overlay {path} has no [[edit]], [[copy]], [[compose]] or compose_host_env")
         return cls(
-            name=str(data.get("name") or root.name),
+            name=name,
             root=root,
             match=match,
             edits=edits,
             copies=copies,
             digest=digest.hexdigest(),
+            compose=compose,
+            compose_host_env=tuple(host_env),
         )
 
     def matches(self, name: str, index: Mapping[str, Any]) -> bool:

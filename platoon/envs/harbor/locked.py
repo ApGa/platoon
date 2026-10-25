@@ -119,6 +119,13 @@ class LockedTasks:
 
         return dict(self.dataset(fetch_allowed=False).row(task_id).index)
 
+    def compose(self, task_id: str) -> dict[str, Any] | None:
+        """The task's stack plan as the lock records it (``LockedTask.compose``, overlays' edits applied), None for a
+        task without a compose file: what its sessions run, never planned again from its files."""
+
+        compose = self.dataset(fetch_allowed=False).row(task_id).compose
+        return dict(compose) if compose else None
+
     def task_misc(self, task_id: str) -> dict[str, Any]:
         """What a task's ``misc["harbor"]`` records about it from the lock: digest, index, image key."""
 

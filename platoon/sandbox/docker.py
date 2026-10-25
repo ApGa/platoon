@@ -7,7 +7,8 @@ cancelled, is killed inside the container with everything that still carries
 its marker (:func:`platoon.sandbox._processes.kill_marked_command`).  Processes that
 drop the marker end when the container is removed, or when ``kill_processes``
 kills every process in the container but the ones that keep it alive, which
-the sandbox lists when it starts (:mod:`platoon.sandbox._processes`).
+the sandbox lists when it starts, and the ones ``keep_processes`` keeps, with
+their descendants (:mod:`platoon.sandbox._processes`).
 Snapshots are committed images, removed when the sandbox they came from stops.
 
 A container without a network (``--network none``) reaches a Unix-socket
@@ -25,7 +26,7 @@ import logging
 import posixpath
 import shutil
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,7 @@ class DockerSandbox:
         self._routes: SandboxRoutes | None = None
         self._token: int | None = None
         self._own_processes: frozenset[str] | None = None  # the container's own, listed when it starts
+        self._kept: frozenset[str] = frozenset()  # what kill_processes spares too, with descendants (keep_processes)
 
     @property
     def routes(self) -> dict[str, str]:
@@ -166,9 +168,15 @@ class DockerSandbox:
             target.parent.mkdir(parents=True, exist_ok=True)
             await self._docker("cp", f"{self.id}:{source}", str(target))
 
+    def keep_processes(self, entries: Iterable[str]) -> None:
+        """Spare the processes ``entries`` ("<pid>:<start time>" in the container) and their descendants from
+        :meth:`kill_processes`."""
+
+        self._kept = self._kept | frozenset(entries)
+
     async def kill_processes(self) -> None:
         self._check_running()
-        await kill_other_processes(self, self._own_processes)
+        await kill_other_processes(self, self._own_processes, self._kept)
 
     async def snapshot(self) -> SandboxSnapshot:
         self._check_running()

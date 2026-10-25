@@ -4,11 +4,16 @@ A task's image takes files from its build context, ``environment/``: its Dockerf
 whether a build of its image bakes a file in (the build prefix) or a session uploads it when it opens (the deferred
 steps, :mod:`platoon.envs.harbor.dockerfile`); a task with a prebuilt image and no Dockerfile gets the directory
 whole, as Harbor uploads it.  Those are its input files: the data its agents work on, the same however the image is
-built (an overlay that moves a ``COPY`` behind a ``RUN`` changes nothing here).  Never inputs:
+built (an overlay that moves a ``COPY`` behind a ``RUN`` changes nothing here).  A main-only compose file's binds of
+the task's own files (``./data:/data:ro``, :mod:`platoon.envs.harbor.compose`) put them in the sandbox too: they are
+inputs, but for what the bind's volumes mask.  Never inputs, bound or not:
 
-- the build's own files at the context's root (``Dockerfile``, ``.dockerignore``, a compose file);
+- the build's own files at the context's root (``Dockerfile``, ``.dockerignore``, the compose file), and the task's
+  own definition (``task.toml``, ``instruction.md``), which a templated dataset's tasks share byte for byte, so that a
+  hold-out would join them all by those;
 - a file of the context that no step takes (a leftover helper script, say), which no sandbox holds;
-- the tests and the solution, which the agents never see, and a separate verifier's own build context;
+- the tests and the solution, which the agents never see (and which join no tasks even where a bind leaves them
+  unmasked), and a separate verifier's own build context;
 - remote content (``ADD <url>``, ``COPY --from``), which is not the task's.
 
 A task whose image cannot be planned, or whose ``task.toml`` cannot be read, has no input files platoon knows of: a
@@ -30,14 +35,20 @@ import re
 import tomllib
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from platoon.envs.harbor.dockerfile import DOCKERFILE, DockerfileError, plan_dockerfile
 from platoon.envs.harbor.hashing import file_sha256, task_files
-from platoon.envs.harbor.task import COMPOSE_FILENAMES, CONFIG_FILENAME
+from platoon.envs.harbor.task import COMPOSE_FILENAMES, CONFIG_FILENAME, INSTRUCTION_FILENAME, TESTS_DIR
+
+if TYPE_CHECKING:
+    from platoon.envs.harbor.compose import ComposePlan
 
 CONTEXT_DIR = "environment"
 BUILD_FILES = frozenset({DOCKERFILE, ".dockerignore", *COMPOSE_FILENAMES})  # at the context's root
+# What a bind of the task never makes an input (besides BUILD_FILES): its definition, its tests and its solution.
+_DEFINITION = frozenset({CONFIG_FILENAME, INSTRUCTION_FILENAME})
+_HIDDEN_DIRS = frozenset({TESTS_DIR, "solution"})
 # The digest of an empty file, which holds no data (and of text that normalizes to nothing): a hold-out joins no
 # groups by it.
 EMPTY_FILE = "sha256:" + hashlib.sha256(b"").hexdigest()
@@ -76,11 +87,14 @@ def copied_paths(task_dir: str | Path) -> tuple[str, ...]:
         return ()
 
 
-def input_files(task_dir: str | Path, *, digest: Callable[[Path], str] | None = None) -> dict[str, str]:
-    """The task's input files (:func:`copied_paths`, less the build's own files), by task-relative path
-    (``environment/input/sales.csv``), each with ``"sha256:<hex>"`` of its digest (:func:`input_digest`), sorted by
-    path.  Only files that Harbor's content hash covers count (:func:`~platoon.envs.harbor.hashing.task_files`), so a
-    lock's task digest vouches for them.
+def input_files(
+    task_dir: str | Path, *, digest: Callable[[Path], str] | None = None, compose: ComposePlan | None = None
+) -> dict[str, str]:
+    """The task's input files (:func:`copied_paths`, and the files ``compose``'s binds of ``main`` take,
+    :func:`bound_paths`, less the build's own files, the task's definition, its tests and its solution), by
+    task-relative path (``environment/input/sales.csv``), each with ``"sha256:<hex>"`` of its digest
+    (:func:`input_digest`), sorted by path.  Only files that Harbor's content hash covers count
+    (:func:`~platoon.envs.harbor.hashing.task_files`), so a lock's task digest vouches for them.
 
     ``digest`` gives a file's digest (default: :func:`input_digest`, remembered for this process by device, inode,
     size, modification time and change time).
@@ -88,17 +102,49 @@ def input_files(task_dir: str | Path, *, digest: Callable[[Path], str] | None = 
 
     root = Path(task_dir)
     copied = copied_paths(root)
-    if not copied:
+    bound = bound_paths(compose)
+    if not copied and not bound:
         return {}
     digest = digest or _remembered_digest
     files: dict[str, str] = {}
     for relative in task_files(root):
         top, _, rest = relative.partition("/")
-        if top != CONTEXT_DIR or not rest or rest in BUILD_FILES:
-            continue
-        if any(path == "." or rest == path or rest.startswith(f"{path}/") for path in copied):
+        built = top == CONTEXT_DIR and rest and rest not in BUILD_FILES
+        if built and any(path == "." or rest == path or rest.startswith(f"{path}/") for path in copied):
             files[relative] = f"sha256:{digest(root / relative)}"
-    return files
+        elif (
+            relative not in _DEFINITION
+            and top not in _HIDDEN_DIRS
+            and not (top == CONTEXT_DIR and rest in BUILD_FILES)
+            and any(
+                _within(relative, source) and not any(_within(relative, mask) for mask in masks)
+                for source, masks in bound
+            )
+        ):
+            files[relative] = f"sha256:{digest(root / relative)}"
+    return dict(sorted(files.items()))
+
+
+def bound_paths(compose: ComposePlan | None) -> list[tuple[str, tuple[str, ...]]]:
+    """The task paths a main-only compose file binds into ``main`` (``.`` for the whole task), each with the paths
+    below it that its volumes mask, relative to the task."""
+
+    main = compose.main() if compose is not None else None
+    if main is None:
+        return []
+    return [
+        (bind.task, tuple(_join(bind.task, mask) for mask in bind.masks))
+        for bind in main.binds
+        if bind.task is not None and not bind.missing
+    ]
+
+
+def _within(relative: str, path: str) -> bool:
+    return path == "." or relative == path or relative.startswith(f"{path}/")
+
+
+def _join(base: str, relative: str) -> str:
+    return relative if base == "." else f"{base}/{relative}"
 
 
 def input_digest(path: Path, *, sha256: Callable[[Path], str] = file_sha256) -> str:

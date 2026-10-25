@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The Harbor service (`platoon/envs/harbor/`), sandboxes (`platoon/sandbox/`), the harness runner (`platoon/harness/runner.py`) and the gateway (`platoon/gateway/server.py`); [Architecture](../architecture.md) (the Harbor backend, sandboxes, the native-tools rule); [RFC 0001](0001-native-multi-agent.md) (per-agent grading, `snapshot_async`), [RFC 0004](0004-sandweave-integration.md) (capabilities and routes), [RFC 0005](0005-gateway-dialects-and-tito.md) (dialects), [RFC 0008](0008-config-and-cli.md) (`platoon eval`), [RFC 0009](0009-gateway-step-budgets.md) (step budgets) |
 | Discussion | The pull request that adds this revision |
-| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources (no `harbor://`, `git+https://`, adapters or `ls`); M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). Not yet: M5–M9, `network_policy`, `stacks`, and trajectories recording the kill mode |
+| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources (no `harbor://`, `git+https://`, adapters or `ls`); M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider; sidecar stacks stay refused. Not yet: M5, the rest of M6 (stacks on Docker, sidecar probes, task MCP servers), M7–M9, `network_policy`, `stacks`, and trajectories recording the kill mode |
 
 ## Summary
 
@@ -443,14 +443,21 @@ class HarnessExitPolicy:  # environments[].on_harness_exit, next to on_context_o
 
 ### 6. Multi-container tasks
 
-The service reads `environment/docker-compose.yaml` the way Harbor layers it (the task's file over a base that
-defines `main`), into a stack spec:
+A fetch reads `environment/docker-compose.yaml`, the only compose file Harbor reads (`compose.yaml` and compose's
+other names are plain files of a Harbor task, which a fetch warns of), the way Harbor layers it: the task's file over
+a base that defines `main`, platoon's own (the task's image, `sh -c "sleep infinity"`), never Harbor's egress
+sidecar, since platoon has network phases of its own.  It records a **stack plan** in the lock (`compose`: each
+service's image or build context with its build key, command, environment, volumes, healthcheck, dependencies,
+ports and networks, and what was ignored, noted and edited), under the rule `compose_rule: harbor-c178c20`, so that a
+change of Harbor's layering is a visible rule bump, and the kind in `flags.stack`: `single`, `trivial`, `main_only`
+or `sidecars` (`platoon/envs/harbor/compose.py`).  Sessions read the plan from the lock; a dataset directory's
+tasks are planned when they load.  Stacks run from it as a stack spec:
 
 ```python
 @dataclass
 class ServiceSpec:
     sandbox: SandboxSpec
-    command: list[str] | None = None  # None: the image's ENTRYPOINT and CMD from the image map; main stays idle
+    command: list[str] | None = None  # the final argv, by compose's rules over the image's ENTRYPOINT and CMD
     entrypoint: list[str] | None = None
     healthcheck: Healthcheck | None = None
     depends_on: dict[str, Literal["started", "healthy"]] = field(default_factory=dict)
@@ -482,16 +489,52 @@ class StackProvider(Protocol):
 ```
 
 **The compose subset:**
-- **Accepted:** `image`, `build` (through the image map), `command`, `entrypoint`, `environment`, `working_dir`,
-  `volumes` (task-relative binds, anonymous and named volumes as per-stack directories, Harbor's `${HOST_*_PATH}`
-  binds), `depends_on`, `healthcheck`, `expose`, `networks`, `shm_size`, `ulimits` and `deploy.resources` limits.
-- **Interpolated:** Harbor's variables, the task's `[environment].env`, and only the host variables an overlay lists.
-- **Refused** unless the provider declares them: `privileged`, `cap_add`, `devices`, `network_mode`, `pid` and
-  published `ports`.
-- A refusal is `env_config` at fetch, never a partial stack.
+- **Accepted:** `image`, `build` (`context` in `environment/`, `dockerfile`, `args`; a service's context is planned
+  whole, with no deferred suffix, so that its key hashes every file it copies), `command` and `entrypoint` (a string
+  is split into words as compose splits it), `environment` and `env_file`, `working_dir`, `volumes` and `tmpfs`,
+  `depends_on` with its three conditions (`service_started`, `service_healthy`, `service_completed_successfully`) and
+  `required`, `healthcheck` (compose's durations, `disable`, `test: NONE`; else the image's `HEALTHCHECK`), `expose`,
+  `ports` (kept as `expose`: nothing is published on the host), `networks` (with aliases), `network_mode:
+  service:<x>`, `hostname`, `shm_size`, `ulimits`, `cpus`, `mem_limit`, `deploy.resources`, `cap_add` of the
+  capabilities a service's root holds over its own processes and files (`SYS_PTRACE`, `SYS_CHROOT`, Docker's
+  defaults but `NET_RAW`), `stop_signal`, and `profiles` (such a service is not started, as Harbor starts none).
+- **Ignored**, since they cannot change what a task measures: `container_name`, `restart`, `init`, `stdin_open`,
+  `tty`, `labels`, `logging`, `stop_grace_period`, `pull_policy`, and `platform` when it is the host's.
+- **Refused**, naming the service and key: every other key, security-relevant ones never ignored (`privileged`,
+  `devices`, `pid`, `ipc`, `security_opt`, `sysctls`, `user`, `cap_drop`, `cap_add` of `NET_ADMIN`, `NET_RAW` or any
+  capability over the stack's network, a `network_mode` other than another service's, GPU requests); binds of host
+  paths, external volumes and networks, static addresses, networks that keep a service from `main`, a mix of
+  internal and other networks (egress is the whole stack's or none), and two services that declare one port (a pod's
+  services share one loopback).
+- **Interpolated:** compose's forms (`${V}`, `${V:-d}`, `${V-d}`, `${V:?e}`, `${V:+r}`, `$$`), an unset variable
+  blank, as compose makes it.  Harbor's variables take platoon's meaning: `CONTEXT_DIR` is the task's `environment/`
+  in the cache, which only binds and build contexts may name; `HOST_{VERIFIER,AGENT}_LOGS_PATH` and
+  `HOST_ARTIFACTS_PATH` are the session's log directories; `MAIN_IMAGE_NAME` is `main`'s image, `CPUS` and `MEMORY`
+  the task's resources.  Then the task's `[environment].env`, and only the host variables an overlay lists
+  (`compose_host_env`): those, and a task variable that is a host template, stay unresolved in the plan, with the
+  form the file gives them (`${V:-d}`, ...), and are resolved when a session opens, so that no host value enters a
+  lock.  Environment values may name both; a read-only bind, only the path a listed host variable names or one below
+  it.  A file holding the private-use characters that mark them in a plan is refused, and so is one whose YAML
+  aliases expand it beyond 100,000 values.  Env files are read as compose reads them (comments, quotes, escapes).
+- **Volumes:** a bind of the task's own files binds the cached task (a writable one a copy of it, so that the
+  content-addressed cache is never written; a missing source an empty directory, as Docker creates one); anonymous
+  and named volumes below a bind mask it, and the bind is of a filtered copy in which they are empty directories, so
+  that the masked files never enter a sandbox; binds of `${HOST_*_PATH}` are the session's log directories.
+- **Edited** by a dataset's overlays (`[[compose]]`: `set`, `replace` and `unset` a service's keys, or mark it
+  `external`, served by a node service), which the plan records.
+- A refusal is recorded at fetch (`compose: <service>.<key>: <why>`, which a run that names the task meets as
+  `env_config`), never a partial stack.
 
-**A trivial compose file** that defines only `main` with no keys (`services: main: {}`) is a single-container task.
-It is accepted from M0 on, because some conversion tools emit one for every task.
+**A trivial compose file** that defines only `main` with nothing platoon applies (`services: main: {}`, or Harbor's
+base restated) is a single-container task.  It is accepted from M0 on, because some conversion tools emit one for
+every task.  **A main-only compose file**, which gives `main` settings and names no other service, runs as the
+task's one sandbox on every provider: its environment, working directory, resources and binds go into the sandbox's
+spec, its healthcheck is waited for, and its `command` (under the image's `ENTRYPOINT` where the image map knows it),
+unless it only idles, is started once as `main`'s **init**.  The kill before grading spares the init and what it
+started, daemons it detached included (`Sandbox.keep_processes`); an init that is gone by grading, which in Docker
+would have ended the container, makes the outcome `Outcome.infra("main_exited")`; a `copy` fork of such a task is
+refused, since a restore brings back files, not processes.  What one sandbox cannot apply yet (`cap_add`,
+`shm_size`, `ulimits`, `tmpfs`, internal-only networks) refuses the task when it loads.
 
 **Providers:**
 
@@ -585,6 +628,8 @@ What changes is the default HPC provider:
 | New `service_kwargs`: `dataset`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy`, `stacks` (`refuse`, `trivial`, `pods`, `host_network`), `agent_user` | additive |
 | New environment-entry key `on_harness_exit`; new rollout-config key `sampling_precedence` (`request`, today's behavior, or `config`, under which policy calls sample with the temperature, top_p and top_k of `inference_params`, never a harness's own) and `inference_params.top_k` | additive; defaults keep today's behavior |
 | Spec keys `[install.recipe]`, `[resources]`, `[budget]`; `[install].toolchain` may be a name | additive |
+| Overlay keys `[[compose]]` and `compose_host_env`; the lock's `compose` and `compose_rule`, and `flags.stack: main_only`; `Sandbox.keep_processes` (optional) | additive |
+| Main-only compose files run; a task with `compose.yaml`, `compose.yml` or `docker-compose.yml` runs as one container, as in Harbor, which reads none of them | behavior change, intended |
 | `EnvironmentService.open` takes `needs`; `Sandbox.routes`, `Sandbox.kill_processes`, `SandboxSpec.upstreams`, `SandboxProvider.reap` | services and providers outside platoon must accept the new keyword and fields (a public protocol change) |
 | Commands `platoon harbor fetch\|verify\|images\|check\|ls`, `platoon toolchain build\|ls` | new |
 | Task ids of fetched datasets come from `registry.json`, else `task-index.json`, else the task's path relative to the dataset, as `dataset_dir` names them; local directories keep directory names unless they ship a `registry.json` | existing configs unchanged |
@@ -667,7 +712,7 @@ Effort is EST, for one implementer plus review.
 | M3 Gateway routes | The gateway's Unix socket; `SessionNeeds`; `upstreams` and `routes` on every built-in provider; the forwarder; route-bound keys; mint and call caps. 2.5 days | CPU tests (process, and docker in CI): a harness in a no-network sandbox finishes an episode through the route; the host's loopback is unreachable from it; a key presented on another rollout's socket is refused || the Harbor fast-path pull request |
 | M4 Grading | Separate verifiers with artifacts; reward contracts; opt-in classifiers; `on_harness_exit`; the task's agent timeout; `Sandbox.kill_processes` before grading. 3.5 days | CPU fixtures: separate-verifier tasks score oracle 1.0 and no-op 0.0; a background process cannot shadow `reward.txt`; a crash after a gateway error is `error`, a crash without one is graded || the Harbor fast-path pull request |
 | M5 An offline training pool | An offline, separate-verifier pool through M0–M4 on Singularity, with a CLI harness in the task sandbox. 2 days plus the run | oracle at least 0.98 and no-op 0 on at least 100 tasks per source through the training path; `error` plus `invalid` under 5% with a base model; 5 training steps with no leaked sandboxes | |
-| M6 Stacks on Docker | The compose parser and subset; the `docker compose` provider; sidecar probes; task MCP servers through the tool plane. 3.5 days | Harbor's `hello-mcp` oracle scores 1.0; a killed sidecar gives `invalid`, not 0; nothing is left after teardown | |
+| M6 Stacks on Docker | The compose parser and subset; the `docker compose` provider; sidecar probes; task MCP servers through the tool plane. 3.5 days | Harbor's `hello-mcp` oracle scores 1.0; a killed sidecar gives `invalid`, not 0; nothing is left after teardown | the compose parser and subset, with main-only compose files: the compose-subset pull request |
 | M7 Pods | hpc-sandbox pods (holder, anchors, exec services, relays, `/etc/hosts`, egress per phase, janitor); stacks on Singularity and Apptainer; enroot pods at a Slurm site. 6 days, plus site time | a two-service toy stack and `hello-mcp` score their oracles; name resolution, the relay and teardown pass; one stack cannot reach another's services; nothing leaks after 200 stacks; setup p50 and p99 at 16 and 64 stacks per node | |
 | M8 Host-network fallback | `HostNetworkStackProvider` for sites without unprivileged user namespaces: port allocation, rewriting, listen rules, the literal scan, refusals. 4 days | CPU tests over `process` cover a healthcheck that names its own loopback port; with user namespaces disabled, a two-service toy stack scores its oracle, an unauthenticated sidecar is refused, and nothing leaks after 200 stacks | |
 | M9 Frontier-CS | Adapter sources at the pinned commit; the overlay (verifier and judge patches, host-data pins, file-staging mounts); the shared judge-pool binding for the algorithmic track; the image map. 6 days plus compute | fetching both adapters yields the ORS server's 188 + 13 task ids; reference solutions and fixed submissions score as on the ORS server; a judge killed mid-grade gives `invalid`; a 4B run on the 2.0 tasks plus 40 algorithmic tasks takes 20 steps with no leaked sandboxes and `error` plus `invalid` under 5% | |

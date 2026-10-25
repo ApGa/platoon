@@ -18,9 +18,12 @@ user, as they would in Docker.
 
 Grading takes the sandbox the tests run in away from the agents.  In the agents' own sandbox (Harbor's ``shared``
 verifier mode) it first kills every process they left running (``Sandbox.kill_processes``) and makes ``/tests`` and
-``/logs/verifier`` afresh.  In either sandbox it kills again what the tests left running (the tests may run the
-agent's code) before it reads their output, file by file and never through a symlink
-(:mod:`platoon.envs.harbor.verifier`).
+``/logs/verifier`` afresh.  A main-only compose file's init (``main``'s command) and what it started are not the
+agents': the kill spares them (``Sandbox.keep_processes``), and an init that is gone by then, which in Docker would
+have ended the container, makes the outcome an ``error`` (``main_exited``) without the tests.  A copy fork of such a
+task is refused, since a restore brings back its files, not its init.  In either sandbox grading kills again what
+the tests left running (the tests may run the agent's code) before it reads their output, file by file and never
+through a symlink (:mod:`platoon.envs.harbor.verifier`).
 
 The agents' workdir is where the tests run (``shared``) and where the artifacts are (``separate``), so an attempt
 whose agents removed or moved it, left something else in its place or locked it scores 0 (``workdir_missing``) in
@@ -51,6 +54,7 @@ from platoon.envs.harbor.tools import TOOL_SPECS, SandboxTools
 from platoon.envs.harbor.users import DOCKER_UMASK
 from platoon.envs.harbor.verifier import TEST_STDOUT, collect, output_tail, suspect_outcome, write_local
 from platoon.envs.service import EnvSetupError, ForkMode, Outcome, ToolResult, ToolSpec
+from platoon.sandbox._processes import alive_processes
 from platoon.sandbox.base import CWD_ERROR_EXIT_CODE, ExecResult, Sandbox, SandboxSpec, cwd_error
 from platoon.task import Task
 from platoon.utils import scratch
@@ -97,6 +101,8 @@ class SandboxLease:
 
     ``gate`` orders the operations on the sandbox (:mod:`platoon.envs.gate`); ``inflight`` holds the tool calls
     still running, which the last release waits for (at most ``close_timeout_s``) before it stops the sandbox.
+    ``init`` is the main-only compose file's init running in it ("<pid>:<start time>"), and ``scratch`` the host
+    directories its binds mount (copies of the task's files), deleted once it stops.
     """
 
     def __init__(
@@ -106,9 +112,13 @@ class SandboxLease:
         *,
         queue_timeout_s: float | None = DEFAULT_QUEUE_TIMEOUT_S,
         close_timeout_s: float = DEFAULT_CLOSE_TIMEOUT_S,
+        init: str | None = None,
+        scratch: list[Path] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.spec = spec
+        self.init = init
+        self.scratch = list(scratch or ())
         self.gate = ToolGate(queue_timeout_s=queue_timeout_s)
         self.close_timeout_s = close_timeout_s
         self.inflight: set[asyncio.Task[Any]] = set()
@@ -150,7 +160,11 @@ class SandboxLease:
                     self.close_timeout_s,
                 )
         self.gate.close()
-        await self.sandbox.stop()
+        try:
+            await self.sandbox.stop()
+        finally:
+            for directory in self.scratch:
+                shutil.rmtree(directory, ignore_errors=True)
 
 
 class HarborSession:
@@ -293,6 +307,8 @@ class HarborSession:
             logger.exception("Grading Harbor task %s failed", self.harbor_task.name)
             return Outcome.infra(f"unexpected:{type(exc).__name__}", metadata={"error": str(exc)})
         outcome.metadata["verifier_mode"] = self.harbor_task.verifier_mode
+        if self.harbor_task.compose is not None:
+            outcome.metadata["stack"] = self.harbor_task.compose.kind
         if self.harbor_task.ignored_users:
             outcome.metadata["ignored_users"] = dict(self.harbor_task.ignored_users)  # ran as the sandbox's uid
         if self.harbor_task.verifier_root:
@@ -319,6 +335,11 @@ class HarborSession:
         if mode == "shared":
             return HarborSession(self._service, task, harbor_task, self._lease.acquire(), rollout_id=self.rollout_id)
         if mode == "copy":
+            if self._lease.init is not None:
+                raise NotImplementedError(
+                    f"Harbor task {self.harbor_task.name!r} runs main's command from its compose file, and a copy fork "
+                    "restores files, not processes: fork it shared or fresh"
+                )
             provider = self._service.provider
             if "snapshot" not in provider.capabilities:
                 raise NotImplementedError(f"The {provider.name!r} sandbox provider cannot snapshot for copy forks")
@@ -365,6 +386,8 @@ class HarborSession:
             env = resolve_env(self.harbor_task.verifier_env)
         except KeyError as exc:
             return Outcome.infra("verifier_setup", reason=f"host variable {exc} is not set")
+        if (exited := await self._check_init(sandbox)) is not None:
+            return exited
         if (unsafe := await self._kill_processes(sandbox, "before the tests")) is not None:
             return unsafe
         # Grading's own commands run in "/", which an agent cannot remove, unlike the workdir, where the tests run.
@@ -405,7 +428,9 @@ class HarborSession:
             async with self._lease.gate.hold("exclusive"):
                 # Nothing the agents left running may change the artifacts while they are collected from the
                 # workdir, and an unusable workdir scores 0 before anything is collected.
-                early = await self._kill_processes(sandbox, "before collecting the artifacts")
+                early = await self._check_init(sandbox)
+                if early is None:
+                    early = await self._kill_processes(sandbox, "before collecting the artifacts")
                 if early is None:
                     early = await self._check_workdir(sandbox)
                 if early is None:
@@ -550,6 +575,26 @@ class HarborSession:
                 "verifier_isolation", reason=f"could not kill the processes left in the sandbox {when}: {exc}"
             )
         return None
+
+    async def _check_init(self, sandbox: Sandbox) -> Outcome | None:
+        """None unless the main-only compose file's init (main's command) is gone: Docker would have ended the
+        container with it, so the attempt is an infra ``error`` (``main_exited``), never graded."""
+
+        init = self._lease.init
+        if init is None:
+            return None
+        try:
+            alive = await alive_processes(sandbox, {init})
+        except Exception as exc:
+            return Outcome.infra("verifier_setup", reason=f"cannot tell whether main's command runs: {exc}")
+        if alive:
+            return None
+        logger.info("Harbor task %s: main's command (%s) exited before grading", self.harbor_task.name, init)
+        return Outcome.infra(
+            "main_exited",
+            reason="main's command, which the task's compose file gives it, exited before grading",
+            metadata={"main_init": init},
+        )
 
     async def _check_workdir(self, sandbox: Sandbox) -> Outcome | None:
         """None when the agents' workdir is a directory a command can start in.  Else the agents made it unusable

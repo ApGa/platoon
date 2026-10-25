@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
+import posixpath
+import shutil
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
@@ -13,6 +17,7 @@ from typing import Any, ClassVar
 from platoon.deprecations import removed_hint
 from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, check_queue_timeout
 from platoon.envs.harbor.artifacts import DEFAULT_MAX_ARTIFACT_BYTES
+from platoon.envs.harbor.compose import MainService, ServiceHealthcheck, image_healthcheck, resolve_deferred
 from platoon.envs.harbor.dataset import (
     HarborDataset,
     SplitManifest,
@@ -25,8 +30,10 @@ from platoon.envs.harbor.fetch import FetchError
 from platoon.envs.harbor.grading import RewardContract, classifier_list, classify
 from platoon.envs.harbor.holdout import EVAL, SPLITS, HoldoutError, HoldoutRule, HoldoutSplit, hold_out
 from platoon.envs.harbor.images import (
+    FileOp,
     ImageMapError,
     SessionImage,
+    _check_contained,
     apply_image_files,
     docker_image_reference,
     has_image,
@@ -36,6 +43,7 @@ from platoon.envs.harbor.lock import LockError
 from platoon.envs.harbor.locked import LockedTasks, TaskImages
 from platoon.envs.harbor.session import DEFAULT_CLOSE_TIMEOUT_S, LOG_DIRS, HarborSession, SandboxLease
 from platoon.envs.harbor.task import (
+    _PLANNED_HERE,
     AGENT_USER_POLICIES,
     HARBOR_MISC_KEY,
     VERIFIER_USER_POLICIES,
@@ -60,8 +68,10 @@ from platoon.sandbox import (
     root_refusal,
     rootfs_layout_refusal,
 )
+from platoon.sandbox._processes import alive_processes, list_processes, start_background
 from platoon.sandbox.routes import RouteError
 from platoon.task import Task
+from platoon.utils import scratch
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +79,8 @@ DEFAULT_SANDBOX_START_BUDGET_S = 600.0
 # What the grading commands around the tests take at most besides them: killing processes, checking the workdir,
 # making the directories, uploading the tests, reading the output and, for a separate verifier, the artifacts.
 _GRADING_ALLOWANCE_S = 120.0
+# Where a main-only task's init (its compose command) writes its output in the sandbox.
+INIT_LOG = "/tmp/platoon-init/init.log"
 _REPORTED: set[tuple[str, str]] = set()  # hold-out reports logged by this process: (dataset, eval digest)
 
 
@@ -80,7 +92,10 @@ class HarborEnvironmentService:
     A session's sandbox runs the task's ``environment.docker_image`` (a registry reference gets ``docker://``; a
     ``.sif``, ``.sqsh`` or absolute path is used as written), else ``default_image``.  A task whose environment is
     a compose stack (sidecar services) is refused when it loads, never started as its main container alone and
-    scored; so is a task that needs GPUs on a provider without them, when its session opens.
+    scored; so is a task that needs GPUs on a provider without them, when its session opens.  A main-only compose
+    file (:mod:`platoon.envs.harbor.compose`) gives the sandbox its environment, working directory, resources and
+    binds, and its command (main's init), which the session starts once the sandbox runs, waits for main's
+    healthcheck, and keeps alive through grading: ``kill_processes`` spares it and what it started.
     The dataset is indexed lazily, so opening a session for a task that already
     carries its directory (``Task.misc["harbor"]["task_dir"]``) never scans it,
     and the sandbox provider is built when the first session opens.
@@ -615,7 +630,7 @@ class HarborEnvironmentService:
         if self._locked is not None:
             dataset = self._locked.dataset(fetch_allowed=False)
             row = dataset.row(task_id)
-            return self._load(dataset.cache / row.path, index=row.index)
+            return self._load(dataset.cache / row.path, index=row.index, compose=row.compose)
         return self._lookup(task_id)
 
     async def list_splits(self) -> list[str]:
@@ -719,6 +734,9 @@ class HarborEnvironmentService:
         health = (
             0.0 if check is None else check.start_period_s + (check.retries + 1) * (check.timeout_s + check.interval_s)
         )
+        main = harbor_task.main
+        if main is not None and main.healthcheck is not None:  # main's compose healthcheck runs before it
+            health += main.healthcheck.worst_case_s
         verifier = harbor_task.verifier_timeout_s * self.verifier_timeout_multiplier
         overhead = (
             starts * self.sandbox_start_budget_s + health + verifier + _GRADING_ALLOWANCE_S + self.close_timeout_s
@@ -732,7 +750,9 @@ class HarborEnvironmentService:
 
         misc = task.misc.get(HARBOR_MISC_KEY, {})
         if misc.get("task_dir") is not None:
-            return self._load(misc["task_dir"], index=misc.get("index"))
+            row = self._locked.row_for(misc["task_dir"]) if self._locked is not None else None
+            compose = row.compose if row is not None else _PLANNED_HERE
+            return self._load(misc["task_dir"], index=misc.get("index"), compose=compose)
         if task.id is None:
             raise ValueError("A Harbor task needs an id or a task directory in misc")
         return self._lookup(task.id)
@@ -762,8 +782,23 @@ class HarborEnvironmentService:
             )
         if needs is not None:  # the harness's gateway route, toolchain and memory; never the verifier's
             spec = needs.apply(spec)
-        sandbox = await self._start(spec, harbor_task)
-        lease = SandboxLease(sandbox, spec, queue_timeout_s=self.queue_timeout_s, close_timeout_s=self.close_timeout_s)
+        views: list[Path] = []
+        try:
+            if (main := harbor_task.main) is not None:
+                spec, views = await asyncio.to_thread(_with_bind_copies, spec, harbor_task, main)
+            sandbox, init = await self._start(spec, harbor_task)
+        except BaseException:
+            for view in views:
+                shutil.rmtree(view, ignore_errors=True)
+            raise
+        lease = SandboxLease(
+            sandbox,
+            spec,
+            queue_timeout_s=self.queue_timeout_s,
+            close_timeout_s=self.close_timeout_s,
+            init=init,
+            scratch=views,
+        )
         return HarborSession(self, task, harbor_task, lease, rollout_id=rollout_id)
 
     async def open_verifier(self, harbor_task: HarborTask, *, rollout_id: str) -> tuple[Sandbox, SandboxSpec]:
@@ -776,11 +811,15 @@ class HarborEnvironmentService:
             spec = self._sandbox_spec(harbor_task, rollout_id, verifier=True)
         except (KeyError, ValueError) as exc:
             raise EnvSetupError("env_config", str(exc)) from exc
-        return await self._start(spec, harbor_task, verifier=True), spec
+        sandbox, _ = await self._start(spec, harbor_task, verifier=True)
+        return sandbox, spec
 
-    async def _start(self, spec: SandboxSpec, harbor_task: HarborTask, *, verifier: bool = False) -> Sandbox:
-        """Start the task's sandbox (``verifier``: its separate verifier's) and prepare it; on any failure it is
-        stopped again and an ``EnvSetupError`` says why."""
+    async def _start(
+        self, spec: SandboxSpec, harbor_task: HarborTask, *, verifier: bool = False
+    ) -> tuple[Sandbox, str | None]:
+        """Start the task's sandbox (``verifier``: its separate verifier's) and prepare it; the sandbox, and the init
+        a main-only compose file gives it ("<pid>:<start time>", or None).  On any failure the sandbox is stopped
+        again and an ``EnvSetupError`` says why."""
 
         try:
             sandbox = await (self.verifier_provider if verifier else self.provider).start(spec)
@@ -789,22 +828,29 @@ class HarborEnvironmentService:
         except Exception as exc:
             raise EnvSetupError("sandbox_start", f"{type(exc).__name__}: {exc}") from exc
         try:
-            await self._prepare(sandbox, harbor_task, spec, verifier=verifier)
+            init = await self._prepare(sandbox, harbor_task, spec, verifier=verifier)
         except BaseException as exc:
             await asyncio.shield(sandbox.stop())
             if isinstance(exc, EnvSetupError) or not isinstance(exc, Exception):
                 raise
             raise EnvSetupError("env_setup", f"{type(exc).__name__}: {exc}") from exc
-        return sandbox
+        return sandbox, init
 
-    def _load(self, task_dir: str | Path, *, index: Mapping[str, Any] | None = None) -> HarborTask:
-        """A task directory, read with the service's ``agent_user`` and ``verifier_user`` policies."""
+    def _load(
+        self, task_dir: str | Path, *, index: Mapping[str, Any] | None = None, compose: Any = _PLANNED_HERE
+    ) -> HarborTask:
+        """A task directory, read with the service's ``agent_user`` and ``verifier_user`` policies; ``compose`` is
+        its stack plan from the lock (a fetched dataset's task), else it is planned from its files."""
 
-        return HarborTask.load(task_dir, agent_user=self.agent_user, verifier_user=self.verifier_user, index=index)
+        return HarborTask.load(
+            task_dir, agent_user=self.agent_user, verifier_user=self.verifier_user, index=index, compose=compose
+        )
 
     def _lookup(self, task_id: str) -> HarborTask:
         if self._locked is not None:  # workers read the lock: no fetch, no scan
-            return self._load(self._locked.task_dir(task_id), index=self._locked.index(task_id))
+            return self._load(
+                self._locked.task_dir(task_id), index=self._locked.index(task_id), compose=self._locked.compose(task_id)
+            )
         # Workers build a service per rollout, so an id finds its directory without indexing the dataset: through the
         # dataset's registry when it has one, else as a path below the dataset directory.
         if Path(task_id).is_absolute():
@@ -864,13 +910,24 @@ class HarborEnvironmentService:
                 f"Harbor task {harbor_task.name!r} is refused: {role} {gpus} GPU(s), and the {provider.name!r} "
                 "sandbox provider cannot give a sandbox GPUs"
             )
+        compose_env: dict[str, str] = {}
         if environment is None:
             built = self._session_image(harbor_task)
             image = built.image if built is not None and built.image else self._image(harbor_task)
-            workdir = harbor_task.workdir or (built.workdir if built is not None else None)
+            main = harbor_task.main
+            composed = main.working_dir if main is not None else None
+            workdir = harbor_task.workdir or composed or (built.workdir if built is not None else None)
             env = harbor_task.env
-            settings = (harbor_task.network, harbor_task.cpus, harbor_task.memory_mb)
+            cpus = main.cpus if main is not None and main.cpus is not None else harbor_task.cpus
+            memory_mb = main.memory_mb if main is not None and main.memory_mb is not None else harbor_task.memory_mb
+            settings = (harbor_task.network, cpus, memory_mb)
             mounts = list(self.mounts)
+            if main is not None:
+                compose_env = {
+                    name: resolve_deferred(value, harbor_task.env, os.environ)
+                    for name, value in main.environment.items()
+                }
+                mounts += _bind_mounts(harbor_task, main)
         else:
             built = self._verifier_image(harbor_task)
             if built is not None and built.image:
@@ -892,7 +949,7 @@ class HarborEnvironmentService:
             image=image,
             workdir=workdir or self.workdir,
             # The image's own environment and deferred ENV steps first; the service's and the task's go on top.
-            env={**(built.env if built is not None else {}), **self.env, **resolve_env(env)},
+            env={**(built.env if built is not None else {}), **self.env, **compose_env, **resolve_env(env)},
             mounts=mounts,
             network=network,
             cpus=cpus,
@@ -910,7 +967,10 @@ class HarborEnvironmentService:
 
     async def _prepare(
         self, sandbox: Sandbox, harbor_task: HarborTask, spec: SandboxSpec, *, verifier: bool = False
-    ) -> None:
+    ) -> str | None:
+        """Make the task's directories, apply the deferred Dockerfile steps and, in the agents' sandbox of a main-only
+        task, its compose binds and init; wait for its healthchecks.  The init, "<pid>:<start time>", or None."""
+
         root = verifier and harbor_task.verifier_root
         built = self._verifier_image(harbor_task) if verifier else self._session_image(harbor_task)
         if root:
@@ -938,10 +998,64 @@ class HarborEnvironmentService:
         result = await sandbox.exec(mkdir, cwd="/")
         if result.exit_code != 0:
             raise EnvSetupError("env_setup", f"Cannot create the task directories: {result.stderr.strip()}")
+        main = harbor_task.main if not verifier else None
         if built is not None and built.files:  # the deferred Dockerfile steps: WORKDIR directories, COPY uploads
+            if main is not None:  # a compose bind hides what the image has there, its deferred copies too
+                built = replace(built, files=_unbound(built.files, main, harbor_task, spec.workdir))
             await apply_image_files(sandbox, built, workdir=spec.workdir, umask=DOCKER_UMASK if root else None)
+        init = None
+        if main is not None:
+            for target in main.volumes:  # a volume of main's own: its directory, with what the image has there
+                _check_contained(sandbox, target)
+                made = await sandbox.exec(["mkdir", "-p", target], cwd="/")
+                if made.exit_code != 0:
+                    raise RuntimeError(f"Cannot make the volume directory {target}: {made.stderr.strip()}")
+            init = await self._start_init(sandbox, harbor_task, main, spec, built)
         if harbor_task.healthcheck is not None and not verifier:  # as in Harbor, none runs in a verifier's sandbox
             await _wait_until_healthy(sandbox, harbor_task.healthcheck)
+        return init
+
+    async def _start_init(
+        self,
+        sandbox: Sandbox,
+        harbor_task: HarborTask,
+        main: MainService,
+        spec: SandboxSpec,
+        built: SessionImage | None,
+    ) -> str | None:
+        """Start main's init, the command a main-only compose file gives it (with its image's ENTRYPOINT, where the
+        image map knows it), wait for main's healthcheck (compose's, else its image's), and keep the init and what it
+        started alive through grading (``Sandbox.keep_processes``); None when main only idles."""
+
+        argv = main.init(built.entrypoint if built is not None else None)
+        check: ServiceHealthcheck | None = main.healthcheck
+        if check is None and not main.healthcheck_disabled and built is not None:
+            check = image_healthcheck(built.healthcheck)
+        if argv is None:
+            if check is not None:
+                await _wait_until_healthy(sandbox, check)
+            return None
+        keep = getattr(sandbox, "keep_processes", None)
+        if keep is None:
+            raise EnvSetupError(
+                "env_config",
+                f"Harbor task {harbor_task.name!r}: its compose file gives main a command, which the "
+                f"{type(sandbox).__name__} cannot keep running through grading (it has no keep_processes)",
+            )
+        before = await list_processes(sandbox)
+        init = await start_background(sandbox, argv, log=INIT_LOG, cwd=spec.workdir)
+        if check is not None:
+            await _wait_until_healthy(sandbox, check)
+        if not await alive_processes(sandbox, {init}):
+            log = await sandbox.exec(["tail", "-c", "2000", INIT_LOG], cwd="/")
+            raise EnvSetupError(
+                "env_setup",
+                f"Harbor task {harbor_task.name!r}: main's command ({argv[0]}) exited as the session started: "
+                f"{(log.stdout or log.stderr).strip()[-1000:]}",
+            )
+        # What appeared since it started is its own: the processes it runs, the daemons it detached.
+        keep((await list_processes(sandbox)) - before | {init})
+        return init
 
 
 def _network_refusal(harbor_task: HarborTask, refusals: Mapping[str, str | None]) -> str | None:
@@ -957,7 +1071,124 @@ def _network_refusal(harbor_task: HarborTask, refusals: Mapping[str, str | None]
     return None
 
 
-async def _wait_until_healthy(sandbox: Sandbox, check: Healthcheck) -> None:
+def _bind_mounts(harbor_task: HarborTask, main: MainService) -> list[Mount]:
+    """The read-only binds of ``main`` that mount what they name: the task's own files (but masked ones and missing
+    sources, which bind copies of their own, :func:`_with_bind_copies`), and host paths that listed host variables
+    name, resolved now (``KeyError`` names an unset one)."""
+
+    mounts = []
+    for bind in main.binds:
+        if not bind.read_only or bind.missing or bind.masks or bind.logs is not None:
+            continue
+        if bind.task is not None:
+            mounts.append(Mount(source=str(harbor_task.task_dir / bind.task), target=bind.target, read_only=True))
+        elif bind.host is not None:
+            source = resolve_deferred(bind.host, harbor_task.env, os.environ)
+            if not os.path.isabs(source) or not os.path.exists(source):
+                raise ValueError(
+                    f"Harbor task {harbor_task.name!r} binds the host path {source!r} at {bind.target}, which is not "
+                    "an existing absolute path on this host"
+                )
+            mounts.append(Mount(source=source, target=bind.target, read_only=True))
+    return mounts
+
+
+def _with_bind_copies(spec: SandboxSpec, harbor_task: HarborTask, main: MainService) -> tuple[SandboxSpec, list[Path]]:
+    """``spec`` with the mounts of ``main``'s binds that need a copy of their own, and those copies, in scratch, for
+    the caller to delete with the sandbox: a masked read-only bind of the task's files binds a filtered copy (hard
+    links where the filesystem allows), in which the masked paths are empty directories, so that the masked files
+    never enter the sandbox; a writable bind binds a copy (never links: the content-addressed cache is never
+    written); a missing source binds an empty directory, as Docker creates one."""
+
+    copies: list[Path] = []
+    mounts = list(spec.mounts)
+    try:
+        for bind in main.binds:
+            if bind.task is None or (bind.read_only and not bind.masks and not bind.missing):
+                continue
+            directory = Path(scratch.mkdtemp("platoon-harbor-bind-"))
+            copies.append(directory)
+            tree = directory / "tree"
+            if bind.missing:
+                tree.mkdir()
+            else:
+                _filtered_copy(harbor_task.task_dir / bind.task, tree, bind.masks, link=bind.read_only)
+            mounts.append(Mount(source=str(tree), target=bind.target, read_only=bind.read_only))
+    except BaseException:
+        for directory in copies:
+            shutil.rmtree(directory, ignore_errors=True)
+        raise
+    return replace(spec, mounts=mounts), copies
+
+
+def _filtered_copy(source: Path, target: Path, masks: Sequence[str], *, link: bool) -> None:
+    """Copy ``source`` (a file or a directory) to ``target``, with hard links where possible when ``link``, leaving
+    each of ``masks`` (paths relative to ``source``) an empty directory.  A symlink is copied as a link, as a bind
+    shows it."""
+
+    hidden = {posixpath.normpath(mask) for mask in masks}
+
+    def copy(path: str, destination: str) -> None:
+        if os.path.islink(path):
+            os.symlink(os.readlink(path), destination)
+            return
+        if link:
+            try:
+                os.link(path, destination)
+                return
+            except OSError:
+                pass
+        shutil.copy2(path, destination)
+
+    if not source.is_dir() or source.is_symlink():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        copy(str(source), str(target))
+        return
+    for directory, names, files in os.walk(source):  # symlinks to directories are among the names, never walked
+        relative = os.path.relpath(directory, source)
+        (target / relative).mkdir(parents=True, exist_ok=True)
+        for name in list(names):
+            path = posixpath.normpath(posixpath.join(relative, name))
+            if path in hidden:
+                names.remove(name)
+                (target / path).mkdir()
+            elif os.path.islink(os.path.join(directory, name)):
+                names.remove(name)
+                copy(os.path.join(directory, name), str(target / path))
+        for name in files:
+            path = posixpath.normpath(posixpath.join(relative, name))
+            if path not in hidden:
+                copy(os.path.join(directory, name), str(target / path))
+    for mask in hidden:  # a mask the task has nothing at is an empty directory too, as Docker's volume makes one
+        (target / mask).mkdir(parents=True, exist_ok=True)
+
+
+def _unbound(files: Sequence[FileOp], main: MainService, harbor_task: HarborTask, workdir: str) -> tuple[FileOp, ...]:
+    """The deferred file operations of a main-only task but those at or below one of ``main``'s binds, which hide
+    what the image has there, as in Docker; ``env_config`` for a copy of a directory that holds a bind's target,
+    which would write into the bind."""
+
+    kept = []
+    for op in files:
+        target = op.target or workdir
+        if any(_at_or_below(target, bind.target) for bind in main.binds if bind.logs is None):
+            continue
+        holds = [bind.target for bind in main.binds if bind.logs is None and _at_or_below(bind.target, target)]
+        if op.kind == "copy" and op.into and holds:
+            raise EnvSetupError(
+                "env_config",
+                f"Harbor task {harbor_task.name!r}: its Dockerfile copies {op.source} into {target}, which holds the "
+                f"compose bind at {holds[0]}; platoon cannot apply both",
+            )
+        kept.append(op)
+    return tuple(kept)
+
+
+def _at_or_below(path: str, directory: str) -> bool:
+    return path == directory or path.startswith(directory.rstrip("/") + "/")
+
+
+async def _wait_until_healthy(sandbox: Sandbox, check: Healthcheck | ServiceHealthcheck) -> None:
     """Retry the probe like Docker's HEALTHCHECK; failures in the start period do not count."""
 
     started = asyncio.get_running_loop().time()

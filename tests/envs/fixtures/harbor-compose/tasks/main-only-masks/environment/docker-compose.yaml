@@ -1,0 +1,30 @@
+# Written for platoon, after Harbor's ml_dev_bench template: main binds the whole task read-only, hides its solution
+# and tests with anonymous volumes, binds a scratch directory writable and a source the task does not have, and its
+# command copies the inputs into the workdir before it idles.
+services:
+  main:
+    working_dir: /app
+    volumes:
+      - ${CONTEXT_DIR}/..:/opt/task-src:ro
+      - /opt/task-src/solution
+      - /opt/task-src/tests
+      - ./scratch:/opt/scratch
+      - ${CONTEXT_DIR}/../setup_workspace:/opt/setup_workspace:ro
+      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}
+    environment:
+      - INPUTS=/opt/task-src/environment/data
+      - UNSET_IN_HARBOR=${TEST_DIR}
+    command:
+      - bash
+      - -c
+      - "for item in /opt/task-src/environment/data/*; do cp \"$$item\" /app/; done && touch /app/.ready && exec sleep infinity"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/.ready"]
+      interval: 100ms
+      retries: 100
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPUS:-4}
+          memory: ${MEMORY:-16G}
+    tty: true

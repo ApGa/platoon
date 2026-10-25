@@ -7,14 +7,16 @@ keys to built images, written by ``platoon harbor images build``::
     {"version": 1, "images": {"sha256:<key>": {
        "image": "/shared/images/<key>.sif", "sha256": "<file digest>", "builder": "oci",
        "env": {"PATH": "/opt/extra/bin:...", "FOO": "bar"}, "workdir": "/workdir", "user": null,
-       "entrypoint": null, "cmd": null, "receipt": {...}}}}
+       "entrypoint": null, "cmd": null, "healthcheck": null, "exposed_ports": [], "volumes": [],
+       "stop_signal": null, "receipt": {...}}}}
 
 When a session opens, :func:`session_image` picks the image (the map's entry for the task's key, the task's
-``docker_image``, or the service's default), merges the image's environment with the deferred ``ENV`` steps, and
-lists the file operations (``WORKDIR`` directories, ``COPY`` uploads) that :func:`apply_image_files` performs once
-the sandbox runs. A task that builds from a Dockerfile but has no entry in the map is refused with ``env_config``,
-never run on a default image. A prebuilt-image task without a Dockerfile gets its ``environment/`` directory
-uploaded into its working directory, as Harbor does.
+``docker_image``, or the service's default), merges the image's environment with the deferred ``ENV`` steps, lays the
+deferred metadata (``ENTRYPOINT``, ``CMD``, ``HEALTHCHECK``) over the image's own, and lists the file operations
+(``WORKDIR`` directories, ``COPY`` uploads) that :func:`apply_image_files` performs once the sandbox runs. A task that
+builds from a Dockerfile but has no entry in the map is refused with ``env_config``, never run on a default image. A
+prebuilt-image task without a Dockerfile gets its ``environment/`` directory uploaded into its working directory, as
+Harbor does.
 
 A lock-backed Harbor entry uses its **default image map**, ``images/<provider>.json`` in its Harbor cache
 (:func:`default_image_map`), when that file exists: ``platoon prepare`` builds the entry's images for its sandbox
@@ -63,8 +65,14 @@ class ImageEntry:
     env: Mapping[str, str] = field(default_factory=dict)  # from the image config; applied to every command
     workdir: str | None = None
     user: str | None = None
-    entrypoint: tuple[str, ...] | None = None  # for sidecars (stacks)
+    entrypoint: tuple[str, ...] | None = None  # what runs main's or a compose service's command (stacks)
     cmd: tuple[str, ...] | None = None
+    # The image's HEALTHCHECK as compose writes a healthcheck (durations in seconds), its EXPOSE ports ("80/tcp"),
+    # VOLUME paths and STOPSIGNAL, from its configuration.
+    healthcheck: Mapping[str, Any] | None = None
+    exposed_ports: tuple[str, ...] = ()
+    volumes: tuple[str, ...] = ()
+    stop_signal: str | None = None
     receipt: Mapping[str, Any] = field(default_factory=dict)  # builder version, time, log, size, ...
 
     @classmethod
@@ -83,6 +91,10 @@ class ImageEntry:
             user=data.get("user") or None,
             entrypoint=tuple(data["entrypoint"]) if data.get("entrypoint") else None,
             cmd=tuple(data["cmd"]) if data.get("cmd") else None,
+            healthcheck=dict(data["healthcheck"]) if data.get("healthcheck") else None,
+            exposed_ports=tuple(data.get("exposed_ports") or ()),
+            volumes=tuple(data.get("volumes") or ()),
+            stop_signal=data.get("stop_signal") or None,
             receipt=dict(data.get("receipt") or {}),
         )
 
@@ -96,6 +108,10 @@ class ImageEntry:
             "user": self.user,
             "entrypoint": list(self.entrypoint) if self.entrypoint else None,
             "cmd": list(self.cmd) if self.cmd else None,
+            **({"healthcheck": dict(self.healthcheck)} if self.healthcheck else {}),
+            **({"exposed_ports": list(self.exposed_ports)} if self.exposed_ports else {}),
+            **({"volumes": list(self.volumes)} if self.volumes else {}),
+            **({"stop_signal": self.stop_signal} if self.stop_signal else {}),
             "receipt": dict(self.receipt),
         }
 
@@ -232,6 +248,11 @@ class SessionImage:
     key: str | None = None  # the build key, when the image comes from the map
     context: Path | None = None  # the build context the copies read from
     files: tuple[FileOp, ...] = ()
+    # The image's ENTRYPOINT and CMD (the map's, with the deferred ones over them), and its HEALTHCHECK as compose
+    # writes one; None where platoon does not know them, as for a task's prebuilt docker_image.
+    entrypoint: tuple[str, ...] | None = None
+    cmd: tuple[str, ...] | None = None
+    healthcheck: Mapping[str, Any] | None = None
 
 
 def session_image(
@@ -266,14 +287,20 @@ def session_image(
         env, workdir, files = deferred_effects(
             plan.get("deferred") or (), env=entry.env, workdir=entry.workdir, context=task_dir / context
         )
+        config = plan.get("config") or {}
+        entrypoint = config.get("entrypoint", entry.entrypoint)
+        cmd = config.get("cmd", entry.cmd)
         return SessionImage(
             image=entry.image,
             env=env,
             workdir=workdir,
-            user=entry.user,
+            user=config.get("user", entry.user),
             key=key,
             context=task_dir / context,
             files=files,
+            entrypoint=tuple(entrypoint) if entrypoint is not None else None,
+            cmd=tuple(cmd) if cmd is not None else None,
+            healthcheck=config.get("healthcheck", entry.healthcheck),
         )
     image = docker_image_reference(docker_image) if docker_image else default_image
     files: tuple[FileOp, ...] = ()

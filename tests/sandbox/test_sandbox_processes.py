@@ -21,7 +21,13 @@ import pytest
 
 from platoon.envs.harbor.verifier import VerifierFile, collect
 from platoon.sandbox._exec import run_command
-from platoon.sandbox._processes import kill_other_processes, own_processes
+from platoon.sandbox._processes import (
+    alive_processes,
+    kill_other_processes,
+    list_processes,
+    own_processes,
+    start_background,
+)
 from platoon.sandbox.base import ExecResult
 
 pytestmark = pytest.mark.asyncio
@@ -143,6 +149,40 @@ async def test_every_process_the_commands_left_dies_and_the_sandbox_lives_on(san
     assert (await sandbox.exec("echo alive")).stdout == "alive\n"
     await asyncio.sleep(0.2)
     assert len(await sandbox.processes()) == 2  # nothing came back
+
+
+@requires_namespaces
+async def test_kept_processes_and_their_descendants_outlive_the_kill(sandbox: NamespaceSandbox, tmp_path: Path):
+    """A task's init (a main-only compose file's command) and what it started, daemons it detached included, are
+    the task's: the kill spares them, and every process the agents left still dies."""
+
+    own = await own_processes(sandbox)
+    before = await list_processes(sandbox)
+    init = await start_background(
+        sandbox,
+        ["sh", "-c", "setsid sh -c 'exec sleep 1005' </dev/null >/dev/null 2>&1 & sleep 1003 & sleep 1004 & wait"],
+        log=str(tmp_path / "init.log"),
+        cwd="/",
+    )
+    await asyncio.sleep(0.3)
+    kept = (await list_processes(sandbox)) - before | {init}
+    assert len(kept) == 4  # the init, its two sleeps, and the daemon it detached (an orphan of the namespace's init)
+    planted = await sandbox.exec(AGENT_PROCESSES)
+    assert planted.stdout.strip() == "planted"
+
+    await kill_other_processes(sandbox, own, kept)
+
+    left = {entry.split()[0] for entry in await sandbox.processes()}
+    assert left == {"1", "2", *(entry.split(":")[0] for entry in kept)}
+    assert await alive_processes(sandbox, {init, "99999:1"}) == {init}  # a gone or reused pid is not alive
+
+
+@requires_namespaces
+async def test_a_command_that_exits_is_no_longer_alive(sandbox: NamespaceSandbox, tmp_path: Path):
+    entry = await start_background(sandbox, ["sh", "-c", "exit 3"], log=str(tmp_path / "x.log"), cwd="/")
+    await asyncio.sleep(0.3)
+
+    assert await alive_processes(sandbox, {entry}) == frozenset()
 
 
 @requires_namespaces
