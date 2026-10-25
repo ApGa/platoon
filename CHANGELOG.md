@@ -165,6 +165,11 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
 
 ### Fixes
 
+- A `GroupRolloutWorkflow` group without a straggler policy no longer leaves its other rollouts running when one of
+  them raises (as a subclass's own `arun_episode_single` can): it cancels them and raises once they have unwound. They
+  ran on after the group had failed and its rollout permits had come back, so more rollouts could run at once than
+  `train.max_concurrent_rollouts`, on work that no step trains. A cancelled group likewise returns only once all its
+  rollouts have unwound, not once the first has.
 - A resume under `train.task_sampler: uniform` draws again exactly the row it had drawn; it could take the listing's
   form of the row, whose nested values differ in their empty keys.
 - A rollout worker that is cancelled, as by a straggler cut or a stop, no longer leaves its readiness and diagnostics

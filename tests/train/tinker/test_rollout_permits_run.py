@@ -12,6 +12,8 @@ faked; RFC 0020).
   carries its own start delay, so a late member gets its full grace; an override of ``_run_group_member`` is still cut.
 - A recursive tree is one rollout on one permit, held until its last child is graded; a group that a member runs in
   turn takes no permits of its own.
+- Without a straggler policy, a member that raises ends its siblings before the group raises, so that none runs on
+  after its draw is released; a cancelled group returns once its slowest member has unwound, each cancelled once.
 - The step metrics (permits held, the dispatcher's blocked shares, the straggler policy's censoring) and the warnings
   (stale groups above 2% of the last 10 steps', rollouts beyond the budget), once each.
 """
@@ -646,6 +648,101 @@ def test_a_group_that_a_member_runs_in_turn_takes_no_permits_of_its_own(release)
     assert held == [2] * 6 and pool.free == 2  # the draw's two permits, and no more, throughout
     for scope in (f"test_nested_{release}", f"test_outer_{release}"):
         get_tracker(scope).export(reset=True)
+
+
+# --- a member that raises, a cancelled group -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("release", ["group", "rollout"])
+def test_a_member_that_raises_ends_its_siblings_before_the_group_raises(release):
+    """No straggler policy, a draw of 2 on a pool of 2, and member 0 raises while member 1 runs: the group cancels
+    member 1 and raises member 0's error only once member 1 has unwound, so that no member runs on after its draw is
+    released, and the next draw's two rollouts, on the permits it gave back, never run beside it, beyond the budget."""
+
+    config = WorkflowConfig(group_size=2, filter_zero_advantage_datums=False)
+    scope = f"test_permit_member_raises_{release}"
+    pool = PermitPool(2)
+    sibling_runs = asyncio.Event()
+    running: list[int] = []  # the position of each rollout running
+    peak = 0
+
+    async def script(row, member):
+        nonlocal peak
+        position = row[POSITION_COLUMN]
+        running.append(position)
+        peak = max(peak, len(running))
+        try:
+            if position == 1:
+                await asyncio.sleep(0.01)
+            elif member == 0:
+                await sibling_runs.wait()
+                raise RuntimeError("member 0 failed")
+            else:
+                sibling_runs.set()
+                await asyncio.sleep(30)  # cut by member 0's failure
+        finally:
+            running.remove(position)
+        return float(member % 2)
+
+    workflow = _group(config, script, scope)
+
+    async def run():
+        lease = pool.reserve(2, rolling=release == "rollout", active=release == "rollout")
+        with holding(lease), pytest.raises(RuntimeError, match="member 0 failed"):
+            await asyncio.wait_for(workflow.arun_episode({"task_id": "t", POSITION_COLUMN: 0}), 10)
+        left_running = list(running)
+        lease()  # the runner releases the draw once its workflow has raised
+        lease = pool.reserve(2, rolling=release == "rollout", active=release == "rollout")
+        with holding(lease):
+            output = await asyncio.wait_for(workflow.arun_episode({"task_id": "t", POSITION_COLUMN: 1}), 10)
+        lease()
+        return left_running, output
+
+    left_running, output = asyncio.run(run())
+    assert left_running == [] and ("cancelled", 0, 1) in workflow.log
+    assert peak == 2 and pool.free == 2 and output.observed_rollouts == 2
+    get_tracker(scope).export(reset=True)
+
+
+def test_a_cancelled_group_returns_once_its_slowest_member_has_unwound_and_cancels_each_member_once():
+    """No straggler policy: a group of 2 is cancelled while both members run, and member 1 takes a while to unwind (its
+    worker and sandboxes going away).  The group's cancellation ends only once member 1 has unwound, its permit held
+    until then, and each member sees one cancellation: a second would cut member 1's unwinding short."""
+
+    config = WorkflowConfig(group_size=2, filter_zero_advantage_datums=False)
+    unwound = asyncio.Event()
+    cancellations: list[int] = []
+
+    async def script(row, member):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancellations.append(member)
+            if member == 1:
+                await unwound.wait()
+            raise
+        return 1.0
+
+    workflow = _group(config, script, "test_permit_cancelled_group")
+
+    async def run():
+        pool = PermitPool(2)
+        lease = pool.reserve(2, rolling=True, active=True)
+        with holding(lease):
+            group = asyncio.ensure_future(workflow.arun_episode({"task_id": "t", POSITION_COLUMN: 0}))
+        await _quiet()
+        group.cancel()
+        await _quiet()
+        assert not group.done() and pool.free == 1  # member 1 still unwinds, on its permit
+        unwound.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(group, 10)
+        assert pool.free == 2
+        lease()
+
+    asyncio.run(run())
+    assert cancellations == [0, 1]
+    get_tracker("test_permit_cancelled_group").export(reset=True)
 
 
 # --- the step metrics and the warnings -------------------------------------------------------------------------------
