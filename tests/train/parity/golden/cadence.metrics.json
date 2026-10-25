@@ -18,6 +18,7 @@
       "cpu_saturation": "timing",
       "groups_in_flight_max": 2.0,
       "groups_in_flight_mean": "timing",
+      "permits_held_mean": [3.444946725388403, 3.9079547805105475, 2.8782192339035912, 2.9438047745834375, 3.386634280337799, 2.4839641431944868],
       "rollouts_in_flight_configured": 4.0,
       "rollouts_in_flight_max": 4.0,
       "rollouts_in_flight_mean": "timing",
@@ -158,6 +159,13 @@
      "train/credit/root_advantage": {
       "abs_avg": [0.5, 0.0, 0.25, 0.0, 0.25, 0.25],
       "abs_avg__count": 2
+     },
+     "train/dispatch/blocked_share": {
+      "horizon": [1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+      "labels": 0.0,
+      "permits": 0.0,
+      "plan": [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+      "sampler": 0.0
      },
      "train/optim": {
       "clip_frac_high": [0.42857142857142855, null, 0.5, null, 0.75, 0.3333333333333333],
