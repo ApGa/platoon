@@ -215,8 +215,8 @@ both phases (`ok   environments.yaml (EnvironmentsConfig)`).
 
 A key that is going away still loads, for one minor release. `config validate` lists each deprecated key a file
 sets under it, with the key that replaces it and the release that removes it, and `--strict` fails on them, so CI
-finds them before that release does. For a `train.yaml` that still sets `train.task_order`, the name of
-`train.task_sampler` until platoon 0.3.0:
+finds them before that release does. Platoon 0.3.0, which renamed `train.task_order` to `train.task_sampler`, said
+so of a `train.yaml` that still set the old name:
 
 ```console
 $ uv run platoon config validate --strict train.yaml
@@ -230,13 +230,13 @@ such a config warns with `pt.PlatoonDeprecationWarning`, a `FutureWarning`;
 `-W error::platoon.PlatoonDeprecationWarning`, turns them into errors.
 
 Once the release a deprecation names removes the key, a config that still sets it does not load (exit code 78): the
-key is unknown, and its problem says what replaces it and which release removed it. For a `train.yaml` that still
-sets `train.rollout_group_key`, which platoon 0.3.0 removed:
+key is unknown, and its problem says what replaces it and which release removed it. For that `train.yaml`, since
+platoon 0.4.0:
 
 ```console
 $ uv run platoon config validate train.yaml
 FAIL train.yaml
-  train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by
+  train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler
 ```
 
 A service option that a release removed fails the same way as the config loads, `--no-resolve` or not

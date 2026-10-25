@@ -4,7 +4,8 @@ A deprecated form keeps working for one minor release, with a :class:`PlatoonDep
 replaces it and the release that removes it; the next minor release removes it, so a form that first warns in 0.3 is
 gone in 0.4 (RFC 0016, section 10).
 
-A config class names the keys it still takes but that are going away in a class attribute, ``DEPRECATED_KEYS``::
+A config class names the keys it still takes but that are going away in a class attribute, ``DEPRECATED_KEYS``, as
+platoon 0.3.0's ``TrainConfig`` named ``task_order``, the former name of ``task_sampler``::
 
     @dataclass
     class TrainConfig:
@@ -18,10 +19,10 @@ and reports each as a :class:`Deprecation` with its dotted path: as a warning, i
 
 The release named removes the key: the config class drops its field and names it in its ``UNKNOWN_KEY_HINTS``
 (:mod:`platoon.utils.config`) with :func:`removed_hint`, so a config that still sets it does not load (exit 78), and
-says what replaces it and the release that removed it::
+says what replaces it and the release that removed it, as platoon 0.4.0's ``TrainConfig`` names ``task_order``::
 
     UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
-        "propogate_root_success": removed_hint("0.3.0", "propagate_root_success"),
+        "task_order": removed_hint("0.4.0", "train.task_sampler"),
     }
 
 A service's removed options go in its class's ``UNKNOWN_KEY_HINTS`` alike: a config whose entry's ``service_kwargs``

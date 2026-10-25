@@ -603,8 +603,6 @@ def run_options_problems(value: Any, train: Mapping[str, Any], root: Any, path: 
     if not isinstance(value, Mapping):
         return []
     name = train.get("task_sampler") if isinstance(train, Mapping) else None
-    if name is None and isinstance(train, Mapping):
-        name = train.get("task_order")
     if name is None:
         name = "auto"
     return _options_problems(name, value, path) if isinstance(name, str) else []

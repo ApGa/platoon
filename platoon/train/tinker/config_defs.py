@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
 from platoon.config_defs import RolloutConfig
-from platoon.deprecations import DeprecatedKey, deprecated_keys, removed_hint
+from platoon.deprecations import deprecated_keys, removed_hint
 from platoon.train import entry_settings
 from platoon.train.admission_api import DEFAULT_MAX_GROUPS_PER_STEP, max_groups_problem
 from platoon.train.components import (
@@ -383,12 +383,9 @@ class TrainConfig:
             "train.max_concurrent_rollouts, which counts rollouts, not groups: this value × "
             "train.workflow_config.group_size",
         ),
+        "task_order": removed_hint("0.4.0", "train.task_sampler"),
         "on_stale": "not in this release: a stale group is dropped, and under a group admission rule the step takes "
         "another in its place",
-    }
-    # Keys that still load, with a warning, until the release named removes them (platoon.deprecations).
-    DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
-        "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
     }
     # The task sampler's name and options, checked when the config loads beside its other problems: a name that no
     # package could register, options for a built-in sampler that takes none, and pass_rate's options
@@ -507,10 +504,6 @@ class TrainConfig:
     # max_draws_per_epoch, max_outstanding_per_task, candidates, seed); ``auto``, ``weighted`` and ``uniform`` take
     # none.
     task_sampler_options: dict[str, Any] = field(default_factory=dict)
-    # The former name of ``task_sampler``, read as that key is, with the values it had (``uniform`` came after it).
-    # Beside another ``task_sampler``, its former default ``auto`` (as a dump of platoon 0.2.0's ``config show
-    # --defaults`` spells it) is ignored, with a warning, and ``weighted`` is an error.
-    task_order: Literal["auto", "weighted"] | None = None
     # Which settled training groups count toward the batch (experimental): ``all`` admits every group, as before;
     # ``informative`` rejects the groups whose workflow's verdict says they train nothing (their rollouts scored alike,
     # or no datum) and, with ``band``, those whose pass rate is outside it. A rejected group's place is refilled (at
@@ -546,29 +539,10 @@ class TrainConfig:
             raise ValueError(
                 f"train.sample_timeout_seconds must be a positive number of seconds or null, got {seconds!r}"
             )
-        sampler, legacy = self.task_sampler, self.task_order
-        if legacy is not None and legacy not in ("auto", "weighted"):  # it takes the values it had before the rename
-            raise ValueError(
-                f"train.task_order, the deprecated name of train.task_sampler, takes 'auto' or 'weighted', got "
-                f"{legacy!r}: set train.task_sampler instead"
-            )
-        # task_order at its default before the rename (auto, as a dump of 0.2.0's config show --defaults spells it)
-        # yields to task_sampler, and the loader's deprecation says that it was ignored; another sampler conflicts.
-        if (
-            legacy is not None
-            and sampler is not None
-            and legacy != sampler
-            and not TrainConfig.DEPRECATED_KEYS["task_order"].ignored_beside(legacy, sampler)
-        ):
-            raise ValueError(
-                f"train.task_sampler is {sampler!r} and train.task_order, its deprecated name, is {legacy!r}; set "
-                "task_sampler alone"
-            )
-        # The run's one sampler: the deprecated name's value until it is resolved here, then task_sampler's alone.
-        sampler = sampler if sampler is not None else legacy if legacy is not None else "auto"
+        sampler = self.task_sampler if self.task_sampler is not None else "auto"
         if not isinstance(sampler, str) or not sampler:  # which names a sampler is the trainer config's to say
             raise ValueError(f"train.task_sampler must name a task sampler, got {sampler!r}")
-        self.task_sampler, self.task_order = sampler, None
+        self.task_sampler = sampler
         if not isinstance(self.task_sampler_options, Mapping):
             raise ValueError(f"train.task_sampler_options must be a mapping, got {self.task_sampler_options!r}")
         self.task_sampler_options = copy.deepcopy(dict(self.task_sampler_options))
