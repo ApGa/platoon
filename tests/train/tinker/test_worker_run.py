@@ -28,6 +28,7 @@ from platoon.envs.service import EnvSetupError
 from platoon.task import Task
 from platoon.train.tinker.rollout_metrics import (
     RolloutTimeline,
+    current_timeline,
     record_model_call,
     timeline_scope,
 )
@@ -621,6 +622,37 @@ def test_model_call_timings_reach_the_response(tmp_path, monkeypatch):
     # the next beginning.
     assert response.timing.tool_seconds_total == pytest.approx(2 * 7.25)
     assert len(response.timing.samples) == 3
+
+
+def test_on_first_call_reaches_the_session_s_timeline_and_without_it_nothing_changes(tmp_path, monkeypatch):
+    """The start limit's signal: the session's timeline calls ``on_first_call`` once, at the first call it is told was
+    issued. Told so without one, it changes nothing: its first call is still the first one recorded."""
+
+    fired: list[str] = []
+
+    async def rollout_fn(_task, _config):
+        timeline = current_timeline()
+        assert timeline is not None
+        timeline.call_started()
+        timeline.call_started()
+        record_model_call(
+            started_at=timeline.started_at + 1.0,
+            render_seconds=0.1,
+            sample_seconds=0.2,
+            parse_seconds=0.1,
+            ended_at=timeline.started_at + 1.4,
+        )
+        return {"trajectories": {"root": {"steps": [{}]}}}
+
+    result = _result(num_datums=1, stats_datums=1)
+    signalled = _run(
+        _request(tmp_path), rollout_fn, result=result, monkeypatch=monkeypatch, on_first_call=lambda: fired.append("1")
+    )
+    plain = _run(_request(tmp_path), rollout_fn, result=result, monkeypatch=monkeypatch)
+    assert fired == ["1"]
+    for response in (signalled, plain):
+        assert response.status == "completed" and response.timing.model_calls == 1
+        assert response.timing.first_model_call_seconds == pytest.approx(1.0)
 
 
 def test_a_rollout_that_fails_before_the_session_still_returns_a_summary(tmp_path):

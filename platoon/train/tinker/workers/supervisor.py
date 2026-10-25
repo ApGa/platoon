@@ -628,6 +628,7 @@ class RolloutWorkerSupervisor:
         on_ready: Callable[[], None] | None = None,
         on_launch: Callable[[int], None] | None = None,
         on_reap: Callable[[int], None] | None = None,
+        on_first_call: Callable[[], None] | None = None,
     ) -> WorkerOutcome:
         """Run one rollout in one process.  Never raises except ``CancelledError``.
 
@@ -639,6 +640,9 @@ class RolloutWorkerSupervisor:
         group's imports would otherwise drop several members below
         ``min_successful_group_size`` and discard the whole task's generation
         cost.
+
+        ``on_first_call`` is called once the worker has marked its rollout's first model call, for a request that asks
+        it to (``signal_first_call``).
         """
 
         await self.sweep_orphaned_workers()
@@ -657,8 +661,10 @@ class RolloutWorkerSupervisor:
                     on_ready=on_ready,
                     on_launch=on_launch,
                     on_reap=on_reap,
+                    on_first_call=on_first_call,
                 )
             except asyncio.CancelledError:
+                _remove_worker_files(attempt_request)  # its worker is reaped: a cancelled rollout leaves no file either
                 raise
             except _LaunchFailed as exc:
                 last_error = exc.__cause__ or exc
@@ -696,6 +702,7 @@ class RolloutWorkerSupervisor:
         on_ready: Callable[[], None] | None,
         on_launch: Callable[[int], None] | None,
         on_reap: Callable[[int], None] | None,
+        on_first_call: Callable[[], None] | None = None,
     ) -> WorkerOutcome:
         started = time.monotonic()
         request_path = os.path.join(self.scratch_dir, f"{request.request_id}.req")
@@ -771,7 +778,9 @@ class RolloutWorkerSupervisor:
 
         waiter = asyncio.ensure_future(proc.wait())
         ready_state = {"seconds": 0.0}
-        ready_watcher = asyncio.ensure_future(self._watch_ready(request, proc, started, ready_state, on_ready))
+        ready_watcher = asyncio.ensure_future(
+            self._watch_ready(request, proc, started, ready_state, on_ready, on_first_call, waiter)
+        )
 
         deadline = request.rollout_budget_seconds + self.parent_grace_seconds
         try:
@@ -841,9 +850,7 @@ class RolloutWorkerSupervisor:
             worker_pid=proc.pid,
             log_path=log_path,
         )
-        unlink_quietly(request.response_path)
-        unlink_quietly(request.diag_path)
-        unlink_quietly(request.ready_path)
+        _remove_worker_files(request)
         if outcome.response is None:
             _remove_event_temporaries(request, proc.pid)
         return outcome
@@ -904,12 +911,23 @@ class RolloutWorkerSupervisor:
         started: float,
         state: dict,
         on_ready: Callable[[], None] | None,
+        on_first_call: Callable[[], None] | None = None,
+        waiter: asyncio.Future | None = None,
     ) -> None:
         """Fire once the child has finished importing and registering.
 
         ``create_subprocess_exec`` returns in well under a millisecond, so
         gating group admission on exec would bound nothing; the child then
         spends 20-30 s importing.  Readiness is the only useful gate.
+
+        With ``on_first_call``, then watch for the marker of the rollout's first
+        model call (``request.first_call_path``) and fire it once the marker is
+        there, until ``waiter``, the worker's wait, ends (not its return code,
+        which a forked worker whose fork server died never gets), looking once
+        more then: a call made in the last poll interval still counts.  Nothing
+        else ends the watch, so a rollout that calls no model through the
+        gateway, or whose start slot came back on its timer, is watched to its
+        end, at one ``stat`` a poll.
         """
 
         deadline = started + request.startup_budget_seconds + 30.0
@@ -924,6 +942,13 @@ class RolloutWorkerSupervisor:
         if on_ready is not None:
             with contextlib.suppress(Exception):
                 on_ready()
+        if on_first_call is None or waiter is None:
+            return
+        while not os.path.exists(request.first_call_path) and not waiter.done():
+            await asyncio.sleep(self.ready_poll_seconds)
+        if os.path.exists(request.first_call_path):
+            with contextlib.suppress(Exception):
+                on_first_call()
 
     def _classify(
         self,
@@ -1019,6 +1044,16 @@ class RolloutWorkerSupervisor:
             log_path=log_path,
             request_id=request.request_id,
         )
+
+
+def _remove_worker_files(request: RolloutWorkerRequest) -> None:
+    """Delete what a worker writes beside its request: its response, diagnostics, readiness and, for a request that
+    asks for it, first-call marker."""
+
+    for path in (request.response_path, request.diag_path, request.ready_path):
+        unlink_quietly(path)
+    if request.signal_first_call:
+        unlink_quietly(request.first_call_path)
 
 
 def _remove_event_temporaries(request: RolloutWorkerRequest, pid: int) -> None:

@@ -11,6 +11,8 @@ Environment:
     STUB_RESPONSE_SRC   a pre-pickled RolloutWorkerResponse to publish
     STUB_RESPONSE_DST   where to publish it (``.diag`` is derived from it)
     STUB_READY_PATH     touched to signal readiness
+    STUB_FIRST_CALL_PATH  touched to mark the rollout's first model call (the ``called_*`` modes)
+    STUB_GO_PATH        what ``called_then_wait_for_go`` waits for before it answers
     STUB_MARKER_DIR     where informational markers are dropped
     STUB_EVENTS_DIR     where ``events_then_killed`` leaves a temporary event file
 """
@@ -31,6 +33,13 @@ def _touch_ready() -> None:
     if path:
         with open(path, "wb") as handle:
             handle.write(b"ready\n")
+
+
+def _touch_first_call() -> None:
+    path = os.environ.get("STUB_FIRST_CALL_PATH")
+    if path:
+        with open(path, "wb"):
+            pass
 
 
 def _publish_response(*, truncate: bool = False) -> None:
@@ -93,6 +102,17 @@ def main() -> int:
     _touch_ready()
 
     if mode == "ok":
+        _publish_response()
+        return 0
+    if mode == "called_then_ok":  # marks its first model call just before it answers and exits
+        _touch_first_call()
+        _publish_response()
+        return 0
+    if mode == "called_then_wait_for_go":  # marks its first model call, then answers once told to (10 s at most)
+        _touch_first_call()
+        deadline = time.monotonic() + 10.0
+        while not os.path.exists(os.environ["STUB_GO_PATH"]) and time.monotonic() < deadline:
+            time.sleep(0.01)
         _publish_response()
         return 0
     if mode == "write_then_sleep":

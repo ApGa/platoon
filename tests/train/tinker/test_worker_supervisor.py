@@ -22,7 +22,10 @@ import asyncio
 import os
 import pickle
 import signal
+import time
 from dataclasses import asdict
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,6 +120,8 @@ def _supervisor(tmp_path, mode, *, response_blob=None, request_id="task-r0-aaaaa
         "STUB_READY_PATH": os.path.join(str(scratch), f"{request_id}.ready"),
         "PYTHONPATH": os.pathsep.join([STUB_DIR, os.environ.get("PYTHONPATH", "")]),
         "STUB_RESPONSE_DST": os.path.join(str(scratch), f"{request_id}.res"),
+        "STUB_FIRST_CALL_PATH": os.path.join(str(scratch), f"{request_id}.res.first_call"),
+        "STUB_GO_PATH": os.path.join(str(markers), "go"),
     }
     if response_blob:
         env["STUB_RESPONSE_SRC"] = response_blob
@@ -175,6 +180,92 @@ def test_normal_completion_and_cleanup(tmp_path):
     assert not os.path.exists(os.path.join(scratch, f"{request.request_id}.req"))
     assert os.path.exists(outcome.log_path)
     assert outcome.launch_seconds > 0.0
+
+
+def test_the_first_model_call_s_marker_fires_on_first_call_while_the_worker_runs_and_is_removed(tmp_path):
+    """The start limit's signal under process isolation: a worker marks its rollout's first model call, then answers
+    only once ``on_first_call`` has told it to. It completes, so ``on_first_call`` fired, once, while it ran; the marker
+    is gone."""
+
+    blob = _response_blob(tmp_path)
+    supervisor, scratch, markers = _supervisor(tmp_path, "called_then_wait_for_go", response_blob=blob)
+    request = _request(scratch, signal_first_call=True)
+    fired: list[int] = []
+
+    def on_first_call() -> None:
+        fired.append(1)
+        (markers / "go").touch()
+
+    outcome = asyncio.run(supervisor.run(request, on_first_call=on_first_call))
+    assert outcome.disposition == "completed" and outcome.killed_by_parent is False
+    assert fired == [1] and not os.path.exists(request.first_call_path)
+
+
+def test_a_cancelled_rollout_leaves_none_of_its_worker_s_files(tmp_path):
+    """A member cancelled after its worker marked its first model call, as a straggler cut, its group's cancellation or
+    a stop cancels it: once its worker is reaped, nothing of the worker's is left in the scratch directory, which
+    outlives the run (its readiness file, its marker)."""
+
+    supervisor, scratch, _markers = _supervisor(tmp_path, "called_then_wait_for_go")
+    request = _request(scratch, signal_first_call=True, rollout_budget_seconds=30.0)
+    fired: list[int] = []
+
+    async def run() -> None:
+        task = asyncio.ensure_future(supervisor.run(request, on_first_call=lambda: fired.append(1)))
+        while not fired:
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(asyncio.wait_for(run(), 60))
+    assert fired == [1] and [name for name in os.listdir(scratch) if name.startswith(request.request_id)] == []
+
+
+def test_without_on_first_call_the_supervisor_never_looks_for_the_marker(tmp_path, monkeypatch):
+    blob = _response_blob(tmp_path)
+    supervisor, scratch, _markers = _supervisor(tmp_path, "called_then_ok", response_blob=blob)
+    request = _request(scratch, signal_first_call=True)
+    looked: list[str] = []
+    exists = os.path.exists
+
+    def counting(path) -> bool:
+        if str(path).endswith(".first_call"):
+            looked.append(str(path))
+        return exists(path)
+
+    monkeypatch.setattr(os.path, "exists", counting)
+    outcome = asyncio.run(supervisor.run(request))
+    monkeypatch.undo()
+    assert outcome.disposition == "completed" and looked == []
+    assert not os.path.exists(request.first_call_path)  # removed all the same: the request asked for it
+
+
+def test_the_marker_watch_ends_with_the_worker_s_wait_and_counts_a_marker_left_as_it_exits(tmp_path):
+    """``_watch_ready`` for a worker whose return code never comes (a forked worker whose fork server died): after
+    readiness it watches for the marker until the worker's wait ends, and then looks once more."""
+
+    supervisor = _new_supervisor(scratch_dir=str(tmp_path), ready_poll_seconds=0.01)
+    request = _request(tmp_path, signal_first_call=True)
+    Path(request.ready_path).touch()
+    proc = SimpleNamespace(returncode=None)
+
+    async def watch(marked_as_it_exits: bool) -> list[int]:
+        fired: list[int] = []
+        waiter = asyncio.get_running_loop().create_future()
+        watcher = asyncio.ensure_future(
+            supervisor._watch_ready(request, proc, time.monotonic(), {}, None, lambda: fired.append(1), waiter)
+        )
+        await asyncio.sleep(0.1)
+        assert not watcher.done()  # still watching: no marker yet, and the worker runs
+        if marked_as_it_exits:
+            Path(request.first_call_path).touch()
+        waiter.set_result(None)  # its wait ends, with no return code
+        await asyncio.wait_for(watcher, 5)
+        return fired
+
+    assert asyncio.run(watch(marked_as_it_exits=False)) == []
+    assert asyncio.run(watch(marked_as_it_exits=True)) == [1]
 
 
 def test_a_response_written_just_before_a_kill_still_counts(tmp_path):

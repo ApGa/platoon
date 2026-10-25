@@ -49,7 +49,7 @@ code is faked (`trace_fakes.py`):
 |---|---|
 | The Tinker service | `tinker.ServiceClient`. Its training clients record every call, and each call takes virtual time, as a round trip does. Checkpoints go through tinker-cookbook's own saving, so `checkpoints.jsonl`, and a resume from it, are a real run's |
 | The policy | `register_tinker_llm` returns a policy that keeps the version as `TinkerLLM` does, without a tokenizer or renderer |
-| The rollouts | At the worker-request boundary, `run_rollout_request`. Each request is answered after a virtual time with datums, rewards and outcomes drawn from a hash of the task, the rollout number and the policy version |
+| The rollouts | At the worker-request boundary, `run_rollout_request`. Each request is answered after a virtual time with datums, rewards and outcomes drawn from a hash of the task, the rollout number and the policy version. Under a start limit (`train.max_starting_rollouts`) each rollout makes its first model call, which gives its start slot back, early in that time |
 | An environment's tasks | The entries' `dataset_loader`, `rollout` and `task_loader` name functions of `trace_fakes.py` |
 | Printing the metrics | `StatsLogger.log` records each logged step instead |
 
@@ -78,7 +78,9 @@ Each scenario has two golden files. `golden/<scenario>.json` holds, for each sta
 - `messages`: the INFO and higher messages of platoon's loggers, in order. Reported durations, the run's temporary
   directory, the import name of `trace_fakes` and the random part of request ids are masked;
 - `files`: the files the run directory holds when the start ends;
-- `outcome`: `completed`, or how a start that was planned to crash or stop ended.
+- `outcome`: `completed`, or how a start that was planned to crash or stop ended;
+- `start_ups`, only under a start limit (`train.max_starting_rollouts`): the first model calls the rollouts made, and
+  the most rollouts that were starting at once, from their request to their first call.
 
 `golden/<scenario>.metrics.json` holds each start's logged metrics, training's and evaluation's apart, one per line
 under its parent path. A metric with the same value at every step holds that value; any other holds one value per
@@ -136,6 +138,7 @@ The golden trace does not cover:
 | `mix-label-by` | The mixture labelled by another column (`train.label_by`), with a straggler policy for one label |
 | `stale-follow` | Groups dropped as stale, the slow entry by its own bound, with datums stamped by the policy they sampled |
 | `permits-group`, `permits-rollout` | Rollout permits for two groups, under each `train.permit_release` at `max_staleness: 2`: a group holds its permits until its slowest rollout ends, or its rollouts start as permits free, some on the next policy |
+| `start-limit` | At most two rollouts starting at once (`train.max_starting_rollouts`), with the permits of `permits-rollout`: each member takes a start slot after its permit and gives it back at its first model call, so a group's members start in waves |
 | `rule-informative` | Group admission by the `informative` rule, whose rejected places are refilled, under the scoring `pass_rate` sampler |
 | `rule-k1`, `rule-k1-held`, `rule-k1-stale` | The rule at `max_staleness: 1`: short steps, rejected groups without datums that hold their slots, stale groups |
 | `pass-rate` | The `pass_rate` task sampler on the run's one entry, under the `weighted` run sampler |

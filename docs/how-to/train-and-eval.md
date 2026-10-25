@@ -1332,6 +1332,71 @@ shows: then raise `worker_launch_concurrent_groups`.
 The default stays `group` until a GPU comparison confirms the gain; `group` keeps the behavior of earlier releases
 event for event, so it is the way back.
 
+## Rollout start-ups (experimental)
+
+Before its first model call a rollout sets up its worker, its environment session or sandbox and its harness, and part
+of that work is shared by every rollout starting on the node. At a run's start or a resume every permit is free, so the
+whole budget starts at once, and an evaluation during training adds its own rollouts. `train.max_starting_rollouts`
+lets at most that many rollouts be starting at once, training's and evaluation's together, first come, first served:
+
+```yaml
+train:
+  max_concurrent_rollouts: 256  # the rollouts that run at once
+  max_starting_rollouts: 32     # of which at most this many set up at once (default: null, no limit)
+  workflow_config: {group_size: 8}
+```
+
+- **A start-up.** A `GroupRolloutWorkflow` rollout takes a start slot once it holds its permit, before its request is
+  built and its worker launched, and gives it back at the first of: its first model call is issued (its root's or any
+  subagent's, as the model gateway hands the call to sampling, not at its first token), it ends, or
+  `workflow_config.worker_startup_budget_seconds` + 300 s pass without a call (600 s by default). Under process
+  isolation the worker marks its first call in a node-local file next to its readiness file, which the trainer polls
+  as it polls readiness, so the slot can come back up to 0.2 s late.
+- **Where it helps.** Where start-ups share a capacity that slows down as more of them use it at once, or run past
+  per-start timeouts when too many start together: the singularity provider's `copy` layout and the enroot provider,
+  which extract a root filesystem for each sandbox ([The singularity provider's root
+  filesystem](sandboxes-and-harbor.md#the-singularity-providers-root-filesystem)); task sets with an image per task;
+  several runs on one node. The wait comes before the worker starts, so no start-up or rollout timeout counts it.
+- **Where it does not.** It shortens no one-time work: the fork server's import of the worker stack, the copy of a
+  harness toolchain to each node, which the node's first rollouts wait for, or the modules each worker imports after
+  its fork ([Troubleshooting](troubleshooting.md#the-first-rollouts-of-a-run-take-minutes-to-reach-the-model)). Any
+  value makes a run's whole first wave reach the model later, though its first rollouts can reach it sooner: in long
+  agentic runs whose first rollouts took about 100 s to their first call, most of it such one-time work, a limit of 32
+  would have made the whole first wave reach the model 44-56 s later, and 64 about 10-23 s later (estimates). With
+  `worker_start_method: exec`, `worker_launch_concurrent_groups` already bounds the workers' import storms.
+- **One rule.** A start-up must not wait for another rollout of the run. A rollout holding a slot waits for nothing, so
+  one that waited for its group-mates would hold its slot until the timer while they wait for slots.
+- **Sizing.** At least the largest group size: below it a group's members start in waves, and the run warns, though each
+  member keeps its full straggler grace, its deadline shifted by its wait as by a permit's. To keep the shared resource
+  busy, about twice (the start-ups it completes a second) × (the seconds one start-up takes alone); far below that, the
+  resource idles between start-ups. With the limit at that product itself, a model of measured runs of short crafting
+  tasks lost 14-18% of their throughput (estimates).
+- **With the rest.** A rollout waiting for a slot holds its permit but does not run yet, so while the limit binds the
+  gap between `rollout_client/permits_held_mean` and `rollouts_in_flight_mean` widens, by `start_limit/waiting_mean`:
+  the lever is then `max_starting_rollouts`, or turning it off, not a larger `max_concurrent_rollouts`, which only adds
+  waiters. Under process isolation a group keeps its `worker_launch_concurrent_groups` slot until its members are up, so
+  most of a binding limit's queue waits at that gate (`rollout_client/startup_gate_waiting_mean`). An evaluation during
+  training takes slots of the same limit, in turn. In process, training's rollouts that come behind a whole evaluation
+  wait for its start-ups, about eight start-up times behind 256 evaluation rollouts at a limit of 32. A fresh start with
+  `eval.at_start` is such a case: its evaluation reaches the limit before training's first rollouts, so the first step
+  comes that much later. Standalone `platoon eval` is not limited (`num_concurrent_workers` bounds its rollouts), and
+  the limit is one trainer's: several runs on a node do not share it.
+
+Only `GroupRolloutWorkflow`'s members take start slots ([Run rollouts on the
+lease](../extending/rollout-leases.md#grouprolloutworkflow-and-its-subclasses)).
+
+| Metric | What it says |
+|---|---|
+| `rollout_client/start_limit/starting_mean`, `.../waiting_mean` | The training rollouts holding a start slot, and those waiting for one, time-weighted; an evaluation's under `eval/rollout_client/start_limit/`, logged with it |
+| `rollout_client/start_limit/wait_seconds_p50`, `_p90`, `_max` | How long the rollouts that took a slot in the step waited for it (0 for one taken at once) |
+| `rollout_client/start_limit/releases/first_call`, `.../end`, `.../timer`, `.../cancelled` | The slots given back in the step, by cause: mostly `first_call` when the harness calls the model through platoon's gateway; `cancelled` for rollouts cancelled while they held one, as by a straggler cut or a stop |
+
+The time from a slot to the first call, except the request's build, is
+`rollout_client/dequeue_to_first_model_call_seconds_p50` (and `_p90`), as before. The run warns once per start when a
+slot comes back on its timer, and when most come back only at their rollout's end: the harness makes no model call
+through platoon's gateway (`platoon-oracle`, `platoon-noop`, a rollout function of your own), or its rollouts fail
+before one, and the limit then bounds whole rollouts.
+
 ## Metrics to watch
 
 Each step prints its metrics and logs them to W&B. Start with these:
@@ -1360,8 +1425,10 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/admission/groups_admitted`, `.../short`, `.../rejected/<reason>`, `.../draws_per_admitted`, `.../errors` | `errors` 0 | In a run with a group admission rule: what each step admitted and rejected and why, whether it was short, and the draws per admitted group ([Train only on groups that carry signal](#train-only-on-groups-that-carry-signal-experimental)). Short steps at every step: raise `train.refill.max_groups_per_step`, or choose tasks with `pass_rate` |
 | `train/sampler/decision_ms`, `.../decision_ms_max` | A few ms | The mean and longest time a sampler's decisions took since the last step; long ones hold up the event loop. An adaptive entry's `.../tokens` counts its slots waiting for a group to start, and `train/sampler/skipped_slots` those a full queue skipped. `pass_rate`'s own metrics: [Choose tasks by their pass rates](#choose-tasks-by-their-pass-rates-experimental) |
 | `rollout_client/trainer_queue_wait_seconds_total` | Small next to `timing/batch_total` | The trainer waits on rollouts: raise rollout concurrency or speed up the environment |
-| `train/dispatch/blocked_share/permits`, `.../horizon` | One of them near 1 says what decides when groups start | `permits`: the rollout budget binds; try `train.permit_release: rollout`, or a larger `max_concurrent_rollouts` while the engines have room. `horizon`: only `max_staleness` or a faster trainer helps ([Rollout permits](#rollout-permits-experimental)) |
-| `rollout_client/permits_held_mean` against `rollout_client/rollouts_in_flight_mean` | Close under `permit_release: rollout`; under `group` the gap is the straggler idle that `rollout` returns | Permits held while no rollout ran: finished rollouts waiting for their group's slowest (`permit_release: group`), or groups waiting at the startup gate |
+| `train/dispatch/blocked_share/permits`, `.../horizon` | One of them near 1 says what decides when groups start | `permits`: the rollout budget binds; try `train.permit_release: rollout`, or a larger `max_concurrent_rollouts` while the engines have room, unless `rollout_client/start_limit/waiting_mean` is above 0: then rollouts hold permits while they wait to start up, and the lever is `max_starting_rollouts`. `horizon`: only `max_staleness` or a faster trainer helps ([Rollout permits](#rollout-permits-experimental)) |
+| `rollout_client/permits_held_mean` against `rollout_client/rollouts_in_flight_mean` | Close under `permit_release: rollout`; under `group` the gap is the straggler idle that `rollout` returns | Permits held while no rollout ran: finished rollouts waiting for their group's slowest (`permit_release: group`), groups waiting at the startup gate, or rollouts waiting for a start slot |
+| `rollout_client/start_limit/waiting_mean`, `.../wait_seconds_p90`, and under process isolation `rollout_client/startup_gate_waiting_mean` | Near 0, or briefly at a run's start | With `train.max_starting_rollouts`: rollouts wait to start up, holding their permits. Raise `max_starting_rollouts`, or turn it off, not `max_concurrent_rollouts` ([Rollout start-ups](#rollout-start-ups-experimental)) |
+| `rollout_client/start_limit/releases/<cause>` | Mostly `first_call` | Many `end` or `timer`: the rollouts make no model call through platoon's gateway, or fail before one, so the limit bounds whole rollouts: turn it off for this workload, or fix the failures |
 | `rollout_client/cpu_saturation` | Below 1 | The client machine is out of CPU: use fewer concurrent rollouts or a bigger node |
 | `rollout_client/agent_step_tool_fraction` | Depends on the environment | Most of each step is spent in tools and the environment, not the model |
 

@@ -79,6 +79,7 @@ import sys
 import threading
 import time
 from collections.abc import Coroutine
+from functools import partial
 from typing import Any
 
 from platoon.utils.stopping import (
@@ -586,6 +587,10 @@ def main(argv: list[str] | None = None) -> int:
                     llm,
                     startup_seconds=startup_seconds,
                     extra_allow=extra_allow,
+                    # The first call's marker, a file like readiness's, which the supervisor polls for.
+                    on_first_call=partial(_signal_ready, request.first_call_path)
+                    if request.signal_first_call
+                    else None,
                 )
             )
         )

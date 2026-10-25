@@ -144,6 +144,21 @@ def test_request_round_trips_task_config_and_sampler(tmp_path):
     assert loaded.conversion.subagent_datum_sampler == DeterministicSubagentDatumSampler(keep_probability=0.25, seed=11)
 
 
+def test_a_request_asks_for_the_first_model_call_s_marker_only_when_told_and_names_it_after_its_response(tmp_path):
+    """The start limit's signal (``train.max_starting_rollouts``): off unless asked for; ``first_call_path`` follows
+    ``response_path``, so a retried request, which gets a fresh response path, gets a fresh marker too."""
+
+    request = _request(tmp_path)
+    assert request.signal_first_call is False
+    assert request.first_call_path == request.response_path + ".first_call"
+    asked = replace(request, signal_first_call=True)
+    path = str(tmp_path / "req.pkl")
+    dump_request(asked, path)
+    assert load_request(path) == asked
+    retried = replace(asked, response_path=str(tmp_path / "task-r0-cafebabe.res"))
+    assert retried.first_call_path == str(tmp_path / "task-r0-cafebabe.res.first_call")
+
+
 def test_response_round_trips_datums_including_routing_handle(tmp_path):
     result = _result()
     workload = add_datum_funnel(

@@ -76,8 +76,10 @@ from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
 from platoon.train.tinker.staleness import StaleWatch
+from platoon.train.tinker.start_limit import StartLimit
 from platoon.train.tinker.task_records import TaskRecorder, record_lost_state, record_sampling_changed, resume_record
 from platoon.train.tinker.workflows.base import RolloutWorkflow
+from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow
 from platoon.utils.rollout_stats import REWARD_KEY_MISMATCH, REWARD_KEY_PREFIX, RolloutStats, outcome_counts
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_logger import StatsLogger
@@ -322,6 +324,31 @@ def _rollouts_at_once(config: Any, phase: str, budget: int | None) -> float:
     if phase == "train" and getattr(config.train, "permit_release", "group") == "rollout":
         return float(budget)
     return float(min(budget, groups * max([*sizes.values(), group_size])))
+
+
+def _limit_starts(config: Any, train_workflow: Any, eval_workflow: Any | None) -> None:
+    """Set this start's limit on the rollouts starting at once (``train.max_starting_rollouts``; None when it is off)
+    as the ``start_limit`` of the training workflow and of ``eval_workflow``, the evaluation's that runs during
+    training, where each is a ``GroupRolloutWorkflow``, so that both share it, first come, first served.  Off, their
+    ``start_limit`` is None, so that a workflow an earlier start used keeps no limit."""
+
+    limit = getattr(config.train, "max_starting_rollouts", None)
+    gate = StartLimit(limit) if limit is not None else None
+    for workflow in (train_workflow, eval_workflow):
+        if isinstance(workflow, GroupRolloutWorkflow):
+            workflow.start_limit = gate
+    if gate is None:
+        return
+    phases = ("train",) if eval_workflow is None else ("train", "eval")
+    largest = 0
+    for phase in phases:
+        sizes, size = _group_sizes(config, phase)
+        largest = max(largest, size, *sizes.values())
+    gate.announce(
+        largest_group=largest,
+        rollouts_at_once=sum(getattr(config, phase).max_concurrent_rollouts for phase in phases),
+        gated=isinstance(train_workflow, GroupRolloutWorkflow),
+    )
 
 
 def _run_steps(config: Any, batches_per_epoch: int) -> int:
@@ -1977,6 +2004,9 @@ class PlatoonTinkerRLTrainer:
             if shared_state.evaluation_due(step):
                 eval_start = time.perf_counter()
                 logger.info(f"Starting evaluation at step {shared_state.train_step}")
+                limited = getattr(workflow, "start_limit", None) is not None  # train.max_starting_rollouts
+                if limited:  # its start-limit metrics cover this evaluation
+                    client_monitor("eval").start_limit_metrics(reset=True)
                 # Rollout workers read the sampling client from its published binding, which training publishes for
                 # its own: an evaluation whose rollouts run in worker processes while training's do not needs it too.
                 if getattr(workflow, "rollout_isolation", "inprocess") == "process":
@@ -2034,6 +2064,8 @@ class PlatoonTinkerRLTrainer:
                 for label, stats in label_stats.items():
                     stats.record(eval_tracker, prefix=metric_prefix(column, label))
                 eval_stats = eval_tracker.export(reset=True)
+                if limited:
+                    eval_stats.update(client_monitor("eval").start_limit_metrics(prefix="eval/rollout_client"))
                 eval_stats["eval/time"] = eval_elapsed
                 eval_stats["eval/num_tasks"] = total_eval_tasks
                 # The step whose policy the evaluation started on; it is logged at the step training reached by its end.
@@ -2906,6 +2938,7 @@ class PlatoonTinkerRLTrainer:
         shared_state.eval_loop_running = self._evaluates_during_training(shared_state)
         if shared_state.eval_loop_running:
             logger.log(*_evaluation_plan(shared_state, resumed=resume_info is not None, end=end_batch))
+        _limit_starts(self.config, train_workflow, eval_workflow if shared_state.eval_loop_running else None)
 
         interrupted = False
         try:

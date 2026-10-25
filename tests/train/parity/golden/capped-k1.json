@@ -53,6 +53,7 @@
    "rollout_fn_ref": "platoon.train.auto:mixture_rollout",
    "rss_soft_limit_bytes": 25769803776,
    "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
    "startup_budget_seconds": 300.0,
    "task": {
     "fork_strategy": "subtask",
@@ -140,6 +141,7 @@
    "rollout_fn_ref": "platoon.train.auto:mixture_rollout",
    "rss_soft_limit_bytes": 25769803776,
    "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
    "startup_budget_seconds": 300.0,
    "task": {
     "fork_strategy": "subtask",

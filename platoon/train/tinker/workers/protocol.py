@@ -163,10 +163,19 @@ class RolloutWorkerRequest:
     # The labels the trainer puts on its sandboxes (its run's ``platoon.run``), which the worker puts on its own
     # beside its ``platoon.worker`` label (:mod:`platoon.sandbox.cleanup`).
     sandbox_labels: dict[str, str] = field(default_factory=dict)
+    # Whether the worker marks its rollout's first model call (``first_call_path``), for the trainer's start limit
+    # (platoon.train.tinker.start_limit).
+    signal_first_call: bool = False
 
     @property
     def diag_path(self) -> str:
         return self.response_path + ".diag"
+
+    @property
+    def first_call_path(self) -> str:
+        """Where the worker marks its rollout's first model call (``signal_first_call``), next to its readiness file."""
+
+        return self.response_path + ".first_call"
 
     @property
     def sessions_path(self) -> str:

@@ -212,6 +212,40 @@ def _check_permits_rollout(trace: Trace) -> None:
     assert any(len(found) > 1 for found in versions), "no group whose rollouts started on either side of a publication"
 
 
+def _check_start_limit(trace: Trace) -> None:
+    """That the start limit (2) bound: never more than 2 rollouts starting at once, from their request to their first
+    model call, as the fake rollouts saw them, and 2 at times, while more ran; members waited for their slots; every
+    request asked for the first-call signal; the run said so as it started; and every step logged the start-limit
+    metrics, consistent with that: at most 2 slots held on average, slots that came back at their rollout's first call,
+    none at its end or on its timer, and no more of those than first calls."""
+
+    limit, name = 2, "rollout_client/start_limit"
+    (start,) = trace["starts"]
+    ups = start.get("start_ups", {})
+    assert ups.get("most_at_once") == limit, f"not at most and at times {limit} rollouts starting at once: {ups}"
+    running = series(trace, "rollout_client/rollouts_in_flight_max")
+    assert max(running, default=0) > limit, f"never more rollouts running than starting: {running}"
+    flags = {setting["signal_first_call"] for setting in trace["request_settings"]}
+    assert flags == {True}, f"a request that does not ask for the first-call signal: {flags}"
+    said = messages(trace)
+    assert any(f"limited to {limit} at once" in message for message in said), "the run did not say its limit"
+    assert any("below the largest group size (4)" in message for message in said), "no warning of starts in waves"
+    steps = len(start["metrics"]["train"]["steps"])
+    causes = ("first_call", "end", "timer", "cancelled")
+    keys = ("starting_mean", "waiting_mean", *(f"releases/{cause}" for cause in causes))
+    logged = {key: series(trace, f"{name}/{key}") for key in keys}
+    for key, values in logged.items():
+        assert len(values) == steps and None not in values, f"{name}/{key} is not logged at every step: {values}"
+    held = logged["starting_mean"]
+    assert any(held) and max(held) <= limit, f"the slots held on average, each step: {held}"
+    assert any(logged["waiting_mean"]) and any(series(trace, f"{name}/wait_seconds_p90")), "no member waited"
+    late = [*logged["releases/end"], *logged["releases/timer"]]
+    assert not any(late), "a slot came back at its rollout's end or on its timer, not at its first call"
+    released = sum(logged["releases/first_call"])
+    calls, requested = ups.get("first_calls", 0), len(start["requests"]["train"])
+    assert 0 < released <= calls <= requested, f"{released:g} first-call releases, {calls} calls, {requested} requests"
+
+
 def _check_rule_short(trace: Trace) -> None:
     assert any(series(trace, "train/admission/short")), "the rule never closed a step short on its cap"
 
@@ -410,6 +444,22 @@ SCENARIOS: dict[str, Scenario] = {
         },
         tasks=8,
         check=_check_permits_rollout,
+    ),
+    "start-limit": Scenario(
+        "At most two rollouts starting at once (train.max_starting_rollouts: 2), with rollout permits for two groups "
+        "of four under permit_release rollout at max_staleness 2: each member takes a start slot after its permit and "
+        "gives it back at its rollout's first model call, so a group's members start in waves",
+        {
+            "train": {
+                "max_training_steps": 4,
+                "max_staleness": 2,
+                "max_concurrent_rollouts": 8,
+                "permit_release": "rollout",
+                "max_starting_rollouts": 2,
+            }
+        },
+        tasks=8,
+        check=_check_start_limit,
     ),
     # ------------------------------------------------------------------- task selection
     "rule-informative": Scenario(

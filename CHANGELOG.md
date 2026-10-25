@@ -93,6 +93,16 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   of its own instead of 290 MB. In CPU emulations of an OpenHands first wave whose toolchain copy took 77-90 s, the
   first sandbox could open 8-17 s sooner after the training client opened, and 46-53 s sooner behind a 38 s launch
   save ([Rollouts are slow to start](docs/how-to/troubleshooting.md#rollouts-are-slow-to-start)).
+- **A limit on rollouts starting at once (experimental).** `train.max_starting_rollouts: N` lets at most `N` rollouts
+  set up their workers, sandboxes and harnesses at once, training's and evaluation's together, first come, first
+  served: a `GroupRolloutWorkflow` rollout takes a start slot once it holds its permit and gives it back as its first
+  model call is issued, as it ends, or after `worker_startup_budget_seconds` + 300 s without a call. It is for
+  start-ups that contend for a shared capacity, such as sandboxes that each extract a root filesystem; off by default
+  (`null`), it changes nothing. It shortens no one-time start-up work (the fork server's import, a harness toolchain's
+  copy to each node, the modules each worker imports), and with any value a run's whole first wave reaches the model
+  later. Each step logs the rollouts starting and waiting to start, their waits and why slots came back
+  (`rollout_client/start_limit/...`), and the run warns when slots come back on their timer, or mostly only at their
+  rollouts' end ([Rollout start-ups](docs/how-to/train-and-eval.md#rollout-start-ups-experimental)).
 
 ### Changes
 
@@ -157,6 +167,8 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
 
 - A resume under `train.task_sampler: uniform` draws again exactly the row it had drawn; it could take the listing's
   form of the row, whose nested values differ in their empty keys.
+- A rollout worker that is cancelled, as by a straggler cut or a stop, no longer leaves its readiness and diagnostics
+  files in node-local scratch, where they stayed until a later run found them a day old.
 
 ## 0.3.1 (unreleased)
 

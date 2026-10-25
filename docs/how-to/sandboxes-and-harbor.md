@@ -92,6 +92,12 @@ needs the node's extraction of the image (hpc-sandbox's `rootfs_templates`, on b
 `rootfs_templates: false` is refused, and the job-wide default leaves such a provider on copies. The enroot provider
 ignores `rootfs_layout`.
 
+The copy layout and the enroot provider extract a root filesystem at each sandbox's start, so many starts at once on
+a node, as at a run's start, contend for its filesystem. `train.max_starting_rollouts` bounds how many rollouts start
+up at once, their sandboxes and harnesses included ([Rollout
+start-ups](train-and-eval.md#rollout-start-ups-experimental)); a separate verifier's sandbox and a copy fork start
+after their rollout's first model call, outside it.
+
 ## Steps
 
 ### 1. Lay out the tasks
