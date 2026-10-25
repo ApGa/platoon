@@ -5,6 +5,8 @@ tokenizer)."""
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tomllib
 from importlib.metadata import EntryPoint
 from pathlib import Path
@@ -128,3 +130,36 @@ def test_the_example_configs_validate(capsys):
 
     out = capsys.readouterr().out
     assert "(PlatoonEvalConfig)" in out and "(PlatoonTinkerRLTrainerConfig)" in out
+
+
+# A fresh process whose first harness lookup happens inside the example, as a pytest-xdist worker's can.
+_FIRST_LOOKUP_INSIDE_THE_EXAMPLE = """
+import sys
+
+import pytest
+
+sys.path.insert(0, sys.argv[1])
+from harness_example_fakes import EXAMPLES, isolate_example
+
+from platoon.harness.registry import get_harness
+
+with pytest.MonkeyPatch.context() as monkeypatch:
+    isolate_example(monkeypatch, EXAMPLES / "function-harness", ("tool_loop",))
+    get_harness("platoon-oracle")
+get_harness("platoon-oracle")
+"""
+
+
+def test_a_first_harness_lookup_inside_the_example_leaves_the_built_ins_to_later_tests():
+    """Core's built-in harnesses register on a process's first harness lookup. When a test of this module makes it
+    (an xdist worker may start with this module), they register in the process's registry all the same, not in the
+    copy the example works on and throws away: the tests that run later, ``tests/harness/test_oracle_harness.py``'s
+    among them, still find ``platoon-oracle``."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _FIRST_LOOKUP_INSIDE_THE_EXAMPLE, str(Path(__file__).resolve().parent)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
