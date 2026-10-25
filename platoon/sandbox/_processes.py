@@ -13,8 +13,9 @@ left, and lets the sandbox's own processes continue.
 The scripts run in the image's own ``/bin/sh`` (dash, busybox ash or bash) and use only shell builtins while they
 look at ``/proc``.  They refuse to act on a ``/proc`` that does not list their own shell, as one mounted over by a
 command would not.  A command run as another user that the sandbox's commands may not signal survives, and the kill
-fails, which no built-in provider allows: every command runs as the same user, or as the root of the sandbox's user
-namespace (``singularity`` with ``--fakeroot``), which may signal every other user's process there.
+fails, which no built-in provider allows: every command runs as the same user, or the kill runs as the root of the
+sandbox's user namespace (``singularity`` with ``--fakeroot``; ``docker``, whose own commands run as root), which may
+signal every other user's process there.
 
 A runtime may give a sandbox no PID namespace of its own (Singularity does not where the site's configuration says
 ``allow pid ns = no``), and there ``kill -1`` would reach every process of the user on the host.  So
@@ -33,12 +34,29 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from platoon.sandbox.base import Sandbox
+    from platoon.sandbox.base import ExecResult
 
 logger = logging.getLogger(__name__)
+
+
+class Commands(Protocol):
+    """What these helpers need of a sandbox: its id, and its ``exec`` (a docker sandbox's own run as root)."""
+
+    id: str
+
+    async def exec(
+        self,
+        cmd: str | list[str],
+        *,
+        timeout_s: float | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        stdin: bytes | None = None,
+    ) -> ExecResult: ...
+
 
 # How long the kill script keeps killing what is left before it gives up (passes of _PASS_PAUSE_S seconds).
 _KILL_PASSES = 100
@@ -233,7 +251,7 @@ done
 
 
 async def start_background(
-    sandbox: Sandbox,
+    sandbox: Commands,
     argv: list[str],
     *,
     log: str,
@@ -257,7 +275,7 @@ async def start_background(
     return entry[0]
 
 
-async def list_processes(sandbox: Sandbox) -> frozenset[str]:
+async def list_processes(sandbox: Commands) -> frozenset[str]:
     """Every process ``/proc`` lists in ``sandbox`` ("<pid>:<start time>"), its listing shell's aside; RuntimeError
     when it cannot be listed.  Unlike :func:`own_processes`, it lists a sandbox that shares this host's processes
     (the ``process`` provider's) too."""
@@ -269,7 +287,7 @@ async def list_processes(sandbox: Sandbox) -> frozenset[str]:
     return frozenset(line for line in result.stdout.split() if _ENTRY.fullmatch(line))
 
 
-async def alive_processes(sandbox: Sandbox, entries: frozenset[str] | set[str]) -> frozenset[str]:
+async def alive_processes(sandbox: Commands, entries: frozenset[str] | set[str]) -> frozenset[str]:
     """Which of ``entries`` ("<pid>:<start time>") still run in ``sandbox``; RuntimeError when it cannot tell."""
 
     if not entries:
@@ -283,7 +301,7 @@ async def alive_processes(sandbox: Sandbox, entries: frozenset[str] | set[str]) 
     return frozenset(line for line in result.stdout.split() if line in entries)
 
 
-async def own_processes(sandbox: Sandbox) -> frozenset[str] | None:
+async def own_processes(sandbox: Commands) -> frozenset[str] | None:
     """The sandbox's own processes ("<pid>:<start time>"), listed from inside it before any command ran.
 
     None when they cannot be listed (no ``/bin/sh``, or a ``/proc`` that does not show the sandbox's processes), or
@@ -329,7 +347,7 @@ def _this_process() -> str | None:
 
 
 async def kill_other_processes(
-    sandbox: Sandbox, keep: frozenset[str] | None, trees: frozenset[str] | set[str] = frozenset()
+    sandbox: Commands, keep: frozenset[str] | None, trees: frozenset[str] | set[str] = frozenset()
 ) -> None:
     """SIGKILL, from inside ``sandbox``, every process but its own (``keep``, from :func:`own_processes`) and the kept
     ``trees`` (their roots, "<pid>:<start time>"), each with its descendants.

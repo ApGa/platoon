@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from platoon.envs.harbor import HarborEnvironmentService, HarborSession, load_task
+from platoon.envs.harbor.tools import SandboxTools
 from platoon.envs.service import PLATOON_ZERO_KEY, EnvironmentService, EnvSession, EnvSetupError, get_service
-from platoon.sandbox import CWD_ERROR_EXIT_CODE, CWD_ERROR_PREFIX, ExecResult, SandboxSpec
+from platoon.sandbox import CWD_ERROR_EXIT_CODE, CWD_ERROR_PREFIX, ExecResult, Sandbox, SandboxSpec
 from platoon.sandbox.process import ProcessProvider, ProcessSandbox
 from platoon.task import Task
 
@@ -380,6 +384,81 @@ async def test_calls_from_shared_forks_take_turns_unless_the_tool_is_declared_co
         finally:
             await child.close()
             await parent.close()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every file")
+async def test_edit_reads_as_the_sandboxs_commands_user(service: HarborEnvironmentService):
+    """edit reads through the sandbox's shell, as its commands' user (the agents' where a session honors users), never
+    as the sandbox's root: a file that user may not read is an error that says only so."""
+
+    session = await _open(service, "hello-file")
+    try:
+        private = _host(session, "/app/private.txt")
+        private.write_text("secret\n")
+        private.chmod(0)
+        refused = await session.call_tool("edit", {"path": "private.txt", "old_str": "secret", "new_str": "x"})
+        assert refused.is_error and _text(refused) == "Cannot read /app/private.txt: Permission denied"
+        missing = await session.call_tool("edit", {"path": "missing.txt", "old_str": "a", "new_str": "b"})
+        assert missing.is_error and _text(missing) == "No such file: /app/missing.txt"
+        _host(session, "/app/bytes.bin").write_bytes(b"\xff\xfe")
+        binary = await session.call_tool("edit", {"path": "bytes.bin", "old_str": "a", "new_str": "b"})
+        assert binary.is_error and _text(binary) == "/app/bytes.bin is not a UTF-8 text file"
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("cut", [400, 401])  # at the end of a base64 group, and within one
+async def test_edit_refuses_a_file_whose_contents_the_sandbox_cut_short(cut: int):
+    class Capped:
+        """A sandbox whose output holds the first bytes of a large file only, as one that caps a command's output."""
+
+        id = "capped"
+
+        async def exec(self, cmd, **options) -> ExecResult:
+            return ExecResult(0, "100000000\n" + base64.b64encode(b"x" * 600).decode()[:cut], "")
+
+    result = await SandboxTools(cast(Sandbox, Capped()), workdir="/app").call(
+        "edit", {"path": "big.txt", "old_str": "x", "new_str": "y"}
+    )
+
+    assert result.is_error and _text(result) == "/app/big.txt is too large to edit (100000000 bytes)"
+
+
+@pytest.mark.parametrize("path", ["fifo", "/dev/zero"])
+async def test_edit_refuses_a_file_that_is_not_regular_at_once(service: HarborEnvironmentService, path: str):
+    """A FIFO, whose read waits for a writer, and a device that never ends are no files to edit: refused at once, never
+    a read that holds the session's turn."""
+
+    session = await _open(service, "hello-file")
+    try:
+        made = await session.call_tool("bash", {"command": "mkfifo fifo"})
+        assert not made.is_error, _text(made)
+        result = await asyncio.wait_for(session.call_tool("edit", {"path": path, "old_str": "a", "new_str": "b"}), 20)
+        assert result.is_error and _text(result) == f"{posixpath.join('/app', path)} is not a regular file"
+    finally:
+        await session.close()
+
+
+async def test_edit_reads_within_the_tools_command_timeout():
+    class Stuck:
+        """A sandbox whose read of the file never answers, as one of a file that turned into a FIFO would not."""
+
+        id = "stuck"
+
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        async def exec(self, cmd, *, timeout_s=None, **options) -> ExecResult:
+            self.timeouts.append(timeout_s)
+            return ExecResult(-9, "", "", timed_out=True)
+
+    sandbox = Stuck()
+    result = await SandboxTools(cast(Sandbox, sandbox), workdir="/app", command_timeout_s=7).call(
+        "edit", {"path": "notes.txt", "old_str": "a", "new_str": "b"}
+    )
+
+    assert sandbox.timeouts == [7]
+    assert result.is_error and _text(result) == "Cannot read /app/notes.txt: no answer in 7 s"
 
 
 async def test_concurrent_edits_of_one_file_all_apply(service: HarborEnvironmentService):

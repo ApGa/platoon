@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The Harbor service (`platoon/envs/harbor/`), sandboxes (`platoon/sandbox/`), the harness runner (`platoon/harness/runner.py`) and the gateway (`platoon/gateway/server.py`); [Architecture](../architecture.md) (the Harbor backend, sandboxes, the native-tools rule); [RFC 0001](0001-native-multi-agent.md) (per-agent grading, `snapshot_async`), [RFC 0004](0004-sandweave-integration.md) (capabilities and routes), [RFC 0005](0005-gateway-dialects-and-tito.md) (dialects), [RFC 0008](0008-config-and-cli.md) (`platoon eval`), [RFC 0009](0009-gateway-step-budgets.md) (step budgets) |
 | Discussion | The pull request that adds this revision |
-| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources; M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. The sources pull request: the rest of M1, the Harbor Hub, Harbor's legacy registry, git repositories and adapters (no `ls`, and no `service: harbor://...` shorthand). The Docker-stacks pull request: stacks on the `docker` provider as `docker compose` projects, sidecars' build contexts built by `platoon prepare`, and Docker-only privileges for a fetch that keeps them (`refuse: {privileges: false}`, the `privileged` capability). The pods pull request: M7's stacks as hpc-sandbox pods on Singularity, and on Apptainer and enroot (experimental), with hpc-sandbox 0.5 (with 0.4 they are refused, naming it): a run mode per service, the gateway relayed by the pod, volumes in the pod's directory, egress per phase; the registry images that sidecars run pinned with their configuration by `platoon prepare` (`platoon harbor images pin`), which also fetches the pod tools. Not yet: M5, the rest of M6 (task MCP servers), enroot pods at a site, M8, M9, and trajectories recording the kill mode |
+| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources; M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. The sources pull request: the rest of M1, the Harbor Hub, Harbor's legacy registry, git repositories and adapters (no `ls`, and no `service: harbor://...` shorthand). The Docker-stacks pull request: stacks on the `docker` provider as `docker compose` projects, sidecars' build contexts built by `platoon prepare`, and Docker-only privileges for a fetch that keeps them (`refuse: {privileges: false}`, the `privileged` capability). The pods pull request: M7's stacks as hpc-sandbox pods on Singularity, and on Apptainer and enroot (experimental), with hpc-sandbox 0.5 (with 0.4 they are refused, naming it): a run mode per service, the gateway relayed by the pod, volumes in the pod's directory, egress per phase; the registry images that sidecars run pinned with their configuration by `platoon prepare` (`platoon harbor images pin`), which also fetches the pod tools. The users pull request: `agent_user: honor` and `verifier_user: honor` for any user in single sandboxes (§7: Docker's, and Singularity's with `--fakeroot`), with owner manifests and pulled entries recorded by `platoon prepare`. Not yet: M5, the rest of M6 (task MCP servers), enroot pods at a site, M8, M9, users on stacks, and trajectories recording the kill mode |
 
 ## Summary
 
@@ -226,7 +226,7 @@ class BuildPlan:
     a `FROM`, a `COPY --from`, …).
   - The deferred suffix is the instructions after it that copy task files or set metadata. Nothing executes after
     them at build time, so applying them when a session opens is equivalent.
-  - `USER` in the suffix is refused unless the environment accepts running as one uid (§7).
+  - `USER` in the suffix is the agents' user where the environment honors users (§7); a fetch refuses it otherwise.
 - **Sharing.** Tasks whose prefixes match share one image. A data-analysis pool whose Dockerfiles differ only in a
   trailing `COPY input/` needs one image, not one per task.
 - **Overlays.** A pool whose `RUN` comes after its `COPY` can be reordered by a dataset overlay. Overlays are task
@@ -669,11 +669,38 @@ sidecars that the overlay does not authenticate or bind to a node service.
 
 - **GPUs.** `gpus > 0` is refused on providers without the `gpu` capability. A provider with it leases whole devices
   per sandbox: one `flock` per device in a node-local directory, and the leased devices passed by UUID.
-- **Users.** Rootless providers run the agents' processes as one uid, so `[agent].user` and `[verifier].user` cannot be
-  honored there; a pod's sidecars run in their own run modes (§6), with the caller's subordinate ids where it has
-  them, so that an image's own switch to its user works.
-  - `agent_user: refuse`, the default, refuses such tasks at fetch.
-  - `ignore` runs them as the single uid and records that in the trajectory.
+- **Users** (implemented for single sandboxes). A rootless sandbox runs every process as one uid, unless it gives root
+  and other users: Docker's, Singularity's with `--fakeroot` (root of a user namespace that maps the caller's
+  subordinate ids), and pods with subordinate ids. A pod's sidecars run in their own run modes (§6), with the caller's
+  subordinate ids where it has them, so that an image's own switch to its user works; its `main` runs as root alone.
+  - `agent_user: refuse`, the default, refuses tasks that name users at fetch (`refuse.agent_user`) and at load.
+  - `ignore` runs them as the sandbox's own uid and records that in the trajectory.
+  - `honor` runs each phase as Harbor does: the agents' commands as `[agent].user`, else the image's `USER`, else
+    root; the tests as `[verifier].user`, else the image's `USER`, else root; platoon's own commands as root. On
+    Docker, through `docker exec --user`; elsewhere, through a switch run by the sandbox's root with the image's
+    `setpriv`, else `su`, else Python's standard library, which also sets `HOME`, `USER` and `LOGNAME` from the
+    image's `/etc/passwd`. The session's `sandbox` is the agents' view, which the harness, the env tools and the
+    oracle use; grading and the kills keep root's. Commands there run with Docker's umask, the log directories the
+    agents publish in are every user's, `/logs/verifier` and `/tests` are the tests' where they run as a user other
+    than root (root's tests keep `/tests` with the host's modes, as Harbor copies it), and `edit` reads files through
+    the switched shell, never as root, regular files only and within the tools' time limit. `enroot` and `process`
+    refuse it, and so does Singularity without `fakeroot` or on the fuse-overlay layout; a stack in which users would
+    run (every stack under `agent_user: honor`) is refused until stacks honor users (views of a compose project's
+    `main`, and pods that run `main` with subordinate ids). A root verifier graded in its agents' own sandbox is legal
+    when the agents run as their user.
+  - **Owner manifests.** hpc-sandbox extracts every image as the caller, and Singularity's conversion of a registry
+    image records every file as root's, so a user that an image gives a directory would find it root's. `platoon
+    prepare` records each image's manifest of the paths its layers give users other than root: from the OCI-SIF
+    layer the `oci` builder makes (`unsquashfs -lln`, before it unpacks the layer as the caller), and, for a task's
+    `docker_image`, from the registry's layer tar headers (whiteouts applied) in a *pulled* entry that pins the
+    image and records its `USER`, which a sandbox there could not read otherwise: a sandbox that runs anything as an
+    image's `USER` needs the record too. A deferred `COPY --chown` is applied when the session uploads it, and a
+    deferred `WORKDIR` gives the directories it makes to the `USER` in effect there, as BuildKit makes them (the plan
+    keeps each deferred `USER`'s place); such a sandbox starts in `/`, so that its start makes no working directory as
+    root, and its commands run in the working directory.
+    hpc-sandbox 0.5 applies a manifest in `fakeroot` sandboxes (`SandboxSpec.file_owners`); platoon detects the field
+    and refuses, naming 0.5, a task that needs one with an older hpc-sandbox. Docker keeps its images' owners itself.
+  - `copy` forks of a Singularity sandbox that honors users are refused: its snapshots keep no owners.
 - **Network policy** (implemented). `network_policy: task`, the default, honors the task's `network_mode` per phase
   (a stack graded in its own `main` gets the verifier's). `none` forces no network on every sandbox and stack, in
   every phase, for datasets whose answers can be found on the web.
@@ -701,7 +728,7 @@ What changes is the default HPC provider:
 
 | Change | Compatible? |
 |---|---|
-| New `service_kwargs`: `dataset`, `adapter`, `registry`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy` (`task`, `none`), `stacks` (`auto`, `refuse`; `host_network` with the fallback), `on_sidecar_down` (`invalid`, `grade`), `agent_user` | additive |
+| New `service_kwargs`: `dataset`, `adapter`, `registry`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy` (`task`, `none`), `stacks` (`auto`, `refuse`; `host_network` with the fallback), `on_sidecar_down` (`invalid`, `grade`), `agent_user` (`refuse`, `ignore`, `honor`) | additive |
 | New environment-entry key `on_harness_exit`; new rollout-config key `sampling_precedence` (`request`, today's behavior, or `config`, under which policy calls sample with the temperature, top_p and top_k of `inference_params`, never a harness's own) and `inference_params.top_k` | additive; defaults keep today's behavior |
 | Spec keys `[install.recipe]`, `[resources]`, `[budget]`; `[install].toolchain` may be a name | additive |
 | Overlay keys `[[compose]]` and `compose_host_env`; the lock's `compose` and `compose_rule`, and `flags.stack: main_only`; `Sandbox.keep_processes` (optional) | additive |
@@ -727,7 +754,8 @@ No public name is removed.
    - Exec goes through `nsenter`, which must reproduce the payload's environment and working directory.
    - Inside the pod, processes are uid 0 mapped to the caller, so `chown` to other uids fails, unless the service
      runs with the caller's subordinate ids (its `subids` run mode, where the caller has them), as a sidecar does that
-     switches users. apt drops privileges to `_apt`, which hpc-sandbox's drop-in keeps from failing.
+     switches users. apt drops privileges to `_apt`, which hpc-sandbox's drop-in keeps from failing. A task's users
+     are honored in single sandboxes (§7), not yet in a stack's `main`.
 2. **Images at scale.**
    - Each sandbox extracts its root filesystem from the image, and separate verifiers double the number of
      sandboxes. Large images make start time the bottleneck. A per-node template plus copy-on-write copies

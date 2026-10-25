@@ -24,6 +24,11 @@ Of its provider's capabilities, an adapter keeps those of platoon's contract
 its sandboxes run on this node.  It also declares ``stacks`` where hpc-sandbox's ``pods`` can run them: it starts each
 stack as a pod (:mod:`platoon.sandbox.hpc_stacks`), with hpc-sandbox 0.5 and on a node that nests user namespaces.
 
+hpc-sandbox extracts every image as your user, which loses the owners the image gives its files
+(:attr:`HpcProvider.loses_file_owners`).  A spec's ``file_owners``, the image's owner manifest, passes to an
+hpc-sandbox that applies one (0.5 on, in ``fakeroot`` sandboxes); an older one refuses such a spec when it starts
+(:func:`file_owners_refusal`).
+
 A string command runs through ``bash -c``, as :mod:`platoon.sandbox.base` says and the other providers do, not through
 hpc-sandbox's ``/bin/sh -c``: the ``bash`` tool of a Harbor task then takes bash syntax (``[[ ]]``, ``source``,
 ``set -o pipefail``) on every provider, and an image without bash runs only argv commands.
@@ -39,6 +44,7 @@ without a network (a bind of the socket's directory plus a forwarder on port 180
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib
 import logging
 import shutil
@@ -77,6 +83,27 @@ class Routes(Protocol):
     def routes(self) -> dict[str, str]: ...
 
     async def ensure(self, sandbox: Any) -> dict[str, str]: ...
+
+
+# Why an hpc-sandbox without SandboxSpec.file_owners cannot give a sandbox's files the owners its image gives them.
+NO_FILE_OWNERS = (
+    "the installed hpc-sandbox cannot give a sandbox's files the owners its image gives them "
+    "(SandboxSpec.file_owners): it extracts every image as your user, so the users a task names would find root's "
+    "files where Docker gives them their own. Install hpc-sandbox 0.5, whose fakeroot sandboxes apply an image's "
+    "owner manifest"
+)
+
+
+def file_owners_refusal() -> str | None:
+    """Why the installed hpc-sandbox cannot apply an image's owner manifest (``SandboxSpec.file_owners``, 0.5 on);
+    None when it can, or when no hpc-sandbox is installed (building a provider says so)."""
+
+    try:
+        spec = importlib.import_module("hpc_sandbox").SandboxSpec
+        takes = "file_owners" in {field.name for field in dataclasses.fields(spec)}
+    except (ImportError, AttributeError, TypeError):
+        return None
+    return None if takes else NO_FILE_OWNERS
 
 
 class HpcSandbox:
@@ -188,6 +215,9 @@ class HpcProvider:
     isolates: ClassVar[bool] = True
     # The runtime executables a node needs, any one of them, unless the options name one (``binary``).
     executables: ClassVar[tuple[str, ...]] = ()
+    # It extracts every image as one user: a sandbox's files keep the owners the image gives them only through the
+    # image's owner manifest (SandboxSpec.file_owners).
+    loses_file_owners: ClassVar[bool] = True
 
     @classmethod
     def unavailable(cls, options: Mapping[str, Any]) -> str | None:
@@ -235,6 +265,13 @@ class HpcProvider:
         switch to, or None (:func:`platoon.sandbox.root_refusal`); each subclass says so for its runtime."""
 
         return None
+
+    @classmethod
+    def file_owners_refusal(cls, options: Mapping[str, Any]) -> str | None:
+        """Why a provider built with ``options`` could not apply an image's owner manifest
+        (:func:`platoon.sandbox.file_owners_refusal`): an hpc-sandbox before 0.5."""
+
+        return file_owners_refusal()
 
     @classmethod
     def stack_refusal(cls, options: Mapping[str, Any]) -> str | None:
@@ -328,6 +365,11 @@ class HpcProvider:
 
         hpc_sandbox = self.hpc_sandbox
         mounts = [*spec.mounts, *(routes.mounts() if routes is not None else ())]
+        owners: dict[str, str] = {}
+        if spec.file_owners is not None:
+            if (refusal := file_owners_refusal()) is not None:
+                raise ValueError(refusal)
+            owners["file_owners"] = spec.file_owners
         return hpc_sandbox.SandboxSpec(
             image=spec.image,
             workdir=spec.workdir,
@@ -337,7 +379,8 @@ class HpcProvider:
             cpus=spec.cpus,
             memory_mb=spec.memory_mb,
             labels=dict(spec.labels if labels is None else labels),
+            **owners,
         )
 
 
-__all__ = ["HpcProvider", "HpcSandbox", "import_hpc_sandbox"]
+__all__ = ["NO_FILE_OWNERS", "HpcProvider", "HpcSandbox", "file_owners_refusal", "import_hpc_sandbox"]

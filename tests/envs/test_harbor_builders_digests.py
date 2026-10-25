@@ -113,7 +113,7 @@ def test_a_reference_pinned_by_digest_needs_no_request():
     ],
 )
 def test_references_resolve_with_dockers_defaults(reference: str, parsed: tuple):
-    assert builders._parse_reference(reference) == parsed
+    assert builders.parse_reference(reference) == parsed
 
 
 def test_registries_that_cannot_answer_raise_digest_errors():
@@ -176,7 +176,7 @@ def test_builds_run_dockerfiles_with_each_base_image_named_by_digest(tmp_path: P
     ]
     unresolved = builders._pinned_dockerfile(plan, {"golang:1.22": None, "python:3.12-slim": python})
     assert "FROM --platform=linux/amd64 golang:1.22 AS build\n" in unresolved  # built as written
-    assert builders._pinned_reference("localhost:5000/team/tool:1", golang) == f"localhost:5000/team/tool@{golang}"
+    assert builders.pinned_reference("localhost:5000/team/tool:1", golang) == f"localhost:5000/team/tool@{golang}"
 
 
 def test_a_run_asks_the_registry_once_per_reference():

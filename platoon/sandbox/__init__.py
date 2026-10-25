@@ -174,6 +174,36 @@ def root_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | N
     return refusal(dict(options or {})) if callable(refusal) else None
 
 
+def loses_file_owners(provider: str | SandboxProvider) -> bool:
+    """Whether ``provider`` (a name, or a built provider) gives its sandboxes' files other owners than their image does,
+    as hpc-sandbox, which extracts every image as one user: their files then keep the image's owners only through its
+    owner manifest (``SandboxSpec.file_owners``).  A provider class says so with ``loses_file_owners = True``; False
+    for one that does not, or that cannot be imported (building it reports that)."""
+
+    if isinstance(provider, str):
+        try:
+            provider = provider_class(provider)
+        except (ImportError, AttributeError, ValueError):
+            return False
+    return bool(getattr(provider, "loses_file_owners", False))
+
+
+def file_owners_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | None = None) -> str | None:
+    """Why ``provider`` (a name with its ``options``, or a built provider) could not give a sandbox's files the owners
+    its image's manifest lists (``SandboxSpec.file_owners``), read without building it; None when it can, or when it
+    cannot tell.  A provider class tells through a ``file_owners_refusal(options)`` class method."""
+
+    if isinstance(provider, str):
+        try:
+            kind = provider_class(provider)
+        except (ImportError, AttributeError, ValueError):
+            return None  # building the provider reports it
+    else:
+        kind, options = type(provider), getattr(provider, "options", None)
+    refusal = getattr(kind, "file_owners_refusal", None)
+    return refusal(dict(options or {})) if callable(refusal) else None
+
+
 __all__ = [
     "CWD_ERROR_EXIT_CODE",
     "CWD_ERROR_PREFIX",
@@ -198,7 +228,9 @@ __all__ = [
     "SupportsReap",
     "Volume",
     "cwd_error",
+    "file_owners_refusal",
     "get_provider",
+    "loses_file_owners",
     "network_none_refusal",
     "privilege_refusal",
     "provider_class",

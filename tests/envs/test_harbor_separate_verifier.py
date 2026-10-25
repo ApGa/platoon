@@ -356,7 +356,7 @@ async def test_workers_find_registered_tasks_without_indexing_the_dataset(record
 async def test_the_task_agent_timeout_scales_and_ignored_users_are_recorded(recording, make_task):
     task_dir = make_task("user", task_toml='[agent]\ntimeout_sec = 120\nuser = "agent"\n')
     made_elsewhere = Task(id="user", goal="Do the task.", misc={"harbor": {"task_dir": str(task_dir)}})
-    with pytest.raises(EnvSetupError, match="agent_user: ignore") as refused:
+    with pytest.raises(EnvSetupError, match="agent_user: honor, .* or ignore") as refused:
         await _service(recording, task_dir).open(made_elsewhere, rollout_id="r")
     assert refused.value.failure_kind == "env_config" and recording.started == []
 

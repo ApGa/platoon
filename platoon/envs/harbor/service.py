@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import os
+import posixpath
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -42,7 +43,14 @@ from platoon.envs.harbor.images import (
 )
 from platoon.envs.harbor.lock import LockError
 from platoon.envs.harbor.locked import LockedTasks, TaskImages
-from platoon.envs.harbor.session import DEFAULT_CLOSE_TIMEOUT_S, LOG_DIRS, HarborSession, SandboxLease, StackLease
+from platoon.envs.harbor.session import (
+    DEFAULT_CLOSE_TIMEOUT_S,
+    LOG_DIRS,
+    PUBLISHED_DIRS,
+    HarborSession,
+    SandboxLease,
+    StackLease,
+)
 from platoon.envs.harbor.task import (
     _PLANNED_HERE,
     AGENT_USER_POLICIES,
@@ -57,7 +65,8 @@ from platoon.envs.harbor.task import (
     resolve_env,
 )
 from platoon.envs.harbor.tools import DEFAULT_COMMAND_TIMEOUT_S, TOOL_SPECS
-from platoon.envs.harbor.users import DOCKER_UMASK, nobody_problem, root_problem
+from platoon.envs.harbor.users import hook_users, nobody_problem, phase_users, root_problem, runs_image_user
+from platoon.envs.harbor.views import SessionUsers, root_view, session_users
 from platoon.envs.service import EnvNotPrepared, EnvSetupError, Outcome, PathOption, SessionNeeds
 from platoon.sandbox import (
     Mount,
@@ -65,7 +74,9 @@ from platoon.sandbox import (
     SandboxProvider,
     SandboxSpec,
     StackStartError,
+    file_owners_refusal,
     get_provider,
+    loses_file_owners,
     network_none_refusal,
     privilege_refusal,
     root_refusal,
@@ -140,10 +151,12 @@ class HarborEnvironmentService:
     verifier is graded in a sandbox of its own (:mod:`platoon.envs.harbor.session`), from artifacts of at most
     ``max_artifact_bytes`` each (1 GiB by default; a larger one is left out).  ``agent_timeout_multiplier``
     scales each task's ``[agent].timeout_sec``, which harness rollouts cap the harness with.  ``agent_user``
-    (``refuse`` or ``ignore``) decides what a task naming a user to run as gets, and ``verifier_user`` decides for
-    ``[verifier].user`` instead when it is set: ``honor`` runs a separate verifier whose user is root as root
-    (:mod:`platoon.envs.harbor.users`).  Separate verifiers' sandboxes start with ``verifier_provider_options`` laid
-    over ``provider_options``, such as Singularity's ``fakeroot`` for verifiers that run as root.
+    (``refuse``, ``ignore`` or ``honor``) decides what a task naming a user to run as gets, and ``verifier_user``
+    decides for ``[verifier].user`` instead when it is set: ``honor`` runs each phase as Harbor does, the agents as
+    ``[agent].user``, else the image's ``USER``, the tests as ``[verifier].user``, else the image's ``USER``, in
+    sandboxes that give root and other users, with the image's file owners (:mod:`platoon.envs.harbor.views`).
+    Separate verifiers' sandboxes start with ``verifier_provider_options`` laid over ``provider_options``, such as
+    Singularity's ``fakeroot`` for verifiers that run as root.
 
     Agents sharing a sandbox take turns on it: its tools run one at a time,
     except those named in ``concurrent_tools`` (``bash`` and ``view`` may
@@ -312,6 +325,7 @@ class HarborEnvironmentService:
         )
         self._locked: LockedTasks | None = None
         self._warned_of_fetch = False
+        self._warned_of_copies = False
         if dataset is not None or adapter is not None or lock is not None:
             if dataset_dir is not None or task_dirs is not None:
                 raise ValueError("Pass dataset, adapter or lock, or dataset_dir or task_dirs, not both")
@@ -438,13 +452,14 @@ class HarborEnvironmentService:
 
     async def check_tasks(self, split: str, task_ids: Sequence[str]) -> None:
         """Refuse, with an ``env_config`` ``EnvSetupError``, the tasks of ``split`` a run keeps (``task_ids``, what
-        ``exclude_tasks`` left of the listing) that the sandbox provider would refuse to start, or whose verifier
-        could not run as their ``[verifier].user`` asks (:meth:`_check_users`), or whose verifier would run as root
-        on an image that may keep its files from other users (:meth:`_check_root_images`), so that the run stops when
-        it lists its tasks rather than lose every rollout of theirs, or that are multi-container stacks no rollout
+        ``exclude_tasks`` left of the listing) that the sandbox provider would refuse to start, or that could not run
+        as their ``[agent].user`` and ``[verifier].user`` ask (:meth:`_check_users`), or whose sandboxes honor users
+        on an image that may keep its files from other users (:meth:`_check_closed_images`), so that the run stops
+        when it lists its tasks rather than lose every rollout of theirs, or that are multi-container stacks no rollout
         could start (:meth:`_check_stacks`, :meth:`_check_privileges`, :meth:`_check_stack_specs`); and, with
         :class:`EnvNotPrepared`, tasks of a fetched dataset whose images the image map lacks (:meth:`_check_images`),
-        or whose sidecars run registry images it has not pinned (:meth:`_check_pins`)."""
+        whose sidecars run registry images it has not pinned (:meth:`_check_pins`), or whose sandboxes honor users and
+        lack their images' file owners (:meth:`_check_owners`)."""
 
         if task_ids and (refusal := rootfs_layout_refusal(self._provider, self._provider_options)):
             raise EnvSetupError("env_config", f"the {self._provider_name()} provider would start no sandbox: {refusal}")
@@ -462,8 +477,9 @@ class HarborEnvironmentService:
         self._check_users(task_ids, split)
         self._check_images(task_ids, split)
         self._check_pins(task_ids, split)
+        self._check_owners(task_ids, split)
         self._check_stack_specs(task_ids, split)
-        self._check_root_images(task_ids, split)
+        self._check_closed_images(task_ids, split)
 
     def _check_images(self, names: Sequence[str], split: str) -> None:
         """Refuse tasks of a fetched dataset that build their image, their separate verifier's or a stack sidecar's
@@ -658,17 +674,19 @@ class HarborEnvironmentService:
         return {phase: network_none_refusal(self._provider, options) for phase, options in self._phase_options.items()}
 
     def _check_users(self, names: Sequence[str], split: str) -> None:
-        """With ``verifier_user: honor``, refuse the tasks whose ``[verifier].user`` it cannot honor (another user
-        than root, or a root verifier of a task graded in its agents' sandbox, which :meth:`HarborTask.load` refuses),
-        and the tasks whose verifier runs as root where the verifiers' sandboxes cannot give it root and other users
-        (:func:`platoon.sandbox.root_refusal`): every rollout of theirs would fail, or score 0 when their tests cannot
-        run the agent's code as another user."""
+        """With ``agent_user`` or ``verifier_user`` set to ``honor``, refuse the tasks that could not run as their
+        ``[agent].user`` and ``[verifier].user`` ask: those :meth:`HarborTask.load` refuses (a stack whose users are
+        honored, a root verifier of a task graded in its agents' sandbox whose agents are not), and those with a sandbox
+        that honors users (:meth:`HarborTask.honors_users_in`) where its provider's options cannot give root and other
+        users (:func:`platoon.sandbox.root_refusal`): every rollout of theirs would fail, or score 0 when their tests
+        cannot run the agent's code as another user."""
 
-        if self.verifier_user != "honor" or not names:
+        if "honor" not in (self.agent_user, self.verifier_user) or not names:
             return
         self._warn_of_fetch_refusals()
-        cannot_give_root = root_refusal(self._provider, self._phase_options["verifier"])
+        cannot = {phase: root_refusal(self._provider, options) for phase, options in self._phase_options.items()}
         refused: dict[str, str] = {}  # task -> why
+        honoring: list[str] = []
         for name in names:
             try:
                 harbor_task = self._peek(name)
@@ -677,59 +695,126 @@ class HarborEnvironmentService:
                 continue
             except (KeyError, ValueError):  # unknown, or not readable: it fails on its own when it is opened
                 continue
-            if harbor_task.verifier_root and cannot_give_root is not None:
-                refused[name] = (
-                    f"its verifier runs as root, and the verifiers' sandboxes cannot give it root: {cannot_give_root}"
-                )
+            if (why := _users_refusal(harbor_task, cannot)) is not None:
+                refused[name] = why
+            if harbor_task.honored_users:
+                honoring.append(name)
+        self._warn_of_dropped_owners(honoring)
         if refused:
             shown = ", ".join(list(refused)[:3]) + (f" and {len(refused) - 3} more" if len(refused) > 3 else "")
             name, why = next(iter(refused.items()))
-            root = any(reason.startswith("its verifier runs as root") for reason in refused.values())
+            fix = (
+                "set agent_user or verifier_user to ignore, to run them as the sandbox's own user, or leave those "
+                "tasks out (exclude_tasks)"
+            )
+            if any(reason.startswith("its ") for reason in refused.values()):  # a sandbox that cannot give root
+                fix = (
+                    f"Give those sandboxes root (provider_options, verifier_provider_options for the verifiers'), {fix}"
+                )
             raise EnvSetupError(
                 "env_config",
-                f"{len(refused)} of the {len(names)} tasks of split {split!r} cannot run their verifier as their "
-                f"[verifier].user asks ({shown}); {name}: {why}. "
-                + ("Give the verifiers' sandboxes root (verifier_provider_options), set " if root else "Set ")
-                + "verifier_user: ignore to run them as the sandbox's own user, or leave those tasks out "
-                "(exclude_tasks)",
+                f"{len(refused)} of the {len(names)} tasks of split {split!r} cannot run as their [agent].user and "
+                f"[verifier].user ask ({shown}); {name}: {why}. {fix[0].upper()}{fix[1:]}",
+            )
+
+    def _check_owners(self, names: Sequence[str], split: str) -> None:
+        """Refuse the tasks whose sandboxes honor users on a provider that loses the files' owners (hpc-sandbox), and
+        that could not give their images' files their owners: :class:`EnvNotPrepared` for an image whose owner manifest
+        the image map lacks (``platoon prepare`` records those of pulled images, and names the build of the others),
+        an ``env_config`` ``EnvSetupError`` for one no image map can hold (a dataset directory's) or that the installed
+        hpc-sandbox cannot apply (before 0.5)."""
+
+        if "honor" not in (self.agent_user, self.verifier_user) or not names or not loses_file_owners(self._provider):
+            return
+        missing: dict[str, str] = {}
+        refused: dict[str, str] = {}
+        for name in names:
+            try:
+                harbor_task = self._peek(name)
+            except (KeyError, ValueError):  # refused or unknown: it fails on its own when it is opened
+                continue
+            for verifier in (False, True):
+                try:
+                    self._file_owners(harbor_task, verifier=verifier)
+                except EnvNotPrepared as exc:
+                    missing.setdefault(name, str(exc))
+                except ValueError as exc:
+                    refused.setdefault(name, str(exc))
+        if problems := refused or missing:
+            shown = ", ".join(list(problems)[:3]) + (f" and {len(problems) - 3} more" if len(problems) > 3 else "")
+            message = (
+                f"{len(problems)} of the {len(names)} tasks of split {split!r} honor users in sandboxes that lose the "
+                f"owners of their images' files ({shown}): {next(iter(problems.values()))}"
+            )
+            raise EnvSetupError("env_config", message) if refused else EnvNotPrepared(message)
+
+    def _warn_of_dropped_owners(self, names: Sequence[str]) -> None:
+        """Warn, once, of the tasks that honor users (``names``) whose build plans defer a ``COPY``, or a ``WORKDIR``
+        and a ``USER``, in a lock that a platoon before 0.5 wrote, which drops a deferred copy's ``--chown`` and where
+        a ``USER`` falls among the deferred steps: their copies, and the directories that a ``WORKDIR`` after the
+        ``USER`` makes, stay root's."""
+
+        if self._locked is None or self._warned_of_copies:
+            return
+        self._warned_of_copies = True
+        lock = self._locked.dataset(fetch_allowed=False).lock
+        if lock.compose_rule:  # written by platoon 0.5 or later, whose plans keep --chown and their USER steps
+            return
+        copying = []
+        for name in names:
+            row = lock.get(name)
+            for plan in (row.image or {}, row.verifier_image or {}):
+                kinds = {step[0] for step in plan.get("deferred") or ()}
+                if "COPY" in kinds or (plan.get("suffix_user") and "WORKDIR" in kinds):
+                    copying.append(name)
+                    break
+        if copying:
+            shown = ", ".join(copying[:3]) + (f" and {len(copying) - 3} more" if len(copying) > 3 else "")
+            logger.warning(
+                "%d task(s) of %s that honor users defer a COPY, or a WORKDIR and a USER, (%s) in a lock that a "
+                "platoon before 0.5 wrote, which keeps no COPY --chown and no USER among the deferred steps: their "
+                "copies, and the directories that a WORKDIR after the USER makes, stay root's. Fetch the dataset "
+                "again to keep their owners (platoon harbor fetch CONFIG --repair)",
+                len(copying),
+                lock.dataset,
+                shown,
             )
 
     def _warn_of_fetch_refusals(self) -> None:
-        """Warn, once, of the tasks whose ``[verifier].user`` is root that the fetch of the service's dataset left out:
-        its ``refuse.agent_user``, on by default, refuses every task that names a user, so ``verifier_user: honor``
-        never sees them."""
+        """Warn, once, of the tasks whose users ``honor`` would honor that the fetch of the service's dataset left out:
+        its ``refuse.agent_user``, on by default, refuses every task that names a user, so ``honor`` never sees them."""
 
         if self._locked is None or self._warned_of_fetch:
             return
         self._warned_of_fetch = True
         lock = self._locked.dataset(fetch_allowed=False).lock
+        phases = ("agent_user", "verifier_user") if self.agent_user == "honor" else ("verifier_user",)
         left_out = [
             task.name
             for task in lock.tasks
-            if (task.refused or "").startswith("agent_user:")
-            and task.flags.get("verifier_user") is not None
-            and is_root(str(task.flags["verifier_user"]))
+            if (task.refused or "").startswith("agent_user:") and any(task.flags.get(phase) for phase in phases)
         ]
         if left_out:
             shown = ", ".join(left_out[:3]) + (f" and {len(left_out) - 3} more" if len(left_out) > 3 else "")
+            policy = "agent_user" if self.agent_user == "honor" else "verifier_user"
             logger.warning(
-                "verifier_user: honor runs none of the %d task(s) of %s whose [verifier].user is root (%s): the fetch "
-                "left them out, since its refuse.agent_user, on by default, refuses every task that names a user. Set "
-                "refuse: {agent_user: false} to fetch them, with agent_user: ignore for those that also set "
-                "[agent].user",
+                "%s: honor runs none of the %d task(s) of %s that name users to run as (%s): the fetch left them out, "
+                "since its refuse.agent_user, on by default, refuses every task that names a user. Set refuse: "
+                "{agent_user: false} to fetch them",
+                policy,
                 len(left_out),
                 lock.dataset,
                 shown,
             )
 
-    def root_images_closed(self, names: Sequence[str] | None = None) -> dict[str, list[str]]:
-        """With ``verifier_user: honor``, the images of the image map that tasks of a fetched dataset (``names``, else
-        every runnable task of its lock) run their verifier as root on and that may keep their files from the users
-        the tests switch to, since the ``oci`` builder of platoon before 0.3.0 built them
+    def closed_images(self, names: Sequence[str] | None = None) -> dict[str, list[str]]:
+        """The images of the image map that tasks of a fetched dataset (``names``, else every runnable task of its
+        lock) run in sandboxes that honor users (:meth:`HarborTask.honors_users_in`), and that may keep their files from
+        the users other than root, since the ``oci`` builder of platoon before 0.3.0 built them
         (:func:`~platoon.envs.harbor.images.withholds_modes`): by build key, with the tasks that run each.  Empty
-        otherwise, and for images the map lacks, which :meth:`_check_images` reports."""
+        without ``honor``, and for images the map lacks, which :meth:`_check_images` reports."""
 
-        if self.verifier_user != "honor" or self._locked is None:
+        if "honor" not in (self.agent_user, self.verifier_user) or self._locked is None:
             return {}
         try:
             image_map = self._images.load()
@@ -744,33 +829,84 @@ class HarborEnvironmentService:
                 harbor_task = self._peek(name)
             except (KeyError, ValueError):  # refused or unknown: reported, or failing, on its own
                 continue
-            environment = harbor_task.verifier_environment
-            if not harbor_task.verifier_root or environment is None:
-                continue
             row = lock.get(name)
-            plan = {"task": row.image, "tests": row.verifier_image}.get(environment.image_source) or {}
-            entry = image_map.get(key) if (key := plan.get("key")) else None
-            if entry is not None and withholds_modes(entry):
-                closed.setdefault(key, []).append(name)
+            plans = [row.image] if harbor_task.honors_users_in("agents") else []
+            environment = harbor_task.verifier_environment
+            if harbor_task.honors_users_in("verifier") and environment is not None:
+                plans.append({"task": row.image, "tests": row.verifier_image}.get(environment.image_source) or {})
+            for plan in plans:
+                entry = image_map.get(key) if (key := plan.get("key")) else None
+                if entry is not None and withholds_modes(entry):
+                    closed.setdefault(key, []).append(name)
         return closed
 
-    def _check_root_images(self, names: Sequence[str], split: str) -> None:
-        """Refuse tasks whose verifier runs as root on an image the ``oci`` builder of platoon before 0.3.0 built
-        (:meth:`root_images_closed`): on a host whose umask is 027, the users its tests switch to cannot run its
-        programs, and every grade would fail or score 0.  A run never builds images; the message names the build."""
+    def owner_gaps(self, names: Sequence[str] | None = None) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """Of the images that tasks of a fetched dataset (``names``, else every runnable task of its lock) run in
+        sandboxes that honor users, on a provider that loses the files' owners, those whose owners and ``USER`` such a
+        sandbox needs (:func:`_needs_record`) and the image map does not record: by build key, those built without an
+        owner manifest (by platoon before 0.5, the def builder, or the oci builder with a squashfs-tools before 4.4),
+        and by registry reference, the ``docker_image`` references that the map has no pulled entry for (``platoon
+        prepare`` records them); each with the tasks that run it.  Empty where no sandbox needs a record."""
 
-        if not names or not (closed := self.root_images_closed(names)):
+        if "honor" not in (self.agent_user, self.verifier_user) or self._locked is None:
+            return {}, {}
+        if not loses_file_owners(self._provider):
+            return {}, {}
+        lock = self._locked.dataset(fetch_allowed=False).lock
+        built: dict[str, list[str]] = {}
+        pulled: dict[str, list[str]] = {}
+        for name in names if names is not None else [task.name for task in lock.runnable()]:
+            try:
+                harbor_task = self._peek(name)
+                images = self._honoring_images(harbor_task)
+            except (KeyError, ValueError):  # refused or unknown: reported, or failing, on its own
+                continue
+            for image, session, verifier in images:
+                if session is not None and session.file_owners is not None:
+                    continue
+                if not _needs_record(harbor_task, session, verifier=verifier):
+                    continue
+                if session is not None and session.key:
+                    built.setdefault(image, []).append(name)
+                elif image.startswith("docker://"):  # a registry's, which prepare pulls; another is refused
+                    pulled.setdefault(image, []).append(name)
+        return built, pulled
+
+    def _honoring_images(self, harbor_task: HarborTask) -> list[tuple[str, SessionImage | None, bool]]:
+        """The images that the task's sandboxes which honor users run, its agents' and its separate verifier's, each
+        named by its build key, else by its reference as a sandbox runs it, with its session image (None: a
+        ``docker_image`` that the image map has no pulled entry for) and whether it is the verifier's."""
+
+        images: list[tuple[str, SessionImage | None, bool]] = []
+        if harbor_task.honors_users_in("agents"):
+            session = self._session_image(harbor_task)
+            images.append((_image_name(session) or self._image(harbor_task), session, False))
+        environment = harbor_task.verifier_environment
+        if harbor_task.honors_users_in("verifier") and environment is not None:
+            session = self._verifier_image(harbor_task)
+            name = _image_name(session)
+            if name is None and environment.docker_image:
+                name = docker_image_reference(environment.docker_image)
+            images.append((name or self._image(harbor_task), session, True))
+        return images
+
+    def _check_closed_images(self, names: Sequence[str], split: str) -> None:
+        """Refuse tasks that honor users on an image the ``oci`` builder of platoon before 0.3.0 built
+        (:meth:`closed_images`): on a host whose umask is 027, the users other than root cannot run its programs, and
+        every rollout would fail or score 0.  A run never builds images; the message names the build."""
+
+        if not names or not (closed := self.closed_images(names)):
             return
         tasks = sorted({name for needing in closed.values() for name in needing})
         shown = ", ".join(tasks[:3]) + (f" and {len(tasks) - 3} more" if len(tasks) > 3 else "")
         keys = " ".join(f"--key {key}" for key in closed)
         raise EnvSetupError(
             "env_config",
-            f"{len(tasks)} of the {len(names)} tasks of split {split!r} run their verifier as root ({shown}) on "
-            f"{len(closed)} image(s) that the oci builder of platoon before 0.3.0 built, which unpacked them under the "
-            "host's umask: under one such as 027, their files keep out the users the tests switch to. Build them again "
-            f"with `platoon harbor images build CONFIG {keys}`, or set verifier_user: ignore, or leave those tasks out "
-            "(exclude_tasks)",
+            f"{len(tasks)} of the {len(names)} tasks of split {split!r} honor users ({shown}) on {len(closed)} "
+            "image(s) that the oci builder of platoon before 0.3.0 built, which unpacked them under the host's umask: "
+            "under one such as 027, their files keep out the users other than root. Build them again with "
+            f"`platoon harbor images build CONFIG {keys}`, or set agent_user and verifier_user to ignore, or leave "
+            "those tasks out (exclude_tasks)",
         )
 
     def _separate(self, name: str) -> bool:
@@ -941,6 +1077,9 @@ class HarborEnvironmentService:
     async def open(self, task: Task, *, rollout_id: str, needs: SessionNeeds | None = None) -> HarborSession:
         try:
             harbor_task = self.harbor_task(task)
+            cannot = {phase: root_refusal(self._provider, options) for phase, options in self._phase_options.items()}
+            if (refusal := _users_refusal(harbor_task, cannot)) is not None:  # refused now, not after the agent ran
+                raise EnvSetupError("env_config", f"Harbor task {harbor_task.name!r}: {refusal}")
             spec = self._sandbox_spec(harbor_task, rollout_id)
             if harbor_task.verifier_mode == "separate":
                 self._sandbox_spec(harbor_task, rollout_id, verifier=True)  # refused now, not after the agent ran
@@ -950,12 +1089,6 @@ class HarborEnvironmentService:
             policy = " (the environment's network_policy: none)" if self.network_policy == "none" else ""
             raise EnvSetupError(
                 "env_config", f"Harbor task {harbor_task.name!r} runs without a network{policy}, and {refusal}"
-            )
-        if harbor_task.verifier_root and (refusal := root_refusal(self._provider, self._phase_options["verifier"])):
-            raise EnvSetupError(  # refused now, not after the agent ran
-                "env_config",
-                f"Harbor task {harbor_task.name!r} runs its verifier as root, and the verifiers' sandboxes cannot give "
-                f"it root: {refusal}",
             )
         if needs is not None:  # the harness's gateway route, toolchain and memory; never the verifier's
             spec = needs.apply(spec)
@@ -969,18 +1102,19 @@ class HarborEnvironmentService:
                     undo=lambda made: _remove(made[1]) if made is not None else None,
                 )
                 spec = replace(spec, mounts=[*spec.mounts, *mounts])
-            sandbox, init = await self._start(spec, harbor_task)
+            users, init = await self._start(spec, harbor_task)
         except BaseException:
             for view in views:
                 shutil.rmtree(view, ignore_errors=True)
             raise
         lease = SandboxLease(
-            sandbox,
+            users.root,
             spec,
             queue_timeout_s=self.queue_timeout_s,
             close_timeout_s=self.close_timeout_s,
             init=init,
             scratch=views,
+            users=users,
         )
         return HarborSession(self, task, harbor_task, lease, rollout_id=rollout_id)
 
@@ -1004,7 +1138,7 @@ class HarborEnvironmentService:
         async def setup(sandbox: Sandbox) -> None:  # main's preparation, once its dependencies are up
             nonlocal init
             try:
-                init = await self._prepare(sandbox, harbor_task, spec)
+                init, _ = await self._prepare(sandbox, harbor_task, spec)  # a stack honors no users
             except EnvSetupError:
                 raise
             except Exception as exc:
@@ -1093,9 +1227,10 @@ class HarborEnvironmentService:
         egress = plan is None or plan.egress
         return "egress" if egress and phase != "none" and self.network_policy != "none" else "none"
 
-    async def open_verifier(self, harbor_task: HarborTask, *, rollout_id: str) -> tuple[Sandbox, SandboxSpec]:
+    async def open_verifier(self, harbor_task: HarborTask, *, rollout_id: str) -> tuple[SessionUsers, SandboxSpec]:
         """Start the separate verifier sandbox of a task (:class:`~platoon.envs.harbor.task.VerifierEnvironment`),
-        ready for the artifacts and tests; ``EnvSetupError`` when it cannot start.  The caller stops it."""
+        ready for the artifacts and tests: who runs what there (its ``root`` is the sandbox, or its root's view), and
+        its spec; ``EnvSetupError`` when it cannot start.  The caller stops it."""
 
         if harbor_task.verifier_environment is None:
             raise ValueError(f"Harbor task {harbor_task.name!r} grades in its own sandbox, not a separate one")
@@ -1103,28 +1238,30 @@ class HarborEnvironmentService:
             spec = self._sandbox_spec(harbor_task, rollout_id, verifier=True)
         except (KeyError, ValueError) as exc:
             raise EnvSetupError("env_config", str(exc)) from exc
-        sandbox, _ = await self._start(spec, harbor_task, verifier=True)
-        return sandbox, spec
+        users, _ = await self._start(spec, harbor_task, verifier=True)
+        return users, spec
 
     async def _start(
         self, spec: SandboxSpec, harbor_task: HarborTask, *, verifier: bool = False
-    ) -> tuple[Sandbox, str | None]:
-        """Start the task's sandbox (``verifier``: its separate verifier's) and prepare it; the sandbox, and the init
-        a main-only compose file gives it ("<pid>:<start time>", or None).  On any failure the sandbox is stopped
-        again and an ``EnvSetupError`` says why."""
+    ) -> tuple[SessionUsers, str | None]:
+        """Start the task's sandbox (``verifier``: its separate verifier's) and prepare it; who runs what there, and
+        the init a main-only compose file gives it ("<pid>:<start time>", or None).  On any failure the sandbox is
+        stopped again and an ``EnvSetupError`` says why."""
 
         try:
-            sandbox = await (self.verifier_provider if verifier else self.provider).start(spec)
+            sandbox = await (self.verifier_provider if verifier else self.provider).start(
+                self._start_spec(spec, harbor_task, verifier=verifier)
+            )
         except Exception as exc:
             raise _start_failure(exc) from exc
         try:
-            init = await self._prepare(sandbox, harbor_task, spec, verifier=verifier)
+            init, users = await self._prepare(sandbox, harbor_task, spec, verifier=verifier)
         except BaseException as exc:
             await asyncio.shield(sandbox.stop())
             if isinstance(exc, EnvSetupError) or not isinstance(exc, Exception):
                 raise
             raise EnvSetupError("env_setup", f"{type(exc).__name__}: {exc}") from exc
-        return sandbox, init
+        return users, init
 
     def _load(
         self, task_dir: str | Path, *, index: Mapping[str, Any] | None = None, compose: Any = _PLANNED_HERE
@@ -1166,24 +1303,39 @@ class HarborEnvironmentService:
     def _task_index(self) -> dict[str, dict[str, Any]]:
         return read_task_index(self._dataset_dir) if self._dataset_dir is not None else {}
 
-    def _session_image(self, harbor_task: HarborTask) -> SessionImage | None:
+    def _session_image(self, harbor_task: HarborTask, *, honoring: bool | None = None) -> SessionImage | None:
         """The image of a task of a fetched dataset; None: the task's own ``docker_image`` or the default image, as a
-        dataset directory's tasks run. Raises ``ValueError`` for a missing image."""
+        dataset directory's tasks run. Raises ``ValueError`` for a missing image.  Where the sandbox honors users
+        (``honoring``, by default whether the agents' sandbox does) on a provider that loses the files' owners, a
+        ``docker_image`` runs its pulled entry: the image its registry served, pinned, with its ``USER`` and owners."""
 
+        if honoring is None:
+            honoring = harbor_task.honors_users_in("agents")
         return self._images.for_task(
-            harbor_task.task_dir, docker_image=harbor_task.docker_image, default_image=self.default_image
+            harbor_task.task_dir,
+            docker_image=harbor_task.docker_image,
+            default_image=self.default_image,
+            pulled=honoring and loses_file_owners(self._provider),
         )
 
     def _verifier_image(self, harbor_task: HarborTask) -> SessionImage | None:
         """The built image of a task's separate verifier, with its deferred steps: the image map's image of
         ``tests/Dockerfile``, or the task's own (:meth:`_session_image`); None for a ``[verifier.environment]``
-        ``docker_image``, which runs as written.  Raises ``ValueError`` when the map has no image for it."""
+        ``docker_image``, which runs as written, unless its users are honored where the files' owners are lost, and the
+        map has its pulled entry.  Raises ``ValueError`` when the map has no image for it."""
 
         environment = harbor_task.verifier_environment
-        if environment is None or environment.image_source == "verifier_image":
+        honoring = harbor_task.honors_users_in("verifier")
+        if environment is None:
             return None
+        if environment.image_source == "verifier_image":
+            # Run as written, unless it honors users where the files' owners are lost: then its pulled entry.
+            entry = self._images.pulled(docker_image_reference(environment.docker_image or ""))
+            if not (honoring and loses_file_owners(self._provider)) or entry is None:
+                return None
+            return SessionImage(image=entry.image, env={}, workdir=None, user=entry.user, file_owners=entry.file_owners)
         if environment.image_source == "task":
-            return self._session_image(harbor_task)
+            return self._session_image(harbor_task, honoring=honoring)
         built = self._images.for_verifier(harbor_task.task_dir)
         if built is None or not built.image:
             raise ValueError(
@@ -1256,7 +1408,67 @@ class HarborEnvironmentService:
             cpus=cpus,
             memory_mb=memory_mb,
             labels=labels,
+            file_owners=self._file_owners(harbor_task, verifier=verifier),
         )
+
+    def _file_owners(self, harbor_task: HarborTask, *, verifier: bool) -> str | None:
+        """The owner manifest that a sandbox of the task (``verifier``: its separate verifier's) applies: None where it
+        honors no users, where its provider keeps the files' owners, and where the image gives none to users other
+        than root.  Where it needs the image map's record of its image (:func:`_needs_record`), :class:`EnvNotPrepared`
+        when the map lacks it (``platoon prepare`` records it), and ``ValueError`` when no image map can hold it (a
+        dataset directory's, a local image file) or the provider cannot apply it."""
+
+        honors = harbor_task.honors_users_in("verifier" if verifier else "agents")
+        if not honors or not loses_file_owners(self._provider):
+            return None
+        built = self._verifier_image(harbor_task) if verifier else self._session_image(harbor_task)
+        manifest = built.file_owners if built is not None else None
+        if not _needs_record(harbor_task, built, verifier=verifier):
+            # Only root runs there, which needs no owners, as root verifiers ran before images had manifests: apply one
+            # where the provider can.
+            options = self._phase_options["verifier" if verifier else "agents"]
+            usable = manifest is not None and file_owners_refusal(self._provider, options) is None
+            return manifest if usable and os.path.exists(manifest) and os.path.getsize(manifest) > 0 else None
+        where = f"Harbor task {harbor_task.name!r} honors users on the {self._provider_name()} provider, which loses "
+        where += "the owners an image gives its files and cannot tell its USER"
+        if manifest is None and self._locked is None:
+            raise ValueError(
+                f"{where}, and a dataset directory has no image map that could record them: serve the directory as a "
+                "dataset to fetch (service_kwargs.dataset), whose images platoon prepare records with their owners "
+                "and USER"
+            )
+        if manifest is None and built is not None and built.key:
+            raise EnvNotPrepared(
+                f"{where}, and its image (build key {built.key}) records no owners, as images that platoon before 0.5, "
+                "the def builder, or the oci builder with a squashfs-tools before 4.4 built: build it again with the "
+                f"oci builder, where unsquashfs is 4.4 or later (platoon harbor images build CONFIG --key {built.key})"
+            )
+        if manifest is None:
+            environment = harbor_task.verifier_environment
+            if built is not None and built.image:
+                image = built.image
+            elif verifier and environment is not None and environment.docker_image:
+                image = docker_image_reference(environment.docker_image)
+            else:
+                image = self._image(harbor_task)
+            if not image.startswith("docker://"):
+                raise ValueError(
+                    f"{where}, and its image {image} is no registry's, whose owners and USER platoon prepare could "
+                    "record: give the task a docker_image or a Dockerfile, or leave it out (exclude_tasks)"
+                )
+            raise EnvNotPrepared(
+                f"{where}, and the image map has no pulled entry for its image {image}, which records the owners its "
+                "registry's layers give and its USER: platoon prepare records it"
+            )
+        try:
+            if os.path.getsize(manifest) == 0:
+                return None
+        except OSError as exc:
+            raise EnvNotPrepared(f"{where}, and its image's owner manifest cannot be read: {exc}") from exc
+        options = self._phase_options["verifier" if verifier else "agents"]
+        if (refusal := file_owners_refusal(self._provider, options)) is not None:
+            raise ValueError(f"{where}, and its image gives files to users other than root: {refusal}")
+        return manifest
 
     def _image(self, harbor_task: HarborTask) -> str:
         """The image of the task's own environment: its ``docker_image``, else the service's ``default_image``."""
@@ -1266,55 +1478,127 @@ class HarborEnvironmentService:
             raise ValueError(f"Harbor task {harbor_task.name!r} has no environment.docker_image and no default image")
         return image
 
+    def _start_spec(self, spec: SandboxSpec, harbor_task: HarborTask, *, verifier: bool) -> SandboxSpec:
+        """The spec the task's sandbox starts from: ``spec``, but in ``/`` where the sandbox honors users and its image
+        defers a ``WORKDIR`` after a ``USER``, which makes its directories as that user.  hpc-sandbox and Docker make a
+        working directory the image lacks as root when the sandbox starts; :meth:`_prepare` makes them instead, as the
+        ``WORKDIR`` makes them, and the session's views run its commands in ``spec.workdir``."""
+
+        if not harbor_task.honors_users_in("verifier" if verifier else "agents"):
+            return spec
+        built = self._verifier_image(harbor_task) if verifier else self._session_image(harbor_task)
+        if built is None or not any(op.kind == "mkdir" and op.owner for op in built.files):
+            return spec
+        return replace(spec, workdir="/")
+
     async def _prepare(
         self, sandbox: Sandbox, harbor_task: HarborTask, spec: SandboxSpec, *, verifier: bool = False
-    ) -> str | None:
+    ) -> tuple[str | None, SessionUsers]:
         """Make the task's directories, apply the deferred Dockerfile steps and, in the agents' sandbox of a main-only
-        task, its compose binds and init; wait for its healthchecks.  The init, "<pid>:<start time>", or None."""
+        task, its compose binds and init; wait for its healthchecks.  In a sandbox that honors users, platoon's
+        commands run as root under Docker's umask (:mod:`platoon.envs.harbor.views`), the directories that the agents
+        publish in are every user's (Harbor's 777), and a deferred copy's ``--chown`` and the ``USER`` that a deferred
+        ``WORKDIR`` follows apply.  The init ("<pid>:<start time>", or None), and who runs what in the sandbox."""
 
-        root = verifier and harbor_task.verifier_root
         built = self._verifier_image(harbor_task) if verifier else self._session_image(harbor_task)
-        if root:
-            problem = await root_problem(sandbox)
-            if problem is None and (problem := await nobody_problem(sandbox)) is not None:
-                if built is not None and built.key:  # an image of the map: platoon's oci builder may have made it so
-                    problem += (
-                        ", as the oci builder of platoon before 0.3.0 left the images it built under a umask such as "
-                        f"027: build it again (platoon harbor images build CONFIG --key {built.key})"
-                    )
-                else:
-                    problem += ": give the verifier an image whose programs other users may run"
-            if problem is not None:
-                raise EnvSetupError(
-                    "env_config",
-                    f"Harbor task {harbor_task.name!r} runs its verifier as root, and its sandbox {problem}",
-                )
-        mkdir = ["mkdir", "-p", *LOG_DIRS, spec.workdir]
-        if root:
-            # What is missing gets Docker's modes (its WORKDIR, Harbor's directories), so that the users the tests
-            # switch to may enter it; what the image has keeps its mode, as in Docker, which may keep them out on
-            # purpose.  The sandbox's start made a missing workdir already, with these modes in hpc-sandbox's --fakeroot
-            # sandboxes.
-            mkdir = ["/bin/sh", "-c", f'umask {DOCKER_UMASK} && mkdir -p -- "$@"', "platoon-mkdir", *mkdir[2:]]
-        result = await sandbox.exec(mkdir, cwd="/")
+        honors = harbor_task.honors_users_in("verifier" if verifier else "agents")
+        root: Sandbox = root_view(sandbox) if honors else sandbox
+        if honors:
+            await self._check_root(root, harbor_task, built, verifier=verifier)
+        # The working directory after the deferred WORKDIR steps, which make it as their USER where the image lacks it.
+        workdir_later = built is not None and any(op.kind == "mkdir" for op in built.files)
+        # In a root view, what is missing gets Docker's modes (its WORKDIR, Harbor's directories), so that the other
+        # users may enter it, and what the image has keeps its own, as in Docker, which may keep them out on purpose.
+        result = await root.exec(["mkdir", "-p", *LOG_DIRS, *([] if workdir_later else [spec.workdir])], cwd="/")
+        if result.exit_code == 0 and honors:
+            result = await root.exec(["chmod", "777", *PUBLISHED_DIRS], cwd="/")
         if result.exit_code != 0:
             raise EnvSetupError("env_setup", f"Cannot create the task directories: {result.stderr.strip()}")
         main = harbor_task.main if not verifier else None
         if built is not None and built.files:  # the deferred Dockerfile steps: WORKDIR directories, COPY uploads
             if main is not None:  # a compose bind hides what the image has there, its deferred copies too
                 built = replace(built, files=_unbound(built.files, main, harbor_task, spec.workdir))
-            await apply_image_files(sandbox, built, workdir=spec.workdir, umask=DOCKER_UMASK if root else None)
+            await apply_image_files(root, built, workdir=spec.workdir, owners=honors)
+        if workdir_later:  # one the task names (task.toml, compose) where the image has none, as Docker's -w makes it
+            result = await root.exec(["mkdir", "-p", spec.workdir], cwd="/")
+            if result.exit_code != 0:
+                raise EnvSetupError("env_setup", f"Cannot create the working directory: {result.stderr.strip()}")
+        users = SessionUsers.alone(sandbox)
+        if honors:
+            users = await self._session_users(sandbox, harbor_task, built, spec, verifier=verifier)
         init = None
         if main is not None:
             for target in main.volumes:  # a volume of main's own: its directory, with what the image has there
                 _check_contained(sandbox, target)
-                made = await sandbox.exec(["mkdir", "-p", target], cwd="/")
+                made = await root.exec(["mkdir", "-p", target], cwd="/")
                 if made.exit_code != 0:
                     raise RuntimeError(f"Cannot make the volume directory {target}: {made.stderr.strip()}")
-            init = await self._start_init(sandbox, harbor_task, main, spec, built)
+            init = await self._start_init(users.default, harbor_task, main, spec, built)
         if harbor_task.healthcheck is not None and not verifier:  # as in Harbor, none runs in a verifier's sandbox
-            await _wait_until_healthy(sandbox, harbor_task.healthcheck)
-        return init
+            await _wait_until_healthy(users.default, harbor_task.healthcheck)
+        return init, users
+
+    async def _check_root(
+        self, root: Sandbox, harbor_task: HarborTask, built: SessionImage | None, *, verifier: bool
+    ) -> None:
+        """Refuse, with an ``env_config`` ``EnvSetupError``, a sandbox that honors users whose ``root`` view's commands
+        do not run as root with every uid and gid up to nobody's mapped, or whose image's shell nobody may not run
+        (:mod:`platoon.envs.harbor.users`)."""
+
+        problem = await root_problem(root)
+        if problem is None and (problem := await nobody_problem(root)) is not None:
+            if built is not None and built.key:  # an image of the map: platoon's oci builder may have made it so
+                problem += (
+                    ", as the oci builder of platoon before 0.3.0 left the images it built under a umask such as "
+                    f"027: build it again (platoon harbor images build CONFIG --key {built.key})"
+                )
+            else:
+                problem += (
+                    f": give {'the verifier' if verifier else 'the task'} an image whose programs other users may run"
+                )
+        if problem is not None:
+            if verifier:
+                phase = "its verifier as root" if harbor_task.verifier_root else "its verifier as the user it names"
+            else:
+                phase = "its commands as the users it names"
+            raise EnvSetupError(
+                "env_config", f"Harbor task {harbor_task.name!r} runs {phase}, and its sandbox {problem}"
+            )
+
+    async def restored_users(self, sandbox: Sandbox, harbor_task: HarborTask, spec: SandboxSpec) -> SessionUsers:
+        """Who runs what in ``sandbox``, a copy fork's restore of the task's agents' sandbox: the sandbox alone where it
+        honors no users, else as at that sandbox's start (:meth:`_session_users`)."""
+
+        if not harbor_task.honors_users_in("agents"):
+            return SessionUsers.alone(sandbox)
+        return await self._session_users(sandbox, harbor_task, self._session_image(harbor_task), spec, verifier=False)
+
+    async def _session_users(
+        self,
+        sandbox: Sandbox,
+        harbor_task: HarborTask,
+        built: SessionImage | None,
+        spec: SandboxSpec,
+        *,
+        verifier: bool,
+    ) -> SessionUsers:
+        """Who runs what in ``sandbox``, which honors users (:func:`platoon.envs.harbor.views.session_users`); an
+        ``env_config`` ``EnvSetupError`` names a user that cannot run there.  The interpreters of its read-only mounts
+        (a harness toolchain's) may switch users where the image has nothing that does."""
+
+        pythons = [posixpath.join(mount.target, "bin", "python3") for mount in spec.mounts if mount.read_only]
+        try:
+            return await session_users(
+                sandbox,
+                harbor_task,
+                image_user=built.user if built is not None else None,
+                verifier=verifier,
+                spec_env=spec.env,
+                pythons=pythons,
+                workdir=spec.workdir,
+            )
+        except ValueError as exc:
+            raise EnvSetupError("env_config", f"Harbor task {harbor_task.name!r}: {exc}") from exc
 
     async def _start_init(
         self,
@@ -1357,6 +1641,44 @@ class HarborEnvironmentService:
         # What appeared since it started is its own: the processes it runs, the daemons it detached.
         keep((await list_processes(sandbox)) - before | {init})
         return init
+
+
+def _needs_record(harbor_task: HarborTask, built: SessionImage | None, *, verifier: bool) -> bool:
+    """Whether a sandbox of the task that honors users (``verifier``: its separate verifier's), on a provider that
+    loses the files' owners, needs what the image map records of its image (``built``), the owners its files have and
+    its ``USER``: where it runs a user other than root, whose files' owners matter, or, where the map records neither
+    (no ``file_owners``), something as the image's ``USER``, which only that record tells
+    (:func:`~platoon.envs.harbor.users.phase_users`)."""
+
+    recorded = built is not None and built.file_owners is not None
+    if not recorded and runs_image_user(harbor_task, verifier=verifier):
+        return True
+    users = phase_users(harbor_task, image_user=built.user if built is not None else None, verifier=verifier)
+    return any(not is_root(user) for user in [*users.values(), *hook_users(harbor_task, verifier=verifier)] if user)
+
+
+def _image_name(session: SessionImage | None) -> str | None:
+    """A session image's name in the image map: its build key, else the reference it runs."""
+
+    if session is None:
+        return None
+    return session.key or session.image
+
+
+def _users_refusal(harbor_task: HarborTask, cannot: Mapping[str, str | None]) -> str | None:
+    """Why a sandbox of the task that honors users could not run (``cannot``: why the agents' sandboxes, and the
+    verifiers', cannot give root and other users, :func:`platoon.sandbox.root_refusal`); None when nothing says."""
+
+    if harbor_task.honors_users_in("agents") and cannot["agents"] is not None:
+        return (
+            "its agents' sandbox runs commands as the users it names, and the agents' sandboxes cannot give root and "
+            f"other users: {cannot['agents']}"
+        )
+    if harbor_task.honors_users_in("verifier") and cannot["verifier"] is not None:
+        named = harbor_task.honored_users.get("verifier")
+        who = "root" if harbor_task.verifier_root else repr(named) if named else "its image's user"
+        return f"its verifier runs as {who}, and the verifiers' sandboxes cannot give it root: {cannot['verifier']}"
+    return None
 
 
 def _start_failure(exc: Exception) -> EnvSetupError:

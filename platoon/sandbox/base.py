@@ -31,6 +31,14 @@ those a session started for the task before any agent ran ("<pid>:<start time>",
 them), such as a main-only compose file's command, the task's init.  The Harbor service refuses such a task on a
 sandbox without it.
 
+**Users.**  A sandbox's commands run as its own user: root of its user namespace where it gives root (Docker's
+root, Singularity's ``--fakeroot``), else yours.  ``exec_as(user, cmd, ...)``, optional, runs a command as another
+user of the image, named in one of Docker's ``--user`` forms, with ``exec``'s other arguments: the docker provider's
+sandboxes have it (``docker exec --user``); elsewhere the Harbor service switches users with a tool of the image
+(:mod:`platoon.envs.harbor.views`).  A spec's ``file_owners`` names the image's owner manifest, which a provider
+whose sandboxes lose the image's file owners (hpc-sandbox extracts every image as one user) applies where it maps
+the users the manifest names; one whose images keep their owners (docker) needs none.
+
 **A working directory that cannot be entered.**  A command whose working directory (``cwd``, else the spec's
 ``workdir``) is gone, is not a directory or cannot be entered never starts, and fails like a command: the docker and
 hpc-sandbox providers return exit status 126 (:data:`CWD_ERROR_EXIT_CODE`), as ``docker exec`` does, and the
@@ -76,6 +84,9 @@ class SandboxSpec:
     labels: dict[str, str] = field(default_factory=dict)  # rollout_id etc., for janitors
     # name -> "unix:///abs/dir/name.sock" (a host Unix socket) or "http(s)://host:port"; see Sandbox.routes
     upstreams: dict[str, str] = field(default_factory=dict)
+    # The image's owner manifest: a host file of one "UID GID PATH" line for each path the image gives an owner other
+    # than root's user and group (hpc-sandbox 0.5's format); None: none.  See "Users" above.
+    file_owners: str | None = None
 
 
 @dataclass

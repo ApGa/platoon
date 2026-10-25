@@ -1,19 +1,22 @@
 """Generic ``bash``, ``view``, ``write`` and ``edit`` tools that act on a sandbox.
 
 They are the env tools of a sandboxed session, for harnesses that do not act on
-task state natively. Relative paths start at the sandbox workdir.
+task state natively. Relative paths start at the sandbox workdir. Every tool reads
+and writes through the sandbox's shell, so it acts as the user the sandbox's
+commands run as (the agents' user, where a session honors it), and the files it
+writes are that user's.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import posixpath
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 from platoon.envs.service import ToolResult, ToolSpec
 from platoon.sandbox.base import Sandbox
-from platoon.utils import scratch
 
 DEFAULT_COMMAND_TIMEOUT_S = 300.0
 DEFAULT_MAX_OUTPUT_CHARS = 30_000
@@ -26,6 +29,13 @@ _VIEW_SCRIPT = (
     'else echo "No such file or directory: $1" >&2; exit 2; fi'
 )
 _WRITE_SCRIPT = 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"'
+# Prints the file's size in bytes, then its contents in base64, so that one exec reads its exact bytes; exits 3 for a
+# directory, 4 for anything else but a regular file (a FIFO or a device, whose read would wait or never end), and 2,
+# with the shell's reason, for a file it cannot open.
+_READ_SCRIPT = (
+    'if [ -d "$1" ]; then exit 3; fi; if [ -e "$1" ] && [ ! -f "$1" ]; then exit 4; fi; '
+    'size=$(wc -c < "$1") || exit 2; echo "$size"; base64 < "$1"'
+)
 
 TOOL_SPECS = [
     ToolSpec(
@@ -166,16 +176,35 @@ class SandboxTools:
         return f"Edited {path}:\n{snippet}"
 
     async def _read_file(self, path: str) -> str:
-        # A download copies exact bytes, unlike exec output, which is decoded leniently and capped.
-        with scratch.temporary_directory() as local_dir:
-            local = Path(local_dir) / "file"
-            try:
-                await self._sandbox.download(path, local)
-                return local.read_bytes().decode("utf-8")
-            except FileNotFoundError:
-                raise _ToolError(f"No such file: {path}") from None
-            except (IsADirectoryError, UnicodeDecodeError):
-                raise _ToolError(f"{path} is not a UTF-8 text file") from None
+        # Through the shell, as the sandbox's commands' user, in base64, so that the bytes are exact: a download would
+        # read as the sandbox's root, and could tell an agent about a file it may not read.
+        result = await self._sandbox.exec(
+            ["bash", "-c", _READ_SCRIPT, "read", path], cwd="/", timeout_s=self._command_timeout_s
+        )
+        if result.timed_out:  # a file that changed into one whose read never ends
+            raise _ToolError(f"Cannot read {path}: no answer in {self._command_timeout_s:g} s")
+        if result.exit_code == 2:
+            reason = result.stderr.strip().rpartition(": ")[2]
+            raise _ToolError(f"No such file: {path}" if "No such file" in reason else f"Cannot read {path}: {reason}")
+        if result.exit_code == 3:
+            raise _ToolError(f"{path} is not a UTF-8 text file")
+        if result.exit_code == 4:
+            raise _ToolError(f"{path} is not a regular file")
+        if result.exit_code != 0:
+            raise _ToolError(result.stderr.strip() or f"Cannot read {path}")
+        size, _, encoded = result.stdout.partition("\n")
+        if not size.strip().isdigit():
+            raise _ToolError(f"Cannot read {path}: its shell's output was cut short")
+        try:
+            data: bytes | None = base64.b64decode(encoded)
+        except (binascii.Error, ValueError):  # cut short where no whole base64 group ends
+            data = None
+        if data is None or len(data) != int(size):  # more than the sandbox's output holds
+            raise _ToolError(f"{path} is too large to edit ({size.strip()} bytes)")
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise _ToolError(f"{path} is not a UTF-8 text file") from None
 
     async def _write_file(self, path: str, content: str) -> None:
         # Writing through the shell keeps an existing file's mode, which an upload would replace.

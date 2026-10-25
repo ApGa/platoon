@@ -30,10 +30,12 @@ Builders:
   Dockerfile syntax: a directive that names a 1.x release of that (``docker/dockerfile:1.7``) is left out of the
   Dockerfile it builds, and one that names another frontend (labs, a third party's) is refused, naming the
   ``docker`` builder. The native runtime cannot run the OCI-SIF it writes, so the builder extracts its single
-  squashfs layer
-  and image config (``singularity sif list``/``dump``), unpacks the layer (``unsquashfs``) and builds a native SIF
-  from the tree (``singularity build``). The image's ``ENV``, ``WORKDIR``, ``USER``, ``ENTRYPOINT`` and ``CMD``
-  go into the map from the config, since a SIF built from a directory carries none of them.
+  squashfs layer and image config (``singularity sif list``/``dump``), lists the owners the layer gives its files
+  (``unsquashfs -lln``, squashfs-tools 4.4 or later: the image's owner manifest, ``<key>.owners``,
+  :mod:`platoon.envs.harbor.owners`; an older one records none), unpacks the layer as you (``unsquashfs``) and builds
+  a native SIF from the tree (``singularity build``). The image's ``ENV``,
+  ``WORKDIR``, ``USER``, ``ENTRYPOINT`` and ``CMD`` go into the map from the config, since a SIF built from a
+  directory carries none of them, and so does the manifest, which a sandbox that honors users applies.
 - ``def``: a translation to a ``Bootstrap: docker`` definition file built with ``--fakeroot``. As in a Docker
   build, each ``RUN`` runs in a shell of its own that starts in the current ``WORKDIR`` and sees the ``ARG``
   values, and ``ENV`` values are literal but for their variable references (:func:`definition_file`). It refuses
@@ -41,8 +43,9 @@ Builders:
   here-documents, ``ADD`` of a URL, a git repository or an archive), naming the ``oci`` builder, and never falls
   back to the base image.  A definition file keeps none of the Dockerfile's image configuration, so the map records
   its base image's (from the registry, as a pin does), under what the Dockerfile itself sets, which the lock's plan
-  holds.  It is the builder of the ``singularity`` provider where the runtime is Apptainer, which has no BuildKit
-  (:func:`provider_builder`).
+  holds.  Its images keep no record of their owners (``--fakeroot`` builds give every file to root), so a sandbox that
+  honors users does not run them.  It is the builder of the ``singularity`` provider where the runtime is Apptainer,
+  which has no BuildKit (:func:`provider_builder`).
 - ``docker``: ``docker build`` (or ``podman`` with ``PLATOON_DOCKER=podman``) tagged ``platoon-harbor:<key>``, for
   the docker provider; with ``push``, pushed and recorded by digest (enroot sites import that digest).  It alone passes
   a sidecar's build arguments (``--build-arg``); the others refuse an image that has any.
@@ -98,6 +101,7 @@ from platoon.envs.harbor.images import (
     update_image_map,
 )
 from platoon.envs.harbor.lock import DatasetLock, LockedTask
+from platoon.envs.harbor.owners import Owner, from_squashfs_listing, write_manifest
 from platoon.utils.scratch import node_scratch
 
 logger = logging.getLogger(__name__)
@@ -479,8 +483,12 @@ def build_image(
                 )
         _stage_context(plan, source, build_context, _pinned_dockerfile(plan, digests, directives))
         if builder == "oci":
-            sif, config = _build_oci(runner, build_context, work, out_dir / f"{hexkey}.sif")
+            sif, config, owners = _build_oci(runner, build_context, work, out_dir / f"{hexkey}.sif")
             entry = _entry_from_config(str(sif), config, builder="oci", sha256=file_sha256(sif))
+            if owners is not None:
+                manifest = out_dir / f"{hexkey}.owners"
+                entry = replace(entry, file_owners=str(manifest))
+                runner.note(f"its layer gives {write_manifest(owners, manifest)} path(s) other owners than root")
         elif builder == "def":
             sif, workdir = _build_def(runner, plan, build_context, work, out_dir / f"{hexkey}.sif", digests)
             env = _sif_environment(runner, sif)
@@ -544,11 +552,11 @@ def registry_digest(
     registry cannot be reached or gives no digest.
     """
 
-    host, repository, tag, digest = _parse_reference(reference)
+    host, repository, tag, digest = parse_reference(reference)
     if digest is not None:
         return digest
     url = f"https://{host}/v2/{repository}/manifests/{tag}"
-    client = _RegistryClient(urlopen or urllib.request.urlopen, repository, timeout_s)
+    client = RegistryClient(urlopen or urllib.request.urlopen, repository, timeout_s)
     try:
         try:
             digest = client.manifest_digest(url, "HEAD")
@@ -567,7 +575,7 @@ def registry_digest(
     return digest
 
 
-class _RegistryClient:
+class RegistryClient:
     """Requests to one repository of a registry, with the anonymous token it asks for, once it asks."""
 
     def __init__(self, urlopen: Callable[..., Any], repository: str, timeout_s: float) -> None:
@@ -580,7 +588,7 @@ class _RegistryClient:
         """The ``Docker-Content-Digest`` of the manifest at ``url``; for a ``GET`` without one, the SHA-256 of the
         manifest it serves, which is the digest by definition."""
 
-        with self._open(url, method) as response:
+        with self.open(url, method) as response:
             digest = response.headers.get("Docker-Content-Digest")
             if digest or method == "HEAD" or response.headers.get_content_type() not in _MANIFEST_TYPES:
                 return digest or None
@@ -590,12 +598,14 @@ class _RegistryClient:
         """The JSON document at ``url`` (a manifest or a blob), and its digest: the ``Docker-Content-Digest`` the
         registry gives, else the SHA-256 of what it served."""
 
-        with self._open(url, "GET") as response:
+        with self.open(url, "GET") as response:
             body = response.read()
             digest = response.headers.get("Docker-Content-Digest") or "sha256:" + hashlib.sha256(body).hexdigest()
         return json.loads(body), digest
 
-    def _open(self, url: str, method: str) -> Any:
+    def open(self, url: str, method: str = "GET") -> Any:
+        """The registry's response to ``method`` on ``url``, with the anonymous token it asks for once it asks."""
+
         request = urllib.request.Request(url, method=method, headers={"Accept": ", ".join(_MANIFEST_TYPES)})
         if self._token is not None:  # never sent on to where a redirect leads, such as a blob's storage
             request.add_unredirected_header("Authorization", f"Bearer {self._token}")
@@ -607,7 +617,7 @@ class _RegistryClient:
                 raise
             exc.close()
         self._token = self._anonymous_token(challenge)
-        return self._open(url, method)
+        return self.open(url, method)
 
     def _anonymous_token(self, challenge: str) -> str:
         """A pull token from the ``realm`` of a ``Bearer realm=...,service=...,scope=...`` challenge."""
@@ -636,7 +646,7 @@ class _RegistryClient:
         return token
 
 
-def _parse_reference(reference: str) -> tuple[str, str, str, str | None]:
+def parse_reference(reference: str) -> tuple[str, str, str, str | None]:
     """An image reference (``[registry/]repository[:tag][@digest]``) as the registry host to ask, the repository,
     the tag and the digest, with Docker's defaults: no registry is Docker Hub (``registry-1.docker.io``, with
     ``library/`` before a single name), and no tag is ``latest``."""
@@ -661,7 +671,7 @@ def _parse_reference(reference: str) -> tuple[str, str, str, str | None]:
     return host, repository, tag, digest or None
 
 
-def _pinned_reference(reference: str, digest: str) -> str:
+def pinned_reference(reference: str, digest: str) -> str:
     """``reference`` by ``digest``, without its tag (some builders refuse a reference with both):
     ``python:3.12-slim`` becomes ``python@sha256:...``."""
 
@@ -689,8 +699,8 @@ def registry_config(
     for :func:`registry_digest`.  Raises :class:`DigestError` when the registry cannot be reached or does not serve
     them, or has no image for this platform."""
 
-    host, repository, tag, pinned = _parse_reference(reference)
-    client = _RegistryClient(urlopen or urllib.request.urlopen, repository, timeout_s)
+    host, repository, tag, pinned = parse_reference(reference)
+    client = RegistryClient(urlopen or urllib.request.urlopen, repository, timeout_s)
     base = f"https://{host}/v2/{repository}"
     try:
         manifest, digest = client.json(f"{base}/manifests/{pinned or tag}")
@@ -728,7 +738,7 @@ def pinned_entry(reference: str, resolve: ConfigResolver | None = None) -> Image
     ``reference``, with its image's configuration (``resolve``, default :func:`registry_config`)."""
 
     digest, config = (resolve or registry_config)(reference)
-    image = docker_image_reference(_pinned_reference(reference, digest))
+    image = docker_image_reference(pinned_reference(reference, digest))
     entry = _entry_from_config(image, config, builder="pulled", sha256=None)
     pinned_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return replace(entry, receipt={"reference": reference, "digest": digest, "pinned_at": pinned_at})
@@ -824,7 +834,7 @@ def _pinned_dockerfile(
             continue
         flags, operands = instruction.flags_and_operands()
         words = [f"--{name}={value}" if value else f"--{name}" for name, value in flags.items()]
-        lines.append(" ".join(["FROM", *words, _pinned_reference(images[position], digest), *operands[1:]]))
+        lines.append(" ".join(["FROM", *words, pinned_reference(images[position], digest), *operands[1:]]))
     return "\n".join(lines) + "\n"
 
 
@@ -931,7 +941,9 @@ class _Runner:
         return result.stdout.strip() or None
 
 
-def _build_oci(runner: _Runner, context: Path, work: Path, target: Path) -> tuple[Path, dict[str, Any]]:
+def _build_oci(
+    runner: _Runner, context: Path, work: Path, target: Path
+) -> tuple[Path, dict[str, Any], list[Owner] | None]:
     singularity = _singularity_binary()
     oci = work / "image.oci.sif"
     runner.run([singularity, "build", "--oci", str(oci), "Dockerfile"], cwd=context)
@@ -958,6 +970,17 @@ def _build_oci(runner: _Runner, context: Path, work: Path, target: Path) -> tupl
         raise BuildError(f"the OCI-SIF holds {len(layers)} squashfs layers, expected 1 (log: {runner.log_path})")
     if config is None:
         raise BuildError(f"the OCI-SIF holds no image config (log: {runner.log_path})")
+    # The layer keeps the owners the Dockerfile gives, which the unpacking below, as this user, loses.
+    listing = work / "layer.listing"
+    owners: list[Owner] | None = None
+    try:
+        runner.run([_tool("unsquashfs"), "-lln", str(layers[0])], stdout=listing)
+        owners = from_squashfs_listing(listing.read_text(errors="surrogateescape"))
+    except BuildError:
+        runner.note(
+            "unsquashfs cannot list the owners of the layer's files (-lln needs squashfs-tools 4.4 or later): the "
+            "image records no owner manifest, so the sandboxes that honor users on hpc-sandbox refuse it"
+        )
     rootfs = work / "rootfs"
     # Run by anyone but root, unsquashfs creates each file with the image's mode through the process's umask and never
     # sets it after: under a host umask such as 027, the image's programs and libraries would lose the read and execute
@@ -970,7 +993,7 @@ def _build_oci(runner: _Runner, context: Path, work: Path, target: Path) -> tupl
         os.replace(partial, target)
     finally:
         partial.unlink(missing_ok=True)
-    return target, config
+    return target, config, owners
 
 
 def _build_def(
@@ -1042,7 +1065,7 @@ def _with_base_config(
         return entry
     digest = digests.get(base)
     try:
-        _, config = resolve(_pinned_reference(base, digest) if digest else base)
+        _, config = resolve(pinned_reference(base, digest) if digest else base)
     except DigestError as exc:
         if required:
             raise BuildError(
@@ -1205,7 +1228,7 @@ def definition_file(
     if staged:
         post.insert(copied, "rm -rf /.platoon-files")  # once every COPY and ADD has read its files
     digest = (digests or {}).get(base)
-    sections = ["Bootstrap: docker", f"From: {_pinned_reference(base, digest) if digest else base}", ""]
+    sections = ["Bootstrap: docker", f"From: {pinned_reference(base, digest) if digest else base}", ""]
     if files:
         sections += ["%files", *files, ""]
     sections += ["%post", *(f"    {line}" for line in post), ""]

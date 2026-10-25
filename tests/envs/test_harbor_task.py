@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -298,12 +299,13 @@ def test_collect_hooks_run_main_s_first_and_their_users_follow_the_policy(make_t
     ]
 
     as_user = make_task("as-user", task_toml='[[verifier.collect]]\ncommand = "sync"\nuser = "postgres"\n')
-    with pytest.raises(HarborTaskError, match="runs a hook as user 'postgres'.*sets agent_user: ignore"):
+    with pytest.raises(HarborTaskError, match="runs a hook as user 'postgres'.*sets agent_user: honor or ignore"):
         HarborTask.load(as_user)
-    with pytest.raises(HarborTaskError, match="sets verifier_user: ignore"):
-        HarborTask.load(as_user, verifier_user="honor")
+    honored = HarborTask.load(as_user, verifier_user="honor")  # the hook runs as its user, in main
+    assert honored.collect[0].user == "postgres" and honored.honors_users_in("agents")
     ignored = HarborTask.load(as_user, agent_user="ignore")
     assert ignored.ignored_users == {"collect": "postgres"} and ignored.collect[0].service == "main"
+    assert ignored.collect[0].user is None and not ignored.honors_users_in("agents")
 
 
 def test_artifacts_of_a_service_name_an_absolute_path_of_one_the_stack_starts(make_task):
@@ -446,12 +448,19 @@ def test_compose_files_that_name_only_main_run_as_one_sandbox(make_task, compose
 def test_users_are_refused_unless_ignored(make_task):
     task_dir = make_task("users", task_toml='[agent]\nuser = "agent"\n[verifier]\nuser = 0\n')
 
-    with pytest.raises(HarborTaskError, match=r"\[agent\].user = 'agent', \[verifier\].user = '0'.*agent_user: ignore"):
+    with pytest.raises(HarborTaskError, match=r"\[agent\].user = 'agent', \[verifier\].user = '0'.*honor, .*or ignore"):
         HarborTask.load(task_dir)
     task = HarborTask.load(task_dir, agent_user="ignore")
     assert task.ignored_users == {"agent": "agent", "verifier": "0"}
+    honored = HarborTask.load(task_dir, agent_user="honor")  # a root verifier in the sandbox of agents run as theirs
+    assert (honored.honored_users, honored.verifier_root, honored.ignored_users) == (
+        {"agent": "agent", "verifier": "0"},
+        True,
+        {},
+    )
+    unknown: Any = "obey"
     with pytest.raises(ValueError, match="agent_user must be one of"):
-        HarborTask.load(task_dir, agent_user="obey")  # type: ignore[arg-type]
+        HarborTask.load(task_dir, agent_user=unknown)
 
 
 def test_gpus_and_the_index_row_are_kept(make_task):

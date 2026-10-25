@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -156,6 +157,29 @@ def test_staging_copies_once_and_checks_the_tree_hash(tmp_path):
     with pytest.raises(ToolchainError, match="does not match its manifest"):
         stage(changed, cache=tmp_path / "other-cache")
     assert [entry.name for entry in (tmp_path / "other-cache").iterdir() if not entry.name.endswith(".lock")] == []
+
+
+def test_a_staged_copy_is_open_to_every_user(tmp_path):
+    """A sandbox's other users run the copy too, such as an agent that runs as the user its Harbor task names: every
+    user may read it, enter its directories and run its programs, whatever modes the build left (a umask of 077)."""
+
+    path = make_toolchain(tmp_path / "root")
+    for entry in [path, *path.rglob("*")]:
+        if not entry.is_symlink():
+            entry.chmod(stat.S_IMODE(entry.stat().st_mode) & 0o700)
+    toolchain = resolve("tc-1.0", root=tmp_path / "root")
+
+    staged = stage(toolchain, cache=tmp_path / "cache")
+
+    modes = {
+        entry.relative_to(staged).as_posix(): stat.S_IMODE(entry.stat().st_mode)
+        for entry in [staged, *staged.rglob("*")]
+        if not entry.is_symlink()
+    }
+    assert modes["."] & 0o555 == 0o555 and modes["bin"] & 0o555 == 0o555
+    assert modes["bin/tool"] & 0o555 == 0o555 and modes["lib/mod.py"] & 0o444 == 0o444
+    assert modes["lib/mod.py"] & 0o111 == 0  # what its owner may not run stays not runnable
+    assert tree_hash(staged) == toolchain.tree_hash
 
 
 def test_concurrent_stagings_copy_once(tmp_path, monkeypatch):

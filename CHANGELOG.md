@@ -141,6 +141,49 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   (exit 78), naming `platoon prepare`. `platoon harbor images pin` pins them too, `platoon harbor images plan` lists
   them, and `platoon harbor images verify` checks them
   ([Build task images](docs/how-to/sandboxes-and-harbor.md#build-task-images)).
+- **Harbor tasks run as the users they name (`agent_user: honor`).** As Harbor runs them, the agents' commands (a
+  harness in the task sandbox, the env tools, `platoon-oracle`) run as `[agent].user`, else the image's `USER`, else
+  root; the tests as `[verifier].user`, else the image's `USER`, else root; a `[[verifier.collect]]` hook as its own
+  `user`; and platoon's own commands as root, in sandboxes that give root and other users: Docker's (`docker exec
+  --user`), and Singularity's with `fakeroot: true` on the copy layout, where platoon switches each command to its user
+  with the image's `setpriv`, `su` or Python, with the user's `HOME`, `USER` and `LOGNAME` from the image's
+  `/etc/passwd`. Any of Docker's `--user` forms names a user. A session's `sandbox` is the agents' view of the sandbox,
+  while grading and the kills keep root's; their commands run with Docker's umask, `/logs/agent` and `/logs/artifacts`
+  are every user's (777, as Harbor makes them), and so is `/logs/verifier`, with `/tests` the tests' own, where the
+  tests run as a user other than root (tests that run as root get both as root's, `/tests` with the host's modes, as
+  Harbor copies it); what platoon uploads for the agents is theirs, a deferred `COPY --chown` gives its owner what it
+  copies and a deferred `WORKDIR` the directories it makes to the `USER` in effect there, as BuildKit does (such a
+  sandbox starts in `/`, and its commands run in the working directory), and the outcome records the task's users
+  (`users`). A `USER` that ends a Dockerfile is the
+  agents' user (a fetch still refuses it unless `refuse: {agent_user: false}`), expanded against the image's
+  environment where it names it (`USER ${NB_UID}`). Refused, when the tasks are listed (exit 78) and when a session
+  opens: users on `enroot`, `process` and Singularity without `fakeroot` or on the fuse-overlay layout, multi-container
+  stacks in which users would run (every stack under `agent_user: honor`, compose projects and pods alike: stacks that
+  honor users follow), a user the image lacks, an image with no way to switch to one; a `copy` fork on Singularity,
+  whose snapshots keep no owners.
+  `verifier_user: honor` alone honors `[verifier].user`, now any user, and a root verifier graded in its agents' own
+  sandbox runs where the agents run as their user
+  ([Users in task sandboxes](docs/how-to/sandboxes-and-harbor.md#users-in-task-sandboxes)).
+- **Images keep their file owners where users are honored.** hpc-sandbox extracts every image as you, so a user that an
+  image gives a directory would find it root's. `platoon prepare` records each image's owner manifest, the paths its
+  layers give users other than root: the `oci` builder lists its OCI-SIF layer's owners before it unpacks it
+  (`<key>.owners` beside the image, `file_owners` in the map; `unsquashfs -lln` needs squashfs-tools 4.4, and with an
+  older one the build records none and says so), and a task's `docker_image` becomes a *pulled* entry of the image map,
+  the image its registry serves pinned by digest, with its `USER` and the owners its layers' tar headers give (whiteouts
+  applied), which the sandboxes that honor users run. The record also tells such a sandbox its image's `USER`, which it
+  cannot read itself. `SandboxSpec.file_owners` hands a manifest to hpc-sandbox 0.5, whose `fakeroot` sandboxes apply it
+  before anything runs; with an older one, such as the 0.4.0 that the lock keeps, a task whose image gives files to
+  users other than root is refused when it is listed, naming 0.5. A task whose sandbox runs a user other than root, or
+  anything as its image's `USER` (the agents' under `agent_user: honor`), is refused where the image has no record:
+  built by platoon before 0.5, the `def` builder (Apptainer's) or the `oci` builder with a squashfs-tools before 4.4
+  (`platoon prepare` names the build), a `docker_image` that `platoon prepare` has not recorded, a local image file, or
+  a dataset directory's, which has no image map. A sandbox in which only root runs needs none. Docker keeps its images'
+  owners itself ([Users in task sandboxes](docs/how-to/sandboxes-and-harbor.md#users-in-task-sandboxes)).
+- **Sandboxes can run a command as another user.** `Sandbox.exec_as(user, cmd, ...)`, optional, runs one as a user of
+  the image (the docker provider's); a provider whose sandboxes lose their images' file owners says so
+  (`loses_file_owners`) and whether it can apply a manifest (`file_owners_refusal(options)`;
+  `platoon.sandbox.loses_file_owners`, `file_owners_refusal`)
+  ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
 
 ### Changes
 
@@ -183,6 +226,27 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   can hold that image (serve the directory as a dataset to fetch). `examples/harbor-local`'s `needs-a-database` is
   still refused on Docker, which runs stacks now, for its `postgres:16` sidecar, which runs its image's own command,
   which only a fetched dataset's image map records (`platoon prepare` pins it).
+- A deferred `COPY` keeps its `--chown` in a lock's build plan (`["COPY", "--chown=<owner>", source, ...,
+  destination]`), and a deferred `USER` its place among the deferred steps (`["USER", user]`), which a platoon before
+  0.5 does not read: fetch such a dataset again with it. A lock fetched before keeps its copies, and the directories
+  that a `WORKDIR` after a `USER` makes, root's where users are honored, and a run that honors users warns of it.
+- A root verifier's sandbox (`verifier_user: honor`) gives every user the read and search access to the files of an
+  image's deferred `COPY` steps that their group has, as a checkout under Docker's umask gives it, where it kept the
+  host's modes (a file of mode 600 stays so); `tests/` keeps the host's modes there, and `/logs/verifier` stays
+  root's, as before.
+- The docker provider runs its own commands in a container, a compose service's too, as root (`docker exec --user
+  0`), whatever the image's `USER`: the kills before grading, the listing of the container's processes, the
+  directories an upload makes and the look at what a download copies. Commands keep running as the container's user.
+- The `edit` tool reads a file through the sandbox's shell, as the sandbox's commands run, rather than with a download,
+  which runs as the sandbox's root; a file larger than a command's output holds (8 MiB on `docker` and `process`, 16
+  MiB on hpc-sandbox, in base64) is an error rather than an edit, and so is one that is not a regular file (a FIFO, a
+  device), at once, and a read that takes longer than `tool_timeout_s`.
+- Staged harness toolchains are readable by every user, their directories and programs runnable by them, so that the
+  users a sandbox switches to run them.
+- The refusals of tasks that name users read `... and the environment refuses tasks that name users; the task is
+  refused unless it sets agent_user: honor, ... or ignore, ...` when a task loads, and `agent_user: the task sets
+  [agent].user or [verifier].user (refuse: {agent_user: false} fetches it, ...)` in a lock. `HarborEnvironmentService
+  .root_images_closed()` is `closed_images()`, which covers every sandbox that honors users.
 - **The training code lives in packages named after the stages of a run.** `platoon/train/tinker/` held the trainer,
   its config, the rollout workflows and the rollout workers; they are now packages of `platoon.train`: `trainer` (one
   start of training: the trainer, the training loop, the training client, signals and the watchdog), `step` (one

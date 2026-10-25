@@ -28,10 +28,11 @@ from test_harbor_fetch import hub as fake_hub  # noqa: F401 - a fixture: the fak
 
 from platoon import cli
 from platoon import prepare as prepare_module
-from platoon.envs.harbor import builders
+from platoon.envs.harbor import builders, owners
 from platoon.envs.harbor import fetch as fetch_module
 from platoon.envs.harbor.images import ImageEntry, ImageMap, pulled_key, update_image_map
 from platoon.envs.harbor.lock import read_lock
+from platoon.envs.harbor.owners import Owner, PulledImage
 from platoon.harness.toolchains import read_manifest
 from platoon.prepare import load_environments, prepare, prepare_command, summary
 from platoon.utils.config import ConfigError
@@ -558,6 +559,59 @@ def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_
     built = ImageMap.load(default).entries[verifier_key]
     again = ImageEntry(image=built.image, builder="oci", receipt={"builder_revision": 1})  # built since
     update_image_map(default, {verifier_key: again})
+    steps, lines, code = _run(config)
+    assert code == 0 and [step.status for step in steps if step.step == "images"] == ["current"], lines
+
+
+def test_prepare_records_the_owners_that_sandboxes_honoring_users_need(site, tmp_path: Path, monkeypatch):
+    """With agent_user: honor on a provider that loses the owners an image gives its files (singularity): an image built
+    without an owner manifest fails the step, naming the build that makes it again, and a task's docker_image is
+    recorded as a pulled entry, pinned, with its USER and the owners its layers give.  Then the step is current."""
+
+    tasks = {
+        "built": {"task.toml": '[agent]\nuser = "agent"\n', "environment/Dockerfile": "FROM python:3.12\nRUN true\n"},
+        "pulled": {"task.toml": '[agent]\nuser = "nobody"\n[environment]\ndocker_image = "python:3.12-slim"\n'},
+    }
+    for name, files in tasks.items():
+        for relative, text in {**files, "instruction.md": "Do it.\n", "tests/test.sh": "true\n"}.items():
+            (tmp_path / "dataset" / name / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / "dataset" / name / relative).write_text(text)
+    service_kwargs = {"dataset": str(tmp_path / "dataset"), "refuse": {"agent_user": False}, "agent_user": "honor"}
+    service_kwargs |= {"provider": "singularity", "provider_options": {"fakeroot": True}}
+    entry = {"name": "honored", "service": "harbor", "service_kwargs": service_kwargs, "harness": str(_spec(tmp_path))}
+    config = tmp_path / "configs" / "honored.yaml"
+    config.parent.mkdir()
+    config.write_text(yaml.safe_dump({"environments": [entry]}))
+    pulls: list[str] = []
+
+    def pull(reference: str) -> PulledImage:
+        pulls.append(reference)
+        return PulledImage("docker://python@sha256:" + "d" * 64, "sha256:" + "d" * 64, None, [Owner("/srv/x", 1, 1)])
+
+    monkeypatch.setattr(owners, "pull_owners", pull)
+
+    steps, lines, code = _run(config)
+    (images,) = [step for step in steps if step.step == "images"]
+    (lock_path,) = (tmp_path / "site" / "harbor" / "locks").iterdir()
+    key = read_lock(lock_path).get("built").image["key"]
+    assert code == 1 and images.status == "failed", lines
+    assert "record no owners of their files" in images.detail and f"--key {key}" in images.detail
+    assert pulls == []  # nothing is pulled while the step fails
+
+    default = tmp_path / "site" / "harbor" / "images" / "singularity.json"
+    built = ImageMap.load(default).entries[key]
+    manifest = Path(built.image).with_suffix(".owners")
+    manifest.write_text("1000 1000 /app\n")
+    again = ImageEntry(image=built.image, builder="oci", file_owners=str(manifest), receipt={"builder_revision": 1})
+    update_image_map(default, {key: again})  # built again, by this platoon's oci builder
+    steps, lines, code = _run(config)
+    (images,) = [step for step in steps if step.step == "images"]
+    assert code == 0 and images.status == "done", lines
+    assert images.detail.endswith("; recorded 1 pulled image(s) that 1 task(s) honor users on")
+    assert pulls == ["docker://python:3.12-slim"]
+    recorded = ImageMap.load(default).get("docker://python:3.12-slim")
+    assert recorded is not None and recorded.builder == "pulled" and recorded.image.endswith("d" * 64)
+
     steps, lines, code = _run(config)
     assert code == 0 and [step.status for step in steps if step.step == "images"] == ["current"], lines
 
