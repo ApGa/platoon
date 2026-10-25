@@ -1,0 +1,29 @@
+version = "1.0"
+
+# Written for platoon, after Harbor's sidecar-artifacts example: the evidence for grading is in the api sidecar, which
+# the agents cannot write: the log of the orders it took, and a snapshot of its counter that a collect hook takes.
+artifacts = [
+    { source = "/tmp/api/orders.log", service = "api" },
+    { source = "/tmp/stats.json", service = "api" },
+]
+
+[task]
+name = "platoon/sidecar-artifacts"
+
+[agent]
+timeout_sec = 60.0
+
+[verifier]
+timeout_sec = 30.0
+environment_mode = "separate"
+
+[[verifier.collect]]
+service = "api"
+command = "python3 /srv/api/fetch.py \"$API_URL/stats\" > /tmp/stats.json"
+timeout_sec = 30.0
+
+[environment]
+docker_image = "python:3.12-slim"
+workdir = "/app"
+cpus = 1
+memory_mb = 512

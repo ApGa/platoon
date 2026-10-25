@@ -6,16 +6,19 @@ in ``artifacts`` (``[verifier] environment_mode = "separate"``, or a ``[verifier
 
 A compose file (``environment/docker-compose.yaml``, the only one Harbor reads) is read into a stack plan
 (:mod:`platoon.envs.harbor.compose`): one that names only ``main`` runs as the task's one sandbox, with what it gives
-``main`` (an environment, binds, a working directory, resources, a command, a healthcheck: :attr:`HarborTask.main`).
+``main`` (an environment, binds, a working directory, resources, a command, a healthcheck: :attr:`HarborTask.main`),
+and one with services besides ``main`` runs as a multi-container stack (:mod:`platoon.envs.harbor.sidecars`), with
+``[[verifier.collect]]`` hooks run in its services and ``artifacts`` collected from them (``service``).
 
-Refused: multi-step and non-Linux tasks; multi-container environments (a compose file with sidecar services), and
-compose files outside the subset platoon runs, or that give ``main`` what one sandbox cannot apply yet; verifier collect
-hooks and artifacts of other services; a compose file in ``tests/``; and ``[agent].user`` or ``[verifier].user`` unless
-the caller ignores them, since rootless sandboxes run every process as one user.  A caller may instead honor a
-``[verifier].user`` of root (``verifier_user="honor"``): the task's tests then run as root in its separate verifier's
-sandbox, where they may run the agent's code as another user (:attr:`HarborTask.verifier_root`).  It honors no other
-user, and no root verifier of a task graded in its agents' own sandbox, whose agents would run as root too: those tasks
-are refused.
+Refused: multi-step and non-Linux tasks; stacks where the caller says none can run (``stack_refusal``), and stacks
+with a service a node service serves, or whose services depend on one another in a cycle; compose files outside the
+subset platoon runs, or that give ``main`` what platoon cannot apply to it yet; collect hooks and artifacts of a
+service the task does not start; a compose file in ``tests/``; and ``[agent].user`` or ``[verifier].user`` (or a
+collect hook's ``user``) unless the caller ignores them, since rootless sandboxes run every process as one user.  A
+caller may instead honor a ``[verifier].user`` of root (``verifier_user="honor"``): the task's tests then run as root
+in its separate verifier's sandbox, where they may run the agent's code as another user
+(:attr:`HarborTask.verifier_root`).  It honors no other user, and no root verifier of a task graded in its agents' own
+sandbox, whose agents would run as root too: those tasks are refused.
 """
 
 from __future__ import annotations
@@ -31,10 +34,12 @@ from typing import Any, Literal, get_args
 
 from platoon.envs.harbor.compose import (
     COMPOSE_FILE,
+    MAIN,
     ComposeError,
     ComposePlan,
     MainService,
     plan_compose,
+    service_binds,
     unread_compose_files,
 )
 from platoon.task import Task
@@ -120,12 +125,25 @@ class Healthcheck:
 class Artifact:
     """A path a separate verifier receives from the agent's sandbox (``artifacts`` in ``task.toml``).
 
-    It is collected from ``main`` and put back at the same path in the verifier's sandbox; a relative path starts
-    at the sandbox's workdir.  ``exclude`` patterns leave files out of a directory (``tar --exclude``).
+    It is collected from ``main``, or from the stack's ``service`` (an absolute path of that service's own files, which
+    the agents cannot write), and put back at the same path in the verifier's sandbox; a relative path starts at the
+    sandbox's workdir.  ``exclude`` patterns leave files out of a directory (``tar --exclude``).
     """
 
     source: str
     exclude: tuple[str, ...] = ()
+    service: str | None = None  # None: main
+
+
+@dataclass(frozen=True)
+class CollectHook:
+    """A command run in one of the task's services once its agents are done, before the artifacts are collected
+    (``[[verifier.collect]]``, Harbor's): best effort, its failure is logged and the grading goes on.  Harbor runs
+    ``main``'s hooks first, then the sidecars'."""
+
+    command: str
+    service: str = "main"
+    timeout_s: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -186,12 +204,23 @@ class HarborTask:
     index: dict[str, Any] = field(default_factory=dict)
     # Its compose file's stack plan, None without one (platoon.envs.harbor.compose).
     compose: ComposePlan | None = None
+    # [[verifier.collect]] hooks, in the task's order.
+    collect: tuple[CollectHook, ...] = ()
+    # The network of a stack while it is graded in its agents' own sandbox: [verifier].network_mode, else the task's.
+    verifier_network: Network = "host"
 
     @property
     def main(self) -> MainService | None:
-        """What a main-only compose file gives the task's sandbox, ``main``; None for a task without one."""
+        """What a compose file gives the task's sandbox, ``main`` (a main-only file's, or a stack's); None for a task
+        without one."""
 
         return self.compose.main() if self.compose is not None else None
+
+    @property
+    def is_stack(self) -> bool:
+        """Whether the task's compose file names services besides ``main``: it runs as a multi-container stack."""
+
+        return self.compose is not None and self.compose.kind == "sidecars"
 
     @property
     def tests_dir(self) -> Path:
@@ -210,6 +239,7 @@ class HarborTask:
         verifier_user: VerifierUserPolicy | None = None,
         index: Mapping[str, Any] | None = None,
         compose: ComposePlan | Mapping[str, Any] | None | object = _PLANNED_HERE,
+        stack_refusal: str | None = None,
     ) -> HarborTask:
         """Read a task directory; ``HarborTaskError`` says why platoon cannot run it.
 
@@ -219,7 +249,8 @@ class HarborTask:
         graded in its agents' sandbox.  ``index`` is the task's row in its dataset's index, kept as
         ``HarborTask.index``.  ``compose`` is the task's stack plan as its lock records it (None: the task has no
         compose file), which a dataset's overlays may have edited; without it, the task's compose file is planned
-        here.
+        here.  ``stack_refusal`` says why no stack could run (the caller's sandbox provider starts none), which
+        refuses a task whose compose file makes it one.
         """
 
         if agent_user not in AGENT_USER_POLICIES:
@@ -241,12 +272,7 @@ class HarborTask:
         agent = _value(config, "agent", dict, "task.toml") or {}
         _check_linux(environment, f"{config_path}")
         settings = _environment_settings(environment, "[environment]")
-        plan = _compose_plan(task_dir, environment, settings, compose)
-        if _value(verifier, "collect", list, "[verifier]"):
-            raise HarborTaskError(
-                f"{config_path}: [[verifier.collect]] hooks run commands in compose services before artifacts are "
-                "collected, which platoon does not support (RFC 0010)"
-            )
+        plan = _compose_plan(task_dir, environment, settings, compose, stack_refusal)
         users = {
             phase: str(user)
             for phase, table in (("agent", agent), ("verifier", verifier))
@@ -266,6 +292,16 @@ class HarborTask:
                 f"{config_path}: {named}, but rootless sandboxes run every process as one user; the task is refused "
                 f"unless the environment sets {fix}"
             )
+        hooks, hook_users = _collect_hooks(verifier, plan, f"{config_path}")
+        if hook_users and policies["verifier"] != "ignore":
+            policy = "verifier_user" if verifier_user is not None else "agent_user"
+            raise HarborTaskError(
+                f"{config_path}: [[verifier.collect]] runs a hook as user {hook_users[0]!r}, but rootless sandboxes "
+                f"run every process as one user; the task is refused unless the environment sets {policy}: ignore"
+            )
+        if hook_users:
+            users = {**users, "collect": hook_users[0]}
+            policies = {**policies, "collect": "ignore"}
         verifier_environment = _verifier_environment(task_dir, environment, verifier)
         verifier_root = policies["verifier"] == "honor" and "verifier" in users
         if verifier_root and not is_root(user := users["verifier"]):
@@ -281,7 +317,7 @@ class HarborTask:
                 "verifier's sandbox: its agents would run as root too; the task is refused unless the environment "
                 "sets verifier_user: ignore"
             )
-        artifacts = _artifacts(config)
+        artifacts = _artifacts(config, plan)
         instruction_path = task_dir / INSTRUCTION_FILENAME
         if not instruction_path.is_file():
             raise HarborTaskError(f"{task_dir} has no {INSTRUCTION_FILENAME}")
@@ -317,6 +353,8 @@ class HarborTask:
             verifier_root=verifier_root,
             index=dict(index or {}),
             compose=plan,
+            collect=hooks,
+            verifier_network=_phase_network(verifier, "[verifier]") or settings["network"],
         )
 
     def to_task(self, task_id: str) -> Task:
@@ -351,10 +389,10 @@ _WARNED_UNREAD: set[str] = set()  # the compose file names that Harbor does not 
 
 
 def _compose_plan(
-    task_dir: Path, environment: dict[str, Any], settings: dict[str, Any], compose: Any
+    task_dir: Path, environment: dict[str, Any], settings: dict[str, Any], compose: Any, stack_refusal: str | None
 ) -> ComposePlan | None:
     """The task's stack plan: ``compose`` when the caller has it (a lock's), else planned from the task's files; a
-    plan that one sandbox cannot run yet refuses the task."""
+    plan that platoon cannot run (yet, or where no stack runs: ``stack_refusal``) refuses the task."""
 
     if compose is _PLANNED_HERE:
         for name in unread_compose_files(task_dir):
@@ -388,21 +426,98 @@ def _compose_plan(
         plan = ComposePlan.from_json(compose)  # type: ignore[arg-type]
     if plan is None:
         return None
+    stack = (
+        f"{task_dir}: {ENVIRONMENT_DIR}/{COMPOSE_FILE} makes the environment a multi-container stack (sidecar services)"
+    )
     if plan.kind == "sidecars":
         # Fail closed (RFC 0010, P0): started from its image (docker_image or the service's default_image), the
         # main container would run alone, without its services or the files and variables compose gives it, and
         # its verifier would write 0 for a policy that may have done the task: a silent reward 0 in training.
-        raise HarborTaskError(
-            f"{task_dir}: {ENVIRONMENT_DIR}/{COMPOSE_FILE} makes the environment a multi-container stack (sidecar "
-            "services), which platoon cannot run yet (RFC 0010); the task is refused, never started without them"
-        )
+        if stack_refusal is not None:
+            raise HarborTaskError(f"{stack}, and {stack_refusal}; the task is refused, never started without them")
+        if external := plan.external:
+            name, served_by = next(iter(sorted(external.items())))
+            raise HarborTaskError(
+                f"{stack} whose service {name} a node service serves ({served_by}, an overlay's external), which "
+                "platoon does not run; the task is refused"
+            )
+        if cycle := plan.dependency_cycle():
+            raise HarborTaskError(f"{stack} whose services depend on one another in a cycle ({' -> '.join(cycle)})")
+        if (problem := _sidecars_problem(plan, planned_here=compose is _PLANNED_HERE)) is not None:
+            raise HarborTaskError(f"{stack} {problem}; the task is refused")
     main = plan.main()
     if main is not None and main.unsupported:
+        sandbox = "main in a stack" if plan.kind == "sidecars" else "the one sandbox of a main-only task"
         raise HarborTaskError(
             f"{task_dir}: {ENVIRONMENT_DIR}/{COMPOSE_FILE} gives main {', '.join(main.unsupported)}, which platoon "
-            "does not apply to the one sandbox of a main-only task yet (RFC 0010); the task is refused"
+            f"does not apply to {sandbox} yet (RFC 0010); the task is refused"
         )
     return plan
+
+
+def _sidecars_problem(plan: ComposePlan, *, planned_here: bool) -> str | None:
+    """Why no stack could run a stack plan's sidecars as compose would; None when nothing says so.
+
+    Always: a sidecar's read-only bind of a session log directory, which would show it what ``main`` writes there in
+    Docker and here an empty directory of its own; and binds of one path of the task's files that another service
+    writes with other masks, or one inside the other, which compose shares and platoon would copy apart.  For a plan
+    ``planned_here``, a dataset directory's: a sidecar of a registry image whose compose file gives it no command
+    (platoon does not record a pulled image's configuration yet), and one that builds its image from a context, which
+    no image map holds for a dataset directory.  A fetched dataset's lock keeps such tasks, which a run refuses when it
+    lists them, and a later platoon may run."""
+
+    for name, service in plan.services.items():
+        if name == MAIN or service.get("external"):
+            continue
+        image = service.get("image")
+        commandless = service.get("command") is None and service.get("entrypoint") is None
+        if planned_here and isinstance(image, str) and commandless:
+            return (
+                f"whose service {name} runs the command of its registry image {image}, which platoon does not know "
+                "yet (a pulled image's configuration is not recorded): give it a command (an overlay's [[compose]] "
+                "replace)"
+            )
+        build = service.get("build")
+        if planned_here and isinstance(build, Mapping) and not build.get("key"):
+            return (
+                f"whose service {name} builds its image from {build.get('context', 'environment')}/"
+                f"{build.get('dockerfile', 'Dockerfile')}, and a dataset directory's task has no image map that could "
+                "hold it (nothing builds a sidecar's image in this release)"
+            )
+        for bind in service_binds(service):
+            if bind.logs is not None and bind.read_only:
+                return (
+                    f"whose service {name} binds the {bind.logs} log directory read-only, to read what main writes "
+                    "there, which a sidecar does not see (it has a directory of its own, which grading copies into "
+                    "main's)"
+                )
+    binds = [
+        (name, bind)
+        for name, service in plan.services.items()
+        if not service.get("external")
+        for bind in service_binds(service)
+        if bind.task is not None
+    ]
+    for index, (name, bind) in enumerate(binds):
+        for other_name, other in binds[index + 1 :]:
+            path, other_path = os.path.normpath(bind.task or "."), os.path.normpath(other.task or ".")
+            same = path == other_path and sorted(bind.masks) == sorted(other.masks)
+            writes = not bind.read_only or not other.read_only or bind.missing or other.missing
+            if writes and not same and _within(path, other_path):
+                return (
+                    f"whose services {name} and {other_name} bind the task's {path} and {other_path}, one inside the "
+                    "other or with other masks, and one writes there: compose shares one directory, platoon would "
+                    "copy them apart"
+                )
+    return None
+
+
+def _within(path: str, other: str) -> bool:
+    """Whether one of two paths of the task (``.`` for all of it) is the other or below it."""
+
+    if "." in (path, other):
+        return True
+    return path == other or path.startswith(f"{other}/") or other.startswith(f"{path}/")
 
 
 def strip_canary(text: str) -> str:
@@ -509,7 +624,49 @@ def _verifier_environment(
     )
 
 
-def _artifacts(config: dict[str, Any]) -> tuple[Artifact, ...]:
+def _collect_hooks(
+    verifier: dict[str, Any], plan: ComposePlan | None, where: str
+) -> tuple[tuple[CollectHook, ...], list[str]]:
+    """The ``[[verifier.collect]]`` hooks, ``main``'s first and then the sidecars', each in the task's order (as Harbor
+    runs them), and the users they name, which the caller's policy decides about.  A hook of a service the task does
+    not start refuses the task."""
+
+    hooks: list[CollectHook] = []
+    users: list[str] = []
+    services = _started_services(plan)
+    for entry in _value(verifier, "collect", list, "[verifier]") or []:
+        table = "[[verifier.collect]]"
+        if not isinstance(entry, dict):
+            raise HarborTaskError(f"{where}: {table} entries must be tables, got {entry!r}")
+        if unknown := sorted(set(entry) - {"command", "service", "timeout_sec", "user"}):
+            raise HarborTaskError(f"{where}: {table} has unknown keys {unknown}")
+        command = _value(entry, "command", str, table)
+        if not command:
+            raise HarborTaskError(f"{where}: {table} needs a command")
+        service = _value(entry, "service", str, table) or "main"
+        if service not in services:
+            raise HarborTaskError(
+                f"{where}: {table} runs a hook in the compose service {service!r}, which the task does not start"
+            )
+        timeout = _value(entry, "timeout_sec", (int, float), table)
+        if (user := _value(entry, "user", (str, int), table)) is not None:
+            users.append(str(user))
+        hooks.append(
+            CollectHook(command=command, service=service, timeout_s=60.0 if timeout is None else float(timeout))
+        )
+    ordered = [hook for hook in hooks if hook.service == "main"] + [hook for hook in hooks if hook.service != "main"]
+    return tuple(ordered), users
+
+
+def _started_services(plan: ComposePlan | None) -> set[str]:
+    """The services a stack plan starts (``main`` and its sidecars); ``main`` alone for a task without one."""
+
+    if plan is None or plan.kind != "sidecars":
+        return {"main"}
+    return {name for name, service in plan.services.items() if not service.get("external")} | {"main"}
+
+
+def _artifacts(config: dict[str, Any], plan: ComposePlan | None = None) -> tuple[Artifact, ...]:
     """The ``artifacts`` list: paths as strings, or ``{source, destination, exclude, service}`` tables."""
 
     artifacts = []
@@ -522,15 +679,20 @@ def _artifacts(config: dict[str, Any]) -> tuple[Artifact, ...]:
         if ".." in PurePosixPath(source).parts:
             raise HarborTaskError(f"artifact source {source!r} must not contain '..'")
         service = _value(entry, "service", str, "artifacts")
-        if service not in (None, "main"):
+        if service == "main":
+            service = None
+        if service is not None and service not in _started_services(plan):
             raise HarborTaskError(
-                f"artifact {source!r} comes from the compose service {service!r}, which platoon cannot run yet "
-                "(RFC 0010)"
+                f"artifact {source!r} comes from the compose service {service!r}, which the task does not start"
+            )
+        if service is not None and not source.startswith("/"):
+            raise HarborTaskError(
+                f"artifact {source!r} of the compose service {service!r} must be an absolute path in that service"
             )
         exclude = _value(entry, "exclude", list, "artifacts") or []
         if not all(isinstance(pattern, str) for pattern in exclude):
             raise HarborTaskError(f"artifacts.exclude must list patterns, got {exclude!r}")
-        artifacts.append(Artifact(source=source, exclude=tuple(exclude)))  # destination only places host copies
+        artifacts.append(Artifact(source=source, exclude=tuple(exclude), service=service))  # destination: host copies
     return tuple(artifacts)
 
 

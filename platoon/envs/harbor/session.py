@@ -25,6 +25,16 @@ task is refused, since a restore brings back its files, not its init.  In either
 the tests left running (the tests may run the agent's code) before it reads their output, file by file and never
 through a symlink (:mod:`platoon.envs.harbor.verifier`).
 
+A task that is a multi-container stack (:mod:`platoon.envs.harbor.sidecars`) holds its whole stack in a
+:class:`StackLease`: ``main`` is the agents' sandbox, shared forks share the stack, and a ``copy`` fork is refused,
+since a restore would bring back ``main``'s files, not the services.  Grading runs the task's ``[[verifier.collect]]``
+hooks in their services (``main``'s first), and probes the sidecars before and after the tests, or before and after
+the artifacts are collected for a separate verifier, which also receives the artifacts of the sidecars that the task
+names (``artifacts[].service``): a sidecar that is down makes the outcome ``invalid`` (``sidecar_unhealthy``), unless
+the service grades anyway (``on_sidecar_down: grade``).  What a sidecar writes in its own log directories reaches the
+sandbox the tests run in once grading made its log directories afresh.  While the tests run in ``main``, the stack has
+the verifier's network.
+
 The agents' workdir is where the tests run (``shared``) and where the artifacts are (``separate``), so an attempt
 whose agents removed or moved it, left something else in its place or locked it scores 0 (``workdir_missing``) in
 either mode, without the tests: no command starts in a working directory that cannot be entered (docker and
@@ -43,19 +53,23 @@ import logging
 import shutil
 import time
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, EnvBusy, GateClosed, ToolGate, caller_or
+from platoon.envs.harbor import sidecars
 from platoon.envs.harbor.artifacts import ArtifactError, CollectedArtifact, collect_artifacts, materialize_artifacts
-from platoon.envs.harbor.task import HarborTask, McpServer, resolve_env
+from platoon.envs.harbor.sidecars import SidecarLogs
+from platoon.envs.harbor.task import CollectHook, HarborTask, McpServer, resolve_env
 from platoon.envs.harbor.tools import TOOL_SPECS, SandboxTools
 from platoon.envs.harbor.users import DOCKER_UMASK
 from platoon.envs.harbor.verifier import TEST_STDOUT, collect, output_tail, suspect_outcome, write_local
 from platoon.envs.service import EnvSetupError, ForkMode, Outcome, ToolResult, ToolSpec
 from platoon.sandbox._processes import alive_processes
 from platoon.sandbox.base import CWD_ERROR_EXIT_CODE, ExecResult, Sandbox, SandboxSpec, cwd_error
+from platoon.sandbox.stacks import ServiceState, Stack
 from platoon.task import Task
 from platoon.utils import scratch
 from platoon.utils.stopping import let_finish
@@ -161,10 +175,40 @@ class SandboxLease:
                 )
         self.gate.close()
         try:
-            await self.sandbox.stop()
+            await self._stop()
         finally:
             for directory in self.scratch:
                 shutil.rmtree(directory, ignore_errors=True)
+
+    async def _stop(self) -> None:
+        await self.sandbox.stop()
+
+
+class StackLease(SandboxLease):
+    """A multi-container stack shared by a session and its shared forks: ``sandbox`` is its ``main``, and the last
+    release stops the whole stack.  ``logs`` are the session's log directories that its sidecars bind, each a volume
+    of the stack."""
+
+    def __init__(
+        self, stack: Stack, spec: SandboxSpec, *, logs: list[SidecarLogs] | None = None, **options: Any
+    ) -> None:
+        super().__init__(stack.main, spec, **options)
+        self.stack = stack
+        self.logs = list(logs or ())
+
+    async def _stop(self) -> None:
+        await self.stack.stop()
+
+
+@dataclass
+class _KeptArtifacts:
+    """What a separate verifier's grading keeps once it released ``main``, for grading again: the directory of the
+    copies, the artifacts, what was left out of them, and the copies of the sidecars' log directories."""
+
+    directory: Path
+    collected: list[CollectedArtifact]
+    skipped: dict[str, str]
+    logs: dict[str, Path]
 
 
 class HarborSession:
@@ -195,6 +239,8 @@ class HarborSession:
         self.harbor_task = harbor_task
         self.rollout_id = rollout_id
         self.sandbox: Sandbox | None = lease.sandbox
+        # The task's multi-container stack, None for a single sandbox; sandbox is its main.
+        self.stack: Stack | None = lease.stack if isinstance(lease, StackLease) else None
         self.mcp_servers: tuple[McpServer, ...] = harbor_task.mcp_servers
         capabilities = service.provider.capabilities
         self.network_isolated = lease.spec.network == "none" and "network_none" in capabilities
@@ -202,10 +248,11 @@ class HarborSession:
         self._service = service
         self._lease = lease
         self._tools = SandboxTools(lease.sandbox, workdir=lease.spec.workdir, command_timeout_s=service.tool_timeout_s)
-        # Separate verifier: the artifacts kept once main was released after collecting them (their directory, the
-        # copies, and what was left out of them), and that release.
-        self._kept_artifacts: tuple[Path, list[CollectedArtifact], dict[str, str]] | None = None
+        # Separate verifier: the artifacts kept once main was released after collecting them, and that release.
+        self._kept_artifacts: _KeptArtifacts | None = None
         self._main_release: asyncio.Task[Any] | None = None
+        self._notes: dict[str, Any] = {}  # what the grade in progress records besides its outcome (collect hooks, ...)
+        self._states: dict[str, ServiceState] = {}  # the sidecars' states at this grade's last probe, if it ran one
 
     @property
     def routes(self) -> dict[str, str]:
@@ -289,6 +336,7 @@ class HarborSession:
         separate = self.harbor_task.verifier_mode == "separate"
         if self.sandbox is None and not (separate and self._kept_artifacts is not None):
             return Outcome.infra("session_closed")
+        self._notes, self._states = {}, {}
         try:
             if separate:
                 outcome = await self._grade_separately()
@@ -306,9 +354,12 @@ class HarborSession:
         except Exception as exc:
             logger.exception("Grading Harbor task %s failed", self.harbor_task.name)
             return Outcome.infra(f"unexpected:{type(exc).__name__}", metadata={"error": str(exc)})
+        outcome.metadata.update(self._notes)
         outcome.metadata["verifier_mode"] = self.harbor_task.verifier_mode
         if self.harbor_task.compose is not None:
             outcome.metadata["stack"] = self.harbor_task.compose.kind
+        if self.stack is not None:
+            outcome.metadata["services"] = sidecars.services_metadata(self.stack, self._states)
         if self.harbor_task.ignored_users:
             outcome.metadata["ignored_users"] = dict(self.harbor_task.ignored_users)  # ran as the sandbox's uid
         if self.harbor_task.verifier_root:
@@ -335,6 +386,11 @@ class HarborSession:
         if mode == "shared":
             return HarborSession(self._service, task, harbor_task, self._lease.acquire(), rollout_id=self.rollout_id)
         if mode == "copy":
+            if self.stack is not None:
+                raise NotImplementedError(
+                    f"Harbor task {self.harbor_task.name!r} is a multi-container stack, and a copy fork restores "
+                    "main's files, not its services: fork it shared or fresh"
+                )
             if self._lease.init is not None:
                 raise NotImplementedError(
                     f"Harbor task {self.harbor_task.name!r} runs main's command from its compose file, and a copy fork "
@@ -360,7 +416,7 @@ class HarborSession:
     async def close(self) -> None:
         kept, self._kept_artifacts = self._kept_artifacts, None
         if kept is not None:
-            shutil.rmtree(kept[0], ignore_errors=True)
+            shutil.rmtree(kept.directory, ignore_errors=True)
         if self._main_release is not None:
             await asyncio.shield(self._main_release)  # main stops in the background once its artifacts are out
             return
@@ -396,12 +452,28 @@ class HarborSession:
         reset = await sandbox.exec(["/bin/sh", "-c", _RESET_SCRIPT, "platoon-reset"], cwd="/")
         if reset.exit_code != 0:
             return Outcome.infra("verifier_setup", reason=reset.stderr.strip())
+        await self._run_hooks(sandbox, self.harbor_task.collect)
+        stack = self.stack
+        agents_network = stack.network if stack is not None else None
         try:
+            if stack is not None:
+                await stack.set_network(
+                    self._service.stack_network(self.harbor_task, self.harbor_task.verifier_network)
+                )
+                if (down := await self._probe("before the tests")) is not None:
+                    return down
+                await self._put_sidecar_logs(sandbox)
             try:
                 await sandbox.upload(self.harbor_task.tests_dir, TESTS_DIR)
             except OSError as exc:
                 return Outcome.infra("verifier_setup", reason=f"cannot upload the tests: {exc}")
-            return await self._run_tests(sandbox, env, agents_sandbox=True)
+            outcome = await self._run_tests(sandbox, env, agents_sandbox=True)
+            if stack is not None and (down := await self._probe("after the tests")) is not None:
+                down.metadata.update(
+                    {key: value for key, value in outcome.metadata.items() if key not in down.metadata}
+                )
+                return down
+            return outcome
         except Exception:
             # Where a provider raises for a working directory it cannot enter (the process provider's OSError, and
             # docker's upload, whose mkdir runs there), a process the kill missed may have removed the workdir since
@@ -413,17 +485,21 @@ class HarborSession:
             raise
         finally:
             await self._remove_tests(sandbox)
+            if stack is not None and agents_network is not None:  # the agents' network again, for shared forks
+                with contextlib.suppress(Exception):
+                    await stack.set_network(agents_network)
 
     async def _grade_separately(self) -> Outcome:
         """Collect the artifacts from main (unless main was released and they were kept), then grade them in a
         verifier sandbox."""
 
-        if self._kept_artifacts is not None:
-            return await self._verify_separately(*self._kept_artifacts[1:])
+        if (kept := self._kept_artifacts) is not None:
+            return await self._verify_separately(kept.collected, kept.skipped, kept.logs)
         sandbox = self._open_sandbox()
         into = Path(scratch.mkdtemp("platoon-harbor-artifacts-"))
         skipped: dict[str, str] = {}
         collected: list[CollectedArtifact] = []
+        logs: dict[str, Path] = {}
         try:
             async with self._lease.gate.hold("exclusive"):
                 # Nothing the agents left running may change the artifacts while they are collected from the
@@ -434,15 +510,10 @@ class HarborSession:
                 if early is None:
                     early = await self._check_workdir(sandbox)
                 if early is None:
-                    workdir = self._lease.spec.workdir
-                    collected = await collect_artifacts(
-                        sandbox,
-                        self.harbor_task.artifacts,
-                        workdir=workdir,
-                        into=into,
-                        skipped=skipped,
-                        max_bytes=self._service.max_artifact_bytes,
-                    )
+                    early = await self._probe("before the artifacts were collected")
+                if early is None:
+                    collected, logs = await self._collect(sandbox, into, skipped)
+                    early = await self._probe("after the artifacts were collected")
         except ArtifactError as exc:
             shutil.rmtree(into, ignore_errors=True)
             return Outcome.infra("artifact_collect", reason=str(exc))
@@ -460,16 +531,118 @@ class HarborSession:
             )
         if self._lease.holders == 1 and not self._lease.inflight and self.sandbox is not None:
             # Nothing else needs main: let it go while the verifier starts, and keep the artifacts for regrading.
-            self._kept_artifacts = (into, collected, skipped)
+            self._kept_artifacts = _KeptArtifacts(into, collected, skipped, logs)
             self.sandbox = None
             self._main_release = _in_background(self._lease.release())
-            return await self._verify_separately(collected, skipped)
+            return await self._verify_separately(collected, skipped, logs)
         try:
-            return await self._verify_separately(collected, skipped)
+            return await self._verify_separately(collected, skipped, logs)
         finally:
             shutil.rmtree(into, ignore_errors=True)
 
-    async def _verify_separately(self, collected: list[CollectedArtifact], skipped: dict[str, str]) -> Outcome:
+    async def _collect(
+        self, sandbox: Sandbox, into: Path, skipped: dict[str, str]
+    ) -> tuple[list[CollectedArtifact], dict[str, Path]]:
+        """Collect what a separate verifier gets, into ``into``: as Harbor does, ``main``'s collect hooks, ``main``'s
+        artifacts, then the sidecars' hooks and their artifacts, each from its service's own files (a path already
+        collected from another service is left out, the first kept), and copies of the sidecars' log directories."""
+
+        hooks = self.harbor_task.collect
+        await self._run_hooks(sandbox, [hook for hook in hooks if hook.service == "main"])
+        collected = await collect_artifacts(
+            sandbox,
+            [artifact for artifact in self.harbor_task.artifacts if artifact.service is None],
+            workdir=self._lease.spec.workdir,
+            into=into / "main",
+            skipped=skipped,
+            max_bytes=self._service.max_artifact_bytes,
+        )
+        await self._run_hooks(sandbox, [hook for hook in hooks if hook.service != "main"])
+        stack = self.stack
+        if stack is None:
+            return collected, {}
+        services = dict.fromkeys(artifact.service for artifact in self.harbor_task.artifacts if artifact.service)
+        for service in services:
+            theirs: dict[str, str] = {}
+            gathered = await collect_artifacts(
+                stack.services[service],
+                [artifact for artifact in self.harbor_task.artifacts if artifact.service == service],
+                workdir="/",
+                into=into / f"service-{service}",
+                skipped=theirs,
+                max_bytes=self._service.max_artifact_bytes,
+                convention=False,
+            )
+            skipped.update({f"{service}:{path}": why for path, why in theirs.items()})
+            workdir = self._lease.spec.workdir
+            for artifact in gathered:
+                target = artifact.target(workdir)
+                if any(_overlaps(target, earlier.target(workdir)) for earlier in collected):
+                    skipped[f"{service}:{target}"] = "collision"  # as Harbor keeps the first claimant
+                    continue
+                collected.append(artifact)
+        return collected, await self._copy_sidecar_logs(into / "sidecar-logs", owner=into)
+
+    async def _run_hooks(self, sandbox: Sandbox, hooks: Sequence[CollectHook]) -> None:
+        """Run collect ``hooks`` (:func:`~platoon.envs.harbor.sidecars.run_collect_hooks`), noting the ones that
+        failed in the outcome (``collect_failed``)."""
+
+        if not hooks:
+            return
+        failed = await sidecars.run_collect_hooks(
+            hooks, main=sandbox, stack=self.stack, task_name=self.harbor_task.name
+        )
+        if failed:
+            self._notes.setdefault("collect_failed", []).extend(failed)
+
+    async def _probe(self, when: str) -> Outcome | None:
+        """Probe the stack's sidecars (:func:`~platoon.envs.harbor.sidecars.probe`): the ``invalid`` outcome when one
+        is down, unless the service grades anyway (``on_sidecar_down: grade``), which notes it (``sidecars_down``).
+        None for a single sandbox."""
+
+        stack = self.stack
+        if stack is None or not isinstance(self._lease, StackLease):
+            return None
+        try:
+            down, states = await sidecars.probe(stack, when=when)
+        except Exception as exc:
+            return Outcome.infra("sidecar_probe", reason=f"cannot probe the stack's sidecars {when}: {exc}")
+        self._states = states
+        if down is None:
+            return None
+        if self._service.on_sidecar_down == "grade":
+            self._notes.setdefault("sidecars_down", []).append(down.reason)
+            return None
+        return down
+
+    async def _put_sidecar_logs(self, sandbox: Sandbox) -> None:
+        """Put what the sidecars wrote in their log directories into those of ``sandbox``, made afresh by now."""
+
+        if not (isinstance(self._lease, StackLease) and self._lease.logs):
+            return
+        directory = Path(scratch.mkdtemp("platoon-harbor-sidecar-logs-"))
+        try:
+            await sidecars.put_logs(sandbox, await self._copy_sidecar_logs(directory, owner=directory))
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    async def _copy_sidecar_logs(self, into: Path, *, owner: Path) -> dict[str, Path]:
+        """Copy the sidecars' log directories, the stack's volumes, into ``into``
+        (:func:`~platoon.envs.harbor.sidecars.snapshot_logs`), in a thread: the copies by log directory.  A grade
+        cancelled meanwhile leaves the thread running, and ``owner``, the scratch directory that holds ``into``, is
+        deleted once it is done."""
+
+        stack = self.stack
+        if stack is None or not isinstance(self._lease, StackLease) or not self._lease.logs:
+            return {}
+        directories = {entry.logs: stack.volume_path(entry.volume) for entry in self._lease.logs}
+        return await sidecars.in_thread(
+            lambda: sidecars.snapshot_logs(directories, into), undo=lambda _: shutil.rmtree(owner, ignore_errors=True)
+        )
+
+    async def _verify_separately(
+        self, collected: list[CollectedArtifact], skipped: dict[str, str], logs: dict[str, Path] | None = None
+    ) -> Outcome:
         try:
             env = resolve_env(self.harbor_task.verifier_env)
         except KeyError as exc:
@@ -492,7 +665,8 @@ class HarborSession:
                 await materialize_artifacts(
                     verifier, collected, workdir=spec.workdir, readable=self.harbor_task.verifier_root
                 )
-            except ArtifactError as exc:
+                await sidecars.put_logs(verifier, logs or {})
+            except (ArtifactError, OSError) as exc:
                 return Outcome.infra("verifier_setup", reason=str(exc))
             if not bundled:  # a verifier image built for the task holds its own /tests
                 try:
@@ -637,6 +811,12 @@ class HarborSession:
 
 def _closed() -> ToolResult:
     return ToolResult.text("The session is closed", is_error=True)
+
+
+def _overlaps(path: str, other: str) -> bool:
+    """Whether one of two sandbox paths is the other or below it."""
+
+    return path == other or path.startswith(other.rstrip("/") + "/") or other.startswith(path.rstrip("/") + "/")
 
 
 def _in_background(coroutine: Awaitable[Any]) -> asyncio.Task[Any]:

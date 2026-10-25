@@ -6,9 +6,8 @@ import asyncio
 import logging
 import math
 import os
-import posixpath
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from functools import cached_property
 from pathlib import Path
@@ -16,8 +15,9 @@ from typing import Any, ClassVar
 
 from platoon.deprecations import removed_hint
 from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, check_queue_timeout
+from platoon.envs.harbor import sidecars
 from platoon.envs.harbor.artifacts import DEFAULT_MAX_ARTIFACT_BYTES
-from platoon.envs.harbor.compose import MainService, ServiceHealthcheck, image_healthcheck, resolve_deferred
+from platoon.envs.harbor.compose import MAIN, MainService, ServiceHealthcheck, image_healthcheck, resolve_deferred
 from platoon.envs.harbor.dataset import (
     HarborDataset,
     SplitManifest,
@@ -41,7 +41,7 @@ from platoon.envs.harbor.images import (
 )
 from platoon.envs.harbor.lock import LockError
 from platoon.envs.harbor.locked import LockedTasks, TaskImages
-from platoon.envs.harbor.session import DEFAULT_CLOSE_TIMEOUT_S, LOG_DIRS, HarborSession, SandboxLease
+from platoon.envs.harbor.session import DEFAULT_CLOSE_TIMEOUT_S, LOG_DIRS, HarborSession, SandboxLease, StackLease
 from platoon.envs.harbor.task import (
     _PLANNED_HERE,
     AGENT_USER_POLICIES,
@@ -63,19 +63,28 @@ from platoon.sandbox import (
     Sandbox,
     SandboxProvider,
     SandboxSpec,
+    StackStartError,
     get_provider,
     network_none_refusal,
     root_refusal,
     rootfs_layout_refusal,
+    stack_refusal,
 )
 from platoon.sandbox._processes import alive_processes, list_processes, start_background
 from platoon.sandbox.routes import RouteError
+from platoon.sandbox.stacks import Healthcheck as StackHealthcheck
+from platoon.sandbox.stacks import StackNetwork, StackProvider
 from platoon.task import Task
-from platoon.utils import scratch
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SANDBOX_START_BUDGET_S = 600.0
+# How a service runs a task that is a multi-container stack: where its provider runs stacks (auto), or never.
+STACK_POLICIES = ("auto", "refuse")
+# The network of a task's sandboxes: the task's network_mode for each phase (task), or none at all (none).
+NETWORK_POLICIES = ("task", "none")
+# What a sidecar that is down at grading makes the outcome: invalid (sidecar_unhealthy), or graded anyway (grade).
+SIDECAR_DOWN_POLICIES = ("invalid", "grade")
 # What the grading commands around the tests take at most besides them: killing processes, checking the workdir,
 # making the directories, uploading the tests, reading the output and, for a separate verifier, the artifacts.
 _GRADING_ALLOWANCE_S = 120.0
@@ -91,11 +100,15 @@ class HarborEnvironmentService:
     names, or relative paths of deeper task directories; ``get_task`` also accepts an absolute task directory path.
     A session's sandbox runs the task's ``environment.docker_image`` (a registry reference gets ``docker://``; a
     ``.sif``, ``.sqsh`` or absolute path is used as written), else ``default_image``.  A task whose environment is
-    a compose stack (sidecar services) is refused when it loads, never started as its main container alone and
-    scored; so is a task that needs GPUs on a provider without them, when its session opens.  A main-only compose
-    file (:mod:`platoon.envs.harbor.compose`) gives the sandbox its environment, working directory, resources and
-    binds, and its command (main's init), which the session starts once the sandbox runs, waits for main's
-    healthcheck, and keeps alive through grading: ``kill_processes`` spares it and what it started.
+    a compose stack (sidecar services) runs as one, ``main`` and its sidecars each in a sandbox of their own, on a
+    provider that runs stacks (:mod:`platoon.envs.harbor.sidecars`), unless ``stacks`` is ``refuse``; elsewhere it is
+    refused when it loads, never started as its main container alone and scored.  So is a task that needs GPUs on a
+    provider without them, when its session opens.  A main-only compose file (:mod:`platoon.envs.harbor.compose`)
+    gives the sandbox its environment, working directory, resources and binds, and its command (main's init), which
+    the session starts once the sandbox runs, waits for main's healthcheck, and keeps alive through grading:
+    ``kill_processes`` spares it and what it started.  ``network_policy`` (``task`` or ``none``) gives every sandbox
+    and stack the network its task asks for, or none, and ``on_sidecar_down`` (``invalid`` or ``grade``) decides what a
+    sidecar that is down at grading makes the outcome.
     The dataset is indexed lazily, so opening a session for a task that already
     carries its directory (``Task.misc["harbor"]["task_dir"]``) never scans it,
     and the sandbox provider is built when the first session opens.
@@ -210,6 +223,9 @@ class HarborEnvironmentService:
         max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
         sandbox_start_budget_s: float = DEFAULT_SANDBOX_START_BUDGET_S,
         holdout: HoldoutRule | Mapping[str, Any] | None = None,
+        stacks: str = "auto",
+        network_policy: str = "task",
+        on_sidecar_down: str = "invalid",
     ) -> None:
         concurrent = frozenset([concurrent_tools] if isinstance(concurrent_tools, str) else concurrent_tools)
         if unknown := sorted(concurrent - {spec.name for spec in TOOL_SPECS}):
@@ -236,6 +252,16 @@ class HarborEnvironmentService:
             number = isinstance(value, int | float) and not isinstance(value, bool)
             if not (number and math.isfinite(value) and value > 0):
                 raise ValueError(f"{option} must be a positive number, got {value!r}")
+        for option, value, allowed in (
+            ("stacks", stacks, STACK_POLICIES),
+            ("network_policy", network_policy, NETWORK_POLICIES),
+            ("on_sidecar_down", on_sidecar_down, SIDECAR_DOWN_POLICIES),
+        ):
+            if value not in allowed:
+                raise ValueError(f"{option} must be one of {allowed}, got {value!r}")
+        self.stacks = stacks
+        self.network_policy = network_policy
+        self.on_sidecar_down = on_sidecar_down
         if agent_user not in AGENT_USER_POLICIES:
             raise ValueError(f"agent_user must be one of {AGENT_USER_POLICIES}, got {agent_user!r}")
         if verifier_user is not None and verifier_user not in VERIFIER_USER_POLICIES:
@@ -345,6 +371,7 @@ class HarborEnvironmentService:
             splits=self._splits,
             agent_user=self.agent_user,
             verifier_user=self.verifier_user,
+            stack_refusal=self._stack_refusal(),
         )
 
     async def list_tasks(self, split: str) -> list[str]:
@@ -403,7 +430,8 @@ class HarborEnvironmentService:
         ``exclude_tasks`` left of the listing) that the sandbox provider would refuse to start, or whose verifier
         could not run as their ``[verifier].user`` asks (:meth:`_check_users`), or whose verifier would run as root
         on an image that may keep its files from other users (:meth:`_check_root_images`), so that the run stops when
-        it lists its tasks rather than lose every rollout of theirs; and, with :class:`EnvNotPrepared`, tasks of a
+        it lists its tasks rather than lose every rollout of theirs, or that are multi-container stacks no rollout
+        could start (:meth:`_check_stacks`, :meth:`_check_stack_specs`); and, with :class:`EnvNotPrepared`, tasks of a
         fetched dataset whose images the image map lacks (:meth:`_check_images`)."""
 
         if task_ids and (refusal := rootfs_layout_refusal(self._provider, self._provider_options)):
@@ -416,9 +444,11 @@ class HarborEnvironmentService:
                     f"the {self._provider_name()} provider would start no separate verifier's sandbox with the "
                     f"verifier_provider_options: {refusal}",
                 )
+        self._check_stacks(task_ids, split)
         self._check_networks(task_ids, split)
         self._check_users(task_ids, split)
         self._check_images(task_ids, split)
+        self._check_stack_specs(task_ids, split)
         self._check_root_images(task_ids, split)
 
     def _check_images(self, names: Sequence[str], split: str) -> None:
@@ -468,6 +498,63 @@ class HarborEnvironmentService:
     def _provider_name(self) -> str:
         return self._provider if isinstance(self._provider, str) else getattr(self._provider, "name", "sandbox")
 
+    def _stack_refusal(self) -> str | None:
+        """Why no task of the service may run as a multi-container stack: ``stacks: refuse``, or a provider that runs
+        none (:func:`platoon.sandbox.stack_refusal`, read without building it); None otherwise."""
+
+        if self.stacks == "refuse":
+            return "the environment sets stacks: refuse"
+        return stack_refusal(self._provider, self._provider_options)
+
+    def _check_stacks(self, names: Sequence[str], split: str) -> None:
+        """Refuse the tasks of a fetched dataset that are multi-container stacks (a fetch with ``refuse: {sidecars:
+        false}`` locks them) where no stack may run (:meth:`_stack_refusal`): every rollout of theirs would fail as it
+        opens.  A dataset directory leaves such tasks out when it lists them, with a warning."""
+
+        if self._locked is None or not names or (refusal := self._stack_refusal()) is None:
+            return
+        lock = self._locked.dataset(fetch_allowed=False).lock
+        stacks = [name for name in names if ((lock.get(name).compose or {}).get("kind")) == "sidecars"]
+        if stacks:
+            shown = ", ".join(stacks[:3]) + (f" and {len(stacks) - 3} more" if len(stacks) > 3 else "")
+            raise EnvSetupError(
+                "env_config",
+                f"{len(stacks)} of the {len(names)} tasks of split {split!r} are multi-container stacks (sidecar "
+                f"services: {shown}), and {refusal}; run them on a provider that runs stacks, or leave them out "
+                "(exclude_tasks)",
+            )
+
+    def _check_stack_specs(self, names: Sequence[str], split: str) -> None:
+        """Refuse the multi-container stacks among the tasks that no rollout could start, as a session would find
+        when it opens (:func:`platoon.envs.harbor.sidecars.stack_spec`, which starts nothing): a sidecar whose image
+        the image map lacks (nothing builds a sidecar's image in this release), whose image's command platoon does not
+        know, a dependency on the health of a service without a healthcheck, an unset host variable.  Where no stack
+        runs, :meth:`_check_stacks` refused them already."""
+
+        if not names or self._stack_refusal() is not None:
+            return
+        unrunnable: dict[str, str] = {}
+        for name in names:
+            try:
+                harbor_task = self._peek(name)
+            except (KeyError, ValueError):  # a refused or unknown task fails on its own when it is opened
+                continue
+            if not harbor_task.is_stack:
+                continue
+            try:
+                self._stack_plan(harbor_task, self._sandbox_spec(harbor_task, "check"), setup=_no_setup)
+            except (KeyError, ValueError) as exc:
+                unrunnable[name] = str(exc)
+        if unrunnable:
+            shown = ", ".join(list(unrunnable)[:3]) + (
+                f" and {len(unrunnable) - 3} more" if len(unrunnable) > 3 else ""
+            )
+            raise EnvSetupError(
+                "env_config",
+                f"{len(unrunnable)} of the {len(names)} tasks of split {split!r} are multi-container stacks that no "
+                f"rollout can start ({shown}): {next(iter(unrunnable.values()))}; leave them out (exclude_tasks)",
+            )
+
     def _check_networks(self, names: Sequence[str], split: str) -> None:
         """Refuse tasks that run without a network (``network_mode = "no-network"``, for their agents or their
         separate verifier) on a provider that would refuse every such sandbox, such as ``singularity`` without
@@ -482,10 +569,17 @@ class HarborEnvironmentService:
                 harbor_task = self._peek(name)
             except (KeyError, ValueError):  # a refused or unknown task fails on its own when it is opened
                 continue
-            if (refusal := _network_refusal(harbor_task, refusals)) is not None:
+            if (refusal := _network_refusal(harbor_task, refusals, self.network_policy)) is not None:
                 offline[name] = refusal
         if offline:
             shown = ", ".join(list(offline)[:3]) + (f" and {len(offline) - 3} more" if len(offline) > 3 else "")
+            if self.network_policy == "none":  # not the tasks' doing: the policy's
+                raise EnvSetupError(
+                    "env_config",
+                    f"{len(offline)} of the {len(names)} tasks of split {split!r} run without a network, as the "
+                    f"environment's network_policy: none makes every sandbox ({shown}), and "
+                    f"{next(iter(offline.values()))}; set it where the site allows it, or set network_policy: task",
+                )
             raise EnvSetupError(
                 "env_config",
                 f"{len(offline)} of the {len(names)} tasks of split {split!r} run without a network ({shown}), and "
@@ -716,8 +810,11 @@ class HarborEnvironmentService:
     def rollout_overhead_s(self, task_id: str) -> float:
         """The seconds a rollout of the task may take beyond its harness's time limit: a ``sandbox_start_budget_s``
         for its sandbox and one for a separate verifier's, its healthcheck, its tests for up to the verifier's
-        timeout (times ``verifier_timeout_multiplier``), the grading commands around them, and the close.  Deadlines
-        on whole rollouts add it (:func:`platoon.train.components.rollout_overhead_s`)."""
+        timeout (times ``verifier_timeout_multiplier``), the grading commands around them, its collect hooks'
+        timeouts, and the close.  For a stack, its services' starts, health waits (their images' healthchecks too) and
+        init jobs' runs (each bounded by a start budget) count along their dependencies' longest path, and so do three
+        probes of its sidecars.  Deadlines on whole rollouts add it
+        (:func:`platoon.train.components.rollout_overhead_s`)."""
 
         return self._limits(task_id)[1]
 
@@ -729,18 +826,30 @@ class HarborEnvironmentService:
             return known
         harbor_task = self._peek(task_id)
         agent = harbor_task.agent_timeout_s
-        starts = 2 if harbor_task.verifier_mode == "separate" else 1
         check = harbor_task.healthcheck
         health = (
             0.0 if check is None else check.start_period_s + (check.retries + 1) * (check.timeout_s + check.interval_s)
         )
-        main = harbor_task.main
-        if main is not None and main.healthcheck is not None:  # main's compose healthcheck runs before it
-            health += main.healthcheck.worst_case_s
+        budget = self.sandbox_start_budget_s
+        if harbor_task.is_stack:
+            # Along the longest path of the services' dependencies, with the healthchecks they run (compose's, else
+            # their images', main's too), an init job's run (bounded by a start budget), and three probes of its
+            # sidecars: the start's last, and the two of grading.
+            checks = self._stack_healthchecks(harbor_task)
+            if (own := checks.get(MAIN)) is not None:
+                health += own.worst_case_s
+            start = sidecars.start_bound_s(harbor_task, checks, start_s=budget, main_health_s=health, job_s=budget)
+            start += 3 * sidecars.probe_bound_s(checks)
+        else:
+            main = harbor_task.main
+            if main is not None and main.healthcheck is not None:  # main's compose healthcheck runs before it
+                health += main.healthcheck.worst_case_s
+            start = budget + health
+        if harbor_task.verifier_mode == "separate":
+            start += budget
+        hooks = sum(hook.timeout_s for hook in harbor_task.collect)
         verifier = harbor_task.verifier_timeout_s * self.verifier_timeout_multiplier
-        overhead = (
-            starts * self.sandbox_start_budget_s + health + verifier + _GRADING_ALLOWANCE_S + self.close_timeout_s
-        )
+        overhead = start + hooks + verifier + _GRADING_ALLOWANCE_S + self.close_timeout_s
         limits = (None if agent is None else agent * self.agent_timeout_multiplier, overhead)
         self._task_limits[task_id] = limits
         return limits
@@ -772,8 +881,11 @@ class HarborEnvironmentService:
                 self._sandbox_spec(harbor_task, rollout_id, verifier=True)  # refused now, not after the agent ran
         except (KeyError, ValueError) as exc:  # a bad task directory (HarborTaskError), unknown id or unset variable
             raise EnvSetupError("env_config", str(exc)) from exc
-        if (refusal := _network_refusal(harbor_task, self._network_refusals())) is not None:
-            raise EnvSetupError("env_config", f"Harbor task {harbor_task.name!r} runs without a network, and {refusal}")
+        if (refusal := _network_refusal(harbor_task, self._network_refusals(), self.network_policy)) is not None:
+            policy = " (the environment's network_policy: none)" if self.network_policy == "none" else ""
+            raise EnvSetupError(
+                "env_config", f"Harbor task {harbor_task.name!r} runs without a network{policy}, and {refusal}"
+            )
         if harbor_task.verifier_root and (refusal := root_refusal(self._provider, self._phase_options["verifier"])):
             raise EnvSetupError(  # refused now, not after the agent ran
                 "env_config",
@@ -782,10 +894,16 @@ class HarborEnvironmentService:
             )
         if needs is not None:  # the harness's gateway route, toolchain and memory; never the verifier's
             spec = needs.apply(spec)
+        if harbor_task.is_stack:  # its copies of the task's files are its own volumes
+            return await self._open_stack(task, harbor_task, spec, rollout_id=rollout_id)
         views: list[Path] = []
         try:
             if (main := harbor_task.main) is not None:
-                spec, views = await asyncio.to_thread(_with_bind_copies, spec, harbor_task, main)
+                mounts, views = await sidecars.in_thread(
+                    lambda: sidecars.bind_copies(harbor_task, main.binds),
+                    undo=lambda made: _remove(made[1]) if made is not None else None,
+                )
+                spec = replace(spec, mounts=[*spec.mounts, *mounts])
             sandbox, init = await self._start(spec, harbor_task)
         except BaseException:
             for view in views:
@@ -800,6 +918,94 @@ class HarborEnvironmentService:
             scratch=views,
         )
         return HarborSession(self, task, harbor_task, lease, rollout_id=rollout_id)
+
+    async def _open_stack(
+        self, task: Task, harbor_task: HarborTask, spec: SandboxSpec, *, rollout_id: str
+    ) -> HarborSession:
+        """Start the task's stack (:mod:`platoon.envs.harbor.sidecars`), ``spec`` being main's sandbox; on any failure
+        everything it started is stopped and an ``EnvSetupError`` says why: ``sidecar_start`` for a sidecar that did
+        not start, ``env_config`` where no stack may run or a service cannot."""
+
+        provider = self.provider
+        refusal = self._stack_refusal() or stack_refusal(provider)
+        if refusal is not None:
+            raise EnvSetupError(
+                "env_config",
+                f"Harbor task {harbor_task.name!r} is a multi-container stack (sidecar services), and {refusal}; the "
+                "task is refused, never started without them",
+            )
+        init: str | None = None
+
+        async def setup(sandbox: Sandbox) -> None:  # main's preparation, once its dependencies are up
+            nonlocal init
+            try:
+                init = await self._prepare(sandbox, harbor_task, spec)
+            except EnvSetupError:
+                raise
+            except Exception as exc:
+                raise EnvSetupError("env_setup", f"{type(exc).__name__}: {exc}") from exc
+
+        try:
+            plan = self._stack_plan(harbor_task, spec, setup=setup)
+        except (KeyError, ValueError) as exc:  # an image without a known command or not in the map, a variable, ...
+            raise EnvSetupError("env_config", str(exc)) from exc
+        assert isinstance(provider, StackProvider)  # stack_refusal checked that it has start_stack
+        try:
+            stack = await provider.start_stack(plan.spec)
+        except EnvSetupError:  # main's preparation said why
+            raise
+        except Exception as exc:
+            raise _start_failure(exc) from exc
+        lease = StackLease(
+            stack,
+            spec,
+            queue_timeout_s=self.queue_timeout_s,
+            close_timeout_s=self.close_timeout_s,
+            init=init,
+            logs=plan.logs,
+        )
+        return HarborSession(self, task, harbor_task, lease, rollout_id=rollout_id)
+
+    def _stack_plan(
+        self, harbor_task: HarborTask, spec: SandboxSpec, *, setup: Callable[[Sandbox], Any]
+    ) -> sidecars.StackPlan:
+        """The spec of the task's stack, ``spec`` being main's sandbox (:func:`sidecars.stack_spec`, which makes
+        nothing); ``ValueError`` or ``KeyError`` says why no rollout could start it."""
+
+        return sidecars.stack_spec(
+            harbor_task,
+            spec,
+            main_image=self._session_image(harbor_task),
+            service_image=self._service_image(harbor_task),
+            env=self.env,
+            mounts=self.mounts,
+            network=self.stack_network(harbor_task, harbor_task.network),
+            labels=spec.labels,
+            setup=setup,
+            job_timeout_s=self.sandbox_start_budget_s,
+        )
+
+    def _service_image(self, harbor_task: HarborTask) -> Callable[[str, Mapping[str, Any]], SessionImage]:
+        """How a stack's service that builds from a context of the task finds its image (the image map's)."""
+
+        return lambda name, build: self._images.for_service(harbor_task.task_dir, name, build, task=harbor_task.name)
+
+    def _stack_healthchecks(self, harbor_task: HarborTask) -> dict[str, StackHealthcheck | None]:
+        """The healthchecks the task's stack runs (:func:`sidecars.healthchecks`), as a session would find them."""
+
+        try:
+            main_image = self._session_image(harbor_task)
+        except ValueError:  # an image the map lacks: no session opens, check_tasks says so
+            main_image = None
+        return sidecars.healthchecks(harbor_task, main_image=main_image, service_image=self._service_image(harbor_task))
+
+    def stack_network(self, harbor_task: HarborTask, phase: str) -> StackNetwork:
+        """A stack's network in a phase whose network is ``phase`` (``host`` or ``none``): none under
+        ``network_policy: none``, or where every network of its compose file is internal."""
+
+        plan = harbor_task.compose
+        egress = plan is None or plan.egress
+        return "egress" if egress and phase != "none" and self.network_policy != "none" else "none"
 
     async def open_verifier(self, harbor_task: HarborTask, *, rollout_id: str) -> tuple[Sandbox, SandboxSpec]:
         """Start the separate verifier sandbox of a task (:class:`~platoon.envs.harbor.task.VerifierEnvironment`),
@@ -823,10 +1029,8 @@ class HarborEnvironmentService:
 
         try:
             sandbox = await (self.verifier_provider if verifier else self.provider).start(spec)
-        except RouteError as exc:  # no Python in the image for the route forwarder: the harness cannot run here
-            raise EnvSetupError("harness_setup", str(exc)) from exc
         except Exception as exc:
-            raise EnvSetupError("sandbox_start", f"{type(exc).__name__}: {exc}") from exc
+            raise _start_failure(exc) from exc
         try:
             init = await self._prepare(sandbox, harbor_task, spec, verifier=verifier)
         except BaseException as exc:
@@ -843,7 +1047,12 @@ class HarborEnvironmentService:
         its stack plan from the lock (a fetched dataset's task), else it is planned from its files."""
 
         return HarborTask.load(
-            task_dir, agent_user=self.agent_user, verifier_user=self.verifier_user, index=index, compose=compose
+            task_dir,
+            agent_user=self.agent_user,
+            verifier_user=self.verifier_user,
+            index=index,
+            compose=compose,
+            stack_refusal=self._stack_refusal(),
         )
 
     def _lookup(self, task_id: str) -> HarborTask:
@@ -920,14 +1129,17 @@ class HarborEnvironmentService:
             env = harbor_task.env
             cpus = main.cpus if main is not None and main.cpus is not None else harbor_task.cpus
             memory_mb = main.memory_mb if main is not None and main.memory_mb is not None else harbor_task.memory_mb
-            settings = (harbor_task.network, cpus, memory_mb)
+            network = harbor_task.network
+            if harbor_task.is_stack:
+                network = "none" if self.stack_network(harbor_task, network) == "none" else "host"
+            settings = (network, cpus, memory_mb)
             mounts = list(self.mounts)
             if main is not None:
                 compose_env = {
                     name: resolve_deferred(value, harbor_task.env, os.environ)
                     for name, value in main.environment.items()
                 }
-                mounts += _bind_mounts(harbor_task, main)
+                mounts += sidecars.bind_mounts(harbor_task, main.binds, copied=sidecars.copied_binds(harbor_task))
         else:
             built = self._verifier_image(harbor_task)
             if built is not None and built.image:
@@ -942,6 +1154,8 @@ class HarborEnvironmentService:
             settings = (environment.network, environment.cpus, environment.memory_mb)
             mounts = [mount for mount in self.mounts if mount.read_only]
         network, cpus, memory_mb = settings
+        if self.network_policy == "none":
+            network = "none"
         labels = {"platoon.env": self.name, "platoon.rollout_id": rollout_id, "platoon.task": harbor_task.name}
         if verifier:
             labels["platoon.role"] = "verifier"
@@ -1058,109 +1272,44 @@ class HarborEnvironmentService:
         return init
 
 
-def _network_refusal(harbor_task: HarborTask, refusals: Mapping[str, str | None]) -> str | None:
-    """Of the phases' ``refusals`` (:meth:`HarborEnvironmentService._network_refusals`), the one that refuses the task:
-    its agents', when they run without a network (``network_mode = "no-network"``), else its separate verifier's,
-    when that runs without one; None when neither applies."""
+def _start_failure(exc: Exception) -> EnvSetupError:
+    """What a sandbox's or a stack's start that raised ``exc`` fails a session's start with: ``harness_setup`` for a
+    route that main's image cannot serve (no Python for the forwarder), ``sidecar_start`` for a sidecar of a stack that
+    did not start, else ``sandbox_start``."""
 
-    if harbor_task.network == "none" and refusals["agents"] is not None:
+    if isinstance(exc, StackStartError):
+        if exc.service != MAIN:
+            return EnvSetupError("sidecar_start", str(exc))
+        if isinstance(exc.__cause__, RouteError):
+            return EnvSetupError("harness_setup", str(exc.__cause__))
+        return EnvSetupError("sandbox_start", str(exc))
+    if isinstance(exc, RouteError):  # no Python in the image for the route forwarder: the harness cannot run here
+        return EnvSetupError("harness_setup", str(exc))
+    return EnvSetupError("sandbox_start", f"{type(exc).__name__}: {exc}")
+
+
+async def _no_setup(sandbox: Sandbox) -> None:
+    """The setup of a stack's main that is only checked, never started."""
+
+
+def _remove(directories: Sequence[Path]) -> None:
+    for directory in directories:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _network_refusal(harbor_task: HarborTask, refusals: Mapping[str, str | None], policy: str = "task") -> str | None:
+    """Of the phases' ``refusals`` (:meth:`HarborEnvironmentService._network_refusals`), the one that refuses the task:
+    its agents', when they run without a network (``network_mode = "no-network"``, or ``network_policy: none``), else
+    its separate verifier's, when that runs without one; None when neither applies.  A stack's network is its stack
+    provider's to give: only its separate verifier's sandbox counts."""
+
+    offline = harbor_task.network == "none" or policy == "none"
+    if offline and not harbor_task.is_stack and refusals["agents"] is not None:
         return refusals["agents"]
     verifier = harbor_task.verifier_environment
-    if verifier is not None and verifier.network == "none":
+    if verifier is not None and (verifier.network == "none" or policy == "none"):
         return refusals["verifier"]
     return None
-
-
-def _bind_mounts(harbor_task: HarborTask, main: MainService) -> list[Mount]:
-    """The read-only binds of ``main`` that mount what they name: the task's own files (but masked ones and missing
-    sources, which bind copies of their own, :func:`_with_bind_copies`), and host paths that listed host variables
-    name, resolved now (``KeyError`` names an unset one)."""
-
-    mounts = []
-    for bind in main.binds:
-        if not bind.read_only or bind.missing or bind.masks or bind.logs is not None:
-            continue
-        if bind.task is not None:
-            mounts.append(Mount(source=str(harbor_task.task_dir / bind.task), target=bind.target, read_only=True))
-        elif bind.host is not None:
-            source = resolve_deferred(bind.host, harbor_task.env, os.environ)
-            if not os.path.isabs(source) or not os.path.exists(source):
-                raise ValueError(
-                    f"Harbor task {harbor_task.name!r} binds the host path {source!r} at {bind.target}, which is not "
-                    "an existing absolute path on this host"
-                )
-            mounts.append(Mount(source=source, target=bind.target, read_only=True))
-    return mounts
-
-
-def _with_bind_copies(spec: SandboxSpec, harbor_task: HarborTask, main: MainService) -> tuple[SandboxSpec, list[Path]]:
-    """``spec`` with the mounts of ``main``'s binds that need a copy of their own, and those copies, in scratch, for
-    the caller to delete with the sandbox: a masked read-only bind of the task's files binds a filtered copy (hard
-    links where the filesystem allows), in which the masked paths are empty directories, so that the masked files
-    never enter the sandbox; a writable bind binds a copy (never links: the content-addressed cache is never
-    written); a missing source binds an empty directory, as Docker creates one."""
-
-    copies: list[Path] = []
-    mounts = list(spec.mounts)
-    try:
-        for bind in main.binds:
-            if bind.task is None or (bind.read_only and not bind.masks and not bind.missing):
-                continue
-            directory = Path(scratch.mkdtemp("platoon-harbor-bind-"))
-            copies.append(directory)
-            tree = directory / "tree"
-            if bind.missing:
-                tree.mkdir()
-            else:
-                _filtered_copy(harbor_task.task_dir / bind.task, tree, bind.masks, link=bind.read_only)
-            mounts.append(Mount(source=str(tree), target=bind.target, read_only=bind.read_only))
-    except BaseException:
-        for directory in copies:
-            shutil.rmtree(directory, ignore_errors=True)
-        raise
-    return replace(spec, mounts=mounts), copies
-
-
-def _filtered_copy(source: Path, target: Path, masks: Sequence[str], *, link: bool) -> None:
-    """Copy ``source`` (a file or a directory) to ``target``, with hard links where possible when ``link``, leaving
-    each of ``masks`` (paths relative to ``source``) an empty directory.  A symlink is copied as a link, as a bind
-    shows it."""
-
-    hidden = {posixpath.normpath(mask) for mask in masks}
-
-    def copy(path: str, destination: str) -> None:
-        if os.path.islink(path):
-            os.symlink(os.readlink(path), destination)
-            return
-        if link:
-            try:
-                os.link(path, destination)
-                return
-            except OSError:
-                pass
-        shutil.copy2(path, destination)
-
-    if not source.is_dir() or source.is_symlink():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        copy(str(source), str(target))
-        return
-    for directory, names, files in os.walk(source):  # symlinks to directories are among the names, never walked
-        relative = os.path.relpath(directory, source)
-        (target / relative).mkdir(parents=True, exist_ok=True)
-        for name in list(names):
-            path = posixpath.normpath(posixpath.join(relative, name))
-            if path in hidden:
-                names.remove(name)
-                (target / path).mkdir()
-            elif os.path.islink(os.path.join(directory, name)):
-                names.remove(name)
-                copy(os.path.join(directory, name), str(target / path))
-        for name in files:
-            path = posixpath.normpath(posixpath.join(relative, name))
-            if path not in hidden:
-                copy(os.path.join(directory, name), str(target / path))
-    for mask in hidden:  # a mask the task has nothing at is an empty directory too, as Docker's volume makes one
-        (target / mask).mkdir(parents=True, exist_ok=True)
 
 
 def _unbound(files: Sequence[FileOp], main: MainService, harbor_task: HarborTask, workdir: str) -> tuple[FileOp, ...]:

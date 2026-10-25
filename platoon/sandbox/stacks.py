@@ -1,0 +1,730 @@
+"""Stacks: a task's services, each in a sandbox of its own, started and stopped together (RFC 0010, section 6).
+
+A multi-container task, such as a Harbor task whose compose file names services besides ``main``, runs as a
+**stack**: ``main``, the agents' sandbox, and its **sidecars** (a database, a judge, an MCP server), which reach one
+another by name.  A provider that runs stacks declares the ``stacks`` capability (:data:`STACKS`) and has
+``start_stack(spec)`` (:class:`StackProvider`): it starts every service of a :class:`StackSpec` and returns a running
+:class:`Stack`, or raises, having stopped what it started.
+
+**The spec.**  Each :class:`ServiceSpec` holds the sandbox the service runs in (a
+:class:`~platoon.sandbox.base.SandboxSpec`: its image, working directory, environment, binds and resources; ``main``'s
+carries the upstreams its harness needs), its command as the final argv (compose's ``entrypoint`` and ``command`` over
+its image's, which the caller resolves; None for a service that only idles, as ``main`` does), its healthcheck, its
+dependencies with their conditions, its volumes (directories the stack owns: a named one shared by every service that
+names it, an anonymous one or a ``tmpfs`` the service's own; a caller may have one filled before any service mounts it,
+such as with a copy of files it binds, which the stack then owns and deletes), the TCP ports it declares, the names it
+answers to besides its own, and what only some runtimes apply (its run mode, ``shm_size``, ``ulimits``, added
+capabilities, its stop signal: the driver passes them to the backend, and the ``process`` provider's applies none).  A
+``setup`` coroutine, when given, runs once the service's sandbox runs and before its command starts: the Harbor service
+prepares ``main`` that way (its directories, its image's deferred files, its init).
+
+**Starting.**  :func:`drive_stack` is the generic driver a provider may start its stacks with, over a
+:class:`StackBackend` that starts one service at a time.  It starts each service once its dependencies have reached
+their conditions, as compose does: ``service_started`` (its command started), ``service_healthy`` (its healthcheck
+passed, by Docker's rules: failures in the start period do not count, and ``retries`` failures in a row make it
+unhealthy) and ``service_completed_successfully`` (its command exited with status 0 within the service's
+``timeout_s``: an init job, such as a seeder); services that do not wait for one another start at once.  It returns
+once every service has started, each one with a healthcheck has passed it and each init job has completed, as ``docker
+compose up --wait`` does, and a last probe of every service but the init jobs finds each one up: a service whose
+command exits by then, or fails, or never turns healthy (or no longer is), fails the start (:class:`StackStartError`,
+with the tail of its log).  On any failure, and when the start is cancelled, it stops every service it started, and
+what the backend holds for the stack, before it raises: a service caught in the middle of its start stops what it
+started itself, which the stop waits for; a ``setup`` coroutine's own exception passes through as it is.
+
+**Probes.**  :meth:`Stack.health` tells each service's state (:class:`ServiceState`): an init job ``completed`` (or
+``exited`` with another status), any other service ``exited``, ``unhealthy`` (its healthcheck failed ``retries`` times
+in a row), ``healthy``, or ``running`` when it has no healthcheck.  Callers probe around what depends on the services,
+such as grading.
+
+**Addressing.**  In a stack whose services share a network of their own (a pod, a compose project), each service
+reaches the others by name at the ports they declare, and :meth:`Stack.rewrite` changes nothing.  Where they share the
+host's network instead, as the ``process`` provider's do (:mod:`platoon.sandbox.process_stacks`), each declared port
+is a port of the host that the stack holds for its life, and ``rewrite`` turns a ``scheme://<service>:<port>``
+reference into the ``scheme://127.0.0.1:<allocated port>`` that reaches it.  The driver rewrites every service's
+environment values and healthchecks so; a caller rewrites what else it runs in a service, such as Harbor's collect
+hooks.
+
+**Teardown.**  :meth:`Stack.stop` stops every service, then what the backend holds; its own task, and each service's
+stop, are cleanups that a stopping process lets finish (:func:`platoon.utils.stopping.let_finish`), inside the cleanup
+scope of the rollout that started them, so a rollout's permit comes back only once its stack is gone.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import logging
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal, Protocol, runtime_checkable
+
+from platoon.sandbox.base import ExecResult, Sandbox, SandboxSpec
+from platoon.utils.stopping import let_finish
+
+logger = logging.getLogger(__name__)
+
+#: The capability of a provider that runs stacks (``start_stack``).
+STACKS = "stacks"
+#: The service that is the agents' sandbox; every stack has it.
+MAIN = "main"
+Condition = Literal["service_started", "service_healthy", "service_completed_successfully"]
+CONDITIONS: tuple[Condition, ...] = ("service_started", "service_healthy", "service_completed_successfully")
+#: A stack's network: ``egress`` reaches beyond the stack (the web), ``none`` only the stack's own services.
+StackNetwork = Literal["egress", "none"]
+#: How a service's processes run (RFC 0010, b.4): as root of a user namespace that maps one id, as the caller's own
+#: uid, or as root with the caller's subordinate ids; a provider that runs everything as the caller says ``caller``.
+RunMode = Literal["root", "caller", "subids"]
+ServiceStatus = Literal["running", "healthy", "unhealthy", "exited", "completed"]
+#: How much of a failed service's log a :class:`StackStartError` carries.
+LOG_TAIL_BYTES = 2000
+_HEALTH_DETAIL_CHARS = 500
+_COMPLETION_POLL_S = (0.05, 1.0)  # how often an init job is looked at: first, and at most (doubling)
+
+
+@dataclass(frozen=True)
+class Healthcheck:
+    """A service's readiness probe, with Docker's defaults: ``command`` (an argv) runs in the service's sandbox, every
+    ``interval_s`` (``start_interval_s`` during the start period), each run at most ``timeout_s``; failures in the
+    first ``start_period_s`` do not count, and ``retries`` failures in a row make the service unhealthy."""
+
+    command: tuple[str, ...]
+    interval_s: float = 30.0
+    timeout_s: float = 30.0
+    start_period_s: float = 0.0
+    start_interval_s: float = 5.0
+    retries: int = 3
+
+    @property
+    def worst_case_s(self) -> float:
+        """How long waiting for it to pass may take at most: its start period, then each retry's timeout and
+        interval."""
+
+        return self.start_period_s + (self.retries + 1) * (self.timeout_s + self.interval_s)
+
+    @property
+    def probe_worst_case_s(self) -> float:
+        """How long a probe of a running service may take at most (:meth:`Stack.health`): ``retries`` runs, no start
+        period."""
+
+        return self.retries * (self.timeout_s + self.interval_s)
+
+
+@dataclass(frozen=True)
+class Dependency:
+    """What a service waits for before it starts: the other service's ``condition`` (``required`` is compose's, which
+    the driver keeps for the record: a service that is started and fails always fails the stack)."""
+
+    condition: Condition = "service_started"
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class Volume:
+    """A directory the stack owns, mounted at ``target`` in a service: a named volume (``name``), shared by every
+    service of the stack that names it, or the service's own (``name`` None: an anonymous volume, or a ``tmpfs``),
+    deleted with the stack.  It is empty when the stack starts unless ``fill`` fills it: called once with the volume's
+    directory on this host, in a thread, before any service that mounts it starts (the first service's ``fill``, for a
+    named volume several name), such as with a copy of files the caller binds, which the stack then owns.  ``subpath``
+    mounts what ``fill`` made at that path of the volume (a file or a directory) rather than the whole of it, and
+    ``read_only`` mounts it read-only where the provider enforces that."""
+
+    target: str
+    name: str | None = None
+    tmpfs: bool = False
+    read_only: bool = False
+    subpath: str | None = None
+    fill: Callable[[Path], None] | None = None
+
+
+@dataclass
+class ServiceSpec:
+    """One service of a stack (the module docstring says what each field means)."""
+
+    sandbox: SandboxSpec
+    command: list[str] | None = None  # the final argv; None: the service only idles (main)
+    healthcheck: Healthcheck | None = None
+    depends_on: dict[str, Dependency] = field(default_factory=dict)
+    volumes: list[Volume] = field(default_factory=list)
+    ports: tuple[int, ...] = ()  # the TCP ports it declares (compose's expose and ports)
+    aliases: tuple[str, ...] = ()  # names it answers to besides its own (compose's hostname, network aliases)
+    network_of: str | None = None  # the service whose network it shares (compose's network_mode: service:<x>)
+    # What only some runtimes apply (the driver passes them to the backend; the process provider applies none).
+    run_as: RunMode | None = None  # None: the provider's choice
+    shm_mb: int | None = None
+    ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
+    cap_add: tuple[str, ...] = ()
+    stop_signal: str | None = None
+    # Awaited with the service's sandbox once it runs, before its command starts; its exception fails the start.
+    setup: Callable[[Sandbox], Awaitable[None]] | None = None
+    # An init job's longest run, from its start to its exit, before the stack's start fails; None: no bound.
+    timeout_s: float | None = None
+
+
+@dataclass
+class StackSpec:
+    """The services of a stack, ``main`` among them, its network, and the labels every service's sandbox carries."""
+
+    services: dict[str, ServiceSpec]
+    network: StackNetwork = "egress"
+    labels: dict[str, str] = field(default_factory=dict)
+
+    def order(self) -> list[str]:
+        """The services in an order that starts each after its dependencies (the spec's order where that allows), once
+        :meth:`check` has found nothing wrong; ``ValueError`` names what is."""
+
+        self.check()
+        placed: list[str] = []
+        remaining = list(self.services)
+        while remaining:
+            ready = next(name for name in remaining if set(self.services[name].depends_on) <= set(placed))
+            placed.append(ready)
+            remaining.remove(ready)
+        return placed
+
+    def check(self) -> None:
+        """Raise ``ValueError`` for a spec no stack can start: no ``main``, a dependency on a service it lacks, on
+        itself or in a cycle, ``service_healthy`` on a service without a healthcheck, or a network of a service it
+        lacks."""
+
+        if MAIN not in self.services:
+            raise ValueError(f"A stack needs a {MAIN!r} service, the agents' sandbox; it has {sorted(self.services)}")
+        if self.network not in ("egress", "none"):
+            raise ValueError(f"A stack's network is egress or none, not {self.network!r}")
+        for name, service in self.services.items():
+            for other, dependency in service.depends_on.items():
+                if other == name:
+                    raise ValueError(f"The service {name!r} depends on itself")
+                if other not in self.services:
+                    raise ValueError(f"The service {name!r} depends on {other!r}, which the stack does not have")
+                if dependency.condition not in CONDITIONS:
+                    raise ValueError(f"The service {name!r} waits for {other!r} to be {dependency.condition!r}")
+                if dependency.condition == "service_healthy" and self.services[other].healthcheck is None:
+                    raise ValueError(
+                        f"The service {name!r} waits for {other!r} to be healthy, and {other!r} has no healthcheck"
+                    )
+            if service.network_of is not None and (
+                service.network_of == name or service.network_of not in self.services
+            ):
+                raise ValueError(
+                    f"The service {name!r} shares the network of {service.network_of!r}, not another service"
+                )
+        if cycle := dependency_cycle({name: set(service.depends_on) for name, service in self.services.items()}):
+            raise ValueError(f"The services depend on one another in a cycle: {' -> '.join(cycle)}")
+
+    def init_jobs(self) -> frozenset[str]:
+        """The services some service waits for to complete successfully: init jobs, which run to their end."""
+
+        return frozenset(
+            other
+            for service in self.services.values()
+            for other, dependency in service.depends_on.items()
+            if dependency.condition == "service_completed_successfully"
+        )
+
+
+def dependency_cycle(graph: Mapping[str, Iterable[str]]) -> list[str] | None:
+    """A cycle of ``graph`` (each node's dependencies), as the nodes along it with the first again at its end; None
+    when it has none.  Dependencies the graph does not list are leaves."""
+
+    state: dict[str, int] = {}  # 1: on the current path, 2: done
+    path: list[str] = []
+
+    def visit(node: str) -> list[str] | None:
+        state[node] = 1
+        path.append(node)
+        for other in sorted(graph.get(node, ())):
+            if state.get(other) == 1:
+                return [*path[path.index(other) :], other]
+            if other not in state and (found := visit(other)) is not None:
+                return found
+        path.pop()
+        state[node] = 2
+        return None
+
+    for node in graph:
+        if node not in state and (found := visit(node)) is not None:
+            return found
+    return None
+
+
+def longest_path(graph: Mapping[str, Iterable[str]], weights: Mapping[str, float]) -> float:
+    """The heaviest path of an acyclic ``graph`` (each node's dependencies), each node counting its weight: how long
+    starting every node takes when each starts once its dependencies have."""
+
+    finish: dict[str, float] = {}
+
+    def done(node: str) -> float:
+        if node not in finish:
+            finish[node] = weights.get(node, 0.0) + max((done(other) for other in graph.get(node, ())), default=0.0)
+        return finish[node]
+
+    return max((done(node) for node in graph), default=0.0)
+
+
+@dataclass(frozen=True)
+class ServiceState:
+    """A service's state as a probe found it (:meth:`Stack.health`): ``status``, its command's exit status once it
+    exited (when known), and what the healthcheck or the backend said."""
+
+    status: ServiceStatus
+    exit_code: int | None = None
+    detail: str = ""
+
+    @property
+    def up(self) -> bool:
+        """Whether the service serves: it runs (healthy, where it has a healthcheck), or an init job completed."""
+
+        return self.status in ("running", "healthy", "completed")
+
+    def describe(self) -> str:
+        """``exited with status 1``, ``is unhealthy: <detail>``, ``is healthy``, ..."""
+
+        if self.status == "exited":
+            return "exited" + (f" with status {self.exit_code}" if self.exit_code is not None else "")
+        if self.status == "unhealthy":
+            return "is unhealthy" + (f": {self.detail}" if self.detail else "")
+        return f"is {self.status}"
+
+
+class StackStartError(RuntimeError):
+    """A service of a stack failed to start: its sandbox did not start, its command exited or failed, or its
+    healthcheck never passed.  ``service`` names it and ``log`` holds the tail of its log."""
+
+    def __init__(self, service: str, message: str, *, log: str = "") -> None:
+        super().__init__(
+            f"the service {service} {message}" + (f"; its log ends: {log.strip()[-500:]}" if log.strip() else "")
+        )
+        self.service = service
+        self.log = log
+
+
+@runtime_checkable
+class Stack(Protocol):
+    """A running stack: its services' sandboxes, their states, and its teardown."""
+
+    id: str
+
+    @property
+    def main(self) -> Sandbox:
+        """The agents' sandbox, ``services["main"]``."""
+        ...
+
+    @property
+    def services(self) -> Mapping[str, Sandbox]:
+        """Every service's sandbox by name, ``main``'s too: where a caller runs a command in a service."""
+        ...
+
+    @property
+    def network(self) -> StackNetwork:
+        """The stack's network now (:meth:`set_network`)."""
+        ...
+
+    @property
+    def run_modes(self) -> Mapping[str, str]:
+        """How each service's processes run (:data:`RunMode`)."""
+        ...
+
+    async def health(self, services: Iterable[str] | None = None) -> dict[str, ServiceState]:
+        """Probe ``services`` (default: every one) and say what each one's state is."""
+        ...
+
+    async def logs(self, service: str, *, max_bytes: int = LOG_TAIL_BYTES) -> str:
+        """The last ``max_bytes`` of what the service's command wrote."""
+        ...
+
+    async def set_network(self, network: StackNetwork) -> None:
+        """Give the whole stack ``network`` from now on (a provider that enforces no network records it)."""
+        ...
+
+    async def connect(self, service: str, port: int) -> str:
+        """A host endpoint that reaches ``port`` of ``service``: ``unix:///<socket>`` or ``tcp://<host>:<port>``."""
+        ...
+
+    def rewrite(self, value: str, *, service: str | None = None) -> str:
+        """``value`` (a command, an environment value) as it must read in ``service`` to reach the stack's services by
+        name (the module docstring's addressing)."""
+        ...
+
+    def volume_path(self, name: str) -> Path:
+        """The directory on this host of the stack's named volume ``name``, which the caller may read (what a sidecar
+        wrote there); ``KeyError`` for a volume the stack does not have."""
+        ...
+
+    async def stop(self) -> None:
+        """Stop every service and release what the stack holds; idempotent."""
+        ...
+
+
+@runtime_checkable
+class StackProvider(Protocol):
+    """A provider that runs stacks (it declares :data:`STACKS`)."""
+
+    async def start_stack(self, spec: StackSpec) -> Stack: ...
+
+
+class ServiceHandle(Protocol):
+    """One started service, as a :class:`StackBackend` runs it."""
+
+    @property
+    def sandbox(self) -> Sandbox: ...
+
+    @property
+    def run_as(self) -> str: ...
+
+    async def status(self) -> tuple[bool, int | None]:
+        """Whether its command still runs (always, for a service without one, while it runs), and its exit status once
+        it exited, when known."""
+        ...
+
+    async def logs(self, max_bytes: int) -> str: ...
+
+    async def stop(self) -> None: ...
+
+
+class StackBackend(Protocol):
+    """What a provider gives :func:`drive_stack`: one service at a time, and the stack's own resources."""
+
+    async def start_service(self, name: str, spec: ServiceSpec) -> ServiceHandle:
+        """Start the service's sandbox, await ``spec.setup`` with it when given, then start ``spec.command`` when
+        given; on any failure, and when cancelled, stop what it started before it raises (a stop that a stopping
+        process lets finish: :func:`platoon.utils.stopping.let_finish`)."""
+        ...
+
+    async def set_network(self, network: StackNetwork) -> None: ...
+
+    async def connect(self, service: str, port: int) -> str: ...
+
+    def rewrite(self, value: str, *, service: str | None = None) -> str: ...
+
+    def volume_path(self, name: str) -> Path: ...
+
+    async def close(self) -> None:
+        """Release what the stack holds besides its services (its volumes, ...); idempotent."""
+        ...
+
+
+class SetupError(Exception):
+    """Wraps what a service's ``setup`` raised while the driver unwinds; never seen outside :func:`drive_stack`."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+class DrivenStack:
+    """A :class:`Stack` whose services :func:`drive_stack` started over a :class:`StackBackend`."""
+
+    def __init__(
+        self, backend: StackBackend, spec: StackSpec, *, id: str, on_stop: Callable[[], None] | None = None
+    ) -> None:
+        self.id = id
+        self.spec = spec
+        self._backend = backend
+        self._network: StackNetwork = spec.network
+        self._jobs = spec.init_jobs()
+        self._handles: dict[str, ServiceHandle] = {}
+        self._checks: dict[str, Healthcheck] = {}  # each service's healthcheck as it runs there (rewritten)
+        self._tasks: list[asyncio.Task[None]] = []
+        self._stopping: asyncio.Task[None] | None = None
+        self._on_stop = on_stop
+
+    @property
+    def main(self) -> Sandbox:
+        return self._handles[MAIN].sandbox
+
+    @property
+    def services(self) -> dict[str, Sandbox]:
+        return {name: handle.sandbox for name, handle in self._handles.items()}
+
+    @property
+    def network(self) -> StackNetwork:
+        return self._network
+
+    @property
+    def run_modes(self) -> dict[str, str]:
+        return {name: handle.run_as for name, handle in self._handles.items()}
+
+    async def health(self, services: Iterable[str] | None = None) -> dict[str, ServiceState]:
+        names = list(self._handles if services is None else services)
+        states = await asyncio.gather(*(self._state(name) for name in names))
+        return dict(zip(names, states, strict=True))
+
+    async def logs(self, service: str, *, max_bytes: int = LOG_TAIL_BYTES) -> str:
+        handle = self._handles.get(service)
+        if handle is None:
+            return ""
+        try:
+            return await handle.logs(max_bytes)
+        except Exception as exc:  # a log that cannot be read says nothing about the service
+            return f"[cannot read the log: {type(exc).__name__}: {exc}]"
+
+    async def set_network(self, network: StackNetwork) -> None:
+        if network not in ("egress", "none"):
+            raise ValueError(f"A stack's network is egress or none, not {network!r}")
+        if network != self._network:
+            await self._backend.set_network(network)
+            self._network = network
+
+    async def connect(self, service: str, port: int) -> str:
+        if service not in self._handles:
+            raise KeyError(f"The stack has no service {service!r}")
+        return await self._backend.connect(service, port)
+
+    def rewrite(self, value: str, *, service: str | None = None) -> str:
+        return self._backend.rewrite(value, service=service)
+
+    def volume_path(self, name: str) -> Path:
+        return self._backend.volume_path(name)
+
+    async def stop(self) -> None:
+        """Stop every service, then what the backend holds; idempotent, and it finishes when its caller stops
+        waiting (a stopping process lets it finish)."""
+
+        if self._stopping is None:
+            self._stopping = let_finish(asyncio.ensure_future(self._stop()))
+        await asyncio.shield(self._stopping)
+
+    async def _stop(self) -> None:
+        # A start that is unwinding: no service may start once the stop has begun.  A service's start that was
+        # cancelled already is stopping what it started (the backend's rollback): it is waited for, never cancelled
+        # again, which would leave that rollback running on its own after the stack counts as stopped.
+        starting = [task for task in self._tasks if not task.done()]
+        for task in starting:
+            if not task.cancelling():
+                task.cancel()
+        if starting:
+            await asyncio.wait(starting)  # unlike gather, a wait that is cancelled cancels none of them
+        for task in self._tasks:  # what they raised, the start reported already
+            if task.done() and not task.cancelled():
+                task.exception()
+        handles = list(self._handles.items())
+        # Each a cleanup of its own: a stopping process cancels every other task, again and again.
+        stops = [let_finish(asyncio.ensure_future(handle.stop())) for _, handle in handles]
+        if stops:
+            await asyncio.wait(stops)
+        for (name, _), stop in zip(handles, stops, strict=True):
+            error = asyncio.CancelledError() if stop.cancelled() else stop.exception()
+            if error is not None:
+                logger.warning("Cannot stop the service %s of stack %s: %r", name, self.id, error)
+        try:
+            await self._backend.close()
+        finally:
+            if self._on_stop is not None:
+                self._on_stop()
+
+    # Starting ---------------------------------------------------------------------------------------------------
+
+    async def _start(self) -> None:
+        order = self.spec.order()
+        loop = asyncio.get_running_loop()
+        reached: dict[tuple[str, str], asyncio.Future[None]] = {
+            (name, condition): loop.create_future() for name in order for condition in CONDITIONS
+        }
+        self._tasks = [asyncio.ensure_future(self._start_service(name, reached)) for name in order]
+        try:
+            pending: set[asyncio.Task[None]] = set(self._tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_EXCEPTION)
+                for task in done:
+                    if not task.cancelled() and (error := task.exception()) is not None:
+                        raise error
+        finally:
+            for task in self._tasks:
+                task.cancel()
+            for future in reached.values():
+                future.cancel()
+        self._tasks = []
+        # As docker compose up --wait: every service that runs on is up, healthy where it has a healthcheck, also the
+        # ones that passed theirs long before the last one started: the probe before the agents.
+        running = [name for name in order if name not in self._jobs]
+        states = await self.health(running)
+        for name in running:
+            if not (state := states[name]).up:
+                raise StackStartError(name, f"{state.describe()} as the stack started", log=await self.logs(name))
+
+    async def _start_service(self, name: str, reached: Mapping[tuple[str, str], asyncio.Future[None]]) -> None:
+        service = self.spec.services[name]
+        for other, dependency in service.depends_on.items():
+            await asyncio.shield(reached[(other, dependency.condition)])
+        prepared = self._prepared(name, service)
+        try:
+            handle = await self._backend.start_service(name, prepared)
+        except SetupError as wrapped:
+            raise wrapped.error from None
+        except StackStartError:
+            raise
+        except Exception as exc:
+            raise StackStartError(name, f"did not start: {type(exc).__name__}: {exc}") from exc
+        self._handles[name] = handle
+        reached[(name, "service_started")].set_result(None)
+        if name in self._jobs:
+            await self._wait_completed(name, handle, service.timeout_s)
+            reached[(name, "service_completed_successfully")].set_result(None)
+            reached[(name, "service_healthy")].set_result(None)  # what waits for it to be healthy waits for its end
+            return
+        if (check := self._checks.get(name)) is not None:
+            await self._wait_healthy(name, handle, check)
+        reached[(name, "service_healthy")].set_result(None)
+
+    def _prepared(self, name: str, service: ServiceSpec) -> ServiceSpec:
+        """``service`` as it starts: its environment values and healthcheck rewritten for the stack's addressing, and
+        its setup's exception marked as its own."""
+
+        rewrite = self._backend.rewrite
+        sandbox = dataclasses.replace(
+            service.sandbox, env={key: rewrite(value, service=name) for key, value in service.sandbox.env.items()}
+        )
+        if service.healthcheck is not None:
+            self._checks[name] = dataclasses.replace(
+                service.healthcheck, command=tuple(rewrite(arg, service=name) for arg in service.healthcheck.command)
+            )
+        setup = service.setup
+        if setup is not None:
+            original = setup
+
+            async def setup(sandbox_: Sandbox) -> None:
+                try:
+                    await original(sandbox_)
+                except Exception as exc:
+                    raise SetupError(exc) from exc
+
+        return dataclasses.replace(service, sandbox=sandbox, healthcheck=self._checks.get(name), setup=setup)
+
+    async def _wait_healthy(self, name: str, handle: ServiceHandle, check: Healthcheck) -> None:
+        """Wait for the service's healthcheck to pass, by Docker's rules; :class:`StackStartError` once its command
+        exits or the check failed ``retries`` times in a row after the start period."""
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        failures = 0
+        while True:
+            passed, detail = await _run_check(handle, check)
+            if passed:
+                return
+            running, code = await handle.status()
+            if not running:
+                raise StackStartError(name, f"{_exited(code)} before its healthcheck passed", log=await self.logs(name))
+            starting = loop.time() - started < check.start_period_s
+            if not starting:
+                failures += 1
+                if failures >= check.retries:
+                    raise StackStartError(
+                        name,
+                        f"never turned healthy: its healthcheck failed {failures} times: {detail}",
+                        log=await self.logs(name),
+                    )
+            await asyncio.sleep(check.start_interval_s if starting else check.interval_s)
+
+    async def _wait_completed(self, name: str, handle: ServiceHandle, timeout_s: float | None) -> None:
+        """Wait for an init job's command to exit, at most ``timeout_s`` (None: no bound); :class:`StackStartError`
+        unless it exits with status 0 by then."""
+
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout_s is None else loop.time() + timeout_s
+        delay, longest = _COMPLETION_POLL_S
+        while True:
+            running, code = await handle.status()
+            if not running:
+                if code == 0:
+                    return
+                raise StackStartError(
+                    name, f"{_exited(code)}, and others wait for it to complete successfully", log=await self.logs(name)
+                )
+            if deadline is not None and loop.time() >= deadline:
+                raise StackStartError(
+                    name,
+                    f"did not complete within {timeout_s:g}s, and others wait for it to complete successfully",
+                    log=await self.logs(name),
+                )
+            await asyncio.sleep(delay if deadline is None else max(0.0, min(delay, deadline - loop.time())))
+            delay = min(delay * 2, longest)
+
+    # Probing ----------------------------------------------------------------------------------------------------
+
+    async def _state(self, name: str) -> ServiceState:
+        handle = self._handles.get(name)
+        if handle is None:
+            return ServiceState("exited", detail="it never started")
+        running, code = await handle.status()
+        if name in self._jobs:
+            if running:
+                return ServiceState("running")
+            return ServiceState("completed" if code == 0 else "exited", code)
+        if not running:
+            return ServiceState("exited", code)
+        check = self._checks.get(name)
+        if check is None:
+            return ServiceState("running")
+        failures = 0
+        while True:
+            passed, detail = await _run_check(handle, check)
+            if passed:
+                return ServiceState("healthy")
+            failures += 1
+            if failures >= check.retries:
+                return ServiceState("unhealthy", detail=detail)
+            running, code = await handle.status()
+            if not running:
+                return ServiceState("exited", code)
+            await asyncio.sleep(check.interval_s)
+
+
+async def drive_stack(
+    backend: StackBackend, spec: StackSpec, *, id: str, on_stop: Callable[[], None] | None = None
+) -> DrivenStack:
+    """Start ``spec``'s services over ``backend`` (the module docstring says how) and return the running stack; on any
+    failure, and when cancelled, stop what started and ``backend``'s own resources first.  ``on_stop`` runs once the
+    stack has stopped."""
+
+    stack = DrivenStack(backend, spec, id=id, on_stop=on_stop)
+    try:
+        await stack._start()
+    except BaseException:
+        await asyncio.shield(stack.stop())
+        raise
+    return stack
+
+
+async def _run_check(handle: ServiceHandle, check: Healthcheck) -> tuple[bool, str]:
+    """Run ``check`` once in the service's sandbox: whether it passed, and what it said when it did not."""
+
+    try:
+        result: ExecResult = await handle.sandbox.exec(list(check.command), timeout_s=check.timeout_s)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"[-_HEALTH_DETAIL_CHARS:]
+    if result.exit_code == 0 and not result.timed_out:
+        return True, ""
+    if result.timed_out:
+        return False, f"it timed out after {check.timeout_s:g}s"
+    output = (result.stderr or result.stdout).strip()
+    return False, (f"exit {result.exit_code}" + (f": {output}" if output else ""))[-_HEALTH_DETAIL_CHARS:]
+
+
+def _exited(code: int | None) -> str:
+    return "exited" + (f" with status {code}" if code is not None else "")
+
+
+__all__ = [
+    "CONDITIONS",
+    "MAIN",
+    "STACKS",
+    "Condition",
+    "Dependency",
+    "DrivenStack",
+    "Healthcheck",
+    "RunMode",
+    "ServiceHandle",
+    "ServiceSpec",
+    "ServiceState",
+    "Stack",
+    "StackBackend",
+    "StackNetwork",
+    "StackProvider",
+    "StackSpec",
+    "StackStartError",
+    "Volume",
+    "dependency_cycle",
+    "drive_stack",
+    "longest_path",
+]

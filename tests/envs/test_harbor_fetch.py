@@ -584,7 +584,7 @@ def test_a_fetch_refuses_what_the_task_loader_refuses(tmp_path: Path):
     assert HarborTask.load(tmp_path / "cache" / lock.get("fine").path).verifier_mode == "separate"
 
 
-def test_sidecar_stacks_stay_refused_when_the_policy_lets_them_through(tmp_path: Path):
+def test_sidecar_stacks_are_refused_by_default_and_locked_as_stacks_when_the_policy_lets_them_through(tmp_path: Path):
     root = tmp_path / "dataset"
     _task(
         root / "with-db",
@@ -592,13 +592,15 @@ def test_sidecar_stacks_stay_refused_when_the_policy_lets_them_through(tmp_path:
         files={**INSTANCE, "environment/docker-compose.yaml": "services:\n  db: {image: postgres:16}\n"},
     )
     by_policy = fetch(fetch_config(str(root), cache=tmp_path / "cache", lock=tmp_path / "a.json"))
-    assert by_policy.get("with-db").refused.startswith("stack: ")
+    assert by_policy.get("with-db").refused == (
+        "stack: the compose file adds sidecar services (refuse: {sidecars: false} fetches it as a stack)"
+    )
     allowed = fetch(
         fetch_config(str(root), cache=tmp_path / "cache", lock=tmp_path / "b.json", refuse={"sidecars": False})
     )
-    reason = allowed.get("with-db").refused
-    assert reason.startswith("task_config: with-db: environment/docker-compose.yaml makes the environment a multi")
-    assert str(tmp_path) not in reason and allowed.runnable() == []
+    row = allowed.get("with-db")
+    assert row.refused is None and row.flags["stack"] == "sidecars" and [task.name for task in allowed.runnable()]
+    assert row.compose is not None and row.compose["services"]["db"]["image"] == "postgres:16"
 
 
 def test_refusals_name_the_task_and_its_files_never_the_directory_it_was_checked_in(tmp_path: Path):

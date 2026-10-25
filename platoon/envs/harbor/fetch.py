@@ -158,10 +158,11 @@ class FetchError(ValueError):
 @dataclass(frozen=True)
 class RefusePolicy:
     """What a fetch records as refused (``refuse:``), besides what :meth:`HarborTask.load` refuses, which a fetch
-    always records (``task_config``: multi-step and non-Linux tasks, collect hooks, a bad ``network_mode``, ...)."""
+    always records (``task_config``: multi-step and non-Linux tasks, a bad ``network_mode``, a stack's sidecar whose
+    command platoon does not know, ...)."""
 
-    # Compose stacks with services beyond `main`, as `stack`. HarborTask.load refuses them too until stacks run, so
-    # with `sidecars: false` they are still refused, as `task_config`.
+    # Compose stacks with services beyond `main`, as `stack`; with `sidecars: false` they are locked as stacks, which a
+    # session runs on a provider that runs stacks (the stacks capability) and refuses elsewhere.
     sidecars: bool = True
     gpus: bool = True  # tasks that ask for GPUs
     agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix
@@ -1201,7 +1202,7 @@ def _inspect(
     if compose_problem is not None:
         problem = compose_problem
     elif flags["stack"] == "sidecars" and refuse.sidecars:
-        problem = "stack: the compose file adds sidecar services, which platoon cannot run yet"
+        problem = "stack: the compose file adds sidecar services (refuse: {sidecars: false} fetches it as a stack)"
     elif flags["gpus"] > 0 and refuse.gpus:
         problem = f"gpus: the task asks for {flags['gpus']} GPU(s)"
     elif (flags["agent_user"] or flags["verifier_user"]) and refuse.agent_user:

@@ -27,6 +27,42 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 - **Sandboxes can keep a task's processes through `kill_processes`.** `Sandbox.keep_processes(entries)`, optional, spares
   processes a session started for the task before any agent ran, with their descendants; the built-in providers have
   it ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
+- **Harbor tasks that are multi-container stacks run, on the `process` provider for now.** A task whose compose file
+  names services besides `main` (a database, a judge, an MCP server) runs as a stack on a sandbox provider with the
+  new `stacks` capability: `main` is the sandbox a main-only file would give the task, and each sidecar a sandbox of
+  its own, with its image, command (compose's over its image's), environment, healthcheck, volumes (named ones shared
+  by the services that name them), binds (writable ones as one copy of the task's files that every service binding it
+  shares, which the stack owns), ports and names. The services start in dependency order, under compose's three
+  conditions (`service_started`, `service_healthy`, and `service_completed_successfully` for init jobs, each bounded
+  by `sandbox_start_budget_s`), and the session opens once all of them are up, as `docker compose up --wait` does, and
+  a last probe finds them so; a sidecar that fails, exits or never turns healthy fails the session's start
+  (`sidecar_start`, an `error`), and nothing of the stack is left, also when the start is cancelled. Grading runs the
+  task's `[[verifier.collect]]` hooks in their services and probes every sidecar before and after the tests (before
+  and after the artifacts are collected, for a separate verifier, which also receives the artifacts that
+  `artifacts[].service` names from a sidecar's own files): a sidecar that is down makes the outcome `invalid`
+  (`sidecar_unhealthy`, with its name, state and log), whatever the reward files say, unless the environment sets
+  `on_sidecar_down: grade`. What a sidecar writes in a log directory it binds (`${HOST_VERIFIER_LOGS_PATH}`) reaches the
+  tests after grading made that directory afresh, so the agents can neither erase nor forge it. `shared` forks share the
+  stack and `copy` forks are refused; a rollout's deadlines count the services' starts and health waits (their images'
+  healthchecks too) along their dependencies' longest path; outcomes record each service's run mode and the state
+  that the grade's probes found (`services`). On the `process` provider, which isolates nothing, each declared port is
+  a port outside the kernel's ephemeral range that the stack holds for its life, which a service learns from
+  `PLATOON_PORT_<port>`, and `scheme://<service>:<port>` in environment values, healthchecks and collect hooks reaches
+  it. `stacks: refuse` refuses every stack; on a provider without the capability (`docker`, `singularity` and `enroot`
+  for now) stacks stay refused, and a fetch still refuses them unless its `refuse` sets `sidecars: false`. Stacks that
+  no rollout could start in this release (a registry sidecar that its compose file gives no command, a sidecar whose
+  build context nothing builds) are skipped by a dataset directory and stop a run when a fetched dataset's tasks are
+  listed ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
+- **A Harbor environment can run every sandbox without a network.** `network_policy: none` gives every sandbox and
+  stack of the environment no network, in every phase, for datasets whose answers the web holds; `task`, the default,
+  gives each phase the network its task asks for, and a stack graded in its own `main` gets the verifier's
+  ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
+- **Write a provider that runs stacks.** `platoon.sandbox.stacks` defines the stack spec (`StackSpec`, `ServiceSpec`,
+  `Healthcheck`, `Dependency`, `Volume`), the running `Stack` (`main`, `services`, `health()`, `logs()`,
+  `set_network()`, `connect()`, `rewrite()`, `stop()`), `StackProvider.start_stack()` and the `stacks` capability, and a
+  generic driver, `drive_stack`, that starts a stack's services in dependency order over a backend that starts one at a
+  time, rolls back on a failure or a cancellation, and probes them
+  ([Write a sandbox provider](docs/extending/sandbox-providers.md#run-multi-container-stacks)).
 
 ### Changes
 
@@ -38,6 +74,19 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   its config, with its main-only tasks refused as 0.4.0 refused them (`stack`): fetch it again to run them
   (`platoon harbor fetch CONFIG --repair`). A lock whose plans follow another compose rule (`compose_rule`) is not
   read: fetch the dataset again.
+- A dataset directory's multi-container tasks are listed where the provider runs stacks, and skipped with a warning, as
+  before, where it runs none. A fetch's `refuse: {sidecars: false}` locks such tasks as runnable stacks, where it locked
+  them refused (`task_config`), and the reason a fetch refuses one by default reads `stack: the compose file adds
+  sidecar services (refuse: {sidecars: false} fetches it as a stack)`.
+- `[[verifier.collect]]` hooks, which platoon refused, run: in `main` for a single-container task, in their service for
+  a stack, `main`'s first, best effort (`collect_failed` in the outcome). A hook that names a `user` is refused unless
+  the users policy ignores it: `verifier_user: ignore`, or, where `verifier_user` is unset, `agent_user: ignore`.
+- The capabilities a provider may declare (`platoon.sandbox.base.CAPABILITIES`) include `stacks`, which the `process`
+  provider declares: a provider that copies another's capabilities, as the provider guide's wrapper did, declares
+  `stacks` only with a `start_stack` of its own. The `process` provider links its mounts before it makes the working
+  directory, so that a working directory that is a mount's target is that mount, and never makes it inside a read-only
+  mount: a read-only bind of a task's files at the working directory, which it dropped, applies, and since the
+  provider enforces no read-only mount, what is written there reaches the task's files.
 - Image map entries record an image's `HEALTHCHECK`, `EXPOSE` ports, `VOLUME`s and `STOPSIGNAL` too, and a
   Dockerfile's build plan what its deferred suffix sets in the image's configuration (`config`: `CMD`, `ENTRYPOINT`,
   `HEALTHCHECK`, ...), which a main-only task's init and healthcheck use. The build keys of task images do not change.

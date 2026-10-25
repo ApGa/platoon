@@ -1,0 +1,22 @@
+# Written for platoon, after Harbor's sidecar-artifacts example.
+services:
+  main:
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+  api:
+    image: python:3.12-slim
+    command: ["python3", "/srv/api/server.py"]
+    environment:
+      API_URL: http://api:8000
+    expose:
+      - "8000"
+    volumes:
+      - ./api:/srv/api:ro
+    healthcheck:
+      test: ["CMD", "python3", "/srv/api/fetch.py", "http://api:8000/stats"]
+      interval: 100ms
+      timeout: 5s
+      retries: 100

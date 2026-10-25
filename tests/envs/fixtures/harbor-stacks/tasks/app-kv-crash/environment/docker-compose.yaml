@@ -1,0 +1,26 @@
+# Written for platoon: app-kv, with a key-value sidecar that exits right after its first write, which the agents make.
+services:
+  main:
+    environment:
+      KV_URL: http://kv:6379
+    depends_on:
+      kv:
+        condition: service_healthy
+  kv:
+    image: python:3.12-slim
+    command: ["python3", "/srv/kv/kv.py"]
+    environment:
+      KV_CRASH_ON_WRITE: "1"
+    expose:
+      - "6379"
+    volumes:
+      - ./kv:/srv/kv:ro
+      - kv-data:/var/lib/kv
+      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}
+    healthcheck:
+      test: ["CMD", "python3", "/srv/kv/health.py", "http://kv:6379/"]
+      interval: 100ms
+      timeout: 5s
+      retries: 100
+volumes:
+  kv-data:

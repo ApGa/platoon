@@ -78,6 +78,7 @@ Capabilities tell platoon what it may ask for, instead of checking provider name
 | `gpu` | The sandbox can reach GPUs |
 | `routes` | The provider implements `spec.upstreams` and `Sandbox.routes` |
 | `host_loopback` | A sandbox on the host network shares this host's network namespace, so its processes reach the model gateway on this host's loopback as they are. A provider whose sandboxes run elsewhere (another node, a cloud) must not declare it: platoon then places a harness in one of its sandboxes only through a route to the gateway |
+| `stacks` | *Since 0.5.0.* The provider also starts stacks, a task's services each in a sandbox of its own (`start_stack`, [below](#run-multi-container-stacks)): a Harbor task whose compose file names services besides `main` runs only on such a provider |
 
 Two optional class attributes concern a site's profile, which can choose a provider for every config run on the
 site ([Write the site's profile](../how-to/clusters.md#4-write-the-sites-profile-once)):
@@ -154,7 +155,8 @@ class AuditedProvider:
     ) -> None:
         self.inner = get_provider(inner, **(inner_options or {}))
         self.name = f"audited-{self.inner.name}"
-        self.capabilities = frozenset(self.inner.capabilities)  # no more than the inner provider can do
+        # No more than the inner provider can do, and no stacks: the wrapper has no start_stack.
+        self.capabilities = frozenset(self.inner.capabilities) - {"stacks"}
         self.log = Path(log_path)
 
     async def start(self, spec: SandboxSpec) -> AuditedSandbox:
@@ -252,6 +254,82 @@ environments:
 The module must be importable in every process that runs rollouts: install your package, or put its directory on
 `PYTHONPATH`.
 
+## Run multi-container stacks
+
+*Since 0.5.0.* A Harbor task whose compose file names services besides `main` (a database, a judge, an MCP server)
+runs as a **stack**, only on a provider that declares the `stacks` capability and has `start_stack`
+(`platoon/sandbox/stacks.py`); elsewhere the task is refused, never started without its services ([Multi-container
+tasks](../how-to/sandboxes-and-harbor.md#multi-container-tasks)). The Harbor service turns the task's stack plan into a
+`StackSpec`, and the provider starts every service of it, or raises having stopped what it started:
+
+```python
+@dataclass
+class ServiceSpec:
+    sandbox: SandboxSpec  # image, workdir, env, binds, resources; main's carries the harness's upstreams
+    command: list[str] | None = None  # the final argv (compose's rules over the image's); None: it only idles
+    healthcheck: Healthcheck | None = None  # an argv, with Docker's interval, timeout, start period and retries
+    depends_on: dict[str, Dependency] = ...  # service_started, service_healthy or service_completed_successfully
+    volumes: list[Volume] = ...  # directories the stack owns: named ones shared by name, anonymous ones its own
+    ports: tuple[int, ...] = ()  # the TCP ports it declares
+    aliases: tuple[str, ...] = ()  # names it answers to besides its own
+    network_of: str | None = None  # the service whose network it shares
+    run_as: RunMode | None = None  # root, caller or subids; None: the provider's choice
+    shm_mb: int | None = None  # with ulimits, cap_add and stop_signal: what the provider applies where it can
+    setup: Callable[[Sandbox], Awaitable[None]] | None = None  # awaited once its sandbox runs, before its command
+    timeout_s: float | None = None  # an init job's longest run
+
+
+@dataclass(frozen=True)
+class Volume:
+    target: str
+    name: str | None = None  # a named volume, shared by every service that names it; None: the service's own
+    tmpfs: bool = False
+    read_only: bool = False
+    subpath: str | None = None  # mount what fill made at this path of the volume, not the whole
+    fill: Callable[[Path], None] | None = None  # fills its directory once, before a service that mounts it starts
+
+
+@dataclass
+class StackSpec:
+    services: dict[str, ServiceSpec]  # "main" is the agents' sandbox
+    network: Literal["egress", "none"] = "egress"
+    labels: dict[str, str] = ...
+
+
+class Stack(Protocol):
+    id: str
+    main: Sandbox  # services["main"]
+    services: Mapping[str, Sandbox]
+    network: Literal["egress", "none"]
+    run_modes: Mapping[str, str]
+
+    async def health(self, services=None) -> dict[str, ServiceState]: ...  # running, healthy, unhealthy, exited, completed
+    async def logs(self, service: str, *, max_bytes: int = 2000) -> str: ...
+    async def set_network(self, network) -> None: ...
+    async def connect(self, service: str, port: int) -> str: ...  # a host endpoint: unix:///... or tcp://host:port
+    def rewrite(self, value: str, *, service: str | None = None) -> str: ...
+    def volume_path(self, name: str) -> Path: ...  # a named volume's directory on this host, which the caller reads
+    async def stop(self) -> None: ...
+```
+
+| A stack provider must | |
+|---|---|
+| Start in dependency order | Start each service once its dependencies reach their conditions: `service_started` once their command started, `service_healthy` once their healthcheck passed (failures in its start period do not count; `retries` failures in a row make the service unhealthy), `service_completed_successfully` once their command exited with status 0 (an init job). Await a service's `setup` with its sandbox once it runs and before its command starts: the Harbor service prepares `main` that way |
+| Start everything, or nothing | Make the stack's volumes, filled by their `fill` where they have one (the Harbor service copies the task's files that its services bind writable that way, so that they share one copy and the stack owns it), before any service starts. Return once every service runs, each one with a healthcheck has passed it and each init job has completed within its `timeout_s`, as `docker compose up --wait` does, and a last probe finds every service up. A service that fails, exits or never turns healthy raises `StackStartError(service, message, log=<its log's tail>)`, which a session reports as `sidecar_start`, after the provider stopped every service it started; a cancelled start stops them too, also a service caught in the middle of its start, before it raises. Make each stop a cleanup that a stopping process lets finish (`platoon.utils.stopping.let_finish`). A `setup`'s own exception passes through as it is |
+| Tell each service's state | `health()` probes: an init job `completed` (or `exited` with another status), any other service `running`, `healthy` or `unhealthy` by its healthcheck, or `exited`. Harbor grading probes the sidecars before and after the tests, and a sidecar that is not up makes the outcome `invalid` (`sidecar_unhealthy`) |
+| Address the services | Where the services share a network of their own (a pod, a compose project), each reaches the others by name at their declared ports, and `rewrite` is the identity. Where they share the host's network, give each declared port a port of the host that the stack holds for its life, which no other stack is given, and make `rewrite` turn `scheme://<service>:<port>` into the address that reaches it; environment values and healthchecks are rewritten so before the services start |
+| Be reaped | Register the stack for cleanup as its sandboxes are (`platoon.sandbox.cleanup.register` before it starts, `attach` once it runs, `unregister` once it stopped), with this process's labels on every service's sandbox, and remove what a dead process's stacks left in `reap(labels)`, their volumes too |
+
+`platoon.sandbox.stacks.drive_stack(backend, spec, id=...)` does the first three for you, over a `StackBackend` that
+starts one service at a time (`start_service(name, spec)`, which returns the service's sandbox with its command's state
+and log), sets the network, connects and rewrites, and releases what the stack holds besides its services (`close()`).
+The `process` provider's stacks use it (`platoon/sandbox/process_stacks.py`): each service is a process sandbox, its
+command runs in the background there, and its declared ports are ports outside the kernel's ephemeral range that the
+stack holds for its life (a claim the kernel arbitrates between processes), which it learns from its listen variable,
+`PLATOON_PORT_<declared port>`. A service that must also run there listens on
+`${PLATOON_PORT_6379:-6379}`, as a script writes below `${PLATOON_SANDBOX_ROOT:-}`, both of which real stacks leave
+unset.
+
 ## Test it like the built-ins
 
 Before you train with a new provider, check what the Harbor service and harnesses rely on, with a small task that
@@ -269,6 +347,9 @@ has a reference solution:
   restored sandbox is not in the original.
 - With `network_none`: a sandbox started with `network="none"` cannot open a connection.
 - The task's reference solution scores 1 through `session.grade()`, and doing nothing scores 0.
+- With `stacks`: a stack whose `main` waits for a sidecar to be healthy starts it first; a sidecar that never turns
+  healthy fails the start and nothing of the stack is left; `health()` tells a killed sidecar `exited`; `stop()`, and a
+  start cancelled midway, leave nothing.
 
 ## Next steps
 
