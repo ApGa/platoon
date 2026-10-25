@@ -1079,7 +1079,10 @@ class GroupRolloutWorkflow:
         """Run ``group_size`` rollouts concurrently with the straggler policy.
 
         Without ``straggler_timeout_seconds`` this is equivalent to
-        ``asyncio.gather``. With it, once ``straggler_quorum`` members
+        ``asyncio.gather``, except that once a member raises, or the group is
+        cancelled, it cancels the members still running and raises only once
+        they have ended, so that none runs on after the group's permits have
+        come back. With it, once ``straggler_quorum`` members
         (default ``group_size - 1``) have settled, the remaining members get at
         most ``straggler_timeout_seconds`` more; leftovers are cancelled and
         reported as unobserved outcomes plus the ``straggler_cancelled`` scalar.
@@ -1101,6 +1104,14 @@ class GroupRolloutWorkflow:
         if straggler_timeout is None:
             try:
                 return list(await asyncio.gather(*tasks))
+            except BaseException:
+                # A member raised, or this task was cancelled (gather then cancelled the members): cancel each member
+                # once, since a second cancellation would cut its unwinding short, such as a worker's termination grace.
+                for task in tasks:
+                    if not task.cancelling():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
             finally:
                 admission.release()
 
