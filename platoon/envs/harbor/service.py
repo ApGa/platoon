@@ -85,9 +85,12 @@ class HarborEnvironmentService:
     carries its directory (``Task.misc["harbor"]["task_dir"]``) never scans it,
     and the sandbox provider is built when the first session opens.
 
-    A fetched dataset (:mod:`platoon.envs.harbor.fetch`) is named by ``dataset`` (``hf://org/name@revision`` or
-    a directory; ``tasks``, ``select``, ``overlays``, ``refuse`` and ``index`` choose and edit what is fetched) or
-    by its ``lock`` alone, with the Harbor cache (``harbor`` in the site profile's cache) holding the files. Its ids
+    A fetched dataset (:mod:`platoon.envs.harbor.fetch`) is named by ``dataset`` (``hf://org/name@revision``, a
+    Harbor Hub package ``harbor://org/name@ref``, a dataset of Harbor's legacy registry ``harbor://name@version``
+    with an optional ``registry``, ``git+<url>@<commit>#<path>`` or a directory; :mod:`platoon.envs.harbor.sources`),
+    by the ``adapter`` that generates it, or by its ``lock`` alone (``tasks``, ``select``, ``overlays``, ``refuse``
+    and ``index`` choose and edit what is fetched), with the Harbor cache (``harbor`` in the site profile's cache)
+    holding the files. Its ids
     come from the lock, and the trainer, which lists the tasks, fetches a pinned ``dataset`` that no lock lists yet;
     rollout workers only read the lock. A task of a fetched dataset that builds from a Dockerfile runs the image map's
     image for its build key, and its deferred Dockerfile steps are applied when its session opens; one the map lacks
@@ -149,9 +152,11 @@ class HarborEnvironmentService:
     }
     # The options that name files platoon reads: a config file may give each relative to itself (RFC 0018, section 5;
     # :class:`~platoon.envs.service.PathOption`).  A split manifest named relative to a ``dataset_dir`` stays relative
-    # to it, and the lock a fetch writes need not exist yet.
+    # to it, the lock a fetch writes need not exist yet, and an adapter's ``repo`` may be a local repository.
     path_options: ClassVar[dict[str, PathOption]] = {
         "dataset": PathOption(),
+        "registry": PathOption(),
+        "adapter.repo": PathOption(),
         "dataset_dir": PathOption(),
         "task_dirs": PathOption(),
         "splits": PathOption(relative_to="dataset_dir"),
@@ -192,6 +197,8 @@ class HarborEnvironmentService:
         overlays: str | Path | Sequence[str | Path] = (),
         refuse: Mapping[str, Any] | None = None,
         index: Sequence[str | Mapping[str, Any]] = (),
+        adapter: Mapping[str, Any] | None = None,
+        registry: str | Path | None = None,
         max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
         sandbox_start_budget_s: float = DEFAULT_SANDBOX_START_BUDGET_S,
         holdout: HoldoutRule | Mapping[str, Any] | None = None,
@@ -262,12 +269,14 @@ class HarborEnvironmentService:
         )
         self._locked: LockedTasks | None = None
         self._warned_of_fetch = False
-        if dataset is not None or lock is not None:
+        if dataset is not None or adapter is not None or lock is not None:
             if dataset_dir is not None or task_dirs is not None:
-                raise ValueError("Pass dataset or lock, or dataset_dir or task_dirs, not both")
+                raise ValueError("Pass dataset, adapter or lock, or dataset_dir or task_dirs, not both")
             manifest = _load_splits(splits, None) if splits is not None else None
             self._locked = LockedTasks(
                 dataset=dataset,
+                adapter=adapter,
+                registry=registry,
                 lock=lock,
                 tasks=tasks,
                 select=select,

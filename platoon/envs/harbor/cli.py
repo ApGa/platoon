@@ -71,12 +71,12 @@ def fetch(
 ) -> int:
     """Fetch the Harbor datasets a config names into the cache, and lock them.
 
-    CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched. A dataset pinned to a
-    commit whose lock answers the config, with a cache that holds its tasks, is left as it is: nothing is downloaded
-    or hashed, unless the lock was written before platoon recorded the tasks' input files. A local directory is fetched
-    again, since its files may have changed. Fetches of one lock take turns, also on several nodes, so a second one
-    finds the first's lock current. Each entry with a hold-out prints the hold-out's report. Prints one JSON line per
-    lock.
+    CONFIG is a training or evaluation config, whose Harbor entries with a dataset (or an adapter) are fetched. A
+    dataset pinned to a commit, revision or digest whose lock answers the config, with a cache that holds its tasks,
+    is left as it is: nothing is downloaded or hashed, unless the lock was written before platoon recorded the tasks'
+    input files. A local directory is fetched again, since its files may have changed. Fetches of one lock take
+    turns, also on several nodes, so a second one finds the first's lock current. Each entry with a hold-out prints
+    the hold-out's report. Prints one JSON line per lock.
 
     Parameters
     ----------
@@ -85,7 +85,8 @@ def fetch(
     overrides
         key=value overrides of a training or evaluation config, as platoon train takes them.
     update
-        Resolve a moving reference (a branch, a tag, no revision) to its current commit, and fetch it.
+        Resolve a moving reference (a branch, a tag, no revision; a Harbor Hub tag; a registry task at HEAD) to what it
+        names now, and fetch it.
     repair
         Fetch a pinned dataset even when its lock answers: hash every cache entry again, and replace a damaged one.
     workers
@@ -94,7 +95,7 @@ def fetch(
 
     from dataclasses import replace
 
-    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed, is_pinned
+    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed
 
     given = {"--lock": lock, "--cache": cache}  # hidden: refused, with what replaces them
     removed = [
@@ -110,7 +111,7 @@ def fetch(
         if workers is not None:
             settings = replace(settings, workers=workers)
         where = f"environments[{label}]: "
-        remote = settings.dataset.startswith("hf://") and is_pinned(settings.dataset)  # its files cannot change
+        remote = settings.immutable  # pinned, and not a directory: its files cannot change
         if remote and not (update or repair) and (old := answering_lock(settings)) and not old.records_input_files:
             _say(
                 f"{where}the lock {settings.lock_path()} records no input files, as locks written before platoon "
@@ -225,7 +226,9 @@ def _fetch_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str, Fe
     targets: list[tuple[str, FetchConfig, HarborEnvironmentService]] = []
     for label, service in _harbor_entries(config, overrides):
         if service.locked is None or service.locked.fetch is None:
-            _say(f"environments[{label}]: names no dataset to fetch (dataset_dir, task_dirs or a lock alone)")
+            _say(
+                f"environments[{label}]: names no dataset or adapter to fetch (dataset_dir, task_dirs or a lock alone)"
+            )
             continue
         targets.append((label, service.locked.fetch, service))
     if not targets:

@@ -353,11 +353,11 @@ class PathOption:
     (RFC 0018, section 5).
 
     A service class lists such options in a class attribute, ``path_options``: a tuple of option names, or a mapping
-    of option names to ``PathOption``.  A name may reach into each mapping of a list, as ``mounts[].source``.  The
-    config loader (:mod:`platoon.utils.config`) makes a relative path absolute against the directory of the config
-    file that gives it, before the files merge, and refuses one that names nothing there; an override's path is
-    relative to the working directory.  A value that is not a local path is left alone: a mapping (an inline split
-    manifest), a URL (``hf://...``) or ``git+...``.
+    of option names to ``PathOption``.  A name may reach into each mapping of a list, as ``mounts[].source``, or into
+    a mapping, as ``adapter.repo``.  The config loader (:mod:`platoon.utils.config`) makes a relative path absolute
+    against the directory of the config file that gives it, before the files merge, and refuses one that names nothing
+    there; an override's path is relative to the working directory.  A value that is not a local path is left alone: a
+    mapping (an inline split manifest), a URL (``hf://...``), ``git+...`` or a git address (``git@host:org/repo``).
     """
 
     # Another option of the service whose directory the path is relative to when the options give that one (a split

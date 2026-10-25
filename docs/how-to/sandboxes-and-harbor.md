@@ -191,9 +191,10 @@ environments:
 ```
 
 `service_kwargs` are the options of the Harbor service (`platoon/envs/harbor/service.py`). The ones that name files
-platoon reads, `dataset`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`, `overlays` and `mounts[].source`,
-are relative to the config file that names them, so `./tasks` is the `tasks` directory beside the config, wherever
-platoon runs from ([Write and override configs](configs.md#2-build-on-it-with-extends)):
+platoon reads, `dataset`, `registry`, `adapter.repo`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`,
+`overlays` and `mounts[].source`, are relative to the config file that names them, so `./tasks` is the `tasks`
+directory beside the config, wherever platoon runs from ([Write and override
+configs](configs.md#2-build-on-it-with-extends)):
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -410,7 +411,18 @@ seconds and names the `platoon prepare` command.
 ## Fetch a dataset by name
 
 Instead of a directory, a Harbor environment can name a dataset that platoon fetches once into a cache and pins with
-a lock: a Hugging Face dataset repository at a commit (`hf://org/name@<commit>[#subdir]`), or a local directory.
+a lock. It comes from one of these sources ([below](#the-harbor-hub-git-repositories-and-adapters) for all but the
+first and the last):
+
+| Source | `service_kwargs` | Pinned (fetched by `platoon train` and `platoon eval` themselves) by |
+|---|---|---|
+| A Hugging Face dataset repository | `dataset: hf://org/name@<commit>[#subdir]` | a commit; a branch moves |
+| A package of the Harbor Hub: a dataset, or a single task | `dataset: harbor://org/name@<ref>` | a revision (`@4`) or a digest (`@sha256:...`); a tag (`@latest`, `@v4.0.0`, or none) moves |
+| A dataset of Harbor's legacy registry | `dataset: harbor://name@<version>`, and `registry:` a `registry.json` (a file, its directory or a URL; default: Harbor's own) | a version in a registry file, or at a URL with a commit in its path; Harbor's own registry, on a branch, moves, and so does a task at `HEAD` |
+| A directory of a git repository | `dataset: git+<url>@<commit>[#<path>]` | a full 40-character commit; a branch or a tag moves |
+| An adapter that generates the tasks | `adapter: {repo, commit, path, command, args, env, sparse}`, instead of `dataset` | a full commit |
+| A local directory | `dataset: <path>` | (copied again by every fetch, since its files may change) |
+
 The entry's `service_kwargs` say what to fetch:
 
 ```yaml
@@ -494,18 +506,20 @@ environments:
 
 | Option | Meaning |
 |---|---|
-| `dataset` | A source to fetch (`hf://org/name@<commit>` or a directory), with `tasks`, `select`, `overlays`, `refuse` and `index` choosing and editing what is fetched |
+| `dataset` | A source to fetch (`hf://org/name@<commit>`, `harbor://org/name@<ref>`, `harbor://name@<version>`, `git+<url>@<commit>#<path>` or a directory), with `tasks`, `select`, `overlays`, `refuse` and `index` choosing and editing what is fetched |
+| `registry` | The legacy registry of a `harbor://name@<version>` dataset: a `registry.json` file, its directory or a URL (default: Harbor's own) |
+| `adapter` | An adapter that generates the tasks, instead of a `dataset`: `{repo, commit, path, command, args, env, sparse}` ([above](#the-harbor-hub-git-repositories-and-adapters)) |
 | `lock` | The lock to read (and, with `dataset`, to write; default `<Harbor cache>/locks/<hash of the fetch settings>.lock.json`) |
 
 The Harbor cache, which holds the tasks' files, the locks and the image maps, is `harbor` in the site profile's
 `cache`, else `~/.cache/platoon/harbor` ([Write the site's profile](clusters.md#4-write-the-sites-profile-once)).
 
-`platoon train` and `platoon eval` fetch a `dataset` pinned to a commit when no lock lists it yet, in the process that
-lists the tasks; a moving reference (a branch, or no revision) is fetched only by `platoon harbor fetch --update`. A
-local directory is copied into the cache when it is fetched: run `platoon harbor fetch` again after changing it.
-For a dataset pinned to a commit, `platoon harbor fetch` does nothing when the lock answers the config and the cache
-holds a directory for each of its tasks; `--repair` fetches anyway, and so does a fetch of a lock written before
-platoon recorded `input_files`, once. A fetch hashes each cache entry it would reuse
+`platoon train` and `platoon eval` fetch a pinned `dataset` (or `adapter`; the table above says what pins each source)
+when no lock lists it yet, in the process that lists the tasks; a moving reference (a branch, a tag, or no revision) is
+fetched only by `platoon harbor fetch --update`. A local directory is copied into the cache when it is fetched: run
+`platoon harbor fetch` again after changing it. For a pinned dataset, `platoon harbor fetch` does nothing when the lock
+answers the config and the cache holds a directory for each of its tasks; `--repair` fetches anyway, and so does a
+fetch of a lock written before platoon recorded `input_files`, once. A fetch hashes each cache entry it would reuse
 again, and replaces one that no longer matches its digest, so `--repair` (and any fetch of a local directory) also
 repairs a damaged cache; `platoon harbor verify` finds one without changing it.
 Rollout workers never fetch and never scan: they look each task up by id in the lock, and check its cache entry
@@ -540,6 +554,93 @@ of each selected task's `[metadata]` table among its index fields in the lock, w
 recorded, a task without a field records none for it, and a field that the dataset's own index gives the same task
 with another value fails the fetch, naming both values. Like every `index` entry, it is one of the lock's inputs:
 adding it fetches a new lock.
+
+### The Harbor Hub, git repositories and adapters
+
+A moving reference (a Hub tag, a branch, a registry task at `HEAD`) is fetched only by `platoon harbor fetch CONFIG
+--update`, which records what it resolved to (a digest, a commit) in the lock; the runs then read that lock until the
+next update. Rollout workers never fetch from any source: they read the lock and the cache. A source downloads or
+checks out into a directory of its own in the Harbor cache, removed once its tasks are cached, and the lock records how
+it resolved (`source`: the package and its digest, the repositories and their commits, an adapter's command).
+
+```yaml
+environments:
+  - name: terminal-bench
+    service: harbor
+    service_kwargs:
+      dataset: harbor://terminal-bench/terminal-bench@4   # revision 4 of the dataset
+      tasks: [splits/cpu-tasks.json]                      # optional: only these are cached and locked
+  - name: kumo
+    service: harbor
+    service_kwargs:
+      dataset: harbor://kumo@1.0                          # Harbor's legacy registry, which moves: fetch it with --update
+  - name: gaia2
+    service: harbor
+    service_kwargs:
+      dataset: git+https://github.com/laude-institute/harbor-datasets@37db108843a49bb31a592e37a75e2c40dc3f9749#datasets/gaia2-cli
+```
+
+**The Harbor Hub.** platoon runs the Harbor CLI (`harbor==0.24.0`, through `uvx` in an environment of its own, with
+its dependencies as PyPI had them at its release, `--exclude-newer 2026-10-06T00:00:00Z`, so that every host installs
+the same packages; set `PLATOON_HARBOR_CLI` to the command line of another Harbor CLI, such as an installed `harbor`),
+never imports Harbor, and needs [uv](https://docs.astral.sh/uv/) on the fetching host; Harbor's telemetry is off
+(`HARBOR_TELEMETRY=0`) unless the environment sets it. `harbor version show --json` resolves the reference to the
+package's digest, and for a dataset to each task's digest; `harbor download` then downloads that digest. The CLI has no
+task filter, so a dataset downloads whole and `tasks` and `select` choose among its tasks afterwards. Each task's files
+must hash to the digest the Hub gives it, by Harbor's content hash, which platoon computes itself: a task that does not
+fails the fetch. Task ids are the tasks' names, the directories of `harbor download --export`. A step that fails for
+a reason that may pass (a reset stream, a timeout, a server error) is tried up to four times; one that the CLI reports
+as a package or a version that is not found, or not yours to read, is not tried again.
+
+**Harbor's legacy registry.** platoon reads the `registry.json` itself, and takes each selected task from its
+`git_url` at its `git_commit_id` and `path`, through a sparse clone that downloads only the selected tasks' files,
+rather than a clone of each whole repository; a task in a Hugging Face dataset repository comes through `hf://`'s
+downloads, which need no git-lfs. Task ids are the registry's names. Of two entries with one name and version, the last
+counts, as in Harbor. A task without a `git_url` is a directory next to a registry file, which a fetch copies again
+every time, as it copies a local directory, so `platoon harbor fetch` takes its changes.
+
+**A git repository.** The fetch takes the commit's tree without its files (a shallow, blobless fetch), finds the tasks
+under `path` as it finds them in a directory (its `registry.json`, else `task-index.json`, else every directory that
+holds a `task.toml`), and checks out only the selected tasks. A commit must be named in full: git cannot fetch an
+abbreviated one. Files kept in Git LFS need `git lfs` on the fetching host; without it, a task that has one fails the
+fetch, naming the file.
+
+**An adapter** generates the tasks from an upstream repository at a pinned commit, as Harbor's adapters and
+Frontier-CS's do. Frontier-CS's adapters, written for Harbor's tree, do not run as projects of their own in
+Frontier-CS's repository, so this entry names the command Frontier-CS runs them with, a module on `PYTHONPATH`:
+
+```yaml
+environments:
+  - name: frontier-cs
+    service: harbor
+    service_kwargs:
+      adapter:
+        repo: https://github.com/FrontierCS/Frontier-CS.git
+        commit: ede1b44d2fe22a65320c5e36b1014b3defc03671
+        path: adapters/frontier-cs-algorithm   # where the command runs
+        sparse: [/adapters/, /algorithmic/, "!/algorithmic/problems/*/testdata/"]   # what to check out
+        command: [uv, run, --no-project, --python, "3.12", --with, pyyaml==6.0.2, python, -m, frontier_cs_algorithm.main]
+        env: {PYTHONPATH: src}
+        args: [--source, "{checkout}"]         # --output-dir {output} is added
+```
+
+The fetch checks the repository out at the commit (whole, or what the `sparse` patterns name: git's sparse-checkout
+patterns, where `!` excludes), runs `command` with `args` in the directory `path`, with `env` added to the fetching
+process's environment, and fetches the directory it wrote as a local directory. In `command`, `args` and `env`,
+`{checkout}` is the checkout and `{output}` the directory the tasks go to; `--output-dir {output}` is added when none of
+them names `{output}`, since Harbor's adapters all take it. Without a `command`, the adapter runs as its own project
+runs it: `uv run --project . <script>`, with the one script of its `pyproject.toml`, and `--locked` when it has a
+`uv.lock`, whose digest the lock records. A `repo` may be a local repository, relative to the config file like every
+input path. An adapter runs the repository's code, with the network and the credentials of the host that fetches: name
+a commit you have read. The repository, commit, command, arguments, environment and patterns are the lock's inputs.
+
+**Links and credentials.** What the Hub, git or a registry brings must stay inside each task. A symbolic link in a
+task is taken as the file it names when that file is in the same task, as Harbor's content hash takes it; a link that
+leaves its task (an absolute one, one that climbs out, a `solution/` or `tests/` directory that links elsewhere, or a
+task that is itself a link or lies behind one) fails the fetch, naming the task and the path, since it would bring
+files of the fetching host into the cache and into every sandbox. The lock and the fetch's log lines record each URL as
+written, so a URL that carries credentials (`https://user:token@host/...`) is refused: give private repositories'
+credentials to git (a credential helper, `~/.netrc` or an SSH key) instead.
 
 ## Build task images
 
@@ -1344,11 +1445,10 @@ an absolute path, is used as written; any other reference without a scheme gets 
 ## What comes next
 
 [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md) is the design behind this page. What it proposes
-beyond what is described here: fetching datasets from the Harbor registry (`harbor://`) and from git repositories, and
-running multi-container tasks, through `docker compose` where Docker exists and as rootless pods on Singularity,
-Apptainer and enroot. Until then, multi-container tasks stay refused. The [RFC index](../rfcs/README.md) lists every
-proposal and explains how one moves from draft to implemented; comment on the RFC, or open a new one, to shape what gets
-built.
+beyond what is described here: running multi-container tasks, through `docker compose` where Docker exists and as
+rootless pods on Singularity, Apptainer and enroot. Until then, multi-container tasks stay refused. The [RFC
+index](../rfcs/README.md) lists every proposal and explains how one moves from draft to implemented; comment on the RFC,
+or open a new one, to shape what gets built.
 
 ## Next steps
 

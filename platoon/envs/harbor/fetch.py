@@ -1,6 +1,6 @@
 """Fetch Harbor datasets by name into a content-addressed cache, and pin them with a lock.
 
-    dataset: hf://org/harbor-dataset@f216b86ca1a18d44433d6cb45f70bec81f47c66e   # or a local directory
+    dataset: hf://org/harbor-dataset@f216b86ca1a18d44433d6cb45f70bec81f47c66e   # or a local directory, harbor://, git+
     lock: locks/harbor-dataset-phase0.lock.json  # default: <cache>/locks/<hash of these settings>.lock.json
     tasks: [splits/phase0-smoldata.json]         # allowlists of task ids: only these are downloaded
     select: {source_dataset: [FineEnvs/SmolDataEnvs-harbor-train]}   # filters on the dataset index's fields
@@ -9,7 +9,10 @@
     index: [{path: data/tasks.jsonl, fields: [split_group]}, {metadata: [kaggle_dataset_name]}]
 
 These are keys of a Harbor entry's ``service_kwargs`` (:func:`fetch_config`). The cache is the Harbor cache,
-``harbor`` in the site profile's cache (:func:`platoon.envs.harbor.lock.default_cache`).
+``harbor`` in the site profile's cache (:func:`platoon.envs.harbor.lock.default_cache`). The Harbor Hub
+(``harbor://org/name@ref``), Harbor's legacy registry (``harbor://name@version``, with ``registry``), git repositories
+(``git+<url>@<commit>#<path>``) and adapters (``adapter: {repo, commit, path, ...}`` instead of ``dataset``) are
+:mod:`platoon.envs.harbor.sources`.
 
 A fetch resolves the source at its pinned revision, reads the dataset's index (``registry.json``, else
 ``task-index.json``, else a scan for ``task.toml``), downloads only the selected tasks, applies overlays, and
@@ -89,6 +92,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
 from platoon.envs.harbor.dataset import dataset_tasks
@@ -105,26 +109,36 @@ from platoon.envs.harbor.hashing import (
 )
 from platoon.envs.harbor.inputs import input_digest, input_files
 from platoon.envs.harbor.lock import TASKS_DIR, DatasetLock, LockedTask, LockError, default_cache, read_lock, write_lock
+from platoon.envs.harbor.references import (
+    _COMMIT,
+    _URL,
+    REGISTRY,
+    AdapterSpec,
+    FetchError,
+    check_source,
+    check_url,
+    is_legacy_registry,
+    legacy_registry_pinned,
+    registry_has_local_tasks,
+    registry_inputs,
+    source_pinned,
+)
 from platoon.envs.harbor.task import HarborTask, compose_file, is_trivial_compose
 
 logger = logging.getLogger(__name__)
 
-REGISTRY = "registry.json"
 TASK_INDEX = "task-index.json"
 OVERLAY_FILE = "overlay.toml"
 COMPOSE_FILENAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
 MODES_RULE = "executable bit restored on *.sh files and files starting with #!"
-_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _HF = re.compile(
     r"^hf://(?:datasets/)?(?P<repo>[A-Za-z0-9][\w.-]*/[\w.-]+)(?:@(?P<revision>[^#]+))?(?:#(?P<subdir>.+))?$"
 )
+# What names a source to download rather than a local directory; ``adapter:`` is an adapter's name in the lock.
+_REMOTE_PREFIXES = ("hf://", "harbor://", "git+", "adapter:")
 _PER_TASK_LISTING = 64  # list each task's directory below this many selected tasks per parent, else the parent
 _MAX_ATTEMPTS = 10
 MIB = 1 << 20  # refuse.uploads_over_mb counts MiB
-
-
-class FetchError(ValueError):
-    """A dataset that cannot be fetched as configured."""
 
 
 @dataclass(frozen=True)
@@ -230,6 +244,42 @@ class FetchConfig:
     refuse: RefusePolicy = RefusePolicy()
     index: tuple[IndexFile | MetadataFields, ...] = ()
     workers: int = 8
+    # The legacy registry of a harbor://name@version dataset: a registry.json file or URL (None: Harbor's own).
+    registry: str | None = None
+    # An adapter that generates the tasks, instead of a dataset to download; ``dataset`` is then its name for messages
+    # and the lock (adapter:<repo>@<commit>#<path>).
+    adapter: AdapterSpec | None = None
+
+    @property
+    def local(self) -> bool:
+        """Whether the fetch copies its tasks from local directories, which it does again every time, since their files
+        may change under the same paths: a local dataset directory, or a registry file's tasks that name no
+        ``git_url`` (directories next to the file)."""
+
+        if self.adapter is not None:
+            return False
+        if self.registry is not None and is_legacy_registry(self.dataset):
+            return registry_has_local_tasks(self.dataset, self.registry)
+        return is_local(self.dataset)
+
+    @property
+    def pinned(self) -> bool:
+        """Whether the source names immutable content, which ``platoon train`` and ``platoon eval`` fetch by
+        themselves (:func:`is_pinned`; an adapter at a full commit; a legacy registry's dataset by its version and
+        its registry, a file or a URL with a commit).  The one place that decides it: a fetch refuses a source that
+        is not pinned unless it updates."""
+
+        if self.adapter is not None:
+            return self.adapter.pinned
+        if is_legacy_registry(self.dataset):
+            return legacy_registry_pinned(self.dataset, self.registry)
+        return is_pinned(self.dataset)
+
+    @property
+    def immutable(self) -> bool:
+        """Whether the files the source names cannot change: pinned, and not copied from local directories."""
+
+        return self.pinned and not self.local
 
     @property
     def metadata_fields(self) -> tuple[str, ...]:
@@ -253,12 +303,19 @@ class FetchConfig:
             "refuse": self.refuse.inputs(),
             "index": [index.__dict__ for index in self.index],
         }
+        # Only when set, so that a lock written before these keys still answers a config that sets neither.
+        if self.registry is not None:
+            payload["registry"] = registry_inputs(self.registry)
+        if self.adapter is not None:
+            payload["adapter"] = self.adapter.inputs()
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=list).encode()).hexdigest()
 
 
 def fetch_config(
-    dataset: str,
+    dataset: str | None = None,
     *,
+    adapter: Mapping[str, Any] | None = None,
+    registry: str | Path | None = None,
     cache: str | Path | None = None,
     lock: str | Path | None = None,
     tasks: str | Path | Sequence[str | Path] = (),
@@ -269,7 +326,9 @@ def fetch_config(
 ) -> FetchConfig:
     """A :class:`FetchConfig` from a Harbor entry's values, fetched into ``cache`` (default: the Harbor cache,
     :func:`~platoon.envs.harbor.lock.default_cache`); relative paths resolve against the working directory, and a
-    relative local ``dataset`` too (a config's are absolute already)."""
+    relative local ``dataset`` too (a config's are absolute already).  ``adapter`` (an adapter that generates the
+    tasks, :class:`~platoon.envs.harbor.references.AdapterSpec`) replaces ``dataset``; ``registry`` (a ``registry.json``
+    file or URL) goes with a ``harbor://name@version`` dataset."""
 
     def resolve(value: str | Path) -> Path:
         path = Path(value).expanduser()
@@ -278,10 +337,31 @@ def fetch_config(
     def paths(value: str | Path | Sequence[str | Path]) -> tuple[Path, ...]:
         return (resolve(value),) if isinstance(value, (str, Path)) else tuple(resolve(item) for item in value)
 
-    if not isinstance(dataset, str) or not dataset:
-        raise FetchError("dataset must name a source: hf://org/name@revision or a local directory")
-    if not dataset.startswith(("hf://", "harbor://", "git+")):
+    spec = None
+    if adapter is not None:
+        if dataset is not None:
+            raise FetchError("Name the dataset or the adapter that generates it, not both")
+        spec = AdapterSpec.parse(adapter, resolve=lambda value: str(resolve(value)))
+        dataset = spec.dataset
+    elif not isinstance(dataset, str) or not dataset:
+        raise FetchError(
+            "dataset must name a source: hf://org/name@revision, harbor://org/name@ref, harbor://name@version, "
+            "git+<url>@<commit>#<path> or a local directory (or name an adapter instead)"
+        )
+    elif not is_local(dataset):
+        check_source(dataset)
+    else:
         dataset = str(resolve(dataset))
+    if registry is not None:
+        if adapter is not None or not is_legacy_registry(dataset):
+            raise FetchError(
+                f"registry names the legacy registry of a harbor://name@version dataset, and {dataset} is none"
+            )
+        if _URL.match(str(registry)):
+            check_url(str(registry), "registry")
+            registry = str(registry)
+        else:
+            registry = str(resolve(registry))
     selection: dict[str, tuple[Any, ...]] = {}
     for key, values in (select or {}).items():
         name = key.removeprefix("index.")
@@ -297,16 +377,27 @@ def fetch_config(
         overlays=paths(overlays),
         refuse=RefusePolicy.from_mapping(refuse),
         index=tuple(index_entry(item) for item in index),
+        registry=registry,
+        adapter=spec,
     )
 
 
+def is_local(dataset: str) -> bool:
+    """Whether ``dataset`` names a local directory rather than a source to download (``hf://``, ``harbor://``,
+    ``git+``, or an adapter's ``adapter:`` name)."""
+
+    return not dataset.startswith(_REMOTE_PREFIXES)
+
+
 def is_pinned(dataset: str) -> bool:
-    """Whether ``dataset`` names immutable content: an hf:// commit, or a local directory."""
+    """Whether ``dataset`` names immutable content: an hf:// commit, a Hub package's revision or digest, a git
+    commit, an adapter at a commit, or a local directory.  A dataset of the legacy registry is pinned only by its
+    registry (:attr:`FetchConfig.pinned`), so it counts as moving here."""
 
     if dataset.startswith("hf://"):
         match = _HF.match(dataset)
         return bool(match and match.group("revision") and _COMMIT.match(match.group("revision")))
-    return not dataset.startswith(("harbor://", "git+"))
+    return is_local(dataset) or source_pinned(dataset)
 
 
 def answering_lock(config: FetchConfig) -> DatasetLock | None:
@@ -341,7 +432,7 @@ def ensure_lock(config: FetchConfig, *, fetch_allowed: bool, log: Callable[[str]
         missing = (
             [task.name for task in existing.tasks if not (config.cache / task.path).is_dir()] if fetch_allowed else []
         )
-        if not missing or not is_pinned(config.dataset):
+        if not missing or not config.pinned:
             return existing
         logger.warning(
             "The cache %s lacks %d task(s) of the lock %s; fetching them again", config.cache, len(missing), path
@@ -353,10 +444,10 @@ def ensure_lock(config: FetchConfig, *, fetch_allowed: bool, log: Callable[[str]
             "start `platoon train` or `platoon eval`, which fetch pinned references, before rollouts of "
             f"{config.dataset}"
         )
-    if not is_pinned(config.dataset):
+    if not config.pinned:
         raise LockError(
             f"{config.dataset} is a moving reference and the lock {path} {why}: pin it with "
-            "`platoon harbor fetch CONFIG --update`, or name a commit"
+            "`platoon harbor fetch CONFIG --update`, or name a commit (a revision or digest on the Harbor Hub)"
         )
     with _flock(fetch_lock_file(config)):
         existing = _read_if_present(path)  # another process may have fetched while this one waited
@@ -380,16 +471,15 @@ def fetch_if_needed(
 ) -> tuple[DatasetLock, bool]:
     """The lock for ``config``, and whether this call fetched it.
 
-    A dataset pinned to a commit whose lock is current (:func:`current_lock`: it answers the settings, records input
-    files, and the cache holds its tasks) is left alone, unless ``update`` or ``repair``; anything else is fetched, a
-    local directory every time, since its files may have changed under the same path.  The fetch takes turns with the
-    other fetches of the same lock (:func:`fetch_lock_file`), so of two at once, on one node or two, the second finds
-    the first's lock current and fetches nothing.
+    A dataset pinned to a commit, revision or digest whose lock is current (:func:`current_lock`: it answers the
+    settings, records input files, and the cache holds its tasks) is left alone, unless ``update`` or ``repair``;
+    anything else is fetched, a local directory every time, since its files may have changed under the same path.
+    The fetch takes turns with the other fetches of the same lock (:func:`fetch_lock_file`), so of two at once, on
+    one node or two, the second finds the first's lock current and fetches nothing.
     """
 
     def current() -> DatasetLock | None:
-        pinned = config.dataset.startswith("hf://") and is_pinned(config.dataset)  # its files cannot change
-        return current_lock(config) if pinned and not (update or repair) else None
+        return current_lock(config) if config.immutable and not (update or repair) else None
 
     if (lock := current()) is not None:
         return lock, False
@@ -404,22 +494,25 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
 
     say = log or logger.info
     started = time.monotonic()
+    overlays = [Overlay.load(path) for path in config.overlays]  # before the source, which may take long to open
     source = _open_source(config, update=update, log=say)
-    overlays = [Overlay.load(path) for path in config.overlays]
-    candidates = source.candidates()
-    for index_file in config.index:
-        if isinstance(index_file, IndexFile):
-            _merge_index(candidates, source.read_json_rows(index_file), index_file)
-    selected = _select(candidates, config)
-    say(f"{len(selected)} of {len(candidates)} tasks selected from {config.dataset}")
-    hashes = _HashMemo()  # what checking the downloads hashed, caching the tasks does not hash again
-    files = source.materialize(selected, hashes)
-    tasks: list[LockedTask] = []
-    (config.cache / TASKS_DIR).mkdir(parents=True, exist_ok=True)
-    for count, candidate in enumerate(selected, 1):
-        tasks.append(_cache_task(candidate, files[candidate.name], config, overlays, hashes))
-        if count % 500 == 0:
-            say(f"cached {count}/{len(selected)} tasks")
+    try:
+        candidates = source.candidates()
+        for index_file in config.index:
+            if isinstance(index_file, IndexFile):
+                _merge_index(candidates, source.read_json_rows(index_file), index_file)
+        selected = _select(candidates, config)
+        say(f"{len(selected)} of {len(candidates)} tasks selected from {config.dataset}")
+        hashes = _HashMemo()  # what checking the downloads hashed, caching the tasks does not hash again
+        files = source.materialize(selected, hashes)
+        tasks: list[LockedTask] = []
+        (config.cache / TASKS_DIR).mkdir(parents=True, exist_ok=True)
+        for count, candidate in enumerate(selected, 1):
+            tasks.append(_cache_task(candidate, files[candidate.name], config, overlays, hashes))
+            if count % 500 == 0:
+                say(f"cached {count}/{len(selected)} tasks")
+    finally:
+        source.close()  # its downloads and checkouts: what the cache needs is in it now
     tasks = _assign_image_kinds(tasks, config.refuse)
     lock = DatasetLock(
         dataset=config.dataset,
@@ -438,6 +531,7 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
         },
         modes=MODES_RULE,
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        source=dict(source.details),
     )
     write_lock(lock, config.lock_path())
     refused = Counter(task.refused.split(":")[0] for task in lock.tasks if task.refused)
@@ -455,8 +549,10 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
 @dataclass
 class Candidate:
     name: str
-    path: str  # relative to the dataset root
+    path: str  # relative to the dataset root (where a registry's task lives: its repository, commit and path)
     index: dict[str, Any] = field(default_factory=dict)
+    # The content digest the source gives the task ("sha256:<hex>", the Harbor Hub's), which its files must hash to.
+    digest: str | None = None
 
 
 def _select(candidates: Mapping[str, Candidate], config: FetchConfig) -> list[Candidate]:
@@ -560,6 +656,7 @@ class _TaskFiles:
 class _Source:
     resolved: str
     fetched_with: str
+    details: Mapping[str, Any] = MappingProxyType({})  # how the source resolved, for the lock (DatasetLock.source)
 
     def candidates(self) -> dict[str, Candidate]:
         raise NotImplementedError
@@ -572,13 +669,18 @@ class _Source:
 
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Remove what the source downloaded or checked out for the fetch, once its tasks are cached."""
+
 
 def _open_source(config: FetchConfig, *, update: bool, log: Callable[[str], None]) -> _Source:
     dataset = config.dataset
     if dataset.startswith("hf://"):
         return _HubSource(config, update=update, log=log)
-    if dataset.startswith(("harbor://", "git+")):
-        raise FetchError(f"{dataset}: harbor:// and git+ sources are not supported yet; use hf:// or a directory")
+    if config.adapter is not None or not is_local(dataset):
+        from platoon.envs.harbor.sources import open_source  # sources builds on this module
+
+        return open_source(config, update=update, log=log)
     return _LocalSource(Path(dataset))
 
 
@@ -602,12 +704,13 @@ class _LocalSource(_Source):
     it holds a ``task.toml``; else every directory below it that holds one, with the ids ``dataset_dir`` gives
     (:func:`~platoon.envs.harbor.dataset.dataset_tasks`)."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, link: bool = False) -> None:
         if not root.is_dir():
             raise FetchError(f"{root} is not a directory")
         self.root = root.resolve()
         self.resolved = str(self.root)
         self.fetched_with = "platoon (local directory)"
+        self.link = link  # hard-link the files into the cache (a directory the fetch made), else copy them
 
     def candidates(self) -> dict[str, Candidate]:
         registry = _load_json(self.root / REGISTRY)
@@ -634,17 +737,29 @@ class _LocalSource(_Source):
             if not (task_dir / "task.toml").is_file():
                 raise FetchError(f"{task_dir} has no task.toml")
             files = {relative: task_dir / relative for relative in _hashed_paths(task_dir)}
-            out[candidate.name] = _TaskFiles(files=files, link=False)
+            if self.link:  # a link is hard-linked as its target, which outlives the directory the fetch made
+                files = {relative: linked_target(path) for relative, path in files.items()}
+            out[candidate.name] = _TaskFiles(files=files, link=self.link)
         return out
 
 
-class _HubSource(_Source):
-    """A Hugging Face dataset repository at one commit."""
+def linked_target(path: Path) -> Path:
+    """The file a symbolic link names, else ``path``: ``os.link`` would link the link itself (Python before 3.14, on
+    Linux), and a copy of a link whose target is removed with its download or checkout would dangle."""
 
-    def __init__(self, config: FetchConfig, *, update: bool, log: Callable[[str], None]) -> None:
-        match = _HF.match(config.dataset)
+    return Path(os.path.realpath(path)) if os.path.islink(path) else path
+
+
+class _HubSource(_Source):
+    """A Hugging Face dataset repository at one commit (``dataset``, else the config's)."""
+
+    def __init__(
+        self, config: FetchConfig, *, update: bool, log: Callable[[str], None], dataset: str | None = None
+    ) -> None:
+        dataset = dataset or config.dataset
+        match = _HF.match(dataset)
         if match is None:
-            raise FetchError(f"{config.dataset}: expected hf://org/name@revision[#subdir]")
+            raise FetchError(f"{dataset}: expected hf://org/name@revision[#subdir]")
         from huggingface_hub import HfApi
 
         self.repo = match.group("repo")
@@ -658,8 +773,7 @@ class _HubSource(_Source):
             self.resolved = revision
         elif not update:
             raise FetchError(
-                f"{config.dataset} is a moving reference: pin a commit, or resolve it with "
-                "`platoon harbor fetch --update`"
+                f"{dataset} is a moving reference: pin a commit, or resolve it with `platoon harbor fetch --update`"
             )
         else:
             info = _retry(lambda: self.api.repo_info(self.repo, repo_type="dataset", revision=revision or "main"))
@@ -985,6 +1099,11 @@ def _cache_task(
                 shutil.copy2(source, target)
             _restore_executable(target)
         upstream = hashes.content_hash(staging)
+        if candidate.digest is not None and f"sha256:{upstream}" != candidate.digest:
+            raise FetchError(
+                f"Harbor task {candidate.name!r} of {config.dataset}: its files hash to sha256:{upstream}, and the "
+                f"source gives it {candidate.digest}: a damaged download, or a content hash that is not Harbor's"
+            )
         applied: list[str] = []
         refused: str | None = None
         for overlay in overlays:

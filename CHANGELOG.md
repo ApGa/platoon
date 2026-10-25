@@ -4,6 +4,29 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
+## 0.5.0 (unreleased)
+
+### New features
+
+- **Harbor datasets from the Harbor Hub, git repositories and adapters.** A Harbor environment's `dataset` may name a
+  package of the Harbor Hub (`harbor://org/name@ref`, a dataset or a single task, at a revision, a `sha256:` digest
+  or a tag), a dataset of Harbor's legacy registry (`harbor://name@version`, from Harbor's `registry.json`, or the
+  file or URL `registry` names), or a directory of a git repository (`git+<url>@<commit>#<path>`), and `adapter:
+  {repo, commit, path, command, args, env, sparse}` in its place generates the tasks with an upstream adapter at a
+  pinned commit, as Frontier-CS's and Harbor's own adapters do. The Hub's packages come through the Harbor CLI at
+  platoon's pin (`harbor==0.24.0`, which platoon runs with `uvx` and never imports; `PLATOON_HARBOR_CLI` names
+  another), resolved to their digest and downloaded by it, and each task's files must hash to the digest the Hub gives
+  it; a registry's tasks and a git directory come through shallow, blobless fetches that check out only the selected
+  tasks, and an adapter runs on a checkout of its repository at the commit (whole, or as `sparse` says), its output
+  fetched as a local directory. Everything else is as for any fetched dataset: selection, overlays, Harbor's content
+  hash, the lock, which now also records how the source resolved (`source`), and rollout workers that read only the
+  lock and the cache. A Hub revision or digest, a full git commit, an adapter's commit and a version in a registry
+  file are pinned, so that `platoon train` and `platoon eval` fetch them themselves; a tag, a branch, a registry task
+  at `HEAD` and Harbor's own registry move, and `platoon harbor fetch CONFIG --update` resolves them into the lock
+  ([Fetch a dataset by name](docs/how-to/sandboxes-and-harbor.md#fetch-a-dataset-by-name)). A symbolic link that
+  leaves its task fails the fetch, so that no file of the fetching host reaches the cache, and a URL with credentials
+  is refused; `registry` and a local `adapter.repo` are relative to the config file, as every input path is.
+
 ## 0.4.0 (2026-10-25)
 
 ### New features

@@ -99,9 +99,9 @@ class LockedTask:
 
 @dataclass(frozen=True)
 class DatasetLock:
-    dataset: str  # as written in the config
+    dataset: str  # as written in the config (an adapter: adapter:<repo>@<commit>#<path>)
     resolved: str  # commit, revision or digest (a local source: its absolute path)
-    fetched_with: str  # e.g. "huggingface_hub==1.33.0"
+    fetched_with: str  # e.g. "huggingface_hub==1.33.0", "harbor==0.24.0 (cli)", "git 2.47.3"
     tasks: tuple[LockedTask, ...]
     hash_rule: str = HASH_RULE
     build_key_rule: str = ""
@@ -111,6 +111,9 @@ class DatasetLock:
     modes: str = ""  # how file modes were restored after the download
     created_at: str = ""
     version: int = LOCK_VERSION
+    # How a Harbor Hub, registry, git or adapter source resolved (platoon.envs.harbor.sources): the package and its
+    # digest, the registry file's digest and the repositories' commits, an adapter's command and arguments, ...
+    source: Mapping[str, Any] = field(default_factory=dict)
 
     @functools.cached_property
     def _by_name(self) -> dict[str, LockedTask]:
@@ -135,20 +138,25 @@ class DatasetLock:
         return all(task.input_files is not None for task in self.tasks)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "version": self.version,
             "dataset": self.dataset,
             "resolved": self.resolved,
             "fetched_with": self.fetched_with,
-            "hash_rule": self.hash_rule,
-            "build_key_rule": self.build_key_rule,
-            "overlay": self.overlay,
-            "inputs": self.inputs,
-            "selection": dict(self.selection),
-            "modes": self.modes,
-            "created_at": self.created_at,
-            "tasks": [task.to_json() for task in self.tasks],
         }
+        if self.source:  # only sources that say how they resolved: the locks of others read as they always have
+            data["source"] = dict(self.source)
+        data.update(
+            hash_rule=self.hash_rule,
+            build_key_rule=self.build_key_rule,
+            overlay=self.overlay,
+            inputs=self.inputs,
+            selection=dict(self.selection),
+            modes=self.modes,
+            created_at=self.created_at,
+            tasks=[task.to_json() for task in self.tasks],
+        )
+        return data
 
 
 # path -> (file stamp, lock): the rollouts of one process read a lock once
@@ -193,6 +201,7 @@ def _parse_lock(path: Path) -> DatasetLock:
         selection=dict(data.get("selection") or {}),
         modes=data.get("modes", ""),
         created_at=data.get("created_at", ""),
+        source=dict(data.get("source") or {}),
     )
 
 
