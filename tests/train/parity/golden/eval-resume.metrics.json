@@ -302,9 +302,9 @@
       "cpu_cores_busy": "timing",
       "cpu_percent": "timing",
       "cpu_saturation": "timing",
-      "groups_in_flight_max": 1.0,
+      "groups_in_flight_max": 2.0,
       "groups_in_flight_mean": "timing",
-      "permits_held_mean": [1.8857827293077973, 2.0, 1.865087065494306, 2.0],
+      "permits_held_mean": [1.6211006136569606, 1.5937371389506512, 1.5680860055501267, 1.8813486798134182],
       "rollouts_in_flight_configured": 2.0,
       "rollouts_in_flight_max": 2.0,
       "rollouts_in_flight_mean": "timing",
@@ -447,9 +447,9 @@
       "abs_avg__count": 2
      },
      "train/dispatch/blocked_share": {
-      "horizon": [0.5436388300414604, 0.4882233515151591, 0.4194561191470575, 0.6793928786541253],
+      "horizon": [0.6822026715225062, 0.7681572964580015, 0.5706697392471057, 0.8019490997561747],
       "labels": 0.0,
-      "permits": [0.45636116995853965, 0.5117766484848408, 0.5805438808529425, 0.3206071213458747],
+      "permits": [0.31779732847749376, 0.23184270354199857, 0.42933026075289427, 0.19805090024382527],
       "plan": 0.0,
       "sampler": 0.0
      },
@@ -1103,9 +1103,9 @@
       "cpu_cores_busy": "timing",
       "cpu_percent": "timing",
       "cpu_saturation": "timing",
-      "groups_in_flight_max": 1.0,
+      "groups_in_flight_max": 2.0,
       "groups_in_flight_mean": "timing",
-      "permits_held_mean": [1.9880762841078443, 1.905805764588065, 1.8093434438769913],
+      "permits_held_mean": [1.8700682654096823, 1.6137313841812957, 1.512411608956309],
       "rollouts_in_flight_configured": 2.0,
       "rollouts_in_flight_max": 2.0,
       "rollouts_in_flight_mean": "timing",
@@ -1248,10 +1248,10 @@
       "abs_avg__count": 2
      },
      "train/dispatch/blocked_share": {
-      "horizon": [0.6793928786541253, 0.5627433040682418, 0.0],
+      "horizon": [0.8019490997561747, 0.7340681312273882, 0.0],
       "labels": 0.0,
-      "permits": [0.3206071213458747, 0.43725669593175825, 0.2715903533333229],
-      "plan": [0.0, 0.0, 0.7284096466666771],
+      "permits": [0.19805090024382527, 0.2659318687726118, 0.24959890562412554],
+      "plan": [0.0, 0.0, 0.7504010943758744],
       "sampler": 0.0
      },
      "train/optim": {

@@ -557,8 +557,8 @@ class _MemberWrapper(_Members):
 
 
 def test_an_override_of_run_group_member_that_skips_the_lease_block_is_still_cut_by_the_straggler_policy():
-    """Under the default ``permit_release: group``: its members never enter a lease block, so each counts as started
-    with the group, and a member that never ends is cut once the quorum's grace has passed."""
+    """Under ``permit_release: group``: its members never enter a lease block, so each counts as started with the group,
+    and a member that never ends is cut once the quorum's grace has passed."""
 
     config = WorkflowConfig(
         group_size=4, straggler_timeout_seconds=0.2, straggler_quorum=3, filter_zero_advantage_datums=False
@@ -871,8 +871,9 @@ def test_a_workflow_that_runs_rollouts_outside_their_blocks_is_warned_of_once(tm
     assert not [key for stats in logged for key in stats if "censoring" in key]
 
 
-def test_permit_release_takes_group_or_rollout(tmp_path):
-    assert trainer_config(tmp_path).train.permit_release == "group"
+def test_permit_release_takes_group_or_rollout_and_defaults_to_rollout(tmp_path):
+    assert trainer_config(tmp_path).train.permit_release == "rollout"
+    assert trainer_config(tmp_path, "train.permit_release=group").train.permit_release == "group"
     assert trainer_config(tmp_path, "train.permit_release=rollout").train.permit_release == "rollout"
     with pytest.raises(ConfigError, match="permit_release"):
         trainer_config(tmp_path, "train.permit_release=member")

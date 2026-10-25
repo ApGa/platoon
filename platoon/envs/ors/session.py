@@ -61,7 +61,7 @@ from platoon.envs.ors import sdk
 from platoon.envs.ors.cleanup import RemoteSessionRecord, check_running, register, unregister
 from platoon.envs.service import ForkMode, Outcome, ToolResult, ToolSpec
 from platoon.task import Task
-from platoon.utils.stopping import let_finish
+from platoon.utils.stopping import in_cleanup_scope, let_finish
 
 if TYPE_CHECKING:
     from platoon.envs.ors.service import OrsEnvironmentService, TaskRef
@@ -235,13 +235,15 @@ class LocalBackend:
 
         The wait has no time limit, since nothing bounds a sync call that never returns, so it never runs inside
         a caller's bounded close; the teardown itself is bounded by :attr:`timeout_s`.  A loop that ends during
-        the wait still tears the env down as it ends, while that code may run on.
+        the wait still tears the env down as it ends, while that code may run on.  The background teardown joins
+        the rollout's cleanup scope, so that an in-process rollout's permit waits for it, a bounded time, but is no
+        cleanup that a stopping rollout worker lets finish (:func:`platoon.utils.stopping.in_cleanup_scope`).
         """
 
         if not self.owned:
             return
         if self.running():
-            defer(self._teardown_when_idle(), f"tear down {type(self.env).__name__}")
+            in_cleanup_scope(defer(self._teardown_when_idle(), f"tear down {type(self.env).__name__}"))
             return
         await self.run(self.env.teardown)
 

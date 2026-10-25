@@ -1,5 +1,6 @@
 """What a stopping process ends -- the process groups registered, never one whose id another process has now, and
-the sessions its descendants started -- and the cleanups it lets finish (``platoon.utils.stopping``)."""
+the sessions its descendants started -- and the cleanups it lets finish, which a rollout's cleanup scope collects
+(``platoon.utils.stopping``)."""
 
 from __future__ import annotations
 
@@ -15,8 +16,10 @@ import pytest
 
 from platoon.utils import stopping
 from platoon.utils.stopping import (
+    CleanupScope,
     cleanups,
     end_process_groups,
+    in_cleanup_scope,
     kill_process_groups,
     let_finish,
     register_process_group,
@@ -136,3 +139,54 @@ async def test_cleanups_are_listed_until_they_end():
     await cleanup
     assert cleanups() == []
     other.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_scope_collects_the_cleanups_its_code_starts_then_or_later_on_its_own_loop():
+    gate = asyncio.Event()
+    outside = let_finish(asyncio.ensure_future(gate.wait()))  # no scope is open
+
+    async def later() -> None:  # a task of the scope's code that starts a cleanup after the block
+        await asyncio.sleep(0)
+        let_finish(asyncio.ensure_future(gate.wait()))
+
+    async def another_loop() -> None:
+        let_finish(asyncio.ensure_future(asyncio.sleep(0)))
+
+    scope = CleanupScope()
+    with scope:
+        first = let_finish(asyncio.ensure_future(gate.wait()))
+        waits = in_cleanup_scope(asyncio.ensure_future(gate.wait()))  # the scope's only
+        starter = asyncio.ensure_future(later())
+        await asyncio.to_thread(asyncio.run, another_loop())  # the thread copies the context, not the loop
+    await starter
+
+    running = scope.running()
+    assert len(running) == 3 and first in running and waits in running and outside not in running
+    assert waits not in cleanups() and first in cleanups()
+    gate.set()
+    assert await scope.finish(5) == 0 and scope.running() == []
+
+
+@pytest.mark.asyncio
+async def test_finishing_a_scope_waits_for_the_cleanups_its_cleanups_start_within_a_bound_and_cancels_none():
+    gate = asyncio.Event()
+
+    async def teardown() -> None:  # as it ends it starts another, as an env's that waits for its code does
+        await asyncio.sleep(0.05)
+        let_finish(asyncio.ensure_future(gate.wait()))
+
+    scope = CleanupScope()
+    with scope:
+        let_finish(asyncio.ensure_future(teardown()))
+
+    assert await scope.finish(0.3) == 1  # the second still runs at the bound
+    (hung,) = scope.running()
+    waiting = asyncio.ensure_future(scope.finish(10))
+    await asyncio.sleep(0.05)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert not hung.done()  # cancelling the wait cancels no cleanup
+    gate.set()
+    assert await scope.finish(1) == 0

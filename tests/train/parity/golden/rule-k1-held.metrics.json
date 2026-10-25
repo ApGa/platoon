@@ -18,7 +18,7 @@
       "cpu_saturation": "timing",
       "groups_in_flight_max": 8.0,
       "groups_in_flight_mean": "timing",
-      "permits_held_mean": [15.04115270076792, 14.327452099749403, 13.749639713146983, 16.0, 16.0, 7.6724398180948405],
+      "permits_held_mean": [12.99038012128072, 12.628486708766086, 11.5674826350788, 14.158801021945324, 12.285412524809061, 5.212413807461508],
       "rollouts_in_flight_configured": 32.0,
       "rollouts_in_flight_max": [16.0, 14.0, 14.0, 16.0, 14.0, 11.0],
       "rollouts_in_flight_mean": "timing",

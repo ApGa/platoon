@@ -6,8 +6,8 @@
 | Created | 2026-10-25; revised 2026-10-25 to match the implementation of P1 and P2 |
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0019](0019-training-mixtures.md), sections 4 (the dispatcher: the horizon, rollout permits, exact resume), 5 (samplers) and 6 (admission and refill); [RFC 0017](0017-public-surface-and-conformance.md) (`platoon.experimental`); [RFC 0001](0001-native-multi-agent.md) and [RFC 0003](0003-multi-policy-training.md), which must stay compatible; the dispatcher (`platoon/train/tinker/dispatcher.py`), the trainer's rollout permits and group runner (`platoon/train/tinker/rl.py`) and the group workflow (`platoon/train/tinker/workflows/group_rollout_workflow.py`) |
-| Discussion | The pull request that adds this RFC, which also records the decisions of 2026-10-25 (open questions 1 to 11); P6's, which records the decision on question 12 (2026-10-25) |
-| Implementation | P1 and P2 in one pull request (merged); P6, the start limit, in its own pull request, which also adds section 10 and open question 12; the run-start fixes of open question 12 in another (open) |
+| Discussion | The pull request that adds this RFC, which also records the decisions of 2026-10-25 (open questions 1 to 11); P6's, which records the decision on question 12 (2026-10-25); P4's, which records the revised decision on question 1 (2026-10-25) |
+| Implementation | P1 and P2 in one pull request (merged); P6, the start limit, in its own pull request, which also adds section 10 and open question 12; the run-start fixes of open question 12 in another (open); P4, `rollout` the default, in its own pull request, for platoon 0.4.0 |
 
 ## Summary
 
@@ -35,8 +35,9 @@ drawing, sampler decisions, credit, admission, the staleness horizon, statistics
   measured runs it would remove no start-up work; their run-start delay has its own fixes, in their own pull request
   (open question 12). As built, P6 adds about 460 lines net, about 300 of them code, plus tests and docs.
 
-`permit_release: group` stays the default until a GPU check and, for any workflow that runs each rollout index once
-(section 2), keeps today's behavior event for event.
+`permit_release: rollout` is the default from P4, in platoon 0.4.0, ahead of the GPU check (open question 1).
+`permit_release: group` stays as the rollback and, for any workflow that runs each rollout index once (section 2), keeps
+today's behavior event for event.
 
 **What it buys**, by trace replays of 12 measured runs (appendix A). The effective rate is trained rollouts per hour
 times the credit's efficiency, which does not change here. Ranges span the engines' measured response to more load.
@@ -230,12 +231,15 @@ Why this is the right point:
 
 - **Process isolation.** `supervisor.run` returns only after the worker's process tree is reaped and its orphaned
   sessions and sandboxes are deleted, in a shielded `finally`. The permit stands for exactly those resources.
-- **In-process isolation.** The rollout coroutine, its subagents and their grading have ended. A sandbox or env session
-  teardown that platoon finishes in the background (`let_finish`) can still outlive the block: one a cancellation
-  interrupts, as it outlives a group's release today, and one a rollout leaves running as it ends, which `rollout`
-  lets overlap the next rollout. With every teardown deferred, a test with a budget of 4 had 11 sandboxes alive at once
-  under `rollout` and 6 under `group`. Waiting for those cleanups inside the block, bounded and shielded, is a
-  prerequisite of P4.
+- **In-process isolation.** The rollout coroutine, its subagents and their grading have ended, and so have the sandbox
+  and env session teardowns that platoon finishes in the background: one a cancellation interrupts, and one a rollout
+  leaves running as it ends. Each joins the rollout's cleanup scope, a context variable that the rollout's tasks copy
+  (`let_finish`, and an ORS environment's teardown that waits for its code to end), and a block that holds a permit
+  waits for its scope, shielded, at most 60 s: a teardown at the default `close_timeout_s` of 30 s drains its calls in
+  flight for that long and closes its env for as long again. A cancellation ends the wait and no teardown, and a member
+  whose rollout had ended keeps its outcome. With every teardown deferred, a test with a budget of 4 had 11 sandboxes
+  alive at once under `rollout` without the wait and 4 with it. Under `group` the blocks hold nothing and wait for
+  nothing, so there such a teardown can outlive the group's release, as in earlier releases (6 in that test).
 - **Every exit passes through it.** A straggler the policy cancels leaves its block after its cancellation is awaited,
   and so do a launch failure and any error.
 - **Overrides keep the gain.** `arun_episode_single`, `compute_baselines`, `assign_advantages`, `_run_group` and
@@ -380,7 +384,7 @@ bring back to about today's level (appendix A.3).
 
 | Key | Values | Default | Meaning |
 |---|---|---|---|
-| `train.permit_release` | `group` \| `rollout` | `group`; `rollout` from P4, after the GPU check (open question 1) | `group`: today's behavior and event order; the lease's blocks hold nothing (section 2). `rollout`: each rollout's permit returns when its block exits; rolling starts for workflows that run their rollouts on the lease, co-start for the others |
+| `train.permit_release` | `group` \| `rollout` | `rollout` from P4 (platoon 0.4.0), ahead of the GPU check; `group` before (open question 1) | `group`: today's behavior and event order; the lease's blocks hold nothing (section 2). `rollout`: each rollout's permit returns when its block exits; rolling starts for workflows that run their rollouts on the lease, co-start for the others |
 | `train.stale_filter` (P5) | `group` \| `datum` | `group` (open question 3) | section 6 |
 | `train.max_concurrent_rollouts` | unchanged | unchanged | under `rollout`, the rollouts that run at once, which the permits then make literally true |
 | `train.max_starting_rollouts` (P6) | a whole number ≥ 1, or `null` | `null` (open question 12) | at most this many rollouts starting at once, training's and evaluation's together: from the start slot a rollout takes after its permit to its first model call, its end, or `worker_startup_budget_seconds + 300` s, whichever comes first (section 10) |
@@ -597,8 +601,8 @@ platoon sees, or its rollouts fail before one, and the limit bounds whole rollou
 
 1. **Returning a permit at the right moment.** A permit stands for a worker and its sandboxes, so it may come back only
    after they are gone. The `async with` block makes that structural: `GroupRolloutWorkflow` gets it from the
-   supervisor's shielded cleanup under process isolation, while in process a teardown left to the background can
-   outlive the block until P4's prerequisite lands (section 3). A custom workflow gets the contract's rules: the run
+   supervisor's shielded cleanup under process isolation, and in process from the wait, at most 60 s, for the
+   teardowns its rollout left to the background (section 3). A custom workflow gets the contract's rules: the run
    checks its indices (an error) and blocks that outlive its draw (a warning) for any workflow, but whether a rollout
    ran outside its block only for `GroupRolloutWorkflow`'s members, the only rollouts the invariant check counts. One
    edge, at shutdown only: a second cancellation during the shielded cleanup can return the permit while the cleanup
@@ -695,7 +699,7 @@ platoon sees, or its rollouts fail before one, and the limit bounds whole rollou
 | P1 permits per rollout | sections 1 to 5: reservations and first-come, first-served grants with rolling starts and co-start; `RolloutLease` and `rollout_lease()` in `platoon.experimental`; `runs_rollouts_on_lease`; `GroupRolloutWorkflow` on the lease, with straggler deadline offsets; `train.permit_release`, default `group`; docs. With P2, in one pull request | CPU tests with fakes. **Permits:** under co-start one returned permit starts nothing and `size` of them start the waiting draw; under rolling starts a draw starts on one free permit and its members start as permits free; first come, first served with trickling permits and mixed group sizes; at most one partly granted draw; the budget is never exceeded (checked on every grant). **The lease:** each index once, bounded at `size` (errors under either setting), holding nothing after release (a warning per draw); failure and cancellation return everything, a member cancelled while it waits for a grant included; a stop while a draw waits behaves as today. **Replay:** a `k = 0` run trains the same datums in the same order as before under both modes' defaults, and `group` reproduces today's event order. **Stragglers:** with `P = 2G` and one straggling member, a third group starts before the straggler ends; a cancelled straggler returns its permit only after its cancellation is awaited; a late-starting member gets its full grace; a member that never enters a block keeps the group's deadline. **Compatibility:** a `_run_group_rollouts` override that bypasses `_run_group_member` keeps co-start and group-held permits, and an override from a mixin or another branch of a diamond reads as not on the lease; a custom workflow without the flag that uses `lease.rollout(i)` returns permits per rollout under co-start; evaluation gets a no-op lease; RFC 0019's resume, sampler and admission tests pass unchanged | |
 | P2 visibility | section 7: `permits_held_mean`, `blocked_share/*`, `startup_gate_waiting_mean`, the staleness warning, the in-flight invariant check, the censoring metrics; docs | the metrics match a hand-computed fake run, the censoring metrics only where a straggler policy applies; the warning fires once on a fake run with 3% stale groups while the horizon has room, names both fixes, and stays silent below 2% and before the tenth step; the invariant warning fires on a `GroupRolloutWorkflow` subclass that says it runs on the lease but runs its members outside their blocks; the blocked shares agree with the dispatcher's own waits | |
 | P3 GPU check | the 30B workload's recipe for 30-50 steps, `rollout` against `group`; one crafting run; then a short budget sweep (256, 320, 384) with `max_staleness + 1` | `concurrency_achieved_fraction` ≥ 0.95; step time at least 15% shorter (the replays predict 20-22%); stale groups ≤ 2%, else apply `max_staleness + 1`; permits held back to 0 at the end; the crafting run unchanged within noise; the sweep shows where step time stops falling | |
-| P4 the default | first, in process, a member's block waits, bounded and shielded, for the teardowns its rollout left to finish in the background (section 3); then `permit_release: rollout` by default, `group` kept as the rollback; the recipes' `max_concurrent_rollouts` per the sweep (open questions 1 and 4) | with every in-process teardown deferred, no more sandboxes are alive at once than the budget; release notes say that `max_concurrent_rollouts` now means rollouts running and that staleness can rise, naming the warning | |
+| P4 the default | first, its prerequisite, which has landed: in process, a member's block waits, shielded and at most 60 s, for the teardowns its rollout left to finish in the background (section 3); then `permit_release: rollout` by default, `group` kept as the rollback; the recipes' `max_concurrent_rollouts` per the sweep (open questions 1 and 4) | with every in-process teardown deferred, no more sandboxes are alive at once than the budget; release notes say that `max_concurrent_rollouts` now means rollouts running and that staleness can rise, naming the warning; recorded again, the golden trace trains the same datums in every scenario, in the same order but where a binding budget at `k = 0` reorders a step's microbatches, and its scenario `permits-group` keeps `group` | its own, in platoon 0.4.0, ahead of P3 by the user's decision (open question 1), with the in-process teardown wait, its prerequisite; the recipes keep their budgets until the sweep |
 | P5 per-datum stale masks | section 6: per-call versions, per-datum stamps, `train.stale_filter: group \| datum` (default `group`), `batch/stale_datums` | with fakes, a rollout that spans versions keeps exactly its in-bound datums; `stale_filter: group` trains byte for byte as today; the fates and statistics of whole groups are unchanged; then a GPU A/B (`max_staleness + 1`, masks, both) on held-out evaluation before any default changes (open question 3) | |
 | P6 start limit | section 10: `train.max_starting_rollouts` (default `null`); the first-call signal in process and from rollout workers; the slot's timer; one limit shared with evaluation during training; the metrics and warnings; docs | CPU tests with fakes. **The limit:** never more than `N` starting (checked at every grant), first come, first served across training and evaluation; a waiter cancelled at its grant hands the slot on, cancellations, failures and timers leak no slot, and a holder's cancellation counts as `cancelled`, not in the warnings. **Releases:** a slot comes back when the first call is issued, a root's or a subagent's (even if the call never completes), and under process isolation when the rollout worker marks it; at the end of a rollout that fails before any call or makes none; and on its timer, the group's startup budget plus 300 s. **Groups:** with `N` = 2 and groups of 4 a run completes under rolling starts and co-start, and every slot is taken inside its member's permit block; a member's slot wait moves its straggler deadline, and a member that waited is not cut before its own grace; the startup gate still admits whole groups; evaluation during training shares the limit. **Replay:** a `k = 0` run with a binding limit trains the same datums per step, and a limit that never binds changes nothing; without the key, `permit_release: group` and `rollout` reproduce P1 and P2's datums, requests, saves, event order and metric keys in every parity scenario, and the golden trace changes only by each request's `signal_first_call: false`; its scenario `start-limit` binds a limit of 2 under rolling starts | its own, after P1 and P2; the run-start fixes of open question 12 (a) in a pull request of their own |
 | Later, each on its own trigger | the unit plan of section 8 with the first workflow without groups (and RFC 0003); permits beyond `size`, with the lending rule, with RFC 0001's scheduling of child agents; one permit pool per policy with RFC 0003; a journal of finished rollouts if restarts become frequent | each with its own design | |
@@ -707,11 +711,17 @@ accounting.
 
 All eleven were decided on 2026-10-25, before this RFC was filed: 1 to 10 take the design study's recommendations, and
 11 records the switch to rolling starts. Question 12 was added and decided the same day, when the user asked about
-limiting start-ups. Each question keeps its options, so that the reasons stay on record.
+limiting start-ups, and question 1 was revised the same day, when the user made `rollout` the default for platoon
+0.4.0. Each question keeps its options, so that the reasons stay on record.
 
 1. **Per-rollout permits by default?** `rollout` as the default after the P3 GPU check, with `group` kept as the
    rollback, or opt-in for a release. *Decided 2026-10-25:* `rollout` becomes the default only after the GPU check
    (P4); P1 and P2 ship with `group` the default.
+
+   *Revised 2026-10-25, by the user:* the default flips in platoon 0.4.0, ahead of the P3 GPU check, with `group`
+   kept as the rollback and as the other arm of the check. P4's prerequisite, the in-process teardown wait of
+   section 3, ships with the flip, so that no more sandboxes are alive at once than the budget. The recipes' budgets
+   still wait for the sweep (question 4).
 2. **How to answer the extra staleness?** (a) The warning plus documented `max_staleness + 1` advice; (b) raise
    `max_staleness` automatically when permits bind and the horizon has room; (c) a cap on groups in flight. *Decided
    2026-10-25:* (a). The bound is the user's staleness contract and never moves by itself; (c) is dominated, so there

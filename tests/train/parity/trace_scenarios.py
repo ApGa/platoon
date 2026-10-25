@@ -111,7 +111,8 @@ def _check_entry(trace: Trace) -> None:
 def _check_micro(trace: Trace) -> None:
     assert 2.0 in series(trace, "train/batch/optimizer_updates"), "no step applied two updates"
     assert len(calls(trace, "forward_backward")) > len(calls(trace, "optim_step")), "no gradient accumulation"
-    assert 2.0 in series(trace, "rollout_client/groups_in_flight_max"), "never two groups at once"
+    assert any(series(trace, "train/dispatch/blocked_share/permits")), "the permits for two groups never held one back"
+    assert max(series(trace, "rollout_client/groups_in_flight_max"), default=0) >= 2, "never two groups at once"
     zero = "Zero policy-gradient objective for microbatch"
     assert any(zero in message for message in messages(trace)), "no zero-advantage microbatch kept by the filter off"
 
@@ -323,7 +324,7 @@ SCENARIOS: dict[str, Scenario] = {
         check=_check_entry,
     ),
     "single-micro": Scenario(
-        "Two minibatches of two microbatches, two groups at once, the zero-advantage filter off",
+        "Two minibatches of two microbatches on rollout permits for two groups, the zero-advantage filter off",
         {
             "train": {
                 "batch_size": 4,
@@ -418,7 +419,7 @@ SCENARIOS: dict[str, Scenario] = {
     # ------------------------------------------------------------------- rollout permits
     "permits-group": Scenario(
         "Rollout permits for two groups of four, at max_staleness 2 so that groups run ahead of the step, under "
-        "permit_release group (the default): a group holds its permits until its slowest rollout ends",
+        "permit_release group, the default before 0.4.0: a group holds its permits until its slowest rollout ends",
         {
             "train": {
                 "max_training_steps": 4,

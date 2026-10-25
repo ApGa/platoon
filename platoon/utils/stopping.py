@@ -14,6 +14,9 @@ members, since Linux reuses no pid that is still a process group's id.
 **Cleanups.**  A task that tears something down -- an env session's teardown, a command's SIGTERM, grace and SIGKILL --
 is marked with :func:`let_finish`.  A stopping rollout worker cancels every other task of its rollout, again and again
 for tasks that swallow the cancellation, but lets these run to their end within its deadline (:func:`cleanups`).
+Each also joins the :class:`CleanupScope` of the rollout whose code started it, if one is open, as does a teardown
+that waits, unbounded, for env code still running (:func:`in_cleanup_scope`): an in-process rollout's permit waits for
+its scope's cleanups, a bounded time, before it comes back (``GroupRolloutWorkflow._run_group_member``).
 
 Stdlib only.  The process-group functions take no lock, so a signal handler may call them.
 """
@@ -24,11 +27,14 @@ import asyncio
 import os
 import signal
 import time
+from contextvars import ContextVar, Token
 from typing import Any, TypeVar
 
 __all__ = [
+    "CleanupScope",
     "cleanups",
     "end_process_groups",
+    "in_cleanup_scope",
     "kill_process_groups",
     "let_finish",
     "process_start_time",
@@ -223,14 +229,74 @@ def _running_groups() -> set[int]:
 _cleanups: set[asyncio.Task[Any]] = set()
 
 
+class CleanupScope:
+    """The cleanups that one rollout's code starts and leaves running in the background (:func:`let_finish`,
+    :func:`in_cleanup_scope`), so that what holds the rollout's resources can wait for them (:meth:`finish`).
+
+    ``with scope:`` opens it for the code that runs in the block, and for the tasks that code creates, which copy
+    the context, for as long as they run: a teardown that one of them starts after the block, as an env's that waits
+    for the env's code to end does, joins it too.  Only tasks of the event loop it was created in join it.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._token: Token[CleanupScope | None] | None = None
+
+    def __enter__(self) -> CleanupScope:
+        self._token = _scope.set(self)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._token is not None:
+            _scope.reset(self._token)
+            self._token = None
+
+    def add(self, task: asyncio.Task[Any]) -> None:
+        if task.get_loop() is self._loop and not task.done():
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    def running(self) -> list[asyncio.Task[Any]]:
+        """Its cleanups still running."""
+
+        return [task for task in list(self._tasks) if not task.done()]
+
+    async def finish(self, timeout_s: float) -> int:
+        """Wait until its cleanups have ended, the ones they start meanwhile included, for at most ``timeout_s``;
+        returns how many still run.  Cancelling the caller ends the wait and cancels no cleanup."""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while (running := self.running()) and (left := deadline - loop.time()) > 0:
+            await asyncio.wait(running, timeout=left)
+        return len(self.running())
+
+
+#: The cleanup scope of the rollout whose code runs in this context (:class:`CleanupScope`).
+_scope: ContextVar[CleanupScope | None] = ContextVar("platoon_cleanup_scope", default=None)
+
+
 def let_finish(task: asyncio.Task[T]) -> asyncio.Task[T]:
-    """Mark ``task`` as a cleanup that a stopping process lets run to its end, and keep it referenced until then.
+    """Mark ``task`` as a cleanup that a stopping process lets run to its end, and keep it referenced until then.  It
+    joins the open cleanup scope too (:func:`in_cleanup_scope`).
 
     Its outcome is still its creator's to retrieve.  Returns ``task``.
     """
 
     _cleanups.add(task)
     task.add_done_callback(_cleanups.discard)
+    return in_cleanup_scope(task)
+
+
+def in_cleanup_scope(task: asyncio.Task[T]) -> asyncio.Task[T]:
+    """Add ``task`` to the cleanup scope open in this context, if any (:class:`CleanupScope`), without marking it as
+    a cleanup that a stopping process lets finish (:func:`let_finish`): for a teardown whose wait has no bound of its
+    own, which a stopping rollout worker cancels.  Returns ``task``."""
+
+    scope = _scope.get()
+    if scope is not None:
+        scope.add(task)
     return task
 
 

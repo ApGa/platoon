@@ -26,6 +26,7 @@ from platoon.envs.service import (
     get_service,
 )
 from platoon.task import Task
+from platoon.utils.stopping import CleanupScope, cleanups
 
 pytestmark = pytest.mark.asyncio
 
@@ -883,6 +884,22 @@ async def test_a_sync_tool_whose_caller_gave_up_holds_off_teardown_until_it_retu
     await session.close()
     assert ors_toys.EVENTS == ["setup:SlowToolEnv"]
     await _until(lambda: len(ors_toys.EVENTS) == 3)
+    assert ors_toys.EVENTS == ["setup:SlowToolEnv", "slow:done", "teardown:SlowToolEnv"]
+
+
+async def test_a_teardown_that_waits_for_a_sync_tool_joins_the_rollouts_cleanup_scope():
+    """So an in-process rollout's permit waits for it; it is no cleanup that a stopping rollout worker lets finish,
+    since its wait has no bound (``platoon.utils.stopping.in_cleanup_scope``)."""
+
+    scope = CleanupScope()
+    with scope:
+        session = await _open("python://ors_toys:SlowToolEnv", close_timeout_s=0.2)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(session.call_tool("slow", {}), 0.2)
+        await session.close()
+    assert ors_toys.EVENTS == ["setup:SlowToolEnv"]
+    assert [task for task in scope.running() if task not in cleanups()]  # the teardown waiting for the tool
+    assert await scope.finish(10) == 0
     assert ors_toys.EVENTS == ["setup:SlowToolEnv", "slow:done", "teardown:SlowToolEnv"]
 
 

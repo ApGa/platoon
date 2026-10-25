@@ -355,6 +355,7 @@
     "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
     "INFO Created new training client for test/model with rank 32",
     "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
     "INFO Starting training from batch 0 to 6",
     "WARNING Batch 0 trains 3 admitted groups, fewer than train.batch_size (4): it counted 8 groups, its cap (train.refill.max_groups_per_step 2), and of the groups it dequeued, 5 were rejected, 0 stale and 0 failed; a short step trains the groups it admitted.  At this pass rate, raise train.refill.max_groups_per_step, or choose tasks with task_sampler: pass_rate (logged once)",
     "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
