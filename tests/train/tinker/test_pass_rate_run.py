@@ -458,9 +458,16 @@ def test_a_resume_whose_entry_no_longer_gets_slots_drops_its_waiting_slots_each_
     tokens = state["tokens"].get("hard", [])
     assert tokens
     skipped = [e for e in events if e["event"] == "slot_skipped"]
-    assert [(e["position"], e["entry"], e["why"]) for e in skipped] == [
+    # The resume drops each waiting slot once, as no_slots.  Before the interrupt the first start may also have skipped
+    # slots of hard's, its queue at the backlog limit (four batches, 16 slots): it does when hard's third group still
+    # runs as the fourth step begins, which timing decides.  Those positions were used up then, and no waiting slot
+    # holds them.
+    assert [(e["position"], e["entry"], e["why"]) for e in skipped if e["start"] == 2] == [
         (position, "hard", "no_slots") for position in tokens
     ]
+    assert all((e["entry"], e["why"]) == ("hard", "backlog") for e in skipped if e["start"] == 1)
+    assert not {e["position"] for e in skipped if e["start"] == 1} & set(tokens)
+    assert not any(e["start"] == 1 for e in skipped) or "Environment 'hard' has 16 slots waiting" in caplog.text
     assert f"{len(tokens)} slots that waited for an entry's task sampler are dropped" in caplog.text
 
 
