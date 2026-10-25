@@ -174,7 +174,7 @@ from the first-party extension `platoon-textcraft` (`extensions/textcraft`).
 ## Compatibility and provenance
 
 *Since 0.2.0.* An extension states the versions of platoon it works with in its requirements
-(`platoon >= 0.3, < 0.4`: below 1.0, a minor release may break extensions). Before platoon imports any of its
+(`platoon >= 0.4, < 0.5`: below 1.0, a minor release may break extensions). Before platoon imports any of its
 components, it checks that range against the running platoon from the installed metadata, and refuses an extension
 whose range excludes it, with an error that names both versions. Set `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` to load
 it anyway, for example while you develop against a checkout of platoon.
