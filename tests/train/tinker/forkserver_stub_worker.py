@@ -9,6 +9,10 @@ Modes:
     sleep <path>          write its pid to ``path``, then sleep
     thread <path>         start a non-daemon thread that writes ``path`` after 0.5 s, and return
     atexit <path>         register an ``atexit`` handler that writes ``path``, and return
+    state <path> [class]  write what the fork server left in this process before it ran anything: its threads, the
+                          descriptors it holds besides stdio and libffi's (``fork_safe_descriptor``), its children, the
+                          modules imported, what ``preload_stubs.builds`` built and its environment's PRELOAD_STUB* and
+                          OPENREWARD* variables; with a ``module:Class``, the splits in that class's task cache
 
 It imports ctypes, as every worker's stack does. On Python 3.14 that import makes a libffi closure, and libffi then
 holds the file with its trampolines open (the interpreter itself, in uv's builds of Python): a forked worker inherits
@@ -92,10 +96,34 @@ def _describe() -> dict:
     return facts
 
 
+def _state(class_ref: str | None) -> dict:
+    from platoon.utils.forkserver import child_processes, fork_safe_descriptor, open_descriptors
+
+    descriptors = {fd: what for fd, what in open_descriptors().items() if fd > 2 and not fork_safe_descriptor(fd, what)}
+    builds = sys.modules.get("preload_stubs.builds")
+    facts: dict = {
+        "threads": threading.active_count(),
+        "tasks": len(os.listdir("/proc/self/task")),
+        "descriptors": {str(fd): what for fd, what in descriptors.items()},
+        "children": sorted(child_processes()),
+        "modules": sorted(sys.modules),
+        "built": dict(builds.BUILT) if builds is not None else None,
+        "environ": {name: os.environ[name] for name in os.environ if name.startswith(("PRELOAD_STUB", "OPENREWARD"))},
+    }
+    if class_ref:
+        module, _, name = class_ref.partition(":")
+        cls = getattr(sys.modules[module], name) if module in sys.modules else None
+        facts["task_cache"] = sorted((cls.__dict__.get("_tasks_cache") or {}) if cls is not None else ())
+    return facts
+
+
 def main() -> int:
     mode = sys.argv[1]
     if mode == "describe":
         _write(sys.argv[2], json.dumps(_describe()))
+        return 0
+    if mode == "state":
+        _write(sys.argv[2], json.dumps(_state(sys.argv[3] if len(sys.argv) > 3 else None)))
         return 0
     if mode == "exit":
         return int(sys.argv[2])

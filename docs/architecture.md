@@ -135,7 +135,20 @@ workers a dead trainer left running before new ones start.
 A worker is forked from a fork server (`worker_start_method: forkserver`, the default; `platoon.utils.forkserver`):
 one process per supervisor that imports the worker's stack once (tinker, torch, transformers and the environments'
 packages), which an exec'd worker would spend 17-24 s on, and about a minute when 64 start at once on one node, and
-builds the run's tokenizer and renderer once, of which each worker it forks takes its own copy.
+builds the run's tokenizer and renderer once, of which each worker it forks takes its own copy. It also imports what
+the run's environments and harnesses import when a rollout opens them, and builds what each rollout would build again
+(`platoon.train.startup`, from the config: an ORS environment's module and SDK, each function harness's module, the
+programs, the registry lookups, an in-process environment's task lists, and `workflow_config.worker_preload`), each
+module and build only when it leaves the server as safe to fork as it was: no thread started, no file, socket or event
+loop left open, no process started and no numpy generator seeded from the OS (an environment variable one sets is set
+in each worker too). One that is not is left out and logged, and once it has tried them all the server executes itself
+again without them, since an import cannot be undone; the processes they started are ended and none of their
+descriptors passes on. A
+value an import makes once per process (an id, a temporary directory) is shared by the workers, which is why only
+modules that keep none belong in the preload, and why nothing is derived under `worker_python_env_isolation`, whose
+rollouts import their environments inside a Python overlay of their own. `platoon train` starts the server as soon as
+its training client is open, so that it imports while the trainer saves at launch, and stages the harness toolchains
+on the node meanwhile.
 Right after the fork, the child becomes the process `python -m platoon.train.tinker.workers.entrypoint` would be: a
 session of its own, `/dev/null` as stdin, its log file, the trainer's working directory and exactly the environment
 an exec'd worker gets, new seeds for numpy's and torch's generators and for every `random.Random` the server's

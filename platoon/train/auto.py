@@ -915,6 +915,28 @@ def check_harness_toolchains(environments: Sequence[EnvironmentConfig]) -> None:
         raise NotPrepared(list(dict.fromkeys(unbuilt)))
 
 
+def harness_toolchains(environments: Sequence[EnvironmentConfig]) -> list[str]:
+    """The named toolchains the environments' TOML harness specs run from, each once, in config order: what a run
+    stages on its node before its first rollout (:func:`platoon.harness.toolchains.prestage`).  Training and
+    evaluation run the same harnesses (``eval_overrides`` changes their options only), so this covers both."""
+
+    from platoon.harness.registry import get_harness
+    from platoon.harness.spec import HarnessSpec
+    from platoon.harness.toolchains import is_named
+
+    names: list[str] = []
+    for environment in environments:
+        for ref in environment.harness_refs():
+            try:
+                harness = get_harness(ref)
+            except (ValueError, OSError, ImportError, AttributeError):
+                continue  # refused where the route is built, with its own error
+            toolchain = harness.install.toolchain if isinstance(harness, HarnessSpec) else None
+            if toolchain is not None and is_named(toolchain):
+                names.append(toolchain)
+    return list(dict.fromkeys(names))
+
+
 # Services whose sessions have no task sandbox, so a harness spec acts on their envs only through MCP tools.
 _SANDBOXLESS_SERVICES = ("table", "python://", "ors+http://", "ors+https://")
 

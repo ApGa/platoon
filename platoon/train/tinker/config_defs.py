@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
@@ -19,6 +20,9 @@ from platoon.train.components import (
 from platoon.train.tinker.checkpoint_pruning import config_pruning_problems
 from platoon.utils.config import ConfigError, value_hint
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
+
+# A dotted module name, as worker_preload lists them.
+_MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 @dataclass
@@ -135,6 +139,15 @@ class WorkflowConfig:
     # 17-24 s an import takes (about a minute when 64 start at once); a forked worker is the process an exec'd one
     # would be, and a worker the fork server cannot fork starts by exec. "exec": a new interpreter per worker.
     worker_start_method: Literal["forkserver", "exec"] = "forkserver"
+    # Modules the fork server imports before it forks the rollout workers, beyond those platoon derives from the
+    # environments (each service's and environment class's module, each function harness's and program's, and what
+    # harness_rollout imports): what an environment or harness imports only when a rollout opens it, which each worker
+    # would otherwise import again. A module that does not import, or whose import starts a thread or a process,
+    # leaves a file or socket open or seeds a numpy generator from the OS, is left out with a warning, and the workers
+    # import it themselves; one that keeps a value of its own process (an id, a temporary directory) does not belong
+    # here. Only with rollout_isolation: process and worker_start_method: forkserver, and not under
+    # worker_python_env_isolation; elsewhere it has no effect, and a warning says so.
+    worker_preload: list[str] = field(default_factory=list)
     # Seconds a worker may take to import and register its components; generous,
     # because many workers may start at once from a shared filesystem.
     worker_startup_budget_seconds: float = 300.0
@@ -202,6 +215,11 @@ class WorkflowConfig:
             raise ValueError("rollout_isolation must be 'inprocess' or 'process'")
         if self.worker_start_method not in ("forkserver", "exec"):
             raise ValueError("worker_start_method must be 'forkserver' or 'exec'")
+        if not isinstance(self.worker_preload, (list, tuple)) or not all(
+            isinstance(name, str) and _MODULE_NAME.fullmatch(name) for name in self.worker_preload
+        ):
+            raise ValueError(f"worker_preload must be a list of module names (a.b.c), got {self.worker_preload!r}")
+        self.worker_preload = list(self.worker_preload)
         for name in (
             "worker_startup_budget_seconds",
             "worker_finalize_grace_seconds",
@@ -233,6 +251,7 @@ EVAL_INHERITED_KEYS = (
     "rollout_config",
     "rollout_isolation",
     "worker_start_method",
+    "worker_preload",
     "worker_startup_budget_seconds",
     "worker_finalize_grace_seconds",
     "worker_parent_grace_seconds",

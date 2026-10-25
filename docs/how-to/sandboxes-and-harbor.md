@@ -979,11 +979,28 @@ path). A toolchain is a directory `<root>/<name>/` with a `manifest.json`:
 
 Before a rollout uses a toolchain, platoon copies it to node-local disk, once per node and toolchain version:
 into a temporary directory under a file lock, checked against the tree hash, then renamed into place. Concurrent
-rollouts copy it once, and none sees a partial copy; the next copy to take the lock removes what a killed copy left
-half done. Copies go to `$PLATOON_TOOLCHAIN_CACHE`, else to `platoon-toolchains-<uid>` in node-local scratch: the
-first of `$PLATOON_NODE_SCRATCH`, `$PBS_LOCALDIR`, `$SLURM_TMPDIR` and `$TMPDIR` that is set, else `/tmp`, where the
-Harbor service also keeps its per-node checks. A toolchain holds tens of thousands of files and about 800 MB, so
-where none of these is node-local disk with room for it, set `$PLATOON_NODE_SCRATCH` or `$PLATOON_TOOLCHAIN_CACHE`.
+rollouts, of one run or of several, copy it once, and none sees a partial copy; the next copy to take the lock removes
+what a killed copy left half done. `platoon train` stages the toolchains of its environments' harnesses before its
+first rollout, while it opens the training service and saves at launch, and `platoon eval` while it lists its tasks,
+so that no rollout waits for the copy, and the first ones only for what of it outlasts the trainer's own start-up
+([Rollouts are slow to start](troubleshooting.md#rollouts-are-slow-to-start)): each rollout's own staging then finds
+it current and returns at once. Copies go to `$PLATOON_TOOLCHAIN_CACHE`, else
+to `platoon-toolchains-<uid>` in node-local scratch: the first of `$PLATOON_NODE_SCRATCH`, `$PBS_LOCALDIR`,
+`$SLURM_TMPDIR` and `$TMPDIR` that is set, else `/tmp`, where the Harbor service also keeps its per-node checks. A
+toolchain holds tens of thousands of files and about 800 MB, so where none of these is node-local disk with room for
+it, set `$PLATOON_NODE_SCRATCH` or `$PLATOON_TOOLCHAIN_CACHE`.
+
+A copy in the job's scratch goes with the job, so every start and every resume in a new job copies the toolchain
+again. To keep it across jobs, set `$PLATOON_TOOLCHAIN_CACHE` to a node-local directory that outlives them. The next
+job on the node keeps the copy when its version and files still match: the copy's name carries the manifest's tree
+hash, and the first staging of each job (each boot and scheduler job, `$PBS_JOBID`, `$SLURM_JOB_ID`, `$LSB_JOBID` or
+`$JOB_ID`) hashes the copy again and compares it with the manifest's tree hash, under the lock, which takes seconds
+instead of the copy's minute. A stamp beside the copy (`.<copy>.staged`) records the jobs that checked it, so that
+jobs sharing the node and the copy check it once each. A copy that no longer matches, because a node's cleanup removed
+some of its files, is copied again beside it, and the fresh copy takes its place; the old one is set aside whole
+(`.<copy>.<hex>.stale`), since rollouts of another job may still run from it, and a warning names it. A cache platoon
+cannot write to (read-only, another user's, a full disk) cannot record a check: a kept copy there is used as it is,
+with a warning. Old versions and set-aside copies stay until you delete them, while no job uses them.
 A run never builds a toolchain: `platoon prepare` does, or `platoon toolchain build`, once per site ([OpenHands in
 task sandboxes](#1-build-the-toolchain)). Before any rollout, `platoon train`, `eval` and `rollout` refuse (exit 78) a
 config whose spec's named toolchain is not built under the root the run uses, naming the `platoon prepare` command

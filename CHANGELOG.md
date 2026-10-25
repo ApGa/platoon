@@ -73,6 +73,26 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   than 2% of the groups the last 10 steps consumed went stale (so from the tenth step on), naming what held the
   dispatcher back and the fixes, and when more of `GroupRolloutWorkflow`'s rollouts ran at once than
   `max_concurrent_rollouts`.
+- **Rollouts start without the work that each used to do again, or wait for.** Two costs fell on a rollout's start.
+  A CLI harness's first rollouts on a node waited while one of them copied the harness's toolchain to node-local disk
+  (about 36,000 files and 800 MB for OpenHands), at every start and every resume in a new job: `platoon train` now
+  stages its toolchains while it opens the training service and saves at launch, and starts no rollout, training's
+  or an evaluation's, before that is done (`platoon eval` while it lists its tasks), so that no rollout waits for the
+  copy and the first ones wait only for what of it outlasts the launch save; it waits ten minutes at most, and not
+  past a shutdown request. And each rollout worker imported, after its fork, what its environment and harness import
+  when they open, about 3,700 modules for an in-process ORS environment played by CodeAct, and parsed the
+  environment's task file again: the workers' fork server now does that once, before it forks them, from what the
+  config names (the environment's module and the openreward SDK, each function harness's and program's module, the
+  registry lookups, an in-process environment's task lists for the run's splits), and starts as soon as the training
+  client is open. It keeps only what leaves it fork-safe: a module or a build that starts a thread or a process,
+  leaves a file, socket or event loop open, or seeds a numpy generator from the OS is left out with a warning that
+  says why, and the workers import it themselves. `train.workflow_config.worker_preload` adds modules that an
+  environment imports only when it opens. In CPU benchmarks of TextCraft-Synth played by CodeAct with Qwen3-4B's
+  renderer, a forked worker reached its agent in 0.03 s instead of 7-9 s, 25-30 s and 48-56 s with 32, 128 and 256
+  workers starting at once, with 149 file system calls on the shared filesystem instead of 17,134 and 30 MB of memory
+  of its own instead of 290 MB. In CPU emulations of an OpenHands first wave whose toolchain copy took 77-90 s, the
+  first sandbox could open 8-17 s sooner after the training client opened, and 46-53 s sooner behind a 38 s launch
+  save ([Rollouts are slow to start](docs/how-to/troubleshooting.md#rollouts-are-slow-to-start)).
 
 ### Changes
 
@@ -115,6 +135,23 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   itself, so `concurrency_achieved_fraction` reads as the permits' busy share, and `groups_in_flight` can exceed the
   budget over the group size. The straggler settings' documentation calls them a deadline against runaway rollouts,
   not a throughput lever.
+- A staged harness toolchain has a stamp beside it, `.<copy>.staged`, that records the tree hash it was checked
+  against and the jobs that checked it. Where the copy outlives its job (`PLATOON_TOOLCHAIN_CACHE` on node-local disk
+  that persists), the first staging of each later job hashes the copy again and keeps it when it matches its
+  manifest; before, a kept copy was used unchecked. One that no longer matches is copied again beside it, and the old
+  copy is set aside whole (`.<copy>.<hex>.stale`), never removed, since rollouts of another job may still run from it.
+  A copy staged by an earlier platoon is checked once. A cache that platoon cannot write to (read-only, another
+  user's, a full disk) records no check, so its kept copy is used unchecked, as before, with a warning.
+  `platoon.harness.toolchains.prestage` stages toolchains ahead of rollouts.
+- The rollout workers' fork server takes 4-8 s longer to start and holds 150-230 MB more memory, which the workers it
+  forks share (14-20 s against 10-13 s, and 890-930 MB against 670-740 MB, in CPU benchmarks of TextCraft-Synth played
+  by CodeAct with Qwen3-4B's renderer), once per run and while the trainer saves at launch; each worker holds far less
+  of its own.
+  Its first log line counts the modules it imported for the environments beyond the worker's stack (`imported the
+  worker's stack and 9 module(s) the environments open with`). An environment variable that one of those imports
+  sets is set in each worker too. Under `worker_start_method: exec`, `rollout_isolation: inprocess` and
+  `worker_python_env_isolation` nothing is imported ahead, as before, and a `worker_preload` set there is warned
+  about.
 
 ### Fixes
 
