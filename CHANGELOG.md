@@ -170,6 +170,15 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
 - A rollout worker that is cancelled, as by a straggler cut or a stop, no longer leaves its readiness and diagnostics
   files in node-local scratch, where they stayed until a later run found them a day old.
 
+### Removed
+
+- **Breaking: `train.task_order` is gone.** Platoon 0.3.0 renamed it `train.task_sampler` and deprecated the old name
+  for removal in 0.4.0. A config or an override that still sets it fails as a configuration error (exit 78), with
+  `train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`; so does a config copied from
+  platoon 0.2.0's `config show --defaults`, which spells `task_order: auto`, even beside a `task_sampler`, where 0.3.0
+  ignored it. Set `train.task_sampler` instead: it takes the old name's values, `auto` and `weighted`, which draw as
+  they did ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+
 ## 0.3.1 (unreleased)
 
 ### Fixes

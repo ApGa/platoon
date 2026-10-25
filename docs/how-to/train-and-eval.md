@@ -358,12 +358,10 @@ An entry cannot name a run's sampler (`auto`, `weighted`), and options for a sam
 with its options, defaults included, and the checkpoints' sampling fingerprint holds the samplers platoon 0.3.0 did
 not have, so a resume that changes one says so ([Checkpoints and resume](#checkpoints-and-resume)).
 
-It was called `train.task_order` before platoon 0.3.0. That name still loads, with the same values, until platoon 0.4.0
-removes it: the commands name it once on stderr with a deprecation warning, `lock.json` records it, and
-`platoon config validate --strict` fails on it. A config may set both names when they agree, or when `task_order` is
-`auto`, its default before 0.3.0, as a dump of platoon 0.2.0's `config show --defaults` spells it: `task_sampler` then
-decides, and when the two differ, the warning says that `task_order` was ignored. A config that sets
-`task_order: weighted` beside another `task_sampler` does not load (exit 78).
+It was called `train.task_order` before platoon 0.3.0, and platoon 0.4.0 removed that name: a config that still sets
+it does not load (exit 78), with `train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`, and
+neither does a config copied from platoon 0.2.0's `config show --defaults`, which spells `task_order: auto`. Set
+`task_sampler` instead: it takes the old name's values, `auto` and `weighted`, which draw as they did.
 
 **Check the mix before a run.** Once `platoon train` lists the tasks, it logs how it draws them: each entry's tasks,
 weight and share of the slots, and how often each of its tasks is drawn over the planned steps (`num_epochs`,

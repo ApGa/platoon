@@ -160,10 +160,7 @@ def test_links_and_anchors_resolve(guide):
         ("platoon/deprecations.py", 'f"{self.path}: deprecated; use {self.replacement} instead (platoon'),
         ("platoon/deprecations.py", 'return f"platoon {removed_in} removed it; use {replacement}"'),
         ("platoon/utils/config.py", 'return f"{_join(parent, key)}: unknown key; {hint}"'),
-        (
-            "platoon/train/tinker/config_defs.py",
-            '"task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto")',
-        ),
+        ("platoon/train/tinker/config_defs.py", '"task_order": removed_hint("0.4.0", "train.task_sampler")'),
         ("platoon/site.py", "f\"the site profile's cache, whose {directory} directory it named (~/.config"),
         ("platoon/envs/harbor/service.py", '"cache": removed_hint("0.3.0", "the site profile\'s cache, whose harbor'),
         ("platoon/envs/harbor/cli.py", 'raise ConfigError(f"{path}: a fetch config file; {FETCH_CONFIG_REMOVED}")'),
