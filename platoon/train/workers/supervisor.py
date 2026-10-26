@@ -1,5 +1,11 @@
 """The parent side of process-per-rollout: launch, deadline, kill, classify.
 
+:meth:`RolloutWorkerSupervisor.run` runs one rollout in a worker process of its own
+(:mod:`platoon.train.workers.entrypoint`): it launches the worker, forked from its fork server
+(:mod:`platoon.train.workers.fork_servers`) or by exec, awaits its exit under the parent's deadline, reaps its process
+tree whatever ends the wait, and classifies what it left, response-first (:mod:`platoon.train.workers.outcomes` says
+why).
+
 One ``asyncio`` subprocess per rollout, no pool.  Measured with
 four workers, ``max_tasks_per_child=1`` and spawn, a single child that
 ``SIGKILL``s itself fails **every** concurrent future in a
@@ -10,18 +16,6 @@ every straggler kill collaterally destroy its siblings.  With
 measure ``rc=0`` (normal), ``rc=-11`` with siblings unaffected (segfault
 contained) and ``rc=-9`` (spinner killed by its own group) -- exactly the
 semantics this design needs.
-
-Classification is **response-first**
-====================================
-
-A worker needs ~1.9 s of interpreter teardown *after* it ``os.replace``s its
-response, and during that window its parent task is still not done and can be
-selected as a straggler.  Classifying on ``(returncode, we_killed_it)`` would
-therefore discard a complete rollout's datums because its group's tail grace
-expired two seconds after it finished.  So the supervisor always tries to read
-the response first; a readable response with a matching protocol wins
-regardless of the return code or who sent the signal, and the kill is recorded
-separately as ``rollout_worker_killed``.
 
 Stopping workers whose trainer is gone
 ======================================
@@ -90,24 +84,24 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass, replace
-from typing import Callable
+from dataclasses import dataclass, field, replace
+from typing import BinaryIO, Callable
 
 from platoon.envs.ors.cleanup import delete_orphaned_sessions, read_mirror
 from platoon.sandbox.cleanup import read_mirror as read_sandbox_mirror
 from platoon.sandbox.cleanup import reap_records
 from platoon.train.startup import WorkerPreload
+from platoon.train.workers import fork_servers
 from platoon.train.workers.binding import publish_binding
 from platoon.train.workers.env import _ENTRYPOINT_MODULES, DIAG_PATH_ENV, NO_CUDA_DRIVER, STARTUP_BUDGET_ENV
+
+# The two removers are private to platoon.train.workers: the supervisor runs them itself, as an attempt ends.
+from platoon.train.workers.outcomes import WorkerOutcome, _remove_event_temporaries, _remove_worker_files, classify
 from platoon.train.workers.protocol import (
-    EXIT_RSS_LIMIT,
     IPC_SWEEP_AGE_SECONDS,
     RolloutWorkerRequest,
-    RolloutWorkerResponse,
     dump_request,
     ipc_dir,
-    load_response,
-    read_diag,
     unlink_quietly,
 )
 from platoon.train.workers.registry import (
@@ -197,25 +191,31 @@ def signal_live_workers(sig: int = signal.SIGTERM) -> int:
     return len(workers)
 
 
-@dataclass(frozen=True)
-class WorkerOutcome:
-    """Everything the workflow needs to turn one worker into a group member."""
+@dataclass(kw_only=True)
+class _LaunchedWorker:
+    """A worker that :meth:`RolloutWorkerSupervisor._launch` started, and what supervising it to its end takes; the
+    comment above each group of fields names the step that sets them."""
 
-    response: RolloutWorkerResponse | None
-    returncode: int | None
-    disposition: str
-    killed_by_parent: bool
-    diag: dict | None
-    launch_seconds: float
-    wall_seconds: float
-    retried: bool
-    worker_pid: int | None
-    log_path: str | None = None
-    request_id: str = ""
+    # _launch: the request and when its attempt started, its request file and log, its process.
+    request: RolloutWorkerRequest
+    started: float
+    request_path: str
+    log_path: str | None
+    log_handle: BinaryIO | None
+    proc: asyncio.subprocess.Process | ForkedWorker
+    # _track: the pidfd and process group that signal it, the wait for its exit and the watch for its readiness.
+    pidfd: int | None = None
+    pgid: int | None = None
+    waiter: asyncio.Future = field(init=False, repr=False)
+    ready_watcher: asyncio.Future | None = None
+    # _watch_ready: the seconds it took to be ready, the outcome's launch seconds.
+    ready_state: dict = field(default_factory=lambda: {"seconds": 0.0})
+    # _reap: whether this supervisor signalled it.
+    killed: bool = False
 
 
 class RolloutWorkerSupervisor:
-    """Runs one rollout in one exec'd process, and reaps its whole tree."""
+    """Runs one rollout in one worker process, exec'd or forked from a fork server, and reaps its whole tree."""
 
     def __init__(
         self,
@@ -418,176 +418,20 @@ class RolloutWorkerSupervisor:
         }
         return [{"ref": "platoon.train.tinker.proxy:prepare_renderer", "kwargs": kwargs}, *steps]
 
-    async def _fork_server_for(self, request: RolloutWorkerRequest) -> ForkServer | None:
-        """The fork server to start ``request``'s worker, started on first use; None to start it by exec.
+    @property
+    def _max_fork_server_starts(self) -> int:
+        """The most fork servers it starts: :data:`MAX_FORK_SERVER_STARTS`, read each time the fork server's functions
+        compare ``_fork_server_starts`` with it."""
 
-        A server forks workers with the environment and working directory it started with, which its imports may
-        have read: when this process's have changed since, another server starts, and the old one serves the workers
-        it forked to their end.  Requests wait for a new server's imports until the worker's startup budget has
-        passed since it started.  A server still importing then is neither waited for nor killed: workers start by
-        exec meanwhile, and once it has imported the stack it forks the next ones.  Another server would import the
-        stack from the beginning, on a node busy enough to have made this one slow.  A server that says it cannot
-        serve (a module did not import, a thread runs in it), however late, turns forking off: so would another."""
+        return MAX_FORK_SERVER_STARTS
 
-        if self.start_method != "forkserver":
-            return None
-        env, cwd = self._child_env(), os.getcwd()
-        loop = asyncio.get_running_loop()
-        server = self._fork_server
-        if server is not None and server.serving and server.loop is loop and server.env == env and server.cwd == cwd:
-            return self._use(server)
-        if server is None and self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
-            return None
-        if self._fork_server_lock is None or self._fork_server_lock[0] is not loop:
-            self._fork_server_lock = (loop, asyncio.Lock())
-        async with self._fork_server_lock[1]:
-            server = self._fork_server
-            if server is not None and not (
-                server.alive and server.loop is loop and server.env == env and server.cwd == cwd
-            ):
-                if server.error is None and server.alive and server.loop is loop:
-                    changed = sorted(
-                        name for name in env.keys() | server.env.keys() if env.get(name) != server.env.get(name)
-                    )
-                    if self._fork_server_starts < MAX_FORK_SERVER_STARTS:
-                        then = "starting another"
-                    else:
-                        then = (
-                            "rollout workers start by exec from now on: this supervisor has started "
-                            f"{self._fork_server_starts} fork server(s), the most it starts"
-                        )
-                    logger.warning(
-                        "rollout worker fork server %s started with another %s; %s",
-                        server.pid,
-                        f"environment ({', '.join(changed[:8])})" if changed else "working directory",
-                        then,
-                    )
-                # Dead, of another event loop or of another environment: it serves its workers out (one still
-                # importing has none, and is killed).
-                server.close()
-                self._fork_server = None
-                if server.error is not None:
-                    # It said it cannot serve after a request stopped waiting for it: another would import the same
-                    # stack, and fail the same way.
-                    self._fork_server_starts = MAX_FORK_SERVER_STARTS
-                    self._warn_exec(ForkServerError(server.error, permanent=True))
-                    return None
-                server = None
-            if server is None:
-                if self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
-                    return None
-                server = self._launch_fork_server(request, env, cwd)
-                if server is None:
-                    return None
-            if not server.serving:
-                try:
-                    await server.ready(request.startup_budget_seconds)
-                except ForkServerError as exc:
-                    if not exc.permanent and server.alive:  # still importing
-                        if not self._fork_server_late:
-                            self._fork_server_late = True
-                            logger.warning(
-                                "rollout worker fork server %s has not imported the worker's stack in %.0fs: rollout "
-                                "workers start by exec, each importing it itself, until it has (log %s)",
-                                server.pid,
-                                request.startup_budget_seconds,
-                                self._fork_server_log,
-                            )
-                        return None
-                    if exc.permanent:
-                        self._fork_server_starts = MAX_FORK_SERVER_STARTS  # starting another would not help
-                    server.close()
-                    self._fork_server = None
-                    self._warn_exec(exc)
-                    return None
-            return self._use(server)
-
-    def _launch_fork_server(self, request: RolloutWorkerRequest, env: dict[str, str], cwd: str) -> ForkServer | None:
-        """Start a fork server for workers like ``request``'s, counted against :data:`MAX_FORK_SERVER_STARTS`; None
-        when it could not start (workers then start by exec).  It imports the worker's stack meanwhile."""
-
-        self._fork_server_starts += 1
-        self._fork_server_log = os.path.join(
-            self.scratch_dir, f"forkserver-{os.getpid()}-{self._fork_server_starts}.log"
-        )
-        self._fork_server_late = self._fork_server_announced = False
-        try:
-            server = ForkServer.launch(
-                python=self.python_executable,
-                module=self.module,
-                preload=self._fork_server_preload(request),
-                child_init=self._fork_server_child_init(),
-                prepare=self._fork_server_prepare(request),
-                optional=self._fork_server_optional(request),
-                skipped=self._fork_server_skipped,
-                env=env,
-                cwd=cwd,
-                log_path=self._fork_server_log,
-            )
-        except Exception as exc:  # noqa: BLE001 - workers then start by exec
-            self._warn_exec(exc)
-            return None
-        self._fork_server = server
-        return server
-
-    async def warm(self, request: RolloutWorkerRequest) -> None:
-        """Start the fork server for workers like ``request``'s now, ahead of the first one, without waiting for its
-        imports: the first worker asked for then finds it importing, or serving.  Nothing when workers start by exec,
-        a server runs already, or the supervisor started as many as it starts."""
-
-        if self.start_method != "forkserver":
-            return
-        loop = asyncio.get_running_loop()
-        if self._fork_server_lock is None or self._fork_server_lock[0] is not loop:
-            self._fork_server_lock = (loop, asyncio.Lock())
-        async with self._fork_server_lock[1]:
-            if self._fork_server is not None or self._fork_server_starts >= MAX_FORK_SERVER_STARTS:
-                return
-            self._launch_fork_server(request, self._child_env(), os.getcwd())
-
-    def _use(self, server: ForkServer) -> ForkServer:
-        """``server``, which serves; the first time, say so, what it imported beyond the worker's stack, and what it
-        left out or could not build ahead."""
-
-        if not self._fork_server_announced:
-            self._fork_server_announced = True
-            preloaded = getattr(server, "preloaded", 0)
-            logger.info(
-                "rollout worker fork server %s imported the worker's stack%s in %.1fs",
-                server.pid,
-                f" and {preloaded} module(s) the environments open with" if preloaded else "",
-                server.seconds,
-            )
-            self._fork_server_skipped = [dict(entry) for entry in getattr(server, "skipped", ())]
-            for entry in self._fork_server_skipped:
-                if entry.get("item") in self._fork_server_warned:
-                    continue
-                self._fork_server_warned.add(str(entry.get("item")))
-                logger.warning(
-                    "the rollout worker fork server left %s out of what it imports ahead of its workers, which then "
-                    "import or build it themselves: %s",
-                    entry.get("item"),
-                    entry.get("reason"),
-                )
-            for problem in server.prepare_errors:
-                logger.warning("the rollout worker fork server could not build ahead (workers build it): %s", problem)
-        return server
-
-    def _warn_exec(self, exc: BaseException) -> None:
-        logger.warning(
-            "rollout workers start by exec, each importing the worker's stack itself: the fork server did not start: "
-            "%s (log %s)",
-            exc,
-            self._fork_server_log,
-        )
-
-    def close(self) -> None:
-        """Stop the fork server taking workers; it exits once the workers it forked have exited (at once when it is
-        still importing the worker's stack)."""
-
-        if self._fork_server is not None:
-            self._fork_server.close()
-            self._fork_server = None
+    # Which fork server forks a worker; starting, replacing, warming, closing it (platoon.train.workers.fork_servers).
+    _fork_server_for = fork_servers._fork_server_for
+    _launch_fork_server = fork_servers._launch_fork_server
+    warm = fork_servers.warm
+    _use = fork_servers._use
+    _warn_exec = fork_servers._warn_exec
+    close = fork_servers.close
 
     # -- the run ----------------------------------------------------------
     def _child_env(self, request: RolloutWorkerRequest | None = None) -> dict[str, str]:
@@ -713,16 +557,29 @@ class RolloutWorkerSupervisor:
         on_reap: Callable[[int], None] | None,
         on_first_call: Callable[[], None] | None = None,
     ) -> WorkerOutcome:
+        """One attempt at running ``request`` in a worker: launch it, track it, await its exit, reap it whatever ends
+        the wait, then classify what it left.  Raises :class:`_LaunchFailed` when the worker did not start."""
+
+        worker = await self._launch(request, log_dir)  # if no worker starts, it cleans up and raises
+        self._track(worker, on_launch=on_launch, on_ready=on_ready, on_first_call=on_first_call)  # never raises
+        try:
+            timed_out = await self._await_exit(worker)
+        finally:
+            # Reap the process TREE on every exit path: normal, timeout, and
+            # CancelledError (a straggler cancellation kills the worker).
+            await self._reap(worker, on_reap)
+        return self._finish(worker, timed_out=timed_out, retried=retried)
+
+    async def _launch(self, request: RolloutWorkerRequest, log_dir: str | None) -> _LaunchedWorker:
+        """Write the request, then start its worker: forked from the fork server when one can fork it
+        (:meth:`_fork_server_for`), else by exec.  Raises :class:`_LaunchFailed`, having closed the log and removed the
+        request file, when the memory floor blocks the launch or the worker did not start."""
+
         started = time.monotonic()
         request_path = os.path.join(self.scratch_dir, f"{request.request_id}.req")
         log_path = self._log_path(request, log_dir)
         log_handle = None
         proc: asyncio.subprocess.Process | ForkedWorker | None = None
-        pidfd: int | None = None
-        pgid: int | None = None
-        killed = False
-        ready_watcher: asyncio.Task | None = None
-        launch_seconds = 0.0
 
         if self._memory_floor_blocks_launch():
             raise _LaunchFailed("MemAvailable below the configured floor")
@@ -768,100 +625,142 @@ class RolloutWorkerSupervisor:
                 log_handle.close()
             unlink_quietly(request_path)
             raise _LaunchFailed(str(exc)) from exc
+        return _LaunchedWorker(
+            request=request,
+            started=started,
+            request_path=request_path,
+            log_path=log_path,
+            log_handle=log_handle,
+            proc=proc,
+        )
 
+    def _track(
+        self,
+        worker: _LaunchedWorker,
+        *,
+        on_launch: Callable[[int], None] | None,
+        on_ready: Callable[[], None] | None,
+        on_first_call: Callable[[], None] | None,
+    ) -> None:
+        """Track the launched worker: its pidfd and process group, which signal it; its record among this process's
+        live workers (:meth:`_remember`) and ``on_launch``; then the wait for its exit and the watch for its readiness
+        and first call (:meth:`_watch_ready`), which :meth:`_reap` ends."""
+
+        proc = worker.proc
         if isinstance(proc, ForkedWorker):
-            pidfd = proc.pidfd  # the fork server opened it before the pid could be reused
+            worker.pidfd = proc.pidfd  # the fork server opened it before the pid could be reused
         else:
             try:
-                pidfd = os.pidfd_open(proc.pid) if hasattr(os, "pidfd_open") else None
+                worker.pidfd = os.pidfd_open(proc.pid) if hasattr(os, "pidfd_open") else None
             except OSError:
-                pidfd = None
+                worker.pidfd = None
         try:
-            pgid = os.getpgid(proc.pid)
+            worker.pgid = os.getpgid(proc.pid)
         except OSError:
-            pgid = proc.pid
-        self._remember(proc.pid, pidfd, pgid, request)
+            worker.pgid = proc.pid
+        self._remember(proc.pid, worker.pidfd, worker.pgid, worker.request)
         if on_launch is not None:
             with contextlib.suppress(Exception):
                 on_launch(proc.pid)
 
-        waiter = asyncio.ensure_future(proc.wait())
-        ready_state = {"seconds": 0.0}
-        ready_watcher = asyncio.ensure_future(
-            self._watch_ready(request, proc, started, ready_state, on_ready, on_first_call, waiter)
+        worker.waiter = asyncio.ensure_future(proc.wait())
+        worker.ready_watcher = asyncio.ensure_future(
+            self._watch_ready(
+                worker.request,
+                proc,
+                worker.started,
+                worker.ready_state,
+                on_ready=on_ready,
+                on_first_call=on_first_call,
+                waiter=worker.waiter,
+            )
         )
 
-        deadline = request.rollout_budget_seconds + self.parent_grace_seconds
-        try:
-            try:
-                await asyncio.wait_for(asyncio.shield(waiter), timeout=deadline)
-                timed_out = False
-            except asyncio.TimeoutError:
-                timed_out = True
-                logger.warning(
-                    "rollout worker %s exceeded the parent deadline of %.0fs; reaping its process group",
-                    request.request_id,
-                    deadline,
-                )
-        finally:
-            # Reap the process TREE on every exit path: normal, timeout, and
-            # CancelledError (a straggler cancellation kills the worker).
-            # Running until its wait ends (a forked worker whose fork server died exits with no return code).
-            if not waiter.done():
-                killed = True
-                self._signal_tree(pidfd, proc.pid, pgid, signal.SIGTERM)
-                if self.termination_grace_seconds > 0:
-                    with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-                        await asyncio.wait_for(asyncio.shield(waiter), self.termination_grace_seconds)
-            if not waiter.done():
-                self._signal_tree(pidfd, proc.pid, pgid, signal.SIGKILL)
-                with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-                    await asyncio.wait_for(asyncio.shield(waiter), 30.0)
-            # Forgotten before its pidfd closes, so signal_live_workers never signals a closed (or reused) fd.
-            self._forget(proc.pid, reaped=waiter.done())
-            if ready_watcher is not None:
-                # Let it observe the exit first: readiness is a real number we
-                # want even for a worker that finished quickly.
-                if not ready_watcher.done():
-                    with contextlib.suppress(BaseException):
-                        await asyncio.wait_for(asyncio.shield(ready_watcher), 5.0)
-                ready_watcher.cancel()
-                with contextlib.suppress(BaseException):
-                    await ready_watcher
-            if isinstance(proc, ForkedWorker):
-                proc.close()
-            elif pidfd is not None:
-                with contextlib.suppress(OSError):
-                    os.close(pidfd)
-            if log_handle:
-                log_handle.close()
-            unlink_quietly(request_path)
-            # A worker that died before closing its remote env sessions left them listed: delete them now
-            # rather than leave them to the env server's 15-minute reaper.
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(self._delete_orphaned_sessions(request))
-            # And the sandboxes it did not stop (Harbor task sandboxes, verifier sandboxes): reaped by its label.
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(self._reap_orphaned_sandboxes(request))
-            if on_reap is not None:
-                with contextlib.suppress(Exception):
-                    on_reap(proc.pid)
+    async def _await_exit(self, worker: _LaunchedWorker) -> bool:
+        """Wait for the worker's exit, for its rollout budget and the parent's grace at most; whether that deadline
+        passed first."""
 
-        launch_seconds = ready_state["seconds"]
-        outcome = self._classify(
-            request,
-            returncode=proc.returncode,
-            killed_by_parent=killed,
+        deadline = worker.request.rollout_budget_seconds + self.parent_grace_seconds
+        try:
+            await asyncio.wait_for(asyncio.shield(worker.waiter), timeout=deadline)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "rollout worker %s exceeded the parent deadline of %.0fs; reaping its process group",
+                worker.request.request_id,
+                deadline,
+            )
+            return True
+        return False
+
+    async def _reap(self, worker: _LaunchedWorker, on_reap: Callable[[int], None] | None) -> None:
+        """Reap the worker's process tree and what it left: a worker still running gets SIGTERM, its termination grace,
+        then SIGKILL; it is forgotten, its readiness watch ends, its pidfd, log and request file are closed and
+        removed, the env sessions and sandboxes it left open are deleted; then ``on_reap``.  :meth:`_run_once` runs it
+        in a ``finally``, so it runs on every exit path, cancellation included."""
+
+        proc, waiter, pidfd = worker.proc, worker.waiter, worker.pidfd
+        # Running until its wait ends (a forked worker whose fork server died exits with no return code).
+        if not waiter.done():
+            worker.killed = True
+            self._signal_tree(pidfd, proc.pid, worker.pgid, signal.SIGTERM)
+            if self.termination_grace_seconds > 0:
+                with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(waiter), self.termination_grace_seconds)
+        if not waiter.done():
+            self._signal_tree(pidfd, proc.pid, worker.pgid, signal.SIGKILL)
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(waiter), 30.0)
+        # Forgotten before its pidfd closes, so signal_live_workers never signals a closed (or reused) fd.
+        self._forget(proc.pid, reaped=waiter.done())
+        ready_watcher = worker.ready_watcher
+        if ready_watcher is not None:
+            # Let it observe the exit first: readiness is a real number we
+            # want even for a worker that finished quickly.
+            if not ready_watcher.done():
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(asyncio.shield(ready_watcher), 5.0)
+            ready_watcher.cancel()
+            with contextlib.suppress(BaseException):
+                await ready_watcher
+        if isinstance(proc, ForkedWorker):
+            proc.close()
+        elif pidfd is not None:
+            with contextlib.suppress(OSError):
+                os.close(pidfd)
+        if worker.log_handle:
+            worker.log_handle.close()
+        unlink_quietly(worker.request_path)
+        # A worker that died before closing its remote env sessions left them listed: delete them now
+        # rather than leave them to the env server's 15-minute reaper.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(self._delete_orphaned_sessions(worker.request))
+        # And the sandboxes it did not stop (Harbor task sandboxes, verifier sandboxes): reaped by its label.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(self._reap_orphaned_sandboxes(worker.request))
+        if on_reap is not None:
+            with contextlib.suppress(Exception):
+                on_reap(proc.pid)
+
+    def _finish(self, worker: _LaunchedWorker, *, timed_out: bool, retried: bool) -> WorkerOutcome:
+        """Classify the reaped worker (:func:`~platoon.train.workers.outcomes.classify`, which reads its response),
+        then remove the files it wrote beside its request, and the hidden event files of one that left no response;
+        returns the outcome."""
+
+        launch_seconds = worker.ready_state["seconds"]
+        outcome = classify(
+            worker.request,
+            returncode=worker.proc.returncode,
+            killed_by_parent=worker.killed,
             timed_out=timed_out,
             launch_seconds=launch_seconds,
-            wall_seconds=time.monotonic() - started,
+            wall_seconds=time.monotonic() - worker.started,
             retried=retried,
-            worker_pid=proc.pid,
-            log_path=log_path,
+            worker_pid=worker.proc.pid,
+            log_path=worker.log_path,
         )
-        _remove_worker_files(request)
+        _remove_worker_files(worker.request)
         if outcome.response is None:
-            _remove_event_temporaries(request, proc.pid)
+            _remove_event_temporaries(worker.request, worker.proc.pid)
         return outcome
 
     def _remember(self, pid: int, pidfd: int | None, pgid: int | None, request: RolloutWorkerRequest) -> None:
@@ -958,127 +857,6 @@ class RolloutWorkerSupervisor:
         if os.path.exists(request.first_call_path):
             with contextlib.suppress(Exception):
                 on_first_call()
-
-    def _classify(
-        self,
-        request: RolloutWorkerRequest,
-        *,
-        returncode: int | None,
-        killed_by_parent: bool,
-        timed_out: bool,
-        launch_seconds: float,
-        wall_seconds: float,
-        retried: bool,
-        worker_pid: int,
-        log_path: str | None,
-    ) -> WorkerOutcome:
-        response: RolloutWorkerResponse | None = None
-        try:
-            if os.path.exists(request.response_path):
-                candidate = load_response(request.response_path)
-                if candidate.request_id == request.request_id:
-                    response = candidate
-                else:
-                    logger.warning(
-                        "rollout worker response at %s is for request %s, not %s; ignoring",
-                        request.response_path,
-                        candidate.request_id,
-                        request.request_id,
-                    )
-        except Exception:
-            logger.warning(
-                "rollout worker %s left an unreadable response at %s",
-                request.request_id,
-                request.response_path,
-                exc_info=True,
-            )
-
-        diag = read_diag(request.diag_path)
-
-        if response is not None:
-            # Response-first: a complete rollout that was signalled during its
-            # ~1.9 s of interpreter teardown still counts, and the kill is
-            # recorded separately.
-            return WorkerOutcome(
-                response=response,
-                returncode=returncode,
-                disposition=response.status,
-                killed_by_parent=killed_by_parent,
-                diag=diag,
-                launch_seconds=launch_seconds,
-                wall_seconds=wall_seconds,
-                retried=retried,
-                worker_pid=worker_pid,
-                log_path=log_path,
-                request_id=request.request_id,
-            )
-
-        if returncode == EXIT_RSS_LIMIT or (diag and diag.get("phase") == "rss"):
-            disposition = "rollout_worker_oom"
-        elif diag and diag.get("phase") in ("startup", "rollout"):
-            disposition = "hard_timeout"
-        elif diag and diag.get("phase") == "terminated":
-            # It stopped on a SIGTERM (this supervisor's, or its trainer's death through PDEATHSIG) and SIGKILLed
-            # its own process group at the end: a crash as far as the group is concerned, unless it was this
-            # supervisor's deadline that stopped it.
-            disposition = "hard_timeout" if timed_out else "worker_crashed"
-        elif timed_out:
-            # The child's own alarm should have fired first; if it did not, the
-            # timeout ladder is misconfigured.
-            logger.warning(
-                "rollout worker %s hit the parent deadline without leaving a diagnostic marker; "
-                "check that the child budget is below the parent budget",
-                request.request_id,
-            )
-            disposition = "hard_timeout"
-        elif returncode is None:
-            disposition = "worker_crashed"
-        elif returncode != 0:
-            disposition = "worker_crashed"
-        else:
-            # Exited cleanly but wrote nothing readable: treat as a launch
-            # failure, never as a partial unpickle.
-            disposition = "worker_launch_failed"
-
-        return WorkerOutcome(
-            response=None,
-            returncode=returncode,
-            disposition=disposition,
-            killed_by_parent=killed_by_parent,
-            diag=diag,
-            launch_seconds=launch_seconds,
-            wall_seconds=wall_seconds,
-            retried=retried,
-            worker_pid=worker_pid,
-            log_path=log_path,
-            request_id=request.request_id,
-        )
-
-
-def _remove_worker_files(request: RolloutWorkerRequest) -> None:
-    """Delete what a worker writes beside its request: its response, diagnostics, readiness and, for a request that
-    asks for it, first-call marker."""
-
-    for path in (request.response_path, request.diag_path, request.ready_path):
-        unlink_quietly(path)
-    if request.signal_first_call:
-        unlink_quietly(request.first_call_path)
-
-
-def _remove_event_temporaries(request: RolloutWorkerRequest, pid: int) -> None:
-    """Delete the hidden event files of a worker that was killed while writing its rollout's events."""
-
-    output_dir = (request.rollout_config or {}).get("output_dir")
-    if not output_dir:
-        return
-    from platoon.visualization.event_sinks import remove_temporary_events
-
-    try:
-        removed = remove_temporary_events(output_dir, pid)
-    except OSError:
-        return
-    if removed:
-        logger.info("removed %d temporary event files rollout worker %s left behind", removed, request.request_id)
 
 
 class _LaunchFailed(RuntimeError):
