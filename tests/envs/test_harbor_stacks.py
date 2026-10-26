@@ -511,6 +511,88 @@ async def test_services_that_bind_one_path_of_the_task_writable_share_one_copy_o
 
 
 @pytest.mark.asyncio
+async def test_a_sidecar_binds_a_readable_copy_of_task_files_that_other_users_cannot_read(make_task, provider):
+    """A task fetched under a umask that keeps other users out (027) has files only you and your group read, where a
+    Docker host's checkout has them 0644, which a sidecar that reads them as a user of its own (the official postgres
+    image runs its init scripts as postgres) needs.  Its read-only binds of them bind a copy, the stack's own, that
+    every user reads (a+rX: an executable stays one), and the cache keeps its modes; what every user reads already
+    binds the cache, and so does what only main binds, which reads it as you."""
+
+    task_dir = make_task("umask-027", task_toml='[environment]\ndocker_image = "python:3.12-slim"\n')
+    environment = task_dir / "environment"
+    (environment / "conf").mkdir()
+    files = {"init.sql": 0o640, "conf/app.conf": 0o640, "conf/start.sh": 0o750, "open.txt": 0o644, "mine.txt": 0o600}
+    for name, mode in files.items():
+        (environment / name).write_text(f"{name}\n")
+        (environment / name).chmod(mode)
+    (environment / "conf").chmod(0o750)
+    (environment / "docker-compose.yaml").write_text(
+        "services:\n  main:\n    volumes:\n      - ./mine.txt:/srv/mine.txt:ro\n    depends_on: [db]\n"
+        '  db:\n    image: python:3.12-slim\n    command: ["sleep", "600"]\n    volumes:\n'
+        "      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro\n      - ./conf:/etc/app:ro\n"
+        "      - ./open.txt:/srv/open.txt:ro\n"
+    )
+
+    def mode(path: Path) -> int:
+        return path.stat().st_mode & 0o7777
+
+    service = HarborEnvironmentService(task_dirs=[task_dir], provider=provider)
+    session = await _open(service, "umask-027")
+    try:
+        stack = _stack(session)
+        db = cast(Any, stack.services["db"])
+        init = db.host_path("/docker-entrypoint-initdb.d/init.sql").resolve()
+        conf = db.host_path("/etc/app").resolve()
+        assert init.is_relative_to(provider.root / stack.id) and conf.is_relative_to(provider.root / stack.id)
+        modes = (mode(init), mode(conf), mode(conf / "app.conf"), mode(conf / "start.sh"))
+        assert modes == (0o644, 0o755, 0o644, 0o755)
+        assert init.read_text() == "init.sql\n" and (conf / "start.sh").read_text() == "conf/start.sh\n"
+        assert db.host_path("/srv/open.txt").resolve() == (environment / "open.txt").resolve()
+        assert cast(Any, session.sandbox).host_path("/srv/mine.txt").resolve() == (environment / "mine.txt").resolve()
+        assert {name: mode(environment / name) for name in files} == files and mode(environment / "conf") == 0o750
+    finally:
+        await session.close()
+    assert _nothing_left(provider)
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_s_masked_copy_of_readable_files_links_them_and_opens_its_directories(make_task, provider):
+    """A masked bind's copy hard-links what every user reads, which keeps the cache's modes (an owner's executable
+    stays 0744: the cache's inode is never changed), and makes its directories as Docker's host does (0755), under a
+    umask of 027 too."""
+
+    task_dir = make_task("masked-027", task_toml='[environment]\ndocker_image = "python:3.12-slim"\n')
+    data = task_dir / "environment" / "data"
+    (data / "hidden").mkdir(parents=True)
+    (data / "run.sh").write_text("#!/bin/sh\n")
+    (data / "run.sh").chmod(0o744)
+    (data / "hidden" / "answer.txt").write_text("42\n")
+    for path, mode in ((data, 0o755), (data / "hidden", 0o755), (data / "hidden" / "answer.txt", 0o644)):
+        path.chmod(mode)  # every user reads them, whatever the umask that wrote them
+    (task_dir / "environment" / "docker-compose.yaml").write_text(
+        "services:\n  main:\n    depends_on: [db]\n"
+        '  db:\n    image: python:3.12-slim\n    command: ["sleep", "600"]\n    volumes:\n'
+        "      - ./data:/srv/data:ro\n      - /srv/data/hidden\n"
+    )
+    service = HarborEnvironmentService(task_dirs=[task_dir], provider=provider)
+    previous = os.umask(0o027)
+    try:
+        session = await _open(service, "masked-027")
+    finally:
+        os.umask(previous)
+    try:
+        copy = cast(Any, _stack(session).services["db"]).host_path("/srv/data").resolve()
+        assert copy.is_relative_to(provider.root / _stack(session).id)
+        assert (copy / "run.sh").stat().st_ino == (data / "run.sh").stat().st_ino
+        assert (data / "run.sh").stat().st_mode & 0o7777 == 0o744
+        assert list((copy / "hidden").iterdir()) == []  # masked
+        assert [path.stat().st_mode & 0o7777 for path in (copy, copy / "hidden")] == [0o755, 0o755]
+    finally:
+        await session.close()
+    assert _nothing_left(provider)
+
+
+@pytest.mark.asyncio
 async def test_reaping_a_stack_s_label_deletes_what_its_session_copied(make_task, provider):
     """What a stack's session copies of the task (a writable bind) and what its sidecars write in their log
     directories are the stack's volumes: reaping by label, as after a killed worker, deletes them with the stack, and
@@ -853,6 +935,101 @@ def test_a_snapshot_of_the_sidecars_logs_copies_regular_files_and_never_through_
     found = sorted(str(path.relative_to(target)) for path in target.rglob("*"))
     assert found == ["deep", "deep/kept-too.log", "kept.log"]
     assert not any(path.is_symlink() for path in target.rglob("*"))
+
+
+@pytest.mark.parametrize("unreadable", ["file", "directory"])
+def test_a_snapshot_of_the_sidecars_logs_raises_for_what_it_cannot_read(tmp_path: Path, unreadable: str):
+    """What a sidecar's own user keeps from this host's user (in a pod, a user of its subordinate ids) is never left
+    out of the copy the tests get; what is gone since it was listed is."""
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads every file")
+    logs = tmp_path / "logs"
+    (logs / "judge").mkdir(parents=True)
+    (logs / "judge" / "actions.jsonl").write_text("a record\n")
+    kept = logs / "judge" if unreadable == "directory" else logs / "judge" / "actions.jsonl"
+    kept.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            sidecars.snapshot_logs({"verifier": logs}, tmp_path / "into")
+    finally:
+        kept.chmod(0o700)
+
+
+class _Downloads:
+    """A sidecar's sandbox that downloads its log directory, or fails to (one that is down)."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.fails = fails
+        self.asked: list[str] = []
+
+    async def download(self, src: str, dst: Path) -> None:
+        self.asked.append(src)
+        if self.fails:
+            raise RuntimeError("the sidecar is down")
+        Path(dst).mkdir(parents=True)
+        (Path(dst) / "actions.jsonl").write_text("a record\n")
+
+
+class _Stack:
+    def __init__(self, run_as: str, sandbox: _Downloads, volume: Path) -> None:
+        self.services = {"main": object(), "judge": sandbox}
+        self.run_modes = {"main": "root", "judge": run_as}
+        self.volume = volume
+
+    def volume_path(self, name: str) -> Path:
+        assert name == "platoon:logs-verifier"
+        return self.volume
+
+
+@pytest.mark.asyncio
+async def test_grading_reads_a_log_directory_that_a_subids_sidecar_binds_through_it(tmp_path: Path):
+    """A sidecar with your subordinate ids may write its log as a user of its own, whose files this host's user may not
+    read: it downloads them, as its root; another sidecar's, or one that is down, are read from the stack's volume."""
+
+    logs = sidecars.SidecarLogs(logs="verifier", volume="platoon:logs-verifier", services={"judge": "/logs/verifier"})
+    volume, downloads = tmp_path / "volume", tmp_path / "downloads"
+    judge = _Downloads()
+    source = await sidecars.log_source(cast(Any, _Stack("subids", judge, volume)), logs, downloads)
+    assert source == downloads / "verifier" / "judge" and (source / "actions.jsonl").is_file()
+    assert judge.asked == ["/logs/verifier"]
+    for run_as, sandbox in (("caller", _Downloads()), ("subids", _Downloads(fails=True))):
+        assert await sidecars.log_source(cast(Any, _Stack(run_as, sandbox, volume)), logs, tmp_path / run_as) == volume
+
+
+@pytest.mark.parametrize("task_id", ["app-kv", "logged"], ids=["shared", "separate"])
+@pytest.mark.asyncio
+async def test_what_grading_cannot_read_of_the_sidecars_logs_fails_the_grade_rather_than_go_missing(
+    task_id: str, tmp_path: Path, provider: ProcessProvider
+):
+    """A file of a sidecar's log directory that grading cannot read makes the outcome an infrastructure error, never a
+    grade whose tests went without it."""
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads every file")
+    dataset = tmp_path / "dataset"
+    shutil.copytree(STACKS / "app-kv", dataset / "app-kv")
+    logged = _variant("logged", dataset, source="sidecar-artifacts")
+    _edit(
+        logged / "environment" / "docker-compose.yaml",
+        "      - ./api:/srv/api:ro\n",
+        "      - ./api:/srv/api:ro\n      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}\n",
+    )
+    service = HarborEnvironmentService(dataset, provider=provider)
+    session = await _open(service, task_id)
+    assert session.stack is not None
+    kept = session.stack.volume_path("platoon:logs-verifier") / "judge"
+    kept.mkdir()
+    (kept / "actions.jsonl").write_text("a record\n")
+    kept.chmod(0)
+    try:
+        outcome = await session.grade()
+    finally:
+        kept.chmod(0o700)
+        await session.close()
+    kind = "verifier_setup" if task_id == "app-kv" else "artifact_collect"
+    assert (outcome.status, outcome.failure_kind) == ("error", kind), outcome.reason
+    assert "cannot copy what the sidecars wrote in their log directories" in (outcome.reason or "")
 
 
 def test_the_fixtures_lock_as_stacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

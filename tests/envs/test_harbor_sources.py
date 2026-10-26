@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -1137,9 +1138,14 @@ async def test_a_fetched_stack_locks_as_a_local_one_and_runs_only_where_stacks_r
     with pytest.raises(EnvSetupError, match=unstartable) as error:
         await runs.check_tasks("train", ["app-kv", "commandless"])
     assert error.value.failure_kind == "env_config"
+    hpc_sandbox = types.ModuleType("hpc_sandbox")  # one without the pods that the singularity provider runs stacks as
+    monkeypatch.setattr(hpc_sandbox, "__version__", "0.4.0", raising=False)
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", hpc_sandbox)
     refusing = {
         "the environment sets stacks: refuse": HarborEnvironmentService(provider=provider, stacks="refuse", **settings),
-        "the singularity provider runs no": HarborEnvironmentService(provider="singularity", **settings),
+        "the singularity provider runs a multi-container stack as an hpc-sandbox pod, .*: install hpc-sandbox 0.5": (
+            HarborEnvironmentService(provider="singularity", **settings)
+        ),
     }
     for why, service in refusing.items():
         with pytest.raises(EnvSetupError, match=rf"1 of the 1 tasks of split 'train' are multi-container .*{why}"):

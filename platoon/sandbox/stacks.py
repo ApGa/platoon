@@ -13,11 +13,12 @@ its image's, which the caller resolves; None for a service that only idles, as `
 dependencies with their conditions, its volumes (directories the stack owns: a named one shared by every service that
 names it, an anonymous one or a ``tmpfs`` the service's own; a caller may have one filled before any service mounts it,
 such as with a copy of files it binds, which the stack then owns and deletes), the TCP ports it declares, the names it
-answers to besides its own, and what only some runtimes apply (its run mode, ``shm_size``, ``ulimits``, added
-capabilities, ``privileged``, its stop signal: the driver passes them to the backend, and the ``process`` provider's
-applies none; a provider with the ``privileged`` capability grants every privilege and capability a spec asks for).  A
-``setup`` coroutine, when given, runs once the service's sandbox runs and before its command starts: the Harbor service
-prepares ``main`` that way (its directories, its image's deferred files, its init).
+answers to besides its own, and what only some runtimes apply (its run mode, the user its image runs its command as,
+``shm_size``, ``ulimits``, added capabilities, ``privileged``, its stop signal: the driver passes them to the backend,
+and the ``process`` provider's applies none; a provider with the ``privileged`` capability grants every privilege and
+capability a spec asks for).  A ``setup`` coroutine, when given, runs once the service's sandbox runs and before its
+command starts: the Harbor service prepares ``main`` that way (its directories, its image's deferred files, its init).
+A backend makes its volumes' directories with :func:`make_volumes`.
 
 **Starting.**  :func:`drive_stack` is the generic driver a provider may start its stacks with, over a
 :class:`StackBackend` that starts one service at a time.  It starts each service once its dependencies have reached
@@ -38,12 +39,13 @@ in a row), ``healthy``, or ``running`` when it has no healthcheck.  Callers prob
 such as grading.
 
 **Addressing.**  In a stack whose services share a network of their own (a pod, a compose project), each service
-reaches the others by name at the ports they declare, and :meth:`Stack.rewrite` changes nothing.  Where they share the
-host's network instead, as the ``process`` provider's do (:mod:`platoon.sandbox.process_stacks`), each declared port
-is a port of the host that the stack holds for its life, and ``rewrite`` turns a ``scheme://<service>:<port>``
-reference into the ``scheme://127.0.0.1:<allocated port>`` that reaches it.  The driver rewrites every service's
-environment values and healthchecks so; a caller rewrites what else it runs in a service, such as Harbor's collect
-hooks.
+reaches the others by name at the ports they declare, and :meth:`Stack.rewrite` changes nothing; nor do they share
+this host's loopback (a stack's ``host_loopback`` is false), so a harness in ``main`` reaches the model gateway only
+through its route.  Where they share the host's network instead, as the ``process`` provider's do
+(:mod:`platoon.sandbox.process_stacks`), each declared port is a port of the host that the stack holds for its life,
+and ``rewrite`` turns a ``scheme://<service>:<port>`` reference into the ``scheme://127.0.0.1:<allocated port>`` that
+reaches it.  The driver rewrites every service's environment values and healthchecks so; a caller rewrites what else
+it runs in a service, such as Harbor's collect hooks.
 
 **Teardown.**  :meth:`Stack.stop` stops every service, then what the backend holds; its own task, and each service's
 stop, are cleanups that a stopping process lets finish (:func:`platoon.utils.stopping.let_finish`), inside the cleanup
@@ -60,7 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
-from platoon.sandbox.base import ExecResult, Sandbox, SandboxSpec
+from platoon.sandbox.base import ExecResult, Mount, Sandbox, SandboxSpec
 from platoon.utils.stopping import let_finish
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,7 @@ class ServiceSpec:
     network_of: str | None = None  # the service whose network it shares (compose's network_mode: service:<x>)
     # What only some runtimes apply (the driver passes them to the backend; the process provider applies none).
     run_as: RunMode | None = None  # None: the provider's choice
+    user: str | None = None  # the user its image runs its command as (USER: a name, uid or uid:gid); None: root
     shm_mb: int | None = None
     ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
     cap_add: tuple[str, ...] = ()
@@ -265,6 +268,63 @@ def longest_path(graph: Mapping[str, Iterable[str]], weights: Mapping[str, float
         return finish[node]
 
     return max((done(node) for node in graph), default=0.0)
+
+
+@dataclass
+class StackVolumes:
+    """Where a stack's volumes are on this host (:func:`make_volumes`): each named volume's directory, and each
+    service's own (an anonymous volume or a ``tmpfs``), by the service and the volume's place in its list."""
+
+    named: dict[str, Path] = field(default_factory=dict)
+    own: dict[tuple[str, int], Path] = field(default_factory=dict)
+
+    def mounts(self, name: str, service: ServiceSpec) -> list[Mount]:
+        """The mounts of the service ``name``'s volumes: each one's directory, or what its ``fill`` made at its
+        ``subpath``, at its target."""
+
+        mounts = []
+        for number, volume in enumerate(service.volumes):
+            directory = self.named[volume.name] if volume.name is not None else self.own[(name, number)]
+            source = directory / volume.subpath if volume.subpath else directory
+            mounts.append(Mount(source=str(source), target=volume.target, read_only=volume.read_only))
+        return mounts
+
+
+def make_volumes(spec: StackSpec, root: Path) -> StackVolumes:
+    """Make the directories of ``spec``'s volumes below ``root``, ``volumes/<name>`` for a named volume (once, for
+    every service that names it) and ``services/<service>/volume-<n>`` for a service's own, with Docker's modes
+    whatever the umask (0755, and 1777 for a ``tmpfs``, so that a service's users other than root use them as there),
+    and fill the ones with a ``fill`` (a named volume with the first service's), before any service starts; in a
+    thread, as it may copy files."""
+
+    volumes = StackVolumes()
+    for name, service in spec.services.items():
+        for number, volume in enumerate(service.volumes):
+            if volume.name is None:
+                directory = volumes.own[(name, number)] = root / "services" / name / f"volume-{number}"
+            elif volume.name in volumes.named:
+                continue  # made and filled for the first service that names it
+            else:
+                directory = volumes.named[volume.name] = root / "volumes" / _volume_dir(volume.name)
+            directory.mkdir(parents=True)
+            directory.chmod(0o1777 if volume.tmpfs else 0o755)
+            if volume.fill is not None:
+                volume.fill(directory)
+    return volumes
+
+
+def _volume_dir(name: str) -> str:
+    """A named volume's directory below ``volumes/``: its name, with each byte of a character other than a letter, a
+    digit, ``_``, ``.`` or ``-`` written as ``%XX``, as a path cannot hold ``/`` and runtimes' binds take no ``:`` or
+    ``,`` (platoon's own volumes are named ``platoon:...``); ``.`` and ``..`` get a ``%`` before them."""
+
+    escaped = "".join(
+        char
+        if char.isascii() and (char.isalnum() or char in "_.-")
+        else "".join(f"%{byte:02X}" for byte in char.encode())
+        for char in name
+    )
+    return f"%{escaped}" if escaped in (".", "..") else escaped
 
 
 @dataclass(frozen=True)
@@ -418,13 +478,21 @@ class SetupError(Exception):
 
 
 class DrivenStack:
-    """A :class:`Stack` whose services :func:`drive_stack` started over a :class:`StackBackend`."""
+    """A :class:`Stack` whose services :func:`drive_stack` started over a :class:`StackBackend`.  ``host_loopback``
+    says whether its services share this host's network, loopback included (the module docstring's addressing)."""
 
     def __init__(
-        self, backend: StackBackend, spec: StackSpec, *, id: str, on_stop: Callable[[], None] | None = None
+        self,
+        backend: StackBackend,
+        spec: StackSpec,
+        *,
+        id: str,
+        on_stop: Callable[[], None] | None = None,
+        host_loopback: bool = True,
     ) -> None:
         self.id = id
         self.spec = spec
+        self.host_loopback = host_loopback
         self._backend = backend
         self._network: StackNetwork = spec.network
         # False after a switch that failed midway, which may have switched some services: the next one runs in full.
@@ -679,13 +747,18 @@ class DrivenStack:
 
 
 async def drive_stack(
-    backend: StackBackend, spec: StackSpec, *, id: str, on_stop: Callable[[], None] | None = None
+    backend: StackBackend,
+    spec: StackSpec,
+    *,
+    id: str,
+    on_stop: Callable[[], None] | None = None,
+    host_loopback: bool = True,
 ) -> DrivenStack:
     """Start ``spec``'s services over ``backend`` (the module docstring says how) and return the running stack; on any
     failure, and when cancelled, stop what started and ``backend``'s own resources first.  ``on_stop`` runs once the
-    stack has stopped."""
+    stack has stopped; ``host_loopback`` says whether the backend's services share this host's network."""
 
-    stack = DrivenStack(backend, spec, id=id, on_stop=on_stop)
+    stack = DrivenStack(backend, spec, id=id, on_stop=on_stop, host_loopback=host_loopback)
     try:
         await stack._start()
     except BaseException:
@@ -733,8 +806,10 @@ __all__ = [
     "StackProvider",
     "StackSpec",
     "StackStartError",
+    "StackVolumes",
     "Volume",
     "dependency_cycle",
     "drive_stack",
     "longest_path",
+    "make_volumes",
 ]

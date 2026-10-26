@@ -20,9 +20,9 @@ workdir with a command run in ``/`` and scores an attempt whose agents removed i
 (:mod:`platoon.envs.harbor.session`).
 
 Of its provider's capabilities, an adapter keeps those of platoon's contract
-(:data:`platoon.sandbox.base.CAPABILITIES`), not hpc-sandbox 0.3's ``pods`` (services that share one network, which
-platoon never starts), and adds ``routes`` and ``host_loopback``: it implements the routes, and its sandboxes run on
-this node.
+(:data:`platoon.sandbox.base.CAPABILITIES`), and adds ``routes`` and ``host_loopback``: it implements the routes, and
+its sandboxes run on this node.  It also declares ``stacks`` where hpc-sandbox's ``pods`` can run them: it starts each
+stack as a pod (:mod:`platoon.sandbox.hpc_stacks`), with hpc-sandbox 0.5 and on a node that nests user namespaces.
 
 A string command runs through ``bash -c``, as :mod:`platoon.sandbox.base` says and the other providers do, not through
 hpc-sandbox's ``/bin/sh -c``: the ``bash`` tool of a Harbor task then takes bash syntax (``[[ ]]``, ``source``,
@@ -30,8 +30,8 @@ hpc-sandbox's ``/bin/sh -c``: the ``bash`` tool of a Harbor task then takes bash
 
 The adapter implements what hpc-sandbox leaves to its caller: routes to Unix-socket upstreams from a sandbox
 without a network (a bind of the socket's directory plus a forwarder on port 18080 of the sandbox's own loopback,
-:mod:`platoon.sandbox.routes`), this process's labels on every sandbox, and reaping by label
-(:meth:`HpcProvider.reap`, hpc-sandbox's janitor: it stops the sessions whose owner process is gone).
+:mod:`platoon.sandbox.routes`), this process's labels on every sandbox and pod, and reaping by label
+(:meth:`HpcProvider.reap`, hpc-sandbox's janitor: it stops the sessions and pods whose owner process is gone).
 
 :mod:`platoon.sandbox.singularity` and :mod:`platoon.sandbox.enroot` name the two providers.
 """
@@ -44,12 +44,14 @@ import logging
 import shutil
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from platoon.sandbox import cleanup
 from platoon.sandbox._processes import kill_other_processes, own_processes
 from platoon.sandbox.base import CAPABILITIES, DownloadReport, DroppedLink, ExecResult, SandboxSnapshot, SandboxSpec
+from platoon.sandbox.hpc_stacks import pods_refusal, start_pod_stack
 from platoon.sandbox.routes import SandboxRoutes
+from platoon.sandbox.stacks import STACKS, DrivenStack, StackSpec
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +69,19 @@ def import_hpc_sandbox(provider: str) -> Any:
         ) from exc
 
 
+class Routes(Protocol):
+    """What gives a sandbox its routes: :class:`~platoon.sandbox.routes.SandboxRoutes`, or a pod's
+    (:mod:`platoon.sandbox.hpc_stacks`)."""
+
+    @property
+    def routes(self) -> dict[str, str]: ...
+
+    async def ensure(self, sandbox: Any) -> dict[str, str]: ...
+
+
 class HpcSandbox:
-    """A sandbox of an :class:`HpcProvider`, over the ``hpc_sandbox`` sandbox the provider started.
+    """A sandbox of an :class:`HpcProvider`, over the ``hpc_sandbox`` sandbox the provider started (or a service of
+    one of its pods).
 
     Both runtimes give a sandbox its own PID namespace (Singularity only where the site allows PID namespaces), in
     which hpc-sandbox keeps the container alive with processes of its own before any command runs: Singularity's
@@ -79,7 +92,7 @@ class HpcSandbox:
     namespace.
     """
 
-    def __init__(self, provider: HpcProvider, inner: Any, *, routes: SandboxRoutes | None = None) -> None:
+    def __init__(self, provider: HpcProvider, inner: Any, *, routes: Routes | None = None) -> None:
         self.id: str = inner.id
         self._provider = provider
         self._inner = inner
@@ -128,6 +141,12 @@ class HpcSandbox:
             dropped_links=[DroppedLink(link.path, link.target, link.reason) for link in report.dropped_links],
             dropped_total=report.dropped_total,
         )
+
+    async def record_own_processes(self) -> None:
+        """List what runs in the sandbox now as its own, which :meth:`kill_processes` spares: once it started, before
+        any command runs."""
+
+        self._own_processes = await own_processes(self)
 
     def keep_processes(self, entries: Iterable[str]) -> None:
         """Spare the processes ``entries`` ("<pid>:<start time>" in the sandbox) and their descendants from
@@ -185,14 +204,15 @@ class HpcProvider:
         return None
 
     def __init__(self, **options: Any) -> None:
-        self._hpc_sandbox = import_hpc_sandbox(self.name)
+        self.hpc_sandbox = import_hpc_sandbox(self.name)  # the package it adapts
         self.options = dict(options)  # as hpc-sandbox's provider takes them: what reaping rebuilds it from
-        self.inner = getattr(self._hpc_sandbox, self.inner_class)(**options)
-        # Of the inner provider's capabilities, those of platoon's contract (not hpc-sandbox 0.3's "pods"), and the
-        # adapter's own: both runtimes run a sandbox on this node, in this host's network namespace unless it has none
-        # of its own.
+        self.inner = getattr(self.hpc_sandbox, self.inner_class)(**options)
+        # Of the inner provider's capabilities, those of platoon's contract, and the adapter's own: both runtimes run a
+        # sandbox on this node, in this host's network namespace unless it has none of its own, and stacks as pods
+        # where hpc-sandbox's pods can run them.
         inner = frozenset(self.inner.capabilities) & CAPABILITIES
-        self.capabilities: frozenset[str] = inner | {"routes", "host_loopback"}
+        pods = "pods" in self.inner.capabilities and pods_refusal(self.name, self.inner_class) is None
+        self.capabilities: frozenset[str] = inner | {"routes", "host_loopback"} | ({STACKS} if pods else set())
 
     @classmethod
     def network_none_refusal(cls, options: Mapping[str, Any]) -> str | None:
@@ -218,13 +238,22 @@ class HpcProvider:
 
     @classmethod
     def stack_refusal(cls, options: Mapping[str, Any]) -> str | None:
-        """Why a provider built with ``options`` would start no stack (:func:`platoon.sandbox.stack_refusal`): the
-        adapter starts no hpc-sandbox pods."""
+        """Why a provider built with ``options`` would start no stack (:func:`platoon.sandbox.stack_refusal`): an
+        hpc-sandbox without the pods it starts them as, or a node where pods cannot run
+        (:func:`platoon.sandbox.hpc_stacks.pods_refusal`)."""
 
-        return f"the {cls.name} provider runs no multi-container stacks"
+        return pods_refusal(cls.name, cls.inner_class)
 
     async def start(self, spec: SandboxSpec) -> HpcSandbox:
         return await self._open(spec, lambda inner_spec: self.inner.start(inner_spec))
+
+    async def start_stack(self, spec: StackSpec) -> DrivenStack:
+        """Start a stack as an hpc-sandbox pod (:mod:`platoon.sandbox.hpc_stacks`); ``ValueError`` where pods
+        cannot run it."""
+
+        if STACKS not in self.capabilities:
+            raise ValueError(self.stack_refusal(self.options) or f"the {self.name} provider runs no stacks here")
+        return await start_pod_stack(self, spec)
 
     async def restore(self, snapshot: SandboxSnapshot, spec: SandboxSpec) -> HpcSandbox:
         if snapshot.provider != self.name:
@@ -232,7 +261,7 @@ class HpcProvider:
                 f"The {self.name} provider cannot restore snapshot {snapshot.id}, which the {snapshot.provider!r} "
                 "provider took"
             )
-        inner_snapshot = self._hpc_sandbox.SandboxSnapshot(
+        inner_snapshot = self.hpc_sandbox.SandboxSnapshot(
             id=snapshot.id,
             provider=snapshot.provider,
             path=snapshot.path,
@@ -242,9 +271,9 @@ class HpcProvider:
         return await self._open(spec, lambda inner_spec: self.inner.restore(inner_snapshot, inner_spec))
 
     async def reap(self, labels: Mapping[str, str]) -> int:
-        """Stop this provider's sandboxes whose labels include ``labels``, and sweep the sessions on this node that
-        carry them and whose owner process is gone (hpc-sandbox's janitor); returns how many it stopped or
-        removed.  Sessions another live process holds are left alone."""
+        """Stop this provider's sandboxes and pods whose labels include ``labels``, and sweep the sessions and pods on
+        this node that carry them and whose owner process is gone (hpc-sandbox's janitor); returns how many it
+        stopped or removed.  What another live process holds is left alone."""
 
         if not labels:
             raise ValueError("Reaping needs labels: an empty set would select every abandoned session")
@@ -264,21 +293,25 @@ class HpcProvider:
         labels = {**spec.labels, **cleanup.labels()}
         token = cleanup.register(provider=cleanup.provider_ref(self), options=self.options, labels=labels)
         try:
-            inner = await start(self._spec(spec, routes=routes, labels=labels))
+            inner = await start(self.inner_spec(spec, routes=routes, labels=labels))
         except BaseException:
             cleanup.unregister(token)
             raise
-        sandbox = HpcSandbox(self, inner, routes=routes)
+        sandbox = self.sandbox_for(inner, routes=routes)
         sandbox._token = token
         try:
-            # Before any route's forwarder starts: what runs in the sandbox now keeps it alive.
-            sandbox._own_processes = await own_processes(sandbox)
+            await sandbox.record_own_processes()  # before any route's forwarder starts
             await routes.start(sandbox)
         except BaseException:  # cancelled too: the sandbox must not outlive the start
             await asyncio.shield(sandbox.stop())
             raise
         cleanup.attach(token, sandbox)
         return sandbox
+
+    def sandbox_for(self, inner: Any, *, routes: Routes | None = None) -> HpcSandbox:
+        """``inner``, an ``hpc_sandbox`` sandbox or pod service this provider started, as one of its sandboxes."""
+
+        return HpcSandbox(self, inner, routes=routes)
 
     async def delete_inner_snapshot(self, snapshot: Any) -> None:
         """Delete an ``hpc_sandbox`` snapshot; nothing when the inner provider cannot delete snapshots."""
@@ -287,10 +320,13 @@ class HpcProvider:
         if delete is not None:
             await delete(snapshot)
 
-    def _spec(
+    def inner_spec(
         self, spec: SandboxSpec, *, routes: SandboxRoutes | None = None, labels: Mapping[str, str] | None = None
     ) -> Any:
-        hpc_sandbox = self._hpc_sandbox
+        """``spec`` as an ``hpc_sandbox.SandboxSpec``, with the binds of ``routes`` and ``labels`` (default: its
+        own)."""
+
+        hpc_sandbox = self.hpc_sandbox
         mounts = [*spec.mounts, *(routes.mounts() if routes is not None else ())]
         return hpc_sandbox.SandboxSpec(
             image=spec.image,

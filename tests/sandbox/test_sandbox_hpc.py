@@ -28,7 +28,9 @@ from platoon.sandbox import (
 )
 from platoon.sandbox.enroot import EnrootProvider, enroot_options
 from platoon.sandbox.hpc import HpcProvider
+from platoon.sandbox.hpc_stacks import pods_refusal
 from platoon.sandbox.singularity import SingularityProvider
+from platoon.sandbox.stacks import STACKS
 
 PROVIDERS = {"singularity": SingularityProvider, "enroot": EnrootProvider}
 IMAGES = {"singularity": "x.sif", "enroot": "x.sqsh"}
@@ -227,9 +229,10 @@ def test_options_and_capabilities_come_from_the_inner_provider(monkeypatch, name
 
 @pytest.mark.parametrize("name", sorted(PROVIDERS))
 def test_capabilities_outside_platoons_contract_are_left_out(monkeypatch, name: str):
-    """A capability says what platoon may ask of a provider (``base.CAPABILITIES``): hpc-sandbox 0.3's providers also
-    report ``pods``, services that share one network, which platoon never starts, so the adapter leaves it out, and
-    any capability hpc-sandbox adds later until platoon has a use for it."""
+    """A capability says what platoon may ask of a provider (``base.CAPABILITIES``): hpc-sandbox's providers also
+    report ``pods``, which is not one of them (an adapter declares ``stacks`` where it runs stacks as pods:
+    ``test_sandbox_hpc_stacks.py``), so the adapter leaves it out, and any capability hpc-sandbox adds later until
+    platoon has a use for it."""
 
     monkeypatch.setitem(sys.modules, "hpc_sandbox", _fake_hpc_sandbox([]))
 
@@ -305,6 +308,14 @@ def test_enroot_refuses_root_and_remap_root_together():
         enroot_options({"root": True, "remap_root": True})
 
 
+def _with_stacks(provider: object, *capabilities: str) -> frozenset[str]:
+    """``capabilities``, and ``stacks`` where the installed hpc-sandbox's pods run them here (0.5 on a node that nests
+    user namespaces)."""
+
+    assert isinstance(provider, HpcProvider)
+    return frozenset({*capabilities, *([STACKS] if pods_refusal(provider.name, provider.inner_class) is None else [])})
+
+
 def _published_hpc_sandbox():
     hpc_sandbox = pytest.importorskip("hpc_sandbox")
     if not hasattr(hpc_sandbox, "EnrootProvider"):
@@ -313,10 +324,10 @@ def _published_hpc_sandbox():
 
 
 def test_one_block_builds_both_published_providers(tmp_path: Path):
-    """Against the hpc-sandbox a checkout locks (0.4.0): its EnrootProvider takes every option its
+    """Against the installed hpc-sandbox (the lock's 0.4.0, or 0.5): its EnrootProvider takes every option its
     SingularityProvider takes, so one provider_options block builds both providers and means the same on both, with
-    platoon's capabilities only (not its pods); root, which the SingularityProvider refuses, builds the
-    EnrootProvider too."""
+    platoon's capabilities only (not its pods), and ``stacks`` where its pods run them here; root, which the
+    SingularityProvider refuses, builds the EnrootProvider too."""
 
     hpc_sandbox = _published_hpc_sandbox()
     singularity_names = set(inspect.signature(hpc_sandbox.SingularityProvider).parameters)
@@ -334,18 +345,19 @@ def test_one_block_builds_both_published_providers(tmp_path: Path):
 
     singularity, enroot = get_provider("singularity", **block), get_provider("enroot", **block)
 
-    assert (
-        singularity.capabilities
-        == enroot.capabilities
-        == frozenset({"snapshot", "isolation", "gpu", "routes", "host_loopback"})
-    )
+    for provider in (singularity, enroot):
+        assert provider.capabilities == _with_stacks(
+            provider, "snapshot", "isolation", "gpu", "routes", "host_loopback"
+        )
     assert (singularity.inner.bind_resolv_conf, enroot.inner.bind_resolv_conf) == (False, False)
     assert enroot.inner.gpus == "all"
     with pytest.raises(TypeError, match="root"):
         get_provider("singularity", **block, root=True)
     enroot = get_provider("enroot", scratch_root=str(tmp_path), gpu="nv", gpus=None, root=False)
     assert (enroot.inner.gpus, enroot.inner.remap_root) == ("all", False)
-    assert enroot.capabilities == frozenset({"snapshot", "isolation", "network_none", "gpu", "routes", "host_loopback"})
+    assert enroot.capabilities == _with_stacks(
+        enroot, "snapshot", "isolation", "network_none", "gpu", "routes", "host_loopback"
+    )
 
 
 @pytest.mark.parametrize("provider", ["singularity", "enroot"])

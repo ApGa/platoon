@@ -1,0 +1,27 @@
+# Written for platoon: a judge sidecar that, as root, gives the verifier log directory it binds to its image's own user
+# and records there as that user, in a file only that user can read, as a database's entrypoint does with its data; the
+# tests read the record, which grading copies into main's log directory.
+services:
+  main:
+    depends_on:
+      judge:
+        condition: service_healthy
+  judge:
+    image: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    command:
+      - sh
+      - -c
+      - |
+        log=/logs/verifier/judge
+        record="umask 077 && mkdir -p $$log && echo recorded > $$log/record.txt && exec sleep 86400"
+        drop="setpriv --reuid redis --regid redis --clear-groups"
+        command -v setpriv > /dev/null || drop="su-exec redis"
+        if [ "$$(id -u)" = 0 ]; then chown redis:redis /logs/verifier && exec $$drop sh -c "$$record"; fi
+        exec sh -c "$$record"
+    volumes:
+      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}
+    healthcheck:
+      test: ["CMD", "test", "-s", "/logs/verifier/judge/record.txt"]
+      interval: 1s
+      timeout: 5s
+      retries: 60

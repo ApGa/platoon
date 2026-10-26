@@ -1,0 +1,20 @@
+# Written for platoon: main stores a row in a PostgreSQL sidecar, whose image's entrypoint gives its data directory
+# to the postgres user and initializes it as that user (initdb refuses root); the tests read the row back.
+services:
+  main:
+    environment:
+      PGHOST: db
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 1s
+      timeout: 5s
+      retries: 120

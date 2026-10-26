@@ -16,7 +16,9 @@ DOCKERFILE = "FROM python:3.12-slim\nRUN pip install numpy\nWORKDIR /app\nCOPY i
 def _exit_code(argv: list[str]) -> int:
     with pytest.raises(SystemExit) as exit_info:
         cli.main(argv)
-    return exit_info.value.code
+    code = exit_info.value.code
+    assert isinstance(code, int)
+    return code
 
 
 @pytest.fixture
@@ -124,6 +126,46 @@ def test_images_verify_checks_the_image_files_against_their_sha256(local_config:
     unchecked = capsys.readouterr()
     assert unchecked.out == "" and "is not a local image file, so it is not checked" in unchecked.err
     assert "0 match their SHA-256, 0 missing or mismatched, 1 not checked" in unchecked.err
+
+
+def test_images_plan_lists_the_registry_images_sidecars_run_and_pin_pins_them(
+    harbor_cache: Path, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+):
+    from platoon.envs.harbor import builders
+    from platoon.envs.harbor.fetch import fetch, fetch_config
+    from platoon.envs.harbor.images import ImageMap, pulled_key
+
+    task = tmp_path / "dataset" / "app-db"
+    for relative, text in {
+        "task.toml": '[environment]\ndocker_image = "python:3.12-slim"\n',
+        "instruction.md": "Use the database.\n",
+        "tests/test.sh": "echo 1\n",
+        "environment/docker-compose.yaml": "services:\n  db:\n    image: postgres:16-alpine\n",
+    }.items():
+        (task / relative).parent.mkdir(parents=True, exist_ok=True)
+        (task / relative).write_text(text)
+    lock = tmp_path / "lock.json"
+    fetch(fetch_config(str(task.parent), lock=lock, refuse={"sidecars": False}))
+    image_map = tmp_path / "images.json"
+    digest = "sha256:" + "a" * 64
+    monkeypatch.setattr(builders, "registry_config", lambda reference, **_: (digest, {"config": {"Cmd": ["postgres"]}}))
+
+    cli.main(["harbor", "images", "plan", str(lock), "--image-map", str(image_map)])
+    table = capsys.readouterr().out
+    assert "postgres:16-alpine  1      no" in table and "1 registry image(s) of sidecars, 1 not pinned" in table
+    image_map.write_text(json.dumps({"images": {}}))
+    assert _exit_code(["harbor", "images", "verify", str(lock), "--image-map", str(image_map)]) == 1
+    assert "pulled:postgres:16-alpine (service, 1 task(s)): not pinned" in capsys.readouterr().out
+    cli.main(["harbor", "images", "pin", str(lock), "--image-map", str(image_map)])
+    assert json.loads(capsys.readouterr().out) == {"postgres:16-alpine": f"docker://postgres@{digest}"}
+    cli.main(["harbor", "images", "verify", str(lock), "--image-map", str(image_map)])  # exits 0: returns
+    assert "pulled:postgres:16-alpine (service, 1 task(s)): pinned as docker://postgres@" in capsys.readouterr().err
+    assert ImageMap.load(image_map).entries[pulled_key("postgres:16-alpine")].cmd == ("postgres",)
+    cli.main(["harbor", "images", "plan", str(lock), "--image-map", str(image_map), "--json-output"])
+    assert json.loads(capsys.readouterr().out)["pulls"] == [
+        {"reference": "postgres:16-alpine", "tasks": 1, "pinned": True}
+    ]
+    assert _exit_code(["harbor", "images", "pin", str(lock), "--image-map", str(image_map), "--reference", "x:1"]) == 78
 
 
 def test_a_local_directory_is_fetched_again_with_its_changes(

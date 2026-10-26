@@ -298,9 +298,10 @@ async def _sandbox_urls(
         if not getattr(session, "host_loopback", True):
             raise HarnessSetupError(
                 f"harness {spec.ref} would run in the task sandbox, which does not share this host's network (its "
-                f"provider does not declare host_loopback) and has no route to the model gateway, so it could not "
-                f"reach the gateway at {base_url}; run it with placement: local, or use a sandbox provider that "
-                "runs sandboxes on this host or gives them a gateway route"
+                "provider does not declare host_loopback, or it is the main of a stack with a network of its own) and "
+                f"has no route to the model gateway, so it could not reach the gateway at {base_url}; run it with "
+                "placement: local, or use a sandbox provider that runs sandboxes on this host or gives them a gateway "
+                "route"
             )
         return base_url, mcp_url
     route, origin = route.rstrip("/"), base_url.rstrip("/")

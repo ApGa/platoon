@@ -19,7 +19,15 @@ from typing import Any
 from platoon.envs.harbor.dockerfile import DockerfileError, plan_dockerfile
 from platoon.envs.harbor.fetch import FetchConfig, ensure_lock, fetch_config
 from platoon.envs.harbor.holdout import HoldoutRow
-from platoon.envs.harbor.images import ImageMap, ImageMapError, SessionImage, default_image_map, session_image
+from platoon.envs.harbor.images import (
+    ImageMap,
+    ImageMapError,
+    SessionImage,
+    default_image_map,
+    pulled_image,
+    pulled_key,
+    session_image,
+)
 from platoon.envs.harbor.lock import DatasetLock, LockedDataset, LockError, default_cache, read_lock
 
 logger = logging.getLogger(__name__)
@@ -241,6 +249,14 @@ class TaskImages:
             cmd=tuple(cmd) if cmd is not None else None,
             healthcheck=config.get("healthcheck", entry.healthcheck),
         )
+
+    def for_pulled(self, reference: str) -> SessionImage | None:
+        """What a stack's sidecar runs of the registry image ``reference`` (as its compose file names it): the image
+        map's pin of it, by digest with its configuration; None where the map has none (``platoon prepare`` pins
+        them), as for a dataset directory, which has no map."""
+
+        entry = self.image_map.get(pulled_key(reference)) if self.image_map is not None else None
+        return pulled_image(entry) if entry is not None else None
 
     def for_verifier(self, task_dir: Path, *, docker_image: str | None = None) -> SessionImage | None:
         """The image of a separate verifier built from ``tests/Dockerfile`` (the lock row's ``verifier_image``,

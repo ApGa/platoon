@@ -11,6 +11,10 @@ Its options pass through to ``hpc_sandbox.EnrootProvider`` (``scratch_root`` on 
 ``provider_options`` block written for a Singularity site serves an enroot site too, except ``binary`` and
 ``extra_start_args``, which each runtime reads as its own.  ``root`` is one more name for ``remap_root``, and
 ``rootfs_layout``, whose layouts only the singularity provider has, is ignored (:func:`enroot_options`).
+
+Multi-container stacks run as hpc-sandbox pods here too (:mod:`platoon.sandbox.hpc_stacks`), with hpc-sandbox 0.5:
+enroot maps one id into a container, so their sidecars run as your own uid, never as a root that switches users.
+enroot pods are experimental until a site runs platoon's pod tests with them.
 """
 
 from __future__ import annotations

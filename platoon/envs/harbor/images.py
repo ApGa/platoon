@@ -18,6 +18,12 @@ builds from a Dockerfile but has no entry in the map is refused with ``env_confi
 prebuilt-image task without a Dockerfile gets its ``environment/`` directory uploaded into its working directory, as
 Harbor does.
 
+The map also **pins** the registry images that stacks' sidecars run as written (``image: redis:7-alpine``), under the
+key ``pulled:<reference>`` (:func:`pulled_key`): an entry of the ``pulled`` builder whose image is the reference by the
+digest its registry served (``docker://redis@sha256:...``), with that image's configuration, from which sessions
+resolve the sidecar's command on every provider, and which a pod's runtimes do not apply by themselves
+(:func:`platoon.envs.harbor.builders.pin_images`).
+
 A lock-backed Harbor entry uses its **default image map**, ``images/<provider>.json`` in its Harbor cache
 (:func:`default_image_map`), when that file exists: ``platoon prepare`` builds the entry's images for its sandbox
 provider into ``images/<provider>/`` there and records them in it. An entry that serves a directory (``dataset_dir``,
@@ -48,6 +54,7 @@ IMAGE_MAP_VERSION = 1
 OCI_BUILDER_REVISION = 1
 ENVIRONMENT_DIR = "environment"
 IMAGES_DIR = "images"  # where a Harbor cache keeps its default image maps and their images
+PULLED = "pulled:"  # the prefix of the key of a registry image that sidecars run
 _LOCAL_IMAGE_SUFFIXES = (".sif", ".sqsh", ".squashfs", ".img")
 
 
@@ -61,7 +68,7 @@ class ImageEntry:
 
     image: str  # a .sif or .sqsh path (never given a docker:// prefix), or a registry reference
     sha256: str | None = None  # receipt: the image file's SHA-256
-    builder: str | None = None  # "oci", "def" or "docker"
+    builder: str | None = None  # "oci", "def" or "docker"; "pulled" for a registry image that sidecars run
     env: Mapping[str, str] = field(default_factory=dict)  # from the image config; applied to every command
     workdir: str | None = None
     user: str | None = None
@@ -193,6 +200,28 @@ def has_image_file(entry: ImageEntry) -> bool:
     if not stat.S_ISREG(found.st_mode):
         return False
     return not isinstance(size, int) or isinstance(size, bool) or found.st_size == size
+
+
+def pulled_key(reference: str) -> str:
+    """The image map's key of a registry image that a stack's sidecar runs, as its compose file names it
+    (``redis:7-alpine``): ``pulled:redis:7-alpine``."""
+
+    return f"{PULLED}{reference}"
+
+
+def pulled_image(entry: ImageEntry) -> SessionImage:
+    """What a sidecar runs of a pinned registry image (``entry``, :func:`pulled_key`'s): the image by its digest,
+    with its configuration, and nothing deferred."""
+
+    return SessionImage(
+        image=entry.image,
+        env=dict(entry.env),
+        workdir=entry.workdir,
+        user=entry.user,
+        entrypoint=entry.entrypoint,
+        cmd=entry.cmd,
+        healthcheck=entry.healthcheck,
+    )
 
 
 def default_image_map(cache: str | Path, provider: str) -> Path:

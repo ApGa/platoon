@@ -4,6 +4,7 @@
     platoon harbor verify CONFIG [key=value ...]          check the cache entries of the locks against their digests
     platoon harbor images plan CONFIG [key=value ...]     the images the tasks need, and which the image map lacks
     platoon harbor images build CONFIG [key=value ...]    build the missing images and record them in the image map
+    platoon harbor images pin CONFIG [key=value ...]      pin the registry images that sidecars run, with their configs
     platoon harbor images verify CONFIG [key=value ...]   check the map's image files against their SHA-256
     platoon harbor images alias CONFIG [key=value ...] --image IMAGE   point missing keys at an existing image
 
@@ -409,7 +410,7 @@ def _image_targets(
 @images_app.command(name="plan")
 def images_plan(config: Path, /, *overrides: str, image_map: Path | None = None, json_output: bool = False) -> int:
     """List the images the tasks need: one per build key, with its task count, base images and whether the image map
-    has it.
+    has it, and the registry images that their stacks' sidecars run, with whether the map pinned each.
 
     CONFIG is a training or evaluation config: each Harbor entry's lock, with the entry's image map,
     `images/<provider>.json` in the Harbor cache; or a lock file, with --image-map.
@@ -453,7 +454,12 @@ def images_plan(config: Path, /, *overrides: str, image_map: Path | None = None,
             for image in plan.images
         ]
         print(_table(("key", "role", "kind", "tasks", "base", "in map", "example"), rows))
+        if plan.pulls:
+            pulls = [(pull.reference, len(pull.tasks), "yes" if pull.pinned else "no") for pull in plan.pulls]
+            print(_table(("sidecar image", "tasks", "pinned"), pulls))
         summary = f"{len(plan.images)} image(s), {len(plan.missing)} missing from the image map"
+        if plan.pulls:
+            summary += f"; {len(plan.pulls)} registry image(s) of sidecars, {len(plan.unpinned)} not pinned"
         if plan.prebuilt:
             summary += f"; prebuilt references: {plan.prebuilt}"
         if plan.default_image:
@@ -516,7 +522,7 @@ def images_build(
         docker builder: a repository to push to (registry/name).
     """
 
-    from platoon.envs.harbor.builders import PROVIDER_BUILDERS, BuildError, build_images, plan_images
+    from platoon.envs.harbor.builders import BuildError, build_images, plan_images, provider_builder
     from platoon.envs.harbor.images import default_image_dir
 
     try:
@@ -533,7 +539,7 @@ def images_build(
         keys = [name for name in wanted if name in plans[id(target)]] if wanted else None
         if keys == []:
             continue
-        chosen = builder or ("oci" if target.label is None else PROVIDER_BUILDERS.get(target.provider or ""))
+        chosen = builder or ("oci" if target.label is None else provider_builder(target.provider or ""))
         if chosen is None:
             raise ConfigError(
                 f"{target.where}the {target.provider} provider has no builder of its own: for a provider that pulls "
@@ -571,10 +577,62 @@ def images_build(
     return 1 if failed else 0
 
 
+@images_app.command(name="pin")
+def images_pin(
+    config: Path, /, *overrides: str, image_map: Path | None = None, reference: list[str] | None = None
+) -> int:
+    """Pin the registry images that the tasks' stacks' sidecars run (`image: redis:7-alpine`) and the image map has
+    not pinned: each by the digest its registry serves for it, with its image's configuration for this host's platform
+    (ENTRYPOINT, CMD, ENV, WORKDIR, USER, HEALTHCHECK, ...), which sessions run it with. Exits 1 if any could not be
+    pinned.
+
+    CONFIG is a training or evaluation config: each Harbor entry's lock, into the entry's image map; or a lock file,
+    with --image-map.
+
+    Parameters
+    ----------
+    config
+        A training or evaluation config, or a lock file.
+    overrides
+        key=value overrides of a training or evaluation config.
+    image_map
+        A lock file's image map (JSON), created if missing.
+    reference
+        Pin these references (again, if pinned) instead of the unpinned ones.
+    """
+
+    from platoon.envs.harbor.builders import DigestError, pin_images, plan_images
+
+    targets = _image_targets(config, overrides, image_map=image_map, cache=None)
+    wanted = list(reference or ())
+    plans = {id(target): {pull.reference for pull in plan_images(target.lock).pulls} for target in targets}
+    if unknown := [name for name in wanted if not any(name in references for references in plans.values())]:
+        raise ConfigError(f"--reference {unknown}: the runnable tasks' sidecars run no such registry image")
+    failed = False
+    for target in targets:
+        references = [name for name in wanted if name in plans[id(target)]] if wanted else None
+        if references == []:
+            continue
+        map_file = target.map_file("pin")
+        try:
+            pinned = pin_images(target.lock, image_map=map_file, references=references, log=_say)
+        except DigestError as exc:
+            _say(f"platoon harbor images pin: {target.where}{exc}")
+            failed = True
+            continue
+        images = {name: entry.image for name, entry in pinned.items()}
+        if target.label is None:
+            print(json.dumps(images, indent=1))
+        else:
+            print(json.dumps({"environment": target.label, "image_map": str(map_file), "pinned": images}))
+    return 1 if failed else 0
+
+
 @images_app.command(name="verify")
 def images_verify(config: Path, /, *overrides: str, image_map: Path | None = None) -> int:
     """Check the image map against the images the runnable tasks use: each must be in the map, and a local image
-    file must exist and hash to the SHA-256 its entry records. Exits 1 if any is missing or mismatched.
+    file must exist and hash to the SHA-256 its entry records; each registry image that sidecars run must be pinned
+    (but for an entry of the process provider, which runs no image). Exits 1 if any is missing or mismatched.
 
     CONFIG is a training or evaluation config (each Harbor entry's lock, with its image map), or a lock file, with
     --image-map.  Each problem is a line on stdout. A registry reference cannot be hashed here, nor can a file whose
@@ -600,7 +658,7 @@ def images_verify(config: Path, /, *overrides: str, image_map: Path | None = Non
             if not path.exists():
                 raise ConfigError(f"{target.where}image map {path} does not exist")
         site_map = target.current_map() or ImageMap()
-        checks = verify_images(target.lock, site_map)
+        checks = verify_images(target.lock, site_map, pins=target.provider != "process")
         counts = {status: 0 for status in ("ok", "missing", "unchecked")}
         for check in checks:
             counts[check.status] += 1

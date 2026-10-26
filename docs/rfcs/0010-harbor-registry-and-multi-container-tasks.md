@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The Harbor service (`platoon/envs/harbor/`), sandboxes (`platoon/sandbox/`), the harness runner (`platoon/harness/runner.py`) and the gateway (`platoon/gateway/server.py`); [Architecture](../architecture.md) (the Harbor backend, sandboxes, the native-tools rule); [RFC 0001](0001-native-multi-agent.md) (per-agent grading, `snapshot_async`), [RFC 0004](0004-sandweave-integration.md) (capabilities and routes), [RFC 0005](0005-gateway-dialects-and-tito.md) (dialects), [RFC 0008](0008-config-and-cli.md) (`platoon eval`), [RFC 0009](0009-gateway-step-budgets.md) (step budgets) |
 | Discussion | The pull request that adds this revision |
-| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources; M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. The sources pull request: the rest of M1, the Harbor Hub, Harbor's legacy registry, git repositories and adapters (no `ls`, and no `service: harbor://...` shorthand). The Docker-stacks pull request: stacks on the `docker` provider as `docker compose` projects, sidecars' build contexts built by `platoon prepare`, and Docker-only privileges for a fetch that keeps them (`refuse: {privileges: false}`, the `privileged` capability). Not yet: M5, the rest of M6 (task MCP servers), M7–M9, and trajectories recording the kill mode |
+| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources; M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. The sources pull request: the rest of M1, the Harbor Hub, Harbor's legacy registry, git repositories and adapters (no `ls`, and no `service: harbor://...` shorthand). The Docker-stacks pull request: stacks on the `docker` provider as `docker compose` projects, sidecars' build contexts built by `platoon prepare`, and Docker-only privileges for a fetch that keeps them (`refuse: {privileges: false}`, the `privileged` capability). The pods pull request: M7's stacks as hpc-sandbox pods on Singularity, and on Apptainer and enroot (experimental), with hpc-sandbox 0.5 (with 0.4 they are refused, naming it): a run mode per service, the gateway relayed by the pod, volumes in the pod's directory, egress per phase; the registry images that sidecars run pinned with their configuration by `platoon prepare` (`platoon harbor images pin`), which also fetches the pod tools. Not yet: M5, the rest of M6 (task MCP servers), enroot pods at a site, M8, M9, and trajectories recording the kill mode |
 
 ## Summary
 
@@ -527,11 +527,15 @@ back; each stop is a cleanup that a stopping worker lets finish, inside the roll
 rollout that its stacks can start: `main` is the sandbox a main-only file would give the task, prepared (its
 directories, its image's deferred files, its init) once its dependencies are up; each sidecar runs its image as
 compose runs it (a registry reference, the image map's image of a build context's whole key, or `main`'s), with
-compose's command over its image's (a registry image's configuration is not recorded yet, so such a service needs a
-command of compose's; `platoon prepare` builds a sidecar's build context with the provider's builder, with its
-`build.args`, and records it in the image map, so no rollout builds one).  Copies of the task's files that services
-bind writable (or masked, or from a missing source) are volumes of the stack, filled before any service starts, one
-per path and masks for every service that binds it, as compose shares the host directory.
+compose's command over its image's: `platoon prepare` builds a fetched dataset's sidecar contexts with the provider's
+builder, with their `build.args`, so no rollout builds one, and **pins** its registry images in the image map
+(`pulled:<reference>`: the digest the registry serves, with the configuration it gives the image, `ENTRYPOINT`, `CMD`,
+`ENV`, `WORKDIR`, `USER`, `HEALTHCHECK`, from which platoon resolves a sidecar's command on every provider, and which
+a pod's runtimes do not apply by themselves), so a run whose map lacks one stops when its tasks are listed; a dataset
+directory has no map, so its registry sidecars need a command of compose's and its build contexts cannot run.  Copies
+of the task's files that services bind writable (or masked, or from a missing source) are volumes of the stack, filled
+before any service starts, one per path and masks for every service that binds it, as compose shares the host
+directory.
 
 **The compose subset:**
 - **Accepted:** `image`, `build` (`context` in `environment/`, `dockerfile`, `args`; a service's context is planned
@@ -589,22 +593,18 @@ refused, since a restore brings back files, not processes.  What one sandbox can
 | Provider | A stack is | Service names | Isolation between stacks |
 |---|---|---|---|
 | `docker` (implemented; `podman` with its compose untested) | a compose project of its own, whose file platoon writes from the stack's spec (each service's image, final command as its `entrypoint`, binds, volumes as the project's directories, resources), in a directory below the provider's `stack_root`; the driver creates and starts each service once its dependencies hold, and runs its healthchecks; at stop, the containers and networks that carry the stack's label, then the directory | compose DNS on the project's `internal` network | that network per stack, which has no address on the host, with a bridge network for egress connected only while the stack has egress |
-| `singularity`, `enroot` on sites with unprivileged user namespaces (the default) | a **pod**: one rootless user and network namespace per stack, with each service a container inside it | `/etc/hosts` in each service's root filesystem maps every service name to `127.0.0.1`; ports stay as written | a private network namespace per stack: no stack reaches another stack's services or the host's loopback |
+| `singularity`, `enroot` on sites with unprivileged user namespaces (the default; implemented, with hpc-sandbox 0.5; Apptainer and enroot experimental) | a **pod**: one rootless user and network namespace per stack, with each service a container inside it, in a run mode of its own: `main` as `root`, a sidecar as `subids` (root with the caller's subordinate ids, which can switch users, as the official database images do) where the runtime and the caller give them, else as `caller` (the caller's own uid), as it is where its image's `USER` is another user | `/etc/hosts` in each service maps every service name and alias to `127.0.0.1`; ports stay as written | a private network namespace per stack: no stack reaches another stack's services or the host's loopback |
 | `singularity`, `enroot` without unprivileged user namespaces (fallback) | one sandbox per service on the host network, with ports allocated and service URLs rewritten per rollout (`HostNetworkStackProvider`, below) | rewritten to `127.0.0.1:<port>` | none: sidecars must be authenticated by the overlay, or bound to node services |
 | `process` (implemented) | each service a process sandbox on the host, its command in the background, for CPU tests; each declared port a port outside the kernel's ephemeral range that the stack holds for its life (a kernel-arbitrated claim, so no other stack is given it), which the service learns from its listen variable, `PLATOON_PORT_<declared port>` | `scheme://<service>:<port>` in environment values, healthchecks and collect hooks rewritten to `127.0.0.1:<its port>` | none |
 
-**Pods:**
-
-```text
-holder    unshare a user namespace (root mapped to the caller) and a network namespace; bring lo up; die with
-          the provider (PR_SET_PDEATHSIG); relay a fixed pod port to the gateway socket; optionally run
-          slirp4netns --disable-host-loopback while a phase's network policy is public
-service   an anchor joins the pod's user and network namespaces, unshares mount, PID and IPC namespaces, and runs
-          singularity exec --writable --containall --no-home <root filesystem directory> <command or keep-alive>
-          (enroot: the anchor joins the pod first, then enroot start nests its own user namespace)
-exec      nsenter into the service's namespaces, with the payload's own environment
-teardown  stop the anchors; the death of a PID namespace's init kills everything in it; then the holder
-```
+**Pods** (`platoon/sandbox/hpc_stacks.py`) are hpc-sandbox's (its `docs/pods.md`): a holder process keeps the pod's
+user and network namespaces, relays `main`'s upstreams (the gateway's socket) from ports of the pod's loopback that no
+service declares, runs slirp4netns while the stack has egress, and dies with the process that started the pod; each
+service is a long-lived `exec` container under a launcher that joins the pod, with an init of its own, in a nested user
+namespace that its run mode maps; commands enter it with `nsenter`. A stack's volumes are directories in the pod's own
+directory, which the pod's deletion takes, after hpc-sandbox gave back to the caller what a `subids` service wrote as
+another user. A stack needs hpc-sandbox 0.5 (its run modes, host aliases and exposed ports) and a node that nests user
+namespaces; a provider without either refuses stacks when the tasks are listed, naming it.
 
 **What was checked on a setuid SingularityCE 4.4.1 site:**
 - **Works:**
@@ -616,15 +616,26 @@ teardown  stop the anchors; the death of a PID namespace's init kills everything
 - **Fails:** Singularity instances inside a pod ("while applying cgroups config: Interactive authentication
   required"), so pods use long-lived `exec` containers under anchors, as hpc-sandbox's enroot provider already
   does.
-- **UNVERIFIED:** name resolution and the gateway relay inside a pod; enroot pods.
+- **Since verified** (hpc-sandbox's pod suite, and the pods pull request's checks on SingularityCE 4.4.1): name
+  resolution, the gateway relay and teardown in a pod; two stacks of one task on one port, each reaching only its own
+  services; `postgres:16-alpine` and `redis:7-alpine` sidecars that switch users with subordinate ids; nothing left
+  after 200 stacks, some cancelled while they started.
+- **UNVERIFIED:** pods on Apptainer, and enroot pods under platoon (hpc-sandbox's ran at a Slurm site).
 
-**Network per phase:**
+**Network per phase** (implemented on pods: the stack's network switches for the whole pod):
 - `no-network` gives `lo` only.
 - `public` gives slirp4netns with host loopback blocked.
 - `allowlist` is refused on providers that cannot enforce it, unless the environment opts into running it as
   `public`.
 - `[agent]` and `[verifier]` phase policies attach and detach egress around grading.
 - Isolation is namespaces under one host uid: not a boundary against same-uid code outside the pods.
+- Within a pod, every connection between services, `main`'s too, comes from `127.0.0.1`, where under compose `main` has
+  an address of its own: a sidecar that trusts loopback (the official postgres image lets `127.0.0.1` in without its
+  `POSTGRES_PASSWORD`) or listens on it alone is open to `main`'s agents. platoon documents this rather than refusing or
+  changing such sidecars, since no list of them is complete and a refusal would also refuse tasks whose agents are meant
+  to use them; a task that keeps a sidecar from its agents must not rely on its loopback rules (postgres:
+  `POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256`). An address per service, in hpc-sandbox's pods, is the follow-up
+  that closes it.
 
 **`HostNetworkStackProvider`** is the fallback for sites without unprivileged user namespaces. It allocates ports per
 rollout and rewrites service names in env values, healthchecks and MCP URLs, including each service's references to
@@ -658,8 +669,9 @@ sidecars that the overlay does not authenticate or bind to a node service.
 
 - **GPUs.** `gpus > 0` is refused on providers without the `gpu` capability. A provider with it leases whole devices
   per sandbox: one `flock` per device in a node-local directory, and the leased devices passed by UUID.
-- **Users.** Rootless providers run every process as one uid, so `[agent].user` and `[verifier].user` cannot be
-  honored there.
+- **Users.** Rootless providers run the agents' processes as one uid, so `[agent].user` and `[verifier].user` cannot be
+  honored there; a pod's sidecars run in their own run modes (§6), with the caller's subordinate ids where it has
+  them, so that an image's own switch to its user works.
   - `agent_user: refuse`, the default, refuses such tasks at fetch.
   - `ignore` runs them as the single uid and records that in the trajectory.
 - **Network policy** (implemented). `network_policy: task`, the default, honors the task's `network_mode` per phase
@@ -693,8 +705,9 @@ What changes is the default HPC provider:
 | New environment-entry key `on_harness_exit`; new rollout-config key `sampling_precedence` (`request`, today's behavior, or `config`, under which policy calls sample with the temperature, top_p and top_k of `inference_params`, never a harness's own) and `inference_params.top_k` | additive; defaults keep today's behavior |
 | Spec keys `[install.recipe]`, `[resources]`, `[budget]`; `[install].toolchain` may be a name | additive |
 | Overlay keys `[[compose]]` and `compose_host_env`; the lock's `compose` and `compose_rule`, and `flags.stack: main_only`; `Sandbox.keep_processes` (optional) | additive |
-| The `stacks` capability and `StackProvider.start_stack` (`platoon.sandbox.stacks`); multi-container tasks run where a provider runs stacks (`docker`, `process`), `[[verifier.collect]]` hooks and sidecars' artifacts run | additive; tasks platoon refused now run |
+| The `stacks` capability and `StackProvider.start_stack` (`platoon.sandbox.stacks`); multi-container tasks run where a provider runs stacks (`docker`, `process`, and `singularity` and `enroot` with hpc-sandbox 0.5), `[[verifier.collect]]` hooks and sidecars' artifacts run | additive; tasks platoon refused now run |
 | The `privileged` capability (`docker`) and the fetch's `refuse: {privileges: false}`; the `docker` provider's `stack_root` option | additive; a lock fetched without the switch answers its config as before |
+| `platoon prepare` builds sidecars' contexts and pins their registry images (`pulled:<reference>` entries of the image map; `platoon harbor images pin`); the `hpc` extra takes hpc-sandbox 0.5 too | additive; a fetch refuses stacks unless `refuse: {sidecars: false}`, until a release requires hpc-sandbox 0.5 |
 | Main-only compose files run; a task with `compose.yaml`, `compose.yml` or `docker-compose.yml` runs as one container, as in Harbor, which reads none of them | behavior change, intended |
 | `EnvironmentService.open` takes `needs`; `Sandbox.routes`, `Sandbox.kill_processes`, `SandboxSpec.upstreams`, `SandboxProvider.reap` | services and providers outside platoon must accept the new keyword and fields (a public protocol change) |
 | Commands `platoon harbor fetch\|verify\|images\|check\|ls`, `platoon toolchain build\|ls` | new |
@@ -712,8 +725,9 @@ No public name is removed.
      service is a long-lived `exec` under an anchor that owns its PID namespace.
    - Teardown relies on PID-namespace semantics: when the anchor's init dies, everything in its namespace dies.
    - Exec goes through `nsenter`, which must reproduce the payload's environment and working directory.
-   - Inside the pod, processes are uid 0 mapped to the caller, so `chown` to other uids fails. apt drops privileges
-     to `_apt`, which may fail at build or run time. Tasks that need several uids are refused.
+   - Inside the pod, processes are uid 0 mapped to the caller, so `chown` to other uids fails, unless the service
+     runs with the caller's subordinate ids (its `subids` run mode, where the caller has them), as a sidecar does that
+     switches users. apt drops privileges to `_apt`, which hpc-sandbox's drop-in keeps from failing.
 2. **Images at scale.**
    - Each sandbox extracts its root filesystem from the image, and separate verifiers double the number of
      sandboxes. Large images make start time the bottleneck. A per-node template plus copy-on-write copies
@@ -779,7 +793,7 @@ Effort is EST, for one implementer plus review.
 | M4 Grading | Separate verifiers with artifacts; reward contracts; opt-in classifiers; `on_harness_exit`; the task's agent timeout; `Sandbox.kill_processes` before grading. 3.5 days | CPU fixtures: separate-verifier tasks score oracle 1.0 and no-op 0.0; a background process cannot shadow `reward.txt`; a crash after a gateway error is `error`, a crash without one is graded || the Harbor fast-path pull request |
 | M5 An offline training pool | An offline, separate-verifier pool through M0–M4 on Singularity, with a CLI harness in the task sandbox. 2 days plus the run | oracle at least 0.98 and no-op 0 on at least 100 tasks per source through the training path; `error` plus `invalid` under 5% with a base model; 5 training steps with no leaked sandboxes | |
 | M6 Stacks on Docker | The compose parser and subset; the `docker compose` provider; sidecar probes; task MCP servers through the tool plane. 3.5 days | Harbor's `hello-mcp` oracle scores 1.0; a killed sidecar gives `invalid`, not 0; nothing is left after teardown | the compose parser and subset, with main-only compose files: the compose-subset pull request; the stack layer, sidecar probes and stacks on `process` (on CPU: a toy app with a key-value sidecar scores its oracle 1.0 and its no-op 0.0, a killed sidecar gives `invalid`, a sidecar that cannot start an `error`, nothing is left after 200 stacks, some cancelled while they start): the stack-layer pull request; stacks on Docker with `docker compose`, sidecars' images built by `platoon prepare`, checked by GitHub CI's `docker-stacks` job, which fails unless `hello-mcp`'s oracle scores 1.0 and its no-op 0.0 through `platoon-oracle` and `platoon-noop`, a killed sidecar gives `invalid`, and no container, network, volume or project directory is left after teardown or after a reap of a SIGKILLed worker's label: the Docker-stacks pull request |
-| M7 Pods | hpc-sandbox pods (holder, anchors, exec services, relays, `/etc/hosts`, egress per phase, janitor); stacks on Singularity and Apptainer; enroot pods at a Slurm site. 6 days, plus site time | a two-service toy stack and `hello-mcp` score their oracles; name resolution, the relay and teardown pass; one stack cannot reach another's services; nothing leaks after 200 stacks; setup p50 and p99 at 16 and 64 stacks per node | |
+| M7 Pods | hpc-sandbox pods (holder, anchors, exec services, relays, `/etc/hosts`, egress per phase, janitor); stacks on Singularity and Apptainer; enroot pods at a Slurm site. 6 days, plus site time | a two-service toy stack and `hello-mcp` score their oracles; name resolution, the relay and teardown pass; one stack cannot reach another's services; nothing leaks after 200 stacks; setup p50 and p99 at 16 and 64 stacks per node | the pods pull request, on SingularityCE (the stack fixtures, a Redis and a PostgreSQL sidecar that switch users, and hello-mcp score their oracles and no-ops; a kumo task's `main` reaches its judge sidecar; nothing leaks after 200 stacks; setup timed at 16 and 64 stacks per node); Apptainer and enroot pods experimental, until a site runs its integration tests |
 | M8 Host-network fallback | `HostNetworkStackProvider` for sites without unprivileged user namespaces: port allocation, rewriting, listen rules, the literal scan, refusals. 4 days | CPU tests over `process` cover a healthcheck that names its own loopback port; with user namespaces disabled, a two-service toy stack scores its oracle, an unauthenticated sidecar is refused, and nothing leaks after 200 stacks | |
 | M9 Frontier-CS | Adapter sources at the pinned commit; the overlay (verifier and judge patches, host-data pins, file-staging mounts); the shared judge-pool binding for the algorithmic track; the image map. 6 days plus compute | fetching both adapters yields the ORS server's 188 + 13 task ids; reference solutions and fixed submissions score as on the ORS server; a judge killed mid-grade gives `invalid`; a 4B run on the 2.0 tasks plus 40 algorithmic tasks takes 20 steps with no leaked sandboxes and `error` plus `invalid` under 5% | |
 
@@ -794,7 +808,8 @@ only for sites that need it.
 2. **Training network policy.** Should `public` tasks run without network by default in training, so the policy
    cannot look answers up, at the cost of tasks that need the network? Decide before M5.
 3. **Pods for single-container tasks.** Should they also run in pods once M7 passes, for host-loopback isolation and
-   public egress without the host network? Decide after M7.
+   public egress without the host network? Decided with M7: no. A single sandbox keeps its own network namespace (or
+   none), its routes and its snapshots, which pods lack; only stacks run as pods.
 4. **Tool names.** Should a Harbor session's env tools (`bash`, `view`, `write`, `edit`) take the ORS names
    (`create_file`, `str_replace`), so a policy that uses env tools sees one surface? Decide before tool-plane
    training on Harbor tasks.
@@ -802,4 +817,6 @@ only for sites that need it.
    Decide before recursive programs run on stacks.
 6. **Classifier sets.** Which named classifier sets should platoon ship, and who maintains them? Decide before M4.
 7. **What sites allow.** Unprivileged user namespaces, slirp4netns, BuildKit, cgroup delegation and reflink-capable
-   scratch differ per site. `platoon doctor` should report them. Decide what it checks before M7.
+   scratch differ per site. Answered with M7: `hpc-sandbox doctor` reports the runtime, the scratch and what pods
+   need (egress, subordinate ids), and the providers check what a run needs before it starts (a node that nests user
+   namespaces, hpc-sandbox's pods, the layouts and options a run asks for), refusing it with what is missing.

@@ -68,8 +68,10 @@ dependencies = [
 # fakeroot option of 0.4, with which Harbor verifiers run as root on Singularity. The lower bound is 0.4.0, the release
 # they are tested against, so that an environment that holds an older hpc-sandbox upgrades instead of keeping it: with
 # 0.3.0, which has no fakeroot, a run refuses those verifiers when it lists its tasks (platoon/sandbox/singularity.py).
+# 0.5 is taken too: its pods run Harbor stacks (platoon/sandbox/hpc_stacks.py), which a run refuses with 0.4, whose pods
+# lack the run modes, host aliases and exposed ports they need.
 hpc = [
-    "hpc-sandbox>=0.4.0,<0.5",
+    "hpc-sandbox>=0.4.0,<0.6",
 ]
 # ORS-native environments (python:// and ors+http:// services); 0.1.125 and 0.1.163 are both supported. structlog
 # (which openreward requires) quiets the SDK's loggers (platoon/envs/ors/sdk.py), which needs 25.1's

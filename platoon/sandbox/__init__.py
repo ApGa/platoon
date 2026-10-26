@@ -112,14 +112,16 @@ def stack_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | 
     """Why ``provider`` (a name with its ``options``, or a built provider) would start no stack, a task's services
     together (:mod:`platoon.sandbox.stacks`), read without building it; None when it starts stacks, or cannot tell
     before it is built.  A built provider tells by its capabilities (``stacks``, with a ``start_stack`` method), then
-    as its class does; a provider class by a ``stack_refusal(options)`` class method (the ``docker`` provider's says
-    whether its CLI has the compose plugin), else by capabilities it declares on the class."""
+    as its class does, which also says why not where it has one; a provider class by a ``stack_refusal(options)``
+    class method (the ``docker`` provider's says whether its CLI has the compose plugin, an hpc-sandbox provider's
+    whether its pods run here), else by capabilities it declares on the class."""
 
     if not isinstance(provider, str):
-        if STACKS not in provider.capabilities or not callable(getattr(provider, "start_stack", None)):
-            return f"the {provider.name!r} sandbox provider runs no multi-container stacks"
         refusal = getattr(type(provider), "stack_refusal", None)
-        return refusal(dict(getattr(provider, "options", None) or {})) if callable(refusal) else None
+        reason = refusal(dict(getattr(provider, "options", None) or {})) if callable(refusal) else None
+        if STACKS not in provider.capabilities or not callable(getattr(provider, "start_stack", None)):
+            return reason or f"the {provider.name!r} sandbox provider runs no multi-container stacks"
+        return reason
     try:
         kind = provider_class(provider)
     except (ImportError, AttributeError, ValueError):

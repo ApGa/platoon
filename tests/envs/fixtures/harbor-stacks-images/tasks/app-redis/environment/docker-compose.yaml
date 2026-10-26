@@ -1,0 +1,18 @@
+# Written for platoon: main stores a value in a Redis sidecar, whose image's entrypoint gives its data to the redis
+# user and runs the server as it; the tests read the value back.
+services:
+  main:
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+  redis:
+    image: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 5s
+      retries: 60

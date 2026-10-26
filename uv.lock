@@ -2260,7 +2260,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=2.21" },
     { name = "datasets", marker = "python_full_version >= '3.14'", specifier = ">=4.4" },
     { name = "dill", marker = "python_full_version >= '3.14'", specifier = ">=0.4" },
-    { name = "hpc-sandbox", marker = "extra == 'hpc'", specifier = ">=0.4.0,<0.5" },
+    { name = "hpc-sandbox", marker = "extra == 'hpc'", specifier = ">=0.4.0,<0.6" },
     { name = "huggingface-hub", specifier = ">=0.25" },
     { name = "ipython", specifier = ">=9.4.0" },
     { name = "jinja2", specifier = ">=3.1" },

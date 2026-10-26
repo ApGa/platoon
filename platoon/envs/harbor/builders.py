@@ -1,13 +1,20 @@
-"""Build the images a lock's tasks need, once per site: ``platoon harbor images plan``, ``build`` and ``verify``.
+"""Build the images a lock's tasks need, once per site: ``platoon harbor images plan``, ``build``, ``pin``, ``verify``.
 
-:func:`plan_images` groups a lock's runnable tasks by build key (:mod:`platoon.envs.harbor.dockerfile`) and says which
-keys a site's image map lacks; an entry whose image file is gone counts as missing. The keys are those of the tasks' own
-images, their separate verifiers' and their stacks' sidecars' that build from a context of the task (``build:`` in the
-compose file, planned whole). :func:`build_images` builds those from a representative task's Dockerfile prefix (a
-sidecar's whole Dockerfile, with its build arguments) and records each image in the map with a receipt (builder,
-version, time, log, size, SHA-256, and the digest of each base image; for ``oci``, the builder's revision,
+:func:`plan_images` groups a lock's runnable tasks by build key (:mod:`platoon.envs.harbor.dockerfile`) and says
+which keys a site's image map lacks; an entry whose image file is gone counts as missing. The keys are those of the
+tasks' own images, their separate verifiers' and their stacks' sidecars' that build from a context of the task
+(``build:`` in the compose file, planned whole). :func:`build_images`
+builds those from a representative task's Dockerfile prefix (a sidecar's whole Dockerfile, with its build arguments)
+and records each image in the map with a receipt
+(builder, version, time, log, size, SHA-256, and the digest of each base image; for ``oci``, the builder's revision,
 :data:`~platoon.envs.harbor.images.OCI_BUILDER_REVISION`). :func:`verify_images` checks the map's image files against
 the SHA-256 their entries record.
+
+The registry images that sidecars run as written (``image: redis:7-alpine``) are planned too (:class:`PlannedPull`),
+and :func:`pin_images` **pins** each in the map: the digest its registry serves for it, and the configuration the
+registry gives its image for this host's platform (``ENTRYPOINT``, ``CMD``, ``ENV``, ``WORKDIR``, ``USER``,
+``HEALTHCHECK``, ...), which sessions run it with, since platoon gives every runtime a sidecar's whole command and a
+pod's runtimes apply none of an image's configuration by themselves (:func:`registry_config`).
 
 A build resolves each base image (``FROM``) to the digest its registry serves for it (:func:`registry_digest`)
 and builds from ``reference@digest``, so the receipt names exactly what the image was built from. The build key,
@@ -32,7 +39,10 @@ Builders:
   values, and ``ENV`` values are literal but for their variable references (:func:`definition_file`). It refuses
   what it cannot translate faithfully (multi-stage builds, ``ARG`` without a default, ``USER``, ``SHELL``, flags,
   here-documents, ``ADD`` of a URL, a git repository or an archive), naming the ``oci`` builder, and never falls
-  back to the base image.
+  back to the base image.  A definition file keeps none of the Dockerfile's image configuration, so the map records
+  its base image's (from the registry, as a pin does), under what the Dockerfile itself sets, which the lock's plan
+  holds.  It is the builder of the ``singularity`` provider where the runtime is Apptainer, which has no BuildKit
+  (:func:`provider_builder`).
 - ``docker``: ``docker build`` (or ``podman`` with ``PLATOON_DOCKER=podman``) tagged ``platoon-harbor:<key>``, for
   the docker provider; with ``push``, pushed and recorded by digest (enroot sites import that digest).  It alone passes
   a sidecar's build arguments (``--build-arg``); the others refuse an image that has any.
@@ -42,11 +52,13 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import hashlib
 import http.client
 import json
 import logging
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -60,12 +72,13 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from platoon.envs.harbor.dockerfile import (
     DOCKERFILE,
     DockerfilePlan,
     expand,
+    image_config,
     parse_assignments,
     plan_dockerfile,
     remote_source,
@@ -78,8 +91,10 @@ from platoon.envs.harbor.images import (
     OCI_BUILDER_REVISION,
     ImageEntry,
     ImageMap,
+    docker_image_reference,
     has_image_file,
     local_image_path,
+    pulled_key,
     update_image_map,
 )
 from platoon.envs.harbor.lock import DatasetLock, LockedTask
@@ -89,10 +104,13 @@ logger = logging.getLogger(__name__)
 
 # Resolves a base image reference to the digest its registry serves for it: None (or a DigestError) when it cannot.
 DigestResolver = Callable[[str], str | None]
+# Resolves an image reference to that digest and the configuration of its image for this host (registry_config).
+ConfigResolver = Callable[[str], tuple[str, Mapping[str, Any]]]
 
 BUILDERS = ("oci", "def", "docker")
-# The builder that builds images a sandbox provider runs: SIF files for singularity, local images for docker.  The
-# other providers pull their images from a registry (enroot), or run none (process).
+# The builder that builds images a sandbox provider runs: SIF files for singularity (def where the runtime is
+# Apptainer: provider_builder), local images for docker.  The other providers pull their images from a registry
+# (enroot), or run none (process).
 PROVIDER_BUILDERS = {"singularity": "oci", "docker": "docker"}
 _SQUASHFS_MAGIC = b"hsqs"
 # A "# syntax=" parser directive, and the frontend images of Docker's own Dockerfile syntax, 1.x releases (and
@@ -145,15 +163,40 @@ class PlannedImage:
 
 
 @dataclass
+class PlannedPull:
+    """A registry image that the sidecars of a lock's stacks run: the tasks that run it, and whether the image map
+    pinned it."""
+
+    reference: str  # as the compose file names it
+    tasks: list[str] = field(default_factory=list)
+    pinned: bool = False
+    role: ClassVar[str] = "service"
+
+    @property
+    def key(self) -> str:
+        """Its key in the image map (:func:`~platoon.envs.harbor.images.pulled_key`)."""
+
+        return pulled_key(self.reference)
+
+    def to_json(self) -> dict[str, Any]:
+        return {"reference": self.reference, "tasks": len(self.tasks), "pinned": self.pinned}
+
+
+@dataclass
 class ImagePlan:
     images: list[PlannedImage]
     prebuilt: dict[str, int]  # registry references of prebuilt-image tasks -> task count
     default_image: int  # tasks without docker_image or Dockerfile (they run on the service's default_image)
     refused: dict[str, int]  # refusal kind -> task count (they need no image)
+    pulls: list[PlannedPull] = field(default_factory=list)  # the registry images sidecars run, most-used first
 
     @property
     def missing(self) -> list[PlannedImage]:
         return [image for image in self.images if not image.present]
+
+    @property
+    def unpinned(self) -> list[PlannedPull]:
+        return [pull for pull in self.pulls if not pull.pinned]
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -162,15 +205,20 @@ class ImagePlan:
             "prebuilt": self.prebuilt,
             "default_image": self.default_image,
             "refused": self.refused,
+            **(
+                {"pulls": [pull.to_json() for pull in self.pulls], "unpinned": len(self.unpinned)} if self.pulls else {}
+            ),
         }
 
 
 def plan_images(lock: DatasetLock, image_map: ImageMap | None = None) -> ImagePlan:
     """The build keys the lock's runnable tasks need (their own images', their separate verifiers' and their stacks'
-    sidecars'), most-used first, and which the image map has. An entry whose image is a local file (``.sif``,
-    ``.sqsh``, ...) counts only while the file exists."""
+    sidecars'), most-used first, and which the image map has, and the registry images their sidecars run, and which
+    the map pinned. An entry whose image is a local file (``.sif``, ``.sqsh``, ...) counts only while the file
+    exists."""
 
     images: dict[str, PlannedImage] = {}
+    pulls: dict[str, PlannedPull] = {}
     prebuilt: dict[str, int] = {}
     refused: dict[str, int] = {}
     default_image = 0
@@ -202,30 +250,38 @@ def plan_images(lock: DatasetLock, image_map: ImageMap | None = None) -> ImagePl
                 image.base = list(build.get("base") or [])
                 image.context, image.dockerfile = build["context"], build.get("dockerfile") or DOCKERFILE
                 image.build_args = dict(build.get("args") or {})
+        for reference in dict.fromkeys(task.service_images()):
+            pulls.setdefault(reference, PlannedPull(reference)).tasks.append(task.name)
     for image in images.values():
         entry = image_map.get(image.key) if image_map is not None else None
         image.present = entry is not None and has_image_file(entry)
+    for pull in pulls.values():
+        pull.pinned = image_map is not None and image_map.get(pulled_key(pull.reference)) is not None
     ordered = sorted(images.values(), key=lambda image: (-len(image.tasks), image.key))
-    return ImagePlan(images=ordered, prebuilt=prebuilt, default_image=default_image, refused=refused)
+    by_use = sorted(pulls.values(), key=lambda pull: (-len(pull.tasks), pull.reference))
+    return ImagePlan(images=ordered, prebuilt=prebuilt, default_image=default_image, refused=refused, pulls=by_use)
 
 
 @dataclass(frozen=True)
 class ImageCheck:
     """One image of a lock checked against the image map."""
 
-    image: PlannedImage
-    status: str  # "ok", "missing" (no entry, no file, or another SHA-256) or "unchecked" (nothing to hash)
+    image: PlannedImage | PlannedPull
+    status: str  # "ok", "missing" (no entry, no file, another SHA-256, no pin) or "unchecked" (nothing to hash)
     detail: str
 
 
-def verify_images(lock: DatasetLock, image_map: ImageMap) -> list[ImageCheck]:
+def verify_images(lock: DatasetLock, image_map: ImageMap, *, pins: bool = True) -> list[ImageCheck]:
     """Check the image map's entry for each build key the lock's runnable tasks use: it must exist, and a local
     image file must exist and hash to the SHA-256 the entry records. A registry reference cannot be hashed here,
-    nor can a file whose entry records no SHA-256: those are ``unchecked``."""
+    nor can a file whose entry records no SHA-256: those are ``unchecked``.  With ``pins`` (the providers that run
+    images), each registry image that sidecars run must be pinned, as a run checks: one that is not is ``missing``, a
+    pin ``unchecked``."""
 
     hashes: dict[Path, str] = {}  # keys aliased to one file hash it once
-    checks = []
-    for image in plan_images(lock, image_map).images:
+    checks: list[ImageCheck] = []
+    plan = plan_images(lock, image_map)
+    for image in plan.images:
         entry = image_map.get(image.key)
         path = local_image_path(entry.image) if entry is not None else None
         if entry is None:
@@ -245,6 +301,12 @@ def verify_images(lock: DatasetLock, image_map: ImageMap) -> list[ImageCheck]:
             else:
                 status, detail = "missing", f"{path} has SHA-256 {hashes[path]}, the image map says {expected}"
         checks.append(ImageCheck(image=image, status=status, detail=detail))
+    for pull in plan.pulls if pins else ():
+        if (entry := image_map.get(pull.key)) is None:
+            status, detail = "missing", "not pinned in the image map (platoon prepare, or platoon harbor images pin)"
+        else:
+            status, detail = "unchecked", f"pinned as {entry.image}, a registry reference, so it is not checked"
+        checks.append(ImageCheck(image=pull, status=status, detail=detail))
     return checks
 
 
@@ -374,11 +436,14 @@ def build_image(
     example: str | None = None,
     log: Callable[[str], None] | None = None,
     resolve_digest: DigestResolver | None = None,
+    resolve_config: ConfigResolver | None = None,
 ) -> ImageEntry:
     """Build the image of ``key`` from the Dockerfile prefix of the cached task at ``task_dir``, its base images
     named by the digests ``resolve_digest`` (default :func:`registry_digest`) resolves them to.  A stack's sidecar
     (``role="service"``) builds its whole Dockerfile, ``dockerfile`` in its build ``context`` (relative to the task),
-    with its ``build_args``; the task's own image builds from ``environment/``, a verifier's from ``tests/``."""
+    with its ``build_args``; the task's own image builds from ``environment/``, a verifier's from ``tests/``.  The
+    ``def`` builder records its base image's configuration, which ``resolve_config`` (default
+    :func:`registry_config`) gives."""
 
     context_name = context or ("tests" if role == "verifier" else "environment")
     source = task_dir / context_name
@@ -420,6 +485,9 @@ def build_image(
             sif, workdir = _build_def(runner, plan, build_context, work, out_dir / f"{hexkey}.sif", digests)
             env = _sif_environment(runner, sif)
             entry = ImageEntry(image=str(sif), sha256=file_sha256(sif), builder="def", env=env, workdir=workdir)
+            entry = _with_base_config(
+                entry, plan, digests, resolve_config or registry_config, required=role == "service"
+            )
         else:
             entry = _build_docker(runner, build_context, hexkey, push=push, build_args=build_args or {})
     except BuildError:
@@ -518,12 +586,21 @@ class _RegistryClient:
                 return digest or None
             return "sha256:" + hashlib.sha256(response.read()).hexdigest()
 
+    def json(self, url: str) -> tuple[Any, str]:
+        """The JSON document at ``url`` (a manifest or a blob), and its digest: the ``Docker-Content-Digest`` the
+        registry gives, else the SHA-256 of what it served."""
+
+        with self._open(url, "GET") as response:
+            body = response.read()
+            digest = response.headers.get("Docker-Content-Digest") or "sha256:" + hashlib.sha256(body).hexdigest()
+        return json.loads(body), digest
+
     def _open(self, url: str, method: str) -> Any:
-        headers = {"Accept": ", ".join(_MANIFEST_TYPES)}
-        if self._token is not None:
-            headers["Authorization"] = f"Bearer {self._token}"
+        request = urllib.request.Request(url, method=method, headers={"Accept": ", ".join(_MANIFEST_TYPES)})
+        if self._token is not None:  # never sent on to where a redirect leads, such as a blob's storage
+            request.add_unredirected_header("Authorization", f"Bearer {self._token}")
         try:
-            return self._urlopen(urllib.request.Request(url, method=method, headers=headers), timeout=self._timeout_s)
+            return self._urlopen(request, timeout=self._timeout_s)
         except urllib.error.HTTPError as exc:
             challenge = (exc.headers.get("WWW-Authenticate") if exc.headers is not None else None) or ""
             if exc.code != 401 or self._token is not None or not challenge.lower().startswith("bearer "):
@@ -590,6 +667,105 @@ def _pinned_reference(reference: str, digest: str) -> str:
 
     head, slash, last = reference.partition("@")[0].rpartition("/")
     return f"{head}{slash}{last.partition(':')[0]}@{digest}"
+
+
+# --- registry images: their configurations, and the pins of the ones sidecars run ------------------------------
+
+# The architecture an image index names for this host's machine (platform.machine()).
+_ARCHITECTURES = {"x86_64": "amd64", "aarch64": "arm64"}
+
+
+def registry_config(
+    reference: str,
+    *,
+    timeout_s: float = _REGISTRY_TIMEOUT_S,
+    urlopen: Callable[..., Any] | None = None,
+    machine: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """The digest the registry of an image reference serves for it, as :func:`registry_digest` gives it (an image
+    index's, for an image of several platforms), and the configuration of its image for Linux on ``machine`` (default:
+    this host's): the image's config blob, whose ``config`` holds the ``Env``, ``Entrypoint``, ``Cmd``,
+    ``WorkingDir``, ``User``, ``Healthcheck``, ... that its containers start with.  ``urlopen`` makes the requests, as
+    for :func:`registry_digest`.  Raises :class:`DigestError` when the registry cannot be reached or does not serve
+    them, or has no image for this platform."""
+
+    host, repository, tag, pinned = _parse_reference(reference)
+    client = _RegistryClient(urlopen or urllib.request.urlopen, repository, timeout_s)
+    base = f"https://{host}/v2/{repository}"
+    try:
+        manifest, digest = client.json(f"{base}/manifests/{pinned or tag}")
+        if isinstance(manifest, dict) and isinstance(manifest.get("manifests"), list):  # an index of platforms
+            manifest, _ = client.json(f"{base}/manifests/{_platform_manifest(manifest, reference, machine)}")
+        blob = (manifest.get("config") or {}).get("digest") if isinstance(manifest, dict) else None
+        if not isinstance(blob, str) or not _DIGEST.fullmatch(blob):
+            raise DigestError(f"{base}/manifests/{pinned or tag} names no image configuration")
+        config, _ = client.json(f"{base}/blobs/{blob}")
+    except urllib.error.HTTPError as exc:
+        raise DigestError(f"{exc.filename or base} answered HTTP {exc.code}") from None
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        raise DigestError(f"{base}: {exc}") from None
+    if not isinstance(config, dict) or not isinstance(config.get("config") or {}, dict):
+        raise DigestError(f"{base}/blobs/{blob} is not an image configuration")
+    return pinned or digest, config
+
+
+def _platform_manifest(index: Mapping[str, Any], reference: str, machine: str | None) -> str:
+    """The digest of the manifest that an image index lists for Linux on ``machine``'s architecture."""
+
+    machine = machine or platform.machine()
+    architecture = _ARCHITECTURES.get(machine, machine)
+    for entry in index.get("manifests") or ():
+        found = (entry.get("platform") or {}) if isinstance(entry, dict) else {}
+        if found.get("os") == "linux" and found.get("architecture") == architecture:
+            digest = entry.get("digest")
+            if isinstance(digest, str) and _DIGEST.fullmatch(digest):
+                return digest
+    raise DigestError(f"{reference} has no image for linux/{architecture}")
+
+
+def pinned_entry(reference: str, resolve: ConfigResolver | None = None) -> ImageEntry:
+    """The image map's entry of a registry image that sidecars run: by the digest its registry serves for
+    ``reference``, with its image's configuration (``resolve``, default :func:`registry_config`)."""
+
+    digest, config = (resolve or registry_config)(reference)
+    image = docker_image_reference(_pinned_reference(reference, digest))
+    entry = _entry_from_config(image, config, builder="pulled", sha256=None)
+    pinned_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return replace(entry, receipt={"reference": reference, "digest": digest, "pinned_at": pinned_at})
+
+
+def pin_images(
+    lock: DatasetLock,
+    *,
+    image_map: str | Path,
+    references: Sequence[str] | None = None,
+    log: Callable[[str], None] | None = None,
+    resolve: ConfigResolver | None = None,
+) -> dict[str, ImageEntry]:
+    """Pin the registry images that the lock's runnable stacks' sidecars run and ``image_map`` has not pinned (or
+    ``references``, again), adding each to the map as soon as it is pinned (:func:`pinned_entry`).  Returns the new
+    entries by reference; raises :class:`DigestError` after trying them all if any failed."""
+
+    say = log or logger.info
+    map_path = Path(image_map).absolute()
+    plan = plan_images(lock, ImageMap.load(map_path) if map_path.exists() else None)
+    if references and (unknown := sorted(set(references) - {pull.reference for pull in plan.pulls})):
+        raise ValueError(f"The lock's runnable stacks run no registry image {unknown}")
+    wanted = [pull for pull in plan.pulls if (pull.reference in references if references else not pull.pinned)]
+    pinned: dict[str, ImageEntry] = {}
+    failures: list[str] = []
+    for pull in wanted:
+        try:
+            entry = pinned_entry(pull.reference, resolve)
+        except DigestError as exc:
+            failures.append(f"{pull.reference}: {exc}")
+            continue
+        update_image_map(map_path, {pulled_key(pull.reference): entry})
+        pinned[pull.reference] = entry
+        say(f"pinned {pull.reference} for {len(pull.tasks)} task(s): {entry.image}")
+    if failures:
+        raise DigestError("; ".join(failures))
+    return pinned
 
 
 def _from_images(plan: DockerfilePlan) -> dict[int, str]:
@@ -845,6 +1021,51 @@ def _sif_environment(runner: _Runner, sif: Path) -> dict[str, str]:
     if env.get("LD_LIBRARY_PATH") == "/.singularity.d/libs":
         del env["LD_LIBRARY_PATH"]
     return env
+
+
+def _with_base_config(
+    entry: ImageEntry,
+    plan: DockerfilePlan,
+    digests: Mapping[str, str | None],
+    resolve: ConfigResolver,
+    *,
+    required: bool,
+) -> ImageEntry:
+    """A ``def`` build's ``entry`` with the image configuration a definition file keeps none of: its base image's
+    (from the registry, by the digest it was built from), under what the built steps set (``CMD``, ``ENTRYPOINT``,
+    ``USER``, ``HEALTHCHECK``, ``EXPOSE``, ``VOLUME``, ``STOPSIGNAL``), with the build's own environment and working
+    directory.  Without the registry, a ``BuildError`` where the configuration is ``required`` (a sidecar's image, whose
+    command may be its base image's), else it records none of them, with a warning."""
+
+    base = next(iter(_from_images(plan).values()), None)  # a definition file has one FROM
+    if base is None:
+        return entry
+    digest = digests.get(base)
+    try:
+        _, config = resolve(_pinned_reference(base, digest) if digest else base)
+    except DigestError as exc:
+        if required:
+            raise BuildError(
+                f"Cannot read the configuration of {base}, the base of {entry.image}, from its registry: {exc}"
+            ) from None
+        logger.warning(
+            "Cannot read the configuration of %s, the base of %s, from its registry (%s)", base, entry.image, exc
+        )
+        return entry
+    inherited = _entry_from_config(entry.image, config, builder="def", sha256=entry.sha256)
+    own = image_config(list(variables_in_scope(plan.prefix)))
+    return replace(
+        inherited,
+        env=entry.env,
+        workdir=entry.workdir or inherited.workdir,
+        entrypoint=tuple(own["entrypoint"]) if "entrypoint" in own else inherited.entrypoint,
+        cmd=tuple(own["cmd"]) if "cmd" in own else inherited.cmd,
+        user=own.get("user", inherited.user),
+        healthcheck=own.get("healthcheck", inherited.healthcheck),
+        exposed_ports=tuple(sorted({*inherited.exposed_ports, *own.get("expose", ())})),
+        volumes=tuple(sorted({*inherited.volumes, *own.get("volumes", ())})),
+        stop_signal=own.get("stop_signal", inherited.stop_signal),
+    )
 
 
 def _build_docker(
@@ -1116,6 +1337,26 @@ def _singularity_binary() -> str:
 
 def _docker_binary() -> str:
     return os.environ.get("PLATOON_DOCKER") or "docker"
+
+
+def provider_builder(provider: str) -> str | None:
+    """The builder of the images that the sandbox provider ``provider`` runs (:data:`PROVIDER_BUILDERS`): for
+    ``singularity`` ``oci``, but ``def`` where its runtime is Apptainer, which has no BuildKit; None for a provider
+    that pulls its images from a registry (``enroot``) or runs none (``process``)."""
+
+    builder = PROVIDER_BUILDERS.get(provider)
+    return "def" if builder == "oci" and _runtime_is_apptainer() else builder
+
+
+@functools.cache
+def _runtime_is_apptainer() -> bool:
+    """Whether the Singularity runtime here is Apptainer (``apptainer version ...``), which builds no OCI image."""
+
+    try:
+        result = subprocess.run([_singularity_binary(), "--version"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip().lower().startswith("apptainer")
 
 
 def _tool(name: str) -> str:

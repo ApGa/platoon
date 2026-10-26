@@ -69,7 +69,7 @@ from platoon.envs.harbor.verifier import TEST_STDOUT, collect, output_tail, susp
 from platoon.envs.service import EnvSetupError, ForkMode, Outcome, ToolResult, ToolSpec
 from platoon.sandbox._processes import alive_processes
 from platoon.sandbox.base import CWD_ERROR_EXIT_CODE, ExecResult, Sandbox, SandboxSpec, cwd_error
-from platoon.sandbox.stacks import ServiceState, Stack
+from platoon.sandbox.stacks import MAIN, ServiceState, Stack
 from platoon.task import Task
 from platoon.utils import scratch
 from platoon.utils.stopping import let_finish
@@ -218,7 +218,9 @@ class HarborSession:
     says the sandbox has no network: the task's ``network_mode`` is ``no-network`` and the provider enforces it
     (its ``network_none`` capability), so a harness placed in the sandbox could not reach the model gateway.
     ``host_loopback`` says the sandbox shares this host's network, so a harness placed in it reaches the gateway on
-    loopback: it has a network, and its provider declares the ``host_loopback`` capability.
+    loopback: it has a network, its provider declares the ``host_loopback`` capability, and it is not the ``main`` of a
+    stack whose services have a network of their own (a pod's or a compose project's, whose ``main`` reaches the
+    gateway through its route).
     """
 
     # call_tool takes calls from every agent at once and orders them on the sandbox's gate (platoon.envs.gate).
@@ -244,7 +246,11 @@ class HarborSession:
         self.mcp_servers: tuple[McpServer, ...] = harbor_task.mcp_servers
         capabilities = service.provider.capabilities
         self.network_isolated = lease.spec.network == "none" and "network_none" in capabilities
-        self.host_loopback = not self.network_isolated and "host_loopback" in capabilities
+        self.host_loopback = (
+            not self.network_isolated
+            and "host_loopback" in capabilities
+            and getattr(self.stack, "host_loopback", True)  # a stack's services may share a network of their own
+        )
         self._service = service
         self._lease = lease
         self._tools = SandboxTools(lease.sandbox, workdir=lease.spec.workdir, command_timeout_s=service.tool_timeout_s)
@@ -462,7 +468,8 @@ class HarborSession:
                 )
                 if (down := await self._probe("before the tests")) is not None:
                     return down
-                await self._put_sidecar_logs(sandbox)
+                if (unread := await self._put_sidecar_logs(sandbox)) is not None:
+                    return unread
             try:
                 await sandbox.upload(self.harbor_task.tests_dir, TESTS_DIR)
             except OSError as exc:
@@ -615,30 +622,40 @@ class HarborSession:
             return None
         return down
 
-    async def _put_sidecar_logs(self, sandbox: Sandbox) -> None:
-        """Put what the sidecars wrote in their log directories into those of ``sandbox``, made afresh by now."""
+    async def _put_sidecar_logs(self, sandbox: Sandbox) -> Outcome | None:
+        """Put what the sidecars wrote in their log directories into those of ``sandbox``, made afresh by now; an
+        infra outcome (``verifier_setup``) when that cannot be done."""
 
         if not (isinstance(self._lease, StackLease) and self._lease.logs):
-            return
+            return None
         directory = Path(scratch.mkdtemp("platoon-harbor-sidecar-logs-"))
         try:
             await sidecars.put_logs(sandbox, await self._copy_sidecar_logs(directory, owner=directory))
+        except (ArtifactError, OSError) as exc:
+            return Outcome.infra("verifier_setup", reason=str(exc))
         finally:
             shutil.rmtree(directory, ignore_errors=True)
+        return None
 
     async def _copy_sidecar_logs(self, into: Path, *, owner: Path) -> dict[str, Path]:
-        """Copy the sidecars' log directories, the stack's volumes, into ``into``
-        (:func:`~platoon.envs.harbor.sidecars.snapshot_logs`), in a thread: the copies by log directory.  A grade
-        cancelled meanwhile leaves the thread running, and ``owner``, the scratch directory that holds ``into``, is
-        deleted once it is done."""
+        """Copy the sidecars' log directories into ``into`` (:func:`~platoon.envs.harbor.sidecars.snapshot_logs`, in a
+        thread), each from where :func:`~platoon.envs.harbor.sidecars.log_source` finds it, which downloads into
+        ``owner``, the scratch directory that holds ``into``: the copies by log directory, or :class:`ArtifactError`
+        for what cannot be read.  A grade cancelled meanwhile leaves the thread running, and ``owner`` is deleted once
+        it is done."""
 
         stack = self.stack
         if stack is None or not isinstance(self._lease, StackLease) or not self._lease.logs:
             return {}
-        directories = {entry.logs: stack.volume_path(entry.volume) for entry in self._lease.logs}
-        return await sidecars.in_thread(
-            lambda: sidecars.snapshot_logs(directories, into), undo=lambda _: shutil.rmtree(owner, ignore_errors=True)
-        )
+        downloads = owner / "sidecar-downloads"
+        directories = {entry.logs: await sidecars.log_source(stack, entry, downloads) for entry in self._lease.logs}
+        try:
+            return await sidecars.in_thread(
+                lambda: sidecars.snapshot_logs(directories, into),
+                undo=lambda _: shutil.rmtree(owner, ignore_errors=True),
+            )
+        except OSError as exc:
+            raise ArtifactError(f"cannot copy what the sidecars wrote in their log directories: {exc}") from exc
 
     async def _verify_separately(
         self, collected: list[CollectedArtifact], skipped: dict[str, str], logs: dict[str, Path] | None = None
@@ -745,10 +762,26 @@ class HarborSession:
             await kill()
         except Exception as exc:
             logger.warning("Could not kill the processes left in sandbox %s %s: %s", sandbox.id, when, exc)
-            return Outcome.infra(
+            return await self._lost_main(when) or Outcome.infra(
                 "verifier_isolation", reason=f"could not kill the processes left in the sandbox {when}: {exc}"
             )
         return None
+
+    async def _lost_main(self, when: str) -> Outcome | None:
+        """Why a stack's ``main`` cannot be graded, as a probe of it finds: the stack cannot be probed (its pod is gone,
+        say: ``sidecar_probe``), or ``main`` exited (``main_exited``, as Docker would have ended its container); None
+        for a single sandbox, or a ``main`` that is up."""
+
+        stack = self.stack
+        if stack is None:
+            return None
+        try:
+            state = (await stack.health([MAIN]))[MAIN]
+        except Exception as exc:
+            return Outcome.infra("sidecar_probe", reason=f"cannot probe the stack's services {when}: {exc}")
+        if state.status != "exited":
+            return None
+        return Outcome.infra("main_exited", reason=f"main {state.describe()} {when}")
 
     async def _check_init(self, sandbox: Sandbox) -> Outcome | None:
         """None unless the main-only compose file's init (main's command) is gone: Docker would have ended the

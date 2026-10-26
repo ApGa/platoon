@@ -55,8 +55,9 @@ SDK, and the example environments are ORS classes. A project that trains only on
 
 ### The hpc extra
 
-The `hpc` extra installs [hpc-sandbox](https://pypi.org/project/hpc-sandbox/) 0.4 from PyPI, which runs the
-`singularity` and `enroot` sandboxes as rootless containers (the runtimes are [system tools](#optional-system-tools)):
+The `hpc` extra installs [hpc-sandbox](https://pypi.org/project/hpc-sandbox/) 0.4 or 0.5 from PyPI, which runs the
+`singularity` and `enroot` sandboxes as rootless containers (the runtimes are [system tools](#optional-system-tools)),
+and, with 0.5, multi-container Harbor tasks as pods:
 
 ```bash
 pip install 'platoon[tinker,ors,hpc]'
@@ -74,7 +75,7 @@ override-dependencies = ["hpc-sandbox @ git+https://github.com/ApGa/hpc-sandbox.
 ```
 
 With pip, name the commit next to the extra (`'hpc-sandbox @ git+https://github.com/ApGa/hpc-sandbox.git@<commit>'`);
-pip takes it only when its version is one the extra accepts (0.4).
+pip takes it only when its version is one the extra accepts (0.4 or 0.5).
 
 ## Depend on platoon from a project
 
