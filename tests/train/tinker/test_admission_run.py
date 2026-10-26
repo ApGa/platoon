@@ -1076,24 +1076,31 @@ def test_a_run_with_rejections_interrupted_consumes_every_position_once(tmp_path
     train, environments = CAPPED
     config = _config(tmp_path, train, environments, checkpoint={"every": 100})
     admitted = 0
+    took = Dispatcher.took
     for interrupt in [3, 3][:interrupts] + [None]:
         trainer, logged = make_pruning_trainer(monkeypatch, config, service)
         from datasets import Dataset
 
         trainer.train_dataset = Dataset.from_list(_capped_rows())
 
-        def hook(row, started, logged=logged, interrupt=interrupt) -> None:
+        def taken(self, kind, window=None, *, held=False, logged=logged, interrupt=interrupt):
             # Once the start has committed some steps, so that its interrupt checkpoint keeps what it decided (an
-            # interrupt in a start's first step saves none, and its decisions are lost as a crash's are).
-            if interrupt is not None and len(logged) == interrupt and not getattr(hook, "sent", False):
-                hook.sent = True
+            # interrupt in a start's first step saves none, and its decisions are lost as a crash's are): as the next
+            # step takes an admitted group, which the checkpoint keeps once the step is dropped at its next wait for a
+            # group. Not at a group start: near the end of the plan, the groups that settled can feed every step left,
+            # and the dispatcher, held back by the plan, then starts none.
+            counts = took(self, kind, window, held=held)
+            if interrupt is not None and len(logged) >= interrupt and kind == "admitted" and not taken.sent:
+                taken.sent = True
                 signal.raise_signal(signal.SIGINT)
+            return counts
 
+        taken.sent = False
+        monkeypatch.setattr(Dispatcher, "took", taken)
         workflow = _VerdictGroups(
             trainer._model_info.llm,
             verdict=by_hash(0.4, "once"),
             delay=lambda row: 0.04 if row[ENVIRONMENT_COLUMN] == "slow" else 0.003,
-            on_start=hook,
         )
         _run(trainer, workflow)
         admitted += sum(stats["train/admission/groups_admitted"] for _step, stats in logged)
