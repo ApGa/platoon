@@ -46,7 +46,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from platoon.sandbox import cleanup
-from platoon.sandbox._exec import kill_process_group, run_command
+from platoon.sandbox._exec import _has_members, kill_process_group, run_command
 from platoon.sandbox.base import ExecResult, SandboxSnapshot, SandboxSpec
 from platoon.sandbox.process_stacks import reap_stack_directories, start_process_stack
 from platoon.sandbox.routes import SandboxRoutes
@@ -64,6 +64,9 @@ GROUPS_FILE = "process-groups"
 # How many times kill_processes looks for processes that left their group, and how long it waits between looks.
 _KILL_PASSES = 50
 _KILL_PAUSE_S = 0.02
+# How long a reap waits for the processes it SIGKILLed to exit, which give back their memory, files and ports first.
+_EXIT_WAIT_S = 10.0
+_GONE = (b"Z", b"X", b"x")  # a zombie or a dead process holds nothing any more
 # A mapped root starts a path when no path character precedes it, and it ends at "/" or a non-path character.
 _PATH_START = r"(?<![\w.~/})-])"
 _PATH_END = r"(?![\w.-])"
@@ -106,16 +109,21 @@ def _is_within(path: str, directory: str) -> bool:
     return path == directory or path.startswith(directory + "/")
 
 
-def _kill_marked(entry: bytes, spare: frozenset[str] = frozenset()) -> list[int]:
+def _kill_marked(entry: bytes, spare: frozenset[str] = frozenset(), killed: dict[int, int] | None = None) -> list[int]:
     """SIGKILL every process of this user whose environment holds ``entry`` (``NAME=value``), but the ``spare`` ones
     ("<pid>:<start time>") and their descendants, looking again until none is left; the ones still there after the
-    last look."""
+    last look.  ``killed`` collects those it signals (pid -> start time).
+
+    The environment of a process that has begun to exit can no longer be read, so no later look finds it, although it
+    still gives back what it held until it has exited (:func:`_wait_exited`)."""
 
     for _ in range(_KILL_PASSES):
         marked = _marked(entry, spare)
         if not marked:
             return []
         for pid in marked:
+            if killed is not None and pid not in killed and (start := process_start_time(pid)) is not None:
+                killed[pid] = start
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
@@ -164,6 +172,52 @@ def _stat(pid: int) -> tuple[int, int] | None:
         return int(fields[1]), int(fields[19])
     except (OSError, IndexError, ValueError):
         return None
+
+
+def _wait_exited(groups: Mapping[int, int | None], pids: Mapping[int, int], timeout_s: float) -> list[int]:
+    """Wait, at most ``timeout_s``, until no process of the process ``groups`` (pgid -> its leader's start time, None
+    when unknown) and none of ``pids`` (pid -> start time) runs any more; the ones that still run then.
+
+    A SIGKILLed process runs on in the kernel while it gives back its memory, which takes a while when it holds much,
+    and then its files and ports; only then is it a zombie, or gone."""
+
+    deadline = time.monotonic() + timeout_s
+    while running := _running(groups, pids):
+        if time.monotonic() >= deadline:
+            return running
+        time.sleep(_KILL_PAUSE_S)
+    return []
+
+
+def _running(groups: Mapping[int, int | None], pids: Mapping[int, int]) -> list[int]:
+    """The processes that run (not a zombie) and are one of ``pids`` or in one of ``groups``: those of
+    :func:`_wait_exited`."""
+
+    groups = {group: start for group, start in groups.items() if _has_members(group)}
+    if not groups and not pids:  # every group is gone, the usual case: no look through /proc
+        return []
+    table: dict[int, tuple[bytes, int, int]] = {}  # pid -> state, process group, start time
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                fields = handle.read().rsplit(b") ", 1)[1].split()
+            table[int(name)] = (fields[0], int(fields[2]), int(fields[19]))
+        except (OSError, IndexError, ValueError):  # gone
+            continue
+
+    def signalled(group: int) -> bool:
+        # A process group's id is the pid of its leader, which no new process gets while the group has a member: a
+        # leader that started at another time leads another group, and the one signalled is gone.
+        leader = table.get(group)
+        return leader is None or groups[group] is None or leader[2] == groups[group]
+
+    return sorted(
+        pid
+        for pid, (state, group, start) in table.items()
+        if state not in _GONE and (pids.get(pid) == start or (group in groups and signalled(group)))
+    )
 
 
 def _root_marker(root: Path) -> bytes:
@@ -382,7 +436,8 @@ class ProcessProvider:
     async def reap(self, labels: Mapping[str, str]) -> int:
         """End every sandbox below ``root`` whose labels include ``labels`` and whose owner is this process or gone:
         SIGKILL the process groups its commands left, and delete its directory, and the directories of such stacks
-        (their volumes).  Returns how many."""
+        (their volumes).  Returns how many, once the processes it killed have exited, or after at most 10 seconds of
+        waiting for them (a warning names those still running)."""
 
         if not labels:
             raise ValueError("Reaping needs labels: an empty set would select every sandbox")
@@ -390,6 +445,8 @@ class ProcessProvider:
 
     def _reap(self, labels: dict[str, str]) -> int:
         reaped = 0
+        groups: dict[int, int | None] = {}  # the process groups it kills: pgid -> its leader's start time
+        killed: dict[int, int] = {}  # and the processes that had left them: pid -> start time
         for base_dir in sorted(self.root.glob("process-*")):
             try:
                 record = json.loads((base_dir / RECORD_FILE).read_text(encoding="utf-8"))
@@ -401,11 +458,20 @@ class ProcessProvider:
             if isinstance(owner, int) and owner != os.getpid() and _alive(owner, record.get("owner_start_time")):
                 continue  # another live process holds it
             for pgid, start_time in _recorded_groups(base_dir / GROUPS_FILE):
-                signal_process_group(pgid, start_time, signal.SIGKILL)
-            _kill_marked(_root_marker(base_dir / "fs"))  # and those that left their group
+                if signal_process_group(pgid, start_time, signal.SIGKILL):
+                    groups[pgid] = start_time
+            _kill_marked(_root_marker(base_dir / "fs"), killed=killed)  # and those that left their group
             shutil.rmtree(base_dir, ignore_errors=True)
             reaped += 1
         reaped += reap_stack_directories(self.root, labels)  # what the stacks of those sandboxes held: their volumes
+        # What runs next, such as the run that reaps before it starts, needs what they held.
+        if running := _wait_exited(groups, killed, _EXIT_WAIT_S):
+            logger.warning(
+                "Processes of the sandboxes labelled %s still run %gs after SIGKILL: %s",
+                labels,
+                _EXIT_WAIT_S,
+                " ".join(map(str, running)),
+            )
         if reaped:
             logger.info("Reaped %d process sandbox(es) labelled %s", reaped, labels)
         return reaped

@@ -10,9 +10,9 @@ import textwrap
 from pathlib import Path
 
 
-async def leave_sandbox(root: Path, label: dict[str, str]) -> int:
-    """Start a process sandbox under ``root``, labelled ``label``, from a process that then exits, leaving a sleep
-    running in it; returns the sleep's pid."""
+async def leave_sandbox(root: Path, label: dict[str, str], command: str = "sleep 300") -> int:
+    """Start a process sandbox under ``root``, labelled ``label``, from a process that then exits, leaving ``command``
+    (a sleep) running in it in the background; returns its pid."""
 
     script = textwrap.dedent(
         f"""
@@ -24,7 +24,7 @@ async def leave_sandbox(root: Path, label: dict[str, str]) -> int:
         async def main():
             cleanup.set_labels({label!r})
             sandbox = await ProcessProvider(root={str(root)!r}).start(SandboxSpec(image="local"))
-            print((await sandbox.exec("sleep 300 > /dev/null 2>&1 & echo $!")).stdout.strip())
+            print((await sandbox.exec({command + " > /dev/null 2>&1 & echo $!"!r})).stdout.strip())
 
         asyncio.run(main())
         """

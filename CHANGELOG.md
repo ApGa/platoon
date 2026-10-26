@@ -287,6 +287,13 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   under `worker_python_env_isolation`, a rollout's Python overlay can now replace those in an exec'd worker, not in a
   forked one.
 
+### Fixes
+
+- The `process` sandbox provider's `reap(labels)`, which a run calls before it starts and as it exits, and
+  `platoon sandbox reap` with it, returns only once the processes it killed have exited, or after 10 seconds, with a
+  warning that names those still running. It returned once it had sent them SIGKILL, while they could still be giving
+  back their memory, files and ports.
+
 ### Deprecations
 
 - **The module paths under `platoon.train.tinker` that moved.** Each still imports, and each name read through it
