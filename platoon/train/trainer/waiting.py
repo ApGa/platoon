@@ -1,8 +1,8 @@
 """What a start waits for: a call, with heartbeats and a deadline; a rollout group, with watchdog heartbeats; the next
 settled group, or a shutdown.
 
-The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.
+The functions here that take the trainer first are its methods still (``_await_with_heartbeat`` every trainer's, on
+``TrainerBase``): to replace one, replace the method, on the class or an instance, not the function.
 """
 
 import asyncio
@@ -11,10 +11,10 @@ import time
 from typing import TYPE_CHECKING
 
 from platoon.train.trainer.signals import TrainInterrupted, Watchdog
-from platoon.train.trainer.state import TrainLoopSharedState
 
 if TYPE_CHECKING:
-    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+    from platoon.train.trainer.api import TrainerBase
+    from platoon.train.trainer.state import TrainLoopSharedState
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ ROLLOUT_HEARTBEAT_INTERVAL_S = 60.0
 
 
 async def _await_with_heartbeat(
-    trainer: "PlatoonTinkerRLTrainer",
+    trainer: "TrainerBase",
     coro,
     name: str,
     heartbeat_interval: float = 60.0,
@@ -72,7 +72,7 @@ async def _await_with_heartbeat(
 
 
 async def _await_rollout_with_heartbeat(
-    trainer: "PlatoonTinkerRLTrainer",
+    trainer: "TrainerBase",
     coro,
     watchdog: Watchdog | None,
     heartbeat_interval: float | None = None,
@@ -103,7 +103,7 @@ async def _await_rollout_with_heartbeat(
 
 
 async def _next_rollout(
-    queue: asyncio.Queue, shared_state: TrainLoopSharedState, *, interruptible: bool, ready: bool = False
+    queue: asyncio.Queue, shared_state: "TrainLoopSharedState", *, interruptible: bool, ready: bool = False
 ):
     """The next rollout result; with ``interruptible`` (no update of the current batch applied yet),
     ``TrainInterrupted`` once a shutdown is requested instead, since the feeders stop on it and the batch

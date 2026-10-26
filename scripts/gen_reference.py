@@ -974,6 +974,8 @@ EXPERIMENTAL_TYPES = (
     "platoon.train.task_stats.VERDICTS",
     "platoon.train.task_stats.FATES",
 )
+# The constants platoon.experimental exports, which carry no module of their own, by the module that defines each.
+EXPERIMENTAL_CONSTANTS = {"MAIN": "platoon.train.policy.spec"}
 
 
 def render_experimental() -> str:
@@ -994,10 +996,23 @@ def render_experimental() -> str:
             "The lease a training workflow runs each of its rollouts on, and how it reads it "
             "([Run rollouts on the lease](../extending/rollout-leases.md)).",
         ),
+        (
+            "Trainers",
+            "The trainer API: what platoon train runs, what it builds a trainer with, the base class whose lifecycle "
+            "calls a trainer's hooks, the policies' specs, the parts of the run's state every full checkpoint holds, "
+            "and what a policy's rows train under.",
+        ),
     )
     names = experimental.__all__
     statistics, admission, leases = names.index("EntryInfo"), names.index("Admission"), names.index("RolloutLease")
-    groups = (names[:statistics], names[statistics:admission], names[admission:leases], names[leases:])
+    trainers = names.index("Trainer")
+    groups = (
+        names[:statistics],
+        names[statistics:admission],
+        names[admission:leases],
+        names[leases:trainers],
+        names[trainers:],
+    )
     lines = [
         GENERATED,
         "",
@@ -1021,14 +1036,17 @@ def render_experimental() -> str:
     for names in groups:
         for name in names:
             value = getattr(experimental, name)
-            doc = _class_doc(value) if isinstance(value, type) else inspect.getdoc(value) or ""
+            if name in EXPERIMENTAL_CONSTANTS:
+                doc = member_docs(importlib.import_module(EXPERIMENTAL_CONSTANTS[name])).get(name, "")
+            else:
+                doc = _class_doc(value) if isinstance(value, type) else inspect.getdoc(value) or ""
             title = f"platoon.experimental.{name}"
             lines.append(f"| [`{name}`](#{anchor(title)}) | {cell(summary(doc))} |")
     for (title, intro), names in zip(sections, groups):
         lines += ["", f"## {title}", "", intro]
         for name in names:
             value = getattr(experimental, name)
-            module = sys.modules[value.__module__]
+            module = importlib.import_module(EXPERIMENTAL_CONSTANTS.get(name) or value.__module__)
             lines += render_object(f"platoon.experimental.{name}", value, module, 3, "platoon.experimental.")
     lines += [
         "",

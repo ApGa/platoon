@@ -1,8 +1,9 @@
 """How a start of training stops: the signal handlers (a first signal stops at the next step boundary, a second
 forces the exit), the watchdog that ends a hung process, and the exceptions that end the loops.
 
-The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.
+``_setup_signal_handlers`` takes the trainer first and is a method of every trainer built on
+:class:`~platoon.train.trainer.api.TrainerBase`, which the run's lifecycle calls (:mod:`platoon.train.trainer.run`): to
+replace it, replace the method, on the class or an instance, not the function.
 """
 
 import asyncio
@@ -15,7 +16,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+    from platoon.train.trainer.api import TrainerBase
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ class TrainInterrupted(Exception):
     """A shutdown signal stopped the train loop where the last completed step is a consistent checkpoint."""
 
 
-def _setup_signal_handlers(trainer: "PlatoonTinkerRLTrainer", shutdown_event: asyncio.Event) -> None:
+def _setup_signal_handlers(trainer: "TrainerBase", shutdown_event: asyncio.Event) -> None:
     """Set up signal handlers for graceful shutdown.
 
     First Ctrl+C (or SIGTERM): Sets shutdown_event. The train loop stops at the next step boundary (a batch

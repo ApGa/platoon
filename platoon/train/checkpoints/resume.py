@@ -1,6 +1,6 @@
-"""Resuming from a checkpoint: where a start begins (:class:`StartPoint`: the checkpoint it resumes from and the policy
-counters that checkpoint saved), and the draws it left outstanding, the groups it kept and its samplers' states, which
-the dispatcher takes up (``_restore_dispatch``, in the steps below it).
+"""Resuming from a checkpoint: where a start begins (:class:`StartPoint`: the checkpoint it resumes from, and for each
+policy, :class:`PolicyStart`, the counters that checkpoint saved), and the draws it left outstanding, the groups it kept
+and its samplers' states, which the dispatcher takes up (``_restore_dispatch``, in the steps below it).
 
 ``_resume_position``, ``_restore_dispatch``, ``_saved_samplings`` and ``_read_kept_groups`` are the trainer's methods
 still: ``PlatoonTinkerRLTrainer`` keeps each under its name, so to replace one, replace the method, on the class or an
@@ -9,7 +9,7 @@ instance, not the function.  The steps of ``_restore_dispatch`` call them throug
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tinker_cookbook import checkpoint_utils
@@ -26,6 +26,7 @@ from platoon.train.checkpoints.kept_groups import decode_group, read_kept
 from platoon.train.checkpoints.saving import ORDER_POSITION_KEY
 from platoon.train.dispatch.dispatcher import Dispatcher
 from platoon.train.dispatch.settled import _Settled
+from platoon.train.policy.spec import MAIN, PolicyId
 from platoon.train.sampling import fingerprint_changes
 from platoon.train.task_records import TaskRecorder, record_sampling_changed
 from platoon.train.task_stats import DISPATCH_KEY
@@ -51,27 +52,53 @@ def _resume_policy_counters(resume_info, num_minibatches: int) -> tuple[int, int
 
 
 @dataclass(frozen=True)
-class StartPoint:
-    """Where a start of training begins: the checkpoint it resumes from (``resume_info``, the run's last one in
-    ``checkpoints.jsonl``; None for a fresh run), the batch it starts at, the policy version and optimizer steps that
-    checkpoint saved (:func:`_resume_policy_counters`), and the whole ``loop_state`` its row holds (empty for a fresh
-    run), where each part of the run's state finds the keys it saved."""
+class PolicyStart:
+    """Where one policy begins a start: the checkpoint row it resumes from (``record``: its weights and its optimizer's
+    state; None for a fresh run), and the policy version and optimizer steps that row saved."""
 
-    resume_info: checkpoint_utils.CheckpointRecord | None
-    batch: int
+    policy: PolicyId
+    record: checkpoint_utils.CheckpointRecord | None
+    version: int
+    optimizer_steps: int
+
+
+@dataclass(frozen=True)
+class StartPoint:
+    """Where a start of training begins: the checkpoint row it resumes from (``record``, the run's last one in
+    ``checkpoints.jsonl``; None for a fresh run), the step it starts at (``step``, the row's ``batch``), the policy
+    version and optimizer steps that row saved (:func:`_resume_policy_counters`), the whole ``loop_state`` it holds
+    (empty for a fresh run), where each part of the run's state finds the keys it saved, and where each policy begins
+    (``policies``: the run's one policy, from that row)."""
+
+    record: checkpoint_utils.CheckpointRecord | None
+    step: int
     policy_version: int
     optimizer_steps: int
     loop_state: Mapping[str, Any]
+    policies: Mapping[PolicyId, PolicyStart] = field(default_factory=dict)
+
+    # The row and the step under the names the rl trainer reads them by: its tests give its methods stand-in starts
+    # that have only those (0.5.0 development names, which go once the tests give start points).
+
+    @property
+    def resume_info(self) -> checkpoint_utils.CheckpointRecord | None:
+        return self.record
+
+    @property
+    def batch(self) -> int:
+        return self.step
 
     @classmethod
-    def read(cls, run_dir: str, num_minibatches: int) -> "StartPoint":
+    def read(cls, run_dir: str, num_minibatches: int, *, leader: PolicyId = MAIN) -> "StartPoint":
         """The start point of a start of the run in ``run_dir``, whose steps take ``num_minibatches`` optimizer steps
-        each (what a checkpoint without the counters implies)."""
+        each (what a checkpoint without the counters implies), for the run's one policy, ``leader``, whose rows the
+        run's ``checkpoints.jsonl`` holds."""
 
         resume_info = checkpoint_utils.get_last_checkpoint(run_dir)
         start_batch = (resume_info.batch or 0) if resume_info else 0
         policy_version, optimizer_steps = _resume_policy_counters(resume_info, num_minibatches)
-        return cls(resume_info, start_batch, policy_version, optimizer_steps, _row_loop_state(resume_info))
+        policies = {leader: PolicyStart(leader, resume_info, policy_version, optimizer_steps)}
+        return cls(resume_info, start_batch, policy_version, optimizer_steps, _row_loop_state(resume_info), policies)
 
 
 def _row_loop_state(resume_info: checkpoint_utils.CheckpointRecord | None) -> dict[str, Any]:

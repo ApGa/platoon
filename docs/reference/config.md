@@ -52,6 +52,7 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 |---|---|---|---|
 | `train` | [TrainConfig](#trainconfig) | required |  |
 | `eval` | [EvalConfig](#evalconfig-platoon-train-config-defs) | `EvalConfig()` | Evaluation during training; a config without the section does not evaluate (`eval.every` is 0). |
+| `trainer` | str | `"rl"` | The trainer: rl, GRPO-style training on the rollouts of the training tasks, with `train:`'s settings (the one trainer of this release; sft and interleaved are reserved for trainers platoon adds). |
 | `log_path` | str | required | Root of the run directories; a run writes to `log_path/<stats.experiment_name>/<stats.trial_name>`. A config without one takes the site profile's `runs` (platoon.site), and then `stats.experiment_name` defaults to the config file's name. A relative one is relative to the working directory. |
 | `tinker_base_url` | str \| None | `null` | URL of a self-hosted Tinker-compatible service, such as miles-tinker (https://github.com/neulab/miles-tinker); None: `TINKER_BASE_URL`, else hosted Tinker. |
 | `environments` | list[[EnvironmentConfig](#environmentconfig)] | `[EnvironmentConfig()]` | The environments to train on: one, or a mixture whose entries each have a `name`. |

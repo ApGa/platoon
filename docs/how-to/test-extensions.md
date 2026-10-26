@@ -294,6 +294,29 @@ with other hash seeds, so put the package on `PYTHONPATH`. No check proves a rul
 more calls, or on other inputs, passes. `check_group_admission` checks the experimental admission API
 (`platoon.experimental`), and changes with it.
 
+## Check a trainer
+
+A trainer class of your own (`platoon.experimental.TrainerBase`, or any class of the `Trainer` protocol) is checked
+against the lifecycle every trainer goes through by `check_trainer`, on CPU, with neither a model nor a Tinker service:
+
+```python
+from platoon.testing import check_trainer
+
+
+def test_my_trainer_keeps_the_lifecycle():
+    check_trainer(MyTrainer)
+```
+
+It runs the trainer through RFC 0021's lifecycle (built from its setup, entered with `async with`, run; `platoon train`
+itself still builds the rl trainer with its constructor and calls its `train()`, which runs the same lifecycle), on a
+fake Tinker service whose saves the run's `checkpoints.jsonl` records as a real service's are, and, for a trainer that
+rolls out, over 16 tasks whose every group is one datum with a nonzero advantage. It raises one `AssertionError` that names every
+check that failed: `trains` (a run of two steps saves its launch checkpoint at step 0 and its final one at step 2, each
+row with the run's counters), `interrupts` (a stop request in the third optimizer step of a run of four ends it at a
+step boundary, with `<step>_interrupted` saved there) and `resumes` (the next start resumes from that row and trains to
+the run's end). Call it outside a running event loop; it puts back the signal handlers it found. `check_trainer`
+checks the experimental trainer API (`platoon.experimental`), and changes with it.
+
 ## Reference
 
 | Name | Signature and behavior |
@@ -314,6 +337,8 @@ more calls, or on other inputs, passes. `check_group_admission` checks the exper
 | `TOY_MODEL_NAME`, `TOY_RENDERER_NAME`, `TOY_TOKENIZER_DIR` | `"platoon/toy"`, `"qwen3_instruct"`, and the directory of the toy tokenizer's files |
 | `check_task_sampler` | `check_task_sampler(sampler, *, options=None, levels=("entry", "run"), budget_ms=20.0)`: raises `AssertionError` naming each check a task sampler fails ([Check a task sampler](#check-a-task-sampler)) |
 | `check_group_admission` | `check_group_admission(rule, *, options=None, levels=("run", "entry"), budget_ms=2.0)`: raises `AssertionError` naming each check a group admission rule fails ([Check a group admission rule](#check-a-group-admission-rule)) |
+| `check_trainer` | `check_trainer(trainer, *, options=None)`: raises `AssertionError` naming each check a trainer fails ([Check a trainer](#check-a-trainer)) |
 
-The names `platoon.testing` exports are a stable API, but for `check_task_sampler` and `check_group_admission`, which
-check the experimental sampler and admission APIs and change with them; its submodules are not.
+The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission` and
+`check_trainer`, which check the experimental sampler, admission and trainer APIs and change with them; its submodules
+are not.

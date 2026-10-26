@@ -2,7 +2,9 @@
 
 The policy they train is the leader of the run's policies (``policies``): its model info, its Tinker clients, its
 optimizer's parameters and the optimizer steps it took are the policy's, which the shared state reads and writes
-through properties of the same names.
+through properties of the same names.  The step the loops are at and the event of each step's end are the run's clock's
+(``clock``, :class:`~platoon.train.trainer.run.StepClock`), likewise ``train_step`` and
+``sampling_client_updated_event``.
 """
 
 import asyncio
@@ -17,6 +19,7 @@ from platoon.train.policy.policy import Policy
 from platoon.train.policy.set import PolicySet
 from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.trainer.run import StepClock
 from platoon.train.trainer.signals import Watchdog
 from platoon.utils.stats_logger import StatsLogger
 from platoon.utils.stats_tracker import StatsTracker
@@ -27,10 +30,11 @@ _NOT_GIVEN: Any = object()
 
 @dataclass(kw_only=True)
 class _GivenPolicyState:
-    """The policy's state as a shared state was given it before the run's policies held it: platoon 0.4.0's keyword
-    arguments, which tests still give.  A shared state made with these, and without ``policies``, keeps them in a
-    policy of its own (:meth:`TrainLoopSharedState.__post_init__`).  To be removed with platoon 0.4.0's paths (0.6.0),
-    once the tests make their states with policies."""
+    """The policy's state as a shared state was given it before the run's policies held it, and the loops' step and the
+    event of each step's end before the run's clock held them: platoon 0.4.0's keyword arguments, which tests still
+    give.  A shared state made with these, and without ``policies`` or ``clock``, keeps them in a policy or a clock of
+    its own (:meth:`TrainLoopSharedState.__post_init__`).  To be removed with platoon 0.4.0's paths (0.6.0), once the
+    tests make their states with policies and a clock."""
 
     optimizer_params: InitVar[Any] = _NOT_GIVEN
     service_client: InitVar[Any] = _NOT_GIVEN
@@ -38,6 +42,8 @@ class _GivenPolicyState:
     sampling_client: InitVar[Any] = _NOT_GIVEN
     model_info: InitVar[Any] = _NOT_GIVEN
     optimizer_steps: InitVar[Any] = _NOT_GIVEN
+    train_step: InitVar[Any] = _NOT_GIVEN
+    sampling_client_updated_event: InitVar[Any] = _NOT_GIVEN
 
 
 def _main_holding(
@@ -65,22 +71,24 @@ def _main_holding(
 @dataclass(kw_only=True)
 class TrainLoopSharedState(_GivenPolicyState):
     """What the train and evaluation loops of one start share, made with keyword arguments: the trainer gives it the
-    run's policies (``policies``); a state made without them, given the policy's state instead
-    (:class:`_GivenPolicyState`), makes its own.  Given both, it raises ``TypeError``, as ``dataclasses.replace()`` of
-    it does, which gives both: the part given would be dropped.  A copy (``copy.copy()``) shares the original's
-    policies, and so their state."""
+    run's policies (``policies``) and clock (``clock``); a state made without them, given the policy's state or the
+    step and the event instead (:class:`_GivenPolicyState`), makes its own.  Given both, it raises ``TypeError``, as
+    ``dataclasses.replace()`` of it does, which gives both: the part given would be dropped.  A copy (``copy.copy()``)
+    shares the original's policies and clock, and so their state."""
 
     config: PlatoonTinkerRLTrainerConfig
     shutdown_event: asyncio.Event
-    train_step: int
     train_dataloader: PlatoonTinkerDataloader
     eval_dataloader: PlatoonTinkerDataloader | None
     # The run's policies, whose leader the loops train; None only until __post_init__ makes the state's own.
     policies: PolicySet | None = None
+    # The run's step clock, which each step's end advances; None only until __post_init__ makes the state's own.
+    clock: StepClock | None = None
     sampling_client_step: int
-    sampling_client_updated_event: asyncio.Event
     stats_logger: StatsLogger
     train_tracker: StatsTracker
+    # The run's watchdog, the one its clock feeds at each step's end (clock.watchdog), which the loops' waits feed too;
+    # None when the config turns it off.
     watchdog: Watchdog | None = None
     # Whether an evaluation loop runs beside the training loop.  The evaluation loop records each training step it
     # has handled (evaluated, when an evaluation was due) and sets ``eval_progress_event``, so that the training loop
@@ -103,9 +111,14 @@ class TrainLoopSharedState(_GivenPolicyState):
         sampling_client: Any,
         model_info: Any,
         optimizer_steps: Any,
+        train_step: Any,
+        sampling_client_updated_event: Any,
     ) -> None:
         """Made without the run's policies: one of its own, ``main``, which holds the state the shared state was given
-        (:func:`_main_holding`).  Made with them: given none of that state, which the policies hold."""
+        (:func:`_main_holding`).  Made with them: given none of that state, which the policies hold.  Likewise the
+        clock: made without one, one of its own at ``train_step``, with ``sampling_client_updated_event``."""
+
+        self._own_clock(train_step, sampling_client_updated_event)
 
         parts = {
             "optimizer_params": optimizer_params,
@@ -123,6 +136,53 @@ class TrainLoopSharedState(_GivenPolicyState):
                 "TrainLoopSharedState takes the run's policies or the policy's state, not both: given policies and "
                 + ", ".join(given)
             )
+
+    def _own_clock(self, train_step: Any, sampling_client_updated_event: Any) -> None:
+        """The state's clock: the run's, when it was given one, else one of its own over the step and the event it was
+        given (``TypeError`` when it was given both, or neither)."""
+
+        given = [
+            name
+            for name, part in (
+                ("train_step", train_step),
+                ("sampling_client_updated_event", sampling_client_updated_event),
+            )
+            if part is not _NOT_GIVEN
+        ]
+        if self.clock is not None and given:
+            raise TypeError(
+                "TrainLoopSharedState takes the run's clock or the loops' step and event, not both: given clock and "
+                + ", ".join(given)
+            )
+        if self.clock is None:
+            if len(given) < 2:
+                raise TypeError(
+                    "TrainLoopSharedState takes the run's clock, or train_step and sampling_client_updated_event"
+                )
+            self.clock = StepClock(step=train_step, updated=sampling_client_updated_event, watchdog=self.watchdog)
+
+    # The step the loops are at, and the event of each step's end, the run's clock's, under the names the shared state
+    # gave them when it held them itself.
+
+    def _clock(self) -> StepClock:
+        assert self.clock is not None  # __post_init__ made it
+        return self.clock
+
+    @property
+    def train_step(self) -> int:
+        return self._clock().step
+
+    @train_step.setter
+    def train_step(self, step: int) -> None:
+        self._clock().step = step
+
+    @property
+    def sampling_client_updated_event(self) -> asyncio.Event:
+        return self._clock().updated
+
+    @sampling_client_updated_event.setter
+    def sampling_client_updated_event(self, event: asyncio.Event) -> None:
+        self._clock().updated = event
 
     # The state of the policy the loops train, the leader, read and written under the names the shared state gave it
     # when it held that state itself.

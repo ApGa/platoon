@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from platoon.train.config_defs import AdamParams
 
 PolicyId = str
-#: The policy that ``train:`` declares.  The same object as ``task_stats.MAIN``, by whose versions the per-task
-#: statistics age their evidence, so that their snapshots keep their format.
+# The policy that ``train:`` declares.  The same object as ``task_stats.MAIN``, by whose versions the per-task
+# statistics age their evidence, so that their snapshots keep their format.
 MAIN: Final[PolicyId] = task_stats.MAIN
 
 
