@@ -327,8 +327,8 @@ def stop_orphaned_workers() -> list[int]:
     nobody), from the registry under ``$TMPDIR`` where trainers keep it; returns their pids; never raises."""
 
     try:
-        from platoon.train.tinker.workers.protocol import ipc_dir
-        from platoon.train.tinker.workers.registry import registry_dir, sweep_orphaned_workers
+        from platoon.train.workers.protocol import ipc_dir
+        from platoon.train.workers.registry import registry_dir, sweep_orphaned_workers
 
         stopped = sweep_orphaned_workers(registry_dir(ipc_dir()))
     except Exception:

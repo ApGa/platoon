@@ -1,0 +1,244 @@
+"""The evaluation loop beside training: each due step evaluated on the eval split, the first update held for step 0's
+evaluation, and the last step's evaluation let end before the loops stop.
+
+The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
+name, so to replace one, replace the method, on the class or an instance, not the function.
+"""
+
+import asyncio
+import logging
+import time
+from typing import TYPE_CHECKING, Any
+
+from platoon.train.dispatch.permits import _Rows, _rows
+from platoon.train.dispatch.runner import _group_done
+from platoon.train.dispatch.settled import _output_label, _Settled, _settled
+from platoon.train.evaluation.record import record_evaluation
+from platoon.train.labels import label_column, metric_labels, metric_prefix
+from platoon.train.step.metrics import LABEL_STATS, _count_every_reward_key, _no_groups_yet, _record_group_stats
+from platoon.train.tinker.rollout_metrics import monitor as client_monitor
+from platoon.train.trainer.signals import TerminateEvalLoop, TrainInterrupted
+from platoon.train.trainer.state import TrainLoopSharedState
+from platoon.train.workflow.protocol import RolloutWorkflow
+from platoon.utils.rollout_stats import RolloutStats
+from platoon.utils.stats_tracker import StatsTracker
+from platoon.utils.stats_tracker import get as get_tracker
+
+if TYPE_CHECKING:
+    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+
+logger = logging.getLogger(__name__)
+
+
+async def _rollout_workflow_worker_loop(
+    trainer: "PlatoonTinkerRLTrainer",
+    shared_state: TrainLoopSharedState,
+    workflow: RolloutWorkflow,
+    task_data_queue: asyncio.Queue[dict],
+    rollout_result_queue: asyncio.Queue[Any],
+    *,
+    tracker: StatsTracker,
+    rows: _Rows | None = None,
+):
+    """An evaluation's rollout worker (training's groups start through the dispatcher): run the groups of the rows
+    ``task_data_queue`` gives, one at a time, until a shutdown is requested, record their statistics in
+    ``tracker``, and put each output on ``rollout_result_queue``.  With ``rows``, a group first takes its entry's
+    group size in rollout permits, and its output goes with the entry and the label of the row it ran
+    (:class:`_Settled`)."""
+
+    while not shared_state.shutdown_event.is_set():
+        data = await task_data_queue.get()
+        entry, label, group_size = rows.of(data) if rows is not None else (None, None, 0)
+        reservation = rows.permits.reserve(group_size) if rows is not None else None
+        try:
+            if reservation is not None:
+                await reservation.ready()
+            start_time = time.perf_counter()
+            rollout = await trainer._run_group(workflow, data, watchdog=shared_state.watchdog, tracker=tracker)
+        finally:
+            if reservation is not None:
+                reservation.withdraw()
+
+        task_id = data.get("task_id", "unknown")
+        _group_done(rollout, time.perf_counter() - start_time, task_id, tracker, shared_state.watchdog)
+        rollout_result_queue.put_nowait(_Settled(entry, label, rollout) if rows is not None else rollout)
+
+
+async def _eval_completion_monitor(
+    trainer: "PlatoonTinkerRLTrainer",
+    total_eval_tasks: int,
+    eval_rollout_result_queue: asyncio.Queue[Any],
+    tracker: StatsTracker | None = None,
+    label_stats: dict[str, RolloutStats] | None = None,
+):
+    """Monitor task that waits for all eval results and then terminates the eval TaskGroup; each group's rollout
+    statistics go into its label's ``label_stats``, when its label's metrics are logged."""
+    for _ in range(total_eval_tasks):
+        settled = _settled(await eval_rollout_result_queue.get())
+        row_label, rollout = settled.label, settled.rollout
+        if tracker is not None:
+            _record_group_stats(rollout, tracker)
+        rollout_stats = getattr(rollout, "rollout_stats", None)
+        label = row_label if row_label is not None else _output_label(rollout)
+        if label_stats is not None and label in label_stats and isinstance(rollout_stats, RolloutStats):
+            label_stats[label].merge(rollout_stats.subset(LABEL_STATS))
+    raise TerminateEvalLoop()
+
+
+async def _eval_loop(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState, workflow: RolloutWorkflow):
+    eval_tracker = get_tracker("eval")
+    # Each evaluation's metrics break down by these labels of the evaluation's tasks (train.label_by), as a
+    # training step's do: eval/<column>/<label>/...
+    column = label_column(trainer.config)
+    labels = metric_labels(getattr(trainer, "eval_dataset", None), column, split="evaluation")
+    reward_keys: set[str] = set()
+
+    while not shared_state.shutdown_event.is_set():
+        await shared_state.sampling_client_updated_event.wait()
+
+        # Check shutdown again after waking up
+        if shared_state.shutdown_event.is_set():
+            break
+
+        # Clear the event so we wait for the next update
+        shared_state.sampling_client_updated_event.clear()
+
+        step = shared_state.train_step
+        # Every eval_every steps: step 0, the starting policy, only with eval.at_start, and a start that resumed
+        # each multiple from the step it resumed at on, that one unless an earlier start completed its evaluation.
+        if shared_state.evaluation_due(step):
+            eval_start = time.perf_counter()
+            logger.info(f"Starting evaluation at step {shared_state.train_step}")
+            limited = getattr(workflow, "start_limit", None) is not None  # train.max_starting_rollouts
+            if limited:  # its start-limit metrics cover this evaluation
+                client_monitor("eval").start_limit_metrics(reset=True)
+            # Rollout workers read the sampling client from its published binding, which training publishes for
+            # its own: an evaluation whose rollouts run in worker processes while training's do not needs it too.
+            if getattr(workflow, "rollout_isolation", "inprocess") == "process":
+                version = shared_state.model_info.llm.version
+                trainer._publish_worker_binding(workflow, shared_state.sampling_client, version)
+
+            eval_data_queue = asyncio.Queue[dict]()
+            eval_rollout_result_queue = asyncio.Queue[Any]()  # each group's _Settled
+
+            # Populate eval queue with all eval data upfront
+            total_eval_tasks = 0
+            for i_batch in range(len(shared_state.eval_dataloader)):
+                batch = shared_state.eval_dataloader.get_batch(i_batch)
+                for data in batch:
+                    eval_data_queue.put_nowait(data)
+                    total_eval_tasks += 1
+
+            rows, num_workers = _rows(trainer.config, "eval", trainer.config.eval.max_concurrent_rollouts)
+            label_stats = {label: _no_groups_yet() for label in labels}
+
+            # Run eval with TaskGroup - completion monitor will raise TerminateEvalLoop when done
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    # Spawn workers with eval tracker
+                    for i in range(num_workers):
+                        tg.create_task(
+                            trainer._rollout_workflow_worker_loop(
+                                shared_state,
+                                workflow,
+                                eval_data_queue,
+                                eval_rollout_result_queue,
+                                tracker=eval_tracker,
+                                rows=rows,
+                            ),
+                            name=f"eval_rollout_workflow_worker_{i}",
+                        )
+                    # Spawn completion monitor
+                    tg.create_task(
+                        trainer._eval_completion_monitor(
+                            total_eval_tasks,
+                            eval_rollout_result_queue,
+                            tracker=eval_tracker,
+                            label_stats=label_stats,
+                        ),
+                        name="eval_completion_monitor",
+                    )
+            except* TerminateEvalLoop:
+                pass  # Expected - eval completed successfully
+
+            eval_elapsed = time.perf_counter() - eval_start
+            logger.info(f"Evaluation completed in {eval_elapsed:.1f}s for {total_eval_tasks} tasks")
+
+            # Export and log eval stats, each label's among them
+            _count_every_reward_key(reward_keys, label_stats.values())
+            for label, stats in label_stats.items():
+                stats.record(eval_tracker, prefix=metric_prefix(column, label))
+            eval_stats = eval_tracker.export(reset=True)
+            if limited:
+                eval_stats.update(client_monitor("eval").start_limit_metrics(prefix="eval/rollout_client"))
+            eval_stats["eval/time"] = eval_elapsed
+            eval_stats["eval/num_tasks"] = total_eval_tasks
+            # The step whose policy the evaluation started on; it is logged at the step training reached by its end.
+            eval_stats["eval/step"] = step
+            # Use force=True since train already logged at this step
+            shared_state.stats_logger.log(step=shared_state.train_step, stats=eval_stats, force=True)
+            if shared_state.evaluations_path is not None:  # so that a start that resumes at step does not rerun it
+                record_evaluation(
+                    shared_state.evaluations_path,
+                    step=step,
+                    logged_at=shared_state.train_step,
+                    tasks=total_eval_tasks,
+                    seconds=eval_elapsed,
+                )
+
+        shared_state.eval_handled_step = step
+        shared_state.eval_progress_event.set()
+
+
+async def _wait_for_starting_policy_evaluation(
+    trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState
+) -> None:
+    """Hold the first update of a run launched at step 0 until the evaluation loop has handled the step it started
+    on, when that is due: the evaluation of the starting policy (``eval.at_start``).
+
+    An evaluation's rollouts sample the policy that is current when they run: rollout workers follow the sampling
+    client the trainer publishes, and a full fine-tuning service serves its newest weights.  An update during the
+    step-0 evaluation would mix later policies into the number the held-out curve starts from.  Training rollouts
+    go on meanwhile.  There is nothing to wait for without an evaluation loop, without ``eval.at_start``, or when
+    an earlier start of the run completed the evaluation of step 0.  A shutdown request ends the wait with
+    ``TrainInterrupted``: no update of the batch has been applied, so it is dropped whole and a resume redoes it,
+    as when a shutdown comes while the batch waits for its rollouts.
+    """
+
+    if not shared_state.eval_loop_running or not shared_state.evaluation_due(0):
+        return
+    while shared_state.eval_handled_step is None:
+        if shared_state.shutdown_event.is_set():
+            raise TrainInterrupted()
+        shared_state.eval_progress_event.clear()
+        progress = asyncio.ensure_future(shared_state.eval_progress_event.wait())
+        shutdown = asyncio.ensure_future(shared_state.shutdown_event.wait())
+        try:
+            await asyncio.wait((progress, shutdown), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            progress.cancel()
+            shutdown.cancel()
+
+
+async def _wait_for_last_step_evaluation(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState) -> None:
+    """Let the evaluation loop handle the last training step before the loops stop.
+
+    Stopping the loops cancels the evaluation loop, so without this wait an evaluation due at the last step
+    never ran, and one still running from an earlier step was cancelled.  A start that resumed a run at its last
+    step trains none, and waits for the evaluation of that step if it is due: one that a crash cut short, which
+    the run's evaluations.jsonl does not list.  There is nothing to wait for without an evaluation loop.  A
+    shutdown request ends the wait at once: the loops then stop as before, cancelling the evaluation, and the
+    final checkpoint is still saved.
+    """
+
+    if not shared_state.eval_loop_running:
+        return
+    while shared_state.eval_handled_step != shared_state.train_step and not shared_state.shutdown_event.is_set():
+        shared_state.eval_progress_event.clear()
+        progress = asyncio.ensure_future(shared_state.eval_progress_event.wait())
+        shutdown = asyncio.ensure_future(shared_state.shutdown_event.wait())
+        try:
+            await asyncio.wait((progress, shutdown), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            progress.cancel()
+            shutdown.cancel()

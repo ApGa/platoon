@@ -18,11 +18,11 @@ from typing import Any
 import pytest
 
 from platoon.train.components import ENVIRONMENT_COLUMN
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN, SEQ_COLUMN
 from platoon.train.sampler_runtime import SamplerSet, TaskPool
+from platoon.train.task_records import TaskRecorder
 from platoon.train.task_stats import MAIN, MemberResult, TaskStatsStore, snapshot_bytes
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN, SEQ_COLUMN
-from platoon.train.tinker.task_records import TaskRecorder
 
 TASKS = [f"{entry}::{index}" for entry in ("quick", "slow") for index in range(3)]
 

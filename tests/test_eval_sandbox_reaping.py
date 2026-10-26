@@ -289,7 +289,7 @@ def test_a_slot_process_labels_its_sandboxes_with_the_evaluations_labels_too(tmp
 _HARD_TIMEOUT_SCRIPT = """
 import sys
 sys.path[:0] = {path!r}
-import platoon.config_defs, platoon.train.tinker.workers.protocol
+import platoon.config_defs, platoon.train.workers.protocol
 from platoon.eval import subprocess_worker
 from platoon.sandbox import cleanup
 from platoon.task import Task

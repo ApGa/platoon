@@ -15,8 +15,8 @@ import pytest
 import tinker
 from test_dispatcher import _Recorder, _Rows, _settle
 
-from platoon.train.tinker.dispatcher import BoundDraw, Dispatcher
-from platoon.train.tinker.rl import _Settled, emptied
+from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
+from platoon.train.dispatch.settled import _Settled, emptied
 
 
 class _Harness:

@@ -440,7 +440,7 @@ class _VersionedClient:
 
 
 def test_following_sampling_client_is_read_at_every_call(renderer, tokenizer, tmp_path):
-    from platoon.train.tinker.workers.binding import FollowingSamplingClient, publish_binding
+    from platoon.train.workers.binding import FollowingSamplingClient, publish_binding
 
     path = str(tmp_path / "binding.pkl")
     publish_binding(_VersionedClient(3), 3, path)

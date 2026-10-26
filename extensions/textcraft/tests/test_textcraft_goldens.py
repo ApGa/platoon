@@ -184,7 +184,7 @@ async def textcraft_synth_recursive_rao_config(make_gateway: MakeGateway, tmp_pa
     from platoon.config_defs import RolloutConfig
     from platoon.harness.rollout import EmbeddedGateway, run_harness_rollout
     from platoon.train.auto import AutoEnvironment, AutoTaskLoader
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.train.tinker.proxy import proxy_interactions
     from platoon.utils.config import load_config
 

@@ -1,6 +1,6 @@
 """The JSON Lines records a training run appends to as it goes and its later starts read back:
-``checkpoints_deleted.jsonl`` (:mod:`platoon.train.tinker.checkpoint_pruning`) and ``evaluations.jsonl``
-(:mod:`platoon.train.tinker.evaluation_record`).
+``checkpoints_deleted.jsonl`` (:mod:`platoon.train.checkpoints.pruning`) and ``evaluations.jsonl``
+(:mod:`platoon.train.evaluation.record`).
 
 A process may die while it writes a line, so a reader skips a line that does not parse, and a writer starts its line on
 a line of its own.

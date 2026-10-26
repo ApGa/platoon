@@ -3,7 +3,7 @@
 :class:`RolloutLease` states the contract, and ``docs/extending/rollout-leases.md`` is the guide.  The trainer sets the
 lease of each training draw in a context variable around the draw's ``arun_episode(row)`` (:func:`holding`), and
 :func:`rollout_lease` reads it.  This module imports nothing of ``tinker``, so that ``platoon.experimental`` can export
-it; the trainer's leases live in :mod:`platoon.train.tinker.permits`.
+it; the trainer's leases live in :mod:`platoon.train.dispatch.permits`.
 """
 
 from __future__ import annotations

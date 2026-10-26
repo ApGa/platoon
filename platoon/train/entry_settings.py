@@ -125,7 +125,7 @@ def _eval_settings(config: Any, train: Any, overlay: Mapping[str, Any]) -> Any:
     if given is None:
         laid = run
     else:
-        from platoon.train.tinker.config_defs import eval_workflow_base
+        from platoon.train.config_defs import eval_workflow_base
 
         base = eval_workflow_base({"train": SimpleNamespace(workflow_config=train)}, _eval_default(config))
         laid = lay_over(base, given) if given else base
@@ -762,7 +762,7 @@ def describe(config: Any, label: str, settings: Mapping[str, EntrySettings] | No
     entry = next(entry for entry in config.environments if entry.label == label)
     blocks: list[str] = []
     if getattr(config, "train", None) is not None:
-        from platoon.train.tinker.config_defs import eval_workflow_base, evaluates
+        from platoon.train.config_defs import eval_workflow_base, evaluates
 
         settings = settings if settings is not None else entry_settings(config)
         own = settings[label]

@@ -192,15 +192,17 @@ class SlowToolEnv(CounterEnv):
         return ToolOutput(blocks=[TextBlock(text="slow")])
 
 
+HELD = threading.Event()  # set once HeldToolEnv's tool runs
 RELEASE = threading.Event()  # lets HeldToolEnv's tool return
 
 
 class HeldToolEnv(CounterEnv):
-    """A sync tool that runs until a test sets ``RELEASE``."""
+    """A sync tool that sets ``HELD`` and runs until a test sets ``RELEASE``."""
 
     @tool
     def held(self) -> ToolOutput:
         """Wait to be released."""
+        HELD.set()
         RELEASE.wait(30)
         EVENTS.append("held:done")
         return ToolOutput(blocks=[TextBlock(text="released")])

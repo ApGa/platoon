@@ -15,11 +15,11 @@ import logging
 import pytest
 from test_rollout_permits_run import _group
 
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN
+from platoon.train.dispatch.permits import PermitPool
 from platoon.train.leases import holding
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN
-from platoon.train.tinker.permits import PermitPool
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.workflow import members as members_module
 from platoon.utils.stats_tracker import get as get_tracker
 from platoon.utils.stopping import let_finish
 
@@ -140,7 +140,7 @@ def test_under_group_no_member_waits_for_the_teardowns_its_rollout_left_running(
 
 
 def test_a_teardown_that_hangs_holds_the_permit_only_for_the_bound(monkeypatch, caplog):
-    monkeypatch.setattr(grw, "CLEANUP_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(members_module, "CLEANUP_WAIT_SECONDS", 0.2)
     sandboxes = _Sandboxes()
 
     async def run() -> None:

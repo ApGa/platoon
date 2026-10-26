@@ -14,7 +14,7 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 
 - [`PlatoonTinkerRLTrainerConfig`](#platoontinkerrltrainerconfig)
 - [`TrainConfig`](#trainconfig)
-- [`EvalConfig (platoon.train.tinker.config_defs)`](#evalconfig-platoon-train-tinker-config-defs)
+- [`EvalConfig (platoon.train.config_defs)`](#evalconfig-platoon-train-config-defs)
 - [`EnvironmentConfig`](#environmentconfig)
 - [`CheckpointConfig`](#checkpointconfig)
 - [`StatsConfig`](#statsconfig)
@@ -42,7 +42,7 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 
 ## PlatoonTinkerRLTrainerConfig
 
-`platoon.train.tinker.config_defs.PlatoonTinkerRLTrainerConfig`
+`platoon.train.config_defs.PlatoonTinkerRLTrainerConfig`
 
 The top level of a training config.
 
@@ -51,7 +51,7 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `train` | [TrainConfig](#trainconfig) | required |  |
-| `eval` | [EvalConfig](#evalconfig-platoon-train-tinker-config-defs) | `EvalConfig()` | Evaluation during training; a config without the section does not evaluate (`eval.every` is 0). |
+| `eval` | [EvalConfig](#evalconfig-platoon-train-config-defs) | `EvalConfig()` | Evaluation during training; a config without the section does not evaluate (`eval.every` is 0). |
 | `log_path` | str | required | Root of the run directories; a run writes to `log_path/<stats.experiment_name>/<stats.trial_name>`. A config without one takes the site profile's `runs` (platoon.site), and then `stats.experiment_name` defaults to the config file's name. A relative one is relative to the working directory. |
 | `tinker_base_url` | str \| None | `null` | URL of a self-hosted Tinker-compatible service, such as miles-tinker (https://github.com/neulab/miles-tinker); None: `TINKER_BASE_URL`, else hosted Tinker. |
 | `environments` | list[[EnvironmentConfig](#environmentconfig)] | `[EnvironmentConfig()]` | The environments to train on: one, or a mixture whose entries each have a `name`. |
@@ -63,7 +63,7 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 
 ## TrainConfig
 
-`platoon.train.tinker.config_defs.TrainConfig`
+`platoon.train.config_defs.TrainConfig`
 
 In a training config: `train`.
 
@@ -100,11 +100,11 @@ The `train:` section: the model, the batch, the loss, the optimizer and the roll
 | `forward_backward_timeout_seconds` | float | `5400.0` | Client-side deadline in seconds for a `forward_backward` result. The client submits every microbatch up front and the Tinker service runs them in order, so the first wait covers the whole optimizer step's training compute, not one microbatch: size it for a full step of the largest batches you train. |
 | `optim_step_timeout_seconds` | float | `300.0` | Deadline in seconds for the optimizer step itself, which is fast; it only guards against a stalled service. |
 
-<a id="evalconfig-platoon-train-tinker-config-defs"></a>
+<a id="evalconfig-platoon-train-config-defs"></a>
 
-## EvalConfig (platoon.train.tinker.config_defs)
+## EvalConfig (platoon.train.config_defs)
 
-`platoon.train.tinker.config_defs.EvalConfig`
+`platoon.train.config_defs.EvalConfig`
 
 In a training config: `eval`.
 
@@ -182,7 +182,7 @@ entry's `package` registers.
 
 ## CheckpointConfig
 
-`platoon.train.tinker.config_defs.CheckpointConfig`
+`platoon.train.config_defs.CheckpointConfig`
 
 In a training config: `checkpoint`.
 
@@ -205,7 +205,7 @@ directory resumes from the newest, weights and optimizer state.
 
 ## StatsConfig
 
-`platoon.train.tinker.config_defs.StatsConfig`
+`platoon.train.config_defs.StatsConfig`
 
 In a training config: `stats`.
 
@@ -221,7 +221,7 @@ The `stats:` section: run names and Weights & Biases logging.
 
 ## WatchdogConfig
 
-`platoon.train.tinker.config_defs.WatchdogConfig`
+`platoon.train.config_defs.WatchdogConfig`
 
 In a training config: `watchdog`.
 
@@ -239,7 +239,7 @@ The `watchdog:` section: a timer that ends a training process that stops making 
 
 ## AdamParams
 
-`platoon.train.tinker.config_defs.AdamParams`
+`platoon.train.config_defs.AdamParams`
 
 In a training config: `train.optimizer`.
 
@@ -258,7 +258,7 @@ The Adam optimizer's settings, applied by the Tinker service at each optimizer s
 
 ## WorkflowConfig
 
-`platoon.train.tinker.config_defs.WorkflowConfig`
+`platoon.train.config_defs.WorkflowConfig`
 
 In a training config: `train.workflow_config`, `eval.workflow_config`.
 
@@ -301,7 +301,7 @@ Each task is rolled out `group_size` times; a rollout's advantage is its reward 
 
 ## RefillConfig
 
-`platoon.train.tinker.config_defs.RefillConfig`
+`platoon.train.config_defs.RefillConfig`
 
 In a training config: `train.refill`.
 
@@ -459,7 +459,7 @@ writes its files, and the default sampling of its model calls.
 
 ## StragglerPolicy
 
-`platoon.train.tinker.config_defs.StragglerPolicy`
+`platoon.train.config_defs.StragglerPolicy`
 
 In a training config: `train.workflow_config.straggler_policies.<key>`, `eval.workflow_config.straggler_policies.<key>`.
 

@@ -25,8 +25,7 @@ from tinker_service_fakes import FakeTinkerService
 from trainer_fakes import Workflow, make_trainer, trainer_config
 
 from platoon import cli
-from platoon.train.tinker import rl
-from platoon.train.tinker.config_defs import (
+from platoon.train.config_defs import (
     CheckpointConfig,
     EvalConfig,
     PlatoonTinkerRLTrainerConfig,
@@ -34,7 +33,8 @@ from platoon.train.tinker.config_defs import (
     evaluates,
     event_interval,
 )
-from platoon.train.tinker.evaluation_record import completed_evaluation_steps
+from platoon.train.evaluation.record import completed_evaluation_steps
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.config import ConfigError, resolve_config
 from platoon.utils.jsonl import read_jsonl
 
@@ -218,7 +218,7 @@ def test_a_run_shorter_than_its_evaluation_epoch_evaluates_nothing_and_says_so_i
 
     config = _config(tmp_path, 3, "eval.every=1", "eval.strategy=epoch")
 
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    with caplog.at_level(logging.INFO, logger=rl_module.__name__):
         _trainer, evaluated, crash = _start(monkeypatch, config, FakeTinkerService())
 
     assert crash is None and evaluated == []

@@ -1,4 +1,4 @@
-"""The rollout permits a training run's draws share, and the lease each draw holds (``platoon.train.tinker.permits``,
+"""The rollout permits a training run's draws share, and the lease each draw holds (``platoon.train.dispatch.permits``,
 RFC 0020): reservations granted first come first served, whole or one at a time; at most one draw partly granted; the
 budget never exceeded; and a lease whose blocks take a permit each and return it as they exit, each rollout index once
 and never more than its size, that holds nothing once released and loses nothing to a cancellation."""
@@ -12,7 +12,7 @@ import random
 import pytest
 
 from platoon.train import leases
-from platoon.train.tinker.permits import DrawLease, PermitPool
+from platoon.train.dispatch.permits import DrawLease, PermitPool
 
 
 async def _quiet() -> None:

@@ -10,12 +10,8 @@ import re
 
 from worker_shutdown_scenarios import _kill_trainer_once_ready
 
-from platoon.train.tinker.workers.entrypoint import (
-    RECANCEL_AFTER_SECONDS,
-    TERMINATION_BACKSTOP_SECONDS,
-    TERMINATION_SECONDS,
-)
-from platoon.train.tinker.workers.protocol import read_diag
+from platoon.train.workers.entrypoint import RECANCEL_AFTER_SECONDS, TERMINATION_BACKSTOP_SECONDS, TERMINATION_SECONDS
+from platoon.train.workers.protocol import read_diag
 
 
 def test_a_worker_cancels_again_a_rollout_that_swallowed_the_first_cancellation(tmp_path):

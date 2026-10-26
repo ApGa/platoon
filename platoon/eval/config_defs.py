@@ -37,7 +37,7 @@ TINKER_API_KEY_VAR = "TINKER_API_KEY"
 # with a SESSION_END event, and a self-hosted gateway such as miles-tinker reads that as the client's exit: it
 # reclaims the session, and each later call of the process fails ("unknown sampling session"). An evaluation's
 # worker process would then lose every rollout it runs after one failed call. Rollout workers turn it off in
-# training for the same reason (platoon.train.tinker.worker_env).
+# training for the same reason (platoon.train.workers.env).
 TINKER_TELEMETRY_OFF = {"TINKER_TELEMETRY": "0"}
 # The most of the Tinker service's answer that a refusal of the key repeats (TinkerKeyRefusedError).
 _REFUSAL_DETAIL_MAX = 300

@@ -16,7 +16,7 @@ from platoon.envs.service import Outcome
 from platoon.gateway.core import AgentSession, ChatResponse
 from platoon.gateway.trace import build_trajectory_collection
 from platoon.task import Task
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.credit import group as credit_group_module
 from platoon.utils.tinker_data_processing import get_train_data_for_trajectory_collection
 from platoon.utils.trajectory_error_filtering import (
     ERROR_ACTION_MASK_KEY,
@@ -116,7 +116,7 @@ def test_the_error_tokens_of_a_gateway_rollout_are_suppressed_where_their_advant
     mask = datum.loss_fn_inputs["mask"].to_torch()
     centered = torch.where(mask > 0, advantages - 0.5, advantages)
     datum.loss_fn_inputs["advantages"] = tinker.TensorData.from_torch(centered)
-    keep, metrics = grw._filter_positive_centered_error_tokens(datum)
+    keep, metrics = credit_group_module._filter_positive_centered_error_tokens(datum)
 
     assert keep and metrics["suppressed_positive_action_tokens"] == 2.0
     trained = datum.loss_fn_inputs["mask"].to_torch() > 0

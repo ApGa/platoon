@@ -20,10 +20,10 @@ from platoon.envs.harbor import HarborEnvironmentService
 from platoon.envs.ors import OrsEnvironmentService
 from platoon.eval.run import PlatoonEvalConfig
 from platoon.task import Task
+from platoon.train import launch as train_module
 from platoon.train.auto import AutoDataset
 from platoon.train.components import ENVIRONMENT_COLUMN, EnvironmentConfig, normalize_environment_configs
 from platoon.train.exclusion import TaskExclusion, record_exclusions
-from platoon.train.tinker import train as train_module
 from platoon.utils.config import ConfigError, resolve_config, update_run_lock
 
 # Splits train and test, each with the tasks <split>:0..2, named <split>-0..2.

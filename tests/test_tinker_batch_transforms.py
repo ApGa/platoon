@@ -52,7 +52,7 @@ def _load_tinker_batch_transforms_module():
     try:
         return _load_module(
             "platoon_tinker_batch_transforms_test",
-            REPO_ROOT / "platoon/train/tinker/batch_transforms.py",
+            REPO_ROOT / "platoon/train/step/batch_transforms.py",
         )
     finally:
         if real_tinker is None:

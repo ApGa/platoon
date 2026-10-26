@@ -16,6 +16,7 @@ import yaml
 from platoon import cli
 from platoon.envs.harbor.holdout import HoldoutRow, HoldoutRule, hold_out
 from platoon.task import Task
+from platoon.train import launch as train_module
 from platoon.train.components import EnvironmentConfig
 from platoon.train.identity import (
     IDENTITY_NAME,
@@ -25,7 +26,6 @@ from platoon.train.identity import (
     identity_changes,
     warn_eval_overlap,
 )
-from platoon.train.tinker import train as train_module
 from platoon.utils.config import ConfigError
 
 GROUPS = 20  # one task per group, in two sources
@@ -170,7 +170,7 @@ def test_a_resume_reads_every_task_a_mixture_trains_on_not_only_its_first_epoch(
     holds none of them."""
 
     from platoon.train.auto import AutoDataset
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     def trainer(**kwargs):

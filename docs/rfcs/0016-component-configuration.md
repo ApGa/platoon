@@ -328,6 +328,12 @@ that does not override it ([Settings per environment](../how-to/train-and-eval.m
 named environment ships rollout settings in `workflow_config.rollout_config` only, never in `eval_overrides`, so it
 cannot outvote the run's evaluation settings.
 
+[RFC 0021](0021-trainers-credit-and-policies.md) proposes two more selectors with sibling options in this pattern:
+`trainer` with `trainer_options` at the top of a training config, and `credit` with `credit_options` on an
+environment entry, each checked at load through `options=` and `check=`. One asymmetry stays: the built-in `rl`
+trainer's settings remain in `train:`, which also holds the main policy's model keys, so `rl` takes no
+`trainer_options`. The deprecation of `trainer_config` (section 8) is unchanged.
+
 ### 3. Checks across an entry
 
 Some rules relate a component's options to the rest of its entry: a judge that needs verifier grading, a harness

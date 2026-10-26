@@ -10,14 +10,14 @@ import tinker
 import torch
 from tinker import TensorData
 
-from platoon.train.tinker.batch_transforms import (
+from platoon.train.config_defs import EvalConfig, PlatoonTinkerRLTrainerConfig, TrainConfig, WorkflowConfig
+from platoon.train.step.batch_transforms import (
     BatchTransformContext,
     DepthLevelDiscountTransform,
     DepthLevelWeightingTransform,
     build_default_batch_transforms,
 )
-from platoon.train.tinker.config_defs import EvalConfig, PlatoonTinkerRLTrainerConfig, TrainConfig, WorkflowConfig
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
+from platoon.train.workflow.group import GroupRolloutWorkflow
 
 CONTEXT = BatchTransformContext(config=None, train_step=0, minibatch_num=0, microbatch_num=0)
 

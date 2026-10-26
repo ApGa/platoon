@@ -10,7 +10,7 @@ import pytest
 
 from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.task import Task
-from platoon.train.tinker import rl
+from platoon.train.trainer import rl as rl_module
 
 RUN = sandbox_cleanup.RUN_LABEL
 
@@ -28,12 +28,12 @@ class _StatsLogger:
         self.closed = True
 
 
-def _trainer(tmp_path, monkeypatch) -> rl.PlatoonTinkerRLTrainer:
+def _trainer(tmp_path, monkeypatch) -> rl_module.PlatoonTinkerRLTrainer:
     """A trainer whose ``async with`` runs without Tinker or W&B."""
 
-    monkeypatch.setattr(rl.checkpoint_utils, "get_last_checkpoint", lambda log_path: None)
-    monkeypatch.setattr(rl, "StatsLogger", _StatsLogger)
-    trainer = object.__new__(rl.PlatoonTinkerRLTrainer)
+    monkeypatch.setattr(rl_module.checkpoint_utils, "get_last_checkpoint", lambda log_path: None)
+    monkeypatch.setattr(rl_module, "StatsLogger", _StatsLogger)
+    trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
     trainer.config = SimpleNamespace(
         log_path="logs",  # relative: the label is absolute
         stats=SimpleNamespace(
@@ -79,8 +79,8 @@ def test_the_trainer_puts_back_the_labels_when_training_fails(tmp_path, monkeypa
 
 
 def test_a_rollout_workers_request_carries_the_labels_of_the_trainer(tmp_path):
-    from platoon.train.tinker.config_defs import WorkflowConfig
-    from platoon.train.tinker.workflows import GroupRolloutWorkflow
+    from platoon.train.config_defs import WorkflowConfig
+    from platoon.train.workflow.group import GroupRolloutWorkflow
 
     async def rollout(task, rollout_config):
         raise AssertionError("not run")

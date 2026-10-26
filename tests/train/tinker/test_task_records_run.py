@@ -23,18 +23,17 @@ from tinker_service_fakes import FakeTinkerService, make_pruning_trainer
 from trainer_fakes import TrainingClient, Workflow, make_trainer, trainer_config
 
 from platoon.task import Task
-from platoon.train import entry_settings
+from platoon.train import entry_settings, task_records
+from platoon.train.checkpoints.pruning import read_checkpoint_records
 from platoon.train.components import ENVIRONMENT_COLUMN
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig
+from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
+from platoon.train.task_records import LOST_KEY
 from platoon.train.task_stats import TaskStatsStore, read_events, snapshot_bytes
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker import task_records
-from platoon.train.tinker.checkpoint_pruning import read_checkpoint_records
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig
-from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
-from platoon.train.tinker.task_records import LOST_KEY
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.train.tinker.workflows import group_rollout_workflow as workflow_module
+from platoon.train.trainer import rl as rl_module
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workflow import members as members_module
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.config import resolve_config
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
@@ -139,7 +138,7 @@ def test_a_cpu_run_logs_each_label_s_pass_at_1_and_pass_at_G_every_step(tmp_path
             rollout_seconds=0.5,
         )
 
-    monkeypatch.setattr(workflow_module, "run_rollout_request", run_rollout_request)
+    monkeypatch.setattr(members_module, "run_rollout_request", run_rollout_request)
     logged: list[dict[str, float]] = []
     trainer._stats_logger = SimpleNamespace(
         wandb_run_id=None, log=lambda step, stats, force=False: logged.append(dict(stats))

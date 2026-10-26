@@ -25,7 +25,7 @@ from platoon.sandbox import SandboxSpec
 from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.sandbox.process import ProcessProvider
 from platoon.train import reaping
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import ConfigError, resolve_config
 
 RUN = sandbox_cleanup.RUN_LABEL

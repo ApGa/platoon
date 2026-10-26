@@ -31,9 +31,9 @@ from platoon.train.components import (
     interleave_by_weight,
     normalize_environment_configs,
 )
-from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN, PoolPasses
-from platoon.train.tinker.workers.protocol import validated_ref
-from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR
+from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN, PoolPasses
+from platoon.train.workers.protocol import validated_ref
+from platoon.train.workers.run import DEFAULT_REWARD_PROCESSOR
 from platoon.trajectory import ParentInfo, Trajectory, TrajectoryCollection
 
 HERE = __name__
@@ -345,7 +345,7 @@ def test_a_mixtures_weights_are_all_numbers_or_all_tasks():
 
 
 def test_weight_tasks_loads_from_a_config_file_and_an_override(tmp_path):
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import ConfigError, resolve_config
 
     path = tmp_path / "train.yaml"
@@ -441,7 +441,7 @@ def test_uniform_draws_a_single_environment_in_the_batches_auto_draws(count):
     """For one environment, ``uniform`` draws the batches the dataloader's shuffled passes draw under ``auto``; only its
     epochs differ, which hold every task, the last batch filled from the next pass."""
 
-    from platoon.train.tinker.rl import PlatoonTinkerDataloader
+    from platoon.train.dataloader import PlatoonTinkerDataloader
 
     single = environment("a", dataset_kwargs={"prefix": "a", "count": count})
     auto = AutoDataset.training(config(single))
@@ -457,7 +457,7 @@ def test_uniform_draws_a_single_environment_in_the_batches_auto_draws(count):
 
 
 def test_uniform_takes_no_entry_weights(tmp_path):
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, task_sampler_problems
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, task_sampler_problems
     from platoon.utils.config import ConfigError, resolve_config
 
     path = tmp_path / "train.yaml"
@@ -483,7 +483,7 @@ def test_an_unknown_task_sampler_is_refused():
     trainer config refuses it with the line the loader reports, and AutoDataset, which resolves the run's sampler,
     with resolution's message.  ``TrainConfig`` alone takes any name, which a package may register."""
 
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, TrainConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, TrainConfig
     from platoon.utils.config import ConfigError
 
     with pytest.raises(ConfigError, match="unknown task sampler 'shuffled'"):
@@ -503,7 +503,7 @@ def test_a_config_file_s_unknown_sampler_names_the_samplers(tmp_path):
     """An unknown sampler, in the config's one report, in a file and in an override: its line names core's samplers,
     a package's and ``module:Class``, for an override too, which parses it as any name."""
 
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import ConfigError, resolve_config
 
     line = (

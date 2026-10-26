@@ -147,6 +147,80 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   can hold that image (serve the directory as a dataset to fetch). `examples/harbor-local`'s `needs-a-database` is
   still refused on Docker, which runs stacks now, for its `postgres:16` sidecar, which runs its image's own command,
   which platoon does not record yet.
+- **The training code lives in packages named after the stages of a run.** `platoon/train/tinker/` held the trainer,
+  its config, the rollout workflows and the rollout workers; they are now packages of `platoon.train`: `trainer` (one
+  start of training: the trainer, the training loop, the training client, signals and the watchdog), `step` (one
+  training step: its metrics, the staleness warning, the batch transforms, the update's metrics), `dispatch` (what
+  starts the training groups: the dispatcher, the rollout permits, running and settling a group), `workflow` (one group
+  of rollouts: `GroupRolloutWorkflow` and its parts), `credit` (a group's baselines and error-token filter), `workers`
+  (process-per-rollout), `checkpoints` (what a full checkpoint saves, and resuming) and `evaluation` (evaluation during
+  training); the config schema is `platoon.train.config_defs`, and `platoon train`'s start `platoon.train.launch`.
+  Nothing a run does changes: the same datums train in the same order, and the metrics, config keys, messages,
+  checkpoints and the files a resume reads are as before. `platoon.train.tinker` keeps the policy client (`proxy`), its
+  renderers, `key_refusal` and `rollout_metrics`, until a later release moves them, and the shims of the old paths
+  (below).
+- **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
+  format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
+  `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),
+  `platoon.train.trainer.rl` (a start's), `platoon.train.workflow.members` (a group's stragglers) or
+  `platoon.train.workflow.telemetry` (a rollout worker's). A filter or a level set on `platoon.train.tinker` no longer
+  reaches them: set it on `platoon.train`.
+- `import platoon.train.tinker` no longer imports the trainer, and with it datasets and transformers: it loads about
+  half the modules it did. It still loads tinker, torch and tinker_cookbook: its init applies the rollout worker
+  invariants first, from `platoon.train.workers.env`, and the init of `platoon.train.workers` imports the protocol.
+  `platoon.train` exports the trainer, its config classes, the batch transforms, `GroupRolloutWorkflow` and
+  `current_entry` lazily, and neither it nor `platoon.train.config_defs` loads tinker or torch.
+- Rollout workers run `python -m platoon.train.workers.entrypoint`. Their fork server preloads the modules it did
+  (the trainer's among them), so a forked worker starts as it did. A worker started by exec no longer imports the
+  trainer before its rollout, nor datasets, pandas and requests with it, which a forked worker holds from its server:
+  under `worker_python_env_isolation`, a rollout's Python overlay can now replace those in an exec'd worker, not in a
+  forked one.
+
+### Deprecations
+
+- **The module paths under `platoon.train.tinker` that moved.** Each still imports, and each name read through it
+  warns once with a `PlatoonDeprecationWarning` that names its new module, until platoon 0.6.0 removes them. A name
+  read through an old path is the moved object itself, so `isinstance` checks, pickles and the `module:Class` a config
+  names keep working. Importing an old module imports the trainer, as it did before (`platoon.train.tinker` itself no
+  longer does: above), so that no module of the trainer is first imported while a patch made through an old path is
+  active. A module that was split still has the names it imported, `from <old path> import *` binds what the new
+  module exports (a split module's public names that moved), the submodules that an old package's init imported are
+  its attributes, and a name set or deleted through an old path, as `monkeypatch` and `mock.patch` do, is set or
+  deleted where the moved code reads it, and undoing the patch puts back what was there, also for a `mock.patch` made
+  with `create=True` or nested in another patch, by unittest.mock or by the `mock` package. A method of
+  `PlatoonTinkerRLTrainer` or `GroupRolloutWorkflow` that moved is a module function that its class keeps under its
+  name: patch the class or an instance, as before, not the module function. What stays different through an old
+  path: a patch through `platoon.train.tinker.rl` also reaches the moved code of `.permits` and `.censoring`, and one
+  through either of them reaches rl's, as they share new modules. Patching an old module's namespace
+  (`mock.patch.dict(vars(module))`, `monkeypatch.setitem(vars(module), ...)`) does not reach the moved code: patch the
+  attribute instead. An old module's `__all__` is computed when it is read, not held in the module. Where each went:
+  - `platoon.train.tinker`'s names (`PlatoonTinkerRLTrainer`, `Watchdog`, the config classes, the batch transforms):
+    `platoon.train`;
+  - `platoon.train.tinker.rl`: by stage, `PlatoonTinkerRLTrainer` and `Watchdog` to `platoon.train` (they live in
+    `platoon.train.trainer.rl` and `.signals`), the loops' exceptions to `platoon.train.trainer.signals`,
+    `TrainLoopSharedState` to `platoon.train.trainer.state`, `PlatoonTinkerDataloader` to `platoon.train.dataloader`,
+    `compute_training_metrics` to `platoon.train.step.update`, and the rest to `platoon.train.trainer`, `.step`,
+    `.dispatch`, `.checkpoints` and `.evaluation`;
+  - `platoon.train.tinker.config_defs`, `.dataset_order`, `.task_records`: `platoon.train.config_defs`,
+    `.dataset_order`, `.task_records`; `platoon.train.tinker.train`: `platoon.train.launch`;
+  - `platoon.train.tinker.batch_transforms`, `.staleness`, `.censoring`: `platoon.train.step.batch_transforms`,
+    `.staleness`, `.metrics`;
+  - `platoon.train.tinker.dispatcher`, `.permits`: `platoon.train.dispatch.dispatcher` (the dispatcher's state file,
+    `save_state`, `read_state` and `plan_resume` among it, to `platoon.train.checkpoints.dispatch_state`) and
+    `platoon.train.dispatch.permits`;
+  - `platoon.train.tinker.kept_groups`, `.checkpoint_pruning`, `.evaluation_record`:
+    `platoon.train.checkpoints.kept_groups`, `platoon.train.checkpoints.pruning`, `platoon.train.evaluation.record`;
+  - `platoon.train.tinker.workflows` and `.workflows.group_rollout_workflow`: `platoon.train.workflow`
+    (`GroupRolloutWorkflow`, `RolloutWorkflow`, `current_entry`, `group_baselines`) and its modules, and the group's
+    credit to `platoon.train.credit.group` (`group_baselines` lives there);
+    `platoon.train.tinker.workflows.base`: `platoon.train.workflow.protocol`; `platoon.train.tinker.start_limit`:
+    `platoon.train.workflow.start_limit`;
+  - `platoon.train.tinker.workers` and its modules, and `platoon.train.tinker.worker_env`: `platoon.train.workers`,
+    its modules, and `platoon.train.workers.env`;
+  - `python -m platoon.train.tinker.workers.entrypoint` and `python -m platoon.train.tinker.train` still run, with the
+    warning: run `python -m platoon.train.workers.entrypoint` and `python -m platoon.train.launch`.
+
+  After upgrading under a run that is training, restart it, so that its rollout workers run the code it does.
 
 ## 0.4.0 (2026-10-25)
 

@@ -33,7 +33,7 @@ ALLOWED: dict[tuple[str, str], str] = {}
 def _schema(data: dict[str, Any]) -> type:
     from platoon.eval.run import PlatoonEvalConfig
     from platoon.train.components import EnvironmentsConfig
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 
     if "inference" in data:
         return PlatoonEvalConfig

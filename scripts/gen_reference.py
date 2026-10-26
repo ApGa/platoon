@@ -267,7 +267,7 @@ def _positional_usage(action: argparse.Action) -> str:
 
 def config_roots() -> list[tuple[str, type]]:
     from platoon.eval.run import PlatoonEvalConfig
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 
     return [("training", PlatoonTinkerRLTrainerConfig), ("evaluation", PlatoonEvalConfig)]
 

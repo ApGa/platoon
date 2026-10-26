@@ -16,8 +16,9 @@ from types import SimpleNamespace
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
-from platoon.train.tinker import rl as rl_module  # noqa: E402
-from platoon.train.tinker.rl import PlatoonTinkerRLTrainer  # noqa: E402
+from platoon.train.trainer import signals as signals_module  # noqa: E402
+from platoon.train.trainer import waiting as waiting_module  # noqa: E402
+from platoon.train.trainer.rl import PlatoonTinkerRLTrainer  # noqa: E402
 
 
 class _StubWatchdog:
@@ -62,7 +63,7 @@ def _shared_state(watchdog):
 
 
 def test_worker_loop_heartbeats_before_group_finishes(monkeypatch):
-    monkeypatch.setattr(rl_module, "ROLLOUT_HEARTBEAT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(waiting_module, "ROLLOUT_HEARTBEAT_INTERVAL_S", 0.05)
 
     async def run():
         watchdog = _StubWatchdog()
@@ -91,7 +92,7 @@ def test_worker_loop_heartbeats_before_group_finishes(monkeypatch):
 
 
 def test_await_rollout_with_heartbeat_default_interval_is_below_watchdog_timeouts():
-    assert rl_module.ROLLOUT_HEARTBEAT_INTERVAL_S == 60.0
+    assert waiting_module.ROLLOUT_HEARTBEAT_INTERVAL_S == 60.0
     import inspect
 
     # Resolved at call time from the module constant (so tests can shorten it); 60 s is far below any watchdog.
@@ -117,7 +118,7 @@ def test_await_rollout_with_heartbeat_propagates_exception_and_none_watchdog():
 
 
 def test_worker_loop_counts_failed_group_and_keeps_heartbeating(monkeypatch):
-    monkeypatch.setattr(rl_module, "ROLLOUT_HEARTBEAT_INTERVAL_S", 0.02)
+    monkeypatch.setattr(waiting_module, "ROLLOUT_HEARTBEAT_INTERVAL_S", 0.02)
 
     async def run():
         watchdog = _StubWatchdog()
@@ -143,7 +144,7 @@ def test_worker_loop_counts_failed_group_and_keeps_heartbeating(monkeypatch):
 
 def test_cancelling_worker_cancels_in_flight_group(monkeypatch):
     """Unshielded: an interrupt reaches the group (and its straggler members) instead of leaking it."""
-    monkeypatch.setattr(rl_module, "ROLLOUT_HEARTBEAT_INTERVAL_S", 0.02)
+    monkeypatch.setattr(waiting_module, "ROLLOUT_HEARTBEAT_INTERVAL_S", 0.02)
 
     async def run():
         shared = _shared_state(_StubWatchdog())
@@ -166,7 +167,7 @@ class _GroupWorkflow:
     """Returns what ``GroupRolloutWorkflow`` returns: a group output carrying its own statistics."""
 
     async def arun_episode(self, data: dict):
-        from platoon.train.tinker.workflows.group_rollout_workflow import _TaskRolloutOutput
+        from platoon.train.workflow.output import _TaskRolloutOutput
         from platoon.utils.rollout_workload import RolloutWorkload
 
         await asyncio.sleep(0.01)
@@ -216,7 +217,7 @@ def test_eval_records_each_groups_statistics_as_it_collects_the_group():
         tracker = _StubTracker()
         try:
             await _trainer()._eval_completion_monitor(2, queue, tracker=tracker)
-        except rl_module.TerminateEvalLoop:
+        except signals_module.TerminateEvalLoop:
             return tracker.scalars
         raise AssertionError("the monitor ends the eval loop once every group is in")
 

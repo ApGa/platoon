@@ -20,13 +20,8 @@ import platoon.train.tinker  # noqa: F401  (import order: package before data pr
 from platoon.config_defs import RolloutConfig
 from platoon.sandbox.cleanup import RUN_LABEL, WORKER_LABEL
 from platoon.task import Task
-from platoon.train.tinker.workers.protocol import (
-    PROTOCOL_VERSION,
-    ConversionPolicy,
-    ModelBinding,
-    RolloutWorkerRequest,
-)
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
+from platoon.train.workers.protocol import PROTOCOL_VERSION, ConversionPolicy, ModelBinding, RolloutWorkerRequest
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 
 STUB_DIR = os.path.dirname(os.path.abspath(__file__))
 

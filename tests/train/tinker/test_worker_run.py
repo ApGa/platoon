@@ -32,9 +32,9 @@ from platoon.train.tinker.rollout_metrics import (
     record_model_call,
     timeline_scope,
 )
-from platoon.train.tinker.workers import run as run_module
-from platoon.train.tinker.workers.binding import FollowingSamplingClient, publish_binding
-from platoon.train.tinker.workers.protocol import (
+from platoon.train.workers import run as run_module
+from platoon.train.workers.binding import FollowingSamplingClient, publish_binding
+from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
@@ -42,7 +42,7 @@ from platoon.train.tinker.workers.protocol import (
     RolloutWorkerRequest,
     dump_response,
 )
-from platoon.train.tinker.workers.run import run_rollout_request
+from platoon.train.workers.run import run_rollout_request
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 

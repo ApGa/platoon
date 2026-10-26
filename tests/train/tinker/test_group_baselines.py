@@ -10,9 +10,9 @@ import tinker
 import torch
 from tinker import TensorData
 
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.train.tinker.workflows.group_rollout_workflow import group_baselines
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.credit.group import group_baselines
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 
 

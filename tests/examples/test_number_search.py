@@ -110,7 +110,7 @@ def test_the_example_configs_are_valid(capsys):
 
 def _load(path: Path, config_class: type | None = None):
     from platoon.train.auto import AutoEnvironment
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import load_config
 
     config, _ = load_config(["--config", str(path)], config_class or PlatoonTinkerRLTrainerConfig)
@@ -206,7 +206,7 @@ def _named(config: Path, path: Path) -> Path:
 def test_the_named_environment_is_the_examples_entry(tmp_path):
     """The built-in ``platoon-number-search@1`` gives the entry the example spells out."""
 
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     named = resolve_config(_named(CONFIG, tmp_path / "named.yaml"), [], PlatoonTinkerRLTrainerConfig)
@@ -239,7 +239,7 @@ def test_a_rollout_of_the_named_environment_records_the_built_in(tmp_path, capsy
 
 def test_train_snapshots_the_config_and_hands_it_to_the_trainer(tmp_path, monkeypatch):
     calls: list[list[str]] = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # train checks its key before anything else: past it
 
     cli.main(["train", str(CONFIG), f"log_path={tmp_path}", "train.max_training_steps=1"])
@@ -253,7 +253,7 @@ def test_train_snapshots_the_config_and_hands_it_to_the_trainer(tmp_path, monkey
 
 def test_train_lists_the_configured_tasks():
     from platoon.train.auto import AutoDataset
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import load_config
 
     config, _ = load_config(args=["--config", str(CONFIG)], config_class=PlatoonTinkerRLTrainerConfig)

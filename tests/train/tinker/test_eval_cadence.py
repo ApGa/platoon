@@ -23,15 +23,20 @@ import torch
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from platoon.train.tinker import rl as rl_module  # noqa: E402
-from platoon.train.tinker.config_defs import CheckpointConfig, EvalConfig  # noqa: E402
-from platoon.train.tinker.evaluation_record import completed_evaluation_steps  # noqa: E402
+from platoon.train.config_defs import CheckpointConfig, EvalConfig  # noqa: E402
+from platoon.train.dispatch import setup as dispatch_setup  # noqa: E402
+from platoon.train.evaluation import loop as loop_module  # noqa: E402
+from platoon.train.evaluation.record import completed_evaluation_steps  # noqa: E402
+from platoon.train.trainer import loops as loops_module  # noqa: E402
+from platoon.train.trainer import rl as rl_module  # noqa: E402
+from platoon.train.trainer import signals as signals_module  # noqa: E402
+from platoon.train.trainer import state as state_module  # noqa: E402
 from platoon.utils.jsonl import read_jsonl  # noqa: E402
 from platoon.utils.stats_tracker import StatsTracker  # noqa: E402
 
 
 def _shared_state(eval_config: EvalConfig, checkpoint_config: CheckpointConfig, *, batches_per_epoch: int = 4):
-    return rl_module.TrainLoopSharedState(
+    return state_module.TrainLoopSharedState(
         config=SimpleNamespace(eval=eval_config, checkpoint=checkpoint_config),
         shutdown_event=asyncio.Event(),
         train_step=0,
@@ -169,9 +174,11 @@ def _train_and_evaluate(
     )
     trainer.eval_dataset = object()
     trainer.batch_transforms = []
-    monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
-    monkeypatch.setattr(rl_module, "client_step_metrics", lambda scope: {})
-    monkeypatch.setattr(rl_module, "_ptc_cell_guard_stats", lambda scope: {})
+    monkeypatch.setattr(dispatch_setup, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loop_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_step_metrics", lambda scope: {})
+    monkeypatch.setattr(loops_module, "_ptc_cell_guard_stats", lambda scope: {})
     evaluated: list[int] = []
     logged: list[tuple[int, dict]] = []
 
@@ -207,7 +214,7 @@ def _train_and_evaluate(
             async with asyncio.TaskGroup() as group:
                 group.create_task(trainer._train_loop(group, state, start, steps, object()))
                 group.create_task(trainer._eval_loop(state, object()))
-        except* rl_module.TerminateTrainLoop:
+        except* signals_module.TerminateTrainLoop:
             pass
         return state
 
@@ -356,9 +363,11 @@ def _first_update(
     )
     trainer.eval_dataset = object()
     trainer.batch_transforms = []
-    monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
-    monkeypatch.setattr(rl_module, "client_step_metrics", lambda scope: {})
-    monkeypatch.setattr(rl_module, "_ptc_cell_guard_stats", lambda scope: {})
+    monkeypatch.setattr(dispatch_setup, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loop_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_step_metrics", lambda scope: {})
+    monkeypatch.setattr(loops_module, "_ptc_cell_guard_stats", lambda scope: {})
     evaluated: list[int] = []
     first_update: list[tuple[int | None, list[int]]] = []
 
@@ -446,7 +455,7 @@ def test_a_shutdown_request_ends_the_wait_for_the_evaluation_of_the_starting_pol
         await asyncio.sleep(0.05)
         assert not waiting.done()
         state.shutdown_event.set()
-        with pytest.raises(rl_module.TrainInterrupted):
+        with pytest.raises(signals_module.TrainInterrupted):
             await asyncio.wait_for(waiting, timeout=5)
 
     asyncio.run(run())

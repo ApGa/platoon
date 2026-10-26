@@ -1,0 +1,599 @@
+"""Group-centered rollout workflow for tinker RL training.
+
+``GroupRolloutWorkflow`` runs ``group_size`` rollouts of one task, converts
+each rollout's trajectory tree into ``tinker.Datum`` rows and turns trajectory
+rewards into per-token advantages. It is the one place where credit is
+computed and broadcast over a task group, in the order
+:mod:`platoon.train.credit.group` describes.  Its parts live beside it:
+its members (``members``), their worker requests (``requests``), the group's
+output (``output``) and the workers' telemetry (``telemetry``); each method
+whose code lives there stays a method of the class under its name.
+
+What a group's workflow measures about the group -- its completion statistics
+(``rollout_completion/*``), its baselines and advantages (``credit/baseline/*``,
+``credit/root_advantage/*``), its workload distributions (``workload/rollout/*``,
+``workload/task/*``), its error-token and subagent-sampling counts -- travels with
+the group's output (``group_stats``, a :class:`~platoon.utils.stats_tracker.DeferredStats`)
+and is recorded by the trainer in the step that dequeues the group. Recorded when
+the group completed, it would land in whichever step was running then: with
+prefetching, groups of the next step complete during this one. Per-member events
+(worker dispositions, straggler cancellations) are recorded as they happen.
+
+Each group runs with the settings of its environment entry: an entry's own
+``workflow_config`` (``platoon.train.entry_settings``) laid over the run's,
+which the trainer hands the workflow as ``entry_configs``. Inside a group,
+``self.config`` is the group's entry's settings, and ``current_entry()``
+(:mod:`platoon.train.workflow.context`) names that entry; outside one,
+``self.config`` is the run's. Member tasks copy the group's context, so they
+see its settings too; code that reads ``self.config`` from a thread of
+``loop.run_in_executor`` gets the run's.
+
+Extension point: to change how advantages are estimated, subclass
+``GroupRolloutWorkflow`` and override ``compute_baselines`` (a different
+baseline) or ``assign_advantages`` (for example to also rescale), then select
+the subclass with ``environments[0].workflow: "package.module.MyWorkflow"`` or
+construct it in a train script. Advantages are always computed in the trainer
+process, so an override never crosses the rollout-worker boundary. An override
+reads its group's settings through ``self.config``.
+"""
+
+import asyncio
+import logging
+import os
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from types import MappingProxyType
+from typing import Callable, ClassVar
+
+import tinker
+import torch
+from tinker import TensorData
+
+from platoon.task import Task
+from platoon.train.components import ENVIRONMENT_COLUMN, row_entry
+from platoon.train.config_defs import RolloutConfig, WorkflowConfig
+from platoon.train.credit.group import _filter_positive_centered_error_tokens, group_baselines
+from platoon.train.labels import task_label
+from platoon.train.startup import WorkerPreload
+from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.tinker.rollout_metrics import monitor as client_monitor
+from platoon.train.workers.protocol import validated_ref
+from platoon.train.workers.run import DEFAULT_REWARD_PROCESSOR
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor
+from platoon.train.workers.workload import add_datum_funnel, workload_from_raw_rollout
+from platoon.train.workflow import members, requests, telemetry
+from platoon.train.workflow import output as group_output
+from platoon.train.workflow.context import _group_config, _group_entry, _group_stats
+from platoon.train.workflow.output import _member, _SingleRolloutOutcome, _TaskRolloutOutput, _trained_keys
+from platoon.train.workflow.start_limit import StartLimit
+from platoon.utils.rollout_workload import RolloutWorkload
+from platoon.utils.stats_tracker import DeferredStats, StatsTracker
+from platoon.utils.stats_tracker import get as get_tracker
+from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
+from platoon.utils.tinker_data_processing import SubagentDatumSamplingStats, TrajectoryCollectionResult
+
+logger = logging.getLogger(__name__)
+
+
+# The methods through which a ``GroupRolloutWorkflow`` runs its members on the lease (``runs_rollouts_on_lease``).
+_LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
+
+
+# Both helpers now live in ``workers.workload`` so the rollout worker calls the
+# same code the trainer does.  The module-level aliases keep the historical
+# names importable.
+_workload_from_raw_rollout = workload_from_raw_rollout
+_add_datum_funnel = add_datum_funnel
+
+
+class GroupRolloutWorkflow:
+    """Workflow that runs multiple rollouts per task and computes group-centered advantages.
+
+    1. Runs `group_size` rollouts for each task in parallel
+    2. Collects training data from each rollout
+    3. Centers advantages on a per-rollout group baseline (``compute_baselines``,
+       broadcast by ``assign_advantages``; see the module docstring)
+    4. Returns training data in tinker.Datum format
+
+    Each group runs with its environment entry's settings, ``entry_configs``
+    (see the module docstring).
+    """
+
+    # It applies an environment entry's own settings to the entry's groups (``entry_configs``); loading refuses an
+    # entry's settings beside a workflow class that does not declare this (``platoon.train.entry_settings``).
+    applies_entry_settings: ClassVar[bool] = True
+    # Its groups' outputs carry a verdict (``verdict``: trained, uniform, or why the group trains nothing), which the
+    # group admission rule ``informative`` reads; resolution refuses it beside a workflow class that does not declare
+    # this (``platoon.train.admissions``).
+    gives_verdicts: ClassVar[bool] = True
+    # It runs each member in a block of its draw's rollout lease (``_run_group_member``), around the member's whole
+    # rollout, so under ``train.permit_release: rollout`` its groups start on their first free permit and their members
+    # as the rest free. A subclass that overrides ``arun_episode``, ``_run_group_rollouts`` or ``_run_group_member``
+    # (``_LEASE_METHODS``) may start members some other way: it reads as False, its groups starting once their whole
+    # size of permits is free, unless its own class body sets the flag. A flag set in a class body covers the overrides
+    # of that class and its bases, not those of a mixin or of another branch of a diamond (``__init_subclass__``).
+    runs_rollouts_on_lease: ClassVar[bool] = True
+    # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
+    # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
+    entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})
+    # The run's limit on rollouts starting at once (platoon.train.workflow.start_limit), which the trainer sets on its
+    # training and evaluation workflows as training starts; None: no limit. _run_group_member takes the slots.
+    start_limit: StartLimit | None = None
+    # The node-local directory of the rollout workers' files, made at its first use (requests._ipc_dir).  Unset before
+    # (read with getattr).
+    _ipc_dir_cache: str
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """The flag of a subclass whose own body does not set it: that of the class that sets it nearest in its method
+        resolution order, unless one of :data:`_LEASE_METHODS` comes from a class other than this one that the
+        declaring class does not derive from (the subclass itself, a mixin, another branch of a diamond): False."""
+
+        super().__init_subclass__(**kwargs)
+        if "runs_rollouts_on_lease" in cls.__dict__:
+            return
+        declared = next(klass for klass in cls.__mro__ if "runs_rollouts_on_lease" in klass.__dict__)
+        for name in _LEASE_METHODS:
+            owner = next(klass for klass in cls.__mro__ if name in klass.__dict__)
+            if owner is not GroupRolloutWorkflow and not issubclass(declared, owner):
+                cls.runs_rollouts_on_lease = False
+                return
+
+    def __init__(
+        self,
+        rollout_fn: Callable[[Task, RolloutConfig], dict],
+        get_task_fn: Callable[[str], Task],
+        config: WorkflowConfig,
+        model_info: ModelInfo,
+        log_path: str | None = None,
+        stats_scope: str = "train",
+        filter_errors: bool = False,
+        reward_processor: Callable[[dict], tuple[float, dict]] = DEFAULT_REWARD_PROCESSOR,
+        packages: Sequence[str] = (),
+        label_by: str = ENVIRONMENT_COLUMN,
+    ):
+        """Initialize the workflow.
+
+        Args:
+            rollout_fn: Async function that runs a rollout given a task and RolloutConfig.
+            get_task_fn: Function that returns a Task given a task_id.
+            config: Workflow configuration (contains group_size and rollout_config).
+            model_info: Model information for the tinker LLM.
+            log_path: Base log directory for the training run. If provided, rollout results
+                      will be stored at {log_path}/rollouts/{stats_scope}/.
+            stats_scope: Name for the stats tracker scope (e.g., "train" or "eval").
+            filter_errors: Whether to suppress erroneous action tokens only when
+                their final group-centered advantage is positive.
+            reward_processor: Function to process trajectory rewards.
+            packages: The environments' ``package`` modules (``AutoEnvironment.packages``),
+                which a rollout worker (``rollout_isolation: process``) imports before its
+                rollout, so it knows the harnesses and programs they register.
+            label_by: The column that labels the run's tasks (``train.label_by``), whose
+                labels ``config.straggler_policies`` key on (:mod:`platoon.train.labels`);
+                each group's output carries its task's label (``label``).
+        """
+        self.rollout_fn = rollout_fn
+        self.get_task_fn = get_task_fn
+        self.config = config  # the run's; inside a group, ``config`` is the group's entry's
+        self.model_info = model_info
+        self.log_path = log_path
+        self.stats_scope = stats_scope
+        self.filter_errors = filter_errors
+        self.reward_processor = reward_processor
+        self.tracker = get_tracker(stats_scope)
+        self.subagent_datum_sampler = (
+            DeterministicSubagentDatumSampler(
+                keep_probability=config.subagent_datum_keep_probability,
+                seed=config.subagent_datum_sampling_seed,
+            )
+            if config.subagent_datum_keep_probability < 1.0
+            else None
+        )
+        self.rollout_isolation = getattr(config, "rollout_isolation", "inprocess")
+        self.packages = tuple(packages)
+        self.label_by = label_by
+        # Callable references are built ONCE, at construction, and proven to
+        # round-trip.  A closure or a functools.partial cannot cross a process
+        # boundary by name, and a ``ref or default`` fallback would silently
+        # substitute the historical reward processor -- changing task_reward,
+        # root_rewards_dict and every advantage with no error and entirely
+        # plausible metrics.  In ``inprocess`` mode the callables are handed to
+        # the shared rollout body directly, so an unnameable callable is only
+        # recorded, not rejected: in-process behaviour is unchanged.
+        self._reward_processor_is_default = reward_processor is DEFAULT_REWARD_PROCESSOR
+        self.rollout_fn_ref = self._build_ref(rollout_fn, what="rollout_fn")
+        self.reward_processor_ref = (
+            None if self._reward_processor_is_default else self._build_ref(reward_processor, what="reward_processor")
+        )
+        self._supervisor = None
+        self._admission: asyncio.Semaphore | None = None
+        self._admission_limit = 0
+
+    @property
+    def config(self) -> WorkflowConfig:
+        """The workflow config: inside a group (``arun_episode``), the settings of the group's environment entry
+        (``entry_configs``); outside one, the run's, as constructed or assigned."""
+
+        group = _group_config.get()
+        return group if group is not None else self._run_config
+
+    @config.setter
+    def config(self, value: WorkflowConfig) -> None:
+        self._run_config = value
+
+    def _filter_errors(self) -> bool:
+        """Whether this group's rollouts suppress positive-credit error tokens: its entry's ``filter_errors`` when the
+        entry sets one of its own, else the workflow's (``filter_errors``, which a run-level ``workflow_kwargs`` may
+        set; loading refuses both at once)."""
+
+        group = _group_config.get()
+        run = getattr(self, "_run_config", None)
+        if group is not None and run is not None and group.filter_errors != run.filter_errors:
+            return group.filter_errors
+        return self.filter_errors
+
+    def _subagent_datum_sampler(self) -> DeterministicSubagentDatumSampler | None:
+        """The subagent datum sampler of this group's settings: the workflow's own (``subagent_datum_sampler``, as
+        built or as a subclass replaced it) for the run's keep probability and seed, else one per pair an entry sets,
+        built once."""
+
+        config = self.config
+        key = (
+            getattr(config, "subagent_datum_keep_probability", 1.0),
+            getattr(config, "subagent_datum_sampling_seed", 0),
+        )
+        run = getattr(self, "_run_config", None)
+        run_key = (
+            getattr(run, "subagent_datum_keep_probability", 1.0),
+            getattr(run, "subagent_datum_sampling_seed", 0),
+        )
+        if run is None or key == run_key:
+            return getattr(self, "subagent_datum_sampler", None)
+        keep = key[0]
+        if keep >= 1.0:
+            return None
+        samplers = self.__dict__.setdefault("_entry_subagent_samplers", {})
+        if key not in samplers:
+            samplers[key] = DeterministicSubagentDatumSampler(keep_probability=key[0], seed=key[1])
+        return samplers[key]
+
+    def _build_ref(self, obj, *, what: str) -> str | None:
+        """Name a callable for a worker, strictly when a worker will need it."""
+
+        if obj is None:
+            if self.rollout_isolation == "process":
+                raise ValueError(f"rollout_isolation='process' requires a real {what}")
+            return None
+        try:
+            return validated_ref(obj, what=what)
+        except Exception:
+            if self.rollout_isolation == "process":
+                raise
+            logger.debug("%s is not nameable across processes; inprocess mode only", what, exc_info=True)
+            return None
+
+    def _get_rollout_config(self) -> RolloutConfig:
+        """Get a copy of the rollout config with model info populated."""
+        config = deepcopy(self.config.rollout_config)
+        config.model_name = self.model_info.model_name
+        config.return_dict = True
+        config.train = True
+
+        # If log_path is provided, use it as the base for rollout output
+        if self.log_path is not None:
+            config.output_dir = os.path.join(self.log_path, "rollouts", self.stats_scope)
+
+        return config
+
+    # Methods whose code lives in this package's modules, as module functions that take the workflow first.  Each stays
+    # a method under its name, so that replacing it on the class or on an instance (a subclass, a test) replaces what
+    # the workflow calls; replacing the module function does not.  Here: the group's output (``output``).
+    _make_task_output = group_output._make_task_output
+
+    def _group_stats(self) -> DeferredStats | StatsTracker:
+        """Where the statistics of the group being run go: inside :meth:`arun_episode`, the group's
+        :class:`DeferredStats`, which the trainer records in the step that consumes the group; outside it (a
+        direct call, say from a subclass or a test), straight into the tracker as before."""
+
+        group_stats = _group_stats.get()
+        return group_stats if group_stats is not None else self.tracker
+
+    async def arun_episode(self, data: dict) -> list[tinker.Datum]:
+        """Run multiple rollouts for a task and return training data.
+
+        Args:
+            data: Dictionary containing 'task_id' and optionally other task data.
+
+        Returns:
+            A list-compatible datum result. An empty result still carries exact
+            task generation workload for trainer-side batch accounting, and
+            ``group_stats``, the group's own statistics, for the consumer to
+            record in the step that consumes it (see the module docstring).
+        """
+        entries = getattr(self, "entry_configs", None) or {}
+        if entries:
+            entry = row_entry(data, tuple(entries))
+        else:
+            entry = data.get(ENVIRONMENT_COLUMN) if isinstance(data, Mapping) else None
+        token = _group_stats.set(DeferredStats())
+        config_token = _group_config.set(entries.get(entry) if entry is not None else None)
+        entry_token = _group_entry.set(entry)
+        try:
+            output = await self._run_group(data)
+        finally:
+            _group_entry.reset(entry_token)
+            _group_config.reset(config_token)
+            _group_stats.reset(token)
+        if isinstance(output, _TaskRolloutOutput):
+            output.label = task_label(data, getattr(self, "label_by", ENVIRONMENT_COLUMN))
+            output.entry = entry
+        return output
+
+    async def _run_group(self, data: dict) -> list[tinker.Datum]:
+        with self._monitor().group_in_flight():
+            raw_outcomes = await self._run_group_rollouts(data)
+        # Accept legacy test/custom overrides that return the old result type,
+        # while the canonical single-rollout path always returns an outcome.
+        outcomes = [
+            outcome
+            if isinstance(outcome, _SingleRolloutOutcome)
+            else _SingleRolloutOutcome(
+                result=outcome,
+                workload=_add_datum_funnel(RolloutWorkload(), outcome),
+                observed=outcome is not None,
+            )
+            for outcome in raw_outcomes
+        ]
+        valid_results = [outcome.result for outcome in outcomes if outcome.result is not None]
+        # What each member returned, read before any datum is filtered (the per-task statistics).
+        members = tuple(_member(outcome) for outcome in outcomes)
+
+        def output(datums: list[tinker.Datum], verdict: str, trainable_rollouts: int = 0) -> _TaskRolloutOutput:
+            return self._make_task_output(
+                datums, outcomes=outcomes, trainable_rollouts=trainable_rollouts, verdict=verdict, members=members
+            )
+
+        # Filter out None results and collect data
+        all_data: list[tinker.Datum] = []
+        subagent_sampling_stats = SubagentDatumSamplingStats()
+
+        for result in valid_results:
+            all_data.extend(result.datums)
+            subagent_sampling_stats.merge(result.subagent_sampling_stats)
+
+        if self._subagent_datum_sampler() is not None:
+            self._group_stats().scalar(**subagent_sampling_stats.to_metrics())
+
+        if len(keys := _trained_keys(outcomes)) > 1:
+            # Its rewards are not on one scale: the group's members trained different names of the reward contract's
+            # list, which their tests' reward files decided (counted as reward_key_mismatch).
+            logger.warning(
+                "Rejecting task %s group: its rollouts trained different reward keys (%s), so none of them trains",
+                data["task_id"],
+                ", ".join(sorted(keys)),
+            )
+            return output([], "reward_key_mismatch")
+
+        if not valid_results:
+            logger.warning(f"No results found for task {data['task_id']}")
+            return output([], "no_results")
+
+        min_successful = getattr(self.config, "min_successful_group_size", 1)
+        trainable_members = sum(1 for result in valid_results if result.task_reward_valid)
+        if min_successful > 1 and trainable_members < min_successful:
+            # Too few trainable members for a meaningful within-task baseline: only a rollout whose root completed
+            # with a scored outcome counts, so an untrainable member (an invalid, error, timeout or cancelled root)
+            # is missing like one that returned nothing (a setup failure, a cancelled straggler, a dead worker). The
+            # generation work is still accounted for through the outcomes. With the default of 1, a group without a
+            # completed root takes the branch below, as it always did.
+            logger.warning(
+                "Rejecting task %s group with %s trainable rollout(s) of %s (%s returned a result); "
+                "min_successful_group_size is %s",
+                data["task_id"],
+                trainable_members,
+                len(outcomes),
+                len(valid_results),
+                min_successful,
+            )
+            self._group_stats().scalar(group_size_rejected=1.0)
+            return output([], "below_min")
+
+        # === Now compute advantages and filter ===
+
+        # Interrupted roots carry partial task rewards. They stay in rollout
+        # statistics but never enter a baseline, so a group trains only when at
+        # least one of its roots completed.
+        valid_task_rewards = [result.task_reward for result in valid_results if result.task_reward_valid]
+        if not valid_task_rewards:
+            logger.warning(
+                "No completed root rewards available for task %s; retaining rollout stats but skipping training",
+                data["task_id"],
+            )
+            return output([], "no_completed_root")
+
+        if not all_data:
+            logger.warning(f"No train data found for task {data['task_id']}")
+            return output([], "no_datums")
+
+        self.assign_advantages(valid_results)
+
+        error_filter_totals: dict[str, float] = {}
+        error_filter_active = False
+        for result in valid_results:
+            retained_datums: list[tinker.Datum] = []
+            for datum in result.datums:
+                keep, metrics = _filter_positive_centered_error_tokens(datum)
+                if metrics:
+                    error_filter_active = True
+                    for key, value in metrics.items():
+                        error_filter_totals[key] = error_filter_totals.get(key, 0.0) + value
+                if keep:
+                    retained_datums.append(datum)
+            result.datums[:] = retained_datums
+        if error_filter_active:
+            self._group_stats().scalar(**{f"error_filter/{key}": value for key, value in error_filter_totals.items()})
+        all_data = [datum for result in valid_results for datum in result.datums]
+
+        # Full-tree rollout statistics intentionally include empty and
+        # policy-ineligible trajectories. The train/no-train decision must not:
+        # a sampled-out or invalid-verifier child with a different reward cannot
+        # turn an otherwise zero-signal retained batch into an optimizer step.
+        retained_action_advantages = [
+            datum.loss_fn_inputs["advantages"].to_torch()[datum.loss_fn_inputs["mask"].to_torch() > 0]
+            for datum in all_data
+        ]
+        retained_action_advantages = [values for values in retained_action_advantages if values.numel() > 0]
+        if not retained_action_advantages:
+            logger.debug("No retained policy action tokens for task %s", data["task_id"])
+            return output([], "no_datums")
+        flattened_advantages = torch.cat(retained_action_advantages)
+        if getattr(self.config, "filter_zero_advantage_datums", True) and bool(torch.all(flattened_advantages == 0)):
+            logger.debug(
+                "Deferring all-zero policy datums for task %s to the post-transform "
+                "trainer filter (mean task reward %.2f)",
+                data["task_id"],
+                sum(valid_task_rewards) / len(valid_task_rewards),
+            )
+            # Keep these candidates until the trainer has assembled the
+            # cross-task microbatch. They must participate in depth-frequency
+            # normalization and the original action-token denominator even
+            # though they can be omitted from the expensive model pass.
+
+        trainable_rollouts = sum(
+            any(
+                bool(
+                    torch.any(
+                        datum.loss_fn_inputs["advantages"].to_torch()[datum.loss_fn_inputs["mask"].to_torch() > 0] != 0
+                    )
+                )
+                for datum in result.datums
+            )
+            for result in valid_results
+        )
+        # Every retained advantage zero: the group trains nothing (a uniform group).
+        return output(all_data, "trained" if trainable_rollouts else "uniform", trainable_rollouts)
+
+    def compute_baselines(self, results: list[TrajectoryCollectionResult]) -> list[float]:
+        """Return one baseline per usable rollout of a task group.
+
+        The default is the completed-root group mean, or its leave-one-out
+        variant with ``leave_one_out_baseline`` (see :func:`group_baselines`).
+        """
+
+        return group_baselines(
+            [result.task_reward for result in results],
+            [result.task_reward_valid for result in results],
+            leave_one_out=self.config.leave_one_out_baseline,
+        )
+
+    def assign_advantages(self, results: list[TrajectoryCollectionResult]) -> None:
+        """Center every datum of each rollout on that rollout's baseline.
+
+        The converter loaded each action token with its trajectory's reward,
+        so this yields ``reward - baseline`` for the root and every subagent
+        datum of a rollout. Non-action positions are left untouched.
+        """
+
+        baselines = self.compute_baselines(results)
+        for result, baseline in zip(results, baselines, strict=True):
+            for datum in result.datums:
+                advantages = datum.loss_fn_inputs["advantages"].to_torch()
+                mask = datum.loss_fn_inputs["mask"].to_torch()
+                datum.loss_fn_inputs["advantages"] = TensorData.from_torch(
+                    torch.where(mask > 0, advantages - baseline, advantages)
+                )
+        # Completed roots only, as in the baselines. The spread is 0 for group-mean baselines and
+        # positive for leave-one-out ones whenever the group's rewards differ.
+        completed = [
+            (result.task_reward, baseline)
+            for result, baseline in zip(results, baselines, strict=True)
+            if result.task_reward_valid
+        ]
+        if completed:
+            self._group_stats().scalar(
+                **{
+                    "credit/baseline/avg": sum(baseline for _, baseline in completed) / len(completed),
+                    "credit/baseline/spread": max(b for _, b in completed) - min(b for _, b in completed),
+                    "credit/root_advantage/abs_avg": sum(abs(reward - baseline) for reward, baseline in completed)
+                    / len(completed),
+                }
+            )
+
+    # Moved methods, as above: running the members (``members``) and their worker requests (``requests``).
+    _admission_semaphore = members._admission_semaphore
+    _admit_group = members._admit_group
+    _run_group_member = members._run_group_member
+    _member_start_slot = members._member_start_slot
+    _run_group_rollouts = members._run_group_rollouts
+    _cancel_late_members = members._cancel_late_members
+    _slug = requests._slug
+    _model_binding = requests._model_binding
+    _build_worker_request = requests._build_worker_request
+    _rollout_budget_seconds = requests._rollout_budget_seconds
+    _ipc_dir = requests._ipc_dir
+
+    def _monitor(self):
+        """Client throughput monitor for this workflow's stats scope.
+
+        ``getattr`` because custom/legacy workflows construct this class with
+        ``__new__`` and set only the attributes they use.
+        """
+
+        return client_monitor(getattr(self, "stats_scope", "train"))
+
+    @property
+    def _isolation(self) -> str:
+        return getattr(self, "rollout_isolation", "inprocess")
+
+    # What the rollout workers' fork server imports and builds ahead of them, each when it is fork-safe: what the run's
+    # environments and harnesses import and build when a rollout opens them, and the run's workflow_config
+    # .worker_preload (platoon.train.startup).  platoon train sets it after construction, before the
+    # supervisor is built.
+    worker_preload: WorkerPreload = WorkerPreload()
+
+    @property
+    def supervisor(self) -> RolloutWorkerSupervisor:
+        """Lazily built so ``inprocess`` runs never touch node-local scratch."""
+
+        if getattr(self, "_supervisor", None) is None:
+            self._supervisor = RolloutWorkerSupervisor(
+                scratch_dir=self._ipc_dir(),
+                termination_grace_seconds=float(getattr(self.config, "worker_termination_grace_seconds", 10.0)),
+                parent_grace_seconds=float(getattr(self.config, "worker_parent_grace_seconds", 60.0)),
+                mem_available_floor_bytes=int(getattr(self.config, "worker_mem_available_floor_bytes", 0)),
+                start_method=str(getattr(self.config, "worker_start_method", "forkserver")),
+                preload=getattr(self, "worker_preload", None),
+            )
+        return self._supervisor
+
+    async def warm_up(self) -> None:
+        """Start what this workflow's rollouts need before the first one: with ``rollout_isolation: process`` and the
+        fork server, the fork server, which imports the worker's stack (and :attr:`worker_preload`) while the trainer
+        gets ready to train, instead of when the first rollouts ask for it.  Nothing for in-process rollouts or exec'd
+        workers."""
+
+        if (
+            self._isolation != "process"
+            or str(getattr(self.config, "worker_start_method", "forkserver")) != "forkserver"
+        ):
+            return
+        await self.supervisor.warm(self._warm_up_request())
+
+    _warm_up_request = requests._warm_up_request  # moved, as above (``requests``)
+
+    def publish_model_binding(self, sampling_client, version: int) -> None:
+        """Republish the trainer's sampling client for its rollout workers."""
+
+        if self._isolation != "process":
+            return
+        self.supervisor.publish_binding(sampling_client, version)
+
+    # Moved methods, as above: a worker's files (``requests``), a member's outcome (``output``), the workers'
+    # telemetry (``telemetry``).
+    _worker_log_dir = requests._worker_log_dir
+    _binding_path = property(requests._binding_path)
+    _outcome_from_response = group_output._outcome_from_response
+    _warn_of_missing_routing_ids = telemetry._warn_of_missing_routing_ids
+    _record_worker_telemetry = telemetry._record_worker_telemetry
+    # One member's rollout, in process or in a rollout worker (``members``): the override point of a workflow that
+    # runs its rollouts its own way, which ``_run_group_member`` calls on the instance.
+    arun_episode_single = members.arun_episode_single

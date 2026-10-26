@@ -43,12 +43,12 @@ from platoon.train.labels import column_keys, label_text
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
 
+    from platoon.train.dataset_order import EpochOrder
     from platoon.train.exclusion import TaskExclusion
     from platoon.train.sampler_runtime import TaskSampling
     from platoon.train.samplers import SamplingChoices
     from platoon.train.sampling import SamplingPlan
     from platoon.train.task_stats import EntryInfo
-    from platoon.train.tinker.dataset_order import EpochOrder
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ class AutoDataset:
     epoch the whole batches they fill, its last partial batch starting the next epoch, unless ``train.task_sampler``
     is ``weighted``: then they take the mixture's path, as a mixture of one (task ids stay unlabeled).  Under
     ``train.task_sampler: uniform`` every training task of every entry is drawn in those seeded shuffled passes, with
-    no entry's share (:class:`~platoon.train.tinker.dataset_order.PoolPasses`), in epochs of as many tasks as there
+    no entry's share (:class:`~platoon.train.dataset_order.PoolPasses`), in epochs of as many tasks as there
     are, filled to whole batches.  Evaluation, and any split of an evaluation config, visits every selected task once,
     in config order.  The trainer draws these orders through task samplers (:class:`TrainingTasks`' ``sampling``),
     which draw the same rows position for position.
@@ -252,7 +252,7 @@ class AutoDataset:
         epochs, and the whole run follows from the environments' seeds.  An environment's share is its ``weight``
         over the mixture's, ``weight: tasks`` counting the tasks it lists here (:func:`mixture_weights`).  Under
         ``train.task_sampler: uniform`` the tasks of every environment take shuffled passes over all of them instead
-        (:class:`~platoon.train.tinker.dataset_order.PoolPasses`), in epochs of the same size, and an environment's
+        (:class:`~platoon.train.dataset_order.PoolPasses`), in epochs of the same size, and an environment's
         share is its tasks'.  What each environment's ``exclude_tasks`` left out is appended to ``exclusions`` when
         given."""
 
@@ -280,7 +280,7 @@ class AutoDataset:
                 sampling=_listing_sampling(config, environments[0], dataset, epoch_size),
             )
 
-        from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
+        from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
 
         listed = _listed_rows(config, environments, "train", exclusions)
         # Every row has every column, as a dataset's rows do, whichever epoch draws it.
@@ -293,7 +293,7 @@ class AutoDataset:
         if batch_size:
             size = math.ceil(size / batch_size) * batch_size  # each epoch is whole batches, its last one filled
         if sampler == "uniform":  # every task equally often, in shuffled passes: an entry's share is its tasks'
-            from platoon.train.tinker.dataset_order import PoolPasses
+            from platoon.train.dataset_order import PoolPasses
 
             rows = [row for entry_rows in pools.values() for row in entry_rows]
             passes = PoolPasses(rows, epoch_size=size)
@@ -376,10 +376,10 @@ def _listing_sampling(
 
     from datasets import Dataset
 
+    from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
     from platoon.train.labels import label_column
     from platoon.train.sampler_runtime import TaskPool, TaskSampling
     from platoon.train.samplers import SamplerChoice, UniformSampler, _ListingOrder
-    from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
 
     if not isinstance(dataset, Dataset) or not len(dataset) or not epoch_size:
         return None
@@ -1075,7 +1075,7 @@ def _ors_environment_class(environment: EnvironmentConfig) -> type | None:
 
 
 def _component_ref(kind: str, spec: str) -> str:
-    from platoon.train.tinker.workers.protocol import validated_ref
+    from platoon.train.workers.protocol import validated_ref
 
     return validated_ref(resolve_component(kind, spec), what=f"{kind} {spec!r}")
 
@@ -1117,7 +1117,7 @@ def _route(task: Task) -> EnvironmentRoute:
 def _resolve_ref(ref: str | None, task: Task) -> Any:
     if ref is None:
         raise ValueError(f"Environment of task {task.id!r} has no rollout configured")
-    from platoon.train.tinker.workers.protocol import resolve_ref
+    from platoon.train.workers.protocol import resolve_ref
 
     return resolve_ref(ref)
 
@@ -1133,7 +1133,7 @@ class AutoRewardProcessor:
         if environments[0].reward_processor is not None:
             return resolve_component("reward_processor", environments[0].reward_processor)
         # The workflow recognizes this object and names no reference for rollout workers.
-        from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR
+        from platoon.train.workers.run import DEFAULT_REWARD_PROCESSOR
 
         return DEFAULT_REWARD_PROCESSOR
 
@@ -1146,7 +1146,7 @@ def mixture_reward_processor(trajectory: dict[str, Any]) -> tuple[float, dict[st
         raise ValueError("Trajectory carries no environment route; its task was not loaded with AutoTaskLoader")
     if route.reward_processor is None:
         return trajectory["reward"], {}
-    from platoon.train.tinker.workers.protocol import resolve_ref
+    from platoon.train.workers.protocol import resolve_ref
 
     return resolve_ref(route.reward_processor)(trajectory)
 

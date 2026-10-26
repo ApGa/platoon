@@ -1,4 +1,4 @@
-"""The dispatcher of a training run's rollout groups (``platoon.train.tinker.dispatcher``), on its own: it starts a
+"""The dispatcher of a training run's rollout groups (``platoon.train.dispatch.dispatcher``), on its own: it starts a
 group only when the horizon, the rollout permits and the label limits allow, keeps a capped label's draws in its
 backlog, holds a slot of the horizon for a capped label's next group, skips past a full backlog only while another
 label has room, never draws while every label is at its limit, and saves and takes up what a checkpoint saved."""
@@ -16,19 +16,12 @@ from typing import Any
 import pytest
 import tinker
 
+from platoon.train.checkpoints import dispatch_state as dispatch_state_module
+from platoon.train.checkpoints.dispatch_state import plan_resume, read_state, save_state
+from platoon.train.checkpoints.kept_groups import decode_group, read_kept
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN, SEQ_COLUMN, BoundDraw, Dispatcher
+from platoon.train.dispatch.permits import PermitPool
 from platoon.train.labels import task_label
-from platoon.train.tinker import dispatcher as dispatcher_module
-from platoon.train.tinker.dispatcher import (
-    POSITION_COLUMN,
-    SEQ_COLUMN,
-    BoundDraw,
-    Dispatcher,
-    plan_resume,
-    read_state,
-    save_state,
-)
-from platoon.train.tinker.kept_groups import decode_group, read_kept
-from platoon.train.tinker.permits import PermitPool
 
 
 class _Rows:
@@ -626,7 +619,7 @@ def test_a_state_or_kept_groups_that_cannot_be_written_cost_their_checkpoint_alo
     """A disk that refuses the kept groups leaves the state without them, so a resume draws their tasks again; one that
     refuses the state leaves the checkpoint without one, so a resume from it draws from its batch.  Neither raises."""
 
-    real = dispatcher_module.write_tasks_file
+    real = dispatch_state_module.write_tasks_file
     refused: set[str] = set()
 
     def flaky(run_dir, name, content):
@@ -634,8 +627,8 @@ def test_a_state_or_kept_groups_that_cannot_be_written_cost_their_checkpoint_alo
             raise OSError(28, "No space left on device")
         return real(run_dir, name, content)
 
-    monkeypatch.setattr(dispatcher_module, "write_tasks_file", flaky)
-    monkeypatch.setattr("platoon.train.tinker.kept_groups.write_tasks_file", flaky)
+    monkeypatch.setattr(dispatch_state_module, "write_tasks_file", flaky)
+    monkeypatch.setattr("platoon.train.checkpoints.kept_groups.write_tasks_file", flaky)
     kept = [((1, 0), SimpleNamespace(entry=None, label=None, record=None, rollout=[_datum(0)]))]
     state = {"start": 1, "next_position": 2, "outstanding": [[1, 0, "t0", 0]], "waiting": {}, "fingerprint": {}}
 

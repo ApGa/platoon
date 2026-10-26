@@ -3,7 +3,7 @@
 ``Datum.loss_fn_inputs["routing_handle"]`` is an int64 ``[1]`` tensor holding
 the gateway ``routing_id`` of the LAST sample call merged into the datum; it is
 absent when that interaction carried no id, and the trainer's strip tuple in
-``platoon/train/tinker/rl.py`` never removes it.
+``platoon/train/trainer/loops.py`` never removes it.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import torch
 
 import platoon.hooks
 import platoon.train.tinker  # noqa: F401  (resolves the package's import cycle first)
-from platoon.train.tinker.batch_transforms import LOSS_NORMALIZATION_TOKENS_KEY
+from platoon.train.step.batch_transforms import LOSS_NORMALIZATION_TOKENS_KEY
 from platoon.utils import tinker_data_processing as tdp
 from platoon.utils.trajectory_error_filtering import detected_message_completion_ids
 
@@ -188,11 +188,11 @@ def test_handle_follows_the_last_merged_call_even_when_it_has_no_id():
 
 
 def _rl_strip_tuple() -> tuple[str, ...]:
-    """Extract the exact strip tuple from rl.py's filtered-datum rebuild."""
+    """Extract the exact strip tuple from the training loop's filtered-datum rebuild (trainer/loops.py)."""
 
-    source = (REPO_ROOT / "platoon/train/tinker/rl.py").read_text()
+    source = (REPO_ROOT / "platoon/train/trainer/loops.py").read_text()
     match = re.search(r"if k\s*\n?\s*not in \(([^)]*)\)", source)
-    assert match is not None, "strip tuple not found in rl.py"
+    assert match is not None, "strip tuple not found in trainer/loops.py"
     names = []
     for element in match.group(1).split(","):
         element = element.strip()

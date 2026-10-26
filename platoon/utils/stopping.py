@@ -3,7 +3,7 @@
 **Process groups.**  A command started in a session of its own (``start_new_session=True``) -- a harness CLI on the
 rollout host (:mod:`platoon.harness.runner`), a sandbox command (:mod:`platoon.sandbox._exec`) -- is out of reach of
 a signal to the process group of the process that started it, so it outlives that group's SIGKILL, the way a stopping
-rollout worker ends (:mod:`platoon.train.tinker.workers.entrypoint`).  The code that starts one registers its group
+rollout worker ends (:mod:`platoon.train.workers.entrypoint`).  The code that starts one registers its group
 here (:func:`register_process_group`) until it has ended it, and a stopping process ends the groups still registered:
 :func:`end_process_groups` (SIGTERM, a grace, SIGKILL), or :func:`kill_process_groups` (SIGKILL, also from a signal
 handler).  :func:`register_descendant_groups` adds the groups of the sessions this process's descendants started

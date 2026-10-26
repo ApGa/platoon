@@ -17,12 +17,12 @@ from test_dispatcher_samplers import Chooser, _mixture, _SizedRows
 from test_permit_pool import _quiet
 
 from platoon.train.components import ENVIRONMENT_COLUMN
+from platoon.train.dispatch import dispatcher as dispatch_dispatcher_module
+from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
+from platoon.train.dispatch.permits import DrawLease, PermitPool
 from platoon.train.labels import task_label
 from platoon.train.leases import holding, rollout_lease
 from platoon.train.sampler_runtime import SamplerSet
-from platoon.train.tinker import dispatcher as dispatcher_module
-from platoon.train.tinker.dispatcher import BoundDraw, Dispatcher
-from platoon.train.tinker.permits import DrawLease, PermitPool
 
 
 class _Rows:
@@ -238,11 +238,12 @@ def test_the_blocked_shares_agree_with_the_dispatcher_s_own_waits(monkeypatch):
     run's last groups have started, on the end of its plan; each read covers the time since the last one."""
 
     clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(dispatcher_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(dispatch_dispatcher_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
 
     def shares(**reasons: float) -> dict[str, float]:
         return {
-            f"dispatch/blocked_share/{reason}": reasons.get(reason, 0.0) for reason in dispatcher_module.BLOCKED_REASONS
+            f"dispatch/blocked_share/{reason}": reasons.get(reason, 0.0)
+            for reason in dispatch_dispatcher_module.BLOCKED_REASONS
         }
 
     async def run():

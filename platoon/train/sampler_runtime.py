@@ -601,7 +601,7 @@ class SamplerSet:
         """The run's per-task statistics at policy version ``now``, every settled group taken in: those the run keeps
         (``live`` False once they stopped), or, when they never started, an empty store over the pool (``live``
         False).  With ``flush`` False, as a group admission rule reads them when a group settles, the settled groups
-        held since the last flush stay held (:meth:`~platoon.train.tinker.task_records.TaskRecorder.peek_store`)."""
+        held since the last flush stay held (:meth:`~platoon.train.task_records.TaskRecorder.peek_store`)."""
 
         recorder = self._recorder
         store = None

@@ -32,9 +32,9 @@ from platoon.train.components import (
     known_rollout_overhead_s,
     rollout_overhead_s,
 )
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.workers.protocol import resolve_ref, validated_ref
-from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.workers.protocol import resolve_ref, validated_ref
+from platoon.train.workflow.group import GroupRolloutWorkflow
 
 SEPARATE = '[verifier]\nenvironment_mode = "separate"\ntimeout_sec = 900\n'
 HEALTHCHECK = '[environment.healthcheck]\ncommand = "true"\nretries = 2\ninterval_sec = 5\ntimeout_sec = 10\n'
@@ -181,7 +181,7 @@ def test_a_task_routed_to_a_service_gets_its_overhead_and_others_get_none(make_t
 def test_a_rollout_workers_alarm_and_an_evaluation_slots_deadline_count_it(make_task):
     task = _routed("separate", {"task_dirs": [str(make_task("separate", task_toml=SEPARATE))], "provider": "process"})
     overhead = 2 * 600 + 900 + 120 + 30
-    workflow = SimpleNamespace(config=SimpleNamespace(worker_finalize_grace_seconds=120.0))
+    workflow: Any = SimpleNamespace(config=SimpleNamespace(worker_finalize_grace_seconds=120.0))  # the method's self
     config = RolloutConfig(timeout=1800)
 
     assert GroupRolloutWorkflow._rollout_budget_seconds(workflow, config, task) == 1800 + overhead + 120

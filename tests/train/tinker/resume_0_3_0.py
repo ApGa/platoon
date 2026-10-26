@@ -109,7 +109,7 @@ def config(name: str, directory: Path) -> Any:
     """Run ``name``'s config, loaded as platoon train loads it (its file written to ``directory``, its run directory
     ``directory/logs/platoon_tinker/run``)."""
 
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     run = RUNS[name]
@@ -139,7 +139,7 @@ def order_rows(name: str, directory: Path) -> list[str]:
     """The row the run's order holds at each of its first ``ROWS`` positions, as the trainer's dataloader draws it."""
 
     from platoon.train.auto import AutoDataset
-    from platoon.train.tinker.rl import PlatoonTinkerDataloader
+    from platoon.train.dataloader import PlatoonTinkerDataloader
 
     loaded = config(name, directory)
     training = AutoDataset.training(loaded)

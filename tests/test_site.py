@@ -25,7 +25,7 @@ from platoon.site import (
     site_profile,
 )
 from platoon.train import reaping
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, evaluates
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, evaluates
 from platoon.utils.config import ConfigError, resolve_config, write_run_record
 
 TRAIN = {"model_name": "Qwen/Qwen3-4B", "renderer_name": "qwen3", "batch_size": 4}

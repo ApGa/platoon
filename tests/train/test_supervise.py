@@ -406,7 +406,7 @@ def test_a_start_that_a_passed_on_stop_killed_before_it_took_it_was_interrupted(
 
 
 def _watchdog(tmp_path: Path, **watchdog):
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     path = tmp_path / "train.yaml"
@@ -499,7 +499,7 @@ def test_train_in_its_own_process_records_itself_and_reaps_before_and_after(tmp_
         assert record is not None and record.pid == os.getpid()
         asyncio.run(leave_sandbox(root, label))  # and what this one leaves
 
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", train)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", train)
 
     cli.main(["train", str(_in_process_config(tmp_path, root))])
 
@@ -519,7 +519,7 @@ def test_train_refuses_a_run_directory_another_process_runs_before_writing_in_it
     try:
         record = reaping.ProcessRecord("train", socket.gethostname(), 4_194_304, None)  # no such pid
         reaping.record_trainer(run_dir, record, sleeper.pid)
-        monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: pytest.fail("trained"))
+        monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("trained"))
 
         with pytest.raises(SystemExit) as exit_info:
             cli.main(["train", str(_in_process_config(tmp_path, tmp_path / "sandboxes"))])

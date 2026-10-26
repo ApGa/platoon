@@ -122,7 +122,7 @@ def test_exclude_tasks_items_are_checked_once_the_settings_can_train(tmp_path, c
     def reached(*args, **kwargs):
         raise AssertionError("the config was not refused before the run started")
 
-    monkeypatch.setattr("platoon.train.tinker.train.PlatoonTinkerRLTrainer", reached)
+    monkeypatch.setattr("platoon.train.launch.PlatoonTinkerRLTrainer", reached)
     monkeypatch.setattr("platoon.eval.run.EvalRunner", reached)
     table = {"name": "table", "service": "table", "service_kwargs": ROWS, "harness": "platoon-react", "program": "gym"}
     search = {"name": "search", "service": NUMBER_SEARCH, "harness": "platoon-bash"}

@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 import resume_0_3_0
 
+from platoon.train.task_records import CHANGED_KEY
 from platoon.train.task_stats import read_events
-from platoon.train.tinker.task_records import CHANGED_KEY
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "resume-0.3.0"
 

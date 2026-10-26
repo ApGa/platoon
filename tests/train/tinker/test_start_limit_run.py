@@ -38,14 +38,16 @@ from platoon.gateway.core import ChatRequest
 from platoon.task import Task
 from platoon.testing import ScriptedPolicy, make_gateway
 from platoon.train.components import ENVIRONMENT_COLUMN
+from platoon.train.config_defs import TrainConfig, WorkflowConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN
 from platoon.train.leases import holding
-from platoon.train.tinker import rl, rollout_metrics
-from platoon.train.tinker.config_defs import TrainConfig, WorkflowConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN
+from platoon.train.tinker import rollout_metrics
 from platoon.train.tinker.rollout_metrics import current_timeline
-from platoon.train.tinker.start_limit import StartLimit, held_slot
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.trainer import rl as rl_module
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import members as members_module
+from platoon.train.workflow.start_limit import StartLimit, held_slot
 from platoon.utils.config import ConfigError
 from platoon.utils.stats_tracker import get as get_tracker
 
@@ -80,11 +82,11 @@ def _first_call() -> None:
         start.first_call()
 
 
-def _workflow(tmp_path: Path, rollout_fn: Any, scope: str, **config: Any) -> grw.GroupRolloutWorkflow:
+def _workflow(tmp_path: Path, rollout_fn: Any, scope: str, **config: Any) -> group_module.GroupRolloutWorkflow:
     """The group workflow itself, in process, its rollouts run by ``run_rollout_request``."""
 
     config.setdefault("filter_zero_advantage_datums", False)
-    return grw.GroupRolloutWorkflow(
+    return group_module.GroupRolloutWorkflow(
         rollout_fn=rollout_fn,
         get_task_fn=lambda task_id: Task(goal="g", id=task_id),
         config=WorkflowConfig(rollout_config=RolloutConfig(output_dir=str(tmp_path / "rollouts")), **config),
@@ -212,7 +214,7 @@ def test_under_process_isolation_a_slot_comes_back_when_the_worker_marks_its_fir
     ipc = tmp_path / "ipc"
     ipc.mkdir(mode=0o700)
     scope = "test_sl_process"
-    workflow = grw.GroupRolloutWorkflow(
+    workflow = group_module.GroupRolloutWorkflow(
         rollout_fn=worker_stub_rollouts.call_then_meet,
         get_task_fn=lambda task_id: Task(
             goal="g", id=task_id, misc={"meet": str(meetings[task_id][0]), "count": meetings[task_id][1]}
@@ -374,7 +376,7 @@ def test_a_member_waiting_for_its_slot_is_waiting_and_its_slot_wait_joins_its_st
     is exactly 0, and the group started together."""
 
     calls = {member: asyncio.Event() for member in range(4)}
-    admissions: list[grw._GroupAdmission] = []
+    admissions: list[members_module._GroupAdmission] = []
 
     class Recording(_Members):
         async def _admit_group(self, group_size):
@@ -500,7 +502,7 @@ def test_a_rollout_that_crashes_while_it_holds_its_slot_gives_it_back(tmp_path, 
             observed=True,
         )
 
-    monkeypatch.setattr(grw, "run_rollout_request", run_rollout_request)
+    monkeypatch.setattr(members_module, "run_rollout_request", run_rollout_request)
     workflow = _workflow(tmp_path, lambda task, config: None, "test_sl_crash", group_size=2)
     workflow.start_limit = limit = StartLimit(1)
     output = asyncio.run(asyncio.wait_for(workflow.arun_episode({"task_id": "t"}), 10))
@@ -637,10 +639,10 @@ def test_a_limit_that_never_binds_trains_and_requests_as_without_one(tmp_path, m
             on_first_call()
             return await respond(request)
 
-        monkeypatch.setattr(grw, "run_rollout_request", as_before if limit is None else with_signal)
+        monkeypatch.setattr(members_module, "run_rollout_request", as_before if limit is None else with_signal)
         client = _Recording()
         trainer, _saves, _logged = make_trainer(monkeypatch, config, tasks=8, training_client=client)
-        workflow = grw.GroupRolloutWorkflow(
+        workflow = group_module.GroupRolloutWorkflow(
             rollout_fn=lambda task, rollout_config: None,
             get_task_fn=lambda task_id: Task(id=task_id),
             config=config.train.workflow_config,
@@ -690,8 +692,8 @@ def test_a_run_says_how_its_rollouts_start_up(tmp_path, caplog):
     def lines(*overrides: str, train: Any = None, evaluation: Any = None) -> list[str]:
         config = trainer_config(tmp_path, *overrides)
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="platoon.train.tinker.start_limit"):
-            rl._limit_starts(config, train, evaluation)
+        with caplog.at_level(logging.INFO, logger="platoon.train.workflow.start_limit"):
+            rl_module._limit_starts(config, train, evaluation)
         return [record.getMessage() for record in caplog.records]
 
     group = _group(WorkflowConfig(group_size=8), None, "test_sl_lines")

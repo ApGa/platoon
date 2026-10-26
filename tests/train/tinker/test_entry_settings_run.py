@@ -20,13 +20,14 @@ from trainer_fakes import TrainingClient, make_trainer
 
 from platoon.task import Task
 from platoon.train import entry_settings
+from platoon.train import launch as train_module
 from platoon.train.components import ENVIRONMENT_COLUMN
-from platoon.train.tinker import train as train_module
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.permits import DrawLease, PermitPool
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.train.tinker.workflows import group_rollout_workflow as workflow_module
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.dispatch.permits import DrawLease, PermitPool
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workflow import context as context_module
+from platoon.train.workflow import members as members_module
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.config import ConfigError, resolve_config
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
@@ -99,7 +100,7 @@ class _Workflow(GroupRolloutWorkflow):
     def compute_baselines(self, results):
         baselines = super().compute_baselines(results)
         rewards = [(result.task_reward, result.task_reward_valid) for result in results]
-        self.baselines.append((workflow_module.current_entry(), self.config.leave_one_out_baseline, rewards, baselines))
+        self.baselines.append((context_module.current_entry(), self.config.leave_one_out_baseline, rewards, baselines))
         return baselines
 
 
@@ -181,7 +182,7 @@ def test_each_entry_s_groups_run_with_its_own_settings_within_the_concurrency_bu
             outcome_status="scored" if valid else "error",
         )
 
-    monkeypatch.setattr(workflow_module, "run_rollout_request", run_rollout_request)
+    monkeypatch.setattr(members_module, "run_rollout_request", run_rollout_request)
     trainer, _saves, logged = make_trainer(monkeypatch, config, training_client=TrainingClient())
     trainer.train_dataset = _rows(("quick", 4), ("slow", 4))
     llm = SimpleNamespace(version=0, model_name="m")

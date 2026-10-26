@@ -11,7 +11,7 @@ import re
 import pytest
 from worker_shutdown_scenarios import EXIT_SLACK_SECONDS, _gone_soon, _kill_leftover, _kill_trainer_once_ready
 
-from platoon.train.tinker.workers.entrypoint import TERMINATION_SECONDS
+from platoon.train.workers.entrypoint import TERMINATION_SECONDS
 
 
 @pytest.mark.parametrize("holds_its_loop", [False, True], ids=["cancelled", "holding-its-loop"])

@@ -132,7 +132,7 @@ CONFIGS: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {
 def config(name: str, directory: Path) -> Any:
     """Config ``name``, loaded as platoon train loads it (its file written to ``directory``)."""
 
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     train, environments = CONFIGS[name]
@@ -161,7 +161,7 @@ def drawn_rows(training: Any, batch_size: int) -> list[dict[str, Any]]:
     """The rows 0.3.0's dataloader draws from ``AutoDataset.training``'s result, position by position: three epochs
     and a batch."""
 
-    from platoon.train.tinker.rl import PlatoonTinkerDataloader
+    from platoon.train.dataloader import PlatoonTinkerDataloader
 
     loader = PlatoonTinkerDataloader(training.dataset, batch_size, order=training.order)
     return [row for batch in range(EPOCHS * len(loader) + 1) for row in loader.get_batch(batch)]

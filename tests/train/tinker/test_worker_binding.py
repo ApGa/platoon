@@ -22,11 +22,7 @@ import pytest
 
 import platoon.train.tinker  # noqa: F401
 from platoon.train.tinker import proxy
-from platoon.train.tinker.workers.binding import (
-    FollowingSamplingClient,
-    publish_binding,
-    read_binding,
-)
+from platoon.train.workers.binding import FollowingSamplingClient, publish_binding, read_binding
 
 
 class _StubRenderer:

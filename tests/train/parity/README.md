@@ -38,7 +38,7 @@ uv run python tests/train/parity/record_golden.py --out /tmp/traces-branch  # in
 ## What runs
 
 A scenario whose config has `environments` runs through `platoon train`'s entry point
-(`platoon.train.tinker.train.arun_tinker_training`): the config is loaded and checked, the entries' tasks are listed,
+(`platoon.train.launch.arun_tinker_training`): the config is loaded and checked, the entries' tasks are listed,
 and the trainer and its training and evaluation `GroupRolloutWorkflow`s are built as for a real run. Any other
 scenario runs the trainer as a train script does, on plain task lists. Either way the real trainer, dispatcher, task
 samplers, group admission rules, per-task statistics, and checkpoint, resume and evaluation code run. A scenario of
