@@ -941,12 +941,18 @@ set = {environment = {TOKEN = "${CYBERGYM_TOKEN}"}}
 
     plain = fetch(fetch_config(str(dataset), cache=tmp_path / "cache", lock=tmp_path / "plain.json"))
     fixed = fetch(
-        fetch_config(str(dataset), cache=tmp_path / "cache", lock=tmp_path / "fixed.json", overlays=[overlay])
+        fetch_config(
+            str(dataset),
+            cache=tmp_path / "cache",
+            lock=tmp_path / "fixed.json",
+            overlays=[overlay],
+            refuse={"sidecars": True},
+        )
     )
 
     assert (plain.get("cybergym").refused or "").startswith("compose: main.cap_add: adds NET_ADMIN")
     task = fixed.get("cybergym")
-    assert (task.refused or "").startswith("stack: ")  # within the subset now; sidecar stacks are refused by default
+    assert (task.refused or "").startswith("stack: ")  # within the subset now: refused only as a stack, as asked
     assert task.compose is not None
     assert task.overlays == ("fix",) and task.compose["edits"] == [
         "fix: main: unset cap_add",
@@ -1056,7 +1062,9 @@ def test_a_fetch_locks_each_kind_with_its_plan_and_warns_of_compose_files_harbor
     _task(dataset, "unread", None, files={"environment/compose.yaml": LSCB_LIKE})
 
     with caplog.at_level(logging.WARNING, logger="platoon.envs.harbor.fetch"):
-        lock = fetch(fetch_config(str(dataset), cache=tmp_path / "cache", lock=tmp_path / "l.json"))
+        lock = fetch(
+            fetch_config(str(dataset), cache=tmp_path / "cache", lock=tmp_path / "l.json", refuse={"sidecars": True})
+        )
 
     kinds = {task.name: task.flags["stack"] for task in lock.tasks}
     assert kinds == {
@@ -1307,7 +1315,7 @@ def test_a_fetch_keeps_privileges_with_its_switch_and_old_locks_still_answer(tmp
     assert (default.get("cybergym").refused or "").startswith("compose: main.cap_add: adds NET_ADMIN")
     # The switch enters what a lock answers only when it is set: a lock fetched before it existed still answers.
     assert RefusePolicy.from_mapping({}).inputs() == {
-        "sidecars": True,
+        "sidecars": False,
         "gpus": True,
         "agent_user": True,
         "per_task_build": False,

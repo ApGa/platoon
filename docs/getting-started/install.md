@@ -47,7 +47,7 @@ tutorials' files and the recipes are in the repository: to follow the tutorials,
 |---|---|---|
 | `tinker` | The Tinker SDK (`tinker==0.16.1`) and `tinker-cookbook` 0.3. | `platoon train`, `platoon eval` and `platoon rollout`: anything that samples or trains a model. |
 | `ors` | The OpenReward SDK (`openreward>=0.1.125`). | Environments written as OpenReward (ORS) classes: `python://` and `ors+http://` services, including number search, the TextCraft extension and `pt.gym.as_environment`. |
-| `hpc` | `hpc-sandbox` 0.4 ([below](#the-hpc-extra)). | The `singularity` and `enroot` task sandboxes, for Harbor tasks on clusters without Docker. |
+| `hpc` | `hpc-sandbox` 0.5, from 0.5.1 ([below](#the-hpc-extra)). | The `singularity` and `enroot` task sandboxes, for Harbor tasks on clusters without Docker. |
 
 Install `tinker` and `ors` for everything in these guides: the trainer and the model gateway import the Tinker
 SDK, and the example environments are ORS classes. A project that trains only on Harbor datasets needs no `ors`, and
@@ -55,9 +55,9 @@ SDK, and the example environments are ORS classes. A project that trains only on
 
 ### The hpc extra
 
-The `hpc` extra installs [hpc-sandbox](https://pypi.org/project/hpc-sandbox/) 0.4 or 0.5 from PyPI, which runs the
-`singularity` and `enroot` sandboxes as rootless containers (the runtimes are [system tools](#optional-system-tools)),
-and, with 0.5, multi-container Harbor tasks as pods:
+The `hpc` extra installs [hpc-sandbox](https://pypi.org/project/hpc-sandbox/) 0.5 from PyPI, 0.5.1 or a later patch
+release, which runs the `singularity` and `enroot` sandboxes as rootless containers (the runtimes are
+[system tools](#optional-system-tools)), and multi-container Harbor tasks as pods:
 
 ```bash
 pip install 'platoon[tinker,ors,hpc]'
@@ -75,7 +75,7 @@ override-dependencies = ["hpc-sandbox @ git+https://github.com/ApGa/hpc-sandbox.
 ```
 
 With pip, name the commit next to the extra (`'hpc-sandbox @ git+https://github.com/ApGa/hpc-sandbox.git@<commit>'`);
-pip takes it only when its version is one the extra accepts (0.4 or 0.5).
+pip takes it only when its version is one the extra accepts (0.5.1 or a later 0.5).
 
 ## Depend on platoon from a project
 

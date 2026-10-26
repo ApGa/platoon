@@ -161,10 +161,11 @@ def test_a_checkout_takes_every_requirement_from_pypi():
     assert elsewhere == {}
 
 
-def test_the_hpc_extra_takes_the_minor_release_a_checkout_locks_and_the_next():
-    """The hpc extra takes hpc-sandbox from the release the providers are tested against, the one the lock names, to
-    the next minor release, whose pods run Harbor stacks (0.5, for the lock's 0.4): an environment that holds an older
-    hpc-sandbox (0.2.0, which checkouts took from git) then upgrades instead of keeping it."""
+def test_the_hpc_extra_takes_the_minor_release_a_checkout_locks():
+    """The hpc extra takes one minor release of hpc-sandbox, the one the lock names, from the release the providers
+    are tested against: an environment that holds an older hpc-sandbox (0.5.0, whose pods fail on group-owned storage
+    and under a umask such as 027; 0.4, without the pods that stacks run as; 0.2.0, which checkouts took from git)
+    then upgrades instead of keeping it."""
 
     [line] = PROJECT["optional-dependencies"]["hpc"]
     requirement = Requirement(line)
@@ -174,9 +175,9 @@ def test_the_hpc_extra_takes_the_minor_release_a_checkout_locks_and_the_next():
 
     assert requirement.name == "hpc-sandbox" and not (requirement.extras or requirement.url or requirement.marker)
     assert locked["source"] == PYPI
-    assert requirement.specifier == SpecifierSet(f">={lowest},<{version.major}.{version.minor + 2}")
+    assert requirement.specifier == SpecifierSet(f">={lowest},<{version.major}.{version.minor + 1}")
     assert lowest.release[:2] == version.release[:2] and version in requirement.specifier
-    assert Version("0.2.0") not in requirement.specifier
+    assert not any(Version(older) in requirement.specifier for older in ("0.2.0", "0.4.0", "0.5.0"))
 
 
 def test_the_lock_covers_every_extension():

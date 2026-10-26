@@ -53,7 +53,7 @@ POSTGRES = {
 }
 DB = "services:\n  db:\n    image: postgres:16-alpine\n"
 STACK = DB + "  api:\n    build: ./api\n    command: [python3, /srv/api.py]\n"
-LOCK_STACKS = {"sidecars": False}  # a fetch refuses stacks unless told to lock them
+LOCK_STACKS: dict[str, bool] = {}  # a fetch's default, which locks stacks as runnable
 
 
 def _task(root: Path, name: str, compose: str) -> Path:

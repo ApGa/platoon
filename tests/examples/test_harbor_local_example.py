@@ -141,7 +141,7 @@ def test_eval_solves_the_runnable_task_in_a_process_sandbox(tmp_path, capsys, sc
             "docker",
             r" whose service db runs the command of its registry image postgres:16, which platoon does not know",
         ),
-        # Singularity runs stacks as hpc-sandbox 0.5's pods, and none with the lock's 0.4.0, which has no pods.
+        # Singularity runs stacks as hpc-sandbox 0.5's pods, and none with 0.4.0, which has no pods.
         (
             "singularity",
             r", and the singularity provider runs a multi-container stack as an hpc-sandbox pod, and the installed "

@@ -204,7 +204,7 @@ pods, which need, on the compute nodes:
 
 | What | For | Check |
 |---|---|---|
-| hpc-sandbox 0.5 | every stack: its pods' run modes, host aliases and exposed ports | `python -c 'import hpc_sandbox; print(hpc_sandbox.__version__)'` |
+| hpc-sandbox 0.5.1, the `hpc` extra's | every stack: its pods' run modes, host aliases and exposed ports (0.5); sidecars that switch users starting where the run's directory or the task's files are on storage that only one of your groups opens, and reaching their binds under a umask such as 027, and a `main` that outlives an agent's `kill -9 -1` (0.5.1) | `python -c 'import hpc_sandbox; print(hpc_sandbox.__version__)'` |
 | unprivileged user namespaces that nest: the pod's (with a network namespace), each service's inside it, and the runtime's own | every stack | `unshare --user --map-root-user --net unshare --user --map-root-user unshare --user --map-root-user true` |
 | util-linux's `nsenter` (and `prlimit` for services that set `ulimits`) | every stack | `hpc-sandbox doctor` |
 | slirp4netns, on `PATH` or fetched once with `hpc-sandbox fetch-tools` (`platoon prepare` fetches it where a stack needs it) | stacks with egress | `hpc-sandbox doctor`'s `pods: egress` line |
@@ -212,8 +212,10 @@ pods, which need, on the compute nodes:
 
 Without subordinate ids, sidecars run as your own uid, which most database images accept, as they accept `docker run
 --user`. enroot runs every sidecar so, since it maps one id into a container. With them, each rollout worker maps them
-once, at its first stack, which can take more than a minute where `/etc/subuid` lists many users. A run refuses stacks
-where pods cannot run, when it lists its tasks, naming what is missing. Pods on Apptainer and enroot are experimental.
+once, at its first stack, which can take more than a minute where `/etc/subuid` lists many users. A fetch locks
+stacks as runnable, and a run refuses them where pods cannot run, when it lists its tasks, naming what is missing:
+leave them out (`exclude_tasks`), or fetch them refused with `refuse: {sidecars: true}`. Pods on Apptainer and enroot
+are experimental.
 
 Such sidecars may read the task's files as a user of their own (the official postgres image runs its init scripts as
 `postgres`). Under a umask that keeps other users out, such as 027, a fetched dataset's files are 0640, so a

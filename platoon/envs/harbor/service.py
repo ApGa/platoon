@@ -568,9 +568,9 @@ class HarborEnvironmentService:
         return stack_refusal(self._provider, self._provider_options)
 
     def _check_stacks(self, names: Sequence[str], split: str) -> None:
-        """Refuse the tasks of a fetched dataset that are multi-container stacks (a fetch with ``refuse: {sidecars:
-        false}`` locks them) where no stack may run (:meth:`stacks_refusal`): every rollout of theirs would fail as it
-        opens.  A dataset directory leaves such tasks out when it lists them, with a warning."""
+        """Refuse the tasks of a fetched dataset that are multi-container stacks (a fetch locks them, unless its
+        ``refuse`` sets ``sidecars: true``) where no stack may run (:meth:`stacks_refusal`): every rollout of theirs
+        would fail as it opens.  A dataset directory leaves such tasks out when it lists them, with a warning."""
 
         if self._locked is None or not names or (refusal := self.stacks_refusal()) is None:
             return
@@ -582,7 +582,7 @@ class HarborEnvironmentService:
                 "env_config",
                 f"{len(stacks)} of the {len(names)} tasks of split {split!r} are multi-container stacks (sidecar "
                 f"services: {shown}), and {refusal}; run them on a provider that runs stacks, or leave them out "
-                "(exclude_tasks)",
+                "(exclude_tasks, or a fetch whose refuse sets sidecars: true, which locks them refused)",
             )
 
     def _check_privileges(self, names: Sequence[str], split: str) -> None:

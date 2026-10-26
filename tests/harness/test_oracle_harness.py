@@ -86,13 +86,13 @@ def stack_repository(root: Path) -> str:
 
 @pytest.mark.asyncio
 async def test_a_stack_fetched_from_git_scores_with_the_oracle_and_not_with_the_noop(tmp_path, monkeypatch):
-    """A multi-container task fetched from a git repository, which ``refuse: {sidecars: false}`` locks as a stack, runs
+    """A multi-container task fetched from a git repository, which a fetch locks as a stack by default, runs
     through the rollout path on the process provider with its sidecar: the oracle scores 1 and the no-op 0, both
     graded (a sidecar that a probe found down would make them invalid)."""
 
     monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
     use_site_cache(monkeypatch, tmp_path / "site")
-    source: dict[str, Any] = {"dataset": stack_repository(tmp_path / "upstream"), "refuse": {"sidecars": False}}
+    source: dict[str, Any] = {"dataset": stack_repository(tmp_path / "upstream")}
     lock = fetch(fetch_config(**source))  # as the trainer fetches it when it lists the tasks
     task = lock.get("app-kv")
     assert (lock.source["kind"], task.flags["stack"], task.refused) == ("git", "sidecars", None)

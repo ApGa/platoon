@@ -875,9 +875,9 @@ the changelog.
    day PyPI accepts no new projects.
 3. Release only requirements that are on PyPI: PyPI refuses a release whose requirements name a URL, and an extra
    whose requirement no index has cannot be installed. hpc-sandbox, which the `hpc` extra installs, is published there
-   from [its repository](https://github.com/ApGa/hpc-sandbox), and the extra takes the minor releases the providers
-   are tested against, from 0.4.0, which the lock holds, to 0.5, whose pods run stacks (`hpc-sandbox>=0.4.0,<0.6`). To
-   move to another, set the range, run `uv lock` in the repository root (one lock covers core and the extensions),
+   from [its repository](https://github.com/ApGa/hpc-sandbox), and the extra takes one minor release of it, the one
+   the lock holds, from the release the providers are tested against, 0.5.1 (`hpc-sandbox>=0.5.1,<0.6`). To move to
+   another, set the range, run `uv lock` in the repository root (one lock covers core and the extensions),
    and run `tests/sandbox/test_sandbox_hpc.py` and `tests/envs/test_harbor_providers.py` after
    `uv sync --dev --extra tinker --extra ors --extra hpc`: their tests of the installed hpc-sandbox check the types,
    errors, options, capabilities and root filesystem layouts that the providers adapt.

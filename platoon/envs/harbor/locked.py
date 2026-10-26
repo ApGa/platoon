@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from platoon.envs.harbor.dockerfile import DockerfileError, plan_dockerfile
-from platoon.envs.harbor.fetch import FetchConfig, ensure_lock, fetch_config
+from platoon.envs.harbor.fetch import FetchConfig, answering_lock_path, ensure_lock, fetch_config
 from platoon.envs.harbor.holdout import HoldoutRow
 from platoon.envs.harbor.images import (
     ImageEntry,
@@ -117,8 +117,9 @@ class LockedTasks:
         lock = self.dataset(fetch_allowed=True).lock
         if not lock.records_input_files:
             missing = sum(1 for task in lock.tasks if task.input_files is None)
+            path = answering_lock_path(self.fetch) if self.fetch is not None else self.lock_path
             raise LockError(
-                f"The lock {self.lock_path} records no input files for {missing:,} of its {len(lock.tasks):,} "
+                f"The lock {path} records no input files for {missing:,} of its {len(lock.tasks):,} "
                 "task(s), as locks written before platoon recorded them do, and a hold-out keeps the tasks that share "
                 "an input file on one side: fetch the dataset again to record them (`platoon harbor fetch CONFIG`)"
             )

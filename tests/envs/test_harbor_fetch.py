@@ -16,7 +16,16 @@ from site_cache import use_site_cache
 
 from platoon.envs.harbor import fetch as fetch_module
 from platoon.envs.harbor.dataset import dataset_tasks
-from platoon.envs.harbor.fetch import FetchError, Overlay, ensure_lock, fetch, fetch_config, is_pinned
+from platoon.envs.harbor.fetch import (
+    FetchError,
+    Overlay,
+    answering_lock,
+    answering_lock_path,
+    ensure_lock,
+    fetch,
+    fetch_config,
+    is_pinned,
+)
 from platoon.envs.harbor.hashing import content_hash
 from platoon.envs.harbor.inputs import input_files
 from platoon.envs.harbor.lock import LockError, check_entry, read_lock, verify_lock
@@ -385,7 +394,7 @@ def test_local_directories_keep_directory_ids_and_refuse_what_cannot_run(tmp_pat
         "alpha": "",
         "group/deep": "",
         "group/plain": "",
-        "stack": "stack",
+        "stack": "",  # a stack, locked as runnable (refuse: {sidecars: true} refuses it)
         "trivial": "",
         "user": "agent_user",
         "suffix-user": "agent_user",
@@ -393,9 +402,9 @@ def test_local_directories_keep_directory_ids_and_refuse_what_cannot_run(tmp_pat
         "broken": "image",
         "prebuilt": "",
     }
-    assert lock.get("trivial").flags["stack"] == "trivial"
+    assert (lock.get("trivial").flags["stack"], lock.get("stack").flags["stack"]) == ("trivial", "sidecars")
     assert lock.get("prebuilt").image == {"kind": "prebuilt", "ref": "python:3.12", "upload_environment": True}
-    assert lock.get("alpha").image["kind"] == "shared"  # alpha, group/deep, group/plain, trivial share it
+    assert lock.get("alpha").image["kind"] == "shared"  # alpha, group/deep, group/plain, stack, trivial share it
 
 
 def test_overlay_mismatches_refuse_the_task(tmp_path: Path):
@@ -584,23 +593,93 @@ def test_a_fetch_refuses_what_the_task_loader_refuses(tmp_path: Path):
     assert HarborTask.load(tmp_path / "cache" / lock.get("fine").path).verifier_mode == "separate"
 
 
-def test_sidecar_stacks_are_refused_by_default_and_locked_as_stacks_when_the_policy_lets_them_through(tmp_path: Path):
+STACK_REFUSED = "stack: the compose file adds sidecar services (refuse: {sidecars: false} fetches it as a stack)"
+WITH_DB = {**INSTANCE, "environment/docker-compose.yaml": "services:\n  db: {image: postgres:16}\n"}
+
+
+def test_sidecar_stacks_are_locked_as_stacks_by_default_and_refused_when_the_policy_says_so(tmp_path: Path):
     root = tmp_path / "dataset"
-    _task(
-        root / "with-db",
-        dockerfile=MCO_DOCKERFILE,
-        files={**INSTANCE, "environment/docker-compose.yaml": "services:\n  db: {image: postgres:16}\n"},
-    )
-    by_policy = fetch(fetch_config(str(root), cache=tmp_path / "cache", lock=tmp_path / "a.json"))
-    assert by_policy.get("with-db").refused == (
-        "stack: the compose file adds sidecar services (refuse: {sidecars: false} fetches it as a stack)"
-    )
-    allowed = fetch(
-        fetch_config(str(root), cache=tmp_path / "cache", lock=tmp_path / "b.json", refuse={"sidecars": False})
-    )
-    row = allowed.get("with-db")
-    assert row.refused is None and row.flags["stack"] == "sidecars" and [task.name for task in allowed.runnable()]
+    _task(root / "with-db", dockerfile=MCO_DOCKERFILE, files=WITH_DB)
+    by_default = fetch(fetch_config(str(root), cache=tmp_path / "cache", lock=tmp_path / "a.json"))
+    row = by_default.get("with-db")
+    assert row.refused is None and row.flags["stack"] == "sidecars" and [task.name for task in by_default.runnable()]
     assert row.compose is not None and row.compose["services"]["db"]["image"] == "postgres:16"
+    refused = fetch(
+        fetch_config(str(root), cache=tmp_path / "cache", lock=tmp_path / "b.json", refuse={"sidecars": True})
+    )
+    assert refused.get("with-db").refused == STACK_REFUSED and not refused.runnable()
+    unset = fetch_config(str(root), cache=tmp_path / "cache")
+    assert (
+        unset.inputs_digest()
+        == fetch_config(str(root), cache=tmp_path / "cache", refuse={"sidecars": False}).inputs_digest()
+    )
+
+
+def _old_default_lock(root: Path, cache: Path, lock: Path | None = None):
+    """The lock that platoon wrote for an entry that set no ``refuse.sidecars`` while that defaulted to true."""
+
+    return fetch(fetch_config(str(root), cache=cache, lock=lock, refuse={"sidecars": True}))
+
+
+def test_a_lock_from_before_the_sidecars_default_still_answers_where_it_refused_no_stack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The default turned to false: a lock written for an entry that set none, which refused no task as a stack, is
+    what a fetch would write now, so it still answers, from the cache's lock named by the digest of then or from the
+    entry's ``lock``, and nothing is fetched again."""
+
+    root = tmp_path / "dataset"
+    _task(root / "plain", dockerfile=MCO_DOCKERFILE, files=INSTANCE)
+    cache = tmp_path / "cache"
+    old = _old_default_lock(root, cache)
+    config = fetch_config(str(root), cache=cache)
+    assert config.lock_path() != config.earlier_lock_path() and not config.lock_path().exists()
+    assert old.inputs == config.earlier_inputs_digest() != config.inputs_digest()
+
+    def never(*args, **kwargs):
+        raise AssertionError("a lock that answers was fetched again")
+
+    monkeypatch.setattr(fetch_module, "fetch", never)
+    found = answering_lock(config)
+    assert found is not None and found.inputs == old.inputs
+    assert answering_lock_path(config) == config.earlier_lock_path()
+    assert ensure_lock(config, fetch_allowed=False).inputs == old.inputs  # a rollout worker
+    assert ensure_lock(config, fetch_allowed=True).inputs == old.inputs  # the trainer
+    monkeypatch.undo()
+
+    named = tmp_path / "named.lock.json"
+    old = _old_default_lock(root, cache, named)
+    config = fetch_config(str(root), cache=cache, lock=named)
+    assert config.earlier_lock_path() == config.lock_path() == named
+    found = answering_lock(config)
+    assert found is not None and found.inputs == old.inputs and answering_lock_path(config) == named
+    assert fetch_config(str(root), cache=cache, refuse={"sidecars": True}).earlier_lock_path() is None
+
+
+def test_a_lock_from_before_the_sidecars_default_that_refused_stacks_is_fetched_again(tmp_path: Path):
+    """A lock written for an entry that set no ``refuse.sidecars`` while that defaulted to true, which refused a
+    stack, does not answer the entry now: a rollout worker is told which lock refused how many, and the trainer
+    fetches the dataset again, which locks the stack as runnable.  An entry that sets ``sidecars: true`` keeps it."""
+
+    root = tmp_path / "dataset"
+    _task(root / "plain", dockerfile=MCO_DOCKERFILE, files=INSTANCE)
+    _task(root / "with-db", dockerfile=MCO_DOCKERFILE, files=WITH_DB)
+    cache = tmp_path / "cache"
+    old = _old_default_lock(root, cache)
+    assert old.get("with-db").refused == STACK_REFUSED
+    config = fetch_config(str(root), cache=cache)
+    assert answering_lock(config) is None and answering_lock_path(config) == config.lock_path()
+    with pytest.raises(LockError) as caught:
+        ensure_lock(config, fetch_allowed=False)
+    message = str(caught.value)
+    assert f"The Harbor lock {config.lock_path()} does not exist" in message
+    assert f"the lock {config.earlier_lock_path()}, which platoon wrote for these settings before" in message
+    assert "refused 1 task(s) as stacks" in message and "refuse: {sidecars: true} keeps them refused" in message
+    fetched = ensure_lock(config, fetch_allowed=True)
+    assert fetched.get("with-db").refused is None and len(fetched.runnable()) == 2
+    assert answering_lock_path(config) == config.lock_path() and fetched.inputs == config.inputs_digest()
+    kept = answering_lock(fetch_config(str(root), cache=cache, refuse={"sidecars": True}))
+    assert kept is not None and kept.inputs == old.inputs and kept.get("with-db").refused == STACK_REFUSED
 
 
 def test_refusals_name_the_task_and_its_files_never_the_directory_it_was_checked_in(tmp_path: Path):
@@ -967,7 +1046,7 @@ def test_refuse_takes_booleans_and_a_positive_size(tmp_path: Path, refuse, messa
 def test_the_size_limit_is_an_input_of_the_lock_only_when_set(tmp_path: Path):
     unset = fetch_config("hf://org/data@" + COMMIT, cache=tmp_path / "c")
     limited = fetch_config("hf://org/data@" + COMMIT, cache=tmp_path / "c", refuse={"uploads_over_mb": 100})
-    assert unset.refuse.inputs() == {"sidecars": True, "gpus": True, "agent_user": True, "per_task_build": False}
+    assert unset.refuse.inputs() == {"sidecars": False, "gpus": True, "agent_user": True, "per_task_build": False}
     assert limited.refuse.inputs()["uploads_over_mb"] == 100.0
     assert unset.inputs_digest() != limited.inputs_digest()
     assert (
@@ -980,7 +1059,7 @@ def test_the_size_limit_is_an_input_of_the_lock_only_when_set(tmp_path: Path):
 
 # The inputs digests that platoon computed for these configs before the size limit and the metadata entries existed
 # (tests/envs fixture values only, so the digests do not depend on the checkout's path): a lock written then still
-# answers the same config.
+# answers the same config (the plain one's by the digest it had while refuse.sidecars defaulted to true).
 GOLDEN_FULL = "cdd5eb84b2e7f78ec1413f98d8cd8be0d18fa290e574a9dd41ee2f4f52c7cc0f"
 GOLDEN_PLAIN = "22cc32a399cec05db28dbe3fab09d5a417356971c3702245343ebf58e27463e0"
 
@@ -1005,7 +1084,9 @@ def test_a_lock_written_before_the_new_keys_still_answers_its_config(tmp_path: P
     )
     plain = fetch_config(f"hf://org/harbor-dataset@{COMMIT}", cache=tmp_path / "c")
 
-    assert (full.inputs_digest(), plain.inputs_digest()) == (GOLDEN_FULL, GOLDEN_PLAIN)
+    assert (full.inputs_digest(), plain.earlier_inputs_digest()) == (GOLDEN_FULL, GOLDEN_PLAIN)
+    assert full.earlier_inputs_digest() is None  # it sets sidecars: true, whose digest has not changed
+    assert plain.earlier_lock_path() == tmp_path / "c" / "locks" / f"{GOLDEN_PLAIN[:16]}.lock.json"
     assert full.lock_path() == tmp_path / "c" / "locks" / f"{GOLDEN_FULL[:16]}.lock.json"  # the default lock is found
 
 

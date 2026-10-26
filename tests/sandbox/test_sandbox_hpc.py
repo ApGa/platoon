@@ -330,7 +330,7 @@ def _published_hpc_sandbox():
 
 
 def test_one_block_builds_both_published_providers(tmp_path: Path):
-    """Against the installed hpc-sandbox (the lock's 0.4.0, or 0.5): its EnrootProvider takes every option its
+    """Against the installed hpc-sandbox (the lock's 0.5.1): its EnrootProvider takes every option its
     SingularityProvider takes, so one provider_options block builds both providers and means the same on both, with
     platoon's capabilities only (not its pods), and ``stacks`` where its pods run them here; root, which the
     SingularityProvider refuses, builds the EnrootProvider too."""
