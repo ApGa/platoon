@@ -16,9 +16,8 @@ from platoon.train.dispatch.permits import DrawLease
 from platoon.train.dispatch.settled import _Settled, carries_datums, emptied
 from platoon.train.leases import holding
 from platoon.train.trainer.state import TrainLoopSharedState
-from platoon.train.workflow.protocol import RolloutWorkflow
-from platoon.utils.rollout_stats import RolloutStats
-from platoon.utils.stats_tracker import DeferredStats, StatsTracker
+from platoon.train.workflow.protocol import RolloutWorkflow, report_of
+from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
     from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
@@ -27,18 +26,18 @@ logger = logging.getLogger(__name__)
 
 
 def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracker, watchdog: Any) -> None:
-    """What a group that ended adds to the statistics: its time, with the group's own statistics when it has them (the
-    step that consumes it records them, :func:`~platoon.train.step.metrics._record_group_stats`), else in ``tracker``
-    at once (a failed group, or a workflow's plain list); a log line for a slow one; and a watchdog heartbeat."""
+    """What a group that ended adds to the statistics: its time, with the group's own statistics when its report gives
+    them (the step that consumes it records them, :func:`~platoon.train.step.metrics._record_group_stats`), else in
+    ``tracker`` at once (a failed group, or a workflow's plain list); a log line for a slow one; and a watchdog
+    heartbeat."""
 
-    group_stats = getattr(rollout, "group_stats", None)
-    if isinstance(group_stats, DeferredStats):
-        group_stats.scalar(**{"rollout_completion/rollout_time": elapsed})
+    report = report_of(rollout)
+    if report.group_stats is not None:
+        report.group_stats.scalar(**{"rollout_completion/rollout_time": elapsed})
     else:
         tracker.scalar(**{"rollout_completion/rollout_time": elapsed})
-    rollout_stats = getattr(rollout, "rollout_stats", None)
-    if isinstance(rollout_stats, RolloutStats):
-        rollout_stats.add("rollout_time", [elapsed])
+    if report.rollout_stats is not None:
+        report.rollout_stats.add("rollout_time", [elapsed])
     if elapsed > 120.0:
         logger.warning(f"Rollout for task {task_id} took {elapsed:.1f}s (very slow)")
     elif elapsed > 60.0:

@@ -1,7 +1,7 @@
 """Collecting a step's groups, the first stage of a step: what the step tallies of the groups it dequeues, for its
 metrics and its commit (:class:`StepTally`), and the dispatcher as a step tells it what it dequeued, took and committed
-(:class:`StepDispatch`).  And what a step reads of each group beside its datums: the workload its output carries,
-which a custom workflow need not give.
+(:class:`StepDispatch`).  And what a step reads of each group beside its datums: the workload its output's report
+gives, which a custom workflow need not give.
 
 The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, dequeues the groups and counts each here.
 """
@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from platoon.train.step.metrics import LABEL_STATS, _no_groups_yet
+from platoon.train.workflow.protocol import malformed_counts, report_of
 from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.rollout_workload import RolloutWorkload
 
@@ -35,22 +36,19 @@ class _TaskWorkloadPayload:
 
 
 def _get_task_workload_payload(rollout: Any) -> _TaskWorkloadPayload | None:
-    """Read optional workload metadata without constraining custom workflows."""
+    """The workload a group's output gives in its report (:func:`~platoon.train.workflow.protocol.report_of`), with
+    its rollout counts; None when it gives none, as a custom workflow's need not.  Malformed counts it carries are
+    logged (:func:`~platoon.train.workflow.protocol.malformed_counts`), and left out with its workload."""
 
-    workload = getattr(rollout, "workload", None)
-    if not isinstance(workload, RolloutWorkload):
+    report = report_of(rollout)
+    # Each of the five is checked, so that each is known to be set; a workload comes with its four counts.
+    workload, requested, observed = report.workload, report.requested_rollouts, report.observed_rollouts
+    trainable, retained = report.trainable_rollouts, report.task_retained_datums
+    if workload is None or requested is None or observed is None or trainable is None or retained is None:
+        if (malformed := malformed_counts(rollout)) is not None:
+            logger.warning("Ignoring malformed task workload rollout counts: %s", malformed)
         return None
-    count_names = (
-        "requested_rollouts",
-        "observed_rollouts",
-        "trainable_rollouts",
-        "task_retained_datums",
-    )
-    counts = [getattr(rollout, name, None) for name in count_names]
-    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
-        logger.warning("Ignoring malformed task workload rollout counts: %s", dict(zip(count_names, counts)))
-        return None
-    return _TaskWorkloadPayload(workload, *counts)
+    return _TaskWorkloadPayload(workload, requested, observed, trainable, retained)
 
 
 @dataclass(kw_only=True)
@@ -110,16 +108,15 @@ class StepTally:
         )
 
     def count_dequeued(self, settled: "_Settled") -> RolloutStats | None:
-        """Count a group the step dequeued, stale or not: its draw, and the workload its output carries; the group's
-        rollout statistics, when its output has them."""
+        """Count a group the step dequeued, stale or not: its draw, and the workload its output gives; the group's
+        rollout statistics, when its output's report gives them."""
 
         self.keys.append(settled.key)
         rollout = settled.rollout
         self.total_tasks += 1
-        rollout_stats = getattr(rollout, "rollout_stats", None)
-        if not isinstance(rollout_stats, RolloutStats):
+        rollout_stats = report_of(rollout).rollout_stats
+        if rollout_stats is None:
             self.groups_without_stats += 1
-            rollout_stats = None
         workload_payload = _get_task_workload_payload(rollout)
         if workload_payload is not None:
             # Attribute generation work when this outer batch

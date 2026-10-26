@@ -351,6 +351,30 @@ def test_what_resolution_refuses(tmp_path, monkeypatch, train, entry, line):
     assert any(problem.startswith(line.replace("PACKAGE", package)) for problem in problems), problems
 
 
+def test_resolution_reads_whether_a_workflow_class_gives_verdicts_of_its_gives_verdicts_alone(tmp_path, monkeypatch):
+    """``informative`` beside a workflow class that declares only ``gives_verdicts`` resolves; beside one that declares
+    only another capability, it is refused."""
+
+    flags = "\n".join(
+        f"class Only_{flag}:\n    {flag} = True\n"
+        for flag in ("gives_verdicts", "applies_entry_settings", "runs_rollouts_on_lease", "takes_start_limit")
+    )
+    package = _package(tmp_path, monkeypatch, "acme_rules_flags", PACKAGE + flags)
+
+    def refused(workflow: str) -> bool:
+        entry = _entry("a", package=package, group_admission="informative", workflow=f"{package}:{workflow}")
+        config = _load(tmp_path, {}, [entry])
+        try:
+            run_components(config)
+        except ConfigError as error:
+            return any(" gives no verdicts " in problem for problem in error.problems)
+        return False
+
+    assert not refused("Only_gives_verdicts")
+    assert refused("Only_applies_entry_settings") and refused("Only_runs_rollouts_on_lease")
+    assert refused("Only_takes_start_limit")
+
+
 def test_lock_json_records_each_rule_other_than_all_with_its_options_and_none_in_all_mode(tmp_path, monkeypatch):
     package = _package(tmp_path, monkeypatch, "acme_rules_two", PACKAGE)
     config = _load(

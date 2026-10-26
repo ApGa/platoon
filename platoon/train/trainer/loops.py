@@ -48,7 +48,7 @@ from platoon.train.step.batch_transforms import (
 )
 from platoon.train.step.collect import StepDispatch, StepTally
 from platoon.train.step.counting import GroupCounting
-from platoon.train.step.datums import _step_datums, advantage_scale, scale_advantages
+from platoon.train.step.datums import _step_datums, advantage_scale, scale_advantages, trained_rows
 from platoon.train.step.metrics import (
     Censoring,
     RunTotals,
@@ -349,12 +349,14 @@ class TrainStep:
         rollout = settled.rollout
         # The group's label: its row's, else its output's.
         label = settled.label if settled.label is not None else _output_label(rollout)
-        failed = rollout is None
+        # Its rows that the run trains, its one trained policy's: a list of datums is its own rows.  None: it failed.
+        rows = None if rollout is None else trained_rows(rollout)
+        failed = rows is None
         # The group's own statistics belong to this step, which consumes it, stale or not.
         _record_group_stats(rollout, self.state.train_tracker)
         rollout_stats = self.tally.count_dequeued(settled)
         self._record_queue_wait(queue_wait_start)
-        stale = self._filter_stale(settled, label)
+        stale = self._filter_stale(settled, rows, label)
         # A marker of a group a rule rejected (or that failed) when it settled has its fate already.
         marker = settled.rejected is not None
         self.context.censoring.add(label, settled.record)
@@ -368,8 +370,8 @@ class TrainStep:
         if not (stale or failed):  # its statistics count, and its datums train (a marker keeps none)
             if rollout_stats is not None:
                 self.tally.merge_stats(rollout_stats, label)
-            fill.datums.extend(_step_datums(rollout))
-            self.tally.total_datums += len(rollout)
+            fill.datums.extend(_step_datums(rows))
+            self.tally.total_datums += len(rows)
         return taken
 
     def _record_queue_wait(self, queue_wait_start: float) -> None:
@@ -382,13 +384,14 @@ class TrainStep:
         if queue_wait_elapsed > 60.0:
             logger.warning(f"Waited {queue_wait_elapsed:.1f}s for rollout from queue (slow)")
 
-    def _filter_stale(self, settled: _Settled, label: str | None) -> bool:
-        """The stale filter: whether the group, of ``label``, is more policy versions old than its entry's bound.  A
-        stale group is logged and counted here, and the caller drops its datums."""
+    def _filter_stale(self, settled: _Settled, rows: Sequence[tinker.Datum] | None, label: str | None) -> bool:
+        """The stale filter: whether the group, of ``label``, whose rows are ``rows`` (None: it failed), is more policy
+        versions old than its entry's bound.  A stale group is logged and counted here, and the caller drops its
+        datums."""
 
         entry = settled.entry
         # Filter out stale rollouts, by the bound of the group's entry. TODO: Consider requeuing.
-        verdict = self.context.stale_filter.check(entry, settled.rollout, self.context.version())
+        verdict = self.context.stale_filter.check(entry, rows, self.context.version())
         if not verdict.stale:
             return False
         logger.info(

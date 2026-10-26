@@ -50,11 +50,12 @@ from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
 from platoon.train.trainer import loops, service, signals, waiting
 from platoon.train.trainer.signals import TerminateTrainLoop, TrainInterrupted, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState
-from platoon.train.workflow.group import GroupRolloutWorkflow
-from platoon.train.workflow.protocol import RolloutWorkflow
+from platoon.train.workflow import output as _group_output  # noqa: F401 - registers GroupOutput's kept-group codec
+from platoon.train.workflow.group import GroupRolloutWorkflow  # noqa: F401 - the platoon.train.tinker.rl shim reads it
+from platoon.train.workflow.protocol import RolloutWorkflow, capabilities_of
 from platoon.train.workflow.start_limit import StartLimit
 from platoon.utils.stats_logger import StatsLogger
-from platoon.utils.stats_tracker import StatsTracker
+from platoon.utils.stats_tracker import DeferredStats, StatsTracker  # noqa: F401 - tinker.rl's shim reads DeferredStats
 from platoon.utils.stats_tracker import get as get_tracker
 
 logger = logging.getLogger(__name__)
@@ -63,13 +64,14 @@ logger = logging.getLogger(__name__)
 def _limit_starts(config: Any, train_workflow: Any, eval_workflow: Any | None) -> None:
     """Set this start's limit on the rollouts starting at once (``train.max_starting_rollouts``; None when it is off)
     as the ``start_limit`` of the training workflow and of ``eval_workflow``, the evaluation's that runs during
-    training, where each is a ``GroupRolloutWorkflow``, so that both share it, first come, first served.  Off, their
-    ``start_limit`` is None, so that a workflow an earlier start used keeps no limit."""
+    training, where each takes one (``takes_start_limit``, as a ``GroupRolloutWorkflow`` does), so that both share it,
+    first come, first served.  Off, their ``start_limit`` is None, so that a workflow an earlier start used keeps no
+    limit."""
 
     limit = getattr(config.train, "max_starting_rollouts", None)
     gate = StartLimit(limit) if limit is not None else None
     for workflow in (train_workflow, eval_workflow):
-        if isinstance(workflow, GroupRolloutWorkflow):
+        if workflow is not None and capabilities_of(workflow).takes_start_limit:
             workflow.start_limit = gate
     if gate is None:
         return
@@ -81,7 +83,7 @@ def _limit_starts(config: Any, train_workflow: Any, eval_workflow: Any | None) -
     gate.announce(
         largest_group=largest,
         rollouts_at_once=sum(getattr(config, phase).max_concurrent_rollouts for phase in phases),
-        gated=isinstance(train_workflow, GroupRolloutWorkflow),
+        gated=capabilities_of(train_workflow).takes_start_limit,
     )
 
 

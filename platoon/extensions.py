@@ -1237,6 +1237,7 @@ def _group_admissions(
     from platoon.registry import resolve_component
     from platoon.train.admissions import admission_lock_records, choose_admissions, rule_mode
     from platoon.train.components import merge_run_level_settings
+    from platoon.train.workflow.protocol import capabilities_of
     from platoon.utils.config import ConfigError
 
     if not rule_mode(config):
@@ -1245,7 +1246,7 @@ def _group_admissions(
     gives_verdicts: bool | None = True
     if workflow != "group_rollout":  # one that does not resolve is reported already
         gives_verdicts = (
-            getattr(resolve_component("workflow", workflow), "gives_verdicts", False) is True
+            capabilities_of(resolve_component("workflow", workflow)).gives_verdicts
             if ("workflow", workflow) in records
             else None
         )

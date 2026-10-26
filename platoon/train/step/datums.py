@@ -1,15 +1,40 @@
-"""A group's datums as a step trains them, by their loss inputs: the copies a step collects, whose loss inputs its
-batch transforms set in place (:func:`_step_datums`, the first stage of a step), and the scale of a microbatch's
-advantages by the action tokens its datums represent, as the step prepares it to send (:func:`advantage_scale`,
-:func:`scale_advantages`, the second stage).
+"""A group's datums as a step trains them, by their loss inputs: the rows of a group's output that the step trains
+(:func:`trained_rows`) and the copies it collects, whose loss inputs its batch transforms set in place
+(:func:`_step_datums`), the first stage of a step; and the scale of a microbatch's advantages by the action tokens its
+datums represent, as the step prepares it to send (:func:`advantage_scale`, :func:`scale_advantages`, the second
+stage).
 """
 
+import logging
 from collections.abc import Sequence
+from typing import Any
 
 import tinker
 from tinker import TensorData
 
 from platoon.train.step.batch_transforms import get_loss_normalization_token_count
+from platoon.train.task_stats import MAIN
+from platoon.train.workflow.protocol import rows_by_policy
+
+logger = logging.getLogger(__name__)
+
+
+def trained_rows(output: Any) -> Sequence[tinker.Datum]:
+    """The rows of a group's output that the step trains: the run's one trained policy's (``main``,
+    :func:`~platoon.train.workflow.protocol.rows_by_policy`), the output itself for a list of datums; none when it
+    gives none (an empty group).  The rows of any other policy are left out with a warning: this trainer trains one
+    policy."""
+
+    by_policy = rows_by_policy(output, MAIN)
+    others = [policy for policy in by_policy if policy != MAIN]
+    if others:
+        logger.warning(
+            "A group's output gives rows of %s, which this run does not train (it trains one policy, %s): they are "
+            "left out",
+            ", ".join(map(str, others)),
+            MAIN,
+        )
+    return by_policy.get(MAIN, ())
 
 
 def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:

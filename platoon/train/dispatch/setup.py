@@ -22,7 +22,7 @@ from platoon.train.sampling import sampling_fingerprint
 from platoon.train.task_stats import next_start
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.trainer.state import TrainLoopSharedState
-from platoon.train.workflow.protocol import RolloutWorkflow
+from platoon.train.workflow.protocol import RolloutWorkflow, capabilities_of
 
 if TYPE_CHECKING:
     from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
@@ -68,7 +68,7 @@ def _dispatch(
             shared_state.train_dataloader, start_batch, end_batch
         )
     dispatcher.bind(results)
-    dispatcher.rolling = bool(getattr(train_workflow, "runs_rollouts_on_lease", False))  # rolling starts
+    dispatcher.rolling = capabilities_of(train_workflow).runs_rollouts_on_lease  # rolling starts
     if dispatcher.permit_release == "rollout":
         logger.info(
             "Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start %s",

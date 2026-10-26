@@ -24,7 +24,7 @@ from platoon.train.step.metrics import LABEL_STATS, _count_every_reward_key, _no
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.trainer.signals import TerminateEvalLoop, TrainInterrupted
 from platoon.train.trainer.state import TrainLoopSharedState
-from platoon.train.workflow.protocol import RolloutWorkflow
+from platoon.train.workflow.protocol import RolloutWorkflow, report_of
 from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.stats_tracker import StatsTracker
 from platoon.utils.stats_tracker import get as get_tracker
@@ -83,9 +83,9 @@ async def _eval_completion_monitor(
         row_label, rollout = settled.label, settled.rollout
         if tracker is not None:
             _record_group_stats(rollout, tracker)
-        rollout_stats = getattr(rollout, "rollout_stats", None)
+        rollout_stats = report_of(rollout).rollout_stats
         label = row_label if row_label is not None else _output_label(rollout)
-        if label_stats is not None and label in label_stats and isinstance(rollout_stats, RolloutStats):
+        if label_stats is not None and label in label_stats and rollout_stats is not None:
             label_stats[label].merge(rollout_stats.subset(LABEL_STATS))
     raise TerminateEvalLoop()
 

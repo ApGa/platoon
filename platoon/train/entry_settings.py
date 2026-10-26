@@ -40,6 +40,7 @@ from typing import Any
 from platoon.config_defs import InferenceParams
 from platoon.train.components import ENTRY_ROLLOUT_KEYS, ENTRY_WORKFLOW_KEYS, ENVIRONMENT_COLUMN, row_entry
 from platoon.train.labels import task_label
+from platoon.train.workflow.protocol import capabilities_of
 
 logger = logging.getLogger(__name__)
 
@@ -533,11 +534,12 @@ def sets_settings(environments: Sequence[Any]) -> list[str]:
 
 def workflow_problems(environments: Sequence[Any], workflow_cls: Any, reference: str) -> list[str]:
     """An entry's training settings beside a workflow class that does not apply them: one that is not a
-    ``GroupRolloutWorkflow`` and does not declare ``applies_entry_settings = True`` never reads them, so they would be
-    ignored without a word."""
+    ``GroupRolloutWorkflow`` and does not declare ``applies_entry_settings = True`` (its capabilities,
+    :func:`~platoon.train.workflow.protocol.capabilities_of`) never reads them, so they would be ignored without a
+    word."""
 
     labels = sets_settings(environments)
-    if not labels or getattr(workflow_cls, "applies_entry_settings", False):
+    if not labels or capabilities_of(workflow_cls).applies_entry_settings:
         return []
     return [
         f"environments[{label}].workflow_config: the run's workflow, {reference}, does not apply an entry's settings "

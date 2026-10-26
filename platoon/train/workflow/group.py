@@ -120,6 +120,9 @@ class GroupRolloutWorkflow:
 
     Each group runs with its environment entry's settings, ``entry_configs``
     (see the module docstring).
+
+    Its class flags below are its capabilities, which the trainer reads through
+    :func:`~platoon.train.workflow.protocol.capabilities_of`.
     """
 
     # It applies an environment entry's own settings to the entry's groups (``entry_configs``); loading refuses an
@@ -136,6 +139,11 @@ class GroupRolloutWorkflow:
     # size of permits is free, unless its own class body sets the flag. A flag set in a class body covers the overrides
     # of that class and its bases, not those of a mixin or of another branch of a diamond (``__init_subclass__``).
     runs_rollouts_on_lease: ClassVar[bool] = True
+    # It takes the run's limit on rollouts starting at once as its ``start_limit`` (below), which the trainer sets.
+    takes_start_limit: ClassVar[bool] = True
+    # Its rollouts can run in rollout workers (``rollout_isolation: process``): ``platoon train`` gives it the
+    # environments' ``packages`` and the run's ``label_by`` as arguments, and its fork server's ``worker_preload``.
+    runs_rollout_workers: ClassVar[bool] = True
     # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
     # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
     entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})
