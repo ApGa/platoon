@@ -46,10 +46,10 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 - **Sandboxes can keep a task's processes through `kill_processes`.** `Sandbox.keep_processes(entries)`, optional, spares
   processes a session started for the task before any agent ran, with their descendants; the built-in providers have
   it ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
-- **Harbor tasks that are multi-container stacks run, on the `process` provider and Docker.** A task whose compose file
-  names services besides `main` (a database, a judge, an MCP server) runs as a stack on a sandbox provider with the
-  new `stacks` capability: `main` is the sandbox a main-only file would give the task, and each sidecar a sandbox of
-  its own, with its image, command (compose's over its image's), environment, healthcheck, volumes (named ones shared
+- **Harbor tasks that are multi-container stacks run.** A task whose compose file names services besides `main` (a
+  database, a judge, an MCP server) runs as a stack on a sandbox provider with the new `stacks` capability: `main` is
+  the sandbox a main-only file would give the task, and each sidecar a sandbox of its own, with its image, command
+  (compose's over its image's), environment, healthcheck, volumes (named ones shared
   by the services that name them), binds (writable ones as one copy of the task's files that every service binding it
   shares, which the stack owns), ports and names. The services start in dependency order, under compose's three
   conditions (`service_started`, `service_healthy`, and `service_completed_successfully` for init jobs, each bounded
@@ -67,10 +67,11 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   that the grade's probes found (`services`). On the `process` provider, which isolates nothing, each declared port is
   a port outside the kernel's ephemeral range that the stack holds for its life, which a service learns from
   `PLATOON_PORT_<port>`, and `scheme://<service>:<port>` in environment values, healthchecks and collect hooks reaches
-  it. `stacks: refuse` refuses every stack; on a provider without the capability (`singularity` and `enroot` for now)
-  stacks stay refused, and a fetch still refuses them unless its `refuse` sets `sidecars: false`. Stacks that no
-  rollout could start in this release (a registry sidecar that its compose file gives no command) are skipped by a
-  dataset directory and stop a run when a fetched dataset's tasks are listed
+  it. `stacks: refuse` refuses every stack; on a provider without the capability (`singularity` and `enroot` where pods
+  cannot run, below) stacks stay refused, and a fetch still refuses them unless its `refuse` sets `sidecars: false`.
+  Stacks that no rollout could start (a dataset directory's registry sidecar that its compose file gives no command, or
+  that builds from a context, neither of which a directory's missing image map can give) are skipped by a dataset
+  directory and stop a run when a fetched dataset's tasks are listed
   ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
 - **A Harbor environment can run every sandbox without a network.** `network_policy: none` gives every sandbox and
   stack of the environment no network, in every phase, for datasets whose answers the web holds; `task`, the default,
@@ -111,6 +112,35 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   only on a provider with the new `privileged` capability, `docker`, and every other refuses it when a run lists its
   tasks. `platoon.sandbox.privilege_refusal` says why a provider would not give them
   ([Stacks on Docker](docs/how-to/sandboxes-and-harbor.md#stacks-on-docker)).
+- **Harbor stacks run as rootless pods on Singularity, and on Apptainer and enroot (experimental).** With hpc-sandbox
+  0.5, the `singularity` and `enroot` providers declare the `stacks` capability and start each stack as an hpc-sandbox
+  pod: one user and network namespace of its own, whose services share one loopback, so each reaches the others by name
+  at the ports it declares, as in compose, and no stack reaches another's. `main` runs as root (your uid, as a single
+  sandbox does); a sidecar whose image runs as root runs as root with your subordinate ids, so that the official
+  database images' own switch to their user works as in Docker, where the runtime gives that mode (not enroot) and your
+  user has them, else as your own uid, as does a sidecar whose image runs as another user. `main`'s upstreams are the
+  pod's, which its holder relays, so the gateway's route in `main` is out of the agents' reach; a stack's network
+  switches for the whole pod per phase (slirp4netns for egress); its volumes are directories in the pod's own directory,
+  with Docker's modes, which the pod's deletion takes, with what a sidecar wrote there as another user. A log directory
+  that a sidecar with your subordinate ids binds reaches the tests through that sidecar, which reads what its own users
+  keep from yours, and a file grading cannot read makes the outcome an `error`. A sidecar's read-only binds of task
+  files that not every user may read (a dataset fetched under a umask such as 027) bind a copy that every user reads, as
+  a Docker host's checkout is, since a sidecar may read them as a user of its own; the stack's other copies get those
+  modes too. Every connection between a pod's services comes from `127.0.0.1`, so a sidecar that trusts loopback (the
+  official postgres image does, for `127.0.0.1`) is open to `main`'s agents, where compose gives `main` an address of
+  its own: the docs say so and how a task closes it. Outcomes record each service's run mode (`services`). Stacks are
+  refused when the tasks are listed, naming what is missing, with an hpc-sandbox older than 0.5 or on a node that does
+  not nest unprivileged user namespaces
+  ([Stacks as pods](docs/how-to/sandboxes-and-harbor.md#stacks-as-pods-on-singularity-apptainer-and-enroot)).
+- **`platoon prepare` makes what stacks need.** Besides the sidecars' images (above), it **pins** the registry images
+  that sidecars run, on every provider but `process`: the digest each registry serves, with the configuration it gives
+  the image for this host's platform (`ENTRYPOINT`, `CMD`, `ENV`, `WORKDIR`, `USER`, `HEALTHCHECK`, ...), which a
+  sidecar runs with, since platoon gives every runtime a sidecar's whole command and a pod's runtimes apply none of an
+  image's configuration; and, where stacks run as pods with egress, fetches slirp4netns (`hpc-sandbox fetch-tools`)
+  when the node has none. A run whose sidecars' images or pins the image map lacks stops when its tasks are listed
+  (exit 78), naming `platoon prepare`. `platoon harbor images pin` pins them too, `platoon harbor images plan` lists
+  them, and `platoon harbor images verify` checks them
+  ([Build task images](docs/how-to/sandboxes-and-harbor.md#build-task-images)).
 
 ### Changes
 
@@ -126,6 +156,12 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   before, where it runs none. A fetch's `refuse: {sidecars: false}` locks such tasks as runnable stacks, where it locked
   them refused (`task_config`), and the reason a fetch refuses one by default reads `stack: the compose file adds
   sidecar services (refuse: {sidecars: false} fetches it as a stack)`.
+- The `hpc` extra takes hpc-sandbox 0.5 too (`hpc-sandbox>=0.4.0,<0.6`), whose pods run stacks; the lock keeps 0.4.0,
+  with which the providers refuse stacks, naming 0.5.
+- The `def` builder's images record their base image's configuration (`ENTRYPOINT`, `CMD`, `USER`, `HEALTHCHECK`,
+  `EXPOSE`, ...), from its registry, under what the Dockerfile sets, since a definition file keeps none of it (a
+  sidecar's image, whose command may be its base's, fails to build without it); and the `singularity` provider's
+  images are built with `def` where its runtime is Apptainer, which has no BuildKit for `oci`.
 - `[[verifier.collect]]` hooks, which platoon refused, run: in `main` for a single-container task, in their service for
   a stack, `main`'s first, best effort (`collect_failed` in the outcome). A hook that names a `user` is refused unless
   the users policy ignores it: `verifier_user: ignore`, or, where `verifier_user` is unset, `agent_user: ignore`.
@@ -146,7 +182,7 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 - A dataset directory's stack whose sidecar builds from a context is refused saying that a fetched dataset's image map
   can hold that image (serve the directory as a dataset to fetch). `examples/harbor-local`'s `needs-a-database` is
   still refused on Docker, which runs stacks now, for its `postgres:16` sidecar, which runs its image's own command,
-  which platoon does not record yet.
+  which only a fetched dataset's image map records (`platoon prepare` pins it).
 - **The training code lives in packages named after the stages of a run.** `platoon/train/tinker/` held the trainer,
   its config, the rollout workflows and the rollout workers; they are now packages of `platoon.train`: `trainer` (one
   start of training: the trainer, the training loop, the training client, signals and the watchdog), `step` (one

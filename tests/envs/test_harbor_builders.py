@@ -50,7 +50,11 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         asked.append(reference)
         return _digest(reference)
 
+    def configure(reference: str, **_: object) -> tuple[str, dict]:
+        return _digest(reference), {"config": {"Cmd": ["python3"]}}  # a base image's, which def builds record
+
     monkeypatch.setattr(builders, "registry_digest", resolve)
+    monkeypatch.setattr(builders, "registry_config", configure)
     return asked
 
 
@@ -519,6 +523,7 @@ def test_def_builds_record_the_images_own_environment(lock, tmp_path: Path, monk
     assert shared.builder == "def" and Path(shared.image).read_text() == "def\n" and shared.workdir is None
     assert "builder_revision" not in shared.receipt and not withholds_modes(shared)
     assert shared.env == {"PATH": "/usr/local/bin:/usr/bin", "LANG": "C.UTF-8"}
+    assert shared.cmd == ("python3",)  # its base image's, which a definition file keeps none of
     assert "build --fakeroot" in (tmp_path / "calls.log").read_text()
 
 

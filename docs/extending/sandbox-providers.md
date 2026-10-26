@@ -275,6 +275,7 @@ class ServiceSpec:
     aliases: tuple[str, ...] = ()  # names it answers to besides its own
     network_of: str | None = None  # the service whose network it shares
     run_as: RunMode | None = None  # root, caller or subids; None: the provider's choice
+    user: str | None = None  # the user its image runs its command as (USER); None: root
     shm_mb: int | None = None  # with ulimits, cap_add and stop_signal: what the provider applies where it can
     setup: Callable[[Sandbox], Awaitable[None]] | None = None  # awaited once its sandbox runs, before its command
     timeout_s: float | None = None  # an init job's longest run
@@ -316,9 +317,9 @@ class Stack(Protocol):
 | A stack provider must | |
 |---|---|
 | Start in dependency order | Start each service once its dependencies reach their conditions: `service_started` once their command started, `service_healthy` once their healthcheck passed (failures in its start period do not count; `retries` failures in a row make the service unhealthy), `service_completed_successfully` once their command exited with status 0 (an init job). Await a service's `setup` with its sandbox once it runs and before its command starts: the Harbor service prepares `main` that way |
-| Start everything, or nothing | Make the stack's volumes, filled by their `fill` where they have one (the Harbor service copies the task's files that its services bind writable that way, so that they share one copy and the stack owns it), before any service starts. Return once every service runs, each one with a healthcheck has passed it and each init job has completed within its `timeout_s`, as `docker compose up --wait` does, and a last probe finds every service up. A service that fails, exits or never turns healthy raises `StackStartError(service, message, log=<its log's tail>)`, which a session reports as `sidecar_start`, after the provider stopped every service it started; a cancelled start stops them too, also a service caught in the middle of its start, before it raises. Make each stop a cleanup that a stopping process lets finish (`platoon.utils.stopping.let_finish`). A `setup`'s own exception passes through as it is |
+| Start everything, or nothing | Make the stack's volumes, filled by their `fill` where they have one (the Harbor service copies the task's files that its services bind writable that way, so that they share one copy and the stack owns it), before any service starts: `platoon.sandbox.stacks.make_volumes(spec, root)` makes them below a directory of the stack's, and gives each service's mounts of them. Return once every service runs, each one with a healthcheck has passed it and each init job has completed within its `timeout_s`, as `docker compose up --wait` does, and a last probe finds every service up. A service that fails, exits or never turns healthy raises `StackStartError(service, message, log=<its log's tail>)`, which a session reports as `sidecar_start`, after the provider stopped every service it started; a cancelled start stops them too, also a service caught in the middle of its start, before it raises. Make each stop a cleanup that a stopping process lets finish (`platoon.utils.stopping.let_finish`). A `setup`'s own exception passes through as it is |
 | Tell each service's state | `health()` probes: an init job `completed` (or `exited` with another status), any other service `running`, `healthy` or `unhealthy` by its healthcheck, or `exited`. Harbor grading probes the sidecars before and after the tests, and a sidecar that is not up makes the outcome `invalid` (`sidecar_unhealthy`) |
-| Address the services | Where the services share a network of their own (a pod, a compose project), each reaches the others by name at their declared ports, and `rewrite` is the identity. Where they share the host's network, give each declared port a port of the host that the stack holds for its life, which no other stack is given, and make `rewrite` turn `scheme://<service>:<port>` into the address that reaches it; environment values and healthchecks are rewritten so before the services start |
+| Address the services | Where the services share a network of their own (a pod, a compose project), each reaches the others by name at their declared ports, and `rewrite` is the identity, and the stack says so (`host_loopback` false, as `drive_stack(..., host_loopback=False)` makes it): a harness in `main` then reaches the gateway only through its route. Where they share the host's network, give each declared port a port of the host that the stack holds for its life, which no other stack is given, and make `rewrite` turn `scheme://<service>:<port>` into the address that reaches it; environment values and healthchecks are rewritten so before the services start |
 | Be reaped | Register the stack for cleanup as its sandboxes are (`platoon.sandbox.cleanup.register` before it starts, `attach` once it runs, `unregister` once it stopped), with this process's labels on every service's sandbox, and remove what a dead process's stacks left in `reap(labels)`, their volumes too |
 
 `platoon.sandbox.stacks.drive_stack(backend, spec, id=...)` does the first three for you, over a `StackBackend` that
@@ -332,9 +333,13 @@ stack holds for its life (a claim the kernel arbitrates between processes), whic
 unset. The `docker` provider's stacks use it too (`platoon/sandbox/compose.py`): each stack a `docker compose` project
 whose file it writes from the spec, each service a container that `docker compose create` makes once its dependencies
 hold and `docker start` starts, on a network of the project's own (so `rewrite` is the identity), with its volumes
-directories of the project's, which `volume_path` names. A provider class whose stacks need something of the host says
-why it has none in a `stack_refusal(options)` class method, which `platoon.sandbox.stack_refusal` asks also of a built
-provider, with its `options` (the `docker` provider's: the CLI's compose plugin).
+directories of the project's, which `volume_path` names. So do the `singularity` and `enroot` providers'
+(`platoon/sandbox/hpc_stacks.py`): each stack is an hpc-sandbox pod, whose services share one network namespace, with
+`main`'s upstreams relayed by the pod itself and each service's run mode chosen from its image's user and what the
+runtime and the node give. A provider class whose stacks need something of the host says why it has none in a
+`stack_refusal(options)` class method, which `platoon.sandbox.stack_refusal` asks also of a built provider, with its
+`options` (the `docker` provider's: the CLI's compose plugin; the HPC providers': hpc-sandbox's pods, on a node that
+nests user namespaces).
 
 ## Test it like the built-ins
 

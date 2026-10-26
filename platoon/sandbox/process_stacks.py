@@ -49,7 +49,6 @@ from typing import TYPE_CHECKING
 
 from platoon.sandbox import cleanup
 from platoon.sandbox._processes import start_background
-from platoon.sandbox.base import Mount
 from platoon.sandbox.stacks import (
     SERVICE_LABEL,
     STACK_LABEL,
@@ -57,7 +56,9 @@ from platoon.sandbox.stacks import (
     ServiceSpec,
     StackNetwork,
     StackSpec,
+    StackVolumes,
     drive_stack,
+    make_volumes,
 )
 from platoon.utils.stopping import let_finish, process_start_time
 
@@ -201,9 +202,7 @@ class _Backend:
                 self.names.setdefault(alias, self.network_of[name])
         self.ports: dict[tuple[str, int], int] = {}  # (network, declared port) -> the host's port
         self._claims: list[socket.socket] = []  # what holds those ports for the stack, until it is released
-        # Each volume's directory: by name for a named one, by (service, its index) for a service's own.
-        self.named: dict[str, Path] = {}
-        self._own: dict[tuple[str, int], Path] = {}
+        self.volumes = StackVolumes()
 
     @classmethod
     def create(cls, provider: ProcessProvider, spec: StackSpec, directory: Path, labels: dict[str, str]) -> _Backend:
@@ -217,37 +216,17 @@ class _Backend:
             )
             ports, backend._claims = _claim_ports(len(declared))
             backend.ports = dict(zip(declared, ports, strict=True))
-            backend._make_volumes(spec)
+            backend.volumes = make_volumes(spec, directory)
         except BaseException:
             backend.release_ports()
             shutil.rmtree(directory, ignore_errors=True)
             raise
         return backend
 
-    def _make_volumes(self, spec: StackSpec) -> None:
-        """Make every volume's directory, and fill the ones with a ``fill``, once each, before any service starts."""
-
-        for name, service in spec.services.items():
-            for number, volume in enumerate(service.volumes):
-                if volume.name is not None:
-                    directory = self.named.get(volume.name)
-                    if directory is not None:
-                        continue  # made and filled for the first service that names it
-                    directory = self.named[volume.name] = self.directory / "volumes" / _volume_dir(volume.name)
-                else:
-                    directory = self._own[(name, number)] = self.directory / "services" / name / f"volume-{number}"
-                directory.mkdir(parents=True)
-                if volume.fill is not None:
-                    volume.fill(directory)
-
     async def start_service(self, name: str, spec: ServiceSpec) -> _Service:
         network = self.network_of[name]
         listen = {PORT_ENV.format(port=port): str(self.ports[(network, port)]) for port in spec.ports}
-        mounts = list(spec.sandbox.mounts)
-        for number, volume in enumerate(spec.volumes):
-            directory = self.named[volume.name] if volume.name is not None else self._own[(name, number)]
-            source = directory / volume.subpath if volume.subpath else directory
-            mounts.append(Mount(source=str(source), target=volume.target, read_only=volume.read_only))
+        mounts = [*spec.sandbox.mounts, *self.volumes.mounts(name, spec)]
         workdir = spec.sandbox.workdir if posixpath.normpath(spec.sandbox.workdir) != "/" else _ROOT_WORKDIR
         sandbox_spec = dataclasses.replace(
             spec.sandbox,
@@ -291,7 +270,7 @@ class _Backend:
         return _URL.sub(replace, value) if "://" in value else value
 
     def volume_path(self, name: str) -> Path:
-        return self.named[name]
+        return self.volumes.named[name]
 
     async def close(self) -> None:
         self.release_ports()
@@ -300,12 +279,6 @@ class _Backend:
     def release_ports(self) -> None:
         while self._claims:
             self._claims.pop().close()
-
-
-def _volume_dir(name: str) -> str:
-    """A named volume's directory below ``volumes/``: its name, with what a path cannot hold replaced."""
-
-    return name.replace("/", "%2F") if name not in (".", "..") else f"%{name}"
 
 
 def _claim_ports(count: int) -> tuple[list[int], list[socket.socket]]:

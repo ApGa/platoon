@@ -37,6 +37,7 @@ from platoon.envs.harbor.images import (
     apply_image_files,
     docker_image_reference,
     has_image,
+    pulled_key,
     withholds_modes,
 )
 from platoon.envs.harbor.lock import LockError
@@ -381,7 +382,7 @@ class HarborEnvironmentService:
             splits=self._splits,
             agent_user=self.agent_user,
             verifier_user=self.verifier_user,
-            stack_refusal=self._stack_refusal(),
+            stack_refusal=self.stacks_refusal(),
         )
 
     async def list_tasks(self, split: str) -> list[str]:
@@ -442,7 +443,8 @@ class HarborEnvironmentService:
         on an image that may keep its files from other users (:meth:`_check_root_images`), so that the run stops when
         it lists its tasks rather than lose every rollout of theirs, or that are multi-container stacks no rollout
         could start (:meth:`_check_stacks`, :meth:`_check_privileges`, :meth:`_check_stack_specs`); and, with
-        :class:`EnvNotPrepared`, tasks of a fetched dataset whose images the image map lacks (:meth:`_check_images`)."""
+        :class:`EnvNotPrepared`, tasks of a fetched dataset whose images the image map lacks (:meth:`_check_images`),
+        or whose sidecars run registry images it has not pinned (:meth:`_check_pins`)."""
 
         if task_ids and (refusal := rootfs_layout_refusal(self._provider, self._provider_options)):
             raise EnvSetupError("env_config", f"the {self._provider_name()} provider would start no sandbox: {refusal}")
@@ -459,6 +461,7 @@ class HarborEnvironmentService:
         self._check_networks(task_ids, split)
         self._check_users(task_ids, split)
         self._check_images(task_ids, split)
+        self._check_pins(task_ids, split)
         self._check_stack_specs(task_ids, split)
         self._check_root_images(task_ids, split)
 
@@ -507,10 +510,40 @@ class HarborEnvironmentService:
             "never builds them"
         )
 
+    def _check_pins(self, names: Sequence[str], split: str) -> None:
+        """Refuse tasks of a fetched dataset whose sidecars run a registry image that the image map has not pinned:
+        its digest and configuration (its ``ENTRYPOINT``, ``CMD``, ``USER``, ...), which ``platoon prepare`` records,
+        since platoon gives every runtime a sidecar's whole command, and a pod's runtimes apply none of an image's
+        configuration by themselves.  The ``process`` provider runs no image, so its stacks run what their compose
+        files give, as a dataset directory's do."""
+
+        if self._locked is None or self._images.path is None or self._provider_name() == "process" or not names:
+            return
+        try:
+            image_map = self._images.load()
+        except ImageMapError as exc:
+            raise EnvSetupError("env_config", str(exc)) from exc
+        dataset = self._locked.dataset(fetch_allowed=False)
+        unpinned: dict[str, list[str]] = {}  # reference -> the tasks whose sidecars run it
+        for name in names:
+            for reference in dataset.lock.get(name).service_images():
+                if image_map is None or image_map.get(pulled_key(reference)) is None:
+                    unpinned.setdefault(reference, []).append(name)
+        if not unpinned:
+            return
+        tasks = {name for needing in unpinned.values() for name in needing}
+        reference, needing = max(unpinned.items(), key=lambda item: len(item[1]))
+        more = f" and {len(unpinned) - 1} more" if len(unpinned) > 1 else ""
+        raise EnvNotPrepared(
+            f"{len(tasks):,} of the {len(names):,} tasks of split {split!r} have sidecars that run registry images "
+            f"the image map {self._images.path} has not pinned by digest with their configuration: {len(unpinned)} "
+            f"image(s), such as {reference} for {len(needing):,} task(s) ({needing[0]}){more}"
+        )
+
     def _provider_name(self) -> str:
         return self._provider if isinstance(self._provider, str) else getattr(self._provider, "name", "sandbox")
 
-    def _stack_refusal(self) -> str | None:
+    def stacks_refusal(self) -> str | None:
         """Why no task of the service may run as a multi-container stack: ``stacks: refuse``, or a provider that runs
         none (:func:`platoon.sandbox.stack_refusal`, read without building it); None otherwise."""
 
@@ -520,10 +553,10 @@ class HarborEnvironmentService:
 
     def _check_stacks(self, names: Sequence[str], split: str) -> None:
         """Refuse the tasks of a fetched dataset that are multi-container stacks (a fetch with ``refuse: {sidecars:
-        false}`` locks them) where no stack may run (:meth:`_stack_refusal`): every rollout of theirs would fail as it
+        false}`` locks them) where no stack may run (:meth:`stacks_refusal`): every rollout of theirs would fail as it
         opens.  A dataset directory leaves such tasks out when it lists them, with a warning."""
 
-        if self._locked is None or not names or (refusal := self._stack_refusal()) is None:
+        if self._locked is None or not names or (refusal := self.stacks_refusal()) is None:
             return
         lock = self._locked.dataset(fetch_allowed=False).lock
         stacks = [name for name in names if ((lock.get(name).compose or {}).get("kind")) == "sidecars"]
@@ -559,11 +592,11 @@ class HarborEnvironmentService:
     def _check_stack_specs(self, names: Sequence[str], split: str) -> None:
         """Refuse the multi-container stacks among the tasks that no rollout could start, as a session would find
         when it opens (:func:`platoon.envs.harbor.sidecars.stack_spec`, which starts nothing): a sidecar whose image's
-        command platoon does not know, a dependency on the health of a service without a healthcheck, an unset host
-        variable.  Where no stack runs, :meth:`_check_stacks` refused them already, and a sidecar's image that the
-        image map lacks :meth:`_check_images`."""
+        command platoon does not know (a dataset directory's registry image that its compose file gives none), a
+        dependency on the health of a service without a healthcheck, an unset host variable.  Where no stack runs,
+        :meth:`_check_stacks` refused them already, and the images a fetched dataset lacks :meth:`_check_images`."""
 
-        if not names or self._stack_refusal() is not None:
+        if not names or self.stacks_refusal() is not None:
             return
         unrunnable: dict[str, str] = {}
         for name in names:
@@ -959,7 +992,7 @@ class HarborEnvironmentService:
         not start, ``env_config`` where no stack may run or a service cannot."""
 
         provider = self.provider
-        refusal = self._stack_refusal() or stack_refusal(provider)
+        refusal = self.stacks_refusal() or stack_refusal(provider)
         if refusal is not None:
             raise EnvSetupError(
                 "env_config",
@@ -1015,6 +1048,7 @@ class HarborEnvironmentService:
             labels=spec.labels,
             setup=setup,
             job_timeout_s=self.sandbox_start_budget_s,
+            pulled_image=self._images.for_pulled,
         )
 
     def _service_image(self, harbor_task: HarborTask) -> Callable[[str, Mapping[str, Any]], SessionImage]:
@@ -1029,7 +1063,27 @@ class HarborEnvironmentService:
             main_image = self._session_image(harbor_task)
         except ValueError:  # an image the map lacks: no session opens, check_tasks says so
             main_image = None
-        return sidecars.healthchecks(harbor_task, main_image=main_image, service_image=self._service_image(harbor_task))
+        return sidecars.healthchecks(
+            harbor_task,
+            main_image=main_image,
+            service_image=self._service_image(harbor_task),
+            pulled_image=self._images.for_pulled,
+        )
+
+    def egress_stacks(self, names: Sequence[str]) -> list[str]:
+        """The tasks among ``names`` that run as stacks with egress in a phase, the agents' or their verifier's in
+        ``main`` (:meth:`stack_network`): what a pod gives them through slirp4netns."""
+
+        found = []
+        for name in names:
+            try:
+                harbor_task = self._peek(name)
+            except (KeyError, ValueError):  # a refused or unknown task fails on its own when it is opened
+                continue
+            phases = (harbor_task.network, harbor_task.verifier_network)
+            if harbor_task.is_stack and any(self.stack_network(harbor_task, phase) == "egress" for phase in phases):
+                found.append(name)
+        return found
 
     def stack_network(self, harbor_task: HarborTask, phase: str) -> StackNetwork:
         """A stack's network in a phase whose network is ``phase`` (``host`` or ``none``): none under
@@ -1084,7 +1138,7 @@ class HarborEnvironmentService:
             verifier_user=self.verifier_user,
             index=index,
             compose=compose,
-            stack_refusal=self._stack_refusal(),
+            stack_refusal=self.stacks_refusal(),
             privilege_refusal=privilege_refusal(self._provider),
         )
 

@@ -399,6 +399,7 @@ async def test_a_stack_runs_as_a_compose_project_of_its_own(docker: FakeDocker, 
     assert main[0][-1] == "platoon-list" and "platoon-route" in main[-2] and main[-1][-2:] == ["touch", "/app/ready"]
     assert prepared == [f"{project}-main"]
     assert stack.main.routes == {"gateway": "http://127.0.0.1:18080"}
+    assert stack.host_loopback is False  # its services share the project's network, not this host's
     assert set(stack.services) == {"main", "kv", "probe"} and stack.run_modes == {
         "kv": "subids",
         "probe": "subids",
@@ -1024,6 +1025,7 @@ def _service(name: str, tmp_path: Path, provider: DockerProvider, monkeypatch) -
     dataset = tmp_path / "dataset"
     source = FIXTURES / where / (name if where.endswith("examples") else f"tasks/{name}")
     shutil.copytree(source, dataset / name)
+    _readable_by_all(dataset)
     if name not in ("hello-mcp", "app-privileges"):
         return HarborEnvironmentService(dataset, provider=provider)
     use_site_cache(monkeypatch, tmp_path / "cache")
@@ -1044,6 +1046,15 @@ def _service(name: str, tmp_path: Path, provider: DockerProvider, monkeypatch) -
     assert service.task_images.path is not None
     update_image_map(service.task_images.path, entries)
     return service
+
+
+def _readable_by_all(root: Path) -> None:
+    """Give ``root``'s files the modes a checkout has under a umask of 022, which every user reads, whatever this
+    process's umask: a sidecar's read-only bind of task files that not every user may read binds a copy instead."""
+
+    for path in [root, *root.rglob("*")]:
+        mode = path.stat().st_mode
+        path.chmod(mode | (0o555 if path.is_dir() or mode & 0o100 else 0o444))
 
 
 @pytest.mark.parametrize("name", sorted(SESSIONS))

@@ -18,6 +18,7 @@ import textwrap
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -26,9 +27,10 @@ from test_harbor_fetch import COMMIT, FakeHub, _overlay
 from test_harbor_fetch import hub as fake_hub  # noqa: F401 - a fixture: the fake hub, serving the dataset
 
 from platoon import cli
+from platoon import prepare as prepare_module
 from platoon.envs.harbor import builders
 from platoon.envs.harbor import fetch as fetch_module
-from platoon.envs.harbor.images import ImageEntry, ImageMap, update_image_map
+from platoon.envs.harbor.images import ImageEntry, ImageMap, pulled_key, update_image_map
 from platoon.envs.harbor.lock import read_lock
 from platoon.harness.toolchains import read_manifest
 from platoon.prepare import load_environments, prepare, prepare_command, summary
@@ -374,6 +376,138 @@ def test_an_entry_that_serves_a_directory_fetches_and_builds_nothing(site, tmp_p
     assert out[0] == "environments[default] dataset: serves a directory, which is not fetched"
     assert out[1].startswith("environments[default] toolchain agent-1.0: built at")
     assert out[-1] == "ready: 1 made now, 0 already current" and not site["builds"]
+
+
+def _registry_stack_config(tmp_path: Path, **service_kwargs) -> Path:
+    """A config with one Harbor entry on a local dataset of one stack, which its fetch locks: main runs a prebuilt
+    image, and its sidecar the registry image postgres:16-alpine, whose compose file gives it no command."""
+
+    task = tmp_path / "stacks" / "app-db"
+    (task / "environment").mkdir(parents=True)
+    (task / "tests").mkdir()
+    (task / "task.toml").write_text('[environment]\ndocker_image = "python:3.12-slim"\n')
+    (task / "instruction.md").write_text("Use the database.\n")
+    (task / "tests" / "test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+    (task / "environment" / "docker-compose.yaml").write_text("services:\n  db:\n    image: postgres:16-alpine\n")
+    entry = {
+        "name": "stacks",
+        "service": "harbor",
+        "service_kwargs": {
+            "dataset": str(tmp_path / "stacks"),
+            "provider": "singularity",
+            "refuse": {"sidecars": False},
+            **service_kwargs,
+        },
+    }
+    config = tmp_path / "configs" / "stacks.yaml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(yaml.safe_dump({"environments": [entry]}))
+    return config
+
+
+def test_prepare_pins_the_registry_images_that_sidecars_run(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    asked: list[str] = []
+
+    def configure(reference: str, **_: object) -> tuple[str, dict]:
+        asked.append(reference)
+        return "sha256:" + "a" * 64, {"config": {"Entrypoint": ["docker-entrypoint.sh"], "Cmd": ["postgres"]}}
+
+    monkeypatch.setattr(builders, "registry_config", configure)
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: ("/usr/bin/slirp4netns", ""))
+    config = _registry_stack_config(tmp_path)
+
+    steps, lines, code = _run(config)
+
+    assert code == 0 and [(step.step, step.status) for step in steps] == [
+        ("dataset", "done"),
+        ("images", "none"),
+        ("registry images", "done"),
+        ("pod tools", "current"),
+    ]
+    default = tmp_path / "site" / "harbor" / "images" / "singularity.json"
+    entry = ImageMap.load(default).entries[pulled_key("postgres:16-alpine")]
+    assert entry.image == "docker://postgres@sha256:" + "a" * 64 and entry.cmd == ("postgres",)
+    assert lines[2] == (
+        f"environments[stacks] registry images: pinned 1 of the 1 the sidecars run in the image map {default}, by "
+        "digest, with their images' configuration"
+    )
+    assert lines[3] == "environments[stacks] pod tools: current: pods with egress run /usr/bin/slirp4netns"
+    steps, lines, code = _run(config)
+    assert code == 0 and steps[2].status == "current" and asked == ["postgres:16-alpine"]
+
+
+def test_prepare_fetches_pod_tools_where_stacks_with_egress_need_them(
+    site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    found: list[str | None] = ["/usr/bin/slirp4netns"]
+    fetched: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object):
+        fetched.append(argv)
+        found[0] = "/srv/tools/slirp4netns-1.3.6-x86_64"
+        return prepare_module.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(builders, "registry_config", lambda reference, **_: ("sha256:" + "a" * 64, {"config": {}}))
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: (found[0], "no slirp4netns is on PATH"))
+    monkeypatch.setattr(prepare_module.subprocess, "run", run)
+    config = _registry_stack_config(tmp_path)
+    assert _run(config)[2] == 0 and not fetched  # this node has one
+    found[0] = None
+
+    steps, lines, code = _run(config, dry_run=True)
+    assert steps[-1].line() == (
+        "environments[stacks] pod tools: would fetch slirp4netns with hpc-sandbox fetch-tools: no slirp4netns is on "
+        "PATH"
+    )
+    steps, lines, code = _run(config)
+    assert code == 0 and steps[-1].status == "done"
+    assert fetched == [[sys.executable, "-m", "hpc_sandbox", "fetch-tools"]]
+    assert lines[-2].endswith(
+        "pod tools: fetched slirp4netns with hpc-sandbox fetch-tools: /srv/tools/slirp4netns-1.3.6-x86_64"
+    )
+    offline = _registry_stack_config(tmp_path / "offline", network_policy="none")
+    steps, lines, code = _run(offline)
+    assert code == 0 and [step.step for step in steps] == ["dataset", "images", "registry images"]  # no egress
+
+
+def test_a_fetch_of_the_pod_tools_that_hangs_fails_its_step(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def run(argv: list[str], **kwargs: Any):
+        raise prepare_module.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(builders, "registry_config", lambda reference, **_: ("sha256:" + "a" * 64, {"config": {}}))
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: (None, "no slirp4netns is on PATH"))
+    monkeypatch.setattr(prepare_module.subprocess, "run", run)
+
+    steps, lines, code = _run(_registry_stack_config(tmp_path))
+
+    assert code == 1 and steps[-1].line() == (
+        "environments[stacks] pod tools: hpc-sandbox fetch-tools did not finish within 600 s"
+    )
+
+
+def test_prepare_pins_and_fetches_nothing_for_stacks_that_do_not_run_here(
+    site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    asked: list[str] = []
+
+    def configure(reference: str, **_: object) -> tuple[str, dict]:
+        asked.append(reference)
+        return "sha256:" + "a" * 64, {"config": {}}
+
+    monkeypatch.setattr(builders, "registry_config", configure)
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: (None, "no slirp4netns is on PATH"))
+
+    steps, lines, code = _run(_registry_stack_config(tmp_path, stacks="refuse"))
+
+    assert code == 0 and [(step.step, step.status) for step in steps] == [
+        ("dataset", "done"),
+        ("images", "none"),
+        ("registry images", "none"),
+    ]  # and no pod tools, which no stack here needs
+    assert lines[2] == (
+        "environments[stacks] registry images: none pinned: no stack runs here, as the environment sets stacks: refuse"
+    )
+    assert not asked
 
 
 def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_before_0_3_0(site, tmp_path: Path):

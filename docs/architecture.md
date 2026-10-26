@@ -355,7 +355,8 @@ resources and command, an init the kill before grading spares; a task that needs
 services) runs as a stack on a provider with the `stacks` capability (`platoon/sandbox/stacks.py`,
 `platoon/envs/harbor/sidecars.py`), which starts its services in dependency order, and grading probes its sidecars,
 whose being down makes the outcome `invalid`; the `docker` provider runs each stack as a `docker compose` project
-(`platoon/sandbox/compose.py`), the `process` provider for tests. Elsewhere such a task is refused rather than run
+(`platoon/sandbox/compose.py`), the HPC providers as an hpc-sandbox pod, one network namespace for all its services
+(`platoon/sandbox/hpc_stacks.py`), the `process` provider for tests. Elsewhere such a task is refused rather than run
 without its services ([RFC 0010](rfcs/0010-harbor-registry-and-multi-container-tasks.md)).
 
 **Grading** (`HarborSession.grade`, `platoon/envs/harbor/session.py`) takes the sandbox the tests run in away from

@@ -108,12 +108,20 @@ class LockedTask:
         """The build plans of its stack's services that build their images from a context of the task (``build``,
         with its whole build key: ``context``, ``dockerfile``, ``args``, ``key``, ``base``), in the plan's order."""
 
-        services = (self.compose or {}).get("services") or {}
         return [
             service["build"]
-            for service in services.values()
+            for service in self._services()
             if isinstance(service.get("build"), Mapping) and service["build"].get("key")
         ]
+
+    def service_images(self) -> list[str]:
+        """The registry images its stack's services run (a compose ``image`` reference, not ``main``'s), in the
+        plan's order."""
+
+        return [service["image"] for service in self._services() if isinstance(service.get("image"), str)]
+
+    def _services(self) -> list[Mapping[str, Any]]:
+        return list(((self.compose or {}).get("services") or {}).values())
 
 
 @dataclass(frozen=True)

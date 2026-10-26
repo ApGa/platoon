@@ -162,8 +162,13 @@ def settings(site: Path) -> dict[str, Any]:
     steps = prepare(load_environments(config), out=lines.append)
     line, code = summary(steps, dry_run=False)
     assert code == 0, [*lines, line]
-    # hello-mcp's two images, main's and its sidecar's, from its build context; the other tasks' are pulled.
-    assert [(step.step, step.status) for step in steps] == [("dataset", "done"), ("images", "done")], lines
+    # hello-mcp's two images, main's and its sidecar's, from its build context; the registry images that the other
+    # tasks' sidecars run are pinned, by digest with their configuration, and pulled.
+    assert [(step.step, step.status) for step in steps] == [
+        ("dataset", "done"),
+        ("images", "done"),
+        ("registry images", "done"),
+    ], lines
     assert "built 2 with the docker builder" in lines[1], lines
     return kwargs
 

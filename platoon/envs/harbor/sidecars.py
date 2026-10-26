@@ -7,7 +7,10 @@ directory, a writable one binds a copy, so that the content-addressed cache is n
 empty directory, as Docker creates one; a host path that a listed host variable names binds read-only, resolved now.
 A single sandbox's copies are the session's, in node scratch (:func:`bind_copies`); a stack's are its own volumes
 (:func:`copied_binds`), one for each path and masks that every service binding it shares, as compose shares the one
-host directory, so a sidecar sees what ``main`` writes there and reaping a stack deletes its copies too.
+host directory, so a sidecar sees what ``main`` writes there and reaping a stack deletes its copies too.  A stack's
+copies have the modes a Docker host's checkout has (every user enters their directories and reads their files), and a
+sidecar's read-only bind of files that not every user may read (a task fetched under a umask such as 027) binds such a
+copy too, since a sidecar may read them as a user of its own, as the official database images do.
 
 **Stacks.**  A task whose compose file names services besides ``main`` (``flags.stack: sidecars``) runs as a stack on a
 sandbox provider that runs stacks (:mod:`platoon.sandbox.stacks`), and :func:`stack_spec` turns its plan into the
@@ -17,17 +20,21 @@ why a stack cannot start:
 - ``main`` is the sandbox a single-container session of the task would get (its image, what the compose file gives
   it, the harness's needs), idle; the session's preparation of it (its directories, its image's deferred files, its
   init and healthchecks) is the service's ``setup``, which runs once its dependencies are up;
-- each sidecar runs its image, as compose runs it: a registry reference as written, the image map's image of a build
-  context's whole build key, or ``main``'s image for ``${MAIN_IMAGE_NAME}``; compose's ``command`` and ``entrypoint``
-  over the image's ``ENTRYPOINT`` and ``CMD``; its environment over the image's and the Harbor service's ``env``; its
-  healthcheck, else its image's; its dependencies, volumes, ports, names and resources.  A registry image's
-  configuration is not recorded yet, so such a service runs compose's command alone, and one that gives none is
-  refused; an init job's run is bounded (``job_timeout_s``);
+- each sidecar runs its image, as compose runs it: a registry reference as the image map pinned it (by digest, with
+  its configuration, which ``platoon prepare`` records), else as written, the image map's image of a build context's
+  whole build key, or ``main``'s image for ``${MAIN_IMAGE_NAME}``; compose's ``command`` and ``entrypoint`` over the
+  image's ``ENTRYPOINT`` and ``CMD``; its environment over the image's and the Harbor service's ``env``; its
+  healthcheck, else its image's; the user its image runs as (``USER``); its dependencies, volumes, ports, names and
+  resources.  An unpinned registry image's configuration is unknown (a dataset directory has no image map), so such a
+  service runs compose's command alone, and one that gives none is refused; an init job's run is bounded
+  (``job_timeout_s``);
 - a sidecar's bind of a session log directory (``${HOST_VERIFIER_LOGS_PATH}``, the agent's or the artifacts') is a
   volume of the stack, one per log directory for the sidecars that bind it: grading copies its regular files, never a
   link, into that directory of the sandbox the tests run in, once it made the directory afresh (:func:`snapshot_logs`,
-  :func:`put_logs`), so that the agents can neither erase nor forge what a sidecar records there.  A sidecar does not
-  see what ``main`` writes in its own, so a read-only bind of one is refused when the task loads.
+  :func:`put_logs`), so that the agents can neither erase nor forge what a sidecar records there; through a sidecar
+  that runs with your subordinate ids, as its root, since its own users may keep their files from yours
+  (:func:`log_source`), and a file it cannot read fails the grade as infrastructure, never left out.  A sidecar does
+  not see what ``main`` writes in its own, so a read-only bind of one is refused when the task loads.
 
 **Probes** (:func:`probe`): before and after the tests (``shared``), or before and after the artifacts are collected
 (``separate``), every sidecar must be up: an init job completed, any other running, and healthy where it has a
@@ -44,6 +51,7 @@ done, best effort, as Harbor runs them: ``main``'s first, then the sidecars'.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import posixpath
@@ -161,29 +169,59 @@ def bind_copies(harbor_task: HarborTask, binds: Sequence[Bind]) -> tuple[list[Mo
 def copied_binds(harbor_task: HarborTask) -> dict[CopyKey, bool]:
     """The binds of a stack's task files that bind a copy the stack owns (a volume of its own), by path and masks, one
     copy for every service that binds that path with those masks: those a service binds writable, masked or from a
-    missing source, and the read-only binds of what another service writes.  Each says whether the copy may hard-link
-    the task's files (every bind of it is read-only).  Empty for a task that is not a stack."""
+    missing source, the read-only binds of what another service writes, and what a sidecar binds that not every user
+    may read, whose copy every user reads (:func:`_fill_copy`).  Each says whether the copy may hard-link the task's
+    files: every bind of it is read-only, and every user may read them or no sidecar binds them.  Empty for a task
+    that is not a stack."""
 
     plan = harbor_task.compose
     if plan is None or plan.kind != "sidecars":
         return {}
     shared: dict[CopyKey, list[Bind]] = {}
-    for data in plan.services.values():
+    sidecars: set[CopyKey] = set()  # what a sidecar binds
+    for name, data in plan.services.items():
         for bind in service_binds(data):
             if bind.task is not None:
                 shared.setdefault(copy_key(bind), []).append(bind)
-    return {
-        key: all(bind.read_only for bind in binds)
-        for key, binds in sorted(shared.items())
-        if any(needs_copy(bind) for bind in binds)
-    }
+                if name != MAIN:
+                    sidecars.add(copy_key(bind))
+    copies = {}
+    for key, binds in sorted(shared.items()):
+        readable = key not in sidecars or _readable_by_all(harbor_task.task_dir / key[0])  # by whoever binds it
+        if any(needs_copy(bind) for bind in binds) or not readable:
+            copies[key] = all(bind.read_only for bind in binds) and readable
+    return copies
+
+
+def _readable_by_all(path: Path) -> bool:
+    """Whether every user may read ``path``, as a sidecar that reads it as a user of its own needs: a file others may
+    read, or a directory others may enter and list, with everything below it so (links are neither followed nor
+    counted: a copy keeps them as links).  A path that does not exist has nothing to read."""
+
+    def others_read(entry: str, *, directory: bool) -> bool:
+        mode = os.lstat(entry).st_mode
+        wanted = 0o005 if directory else 0o004
+        return stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)) or mode & wanted == wanted
+
+    if not os.path.lexists(path):
+        return True
+    if not path.is_dir() or path.is_symlink():
+        return others_read(str(path), directory=False)
+    for directory, _names, files in os.walk(path):  # links to directories are among the names, never walked
+        if not others_read(directory, directory=True):
+            return False
+        if not all(others_read(os.path.join(directory, name), directory=False) for name in files):
+            return False
+    return True
 
 
 def _fill_copy(
-    harbor_task: HarborTask, path: str, masks: Sequence[str], missing: bool, *, link: bool
+    harbor_task: HarborTask, path: str, masks: Sequence[str], missing: bool, *, link: bool, readable: bool = False
 ) -> Callable[[Path], None]:
     """What fills a copy's directory: the task's ``path`` at its ``tree`` (filtered by ``masks``, hard-linked when
-    ``link``), or an empty directory for a missing one."""
+    ``link``), or an empty directory for a missing one.  With ``readable`` (a stack's), every user may then enter the
+    copy's directories and read its files (``chmod a+rX``), whatever this process's umask, as on a Docker host, whose
+    checkouts have those modes; a hard link keeps the cache's modes, which every user reads already."""
 
     def fill(directory: Path) -> None:
         tree = directory / _COPY_TREE
@@ -191,8 +229,28 @@ def _fill_copy(
             tree.mkdir()
         else:
             filtered_copy(harbor_task.task_dir / path, tree, masks, link=link)
+        if readable:
+            _readable_modes(tree)
 
     return fill
+
+
+def _readable_modes(tree: Path) -> None:
+    """``chmod a+rX`` on ``tree`` and everything below it but links and the hard links that :func:`filtered_copy`
+    made (they share the cache's inodes, never changed)."""
+
+    def add(entry: str) -> None:
+        status = os.lstat(entry)
+        if stat.S_ISDIR(status.st_mode) or (stat.S_ISREG(status.st_mode) and status.st_nlink == 1):
+            mode = stat.S_IMODE(status.st_mode)
+            executable = stat.S_ISDIR(status.st_mode) or mode & 0o111
+            os.chmod(entry, mode | 0o444 | (0o111 if executable else 0))
+
+    add(str(tree))
+    if tree.is_dir() and not tree.is_symlink():
+        for directory, names, files in os.walk(tree):
+            for name in [*names, *files]:
+                add(os.path.join(directory, name))
 
 
 def filtered_copy(source: Path, target: Path, masks: Sequence[str], *, link: bool) -> None:
@@ -263,11 +321,12 @@ async def _undo_when_done(running: asyncio.Future[T], undo: Callable[[T | None],
 @dataclass(frozen=True)
 class SidecarLogs:
     """One of the session's log directories (``verifier``, ``agent`` or ``artifacts``) that sidecars bind: a volume of
-    the stack, bound in each of ``services`` where its compose file binds the directory."""
+    the stack, bound in each of ``services`` at the path there (its target) where its compose file binds the
+    directory."""
 
     logs: str
     volume: str
-    services: tuple[str, ...]
+    services: Mapping[str, str]  # each sidecar that binds it, with its target
 
 
 @dataclass
@@ -290,13 +349,15 @@ def stack_spec(
     labels: Mapping[str, str],
     setup: Callable[[Sandbox], Awaitable[None]],
     job_timeout_s: float | None = None,
+    pulled_image: Callable[[str], SessionImage | None] = lambda reference: None,
 ) -> StackPlan:
     """The spec of the task's stack (the module docstring says what each service gets): ``main`` is the agents'
     sandbox, prepared by ``setup``; ``main_image`` is its image as the session runs it (None: its ``docker_image``,
     whose configuration platoon does not know), ``service_image(name, build)`` the image of a service that builds from
-    a context, ``env`` and ``mounts`` the Harbor service's (every sidecar gets its read-only mounts), ``job_timeout_s``
-    an init job's longest run.  It makes nothing.  ``ValueError`` says why a service cannot run (an image without a
-    known command or not in the image map, an unset host variable, a spec no stack can start)."""
+    a context, ``pulled_image(reference)`` the image map's pin of a registry image (None: none), ``env`` and ``mounts``
+    the Harbor service's (every sidecar gets its read-only mounts), ``job_timeout_s`` an init job's longest run.  It
+    makes nothing.  ``ValueError`` says why a service cannot run (an image without a known command or not in the image
+    map, an unset host variable, a spec no stack can start)."""
 
     plan = harbor_task.compose
     assert plan is not None and plan.kind == "sidecars"
@@ -305,11 +366,11 @@ def stack_spec(
             target="",
             name=COPY_VOLUME.format(number=number),
             subpath=_COPY_TREE,
-            fill=_fill_copy(harbor_task, key[0], key[1], _missing(harbor_task, key[0]), link=link),
+            fill=_fill_copy(harbor_task, key[0], key[1], _missing(harbor_task, key[0]), link=link, readable=True),
         )
         for number, (key, link) in enumerate(copied_binds(harbor_task).items())
     }
-    logs: dict[str, list[str]] = {}
+    logs: dict[str, dict[str, str]] = {}  # each log directory's sidecars, with their targets
     services: dict[str, ServiceSpec] = {}
     for name, data in plan.services.items():
         binds = service_binds(data)
@@ -324,13 +385,13 @@ def stack_spec(
             continue
         for bind in binds:
             if bind.logs is not None:
-                logs.setdefault(bind.logs, []).append(name)
+                logs.setdefault(bind.logs, {}).setdefault(name, bind.target)
                 own.append(Volume(target=bind.target, name=LOGS_VOLUME.format(logs=bind.logs)))
         services[name] = _sidecar(
             harbor_task,
             name,
             data,
-            image=_image(harbor_task, name, data, main, main_image, service_image),
+            image=_image(harbor_task, name, data, main, main_image, service_image, pulled_image),
             env=env,
             mounts=[*(mount for mount in mounts if mount.read_only), *bind_mounts(harbor_task, binds, copied=copies)],
             volumes=own,
@@ -341,8 +402,7 @@ def stack_spec(
     spec = StackSpec(services=services, network=network, labels=dict(labels))
     spec.check()
     directories = [
-        SidecarLogs(logs=kind, volume=LOGS_VOLUME.format(logs=kind), services=tuple(dict.fromkeys(names)))
-        for kind, names in logs.items()
+        SidecarLogs(logs=kind, volume=LOGS_VOLUME.format(logs=kind), services=targets) for kind, targets in logs.items()
     ]
     return StackPlan(spec, directories)
 
@@ -384,6 +444,7 @@ def _sidecar(
         healthcheck=_healthcheck(data, image.healthcheck),
         volumes=volumes,
         timeout_s=timeout_s,
+        user=image.user,
     )
 
 
@@ -396,6 +457,7 @@ def _service(
     setup: Callable[[Sandbox], Awaitable[None]] | None = None,
     volumes: Sequence[Volume] = (),
     timeout_s: float | None = None,
+    user: str | None = None,
 ) -> ServiceSpec:
     network_mode = str(data.get("network_mode") or "")
     aliases = [data["hostname"]] if data.get("hostname") else []
@@ -427,6 +489,7 @@ def _service(
         stop_signal=data.get("stop_signal"),
         setup=setup,
         timeout_s=timeout_s,
+        user=user,
     )
 
 
@@ -450,8 +513,10 @@ def _image(
     main: SandboxSpec,
     main_image: SessionImage | None,
     service_image: Callable[[str, Mapping[str, Any]], SessionImage],
+    pulled_image: Callable[[str], SessionImage | None],
 ) -> SessionImage:
-    """A sidecar's image: a registry reference (its configuration unknown), ``main``'s, or a build context's."""
+    """A sidecar's image: a registry reference (as the image map pinned it, else as written, its configuration
+    unknown), ``main``'s, or a build context's."""
 
     image = data.get("image")
     if isinstance(image, Mapping) and image.get("main"):
@@ -459,7 +524,7 @@ def _image(
             return replace(main_image, files=())  # a service's command starts with its sandbox: nothing is deferred
         return SessionImage(image=main.image, env={}, workdir=None)
     if isinstance(image, str):
-        return SessionImage(image=docker_image_reference(image), env={}, workdir=None)
+        return pulled_image(image) or SessionImage(image=docker_image_reference(image), env={}, workdir=None)
     build = data.get("build")
     if not isinstance(build, Mapping):
         raise ValueError(f"Harbor task {harbor_task.name!r}: the service {name} has neither an image nor a build")
@@ -472,9 +537,10 @@ def _argv(harbor_task: HarborTask, name: str, data: Mapping[str, Any], image: Se
     entrypoint, command = data.get("entrypoint"), data.get("command")
     if entrypoint is None and command is None and image.entrypoint is None and image.cmd is None:
         raise ValueError(
-            f"Harbor task {harbor_task.name!r}: the service {name} runs the command of its image "
-            f"{image.image}, which platoon does not know (a registry image's configuration is not recorded): give it "
-            "a command (an overlay's [[compose]] replace)"
+            f"Harbor task {harbor_task.name!r}: the service {name} runs the command of its image {image.image}, "
+            "which platoon does not know (no image map pinned the image with its configuration, as platoon prepare "
+            "pins a fetched dataset's on every provider but process): give the service a command (an overlay's "
+            "[[compose]] replace)"
         )
     argv = resolve_argv(image_entrypoint=image.entrypoint, image_cmd=image.cmd, entrypoint=entrypoint, command=command)
     if not argv:
@@ -509,6 +575,7 @@ def healthchecks(
     *,
     main_image: SessionImage | None,
     service_image: Callable[[str, Mapping[str, Any]], SessionImage],
+    pulled_image: Callable[[str], SessionImage | None] = lambda reference: None,
 ) -> dict[str, Healthcheck | None]:
     """Each service's healthcheck as its stack runs it (compose's, else its image's); a service whose image cannot be
     had (a build context the image map lacks, whose session never opens) counts compose's alone."""
@@ -521,8 +588,9 @@ def healthchecks(
         try:
             if name == MAIN:
                 image = main_image.healthcheck if main_image is not None else None
-            elif not isinstance(data.get("image"), str):  # a registry image's configuration is not recorded
-                image = _image(harbor_task, name, data, SandboxSpec(image=""), main_image, service_image).healthcheck
+            else:
+                main = SandboxSpec(image="")
+                image = _image(harbor_task, name, data, main, main_image, service_image, pulled_image).healthcheck
         except ValueError:
             image = None
         checks[name] = _healthcheck(data, image)
@@ -658,18 +726,43 @@ async def run_collect_hooks(
 # --- the sidecars' log directories ---------------------------------------------------------------------------------
 
 
+async def log_source(stack: Stack, logs: SidecarLogs, downloads: Path) -> Path:
+    """Where grading copies a log directory of the sidecars from: the stack's volume on this host, or, where a sidecar
+    that binds it runs with your subordinate ids, whose own users' files this host's user may not read, a copy that
+    sidecar downloads, as its root, into ``downloads`` (a sidecar that is down leaves the volume)."""
+
+    for service, target in logs.services.items():
+        sandbox = stack.services.get(service)
+        if sandbox is None or stack.run_modes.get(service) != "subids":
+            continue
+        copy = downloads / logs.logs / service
+        try:
+            await sandbox.download(target, copy)
+        except Exception as exc:
+            logger.warning("Cannot download the sidecars' %s logs through %s: %s", logs.logs, service, exc)
+            continue
+        return copy
+    return stack.volume_path(logs.volume)
+
+
 def snapshot_logs(directories: Mapping[str, Path], into: Path) -> dict[str, Path]:
     """Copy the regular files of the sidecars' log directories (``directories``: by log directory, ``verifier``, ...,
-    the stack's volume that holds it) into ``into``, by log directory (``into/verifier``, ...), never through a link at
+    where :func:`log_source` found it) into ``into``, by log directory (``into/verifier``, ...), never through a link at
     any depth, nor a link, a device or anything else, also while a sidecar swaps what is there, so that nothing a
-    sidecar left there leads a copy elsewhere; the directories that hold something, by name."""
+    sidecar left there leads a copy elsewhere; the directories that hold something, by name.  ``OSError`` for what it
+    cannot read, which the tests must not go without; what is gone since it was listed is left out."""
+
+    def unless_gone(error: OSError) -> None:  # what fwalk cannot list or enter
+        if not isinstance(error, FileNotFoundError):
+            raise error
 
     copied: dict[str, Path] = {}
     for logs, source in directories.items():
         target = into / logs
         if not source.is_dir() or source.is_symlink():
             continue
-        for directory, _names, files, directory_fd in os.fwalk(source):  # never follows a link to a directory
+        # Never follows a link to a directory.
+        for directory, _names, files, directory_fd in os.fwalk(source, onerror=unless_gone):
             relative = os.path.relpath(directory, source)
             for name in files:
                 try:
@@ -677,19 +770,19 @@ def snapshot_logs(directories: Mapping[str, Path], into: Path) -> dict[str, Path
                     if not stat.S_ISREG(info.st_mode):
                         continue  # a link, a device, a FIFO: never opened
                     fd = os.open(name, _COPY_FLAGS, dir_fd=directory_fd)
-                except OSError:
-                    continue  # gone, or swapped for a link since it was listed (O_NOFOLLOW)
-                try:
-                    with os.fdopen(fd, "rb") as handle:
-                        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                            continue  # swapped for something else since its stat
-                        destination = target / relative / name
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        with destination.open("wb") as out:
-                            shutil.copyfileobj(handle, out)
+                except FileNotFoundError:
+                    continue  # gone since it was listed
                 except OSError as exc:
-                    logger.warning("Cannot copy %s of the sidecars' %s logs: %s", name, logs, exc)
-                    continue
+                    if exc.errno == errno.ELOOP:
+                        continue  # swapped for a link since it was listed (O_NOFOLLOW)
+                    raise
+                with os.fdopen(fd, "rb") as handle:
+                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                        continue  # swapped for something else since its stat
+                    destination = target / relative / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with destination.open("wb") as out:
+                        shutil.copyfileobj(handle, out)
                 copied[logs] = target
     return copied
 
@@ -713,6 +806,7 @@ __all__ = [
     "filtered_copy",
     "healthchecks",
     "in_thread",
+    "log_source",
     "probe",
     "probe_bound_s",
     "put_logs",

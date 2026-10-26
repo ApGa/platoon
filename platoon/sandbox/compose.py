@@ -133,7 +133,8 @@ async def start_compose_stack(provider: DockerProvider, spec: StackSpec) -> Driv
         cleanup.unregister(token)
         let_finish(asyncio.ensure_future(_remove_made(making, project.directory)))
         raise
-    stack = await drive_stack(project, spec, id=name, on_stop=forget)  # a start that fails stops, and forgets
+    # Its services share the project's network, not this host's: main reaches the gateway through its route alone.
+    stack = await drive_stack(project, spec, id=name, on_stop=forget, host_loopback=False)  # one that fails stops
     cleanup.attach(token, stack)
     return stack
 
