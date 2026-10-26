@@ -16,13 +16,12 @@ import tinker
 import torch
 from tinker import TensorData
 
+# Internal per-datum metadata used to preserve Tinker's original action-token loss denominator after zero-gradient
+# datums are removed from model compute: one of the loss inputs only the trainer reads, which the objective names.
+from platoon.train.objectives.api import LOSS_NORMALIZATION_TOKENS_KEY
+
 if TYPE_CHECKING:
     from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
-
-
-# Internal per-datum metadata used to preserve Tinker's original action-token
-# loss denominator after zero-gradient datums are removed from model compute.
-LOSS_NORMALIZATION_TOKENS_KEY = "_loss_normalization_tokens"
 
 
 def objective_is_zero_for_zero_advantages(loss_fn: str, loss_fn_config: dict) -> bool:

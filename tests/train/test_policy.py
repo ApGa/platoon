@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from platoon.train import task_stats
-from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import AdamParams, PlatoonTinkerRLTrainerConfig
 from platoon.train.policy import service as service_module
 from platoon.train.policy import set as set_module
 from platoon.train.policy.policy import Policy
@@ -31,6 +31,9 @@ SETTINGS = {
         "context_window_length": 32768,
         "sample_timeout_seconds": 300,
         "lora_rank": 16,
+        "optimizer": {"learning_rate": 1e-5, "grad_clip_norm": 1.0},
+        "loss_fn": "ppo",
+        "loss_fn_config": {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2},
     },
     "tinker_base_url": "http://self-hosted:8000",
     "checkpoint": {"load_checkpoint_path": "tinker://run-1/weights/000010"},
@@ -53,6 +56,9 @@ def test_main_is_the_policy_train_declares_under_its_train_names():
             tinker_base_url="http://self-hosted:8000",
             lora_rank=16,
             load_checkpoint_path="tinker://run-1/weights/000010",
+            optimizer=AdamParams(learning_rate=1e-5, grad_clip_norm=1.0),
+            loss_fn="ppo",
+            loss_fn_config={"clip_low_threshold": 0.8, "clip_high_threshold": 1.2},
         )
     }
     assert MAIN is task_stats.MAIN  # the per-task statistics' snapshots keep their format
@@ -60,8 +66,10 @@ def test_main_is_the_policy_train_declares_under_its_train_names():
 
 def test_a_spec_hashes_as_a_frozen_value():
     spec = PolicySpec(MAIN, model_name="m", renderer_name="r", renderer_kwargs={"enable_thinking": False})
+    updated = PolicySpec(MAIN, model_name="m", renderer_name="r", optimizer=AdamParams(), loss_fn_config={"a": 1.0})
 
-    assert hash(spec) == hash(dataclasses.replace(spec)) and {spec: 1}[dataclasses.replace(spec)] == 1
+    for spec in (spec, updated):
+        assert hash(spec) == hash(dataclasses.replace(spec)) and {spec: 1}[dataclasses.replace(spec)] == 1
 
 
 def test_building_the_policies_registers_main_s_gateway_as_the_trainer_did(monkeypatch):

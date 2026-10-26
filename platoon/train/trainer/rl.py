@@ -41,7 +41,7 @@ from platoon.train.evaluation import plan as evaluation_plan
 from platoon.train.evaluation.plan import _evaluation_plan
 from platoon.train.evaluation.record import EVALUATIONS_NAME, completed_evaluation_steps
 from platoon.train.policy import service
-from platoon.train.policy.policy import Policy
+from platoon.train.policy.policy import Policy, adam_params
 from platoon.train.policy.set import PolicySet
 from platoon.train.policy.spec import policy_specs
 from platoon.train.sampler_runtime import TaskSampling
@@ -492,14 +492,9 @@ class PlatoonTinkerRLTrainer:
         watchdog, started when it is enabled, and where the start begins."""
 
         assert self._stats_logger is not None and self._train_tracker is not None  # train() checked (_require_entered)
-        self._leader().optimizer_params = tinker.AdamParams(
-            learning_rate=self.config.train.optimizer.learning_rate,
-            beta1=self.config.train.optimizer.beta1,
-            beta2=self.config.train.optimizer.beta2,
-            eps=self.config.train.optimizer.eps,
-            weight_decay=self.config.train.optimizer.weight_decay,
-            grad_clip_norm=self.config.train.optimizer.grad_clip_norm,
-        )
+        policy = self._leader()
+        assert policy.spec.optimizer is not None  # train.optimizer, as policy_specs took it when the trainer was built
+        policy.optimizer_params = adam_params(policy.spec.optimizer)
 
         eval_dataloader = None
         if self.eval_dataset is not None:

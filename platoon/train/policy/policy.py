@@ -4,18 +4,24 @@ Rollout workers never hold one: they sample the sampling client that the trainer
 (:mod:`platoon.train.policy.binding`).
 """
 
+from typing import TYPE_CHECKING
+
 import tinker
 
 from platoon.train.policy.spec import PolicyId, PolicySpec
 from platoon.train.tinker.key_refusal import key_refusals
 from platoon.train.tinker.proxy import ModelInfo
 
+if TYPE_CHECKING:
+    from platoon.train.config_defs import AdamParams
+
 
 class Policy:
     """One policy: its spec, its model info (the renderer, the tokenizer and the model gateway's ``TinkerLLM``, which
     samples it and keeps its version), and what each start opens and moves on.  The training loops read and write the
     latter through their shared state, whose leader the policy is
-    (:class:`~platoon.train.trainer.state.TrainLoopSharedState`)."""
+    (:class:`~platoon.train.trainer.state.TrainLoopSharedState`), and a step updates it through its learner
+    (:class:`~platoon.train.policy.learner.Learner`)."""
 
     # Set as a start opens the policy: its Tinker service client (connect), the training client on that service, the
     # sampling client of its newest weights (the launch save's, then each step's) and its optimizer's parameters.
@@ -40,3 +46,17 @@ class Policy:
 
         with key_refusals():
             self.service_client = tinker.ServiceClient(base_url=self.spec.tinker_base_url)
+
+
+def adam_params(optimizer: "AdamParams") -> tinker.AdamParams:
+    """The parameters a policy's optimizer steps with, as the Tinker service takes them, from its Adam settings (a
+    spec's ``optimizer``: ``train.optimizer``)."""
+
+    return tinker.AdamParams(
+        learning_rate=optimizer.learning_rate,
+        beta1=optimizer.beta1,
+        beta2=optimizer.beta2,
+        eps=optimizer.eps,
+        weight_decay=optimizer.weight_decay,
+        grad_clip_norm=optimizer.grad_clip_norm,
+    )
