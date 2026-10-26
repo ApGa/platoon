@@ -212,10 +212,15 @@ pods, which need, on the compute nodes:
 
 Without subordinate ids, sidecars run as your own uid, which most database images accept, as they accept `docker run
 --user`. enroot runs every sidecar so, since it maps one id into a container. With them, each rollout worker maps them
-once, at its first stack, which can take more than a minute where `/etc/subuid` lists many users. A fetch locks
-stacks as runnable, and a run refuses them where pods cannot run, when it lists its tasks, naming what is missing:
-leave them out (`exclude_tasks`), or fetch them refused with `refuse: {sidecars: true}`. Pods on Apptainer and enroot
-are experimental.
+once, at its first stack, which can take more than a minute where `/etc/subuid` lists many users. A fetch locks stacks
+as runnable, and a run refuses them where pods cannot run, when it lists its tasks, naming what is missing: leave them
+out (`exclude_tasks`), or fetch them refused with `refuse: {sidecars: true}`. Pods on Apptainer and enroot are
+experimental. Where nodes do not nest user namespaces, or hpc-sandbox 0.5 is not installed, `stacks: host_network` runs
+the stacks that a dataset's overlays make safe on the node's own network, each service a single sandbox, with any
+hpc-sandbox ([Stacks on the host network](sandboxes-and-harbor.md#stacks-on-the-host-network)): their sidecars are then
+reachable from the node, so each listens on the loopback and takes its stack's token, through its environment, never its
+command line, which every user of the node can read. The message that refuses stacks under `stacks: auto` names the
+fallback where it could run them.
 
 Such sidecars may read the task's files as a user of their own (the official postgres image runs its init scripts as
 `postgres`). Under a umask that keeps other users out, such as 027, a fetched dataset's files are 0640, so a

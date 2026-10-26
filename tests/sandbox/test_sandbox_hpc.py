@@ -3,6 +3,7 @@ hpc-sandbox a checkout locks where it is installed."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import sys
@@ -24,6 +25,7 @@ from platoon.sandbox import (
     SandboxSnapshot,
     SandboxSpec,
     base,
+    cleanup,
     cwd_error,
     get_provider,
     network_none_refusal,
@@ -553,3 +555,69 @@ def test_the_owner_manifest_refusal_matches_the_installed_hpc_sandbox():
     takes = "file_owners" in {field.name for field in dataclasses.fields(hpc_sandbox.SandboxSpec)}
 
     assert (platoon.sandbox.file_owners_refusal("singularity", {"fakeroot": True}) is None) is takes
+
+
+@pytest.mark.asyncio
+async def test_a_start_given_up_runs_to_its_end_and_its_sandbox_is_stopped(monkeypatch):
+    """Cancelled while hpc-sandbox makes the container, a start raises at once, while hpc-sandbox's start runs to its
+    end uncancelled (killing the runtime's command midway can leave a container that hpc-sandbox's own rollback does
+    not stop); the sandbox it made is stopped then, and its registration for cleanup goes with it."""
+
+    calls: list[tuple] = []
+    fake = _fake_hpc_sandbox(calls)
+    started, release = asyncio.Event(), asyncio.Event()
+    start = fake.SingularityProvider.start
+
+    async def slow_start(self, spec):
+        started.set()
+        await release.wait()  # the runtime making the container: a cancellation here would kill it midway
+        return await start(self, spec)
+
+    monkeypatch.setattr(fake.SingularityProvider, "start", slow_start)
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", fake)
+    provider = get_provider("singularity")
+    registered = len(cleanup._live)
+    opening = asyncio.ensure_future(provider.start(SandboxSpec(image="x.sif", labels={"k": "v"})))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert len(cleanup._live) == registered + 1  # until what it starts is stopped
+    release.set()
+    for _ in range(500):
+        if ("stop",) in calls:
+            break
+        await asyncio.sleep(0.01)
+    assert [call[0] for call in calls] == ["init", "start", "stop"]  # never cancelled, then stopped
+    assert len(cleanup._live) == registered
+
+
+@pytest.mark.asyncio
+async def test_a_start_given_up_in_the_step_in_which_it_returns_its_sandbox_stops_that_sandbox(monkeypatch):
+    """The caller is cancelled in the very step of the loop in which hpc-sandbox's start returns the sandbox (as a
+    deadline or a rollout's stop can): the start raises, and the sandbox it made is stopped, never left running with
+    its registration for cleanup dropped."""
+
+    calls: list[tuple] = []
+    fake = _fake_hpc_sandbox(calls)
+    start = fake.SingularityProvider.start
+    opening: list[asyncio.Future[Any]] = []
+
+    async def returning_as_its_caller_is_cancelled(self, spec):
+        sandbox = await start(self, spec)
+        asyncio.get_running_loop().call_soon(opening[0].cancel)  # before the start's own completion reaches its caller
+        return sandbox
+
+    monkeypatch.setattr(fake.SingularityProvider, "start", returning_as_its_caller_is_cancelled)
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", fake)
+    provider = get_provider("singularity")
+    registered = len(cleanup._live)
+    opening.append(asyncio.ensure_future(provider.start(SandboxSpec(image="x.sif", labels={"k": "v"}))))
+    with pytest.raises(asyncio.CancelledError):
+        await opening[0]
+    for _ in range(500):
+        if ("stop",) in calls:
+            break
+        await asyncio.sleep(0.01)
+    assert [call[0] for call in calls] == ["init", "start", "stop"]
+    assert len(cleanup._live) == registered

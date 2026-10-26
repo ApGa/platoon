@@ -36,7 +36,11 @@ hpc-sandbox's ``/bin/sh -c``: the ``bash`` tool of a Harbor task then takes bash
 The adapter implements what hpc-sandbox leaves to its caller: routes to Unix-socket upstreams from a sandbox
 without a network (a bind of the socket's directory plus a forwarder on port 18080 of the sandbox's own loopback,
 :mod:`platoon.sandbox.routes`), this process's labels on every sandbox and pod, and reaping by label
-(:meth:`HpcProvider.reap`, hpc-sandbox's janitor: it stops the sessions and pods whose owner process is gone).
+(:meth:`HpcProvider.reap`, hpc-sandbox's janitor: it stops the sessions and pods whose owner process is gone).  A start
+that its caller gives up runs to its end all the same, and the sandbox it started is stopped then, as a cleanup of the
+rollout's: cancelled while the runtime makes the container, hpc-sandbox would kill the runtime's command midway, and its
+own rollback can then fail to stop the half-made container (Singularity's instance, whose PID file it has not written
+yet), which would run on.
 
 :mod:`platoon.sandbox.singularity` and :mod:`platoon.sandbox.enroot` name the two providers.
 """
@@ -58,6 +62,7 @@ from platoon.sandbox.base import CAPABILITIES, DownloadReport, DroppedLink, Exec
 from platoon.sandbox.hpc_stacks import pods_refusal, start_pod_stack
 from platoon.sandbox.routes import SandboxRoutes
 from platoon.sandbox.stacks import STACKS, DrivenStack, StackSpec
+from platoon.utils.stopping import let_finish
 
 logger = logging.getLogger(__name__)
 
@@ -328,11 +333,20 @@ class HpcProvider:
     async def _open(self, spec: SandboxSpec, start: Any) -> HpcSandbox:
         routes = SandboxRoutes(spec, own_network=True)
         labels = {**spec.labels, **cleanup.labels()}
+        inner_spec = self.inner_spec(spec, routes=routes, labels=labels)
         token = cleanup.register(provider=cleanup.provider_ref(self), options=self.options, labels=labels)
+        # hpc-sandbox's start runs to its end whatever its caller does: cancelled while the runtime makes the
+        # container, it would kill the runtime's command midway, which can leave a container that hpc-sandbox's own
+        # rollback cannot prove is the sandbox's, and so leaves running.  A start given up meanwhile stops what it
+        # started once it is done, a cleanup of the rollout's own (platoon.utils.stopping.let_finish).
+        starting = let_finish(asyncio.ensure_future(start(inner_spec)))
         try:
-            inner = await start(self.inner_spec(spec, routes=routes, labels=labels))
+            inner = await asyncio.shield(starting)
         except BaseException:
-            cleanup.unregister(token)
+            if starting.done() and (starting.cancelled() or starting.exception() is not None):
+                cleanup.unregister(token)  # it failed, having undone what it made
+            else:  # given up while it runs, or in the very step in which it returned the sandbox: stopped once done
+                let_finish(asyncio.ensure_future(_stop_once_started(starting, token)))
             raise
         sandbox = self.sandbox_for(inner, routes=routes)
         sandbox._token = token
@@ -381,6 +395,20 @@ class HpcProvider:
             labels=dict(spec.labels if labels is None else labels),
             **owners,
         )
+
+
+async def _stop_once_started(starting: asyncio.Future[Any], token: int) -> None:
+    """Stop the sandbox of a start that its caller gave up, once that start is done, then forget its registration for
+    cleanup (a stopping process reaps it until then)."""
+
+    try:
+        await asyncio.wait([starting])
+        if not starting.cancelled() and starting.exception() is None:
+            await starting.result().stop()
+    except Exception:
+        logger.warning("Cannot stop a sandbox whose start was given up", exc_info=True)
+    finally:
+        cleanup.unregister(token)
 
 
 __all__ = ["NO_FILE_OWNERS", "HpcProvider", "HpcSandbox", "file_owners_refusal", "import_hpc_sandbox"]

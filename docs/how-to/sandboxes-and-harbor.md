@@ -222,7 +222,7 @@ configs](configs.md#2-build-on-it-with-extends)):
 | `close_timeout_s` | 30 | How long closing waits for calls in flight before it stops the sandbox |
 | `max_artifact_bytes` | 1 GiB | The largest artifact a separate verifier receives; a larger one is left out, and the tests decide what its absence means |
 | `sandbox_start_budget_s` | 600 | What a rollout's deadline allows each sandbox start, the task's and a separate verifier's ([Run it](#4-run-it)) |
-| `stacks`, `network_policy`, `on_sidecar_down` | `auto`, `task`, `invalid` | *Since 0.5.0.* Whether multi-container tasks run, the network of every sandbox, and what a sidecar that is down at grading makes the outcome ([Multi-container tasks](#multi-container-tasks)) |
+| `stacks`, `network_policy`, `on_sidecar_down` | `auto`, `task`, `invalid` | *Since 0.5.0.* Whether and how multi-container tasks run, the network of every sandbox, and what a sidecar that is down at grading makes the outcome ([Multi-container tasks](#multi-container-tasks)) |
 
 Values like `${HF_TOKEN}` or `${REGION:-us}` in a task's `env` tables are read from the host: `[environment] env`
 when a session opens (an unset variable without a default fails the session as a configuration error), and
@@ -852,7 +852,9 @@ replace = {command = ["serve", "--port", "9111"]}  # keys set whole
 
 The lock records the edits with the stack plan, and the overlay's hash with the lock's inputs, as for any overlay.
 An entry may also mark a service `external = "<node service>"`: a service that a node service serves, which platoon
-does not start.
+does not start; and say how a service runs on the host-network fallback (`host_network = {listen = {6379 =
+"KV_PORT"}, token = "KV_TOKEN", bind = "KV_HOST"}`, [Stacks on the host network](#stacks-on-the-host-network)), which
+changes nothing elsewhere.
 
 ## Multi-container tasks
 
@@ -861,11 +863,12 @@ does not start.
 provider that declares the `stacks` capability runs stacks: `docker`, each stack a `docker compose` project of its
 own ([below](#stacks-on-docker)); `singularity` and `enroot`, as rootless pods
 ([below](#stacks-as-pods-on-singularity-apptainer-and-enroot)); and `process`, for tests and for checking a dataset
-with a policy you trust ([below](#stacks-on-the-process-provider)). Elsewhere such a task is refused, never started
-without its services: a dataset directory skips it with a warning, and a fetched dataset's stacks stop a run when its
-tasks are listed, naming them. A fetch locks stacks as runnable; where the provider runs none, leave them out of the
-run (`exclude_tasks`), or fetch them refused (`stack`) with `refuse: {sidecars: true}`, as platoon before 0.5.0 did
-by default:
+with a policy you trust ([below](#stacks-on-the-process-provider)). Where pods cannot run, `stacks: host_network` runs
+the stacks that a dataset's overlays make safe there on the node's own network, each service a single sandbox
+([below](#stacks-on-the-host-network)). Elsewhere such a task is refused, never started without its services: a
+dataset directory skips it with a warning, and a fetched dataset's stacks stop a run when its tasks are listed, naming
+them. A fetch locks stacks as runnable; where the provider runs none, leave them out of the run (`exclude_tasks`), or
+fetch them refused (`stack`) with `refuse: {sidecars: true}`, as platoon before 0.5.0 did by default:
 
 ```yaml
     service_kwargs:
@@ -950,7 +953,7 @@ restore brings back `main`'s files, not its services.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `stacks` | `auto` | `auto` runs a stack on a provider that runs stacks, and refuses it elsewhere; `refuse` refuses every stack |
+| `stacks` | `auto` | `auto` runs a stack on a provider that runs stacks, and refuses it elsewhere; `refuse` refuses every stack; `host_network` runs every stack on the host-network fallback, each service a single sandbox of the provider on the node's network ([below](#stacks-on-the-host-network)) |
 | `network_policy` | `task` | `task` gives each phase the network the task asks for (`network_mode`, `[agent]`'s and `[verifier]`'s); `none` gives every sandbox and stack none, in every phase, for datasets whose answers the web holds (a provider that cannot run a sandbox without a network refuses the tasks then) |
 | `on_sidecar_down` | `invalid` | What a sidecar that is down at grading makes the outcome: `invalid` (`sidecar_unhealthy`), or `grade`, which runs the tests anyway |
 
@@ -1011,11 +1014,12 @@ stacks running at once never take one another's ports, each port a service decla
 stack holds for its life: one outside the kernel's ephemeral range (`ip_local_port_range`, which neither a bind to
 port 0 nor an outgoing connection takes), free when the stack starts, and claimed so that no other stack, in any
 process, is given it. The service learns it from its **listen variable**, `PLATOON_PORT_<declared port>`
-(`PLATOON_PORT_6379=21234`), and every `scheme://<service>:<port>` in the services' environment values, healthchecks
-and collect hooks becomes `scheme://127.0.0.1:<that port>`. A service written to run
-there too listens on `${PLATOON_PORT_6379:-6379}` and writes below `${PLATOON_SANDBOX_ROOT:-}`, which real stacks
-leave unset; a reference elsewhere (a literal in a script, a service's own `localhost:<port>`) is not rewritten.
-`tests/envs/fixtures/harbor-stacks` has tasks written that way.
+(`PLATOON_PORT_6379=21234`), and every reference to a service at a port it declares (`http://kv:6379`, `kv:6379`, its
+name or an alias in any case) in the services' environment values, commands, healthchecks and collect hooks, in
+`[verifier].env` and in the task's MCP servers' URLs becomes `127.0.0.1:<that port>`, as does a service's reference to
+its own port on its loopback (`localhost:6379` in its healthcheck). A service written to run there too listens on
+`${PLATOON_PORT_6379:-6379}` and writes below `${PLATOON_SANDBOX_ROOT:-}`, which real stacks leave unset; a reference
+elsewhere (a literal in a script) is not rewritten. `tests/envs/fixtures/harbor-stacks` has tasks written that way.
 
 ### Stacks as pods on Singularity, Apptainer and enroot
 
@@ -1132,7 +1136,7 @@ This host reaches a stack's service through the stack (`Stack.connect`), which n
 
 | Provider | How this host reaches a service's port |
 |---|---|
-| `process` | the port of this host that the stack holds for the service |
+| `process`, and the host-network fallback (`stacks: host_network`) | the port of this host that the stack holds for the service |
 | `docker` | a **relay**: a container per port, in the network of the service that listens there, which serves a Unix socket in the project's directory, which only your uid reaches, whatever the stack's networks, also from a rootless daemon, whose networks this host does not reach. It runs platoon's forwarder with the Python 3 of that service's image, else of `main`'s, as root without capabilities, and goes with the stack; a stack whose images have no Python 3 cannot be reached so |
 | `singularity`, `enroot` | the pod's port, which hpc-sandbox 0.5 exposes as a Unix socket in the pod's directory |
 
@@ -1140,12 +1144,120 @@ A socket whose path is too long for a socket's address is handed out as a link i
 
 **Directly, from `main`.** A harness in the task's sandbox may reach the servers itself, as Harbor's agents do:
 `{task_mcp_servers}` renders them in a harness spec, as a JSON list of each server's `name`, `transport` and `url`, as
-`main` reaches it (on the `process` provider, the port of the host that the stack holds), or, for a `stdio` server,
-its `command` and `args`, which the harness starts in its own sandbox
+`main` reaches it (on the `process` provider and the host-network fallback, the port of the host that the stack holds),
+or, for a `stdio` server, its `command` and `args`, which the harness starts in its own sandbox
 ([Placeholders](../tutorials/cli-harness.md#placeholders)). A harness that runs locally gets `[]`: it reaches only the
 servers that the plane serves, through the env's tools, and no `stdio` server, server outside the stack, or server of
 a task that is no stack. `stdio` servers are never proxied, since that would take a streaming exec that no provider
 has.
+
+### Stacks on the host network
+
+*Since 0.5.0.* Pods need hpc-sandbox 0.5 and a node that lets unprivileged users nest user namespaces. Where a site's
+nodes give neither, `stacks: host_network` runs a fetched dataset's stacks on the **host-network fallback**: each
+service a single sandbox of the provider (`singularity`, `enroot`, or `process`) on the node's own network, as the
+`process` provider runs its stacks ([above](#stacks-on-the-process-provider)): each port a service declares is a port of
+the node that its stack holds for its life, which the service learns from its listen variables, and every reference to
+a service at a port it declares, in the services' environment values, commands and healthchecks, in `[verifier].env`,
+in the task's MCP servers' URLs and in collect hooks, becomes `127.0.0.1:<that port>`, as does a service's own
+`localhost:<port>`. On the node's network every process of the node reaches a service's port, other rollouts' agents
+among them, and other hosts reach one that listens on more than the loopback. So nothing chooses the fallback by itself,
+and a dataset's overlays say, service by service, how each one runs there safely (`host_network` in a `[[compose]]`
+entry):
+
+```yaml
+    service_kwargs:
+      dataset: ./tasks
+      overlays: [overlays/host-network]
+      provider: singularity
+      stacks: host_network  # each service a single sandbox on the node's network
+```
+
+```toml
+# overlays/host-network/overlay.toml
+[match]
+name = "app-kv-*"
+[[compose]]
+service = "kv"
+host_network = { listen = { 6379 = "KV_PORT" }, token = "KV_TOKEN", bind = "KV_HOST" }
+```
+
+- `listen`: for each port the service declares, the variable that sets the port it listens on, which the fallback sets
+  to the port its stack holds (besides `PLATOON_PORT_<port>`). Every declared TCP port needs one, `main`'s too; a UDP
+  port is refused, since the fallback gives it no port of its own.
+- `token`: the variable through which the service takes the stack's **token**, a secret that each stack draws anew and
+  gives, in every token variable an overlay names, to each of its services, `main` and the tests that run there
+  included, and to nothing else. Every sidecar that declares ports needs one (an init job without ports does not), and
+  must refuse a request without it, which the overlay arranges, often by replacing the service's command
+  (`replace = {command = [...]}` in the same entry, as below). That is the overlay's promise: nothing checks it.
+- `bind`: the variable that sets the address the service listens on, which the fallback sets to `127.0.0.1`. However a
+  service learns it, the fallback checks what listens at each port a service declares, `main`'s too: a listener on
+  another address (`0.0.0.0`, the node's own), where other hosts reach it, or one that another user's process holds
+  (it bound the port first, and would get what the stack sends there, the token included), makes the service
+  unhealthy, so its stack does not start (`sidecar_start`), and a sidecar's probe at grading makes the outcome
+  `invalid`. Nothing tells a process of your own uid from the service, another rollout's agent included, which could
+  take a port in the moment before its service binds it; nor is a port that a service listens at without declaring it
+  looked at.
+
+A token goes to a service through its environment or a file, never on a command line, where every user of the node
+reads it (`ps`, `/proc`): a config the command writes from the variable, or reads from its standard input, as redis
+does below; `REDISCLI_AUTH` for a `redis-cli` healthcheck; a database's password variable. A fetch interpolates the
+compose file before any stack exists, so a command names a rule's variable as `$$NAME` (or `$${NAME:-default}`), which
+reaches the service's shell as `$NAME`; written `$CACHE_TOKEN` or `${CACHE_PORT:-6379}` in a command, an entrypoint, an
+environment value or a healthcheck of a service that the fallback gives it (the token to every service, a port or an
+address to the rule's own), it would be planned blank, or as its default, and the fetch refuses the overlay. An
+environment value is not expanded as the service runs, so a command makes a value that needs one. Another service gets a
+port or an address as compose gets it: `main`'s `http://cache:${CACHE_PORT:-6379}` is `http://cache:6379`, which the
+fallback rewrites.
+
+```toml
+[[compose]]
+service = "cache"
+# Elsewhere the variables are unset: no password, port 6379 on every address of the stack's own network.
+replace = {command = ["sh", "-c", """{ [ -z "$$CACHE_TOKEN" ] || printf 'requirepass %s\\n' "$$CACHE_TOKEN"; \
+printf 'port %s\\nbind %s\\n' "$${CACHE_PORT:-6379}" "$${CACHE_HOST:-0.0.0.0}"; } | redis-server -"""]}
+host_network = { listen = { 6379 = "CACHE_PORT" }, token = "CACHE_TOKEN", bind = "CACHE_HOST" }
+```
+
+The fallback alone sets these variables: on every other stack provider they are unset, so one lock serves them all, and
+a service written to take them, or an overlay's command such as the one above, runs elsewhere as it would without them
+(`tests/envs/fixtures/harbor-host-network` has such a task and its overlay).
+
+**What the fallback refuses**, when a run lists its tasks (exit 78) and when a session opens, as `env_config`:
+
+- a sidecar with ports that no overlay authenticates (no `token`), a declared TCP port without a `listen` rule, and a
+  UDP port; a dataset directory has no overlays, so it skips every stack with a warning that says to fetch it with
+  one. A fetch refuses an overlay whose rules name one variable for two things, or that the compose file interpolates
+  where the fallback sets it (write `$$NAME` in a command);
+- a task that names its services where the fallback cannot rewrite them. A fetch scans each stack for references to
+  its services, a name or an alias with a port or a scheme (`kv:6379`, `http://kv`) or a loopback address at a port a
+  service declares: in the task's files but for the compose file (`instruction.md`, `tests/`, `solution/`,
+  `environment/`), in what nothing rewrites (`main`'s compose command, `[environment.healthcheck]`), and where the
+  fallback rewrites, those it cannot (`http://kv` without a port, a port the service does not declare). It reads text
+  files only (one with a NUL byte in its first 8 KiB is binary), and in them a name with a port but no scheme only at
+  a port the service declares (`kv:6379`, not `kv:1`). The lock records what it found
+  (`compose.unrewritable_references`), and an overlay edits those files (`[[edit]]`) to read the address from a
+  variable that is rewritten;
+- a task MCP server that is a sidecar (`url = "http://tools:8000/mcp"`): an MCP client sends no token, the tool
+  plane's no more than a harness's, since a task's MCP server has no headers yet, so the sidecar would answer every
+  process of the node. One in `main`, at a port `main` declares, is at its rewritten URL, and the tool plane serves its
+  tools ([Task MCP servers](#task-mcp-servers)) through the port its stack holds;
+- a stack without a network in a phase (`no-network`, internal networks only, `network_policy: none`): its services
+  have the node's network, which the fallback cannot take away;
+- a provider whose sandboxes run other users (`singularity` with `fakeroot`; `docker`, which runs stacks as compose
+  projects anyway), since what those users would write in the stack's volumes, directories of yours on the node, your
+  uid could not delete.
+
+The scan does not catch a service named without a port or a scheme (`pg_isready -h postgres`, `DB_HOST=postgres`), nor
+a port written apart from its host (`-p 5432`, `--port 8080`): those reach nothing, or something else, on the node's
+network, which a dataset's oracle check shows; an overlay passes them through variables as above. Each service runs as
+the provider runs a single sandbox's commands, as your own uid (`run_as: caller`), with the provider's options, and, as
+on the `process` provider, without what only a pod or a compose project gives a service (`shm_size`, `ulimits`,
+`cap_add`); a stack's volumes are directories below the fallback's own (`platoon-stacks-<uid>` in node scratch, a
+directory of yours alone: made 0700, and refused when it is a symlink or another user's). A stack's stop deletes its
+directory, and so does the worker supervisor's cleanup for a worker it saw killed; a run killed as a whole leaves them
+in node scratch, which a reap by the run's labels does not look in (a batch job's own scratch goes with the job). The
+fallback runs no pod, so hpc-sandbox 0.4 runs it.
 
 ## Users in task sandboxes
 
@@ -1919,6 +2031,7 @@ dataset skips such a task with a warning; naming it directly (as a task id, in a
 | Task | Why |
 |---|---|
 | A multi-container environment (`environment/docker-compose.yaml` with sidecar services) on a provider that runs no stacks (`singularity` and `enroot` with an hpc-sandbox older than 0.5, or on a node that does not nest user namespaces), or with `stacks: refuse` (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. Where a provider runs stacks, they run ([Multi-container tasks](#multi-container-tasks)); a compose file that names only `main` runs as one sandbox on every provider ([Compose files](#compose-files)); the other compose names (`compose.yaml`, ...) are plain files, as in Harbor |
+| A multi-container environment under `stacks: host_network` that the host-network fallback cannot run: a sidecar with ports that no overlay authenticates, a declared TCP port without a listen rule, a UDP port, a reference to a service that the fallback cannot rewrite, a task MCP server that is a sidecar, a phase without a network, or a provider whose sandboxes run other users (when the tasks are listed, exit 78, and when a session opens; a dataset directory skips every stack) | On the node's network every process of the node reaches a service's port, and a name that is not rewritten reaches nothing, or something else: the fallback runs only what a dataset's overlays make safe there ([Stacks on the host network](#stacks-on-the-host-network)) |
 | A stack with a service that a node service serves (an overlay's `external`), whose services depend on one another in a cycle, with a sidecar's read-only bind of a log directory, or with binds of one path of the task that services would share in Docker and platoon would copy apart (when the task loads) | platoon runs no node services yet, compose refuses a cycle, a sidecar does not see `main`'s log directories, and the services must see one another's writes as in Docker |
 | A stack that no rollout could start: a dataset directory's sidecar of a registry image that its compose file gives no command, or that builds from a context; a fetched dataset's sidecar whose built image or pin the image map lacks; a `service_healthy` dependency on a service without a healthcheck (a dataset directory's when the task loads, for the first two; a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, naming `platoon prepare` for what it makes) | A registry image's own command is what `platoon prepare` pins, and a sidecar's build context what it builds, in a fetched dataset's image map, which a dataset directory has none of ([Multi-container tasks](#multi-container-tasks)) |
 | A fetched stack whose services ask for privileges (`refuse: {privileges: false}` kept them) on a provider other than `docker` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | Only Docker gives a service every privilege, or a capability such as `NET_ADMIN` over its stack's network ([Stacks on Docker](#stacks-on-docker)) |
@@ -1951,10 +2064,10 @@ an absolute path, is used as written; any other reference without a scheme gets 
 ## What comes next
 
 [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md) is the design behind this page. What it proposes
-beyond what is described here: running stacks on the host network on sites without unprivileged user namespaces, and
-stacks whose services run as the users a task names. Until then, multi-container tasks run as `docker compose`
-projects, as rootless pods on Singularity, Apptainer and enroot, and on the `process` provider, with their MCP servers
-served through the tool plane ([Multi-container tasks](#multi-container-tasks)), main-only compose files on every
+beyond what is described here: stacks whose services run as the users a task names. Until then, multi-container tasks
+run as `docker compose` projects, as rootless pods on Singularity, Apptainer and enroot, on the node's network where
+pods cannot run (`stacks: host_network`), and on the `process` provider, with their MCP servers served through the tool
+plane ([Multi-container tasks](#multi-container-tasks)), main-only compose files on every
 provider ([Compose files](#compose-files)), and a task's users in single sandboxes ([Users in task
 sandboxes](#users-in-task-sandboxes)). The [RFC index](../rfcs/README.md) lists every proposal and explains how one
 moves from draft to implemented; comment on the RFC, or open a new one, to shape what gets built.

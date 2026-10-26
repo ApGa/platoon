@@ -255,14 +255,15 @@ async def start_background(
     argv: list[str],
     *,
     log: str,
-    cwd: str,
+    cwd: str | None = None,
     env: dict[str, str] | None = None,
     status: str | None = None,
 ) -> str:
-    """Start ``argv`` in ``sandbox`` in the background (in ``cwd``, its output in the sandbox file ``log``) and return
-    "<pid>:<start time>" of it; RuntimeError when it could not start.  A command that exits soon after it started may
-    still be returned: :func:`alive_processes` tells.  With ``status`` (a sandbox file), a subshell runs it and writes
-    its exit status there once it ends, and the process returned is that subshell (:data:`STATUS_START_SCRIPT`)."""
+    """Start ``argv`` in ``sandbox`` in the background (in ``cwd``, by default the sandbox's working directory, its
+    output in the sandbox file ``log``) and return "<pid>:<start time>" of it; RuntimeError when it could not start.  A
+    command that exits soon after it started may still be returned: :func:`alive_processes` tells.  With ``status`` (a
+    sandbox file), a subshell runs it and writes its exit status there once it ends, and the process returned is that
+    subshell (:data:`STATUS_START_SCRIPT`)."""
 
     script = ["/bin/sh", "-c", START_SCRIPT, "platoon-start", log]
     if status is not None:
@@ -288,14 +289,17 @@ async def list_processes(sandbox: Commands) -> frozenset[str]:
 
 
 async def alive_processes(sandbox: Commands, entries: frozenset[str] | set[str]) -> frozenset[str]:
-    """Which of ``entries`` ("<pid>:<start time>") still run in ``sandbox``; RuntimeError when it cannot tell."""
+    """Which of ``entries`` ("<pid>:<start time>") still run in ``sandbox``; RuntimeError when it cannot tell, and
+    TimeoutError when the sandbox does not answer in time (it may still run them)."""
 
     if not entries:
         return frozenset()
     result = await sandbox.exec(
         ["/bin/sh", "-c", ALIVE_SCRIPT, "platoon-alive", *sorted(entries)], cwd="/", timeout_s=60.0
     )
-    if result.exit_code != 0 or result.timed_out:
+    if result.timed_out:
+        raise TimeoutError(f"Could not look for processes in sandbox {sandbox.id}: it did not answer within 60 s")
+    if result.exit_code != 0:
         detail = result.stderr.strip() or f"exit {result.exit_code}"
         raise RuntimeError(f"Could not look for processes in sandbox {sandbox.id}: {detail}")
     return frozenset(line for line in result.stdout.split() if line in entries)

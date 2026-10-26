@@ -84,6 +84,11 @@ resolves when it opens (they never enter the lock)::
     [[compose]]
     service = "judge"
     replace = {command = ["judge", "--port", "8081"]}  # keys set whole
+    host_network = {listen = {8081 = "JUDGE_PORT"}, token = "JUDGE_TOKEN", bind = "JUDGE_HOST"}  # on the fallback
+
+A stack's plan also records the references to its services that the host-network fallback could not rewrite, from a
+scan of the task's files (:func:`platoon.envs.harbor.host_network.with_unrewritable_references`): under ``stacks:
+host_network`` a task that holds any is refused, unless an overlay edits them away.
 """
 
 from __future__ import annotations
@@ -139,6 +144,7 @@ from platoon.envs.harbor.hashing import (
     file_sha256,
     task_files,
 )
+from platoon.envs.harbor.host_network import with_unrewritable_references
 from platoon.envs.harbor.inputs import input_digest, input_files
 from platoon.envs.harbor.lock import TASKS_DIR, DatasetLock, LockedTask, LockError, default_cache, read_lock, write_lock
 from platoon.envs.harbor.references import (
@@ -1459,7 +1465,7 @@ def _plan_compose(
         return None, f"overlay: {_without_paths(str(exc), task_dir, name)}"
     except ComposeError as exc:
         return None, f"compose: {_without_paths(str(exc), task_dir, name)}"
-    return plan, None
+    return with_unrewritable_references(plan, task_dir), None
 
 
 def _upload_bytes(

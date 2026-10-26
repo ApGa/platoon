@@ -35,6 +35,7 @@ from platoon.envs.harbor.compose import (
 from platoon.envs.harbor.dockerfile import image_config, parse_dockerfile, plan_dockerfile, variables_in_scope
 from platoon.envs.harbor.fetch import FetchError, Overlay, fetch, fetch_config
 from platoon.envs.harbor.holdout import HoldoutRow, HoldoutRule, hold_out
+from platoon.envs.harbor.host_network import host_network_problem, with_unrewritable_references
 from platoon.envs.harbor.inputs import input_files
 from platoon.envs.harbor.lock import DatasetLock, LockedTask, LockError, read_lock, write_lock
 from platoon.envs.harbor.sidecars import bind_mounts
@@ -66,6 +67,14 @@ def _task(root: Path, name: str, compose: str | None, *, toml: str = "", files: 
 
 def _plan(task_dir: Path, **options) -> ComposePlan:
     plan = plan_compose(task_dir, **options)
+    assert plan is not None
+    return plan
+
+
+def _scanned(task_dir: Path, **options) -> ComposePlan:
+    """The task's plan as a fetch records it: with the references the host-network fallback could not rewrite."""
+
+    plan = with_unrewritable_references(_plan(task_dir, **options), task_dir)
     assert plan is not None
     return plan
 
@@ -909,7 +918,7 @@ def test_an_overlay_marks_a_service_external(tmp_path: Path):
 @pytest.mark.parametrize(
     ("entry", "message"),
     [
-        ({"service": "main"}, "give set, replace, unset or external"),
+        ({"service": "main"}, "give set, replace, unset, external or host_network"),
         ({"service": "main", "unset": "cap_add"}, "unset must list keys"),
         ({"service": "bad name!", "unset": ["x"]}, "needs a service name"),
         ({"service": "main", "rename": {}}, "unknown keys"),
@@ -977,12 +986,255 @@ def test_an_overlay_that_edits_a_missing_service_refuses_the_task(tmp_path: Path
     [
         ('compose_host_env = ["BAD-NAME"]\n', "compose_host_env must list variable names"),
         ("[compose]\nservice = 'main'\n", r"\[\[compose\]\] must be an array of tables"),
-        ('[[compose]]\nservice = "main"\n', "give set, replace, unset or external"),
+        ('[[compose]]\nservice = "main"\n', "give set, replace, unset, external or host_network"),
     ],
 )
 def test_bad_compose_overlays_fail_the_fetch(tmp_path: Path, text: str, message: str):
     with pytest.raises(FetchError, match=message):
         Overlay.load(_overlay(tmp_path, text))
+
+
+# --- the host-network fallback's rules and scan --------------------------------------------------------------------
+
+KV = (
+    "services:\n"
+    "  main:\n"
+    "    environment: {KV_URL: 'http://kv:6379', BARE: 'http://kv/'}\n"
+    "  kv:\n"
+    "    image: redis:7-alpine\n"
+    "    command: [redis-server, --replicaof, 'db:5432']\n"
+    "    expose: ['6379']\n"
+    "    healthcheck: {test: [CMD, redis-cli, -u, 'redis://localhost:6379', ping]}\n"
+    "  db:\n"
+    "    image: postgres:16-alpine\n"
+    "    command: [postgres]\n"
+    "    expose: ['5432']\n"
+    "    environment: {PEER: 'localhost:6379'}\n"
+)
+
+
+def test_an_overlay_says_how_a_service_runs_on_the_host_network(tmp_path: Path):
+    edits = [
+        ComposeEdit.parse("fix", {"service": "kv", "host_network": {"listen": {"6379": "KV_PORT"}, "token": "T"}}),
+        ComposeEdit.parse("more", {"service": "kv", "host_network": {"bind": "KV_HOST"}}),
+    ]
+    plan = _plan(_task(tmp_path, "kv", KV), edits=edits)
+    assert plan.services["kv"]["host_network"] == {"listen": {"6379": "KV_PORT"}, "token": "T", "bind": "KV_HOST"}
+    assert plan.data["edits"] == [
+        "fix: kv: host_network listen 6379=KV_PORT, token T",
+        "more: kv: host_network bind KV_HOST",
+    ]
+    assert "unrewritable_references" not in plan.data  # scanned only when asked, as a fetch asks
+    undeclared = ComposeEdit.parse("fix", {"service": "kv", "host_network": {"listen": {"7000": "KV_PORT"}}})
+    with pytest.raises(ComposeError, match="kv.host_network: names port 7000 to listen on, which the service does not"):
+        _plan(_task(tmp_path, "undeclared", KV), edits=[undeclared])
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({}, "must be a table of listen, token and bind"),
+        ({"port": 1}, "unknown keys"),
+        ({"listen": {"http": "X"}}, "'http' is not a port"),
+        ({"listen": {"70000": "X"}}, "is not a port"),
+        ({"listen": {"6379": "BAD-NAME"}}, "must name an environment variable"),
+        ({"token": 1}, "must name an environment variable"),
+        ({"listen": {"6379": "X"}, "token": "X"}, "names X twice"),
+    ],
+)
+def test_host_network_rules_are_checked_when_an_overlay_loads(rule, message: str):
+    with pytest.raises(ValueError, match=message):
+        ComposeEdit.parse("fix", {"service": "kv", "host_network": rule})
+
+
+def test_the_scan_finds_the_references_the_fallback_could_not_rewrite(tmp_path: Path):
+    task_dir = _task(
+        tmp_path,
+        "kv",
+        KV,
+        toml=(
+            "[verifier]\nenv = {CHECK = 'http://kv:6379', BAD = 'kv:1'}\n"
+            "[environment.healthcheck]\ncommand = 'curl http://kv:6379'\n"
+            "[[verifier.collect]]\nservice = 'db'\ncommand = 'curl db:5432 && curl kv:6379'\n"
+        ),
+        files={
+            "instruction.md": "The store is at kv:6379; KV, the store, keeps a mykv:6379 too.\n",
+            "tests/check.py": "URL = 'http://localhost:5432'  # the database's port on main's own loopback\n",
+            "solution/solve.sh": "curl http://localhost:8080  # no port of the stack's\n",
+        },
+    )
+    scan = _scanned(task_dir).data["unrewritable_references"]
+    assert scan == {
+        "first": [
+            "instruction.md: kv:6379",
+            "tests/check.py: http://localhost:5432",
+            "task.toml verifier.env.BAD: kv:1",  # a port kv does not declare
+            "task.toml environment.healthcheck.command: http://kv:6379",  # main's own healthcheck: never rewritten
+            "compose main.environment.BARE: http://kv",  # no port to rewrite
+            "compose db.environment.PEER: localhost:6379",  # kv's port, on db's own loopback
+        ],
+        "count": 6,
+    }  # kv's command and the collect hook (in db) name db:5432 and kv:6379, which the fallback rewrites
+
+
+def test_the_fallback_refuses_what_it_cannot_run(tmp_path: Path):
+    rules = {
+        "kv": {"listen": {"6379": "KV_PORT"}, "token": "T"},
+        "db": {"listen": {"5432": "PGPORT"}, "token": "T"},
+    }
+    edits = [ComposeEdit.parse("fix", {"service": name, "host_network": rule}) for name, rule in rules.items()]
+    clean = _task(tmp_path, "clean", KV.replace("    command: [redis-server, --replicaof, 'db:5432']\n", ""))
+    clean_compose = clean / "environment" / "docker-compose.yaml"
+    clean_compose.write_text(
+        clean_compose.read_text().replace(", BARE: 'http://kv/'", "").replace("localhost:6379", "x")
+    )
+
+    assert host_network_problem(_scanned(clean, edits=edits)) is None
+    assert "was not scanned" in (host_network_problem(_plan(clean, edits=edits)) or "")
+    unauthenticated = host_network_problem(_scanned(clean)) or ""
+    assert "whose sidecar kv no overlay authenticates" in unauthenticated
+    assert 'with bind = "VARIABLE" where a variable sets the address' in unauthenticated  # bind is not required
+    assert "external" not in unauthenticated  # refused at load until node services exist
+    listenless = [ComposeEdit.parse("fix", {"service": name, "host_network": {"token": "T"}}) for name in rules]
+    problem = host_network_problem(_scanned(clean, edits=listenless)) or ""
+    assert "whose service kv declares port 6379 and no listen rule" in problem
+    named_dir = _task(tmp_path, "named", KV)
+    named = host_network_problem(_scanned(named_dir, edits=edits)) or ""
+    assert named.startswith("that names its services where the host-network fallback cannot rewrite them (compose")
+    with pytest.raises(
+        HarborTaskError, match="a dataset directory has none of: fetch the dataset with such an overlay"
+    ):
+        HarborTask.load(named_dir, on_host_network=True)  # a plan made here has no overlay's rules
+
+
+def test_each_variable_of_the_host_network_rules_sets_one_thing(tmp_path: Path):
+    """Two overlays' rules for one service, or a service's port in the variable that is the stack's token, would set
+    one value over another (the token over a port, say): refused, naming the variable."""
+
+    merged = [
+        ComposeEdit.parse("one", {"service": "kv", "host_network": {"listen": {"6379": "KV_PORT"}, "token": "T"}}),
+        ComposeEdit.parse("two", {"service": "kv", "host_network": {"bind": "KV_PORT"}}),
+    ]
+    with pytest.raises(ComposeError, match="kv.host_network: names KV_PORT twice"):
+        _plan(_task(tmp_path, "merged", KV), edits=merged)
+    across = [
+        ComposeEdit.parse("one", {"service": "kv", "host_network": {"listen": {"6379": "KV_PORT"}, "token": "T"}}),
+        ComposeEdit.parse("two", {"service": "db", "host_network": {"listen": {"5432": "T"}, "token": "DB_TOKEN"}}),
+    ]
+    with pytest.raises(ComposeError, match="db.host_network: sets T to a port or an address, and a rule names it for"):
+        _plan(_task(tmp_path, "across", KV), edits=across)
+
+
+def test_a_variable_a_rule_names_reaches_the_service_as_written(tmp_path: Path):
+    """A fetch interpolates the compose file, where the stack's token, ports and address are not known yet: a command
+    that names them as $PASS would be planned blank, and the stack would run without its token.  $$PASS reaches the
+    service's shell as $PASS."""
+
+    task_dir = _task(tmp_path, "kv", KV)
+
+    def edits(command: str) -> list[ComposeEdit]:
+        rule = {"listen": {"6379": "KV_PORT"}, "token": "PASS"}
+        entry = {"service": "kv", "replace": {"command": ["sh", "-c", command]}, "host_network": rule}
+        return [ComposeEdit.parse("auth", entry)]
+
+    with pytest.raises(
+        ComposeError, match=r"kv.command: interpolates \$PASS as the dataset is fetched.*write \$\$PASS"
+    ):
+        _plan(task_dir, edits=edits("KV_TOKEN=$PASS exec kv-server"))
+    with pytest.raises(ComposeError, match=r"kv.command: interpolates \$KV_PORT"):
+        _plan(task_dir, edits=edits("exec kv-server --port ${KV_PORT:-6379}"))
+    plan = _plan(task_dir, edits=edits("KV_TOKEN=$$PASS exec kv-server --port $$KV_PORT"))
+    assert "KV_TOKEN=$PASS exec kv-server --port $KV_PORT" in plan.services["kv"]["command"]
+    itself = KV.replace("    expose: ['6379']\n", "    expose: ['6379']\n    environment: {PASS: '${PASS}'}\n", 1)
+    _plan(_task(tmp_path, "itself", itself), edits=edits("exec kv-server"))  # the fallback sets PASS over its blank
+
+
+KV_RULE = [
+    ComposeEdit.parse(
+        "auth", {"service": "kv", "host_network": {"listen": {"6379": "KV_PORT"}, "token": "PASS", "bind": "KV_HOST"}}
+    )
+]
+
+
+def _with_environment(tmp_path: Path, name: str, service: str, environment: str) -> Path:
+    """A task of ``KV`` whose ``service`` (main or kv) has ``environment`` (YAML) in place of what it had."""
+
+    compose = KV.replace("    environment: {KV_URL: 'http://kv:6379', BARE: 'http://kv/'}\n", "", 1)
+    after = {"main": "  main:\n", "kv": "    expose: ['6379']\n"}[service]
+    return _task(tmp_path, name, compose.replace(after, f"{after}    environment: {environment}\n", 1))
+
+
+def test_a_port_or_an_address_is_refused_only_in_the_service_the_fallback_sets_it_in(tmp_path: Path):
+    """The fallback sets a rule's ports and address in the rule's own service alone, and its token in every service:
+    another service that interpolates the port gets it as compose gets it (``http://kv:${KV_PORT:-6379}`` is
+    ``http://kv:6379``, which the fallback rewrites), while the token stays refused in any service."""
+
+    peer = _with_environment(tmp_path, "peer", "main", "{KV_URL: 'http://${KV_HOST:-kv}:${KV_PORT:-6379}'}")
+    assert _plan(peer, edits=KV_RULE).services["main"]["environment"]["KV_URL"] == "http://kv:6379"
+    own = _with_environment(tmp_path, "own", "kv", "{KV_URL: 'redis://127.0.0.1:${KV_PORT:-6379}'}")
+    with pytest.raises(
+        ComposeError,
+        match=r"kv.environment.KV_URL: interpolates \$KV_PORT .*kv's host_network rule names it.*make the value in its",
+    ):
+        _plan(own, edits=KV_RULE)
+    token = _with_environment(tmp_path, "token", "main", "{KV_AUTH: '${PASS}'}")
+    with pytest.raises(ComposeError, match=r"main.environment.KV_AUTH: interpolates \$PASS .*for the stack's token"):
+        _plan(token, edits=KV_RULE)
+
+
+@pytest.mark.parametrize("service", ["main", "kv"])
+def test_an_environment_list_entry_that_names_itself_is_set_over_as_a_mapping_entry_is(tmp_path: Path, service: str):
+    """``- PASS=${PASS}`` names the variable it sets, as ``PASS: ${PASS}`` does, and the fallback sets it over its
+    blank; another entry of the list that interpolates it is refused, as it is in the mapping form."""
+
+    listed = _with_environment(tmp_path, "listed", service, "['PASS=${PASS}', 'KV_PORT=${KV_PORT}', 'MODE=x']")
+    assert _plan(listed, edits=KV_RULE).services[service]["environment"] == {"PASS": "", "KV_PORT": "", "MODE": "x"}
+    copied = _with_environment(tmp_path, "copied", service, "['AUTH=${PASS}']")
+    with pytest.raises(ComposeError, match=rf"{service}.environment.AUTH: interpolates \$PASS"):
+        _plan(copied, edits=KV_RULE)
+
+
+PORTLESS = (
+    "services:\n"
+    "  main:\n"
+    "    depends_on: {seed: {condition: service_completed_successfully}}\n"
+    "  kv:\n"
+    "    image: redis:7-alpine\n"
+    "    expose: ['6379']\n"
+    "  seed:\n"
+    "    image: python:3.12-slim\n"
+    "    command: [python3, -c, 'print(1)']\n"
+)
+AUTHENTICATE_KV = [
+    ComposeEdit.parse("auth", {"service": "kv", "host_network": {"listen": {"6379": "KV_PORT"}, "token": "T"}})
+]
+
+
+def test_a_sidecar_without_ports_needs_no_token_and_a_udp_port_is_refused(tmp_path: Path):
+    """A sidecar that declares no port (an init job) serves nothing a token would guard; a UDP port gets no port of
+    its own on the host network, so the stacks of a task on one node would share it."""
+
+    assert host_network_problem(_scanned(_task(tmp_path, "portless", PORTLESS), edits=AUTHENTICATE_KV)) is None
+    udp = _task(tmp_path, "udp", PORTLESS.replace("expose: ['6379']", "expose: ['6379', '8125/udp']"))
+    problem = host_network_problem(_scanned(udp, edits=AUTHENTICATE_KV)) or ""
+    assert "whose service kv declares the port 8125/udp, which the host-network fallback gives no port" in problem
+
+
+def test_the_scan_reads_text_files_and_in_them_a_name_and_a_port_the_service_declares(tmp_path: Path):
+    """A binary file (a NUL byte at its start) is not read, as its bytes may spell anything; in a text file, a name
+    with a port and no scheme counts only at a port the service declares (``kv:1`` is no address of the stack's)."""
+
+    task_dir = _task(
+        tmp_path,
+        "kv",
+        PORTLESS,
+        files={
+            "instruction.md": "Step kv:1 of the plan writes to kv:6379, or to http://kv:9999.\n",
+            "tests/data.bin": "\0" + "http://kv:6379 " * 3,
+        },
+    )
+    scan = _scanned(task_dir, edits=AUTHENTICATE_KV).data["unrewritable_references"]
+    assert scan == {"first": ["instruction.md: kv:6379", "instruction.md: http://kv:9999"], "count": 2}
 
 
 # --- build keys of compose services --------------------------------------------------------------------------------

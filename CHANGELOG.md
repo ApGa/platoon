@@ -66,9 +66,11 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   healthchecks too) along their dependencies' longest path; outcomes record each service's run mode and the state
   that the grade's probes found (`services`). On the `process` provider, which isolates nothing, each declared port is
   a port outside the kernel's ephemeral range that the stack holds for its life, which a service learns from
-  `PLATOON_PORT_<port>`, and `scheme://<service>:<port>` in environment values, healthchecks and collect hooks reaches
-  it. `stacks: refuse` refuses every stack, and so does a provider without the capability (`singularity` and `enroot`
-  where pods cannot run, below); a fetch locks stacks as runnable unless its `refuse` sets `sidecars: true` (Changes).
+  `PLATOON_PORT_<port>`, and a reference to a service at a port it declares (`scheme://<service>:<port>`,
+  `<service>:<port>`) in environment values, commands, healthchecks, collect hooks, `[verifier].env` and the task's MCP
+  servers' URLs reaches it, as does a service's own `localhost:<port>`. `stacks: refuse` refuses every stack, and so
+  does a provider without the capability (`singularity` and `enroot` where pods cannot run, below); a fetch locks stacks
+  as runnable unless its `refuse` sets `sidecars: true` (Changes).
   Stacks that no rollout could start (a dataset directory's registry sidecar that its compose file gives no command, or
   that builds from a context, neither of which a directory's missing image map can give) are skipped by a dataset
   directory and stop a run when a fetched dataset's tasks are listed
@@ -132,6 +134,29 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   refused when the tasks are listed, naming what is missing, with an hpc-sandbox older than 0.5 or on a node that does
   not nest unprivileged user namespaces
   ([Stacks as pods](docs/how-to/sandboxes-and-harbor.md#stacks-as-pods-on-singularity-apptainer-and-enroot)).
+- **Harbor stacks on the host network, where pods cannot run (`stacks: host_network`).** On a site whose nodes do not
+  nest unprivileged user namespaces, or without hpc-sandbox 0.5, the host-network fallback runs a fetched dataset's
+  stacks with each service a single sandbox of the provider (`singularity`, `enroot`, `process`) on the node's own
+  network, as the `process` provider runs its stacks: each declared port is a port of the node that the stack holds for
+  its life, which the service learns from its listen variables, and the references to the services (above) reach them.
+  Since every process of the node reaches a service there, a dataset's overlays say how each one runs safely
+  (`host_network = {listen, token, bind}` in a `[[compose]]` entry): the variables that set the port it listens on,
+  carry a token that each stack draws anew and gives to its own services alone (through their environment: a fetch
+  refuses a rule's variable that the compose file interpolates where the fallback sets it, `$$NAME` passing it on), and
+  bind it to `127.0.0.1`. The fallback checks what listens at each port a service declares, `main`'s too: a listener
+  beyond the loopback, or one that another user's process holds, makes the service unhealthy. Its stacks' directories
+  are in a root of your uid's alone (0700; a symlink or another user's directory there is refused). A fetch scans each
+  stack's text files and plan for the references to its services that the fallback could not rewrite
+  (`compose.unrewritable_references` in the lock: a service named with a port in `instruction.md`, say), which an
+  overlay's `[[edit]]` passes through a variable instead. Refused, when the tasks are listed (exit 78) and when a
+  session opens: a sidecar with ports that no overlay authenticates, a declared TCP port without a listen rule, a UDP
+  port, such a reference, a task MCP server that is a sidecar (an MCP client sends no token), a stack without a network
+  in a phase, and a provider whose sandboxes run other users (`docker`, `fakeroot`); a dataset directory skips every
+  stack, saying to fetch it with an overlay. Nothing chooses the fallback by itself (the refusal of stacks under
+  `stacks: auto` names it where it could run them), and it needs no pods, so hpc-sandbox 0.4 runs it.
+  `platoon.sandbox.host_network_stacks.HostNetworkStackProvider` runs it over any provider whose sandboxes share the
+  host's network as your own uid
+  ([Stacks on the host network](docs/how-to/sandboxes-and-harbor.md#stacks-on-the-host-network)).
 - **`platoon prepare` makes what stacks need.** Besides the sidecars' images (above), it **pins** the registry images
   that sidecars run, on every provider but `process`: the digest each registry serves, with the configuration it gives
   the image for this host's platform (`ENTRYPOINT`, `CMD`, `ENV`, `WORKDIR`, `USER`, `HEALTHCHECK`, ...), which a
@@ -211,6 +236,14 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
 ### Changes
 
+- A `process` sandbox whose working directory is `/` runs in its own `/tmp`, since no path maps to the host's root; the
+  provider refused such a spec.
+- The `process` provider's root (`platoon-sandboxes-<uid>` in node scratch) is a directory of your uid's alone, as the
+  `docker` provider's `stack_root` is: made 0700, and refused, with nothing made there or reaped from it, when it is a
+  symlink or another user's directory, which another user of a node's shared scratch could have put there.
+- A `singularity` or `enroot` sandbox whose start is given up (a rollout cancelled while its sandbox starts) is stopped
+  once its start is done, which then runs to its end: cancelled while Singularity made its instance, hpc-sandbox's own
+  rollback could fail and leave the instance running until the worker exited.
 - Harbor reads only `environment/docker-compose.yaml`, and so does platoon now: a task whose compose file is named
   `compose.yaml`, `compose.yml` or `docker-compose.yml` runs as one container without it, as in Harbor, where platoon
   refused it (or ran it, when it only named `main`), and the fetch warns of it (`flags.unread_compose`); a task with a

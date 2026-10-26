@@ -18,7 +18,14 @@ from platoon.deprecations import removed_hint
 from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, check_queue_timeout
 from platoon.envs.harbor import sidecars
 from platoon.envs.harbor.artifacts import DEFAULT_MAX_ARTIFACT_BYTES
-from platoon.envs.harbor.compose import MAIN, MainService, ServiceHealthcheck, image_healthcheck, resolve_deferred
+from platoon.envs.harbor.compose import (
+    MAIN,
+    ComposePlan,
+    MainService,
+    ServiceHealthcheck,
+    image_healthcheck,
+    resolve_deferred,
+)
 from platoon.envs.harbor.dataset import (
     HarborDataset,
     SplitManifest,
@@ -30,6 +37,7 @@ from platoon.envs.harbor.dataset import (
 from platoon.envs.harbor.fetch import FetchError
 from platoon.envs.harbor.grading import RewardContract, classifier_list, classify
 from platoon.envs.harbor.holdout import EVAL, SPLITS, HoldoutError, HoldoutRule, HoldoutSplit, hold_out
+from platoon.envs.harbor.host_network import host_network_problem, mcp_problem
 from platoon.envs.harbor.images import (
     FileOp,
     ImageMapError,
@@ -86,6 +94,7 @@ from platoon.sandbox import (
     stack_refusal,
 )
 from platoon.sandbox._processes import alive_processes, list_processes, start_background
+from platoon.sandbox.host_network_stacks import NO_NETWORK, HostNetworkStackProvider, host_network_refusal
 from platoon.sandbox.routes import RouteError
 from platoon.sandbox.stacks import Healthcheck as StackHealthcheck
 from platoon.sandbox.stacks import StackNetwork, StackProvider
@@ -94,8 +103,9 @@ from platoon.task import Task
 logger = logging.getLogger(__name__)
 
 DEFAULT_SANDBOX_START_BUDGET_S = 600.0
-# How a service runs a task that is a multi-container stack: where its provider runs stacks (auto), or never.
-STACK_POLICIES = ("auto", "refuse")
+# How a service runs a task that is a multi-container stack: where its provider runs stacks (auto), never (refuse), or
+# on the host-network fallback, each service a single sandbox of its provider on this host's network (host_network).
+STACK_POLICIES = ("auto", "refuse", "host_network")
 # The network of a task's sandboxes: the task's network_mode for each phase (task), or none at all (none).
 NETWORK_POLICIES = ("task", "none")
 # What a sidecar that is down at grading makes the outcome: invalid (sidecar_unhealthy), or graded anyway (grade).
@@ -118,12 +128,14 @@ class HarborEnvironmentService:
     a compose stack (sidecar services) runs as one, ``main`` and its sidecars each in a sandbox of their own, on a
     provider that runs stacks (:mod:`platoon.envs.harbor.sidecars`), unless ``stacks`` is ``refuse``; elsewhere it is
     refused when it loads, never started as its main container alone and scored.  So is a task that needs GPUs on a
-    provider without them, when its session opens.  A main-only compose file (:mod:`platoon.envs.harbor.compose`)
-    gives the sandbox its environment, working directory, resources and binds, and its command (main's init), which
-    the session starts once the sandbox runs, waits for main's healthcheck, and keeps alive through grading:
-    ``kill_processes`` spares it and what it started.  ``network_policy`` (``task`` or ``none``) gives every sandbox
-    and stack the network its task asks for, or none, and ``on_sidecar_down`` (``invalid`` or ``grade``) decides what a
-    sidecar that is down at grading makes the outcome.
+    provider without them, when its session opens.  ``stacks: host_network`` runs every stack on the host-network
+    fallback instead (:mod:`platoon.sandbox.host_network_stacks`), each service a single sandbox of the provider on this
+    host's network, for the stacks that a fetch's overlays make safe there.  A main-only compose file
+    (:mod:`platoon.envs.harbor.compose`) gives the sandbox its environment, working directory, resources and binds, and
+    its command (main's init), which the session starts once the sandbox runs, waits for main's healthcheck, and keeps
+    alive through grading: ``kill_processes`` spares it and what it started.  ``network_policy`` (``task`` or ``none``)
+    gives every sandbox and stack the network its task asks for, or none, and ``on_sidecar_down`` (``invalid`` or
+    ``grade``) decides what a sidecar that is down at grading makes the outcome.
     The dataset is indexed lazily, so opening a session for a task that already
     carries its directory (``Task.misc["harbor"]["task_dir"]``) never scans it,
     and the sandbox provider is built when the first session opens.
@@ -400,6 +412,7 @@ class HarborEnvironmentService:
             agent_user=self.agent_user,
             verifier_user=self.verifier_user,
             stack_refusal=self.stacks_refusal(),
+            on_host_network=self.stacks == "host_network",
         )
 
     async def list_tasks(self, split: str) -> list[str]:
@@ -475,6 +488,7 @@ class HarborEnvironmentService:
                     f"verifier_provider_options: {refusal}",
                 )
         self._check_stacks(task_ids, split)
+        self._check_host_network(task_ids, split)
         self._check_privileges(task_ids, split)
         self._check_networks(task_ids, split)
         self._check_users(task_ids, split)
@@ -564,11 +578,86 @@ class HarborEnvironmentService:
 
     def stacks_refusal(self) -> str | None:
         """Why no task of the service may run as a multi-container stack: ``stacks: refuse``, or a provider that runs
-        none (:func:`platoon.sandbox.stack_refusal`, read without building it); None otherwise."""
+        none (:func:`platoon.sandbox.stack_refusal`), or none on the host-network fallback under ``stacks:
+        host_network`` (:func:`platoon.sandbox.host_network_stacks.host_network_refusal`), read without building it;
+        None otherwise."""
 
         if self.stacks == "refuse":
             return "the environment sets stacks: refuse"
-        return stack_refusal(self._provider, self._provider_options)
+        if self.stacks == "host_network":
+            return host_network_refusal(self._provider, self._provider_options)
+        refusal = stack_refusal(self._provider, self._provider_options)
+        if refusal is not None and host_network_refusal(self._provider, self._provider_options) is None:
+            refusal += (
+                "; or run its stacks on the host-network fallback (stacks: host_network), each service a single "
+                "sandbox on the node's network, as a fetched dataset's overlays make them safe there"
+            )
+        return refusal
+
+    @cached_property
+    def stack_provider(self) -> SandboxProvider | HostNetworkStackProvider:
+        """What starts the tasks' stacks: the sandbox provider, or the host-network fallback over its single sandboxes
+        under ``stacks: host_network``.  Built on first use."""
+
+        if self.stacks == "host_network":
+            return HostNetworkStackProvider(self.provider)
+        return self.provider
+
+    def _check_host_network(self, names: Sequence[str], split: str) -> None:
+        """Under ``stacks: host_network``, refuse the stacks that the host-network fallback cannot run, as a session
+        would find when it opens: a fetched dataset's whose plan in the lock it refuses
+        (:func:`~platoon.envs.harbor.host_network.host_network_problem`: a sidecar that no overlay authenticates, a port
+        without a listen rule, a reference to a service that it cannot rewrite; a dataset directory lists none such),
+        and those it cannot run as this service runs them (:meth:`_host_network_refusal`)."""
+
+        if self.stacks != "host_network" or not names or self.stacks_refusal() is not None:
+            return
+        lock = self._locked.dataset(fetch_allowed=False).lock if self._locked is not None else None
+        refused: dict[str, str] = {}
+        for name in names:
+            # A fetched dataset's plans are in its lock; a dataset directory lists no stack the fallback refuses.
+            plan = (lock.get(name).compose or {}) if lock is not None else {}
+            if plan.get("kind") == "sidecars" and (problem := host_network_problem(ComposePlan.from_json(plan))):
+                refused[name] = f"Harbor task {name!r} is a multi-container stack {problem}"
+                continue
+            try:
+                harbor_task = self._peek(name)
+            except (KeyError, ValueError):  # refused or unknown: it fails on its own when it is opened
+                continue
+            if (why := self._host_network_refusal(harbor_task)) is not None:
+                refused[name] = why
+        if refused:
+            shown = ", ".join(list(refused)[:3]) + (f" and {len(refused) - 3} more" if len(refused) > 3 else "")
+            raise EnvSetupError(
+                "env_config",
+                f"{len(refused)} of the {len(names)} tasks of split {split!r} are stacks that the host-network "
+                f"fallback (stacks: host_network) cannot run ({shown}): {next(iter(refused.values()))}; leave them out "
+                "(exclude_tasks), or run them where pods or compose projects run (stacks: auto)",
+            )
+
+    def _host_network_refusal(self, harbor_task: HarborTask) -> str | None:
+        """Why the host-network fallback cannot run the task's stack, under ``stacks: host_network``: one of its MCP
+        servers is a sidecar (:func:`~platoon.envs.harbor.host_network.mcp_problem`), or it runs without a network in a
+        phase, its agents' or its verifier's in ``main`` (:meth:`stack_network`); None otherwise."""
+
+        if self.stacks != "host_network" or not harbor_task.is_stack or harbor_task.compose is None:
+            return None
+        urls = {server.name: server.url for server in harbor_task.mcp_servers if server.url}
+        if (problem := mcp_problem(harbor_task.compose, urls)) is not None:
+            return (
+                f"Harbor task {harbor_task.name!r} is a multi-container stack {problem}; the host-network fallback "
+                "(stacks: host_network) refuses it"
+            )
+        phases = {"agents": harbor_task.network}
+        if harbor_task.verifier_mode == "shared":
+            phases["verifier"] = harbor_task.verifier_network
+        for phase, network in phases.items():
+            if self.stack_network(harbor_task, network) == "none":
+                return (
+                    f"Harbor task {harbor_task.name!r} runs its stack without a network for its {phase}, and "
+                    f"{NO_NETWORK}"
+                )
+        return None
 
     def _check_stacks(self, names: Sequence[str], split: str) -> None:
         """Refuse the tasks of a fetched dataset that are multi-container stacks (a fetch locks them, unless its
@@ -581,11 +670,13 @@ class HarborEnvironmentService:
         stacks = [name for name in names if ((lock.get(name).compose or {}).get("kind")) == "sidecars"]
         if stacks:
             shown = ", ".join(stacks[:3]) + (f" and {len(stacks) - 3} more" if len(stacks) > 3 else "")
+            # The fallback's refusal says what to run instead.
+            elsewhere = "" if self.stacks == "host_network" else "run them on a provider that runs stacks, "
             raise EnvSetupError(
                 "env_config",
                 f"{len(stacks)} of the {len(names)} tasks of split {split!r} are multi-container stacks (sidecar "
-                f"services: {shown}), and {refusal}; run them on a provider that runs stacks, or leave them out "
-                "(exclude_tasks, or a fetch whose refuse sets sidecars: true, which locks them refused)",
+                f"services: {shown}), and {refusal}; {elsewhere}or leave them out (exclude_tasks, or a fetch whose "
+                "refuse sets sidecars: true, which locks them refused)",
             )
 
     def _check_privileges(self, names: Sequence[str], split: str) -> None:
@@ -1131,14 +1222,17 @@ class HarborEnvironmentService:
         is stopped and an ``EnvSetupError`` says why: ``sidecar_start`` for a sidecar that did not start or an MCP
         server that did not list its tools, ``env_config`` where no stack may run or a service cannot."""
 
-        provider = self.provider
-        refusal = self.stacks_refusal() or stack_refusal(provider)
+        refusal = self.stacks_refusal()
+        if refusal is None and self.stacks != "host_network":
+            refusal = stack_refusal(self.provider)  # the built provider, which may say more than its class
         if refusal is not None:
             raise EnvSetupError(
                 "env_config",
                 f"Harbor task {harbor_task.name!r} is a multi-container stack (sidecar services), and {refusal}; the "
                 "task is refused, never started without them",
             )
+        if (why := self._host_network_refusal(harbor_task)) is not None:
+            raise EnvSetupError("env_config", why)
         init: str | None = None
 
         async def setup(sandbox: Sandbox) -> None:  # main's preparation, once its dependencies are up
@@ -1154,6 +1248,7 @@ class HarborEnvironmentService:
             plan = self._stack_plan(harbor_task, spec, setup=setup)
         except (KeyError, ValueError) as exc:  # an image without a known command or not in the map, a variable, ...
             raise EnvSetupError("env_config", str(exc)) from exc
+        provider = self.stack_provider
         assert isinstance(provider, StackProvider)  # stack_refusal checked that it has start_stack
         try:
             stack = await provider.start_stack(plan.spec)
@@ -1197,6 +1292,7 @@ class HarborEnvironmentService:
             setup=setup,
             job_timeout_s=self.sandbox_start_budget_s,
             pulled_image=self._images.for_pulled,
+            on_host_network=self.stacks == "host_network",
         )
 
     def _service_image(self, harbor_task: HarborTask) -> Callable[[str, Mapping[str, Any]], SessionImage]:
@@ -1220,8 +1316,11 @@ class HarborEnvironmentService:
 
     def egress_stacks(self, names: Sequence[str]) -> list[str]:
         """The tasks among ``names`` that run as stacks with egress in a phase, the agents' or their verifier's in
-        ``main`` (:meth:`stack_network`): what a pod gives them through slirp4netns."""
+        ``main`` (:meth:`stack_network`): what a pod gives them through slirp4netns.  None on the host-network
+        fallback, whose services have the host's network."""
 
+        if self.stacks == "host_network":
+            return []
         found = []
         for name in names:
             try:
@@ -1291,6 +1390,7 @@ class HarborEnvironmentService:
             compose=compose,
             stack_refusal=self.stacks_refusal(),
             privilege_refusal=privilege_refusal(self._provider),
+            on_host_network=self.stacks == "host_network",
         )
 
     def _lookup(self, task_id: str) -> HarborTask:

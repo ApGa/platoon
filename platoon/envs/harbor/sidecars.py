@@ -36,6 +36,12 @@ why a stack cannot start:
   (:func:`log_source`), and a file it cannot read fails the grade as infrastructure, never left out.  A sidecar does
   not see what ``main`` writes in its own, so a read-only bind of one is refused when the task loads.
 
+**On the host network** (``host_network``, the fallback of :mod:`platoon.sandbox.host_network_stacks`), each service
+also gets what the overlay's rules for it name (:class:`~platoon.envs.harbor.compose.HostNetworkRule`): the stack's
+token, a secret of the stack's own, in every token variable that a rule names, in every service of the stack (so that
+each service, and the tests in ``main``, reach the others), ``127.0.0.1`` in its ``bind`` variable, and its ``listen``
+variables, which the stack sets to the ports it holds.
+
 **Probes** (:func:`probe`): before and after the tests (``shared``), or before and after the artifacts are collected
 (``separate``), every sidecar must be up: an init job completed, any other running, and healthy where it has a
 healthcheck.  One that is down makes the outcome ``invalid`` (``sidecar_unhealthy``: its name, its state and the tail
@@ -55,6 +61,7 @@ import errno
 import logging
 import os
 import posixpath
+import secrets
 import shutil
 import stat
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -66,7 +73,9 @@ from platoon.envs.harbor.compose import (
     LOG_DIRS,
     MAIN,
     Bind,
+    HostNetworkRule,
     ServiceHealthcheck,
+    declared_ports,
     image_healthcheck,
     resolve_argv,
     resolve_deferred,
@@ -79,6 +88,7 @@ from platoon.envs.service import Outcome
 from platoon.sandbox.base import Mount, Sandbox, SandboxSpec
 from platoon.sandbox.stacks import (
     LOG_TAIL_BYTES,
+    LOOPBACK,
     Dependency,
     Healthcheck,
     ServiceSpec,
@@ -351,14 +361,16 @@ def stack_spec(
     setup: Callable[[Sandbox], Awaitable[None]],
     job_timeout_s: float | None = None,
     pulled_image: Callable[[str], SessionImage | None] = lambda reference: None,
+    on_host_network: bool = False,
 ) -> StackPlan:
     """The spec of the task's stack (the module docstring says what each service gets): ``main`` is the agents'
     sandbox, prepared by ``setup``; ``main_image`` is its image as the session runs it (None: its ``docker_image``,
     whose configuration platoon does not know), ``service_image(name, build)`` the image of a service that builds from
     a context, ``pulled_image(reference)`` the image map's pin of a registry image (None: none), ``env`` and ``mounts``
-    the Harbor service's (every sidecar gets its read-only mounts), ``job_timeout_s`` an init job's longest run.  It
-    makes nothing.  ``ValueError`` says why a service cannot run (an image without a known command or not in the image
-    map, an unset host variable, a spec no stack can start)."""
+    the Harbor service's (every sidecar gets its read-only mounts), ``job_timeout_s`` an init job's longest run, and
+    ``on_host_network`` whether it runs on the host-network fallback, with what the overlays' rules say.  It makes
+    nothing.  ``ValueError`` says why a service cannot run (an image without a known command or not in the image map,
+    an unset host variable, a spec no stack can start)."""
 
     plan = harbor_task.compose
     assert plan is not None and plan.kind == "sidecars"
@@ -400,12 +412,31 @@ def stack_spec(
             labels=labels,
             timeout_s=job_timeout_s,
         )
+    if on_host_network:
+        services = _on_host_network(services, plan.host_network_rules)
     spec = StackSpec(services=services, network=network, labels=dict(labels))
     spec.check()
     directories = [
         SidecarLogs(logs=kind, volume=LOGS_VOLUME.format(logs=kind), services=targets) for kind, targets in logs.items()
     ]
     return StackPlan(spec, directories)
+
+
+def _on_host_network(
+    services: Mapping[str, ServiceSpec], rules: Mapping[str, HostNetworkRule]
+) -> dict[str, ServiceSpec]:
+    """``services`` with what the overlays' ``rules`` for them give them on the host-network fallback: a new token of
+    the stack's in every token variable a rule names, in every service; ``127.0.0.1`` in a service's ``bind`` variable;
+    and its ``listen`` variables, which the stack sets."""
+
+    token = secrets.token_urlsafe(32)
+    tokens = dict.fromkeys(sorted({rule.token for rule in rules.values() if rule.token}), token)
+    on_host: dict[str, ServiceSpec] = {}
+    for name, service in services.items():
+        rule = rules.get(name) or HostNetworkRule()
+        env = {**service.sandbox.env, **tokens, **({rule.bind: LOOPBACK} if rule.bind else {})}
+        on_host[name] = replace(service, sandbox=replace(service.sandbox, env=env), listen=dict(rule.listen))
+    return on_host
 
 
 def _sidecar(
@@ -477,7 +508,7 @@ def _service(
             ),
             *volumes,
         ],
-        ports=tuple(int(port.split("/")[0]) for port in data.get("expose") or () if port.endswith("/tcp")),
+        ports=declared_ports(data),
         aliases=service_aliases(data),
         network_of=network_mode.removeprefix("service:") if network_mode.startswith("service:") else None,
         shm_mb=data.get("shm_mb"),

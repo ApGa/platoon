@@ -50,6 +50,11 @@ cached task (a missing source, which Docker would create, binds an empty directo
 below a bind **mask** it (:attr:`Bind.masks`), so that the masked files never enter a sandbox; binds of
 ``${HOST_*_PATH}`` bind the session's log directories; any other host path is refused, but for the one a listed host
 variable names (or a path below it), read-only.
+
+**The host-network fallback** (``stacks: host_network``, :mod:`platoon.sandbox.host_network_stacks`) runs a stack's
+services on this host's network, where every process of the node reaches them.  An overlay's ``[[compose]]`` entry says
+how a service runs there (``host_network``, a :class:`HostNetworkRule`), which the plan records with the service, and
+:mod:`platoon.envs.harbor.host_network` says which stacks the fallback runs.
 """
 
 from __future__ import annotations
@@ -58,7 +63,7 @@ import platform as host_platform
 import posixpath
 import re
 import shlex
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -76,6 +81,11 @@ MAIN = "main"
 ENVIRONMENT_DIR = "environment"
 StackKind = Literal["single", "trivial", "main_only", "sidecars"]
 STACK_KINDS: tuple[str, ...] = ("single", "trivial", "main_only", "sidecars")
+# What an overlay's [[compose]] entry may say of a service on the host-network fallback (HostNetworkRule).
+HOST_NETWORK_KEYS = ("listen", "token", "bind")
+# The keys of a service whose values it reads as it runs, where a variable that a host_network rule names must reach it
+# as written ($$NAME), not interpolated when the dataset is fetched.
+_RUNTIME_KEYS = frozenset({"command", "entrypoint", "environment", "env_file", "healthcheck"})
 
 # Harbor's base gives main this command (docker-compose-build.yaml, docker-compose-prebuilt.yaml).
 BASE_COMMAND = ("sh", "-c", "sleep infinity")
@@ -242,7 +252,8 @@ class ComposeEdit:
     """A dataset overlay's edit of one compose service (``[[compose]]`` in ``overlay.toml``), applied before the
     file is interpolated: ``unset`` removes keys (dotted for nested ones: ``deploy.resources.reservations``),
     ``replace`` sets keys whole, ``set`` merges mappings into the service's (other values replace), and ``external``
-    marks a service that a node service serves, which platoon does not start."""
+    marks a service that a node service serves, which platoon does not start.  ``host_network`` says how the service
+    runs on the host-network fallback (:class:`HostNetworkRule`)."""
 
     overlay: str
     service: str
@@ -250,13 +261,14 @@ class ComposeEdit:
     replace: Mapping[str, Any] = field(default_factory=dict)
     unset: tuple[str, ...] = ()
     external: str | None = None
+    host_network: HostNetworkRule | None = None
 
     @classmethod
     def parse(cls, overlay: str, entry: Any) -> ComposeEdit:
         where = f"overlay {overlay}: [[compose]]"
         if not isinstance(entry, Mapping):
             raise ValueError(f"{where} entries must be tables, got {entry!r}")
-        if unknown := sorted(set(entry) - {"service", "set", "replace", "unset", "external"}):
+        if unknown := sorted(set(entry) - {"service", "set", "replace", "unset", "external", "host_network"}):
             raise ValueError(f"{where}: unknown keys {unknown}")
         service = entry.get("service")
         if not isinstance(service, str) or not _SERVICE_NAME.match(service):
@@ -270,8 +282,9 @@ class ComposeEdit:
         external = entry.get("external")
         if external is not None and (not isinstance(external, str) or not external):
             raise ValueError(f"{where} {service}: external must name a node service")
-        if not (entry.get("set") or entry.get("replace") or unset or external):
-            raise ValueError(f"{where} {service}: give set, replace, unset or external")
+        host_network = HostNetworkRule.parse(entry.get("host_network"), f"{where} {service}: host_network")
+        if not (entry.get("set") or entry.get("replace") or unset or external or host_network):
+            raise ValueError(f"{where} {service}: give set, replace, unset, external or host_network")
         return cls(
             overlay=overlay,
             service=service,
@@ -279,6 +292,7 @@ class ComposeEdit:
             replace=dict(entry.get("replace") or {}),
             unset=tuple(unset),
             external=external,
+            host_network=host_network,
         )
 
     def describe(self) -> str:
@@ -291,7 +305,104 @@ class ComposeEdit:
             parts.append(f"unset {', '.join(self.unset)}")
         if self.external:
             parts.append(f"external {self.external}")
+        if self.host_network is not None:
+            parts.append(f"host_network {self.host_network.describe()}")
         return f"{self.overlay}: {self.service}: {'; '.join(parts)}"
+
+
+@dataclass(frozen=True)
+class HostNetworkRule:
+    """How a service runs on the host-network fallback (``stacks: host_network``), as an overlay's ``[[compose]]``
+    entry says (``host_network = {listen, token, bind}``): for each port the service declares, the variable that sets
+    the port it listens on (``listen``), which the fallback sets to the port its stack holds; the variable through
+    which it takes the stack's token (``token``), which the fallback gives every service of the stack; and the one
+    that sets the address it listens on (``bind``), which the fallback sets to ``127.0.0.1``.  The fallback alone sets
+    them; :mod:`platoon.envs.harbor.host_network` says which stacks it runs."""
+
+    listen: Mapping[int, str] = field(default_factory=dict)
+    token: str | None = None
+    bind: str | None = None
+
+    @classmethod
+    def parse(cls, value: Any, where: str) -> HostNetworkRule | None:
+        """An overlay's ``host_network`` table (None: it has none); ``ValueError`` names what is wrong."""
+
+        if value is None:
+            return None
+        if not isinstance(value, Mapping) or not value:
+            raise ValueError(f"{where} must be a table of listen, token and bind")
+        if unknown := sorted(set(value) - set(HOST_NETWORK_KEYS)):
+            raise ValueError(f"{where}: unknown keys {unknown}; it takes {', '.join(HOST_NETWORK_KEYS)}")
+        listen: dict[int, str] = {}
+        if "listen" in value:
+            if not isinstance(value["listen"], Mapping) or not value["listen"]:
+                raise ValueError(f"{where}.listen must map the ports the service declares to variables")
+            for port, variable in value["listen"].items():
+                if not str(port).isdigit() or not 0 < int(port) < 65536:
+                    raise ValueError(f"{where}.listen: {port!r} is not a port")
+                listen[int(port)] = _variable(variable, f"{where}.listen.{port}")
+        token, bind = (_variable(value[key], f"{where}.{key}") if key in value else None for key in ("token", "bind"))
+        rule = cls(listen=listen, token=token, bind=bind)
+        if (twice := rule.named_twice()) is not None:
+            raise ValueError(f"{where} names {twice} twice: listen, token and bind each set a variable of their own")
+        return rule
+
+    def over(self, earlier: HostNetworkRule | None) -> HostNetworkRule:
+        """This rule laid over ``earlier``, an earlier overlay's for the same service: its ``token`` and ``bind``
+        where it gives them, and the ports of both to listen on, its own variable for a port both name."""
+
+        if earlier is None:
+            return self
+        return HostNetworkRule(
+            listen={**earlier.listen, **self.listen},
+            token=self.token or earlier.token,
+            bind=self.bind or earlier.bind,
+        )
+
+    @property
+    def variables(self) -> list[str]:
+        """Every variable the rule names: its listen variables, then its token's and its bind's."""
+
+        return [*self.listen.values(), *(variable for variable in (self.token, self.bind) if variable)]
+
+    def named_twice(self) -> str | None:
+        """A variable the rule names for two things (a port and the token, say), which would set one over the other;
+        None when each is its own."""
+
+        seen: set[str] = set()
+        for variable in self.variables:
+            if variable in seen:
+                return variable
+            seen.add(variable)
+        return None
+
+    def describe(self) -> str:
+        """``listen 6379=KV_PORT, token KV_TOKEN, bind KV_HOST``: what a plan's edits record."""
+
+        listen = ", ".join(f"{port}={variable}" for port, variable in sorted(self.listen.items()))
+        parts = [f"listen {listen}"] if listen else []
+        parts += [f"{key} {variable}" for key, variable in (("token", self.token), ("bind", self.bind)) if variable]
+        return ", ".join(parts)
+
+    def to_json(self) -> dict[str, Any]:
+        """The rule as a plan records it with its service (``host_network``), its ports as strings."""
+
+        data: dict[str, Any] = {}
+        if self.listen:
+            data["listen"] = {str(port): variable for port, variable in sorted(self.listen.items())}
+        data.update({key: variable for key, variable in (("token", self.token), ("bind", self.bind)) if variable})
+        return data
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> HostNetworkRule:
+        listen = {int(port): str(variable) for port, variable in (data.get("listen") or {}).items()}
+        return cls(listen=listen, token=data.get("token") or None, bind=data.get("bind") or None)
+
+
+def _variable(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not _NAME.fullmatch(value):
+        raise ValueError(f"{where} must name an environment variable, got {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -471,6 +582,17 @@ class ComposePlan:
         return None
 
     @property
+    def host_network_rules(self) -> dict[str, HostNetworkRule]:
+        """What the overlays say of each service on the host-network fallback, by service (:class:`HostNetworkRule`);
+        a service they say nothing of has none."""
+
+        return {
+            name: HostNetworkRule.from_json(service["host_network"])
+            for name, service in self.services.items()
+            if service.get("host_network")
+        }
+
+    @property
     def external(self) -> dict[str, str]:
         """The services an overlay marks as served by a node service (``external``), with that node service."""
 
@@ -643,7 +765,7 @@ def plan_compose(
         if not isinstance(value, Mapping):
             raise ComposeError(name, "must be a mapping of settings")
     document = {**document, "services": {name: dict(value) for name, value in services.items()}}
-    applied, external = _apply_edits(document, edits)
+    applied, external, host_network = _apply_edits(document, edits)
     for key, value in document.items():
         if key == "services":
             for name, service in value.items():
@@ -660,7 +782,7 @@ def plan_compose(
         with_keys=with_keys,
         privileges=privileges,
     )
-    return planner.plan(document, external=external, edits=applied)
+    return planner.plan(document, external=external, edits=applied, host_network=host_network)
 
 
 def _check_reserved(value: Any, where: str) -> None:
@@ -688,12 +810,16 @@ def _check_top_level(document: Mapping[str, Any]) -> None:
         raise ComposeError(key, "is a top-level key outside the compose subset platoon runs")
 
 
-def _apply_edits(document: dict[str, Any], edits: Sequence[ComposeEdit]) -> tuple[list[str], dict[str, str]]:
-    """Apply overlays' service edits to ``document`` in place; what was applied, and the services marked external."""
+def _apply_edits(
+    document: dict[str, Any], edits: Sequence[ComposeEdit]
+) -> tuple[list[str], dict[str, str], dict[str, HostNetworkRule]]:
+    """Apply overlays' service edits to ``document`` in place; what was applied, the services marked external, and
+    what the edits say of each service on the host-network fallback (a later edit's over an earlier's)."""
 
     services: dict[str, dict[str, Any]] = document["services"]
     applied: list[str] = []
     external: dict[str, str] = {}
+    host_network: dict[str, HostNetworkRule] = {}
     for edit in edits:
         if edit.service not in services:
             if edit.service != MAIN:
@@ -709,8 +835,10 @@ def _apply_edits(document: dict[str, Any], edits: Sequence[ComposeEdit]) -> tupl
             if edit.service == MAIN:
                 raise ComposeEditError(MAIN, f"overlay {edit.overlay} marks main external; main is the agents' sandbox")
             external[edit.service] = edit.external
+        if edit.host_network is not None:
+            host_network[edit.service] = edit.host_network.over(host_network.get(edit.service))
         applied.append(edit.describe())
-    return applied, external
+    return applied, external, host_network
 
 
 def _unset(mapping: dict[str, Any], path: Sequence[str]) -> None:
@@ -766,6 +894,36 @@ def interpolate(
 
     out, _ = _interpolate(text, 0, variables, where, notes, closing=False)
     return out
+
+
+def interpolated_names(text: str) -> set[str]:
+    """The variables that compose's interpolation of ``text`` looks up (``$NAME``, ``${NAME:-...}``, ...; not
+    ``$$NAME``, which is a literal ``$NAME``)."""
+
+    names = _LookedUp()
+    try:
+        interpolate(text, names)
+    except ComposeError:  # a required variable, which is unset here, or a malformed ${...}: what came before
+        pass
+    return names.names
+
+
+class _LookedUp(Mapping[str, Any]):
+    """No variable set, each name looked up recorded (``get`` asks ``__getitem__``): what :func:`interpolated_names`
+    lists."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def __getitem__(self, name: str) -> Any:
+        self.names.add(name)
+        raise KeyError(name)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
 
 
 def _interpolate(
@@ -927,6 +1085,7 @@ class _Planner:
         self.notes: list[str] = []
         self.ignored: list[str] = []
         self.deferred: set[str] = set()
+        self.interpolated: set[tuple[str, str]] = set()  # (variable, where) of each variable the file interpolates
         _check_reserved(env, "[environment].env")
         _check_reserved(docker_image, "[environment].docker_image")
         variables: dict[str, str | _Unset] = {}
@@ -955,7 +1114,14 @@ class _Planner:
 
     # The plan --------------------------------------------------------------------------------------------------
 
-    def plan(self, document: dict[str, Any], *, external: Mapping[str, str], edits: list[str]) -> ComposePlan:
+    def plan(
+        self,
+        document: dict[str, Any],
+        *,
+        external: Mapping[str, str],
+        edits: list[str],
+        host_network: Mapping[str, HostNetworkRule],
+    ) -> ComposePlan:
         raw_services: dict[str, dict[str, Any]] = document["services"]
         raw_services.setdefault(MAIN, {})
         if raw_services[MAIN].get("profiles"):
@@ -973,6 +1139,10 @@ class _Planner:
             services[name] = self._service(name, raw, networks=networks, volumes=volumes, started=started)
         egress = self._check_networks(services, networks)
         _check_ports(services)
+        for name, rule in host_network.items():
+            _check_rule(name, rule, services)
+            services[name] = {**services[name], "host_network": rule.to_json()}
+        _check_rules_together(host_network, self.interpolated, services)
         if len(services) > 1:
             kind: StackKind = "sidecars"
         elif services[MAIN] != {"command": list(BASE_COMMAND)}:
@@ -1090,9 +1260,10 @@ class _Planner:
 
     def _interpolated(self, value: Any, where: str) -> Any:
         if isinstance(value, str):
+            self.interpolated.update((name, where) for name in interpolated_names(value))
             return interpolate(value, self.variables, where=where, notes=self.notes)
         if isinstance(value, list):
-            return [self._interpolated(item, where) for item in value]
+            return [self._interpolated(item, _item_where(item, where)) for item in value]
         if isinstance(value, dict):
             return {key: self._interpolated(item, f"{where}.{key}") for key, item in value.items()}
         return value
@@ -1261,6 +1432,7 @@ class _Planner:
                     environment[key] = known
                 continue
             if quote != "'":
+                self.interpolated.update((name, where) for name in interpolated_names(value))
                 value = interpolate(value, {**environment, **self.variables, **earlier}, where=where, notes=self.notes)
             environment[key] = value
         return environment
@@ -1579,6 +1751,90 @@ def _check_ports(services: Mapping[str, Mapping[str, Any]]) -> None:
                     f"{name}.expose",
                     f"declares {port}, which {other} declares too; a stack's services share one loopback, as in a pod",
                 )
+
+
+# --- the host-network fallback ----------------------------------------------------------------------------------
+
+
+def declared_ports(service: Mapping[str, Any]) -> tuple[int, ...]:
+    """The TCP ports a planned service declares (``expose``, and ``ports``, which a plan keeps as ``expose``)."""
+
+    return tuple(int(port.split("/")[0]) for port in service.get("expose") or () if port.endswith("/tcp"))
+
+
+def _check_rule(name: str, rule: HostNetworkRule, services: Mapping[str, Mapping[str, Any]]) -> None:
+    """Refuse an overlay's ``host_network`` rule for the planned service ``name`` unless that service starts, is not
+    served by a node service, and declares each port the rule names to listen on."""
+
+    where = f"{name}.host_network"
+    if name not in services:
+        raise ComposeEditError(where, "is a rule for a service that platoon does not start (it has profiles)")
+    if services[name].get("external"):
+        raise ComposeEditError(where, "is a rule for a service that a node service serves (external)")
+    declared = declared_ports(services[name])
+    for port in rule.listen:
+        if port not in declared:
+            raise ComposeEditError(
+                where, f"names port {port} to listen on, which the service does not declare (expose, ports)"
+            )
+    if (twice := rule.named_twice()) is not None:  # two overlays' rules together
+        raise ComposeEditError(where, f"names {twice} twice: listen, token and bind each set a variable of their own")
+
+
+def _check_rules_together(
+    rules: Mapping[str, HostNetworkRule],
+    interpolated: Iterable[tuple[str, str]],
+    services: Collection[str],
+) -> None:
+    """Refuse ``host_network`` rules that would set one variable over another, or whose variables the compose file
+    interpolates where a service reads them as it runs (``interpolated``: each variable it looks up, and where): a
+    service's port or address in a variable that is the stack's token, which every service gets; and a variable that
+    the fallback sets in a service, which the fetch's interpolation would make blank (or a default) in that service's
+    command or another of its variables before the fallback sets it.  The fallback gives the token to every service,
+    and a port or an address to the rule's own service alone: another service gets those as compose gets them (its
+    ``http://kv:${KV_PORT:-6379}`` is ``http://kv:6379``, which the fallback rewrites).  A variable of the service's
+    environment that names itself (``PASS: ${PASS}``, or ``- PASS=${PASS}``) the fallback sets over that."""
+
+    tokens = {rule.token for rule in rules.values() if rule.token}
+    for name, rule in rules.items():
+        if clash := sorted(tokens & {*rule.listen.values(), *([rule.bind] if rule.bind else [])}):
+            raise ComposeEditError(
+                f"{name}.host_network",
+                f"sets {clash[0]} to a port or an address, and a rule names it for the stack's token, which every "
+                "service gets: each takes a variable of its own",
+            )
+    own = {name: {*rule.listen.values(), *([rule.bind] if rule.bind else [])} for name, rule in rules.items()}
+    for variable, where in sorted(interpolated):
+        service, _, key = where.partition(".")
+        if key == f"environment.{variable}":  # it sets itself, and the fallback sets it over that
+            continue
+        if service not in services or key.partition(".")[0] not in _RUNTIME_KEYS:
+            continue
+        if variable in tokens:
+            named = "a host_network rule names it for the stack's token, which the fallback gives every service"
+        elif variable in own.get(service, ()):
+            named = f"{service}'s host_network rule names it, which the fallback sets as {service} runs"
+        else:
+            continue
+        if key.partition(".")[0] in ("environment", "env_file"):
+            hint = (
+                "a variable's value is not expanded as the service runs: make the value in its command, where "
+                f"$${variable} reaches its shell as ${variable}"
+            )
+        else:
+            hint = f"write $${variable}, which compose turns into ${variable} for the service's shell to read"
+        raise ComposeEditError(
+            where, f"interpolates ${variable} as the dataset is fetched, where it is not set yet, and {named}: {hint}"
+        )
+
+
+def _item_where(item: Any, where: str) -> str:
+    """Where an item of the list at ``where`` is: an ``environment`` list's ``NAME=value`` at ``<where>.NAME``, as
+    the mapping form puts its value; any other item at the list's ``where``."""
+
+    if where.endswith(".environment") and isinstance(item, str) and "=" in item:
+        return f"{where}.{item.partition('=')[0]}"
+    return where
 
 
 def service_binds(data: Mapping[str, Any]) -> tuple[Bind, ...]:

@@ -11,7 +11,9 @@ and one with services besides ``main`` runs as a multi-container stack (:mod:`pl
 ``[[verifier.collect]]`` hooks run in its services and ``artifacts`` collected from them (``service``).
 
 Refused: multi-step and non-Linux tasks; stacks where the caller says none can run (``stack_refusal``), and stacks
-with a service a node service serves, or whose services depend on one another in a cycle; compose files outside the
+with a service a node service serves, or whose services depend on one another in a cycle, or that the host-network
+fallback cannot run, where the caller runs stacks on it (``on_host_network``: a sidecar no overlay authenticates, a port
+without a listen rule, a reference to a service it cannot rewrite); compose files outside the
 subset platoon runs, or that give ``main`` what platoon cannot apply to it yet; collect hooks and artifacts of a
 service the task does not start; a compose file in ``tests/``; and ``[agent].user`` or ``[verifier].user`` (or a
 collect hook's ``user``) unless the caller ignores them, running every process as the sandbox's own user, or honors
@@ -46,6 +48,7 @@ from platoon.envs.harbor.compose import (
     service_binds,
     unread_compose_files,
 )
+from platoon.envs.harbor.host_network import host_network_problem
 from platoon.task import Task
 
 logger = logging.getLogger(__name__)
@@ -126,13 +129,13 @@ class McpServer:
             return None
         return parts.hostname, port if port is not None else 80
 
-    def described(self, url: str | None = None) -> dict[str, Any]:
-        """The server as ``{task_mcp_servers}`` lists it: its name and transport, and its URL (``url`` where a harness
-        reaches it at another) or its command and arguments."""
+    def described(self) -> dict[str, Any]:
+        """The server as ``{task_mcp_servers}`` lists it: its name and transport, and its URL or its command and
+        arguments."""
 
         if self.transport == "stdio":
             return {"name": self.name, "transport": self.transport, "command": self.command, "args": list(self.args)}
-        return {"name": self.name, "transport": self.transport, "url": url or self.url}
+        return {"name": self.name, "transport": self.transport, "url": self.url}
 
 
 @dataclass(frozen=True)
@@ -293,6 +296,7 @@ class HarborTask:
         compose: ComposePlan | Mapping[str, Any] | None | object = _PLANNED_HERE,
         stack_refusal: str | None = None,
         privilege_refusal: str | None = None,
+        on_host_network: bool = False,
     ) -> HarborTask:
         """Read a task directory; ``HarborTaskError`` says why platoon cannot run it.
 
@@ -306,7 +310,8 @@ class HarborTask:
         task's compose file is planned here.  ``stack_refusal`` says why no stack could run (the caller's sandbox
         provider starts none), which refuses a task whose compose file makes it one; ``privilege_refusal`` why the
         provider could not give a stack's services the privileges its plan asks for (:attr:`ComposePlan.privileges`),
-        which refuses it too.
+        which refuses it too.  ``on_host_network`` says the caller runs stacks on the host-network fallback, which
+        refuses a stack it cannot run (:func:`~platoon.envs.harbor.host_network.host_network_problem`).
         """
 
         if agent_user not in AGENT_USER_POLICIES:
@@ -328,7 +333,9 @@ class HarborTask:
         agent = _value(config, "agent", dict, "task.toml") or {}
         _check_linux(environment, f"{config_path}")
         settings = _environment_settings(environment, "[environment]")
-        plan = _compose_plan(task_dir, environment, settings, compose, stack_refusal, privilege_refusal)
+        plan = _compose_plan(
+            task_dir, environment, settings, compose, stack_refusal, privilege_refusal, on_host_network=on_host_network
+        )
         users = {
             phase: str(user)
             for phase, table in (("agent", agent), ("verifier", verifier))
@@ -467,10 +474,14 @@ def _compose_plan(
     compose: Any,
     stack_refusal: str | None,
     privilege_refusal: str | None,
+    *,
+    on_host_network: bool = False,
 ) -> ComposePlan | None:
     """The task's stack plan: ``compose`` when the caller has it (a lock's), else planned from the task's files; a
     plan that platoon cannot run (yet, or where no stack runs: ``stack_refusal``, or not with the privileges it asks
-    for: ``privilege_refusal``) refuses the task."""
+    for: ``privilege_refusal``, or not on the host-network fallback, where the caller runs stacks on it:
+    ``on_host_network``) refuses the task.  A plan made here has no overlay's rules, so the fallback refuses every
+    stack of a dataset directory."""
 
     if compose is _PLANNED_HERE:
         for name in unread_compose_files(task_dir):
@@ -528,6 +539,14 @@ def _compose_plan(
                 f"{stack} whose services ask for privileges ({', '.join(plan.privileges)}), and {privilege_refusal}; "
                 "the task is refused"
             )
+        if on_host_network and compose is _PLANNED_HERE:
+            raise HarborTaskError(
+                f"{stack}, and the host-network fallback (stacks: host_network) runs a stack only as a dataset's "
+                "overlays make it safe there (host_network in a [[compose]] entry), which a dataset directory has none "
+                "of: fetch the dataset with such an overlay"
+            )
+        if on_host_network and (problem := host_network_problem(plan)) is not None:
+            raise HarborTaskError(f"{stack} {problem}; the host-network fallback (stacks: host_network) refuses it")
     main = plan.main()
     if main is not None and main.unsupported:
         sandbox = "main in a stack" if plan.kind == "sidecars" else "the one sandbox of a main-only task"
