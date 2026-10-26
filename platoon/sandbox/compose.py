@@ -94,6 +94,7 @@ from platoon.sandbox.stacks import (
     Volume,
     drive_stack,
 )
+from platoon.utils.scratch import private_dir
 from platoon.utils.stopping import let_finish, process_start_time
 
 logger = logging.getLogger(__name__)
@@ -777,17 +778,13 @@ def _private_root(root: Path) -> Path:
             f"{root} has a ':', which Docker reads as the end of a bind's source, so no stack's compose project may go "
             "there: set the docker provider's stack_root to a path without one"
         )
-    with contextlib.suppress(FileExistsError):  # whatever is there, the check below decides
-        root.mkdir(mode=0o700, parents=True)
-    info = root.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+    try:
+        return private_dir(root)
+    except RuntimeError as exc:
         raise RuntimeError(
-            f"{root} is not a directory of this user's, so no stack's compose project may go there: remove it, or set "
-            "the docker provider's stack_root to a directory of your own"
-        )
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        root.chmod(0o700)
-    return root
+            f"{exc}, so no stack's compose project may go there: remove it, or set the docker provider's stack_root to "
+            "a directory of your own"
+        ) from None
 
 
 __all__ = [

@@ -12,8 +12,9 @@ carries the upstreams its harness needs), its command as the final argv (compose
 its image's, which the caller resolves; None for a service that only idles, as ``main`` does), its healthcheck, its
 dependencies with their conditions, its volumes (directories the stack owns: a named one shared by every service that
 names it, an anonymous one or a ``tmpfs`` the service's own; a caller may have one filled before any service mounts it,
-such as with a copy of files it binds, which the stack then owns and deletes), the TCP ports it declares, the names it
-answers to besides its own, and what only some runtimes apply (its run mode, the user its image runs its command as,
+such as with a copy of files it binds, which the stack then owns and deletes), the TCP ports it declares (with the
+variables that tell it the port it listens on where its stack gives it another: ``listen``), the names it answers to
+besides its own, and what only some runtimes apply (its run mode, the user its image runs its command as,
 ``shm_size``, ``ulimits``, added capabilities, ``privileged``, its stop signal: the driver passes them to the backend,
 and the ``process`` provider's applies none; a provider with the ``privileged`` capability grants every privilege and
 capability a spec asks for).  A ``setup`` coroutine, when given, runs once the service's sandbox runs and before its
@@ -35,17 +36,22 @@ started itself, which the stop waits for; a ``setup`` coroutine's own exception 
 
 **Probes.**  :meth:`Stack.health` tells each service's state (:class:`ServiceState`): an init job ``completed`` (or
 ``exited`` with another status), any other service ``exited``, ``unhealthy`` (its healthcheck failed ``retries`` times
-in a row), ``healthy``, or ``running`` when it has no healthcheck.  Callers probe around what depends on the services,
-such as grading.
+in a row, or its backend found it serving where it must not: a handle's ``problem()``, which the host-network fallback
+has), ``healthy``, or ``running`` when it has no healthcheck.  Callers probe around what depends on the services, such
+as grading.
 
 **Addressing.**  In a stack whose services share a network of their own (a pod, a compose project), each service
 reaches the others by name at the ports they declare, and :meth:`Stack.rewrite` changes nothing; nor do they share
 this host's loopback (a stack's ``host_loopback`` is false), so a harness in ``main`` reaches the model gateway only
-through its route.  Where they share the host's network instead, as the ``process`` provider's do
-(:mod:`platoon.sandbox.process_stacks`), each declared port is a port of the host that the stack holds for its life,
-and ``rewrite`` turns a ``scheme://<service>:<port>`` reference into the ``scheme://127.0.0.1:<allocated port>`` that
-reaches it.  The driver rewrites every service's environment values and healthchecks so; a caller rewrites what else
-it runs in a service, such as Harbor's collect hooks.
+through its route.  Where they share the host's network instead, as the ``process`` provider's and the host-network
+fallback's do (:mod:`platoon.sandbox.process_stacks`, :mod:`platoon.sandbox.host_network_stacks`), each declared port
+is a port of the host that the stack holds for its life, which the service learns from its listen variables, and
+``rewrite`` turns a reference to a service at a port it declares (``scheme://<service>:<port>``, ``<service>:<port>``),
+and a service's own ``localhost:<port>``, into the ``127.0.0.1:<allocated port>`` that reaches it.  The driver rewrites
+every service's environment values, command and healthcheck so; a caller rewrites what else it runs in a service,
+such as Harbor's collect hooks.  What such a rewrite acts on, a **reference** (:func:`service_references`), is
+``[scheme://][user@]<host>:<port>`` or ``scheme://<host>``, the host's name in any case, as host names resolve; a
+host's name alone (``-h postgres``) is none.
 
 **Teardown.**  :meth:`Stack.stop` stops every service, then what the backend holds; its own task, and each service's
 stop, are cleanups that a stopping process lets finish (:func:`platoon.utils.stopping.let_finish`), inside the cleanup
@@ -58,9 +64,10 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
@@ -91,6 +98,19 @@ LOG_TAIL_BYTES = 2000
 _HEALTH_DETAIL_CHARS = 500
 _COMPLETION_POLL_S = (0.05, 1.0)  # how often an init job is looked at: first, and at most (doubling)
 SOCKET_ADDRESS_BYTES = 108  # a Unix socket's path (sun_path), its terminating NUL included
+#: This host's loopback address, where the services of a stack on this host's network reach one another.
+LOOPBACK = "127.0.0.1"
+#: The names of a service's own loopback, whose references to a port it declares are its own.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0"})
+# [scheme://][user@]host[:port]: not inside a longer name, and the host ends where a name would (a dot ends it only
+# before something that is no part of a name, as at the end of a sentence).
+_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9_.+-])"
+    r"(?:(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<user>[^@/\s]*@)?)?"
+    r"(?P<host>[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?)"
+    r"(?::(?P<port>[0-9]{1,5}))?"
+    r"(?![A-Za-z0-9_]|[.-][A-Za-z0-9_]|:[0-9])"
+)
 
 
 @dataclass(frozen=True)
@@ -158,6 +178,9 @@ class ServiceSpec:
     depends_on: dict[str, Dependency] = field(default_factory=dict)
     volumes: list[Volume] = field(default_factory=list)
     ports: tuple[int, ...] = ()  # the TCP ports it declares (compose's expose and ports)
+    # By declared port, the variables that tell it the port it listens on, where its stack gives it another (stacks on
+    # this host's network set them, besides PLATOON_PORT_<port>; elsewhere it listens on the port it declares).
+    listen: dict[int, str] = field(default_factory=dict)
     aliases: tuple[str, ...] = ()  # names it answers to besides its own (compose's hostname, network aliases)
     network_of: str | None = None  # the service whose network it shares (compose's network_mode: service:<x>)
     # What only some runtimes apply (the driver passes them to the backend; the process provider applies none).
@@ -197,8 +220,8 @@ class StackSpec:
 
     def check(self) -> None:
         """Raise ``ValueError`` for a spec no stack can start: no ``main``, a dependency on a service it lacks, on
-        itself or in a cycle, ``service_healthy`` on a service without a healthcheck, or a network of a service it
-        lacks."""
+        itself or in a cycle, ``service_healthy`` on a service without a healthcheck, a network of a service it lacks,
+        or a listen variable for a port the service does not declare."""
 
         if MAIN not in self.services:
             raise ValueError(f"A stack needs a {MAIN!r} service, the agents' sandbox; it has {sorted(self.services)}")
@@ -221,6 +244,10 @@ class StackSpec:
             ):
                 raise ValueError(
                     f"The service {name!r} shares the network of {service.network_of!r}, not another service"
+                )
+            if undeclared := sorted(set(service.listen) - set(service.ports)):
+                raise ValueError(
+                    f"The service {name!r} has listen variables for ports it does not declare: {undeclared}"
                 )
         if cycle := dependency_cycle({name: set(service.depends_on) for name, service in self.services.items()}):
             raise ValueError(f"The services depend on one another in a cycle: {' -> '.join(cycle)}")
@@ -273,6 +300,47 @@ def longest_path(graph: Mapping[str, Iterable[str]], weights: Mapping[str, float
         return finish[node]
 
     return max((done(node) for node in graph), default=0.0)
+
+
+# --- references to services ----------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Reference:
+    """A reference to a host in a text: ``[scheme://][user@]host[:port]`` (:func:`service_references`)."""
+
+    text: str
+    start: int
+    end: int
+    scheme: str
+    user: str
+    host: str
+    port: int | None
+
+
+def service_references(text: str, hosts: Collection[str]) -> Iterator[Reference]:
+    """The references in ``text`` to any of ``hosts`` (lower-case names: host names resolve in any case) that a
+    stack's addressing could act on: with a scheme (``http://kv``, ``http://kv:6379``) or a port (``kv:6379``).  A
+    host's name alone (``-h postgres``) is none."""
+
+    if not hosts:
+        return
+    for match in _REFERENCE.finditer(text):
+        port = match.group("port")
+        if match.group("host").lower() not in hosts or (port is None and match.group("scheme") is None):
+            continue
+        yield Reference(
+            text=match.group(0),
+            start=match.start(),
+            end=match.end(),
+            scheme=match.group("scheme") or "",
+            user=match.group("user") or "",
+            host=match.group("host").lower(),
+            port=int(port) if port is not None and int(port) < 65536 else None,
+        )
+
+
+# --- volumes ---------------------------------------------------------------------------------------------------------
 
 
 @dataclass
@@ -474,7 +542,9 @@ class StackProvider(Protocol):
 
 
 class ServiceHandle(Protocol):
-    """One started service, as a :class:`StackBackend` runs it."""
+    """One started service, as a :class:`StackBackend` runs it.  A handle may also have ``async def problem() -> str |
+    None``, which says why the running service is unhealthy besides its healthcheck (the host-network fallback's: it
+    listens beyond this host's loopback), and makes a probe find it so."""
 
     @property
     def sandbox(self) -> Sandbox: ...
@@ -689,13 +759,14 @@ class DrivenStack:
         reached[(name, "service_healthy")].set_result(None)
 
     def _prepared(self, name: str, service: ServiceSpec) -> ServiceSpec:
-        """``service`` as it starts: its environment values and healthcheck rewritten for the stack's addressing, and
-        its setup's exception marked as its own."""
+        """``service`` as it starts: its environment values, command and healthcheck rewritten for the stack's
+        addressing, and its setup's exception marked as its own."""
 
         rewrite = self._backend.rewrite
         sandbox = dataclasses.replace(
             service.sandbox, env={key: rewrite(value, service=name) for key, value in service.sandbox.env.items()}
         )
+        command = [rewrite(arg, service=name) for arg in service.command] if service.command is not None else None
         if service.healthcheck is not None:
             self._checks[name] = dataclasses.replace(
                 service.healthcheck, command=tuple(rewrite(arg, service=name) for arg in service.healthcheck.command)
@@ -710,7 +781,9 @@ class DrivenStack:
                 except Exception as exc:
                     raise SetupError(exc) from exc
 
-        return dataclasses.replace(service, sandbox=sandbox, healthcheck=self._checks.get(name), setup=setup)
+        return dataclasses.replace(
+            service, sandbox=sandbox, command=command, healthcheck=self._checks.get(name), setup=setup
+        )
 
     async def _wait_healthy(self, name: str, handle: ServiceHandle, check: Healthcheck) -> None:
         """Wait for the service's healthcheck to pass, by Docker's rules; :class:`StackStartError` once its command
@@ -774,6 +847,8 @@ class DrivenStack:
             return ServiceState("completed" if code == 0 else "exited", code)
         if not running:
             return ServiceState("exited", code)
+        if (problem := getattr(handle, "problem", None)) is not None and (detail := await problem()) is not None:
+            return ServiceState("unhealthy", detail=detail)
         check = self._checks.get(name)
         if check is None:
             return ServiceState("running")
@@ -833,6 +908,8 @@ def _exited(code: int | None) -> str:
 
 __all__ = [
     "CONDITIONS",
+    "LOOPBACK",
+    "LOOPBACK_HOSTS",
     "MAIN",
     "SERVICE_LABEL",
     "SOCKET_ADDRESS_BYTES",
@@ -842,6 +919,7 @@ __all__ = [
     "Dependency",
     "DrivenStack",
     "Healthcheck",
+    "Reference",
     "RunMode",
     "ServiceHandle",
     "ServiceSpec",
@@ -859,4 +937,5 @@ __all__ = [
     "drive_stack",
     "longest_path",
     "make_volumes",
+    "service_references",
 ]

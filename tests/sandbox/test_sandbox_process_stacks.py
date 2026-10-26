@@ -1,6 +1,7 @@
 """Stacks on the process provider (platoon.sandbox.process_stacks): ports each stack holds, the listen variable,
-references rewritten to those ports, volumes shared by name and filled before the services start, and nothing left
-after a stop, a cancelled start or a reap."""
+references rewritten to those ports, volumes shared by name and filled before the services start, a root of this user's
+alone, a service whose sandbox does not answer never called exited, and nothing left after a stop, a cancelled start or
+a reap."""
 
 from __future__ import annotations
 
@@ -11,14 +12,24 @@ import socket
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from platoon.sandbox import cleanup, process_stacks
-from platoon.sandbox.base import SandboxSpec
+from platoon.sandbox.base import ExecResult, SandboxSpec
 from platoon.sandbox.process import ProcessProvider, ProcessSandbox
-from platoon.sandbox.process_stacks import PORT_ENV, STACK_LABEL, STACK_RECORD
-from platoon.sandbox.stacks import Dependency, Healthcheck, ServiceSpec, Stack, StackSpec, StackStartError, Volume
+from platoon.sandbox.process_stacks import PORT_ENV, STACK_LABEL, STACK_RECORD, HostService
+from platoon.sandbox.stacks import (
+    Dependency,
+    Healthcheck,
+    ServiceSpec,
+    Stack,
+    StackSpec,
+    StackStartError,
+    Volume,
+    service_references,
+)
 from platoon.utils.stopping import CleanupScope
 
 pytestmark = pytest.mark.asyncio
@@ -299,3 +310,82 @@ async def test_a_port_another_stack_holds_is_never_given_out(provider: ProcessPr
     finally:
         other.close()
     assert list(provider.root.iterdir()) == []
+
+
+async def test_references_to_a_service_and_to_a_service_s_own_loopback_reach_the_ports_the_stack_holds(
+    provider: ProcessProvider,
+):
+    """Every service's environment values, command and healthcheck are rewritten: a reference to a service at a port
+    it declares, with or without a scheme and in any case, and a service's own ``localhost:<port>``; a reference to an
+    undeclared port, to another service's port on a service's own loopback, and to a longer name stay as written."""
+
+    spec = _web_stack("one")
+    web = spec.services["web"]
+    web.healthcheck = Healthcheck(command=(sys.executable, "-c", FETCH, "http://localhost:8000/"), interval_s=0.05)
+    web.listen = {8000: "WEB_PORT"}
+    spec.services["main"].sandbox.env.update(
+        {"PLAIN": "WEB:8000", "LOOPBACK": "http://localhost:8000/", "OTHER": "myweb:8000 web:9 web.example:8000"}
+    )
+    spec.services["main"].command = [sys.executable, "-c", "import time; time.sleep(300)", "--peer=www:8000"]
+    stack = await provider.start_stack(spec)
+    try:
+        port = int((await stack.connect("web", 8000)).rsplit(":", 1)[1])
+        main = _spec(stack, "main")
+        assert main.env["PLAIN"] == f"127.0.0.1:{port}"
+        assert main.env["LOOPBACK"] == "http://localhost:8000/"  # main declares no port 8000: not its own
+        assert main.env["OTHER"] == "myweb:8000 web:9 web.example:8000"
+        assert _spec(stack, "web").env["WEB_PORT"] == str(port)  # the variable its listen names
+        assert stack.rewrite("http://localhost:8000/", service="web") == f"http://127.0.0.1:{port}/"
+        assert stack.rewrite("redis://u@0.0.0.0:8000", service="web") == f"redis://u@127.0.0.1:{port}"
+        assert stack.rewrite("localhost:8000") == "localhost:8000"  # no service: no loopback of its own
+        assert (await stack.health(["web"]))["web"].status == "healthy"  # its healthcheck reached its own port
+        shell = int(cast(Any, stack)._handles["main"]._entry.split(":")[0])  # the shell that runs main's command
+        [child] = Path(f"/proc/{shell}/task/{shell}/children").read_text().split()
+        assert Path(f"/proc/{child}/cmdline").read_bytes().split(b"\0")[3] == f"--peer=127.0.0.1:{port}".encode()
+    finally:
+        await stack.stop()
+
+
+async def test_service_references_have_a_scheme_or_a_port_and_a_name_of_their_own():
+    found = [
+        (reference.text, reference.host, reference.port)
+        for reference in service_references(
+            "http://kv/a kv:6379 KV:1 -h kv mykv:6379 kv.example.com:1 at kv. postgres://u:p@kv:5432/db kv:99999",
+            {"kv"},
+        )
+    ]
+    assert found == [
+        ("http://kv", "kv", None),
+        ("kv:6379", "kv", 6379),
+        ("KV:1", "kv", 1),
+        ("postgres://u:p@kv:5432", "kv", 5432),
+        ("kv:99999", "kv", None),  # not a port
+    ]
+
+
+async def test_the_provider_s_root_must_be_this_user_s_alone(tmp_path: Path):
+    """A root that another user of a node's shared scratch made first, or a symlink planted where it goes, is refused:
+    no sandbox is made there, nor anything reaped from it."""
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "planted").symlink_to(elsewhere)
+    provider = ProcessProvider(root=tmp_path / "planted")
+    with pytest.raises(RuntimeError, match="planted is not a directory of this user's"):
+        await provider.start(SandboxSpec(image="local"))
+    assert await provider.reap({"platoon.task": "web"}) == 0
+    assert list(elsewhere.iterdir()) == []
+
+
+async def test_a_service_whose_sandbox_does_not_answer_in_time_is_not_called_exited():
+    """Its sandbox too slow to tell whether its command runs says nothing of the service: a probe fails as
+    infrastructure (the exception), never reads a sidecar that may run as one that exited."""
+
+    class Slow:
+        id = "slow"
+
+        async def exec(self, *args: Any, **kwargs: Any) -> ExecResult:
+            return ExecResult(exit_code=-1, stdout="", stderr="", timed_out=True)
+
+    with pytest.raises(TimeoutError, match="did not answer"):
+        await HostService(cast(Any, Slow()), "4242:1", {}).status()

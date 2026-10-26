@@ -200,6 +200,7 @@ async def test_with_hpc_sandbox_0_4_stacks_are_refused_before_any_rollout_naming
     with pytest.raises(EnvSetupError, match="are multi-container stacks .* install hpc-sandbox 0.5") as error:
         await locked.check_tasks("train", ["app-redis"])
     assert error.value.failure_kind == "env_config"
+    assert "or run its stacks on the host-network fallback (stacks: host_network)" in str(error.value)  # never chosen
 
 
 @pytest.mark.asyncio

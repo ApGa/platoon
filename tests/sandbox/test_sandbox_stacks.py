@@ -376,8 +376,12 @@ async def test_a_network_switch_that_failed_midway_is_made_again_whichever_way_i
             "waits for 'db' to be healthy, and 'db' has no healthcheck",
         ),
         ({"main": _service(network_of="vpn")}, "shares the network of 'vpn'"),
+        (
+            {"main": _service(ports=(80,), listen={81: "PORT"})},
+            r"has listen variables for ports it does not declare: \[81\]",
+        ),
     ],
-    ids=["no-main", "unknown", "itself", "cycle", "no-healthcheck", "network"],
+    ids=["no-main", "unknown", "itself", "cycle", "no-healthcheck", "network", "listen"],
 )
 @pytest.mark.asyncio
 async def test_specs_no_stack_can_start_are_refused_before_anything_starts(services, message: str):

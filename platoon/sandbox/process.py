@@ -9,7 +9,9 @@ mapped roots (``/app``, ``/tests``, ``/logs``, ``/solution``, ``/tmp``, the
 workdir and mount targets) live under a per-sandbox host directory and are
 translated in commands, ``cwd``, env values and file transfers. File contents
 are not translated: a script that must also run here can prefix sandbox paths
-with ``$PLATOON_SANDBOX_ROOT``, which real sandboxes leave unset.
+with ``$PLATOON_SANDBOX_ROOT``, which real sandboxes leave unset.  A spec whose
+working directory is ``/`` runs in the sandbox's own ``/tmp``, since no path
+maps to the host's root.
 
 A spec with ``network: none`` still runs on the host's network, but its
 Unix-socket upstreams get routes as in an isolated sandbox: a forwarder on a
@@ -48,7 +50,7 @@ from pathlib import Path
 from platoon.sandbox import cleanup
 from platoon.sandbox._exec import _has_members, kill_process_group, run_command
 from platoon.sandbox.base import ExecResult, SandboxSnapshot, SandboxSpec
-from platoon.sandbox.process_stacks import reap_stack_directories, start_process_stack
+from platoon.sandbox.process_stacks import private_root, reap_stack_directories, start_process_stack
 from platoon.sandbox.routes import SandboxRoutes
 from platoon.sandbox.stacks import DrivenStack, StackSpec
 from platoon.utils.scratch import node_scratch
@@ -272,6 +274,7 @@ class ProcessSandbox:
         """Lay out a sandbox below ``base_dir``, starting from a snapshot directory when given."""
 
         sandbox = cls(base_dir, spec)
+        private_root(base_dir.parent)
         if source is not None:
             shutil.copytree(source, sandbox.root, symlinks=True)
         else:
@@ -444,6 +447,13 @@ class ProcessProvider:
         return await asyncio.to_thread(self._reap, dict(labels))
 
     def _reap(self, labels: dict[str, str]) -> int:
+        if not os.path.lexists(self.root):
+            return 0
+        try:
+            private_root(self.root)
+        except RuntimeError as exc:
+            logger.warning("Not reaping the process sandboxes there: %s", exc)
+            return 0
         reaped = 0
         groups: dict[int, int | None] = {}  # the process groups it kills: pgid -> its leader's start time
         killed: dict[int, int] = {}  # and the processes that had left them: pid -> start time
@@ -477,6 +487,8 @@ class ProcessProvider:
         return reaped
 
     async def _open(self, spec: SandboxSpec, source: Path | None = None) -> ProcessSandbox:
+        if posixpath.normpath(spec.workdir) == "/":  # no path maps to the host's root
+            spec = dataclasses.replace(spec, workdir="/tmp")
         routes = SandboxRoutes(spec, own_network=False)
         labels = {**spec.labels, **cleanup.labels()}
         options = {"root": str(self.root)}

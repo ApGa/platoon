@@ -78,7 +78,7 @@ import time
 import urllib.parse
 import uuid
 from collections.abc import Awaitable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -383,7 +383,8 @@ class HarborSession:
 
     ``sandbox`` is what the agents act on: the task's sandbox, or its view as the agents' user where the sandbox
     honors users (:mod:`platoon.envs.harbor.views`).  ``mcp_servers`` lists the task's own MCP servers for harnesses
-    that can attach them.  ``network_isolated`` says the sandbox has no network: the task's ``network_mode`` is
+    that can attach them, at the URLs that reach them from ``main`` (a stack's rewritten for its addressing).
+    ``network_isolated`` says the sandbox has no network: the task's ``network_mode`` is
     ``no-network`` and the provider enforces it (its ``network_none`` capability), so a harness placed in the sandbox
     could not reach the model gateway.  ``host_loopback`` says the sandbox shares this host's network, so a harness
     placed in it reaches the gateway on loopback: it has a network, its provider declares the ``host_loopback``
@@ -412,7 +413,10 @@ class HarborSession:
         self.sandbox: Sandbox | None = lease.users.agents
         # The task's multi-container stack, None for a single sandbox; sandbox is its main.
         self.stack: Stack | None = lease.stack if isinstance(lease, StackLease) else None
-        self.mcp_servers: tuple[McpServer, ...] = harbor_task.mcp_servers
+        self.mcp_servers: tuple[McpServer, ...] = tuple(
+            replace(server, url=_in_main(self.stack, server.url)) if self.stack is not None and server.url else server
+            for server in harbor_task.mcp_servers
+        )
         self._task_tools = lease.task_tools if isinstance(lease, StackLease) else None
         capabilities = service.provider.capabilities
         self.network_isolated = lease.spec.network == "none" and "network_none" in capabilities
@@ -450,14 +454,10 @@ class HarborSession:
     @property
     def task_mcp_servers(self) -> list[dict[str, Any]]:
         """The task's MCP servers as a harness in the task's sandbox reaches them (``{task_mcp_servers}``): each one's
-        name and transport, and its URL, as rewritten for the stack's addressing (the ``process`` provider's ports), or
-        its command and arguments (``stdio``)."""
+        name and transport, and its URL as :attr:`mcp_servers` has it, rewritten for the stack's addressing, or its
+        command and arguments (``stdio``)."""
 
-        stack = self.stack
-        return [
-            server.described(_in_main(stack, server.url) if stack is not None and server.url else None)
-            for server in self.mcp_servers
-        ]
+        return [server.described() for server in self.mcp_servers]
 
     async def tools(self) -> list[ToolSpec]:
         """The generic tools, then those of the task's MCP servers that the plane serves (:class:`TaskTools`)."""
@@ -639,13 +639,16 @@ class HarborSession:
         return self.sandbox
 
     async def _verify(self, users: SessionUsers) -> Outcome:
-        """Grade in the agents' own sandbox (``shared`` mode): platoon's commands as its root, the tests as theirs."""
+        """Grade in the agents' own sandbox (``shared`` mode): platoon's commands as its root, the tests as theirs, with
+        ``[verifier].env``, which a stack rewrites for its addressing, as ``main``'s own environment."""
 
         sandbox = users.root
         try:
             env = resolve_env(self.harbor_task.verifier_env)
         except KeyError as exc:
             return Outcome.infra("verifier_setup", reason=f"host variable {exc} is not set")
+        if self.stack is not None:
+            env = {name: self.stack.rewrite(value, service=MAIN) for name, value in env.items()}
         if (exited := await self._check_init(sandbox)) is not None:
             return exited
         if (unsafe := await self._kill_processes(sandbox, "before the tests")) is not None:
