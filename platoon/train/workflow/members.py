@@ -1,5 +1,6 @@
 """A group's members: the startup gate of process isolation, each member's lease block and start slot, the straggler
-policy, and one member's rollout, in process or in a rollout worker (``arun_episode_single``).
+policy (``_run_group_rollouts``: the quorum, then the grace, then the cut), and one member's rollout, in process or in a
+rollout worker (``arun_episode_single``).
 
 Each member runs in a block of its draw's rollout lease
 (``platoon.train.leases``) in ``_run_group_member``, around its whole rollout,
@@ -11,14 +12,17 @@ free, each member's straggler deadline carrying its own start delay;
 member takes a start slot of the run's start limit (``start_limit``,
 :mod:`platoon.train.workflow.start_limit`).
 
-The functions here that take the workflow first are its methods still: ``GroupRolloutWorkflow`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.
+Seven of these functions are ``GroupRolloutWorkflow``'s methods, which the class keeps under the same names:
+``_admission_semaphore``, ``_admit_group``, ``_run_group_member``, ``_member_start_slot``, ``_run_group_rollouts``,
+``_cancel_late_members`` and ``arun_episode_single``.  To replace one, replace the method, on the class or an instance,
+not the function.  The others are the steps those methods take.
 """
 
 import asyncio
 import contextlib
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from platoon.train.components import ENVIRONMENT_COLUMN
@@ -32,6 +36,9 @@ from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stopping import CleanupScope
 
 if TYPE_CHECKING:
+    from platoon.train.config_defs import WorkflowConfig
+    from platoon.train.tinker.rollout_metrics import ClientThroughputMonitor
+    from platoon.train.workers.protocol import RolloutWorkerRequest
     from platoon.train.workflow.group import GroupRolloutWorkflow
 
 logger = logging.getLogger(__name__)
@@ -245,6 +252,33 @@ def _member_start_slot(workflow: "GroupRolloutWorkflow") -> StartSlot:
     return limit.slot(timeout_seconds=budget + START_SLOT_GRACE_SECONDS, monitor=workflow._monitor())
 
 
+@dataclass(frozen=True)
+class GroupStragglerPolicy:
+    """The straggler policy a group's members run under (``_run_group_rollouts``), resolved from the group's settings:
+    its label's own when they list one (``straggler_policies``, of
+    :class:`~platoon.train.config_defs.StragglerPolicy`), else their ``straggler_timeout_seconds`` and
+    ``straggler_quorum``.  A quorum that is not set is ``group_size - 1``, at least 1."""
+
+    timeout_seconds: float
+    quorum: int
+
+    @classmethod
+    def of(cls, config: "WorkflowConfig", label: str | None) -> "GroupStragglerPolicy | None":
+        """The policy of a group whose task has ``label`` (``train.label_by``), under the group's settings ``config``;
+        None when it sets no timeout, so that no member is cut."""
+
+        straggler_timeout = getattr(config, "straggler_timeout_seconds", None)
+        quorum = getattr(config, "straggler_quorum", None)
+        label_policy = getattr(config, "straggler_policies", {}).get(label)
+        if label_policy is not None:
+            straggler_timeout, quorum = label_policy.timeout_seconds, label_policy.quorum
+        if straggler_timeout is None:
+            return None
+        if quorum is None:
+            quorum = max(config.group_size - 1, 1)
+        return cls(straggler_timeout, quorum)
+
+
 async def _run_group_rollouts(workflow: "GroupRolloutWorkflow", data: dict) -> list:
     """Run ``group_size`` rollouts concurrently with the straggler policy.
 
@@ -262,85 +296,69 @@ async def _run_group_rollouts(workflow: "GroupRolloutWorkflow", data: dict) -> l
     gets it when it starts, so a late start never shortens a member's grace.
     """
     group_size = workflow.config.group_size
-    straggler_timeout = getattr(workflow.config, "straggler_timeout_seconds", None)
-    quorum = getattr(workflow.config, "straggler_quorum", None)
     # The policy of the task's label (train.label_by).
-    column = getattr(workflow, "label_by", ENVIRONMENT_COLUMN)
-    policy = getattr(workflow.config, "straggler_policies", {}).get(task_label(data, column))
-    if policy is not None:
-        straggler_timeout, quorum = policy.timeout_seconds, policy.quorum
+    label = task_label(data, getattr(workflow, "label_by", ENVIRONMENT_COLUMN))
+    policy = GroupStragglerPolicy.of(workflow.config, label)
     admission = await workflow._admit_group(group_size)
     tasks = [asyncio.ensure_future(workflow._run_group_member(data, i, admission)) for i in range(group_size)]
-    if straggler_timeout is None:
-        try:
-            return list(await asyncio.gather(*tasks))
-        except BaseException:
-            # A member raised, or this task was cancelled (gather then cancelled the members): cancel each member
-            # once, since a second cancellation would cut its unwinding short, such as a worker's termination grace.
-            for task in tasks:
-                if not task.cancelling():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-        finally:
-            admission.release()
+    if policy is None:  # no straggler timeout: no member is cut
+        return await gather_members(tasks, admission)
+    late = await await_members(workflow, data, tasks, policy, admission)  # those cut at their own deadlines
+    stragglers = await cancel_stragglers(data, tasks, policy)
+    workflow.tracker.scalar(straggler_cancelled=float(len(stragglers) + len(late)))
+    admission.release()
+    return member_outcomes(tasks)
 
-    if quorum is None:
-        quorum = max(group_size - 1, 1)
-    pending: set[asyncio.Future] = set(tasks)
-    late: list[asyncio.Future] = []  # cancelled at their own deadlines
+
+async def gather_members(tasks: Sequence[asyncio.Task], admission: _GroupAdmission) -> list:
+    """Every member's outcome, without a straggler cut, as ``asyncio.gather`` returns them.  Once a member raises, or
+    the group is cancelled, it cancels the members still running, each once, and raises only once they have ended.  The
+    group's startup permit comes back either way."""
+
     try:
-        while pending and len(pending) > group_size - quorum:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        # A member raised, or this task was cancelled (gather then cancelled the members): cancel each member
+        # once, since a second cancellation would cut its unwinding short, such as a worker's termination grace.
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    finally:
+        admission.release()
+
+
+async def await_members(
+    workflow: "GroupRolloutWorkflow",
+    data: dict,
+    tasks: Sequence[asyncio.Task],
+    policy: GroupStragglerPolicy,
+    admission: _GroupAdmission,
+) -> list[asyncio.Future]:
+    """Wait for the quorum (``policy.quorum`` members settled), then for the grace: when every member started with the
+    group, for the members still running until one deadline, the quorum's plus ``policy.timeout_seconds``; else for
+    each until that deadline plus its own start delay, cancelling each that runs past its own
+    (``workflow._cancel_late_members``).  Returns the members it cancelled.  If the wait raises or is cancelled, it
+    cancels every member, waits until they have ended and gives the group's startup permit back before it raises."""
+
+    pending: set[asyncio.Future] = set(tasks)
+    try:
+        while pending and len(pending) > len(tasks) - policy.quorum:
             _done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
         if pending and admission.starts.together():
             # Every member started with the group: one deadline, the quorum's plus the grace, for all of them.
-            _done, pending = await asyncio.wait(pending, timeout=straggler_timeout)
+            await asyncio.wait(pending, timeout=policy.timeout_seconds)
         elif pending:
-            deadline = asyncio.get_running_loop().time() + straggler_timeout
-            late = await workflow._cancel_late_members(data, tasks, pending, admission.starts, deadline, quorum)
-            pending = set()
+            deadline = asyncio.get_running_loop().time() + policy.timeout_seconds
+            return await workflow._cancel_late_members(data, tasks, pending, admission.starts, deadline, policy.quorum)
     except BaseException:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         admission.release()
         raise
-
-    # A rollout can settle between the deadline and this cancellation;
-    # only members that are still running count as cancelled stragglers.
-    stragglers = [task for task in tasks if not task.done()]
-    if stragglers:
-        logger.warning(
-            "Cancelling %s straggler rollout(s) for task %s after %ss grace (quorum %s/%s)",
-            len(stragglers),
-            data["task_id"],
-            straggler_timeout,
-            quorum,
-            group_size,
-        )
-        for task in stragglers:
-            task.cancel()
-        # run_rollout's own cancellation cleanup marks trajectories as
-        # interrupted; leaked environment sessions are reaped server-side.
-        await asyncio.gather(*stragglers, return_exceptions=True)
-    workflow.tracker.scalar(straggler_cancelled=float(len(stragglers) + len(late)))
-    admission.release()
-
-    outcomes: list = []
-    for task in tasks:
-        if task.cancelled():
-            outcomes.append(
-                _SingleRolloutOutcome(
-                    result=None,
-                    workload=RolloutWorkload(),
-                    observed=False,
-                    disposition="straggler_killed",
-                )
-            )
-        else:
-            # Propagates a legacy override's exception like gather did.
-            outcomes.append(task.result())
-    return outcomes
+    return []
 
 
 async def _cancel_late_members(
@@ -387,6 +405,53 @@ async def _cancel_late_members(
     return cut
 
 
+async def cancel_stragglers(
+    data: dict, tasks: Sequence[asyncio.Task], policy: GroupStragglerPolicy
+) -> list[asyncio.Task]:
+    """Once the grace has passed, cancel the members still running, with a warning, and wait until they have ended.
+    Returns them: none after ``_cancel_late_members``, which waits until every member has ended."""
+
+    # A rollout can settle between the deadline and this cancellation;
+    # only members that are still running count as cancelled stragglers.
+    stragglers = [task for task in tasks if not task.done()]
+    if stragglers:
+        logger.warning(
+            "Cancelling %s straggler rollout(s) for task %s after %ss grace (quorum %s/%s)",
+            len(stragglers),
+            data["task_id"],
+            policy.timeout_seconds,
+            policy.quorum,
+            len(tasks),
+        )
+        for task in stragglers:
+            task.cancel()
+        # run_rollout's own cancellation cleanup marks trajectories as
+        # interrupted; leaked environment sessions are reaped server-side.
+        await asyncio.gather(*stragglers, return_exceptions=True)
+    return stragglers
+
+
+def member_outcomes(tasks: Sequence[asyncio.Task]) -> list:
+    """Each member's outcome, in member order, once every member has ended: a cancelled straggler's is an unobserved
+    outcome (``straggler_killed``), any other member's what it returned."""
+
+    outcomes: list = []
+    for task in tasks:
+        if task.cancelled():
+            outcomes.append(
+                _SingleRolloutOutcome(
+                    result=None,
+                    workload=RolloutWorkload(),
+                    observed=False,
+                    disposition="straggler_killed",
+                )
+            )
+        else:
+            # Propagates a legacy override's exception, as the gather of ``gather_members`` does.
+            outcomes.append(task.result())
+    return outcomes
+
+
 async def arun_episode_single(
     workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int = 0
 ) -> _SingleRolloutOutcome:
@@ -395,9 +460,10 @@ async def arun_episode_single(
     The blanket guard stays and now also covers request building: that adds
     ``pickle.dumps``, a write to node-local scratch and (in ``process``
     mode) opening a log file, any of which can raise on a full disk.  An
-    escape here would propagate through ``_run_group_rollouts``'s
-    ``task.result()`` and cost ALL group members, including the ones that
-    completed and would have satisfied ``min_successful_group_size``.
+    escape here would propagate through ``_run_group_rollouts`` (the gather
+    of ``gather_members``, the ``task.result()`` of ``member_outcomes``) and
+    cost ALL group members, including the ones that completed and would have
+    satisfied ``min_successful_group_size``.
 
     Args:
         data: Dictionary containing 'task_id' and optionally other task data.
@@ -413,29 +479,8 @@ async def arun_episode_single(
         start = held_slot()  # its host gives it back at the first model call; none without a limit
         first_call: dict[str, Any] = {} if start is None else {"on_first_call": start.first_call}
         if workflow._isolation != "process":
-            with monitor.rollout_in_flight():
-                response = await run_rollout_request(
-                    request,
-                    workflow.model_info.llm,
-                    rollout_fn=workflow.rollout_fn,
-                    reward_processor=workflow.reward_processor,
-                    **first_call,
-                )
-            monitor.record_rollout_timing(response.timing)
-            return workflow._outcome_from_response(response, response.status)
-
-        ready = _group_ready_callback.get()
-        with monitor.rollout_in_flight():
-            outcome = await workflow.supervisor.run(
-                request,
-                log_dir=workflow._worker_log_dir(request.model.checkpoint_version),
-                on_ready=ready,
-                on_launch=monitor.register_worker,
-                on_reap=monitor.unregister_worker,
-                **first_call,
-            )
-        workflow._record_worker_telemetry(outcome)
-        return workflow._outcome_from_response(outcome.response, outcome.disposition)
+            return await run_in_process(workflow, request, monitor, first_call)
+        return await run_in_worker(workflow, request, monitor, first_call)
     except asyncio.CancelledError:
         # The straggler policy owns cancellation.
         raise
@@ -453,3 +498,47 @@ async def arun_episode_single(
             observed=False,
             disposition="worker_launch_failed",
         )
+
+
+async def run_in_process(
+    workflow: "GroupRolloutWorkflow",
+    request: "RolloutWorkerRequest",
+    monitor: "ClientThroughputMonitor",
+    first_call: dict[str, Any],
+) -> _SingleRolloutOutcome:
+    """A member's rollout in this process (``rollout_isolation: inprocess``), through the rollout body a worker runs
+    (``run_rollout_request``), with the workflow's own rollout function and reward processor."""
+
+    with monitor.rollout_in_flight():
+        response = await run_rollout_request(
+            request,
+            workflow.model_info.llm,
+            rollout_fn=workflow.rollout_fn,
+            reward_processor=workflow.reward_processor,
+            **first_call,
+        )
+    monitor.record_rollout_timing(response.timing)
+    return workflow._outcome_from_response(response, response.status)
+
+
+async def run_in_worker(
+    workflow: "GroupRolloutWorkflow",
+    request: "RolloutWorkerRequest",
+    monitor: "ClientThroughputMonitor",
+    first_call: dict[str, Any],
+) -> _SingleRolloutOutcome:
+    """A member's rollout in a rollout worker process (``rollout_isolation: process``), which reports its readiness to
+    the group's startup permit; its telemetry is recorded once it has been reaped."""
+
+    ready = _group_ready_callback.get()
+    with monitor.rollout_in_flight():
+        outcome = await workflow.supervisor.run(
+            request,
+            log_dir=workflow._worker_log_dir(request.model.checkpoint_version),
+            on_ready=ready,
+            on_launch=monitor.register_worker,
+            on_reap=monitor.unregister_worker,
+            **first_call,
+        )
+    workflow._record_worker_telemetry(outcome)
+    return workflow._outcome_from_response(outcome.response, outcome.disposition)

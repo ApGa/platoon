@@ -213,6 +213,12 @@ async def run_rollout_request(
 
     ``on_first_call`` becomes the session timeline's: it is called once, as the
     rollout tree's first model call is issued (``RolloutTimeline``).
+
+    The steps, in order: roll out in the policy's session, write its events
+    for the trajectory viewer, convert the trajectories to datums, classify
+    the result.  A rollout without trajectories is not converted, and one
+    that raised reports its error.
+    :class:`_RolloutRun` holds what the steps share.
     """
 
     started = time.monotonic()
@@ -220,22 +226,88 @@ async def run_rollout_request(
         rollout_fn = resolve_ref(request.rollout_fn_ref)
     if reward_processor is None:
         reward_processor = _resolve_reward_processor(request)
-    config = RolloutConfig(**dict(request.rollout_config))
-    task = request.task
-    task_id = request.task_id
-    rollout_number = request.rollout_number
+    run = _RolloutRun(request, started, startup_seconds=startup_seconds, extra_allow=extra_allow)
+    with _python_environment(request):
+        try:
+            async with TinkerLLMProxySession() as session:
+                await run.roll_out(session, rollout_fn, on_first_call)
+                workload = workload_from_raw_rollout(run.collection, run.interactions)
+                if not run.collection.get("trajectories"):
+                    logger.warning(
+                        "No trajectories found for task %s and rollout %s", request.task_id, request.rollout_number
+                    )
+                    return run.response("no_trajectories", None, workload, observed=False)
+                _write_rollout_events(run.config, request.task_id, run.collection)
+                result, workload = run.convert(llm, reward_processor, workload)
+                return run.classify(result, workload)
+        except Exception as exc:
+            return run.failed(exc)
 
-    trajectory_collection: dict | None = None
-    interactions: dict = {}
-    conversion_seconds = 0.0
-    # ``TinkerLLMProxySession`` binds the timeline the proxy records into,
-    # exactly as it binds the interaction map.  Binding a second one here would
-    # be shadowed by the session's, and every timing would silently read zero;
-    # so this starts as an empty timeline (well-formed if the session never
-    # opens) and is replaced by the session's as soon as there is one.
-    timeline = RolloutTimeline()
 
-    def _response(
+def _python_environment(request: RolloutWorkerRequest) -> contextlib.AbstractContextManager:
+    """The rollout's own Python overlay when its request asks for one and this is a rollout worker; else nothing.
+
+    ``isolated_rollout_python_environment`` mutates sys.path, sys.executable
+    and os.environ process-globally and restores them on exit, so with N
+    concurrent in-process rollouts the first to finish would tear the overlay
+    down under the other N-1, and the last could put back an overlay already
+    removed.  It is only ever entered in a dedicated worker, and it refuses a
+    second entry in one process.
+    """
+
+    if request.python_env_isolation and in_rollout_worker():
+        from platoon.utils.rollout_python_env import isolated_rollout_python_environment
+
+        return isolated_rollout_python_environment()
+    return contextlib.nullcontext()
+
+
+def rollout_version(llm: Any, request: RolloutWorkerRequest) -> int:
+    """The policy version a rollout's datums are stamped with (``checkpoint_version``, which staleness is measured
+    against): the oldest one any sample of its tree used, in a worker that followed the trainer's weights while it
+    ran; else the version its request was bound to.  Per-call versions are to replace it."""
+
+    # Process workers follow current weights while waiting for the
+    # environment. Anchor staleness to actual generation, retaining
+    # the oldest root/child/judge sample if weights changed mid-tree.
+    from platoon.train.workers.binding import FollowingSamplingClient
+
+    sampling_client = getattr(llm, "sampling_client", None)
+    checkpoint_version = request.model.checkpoint_version
+    if isinstance(sampling_client, FollowingSamplingClient):
+        sampled_version = sampling_client.oldest_sampled_version
+        if sampled_version is not None:
+            checkpoint_version = sampled_version
+    return checkpoint_version
+
+
+class _RolloutRun:
+    """One rollout of :func:`run_rollout_request`: what its steps share, and the steps after the session opens.
+
+    Its state: the request and the start of the run, the rollout's config, its trajectory collection and interactions
+    once it has run, the conversion's seconds, and the timeline the proxy records into.
+    """
+
+    def __init__(
+        self, request: RolloutWorkerRequest, started: float, *, startup_seconds: float, extra_allow: bool
+    ) -> None:
+        self.request = request
+        self.started = started
+        self.startup_seconds = startup_seconds
+        self.extra_allow = extra_allow
+        self.config = RolloutConfig(**dict(request.rollout_config))
+        self.collection: Any = None  # the rollout's trajectory collection, once it has run
+        self.interactions: dict = {}
+        self.conversion_seconds = 0.0
+        # ``TinkerLLMProxySession`` binds the timeline the proxy records into,
+        # exactly as it binds the interaction map.  Binding a second one here would
+        # be shadowed by the session's, and every timing would silently read zero;
+        # so this starts as an empty timeline (well-formed if the session never
+        # opens) and is replaced by the session's as soon as there is one.
+        self.timeline = RolloutTimeline()
+
+    def response(
+        self,
         status: str,
         result,
         workload: RolloutWorkload,
@@ -243,123 +315,110 @@ async def run_rollout_request(
         observed: bool,
         error: BaseException | None = None,
     ) -> RolloutWorkerResponse:
+        """The rollout's response, with what the run measured and the process it ran in."""
+
         return RolloutWorkerResponse(
             protocol_version=PROTOCOL_VERSION,
-            request_id=request.request_id,
+            request_id=self.request.request_id,
             status=status,  # type: ignore[arg-type]
             result=result,
             workload=workload,
             observed=observed,
             error_type=type(error).__name__ if error is not None else None,
             error_repr=repr(error)[:2000] if error is not None else None,
-            startup_seconds=float(startup_seconds),
-            rollout_seconds=time.monotonic() - started,
-            conversion_seconds=conversion_seconds,
-            model_calls=len(interactions),
-            routing_id_present=_routing_id_present(interactions),
-            extra_allow_verified=bool(extra_allow),
+            startup_seconds=float(self.startup_seconds),
+            rollout_seconds=time.monotonic() - self.started,
+            conversion_seconds=self.conversion_seconds,
+            model_calls=len(self.interactions),
+            routing_id_present=_routing_id_present(self.interactions),
+            extra_allow_verified=bool(self.extra_allow),
             telemetry_disabled=os.environ.get("TINKER_TELEMETRY") == "0",
             torch_threads=_torch_threads(),
             peak_rss_bytes=_peak_rss_bytes(),
             cell_guard=cell_guard_cumulative(at_exit=True),
             worker_pid=os.getpid(),
             worker_pgid=os.getpgrp() if hasattr(os, "getpgrp") else 0,
-            timing=timeline.summary(),
-            outcome_status=_outcome_status(trajectory_collection, error),
-            reward_key=_reward_key(trajectory_collection),
-            success_reward=_success_reward(trajectory_collection),
+            timing=self.timeline.summary(),
+            outcome_status=_outcome_status(self.collection, error),
+            reward_key=_reward_key(self.collection),
+            success_reward=_success_reward(self.collection),
         )
 
-    # ``isolated_rollout_python_environment`` mutates sys.path, sys.executable
-    # and os.environ process-globally and restores them on exit, so with N
-    # concurrent in-process rollouts the first to finish would tear the overlay
-    # down under the other N-1, and the last could put back an overlay already
-    # removed.  It is only ever entered in a dedicated worker, and it refuses a
-    # second entry in one process.
-    if request.python_env_isolation and in_rollout_worker():
-        from platoon.utils.rollout_python_env import isolated_rollout_python_environment
+    async def roll_out(self, session: Any, rollout_fn: Callable, on_first_call: Callable[[], None] | None) -> None:
+        """Run the rollout in ``session``, whose timeline becomes the run's; its interactions are kept whatever the
+        rollout does."""
 
-        environment_stack = isolated_rollout_python_environment()
-    else:
-        environment_stack = contextlib.nullcontext()
-
-    with environment_stack:
+        self.timeline = getattr(session, "timeline", self.timeline)
+        if on_first_call is not None:
+            self.timeline.on_first_call = on_first_call
         try:
-            async with TinkerLLMProxySession() as session:
-                timeline = getattr(session, "timeline", timeline)
-                if on_first_call is not None:
-                    timeline.on_first_call = on_first_call
-                try:
-                    trajectory_collection = await asyncio.create_task(rollout_fn(task, config))
-                finally:
-                    # Copy before the context manager resets its ContextVar.
-                    interactions = dict(session.interactions)
+            self.collection = await asyncio.create_task(rollout_fn(self.request.task, self.config))
+        finally:
+            # Copy before the context manager resets its ContextVar.
+            self.interactions = dict(session.interactions)
 
-                workload = workload_from_raw_rollout(trajectory_collection, interactions)
+    def convert(
+        self, llm: Any, reward_processor: Callable[[dict], tuple[float, dict]], workload: RolloutWorkload
+    ) -> tuple[Any, RolloutWorkload]:
+        """The rollout's trajectories as datums, stamped with :func:`rollout_version`, and its workload with the
+        conversion's funnel."""
 
-                if not trajectory_collection.get("trajectories"):
-                    logger.warning("No trajectories found for task %s and rollout %s", task_id, rollout_number)
-                    return _response("no_trajectories", None, workload, observed=False)
-                _write_rollout_events(config, task_id, trajectory_collection)
+        conversion_started = time.monotonic()
+        checkpoint_version = rollout_version(llm, self.request)
+        result = get_train_data_for_trajectory_collection(
+            trajectory_collection=self.collection,
+            interactions=self.interactions,
+            task_id=self.request.task_id,
+            checkpoint_version=checkpoint_version,
+            filter_errors=self.request.conversion.filter_errors,
+            filter_message_actions=self.request.conversion.filter_message_actions,
+            reward_processor=reward_processor,
+            include_traj_depth=self.request.conversion.include_traj_depth,
+            include_traj_start=self.request.conversion.include_traj_start,
+            subagent_datum_sampler=self.request.conversion.subagent_datum_sampler,
+        )
+        workload = add_datum_funnel(workload, result)
+        self.conversion_seconds = time.monotonic() - conversion_started
+        return result, workload
 
-                conversion_started = time.monotonic()
-                # Process workers follow current weights while waiting for the
-                # environment. Anchor staleness to actual generation, retaining
-                # the oldest root/child/judge sample if weights changed mid-tree.
-                from platoon.train.workers.binding import FollowingSamplingClient
+    def classify(self, result: Any, workload: RolloutWorkload) -> RolloutWorkerResponse:
+        """The converted rollout's response: ``conversion_empty`` for one with no datum to train, else ``completed``."""
 
-                sampling_client = getattr(llm, "sampling_client", None)
-                checkpoint_version = request.model.checkpoint_version
-                if isinstance(sampling_client, FollowingSamplingClient):
-                    sampled_version = sampling_client.oldest_sampled_version
-                    if sampled_version is not None:
-                        checkpoint_version = sampled_version
-                result = get_train_data_for_trajectory_collection(
-                    trajectory_collection=trajectory_collection,
-                    interactions=interactions,
-                    task_id=task_id,
-                    checkpoint_version=checkpoint_version,
-                    filter_errors=request.conversion.filter_errors,
-                    filter_message_actions=request.conversion.filter_message_actions,
-                    reward_processor=reward_processor,
-                    include_traj_depth=request.conversion.include_traj_depth,
-                    include_traj_start=request.conversion.include_traj_start,
-                    subagent_datum_sampler=request.conversion.subagent_datum_sampler,
-                )
-                workload = add_datum_funnel(workload, result)
-                conversion_seconds = time.monotonic() - conversion_started
-
-                # Sampling is allowed to remove every converted datum, but it
-                # must not turn a genuinely unusable rollout into a baseline
-                # member merely because sampling happens to be enabled.  The
-                # per-trajectory counts are deliberately pre-sampling counts.
-                num_pre_sampling_datums = sum(stats.num_datums for stats in result.trajectory_stats)
-                if num_pre_sampling_datums == 0:
-                    logger.warning(
-                        "No pre-sampling train data found for task %s and rollout %s",
-                        task_id,
-                        rollout_number,
-                    )
-                    return _response("conversion_empty", None, workload, observed=True)
-
-                if not result.datums:
-                    logger.warning("No train data found for task %s and rollout %s", task_id, rollout_number)
-                    # Retain an empty result produced by Bernoulli sampling or
-                    # policy exclusion: its reward and trajectory stats still
-                    # belong in group baselines/metrics, and a sibling rollout
-                    # may provide the group's actual training datums.
-                    if request.conversion.subagent_datum_sampler is None and result.num_policy_excluded_datums == 0:
-                        return _response("conversion_empty", None, workload, observed=True)
-
-                return _response("completed", result, workload, observed=True)
-
-        except Exception as exc:
-            logger.exception("Error in tinker workflow for task %s and rollout %s: %s", task_id, rollout_number, exc)
-            workload = workload_from_raw_rollout(trajectory_collection, interactions)
-            return _response(
-                "error",
-                None,
-                workload,
-                observed=workload.trajectories > 0,
-                error=exc,
+        task_id, rollout_number = self.request.task_id, self.request.rollout_number
+        # Sampling is allowed to remove every converted datum, but it
+        # must not turn a genuinely unusable rollout into a baseline
+        # member merely because sampling happens to be enabled.  The
+        # per-trajectory counts are deliberately pre-sampling counts.
+        num_pre_sampling_datums = sum(stats.num_datums for stats in result.trajectory_stats)
+        if num_pre_sampling_datums == 0:
+            logger.warning(
+                "No pre-sampling train data found for task %s and rollout %s",
+                task_id,
+                rollout_number,
             )
+            return self.response("conversion_empty", None, workload, observed=True)
+
+        if not result.datums:
+            logger.warning("No train data found for task %s and rollout %s", task_id, rollout_number)
+            # Retain an empty result produced by Bernoulli sampling or
+            # policy exclusion: its reward and trajectory stats still
+            # belong in group baselines/metrics, and a sibling rollout
+            # may provide the group's actual training datums.
+            if self.request.conversion.subagent_datum_sampler is None and result.num_policy_excluded_datums == 0:
+                return self.response("conversion_empty", None, workload, observed=True)
+
+        return self.response("completed", result, workload, observed=True)
+
+    def failed(self, exc: Exception) -> RolloutWorkerResponse:
+        """The response of a rollout that raised: ``error``, observed when it had produced a trajectory."""
+
+        task_id, rollout_number = self.request.task_id, self.request.rollout_number
+        logger.exception("Error in tinker workflow for task %s and rollout %s: %s", task_id, rollout_number, exc)
+        workload = workload_from_raw_rollout(self.collection, self.interactions)
+        return self.response(
+            "error",
+            None,
+            workload,
+            observed=workload.trajectories > 0,
+            error=exc,
+        )

@@ -7,7 +7,7 @@ Transport is **pickle protocol 5 through node-local files**, not a pipe:
 * a worker needs ~1.9 s of interpreter teardown *after* it writes its response,
   so the parent must be able to read a result that arrived before a kill --
   files make that trivially true and are what makes classification
-  response-first (see :mod:`platoon.train.workers.supervisor`);
+  response-first (see :mod:`platoon.train.workers.outcomes`);
 * ``tinker.Datum``/``TensorData`` are binary, so JSON would be both larger and
   lossy on floats.
 

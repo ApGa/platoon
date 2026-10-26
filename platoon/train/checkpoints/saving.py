@@ -1,12 +1,17 @@
-"""Saving after a step: the cadence (a permanent or a recovery checkpoint, else the weights only), and a full
-checkpoint's ``loop_state``, with the per-task statistics' snapshot and the dispatcher's state.
+"""Saving: the cadence after a step (a permanent or a recovery checkpoint, else the weights only), the one full
+checkpoint of the run that every save of a start writes (:func:`save_run_checkpoint`: at launch, by the cadence, when
+training is interrupted and at its end), which is its ``loop_state`` and then the save itself
+(:func:`save_full_checkpoint`, which reads nothing of the trainer), and a full checkpoint's ``loop_state``, with the
+per-task statistics' snapshot and the dispatcher's state.
 
-The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.
+``_save_checkpoint_and_get_sampling_client`` and ``_checkpoint_state`` take the trainer first and are its methods still:
+``PlatoonTinkerRLTrainer`` keeps each under its name, so to replace one, replace the method, on the class or an
+instance, not the function.  The other functions here call the trainer's methods through the trainer.
 """
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import tinker
@@ -34,6 +39,124 @@ ORDER_POSITION_KEY = "next_position"
 SAVE_CHECKPOINT_TIMEOUT_S = 7200.0
 
 
+# How a save is awaited: ``wait(awaitable, *, name, total_timeout)``, under the trainer's heartbeat
+# (``_await_with_heartbeat``), which logs while it waits and feeds the watchdog the waiter was given, if any.
+Waiter = Callable[..., Awaitable[Any]]
+
+
+async def save_full_checkpoint(
+    training_client: tinker.TrainingClient,
+    name: str,
+    *,
+    log_path: str,
+    loop_state: dict[str, Any],
+    wait: Waiter,
+) -> dict[str, str]:
+    """Save full checkpoint ``name`` (the weights and the optimizer's state, ``kind="both"``), which
+    ``checkpoints.jsonl`` in ``log_path`` records with ``loop_state``.  A full-parameter save takes minutes, so it runs
+    under ``wait``, for at most :data:`SAVE_CHECKPOINT_TIMEOUT_S`.  The paths the save wrote (``state_path``,
+    ``sampler_path``)."""
+
+    return await wait(
+        checkpoint_utils.save_checkpoint_async(
+            training_client=training_client,
+            name=name,
+            log_path=log_path,
+            loop_state=loop_state,
+            kind="both",
+        ),
+        name="save_checkpoint",
+        total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
+    )
+
+
+async def save_run_checkpoint(
+    trainer: "PlatoonTinkerRLTrainer",
+    training_client: tinker.TrainingClient,
+    name: str,
+    *,
+    batch: int,
+    policy_version: int,
+    optimizer_steps: int,
+    wait: Waiter,
+) -> dict[str, str]:
+    """Save full checkpoint ``name`` of the trainer's run (:func:`save_full_checkpoint`, into its ``run_log_path``),
+    whose ``loop_state`` holds ``batch``, the step a resume from it starts at; the W&B run, so that a resume goes on
+    with it (tinker_cookbook's own save leaves it out); ``policy_version`` and ``optimizer_steps``; in that order, then
+    what ``_checkpoint_state`` adds, which runs before the save starts.  The paths the save wrote."""
+
+    log_path = trainer.run_log_path
+    loop_state = await trainer._checkpoint_state(
+        name,
+        {
+            "batch": batch,
+            "wandb_run_id": trainer._stats_logger.wandb_run_id,
+            "policy_version": policy_version,
+            "optimizer_steps": optimizer_steps,
+        },
+    )
+    return await save_full_checkpoint(training_client, name, log_path=log_path, loop_state=loop_state, wait=wait)
+
+
+def _feeding(trainer: "PlatoonTinkerRLTrainer", watchdog: Watchdog | None) -> Waiter:
+    """The waiter of a save after a step: the trainer's heartbeat, which feeds ``watchdog`` while the save runs."""
+
+    async def wait(awaitable: Awaitable[Any], *, name: str, total_timeout: float | None = None) -> Any:
+        return await trainer._await_with_heartbeat(awaitable, name=name, watchdog=watchdog, total_timeout=total_timeout)
+
+    return wait
+
+
+def checkpoint_kind_for_step(steps_completed: int, save_every: int | None, recovery_every: int | None) -> str | None:
+    """The full checkpoint that the cadence saves after a start's ``steps_completed``-th step (counted from 1), in
+    precedence order:
+
+    1. ``steps_completed % save_every == 0`` - ``"permanent"``, a full checkpoint
+       named ``<batch>``, kept forever. ``save_every`` is ``None`` for
+       ``checkpoint.every: 0``, which saves no permanent checkpoints.
+    2. ``recovery_every`` set and ``steps_completed % recovery_every == 0``
+       - ``"recovery"``, an AReaL-style recovery full checkpoint named
+       ``recovery-<batch>``. Same weights+optimizer payload, but
+       ``checkpoint.keep_recovery`` deletes all but the newest few once the
+       save is recorded (:mod:`platoon.train.checkpoints.pruning`),
+       so the recovery cadence can run every step without growing the
+       checkpoint store.
+    3. otherwise - None: a weights-only update (no disk write in the gateway's
+       full mode), which cannot be resumed from.
+    """
+
+    if save_every is not None and steps_completed % save_every == 0:
+        return "permanent"
+    if recovery_every is not None and steps_completed % recovery_every == 0:
+        return "recovery"
+    return None
+
+
+async def save_weights_only(training_client: tinker.TrainingClient) -> tinker.SamplingClient:
+    """The sampling client of the weights after a step that saves no full checkpoint, from a weights-only save."""
+
+    try:
+        sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+    except Exception as e:
+        logger.exception(f"save_weights_and_get_sampling_client_async failed: {e}")
+        raise
+    logger.debug("Weights saved and sampling client created")
+    return sampling_client
+
+
+def sampler_from(training_client: tinker.TrainingClient, path_dict: dict[str, str]) -> tinker.SamplingClient:
+    """The sampling client of the sampler weights that a full checkpoint saved (``path_dict["sampler_path"]``)."""
+
+    logger.info(f"Checkpoint async completed. Creating sampling client from {path_dict['sampler_path']}")
+    try:
+        sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
+    except Exception as e:
+        logger.exception(f"create_sampling_client failed: {e}")
+        raise
+    logger.info("Sampling client created successfully")
+    return sampling_client
+
+
 async def _save_checkpoint_and_get_sampling_client(
     trainer: "PlatoonTinkerRLTrainer",
     training_client: tinker.TrainingClient,
@@ -45,95 +168,53 @@ async def _save_checkpoint_and_get_sampling_client(
     policy_version: int | None = None,
     optimizer_steps: int | None = None,
 ) -> tinker.SamplingClient:
-    """Save a checkpoint with wandb_run_id and return the new sampling client.
+    """Save after step ``i_batch`` as the cadence says (:func:`checkpoint_kind_for_step`; ``steps_completed`` counts
+    steps since ``start_batch``), and return the new sampling client: a full checkpoint's
+    (:func:`save_run_checkpoint`, then :func:`sampler_from`), whose name and batch are ``i_batch + 1`` because the
+    weights are the ones *after* training on ``i_batch``, so a resume starts from ``i_batch + 1``, and whose
+    ``policy_version`` and ``optimizer_steps`` are those given, else that batch; or a weights-only save's
+    (:func:`save_weights_only`).  A recovery checkpoint goes to the pruner once ``checkpoints.jsonl`` records it."""
 
-    Three cadences, in precedence order (``steps_completed`` counts steps
-    since ``start_batch``; the name/batch are ``i_batch + 1`` because the
-    weights are the ones *after* training on ``i_batch``, so a resume starts
-    from ``i_batch + 1``):
-
-    1. ``steps_completed % save_every == 0`` - a *permanent* full checkpoint
-       named ``<batch>``, kept forever. ``save_every`` is ``None`` for
-       ``checkpoint.every: 0``, which saves no permanent checkpoints.
-    2. ``recovery_every`` set and ``steps_completed % recovery_every == 0``
-       - an AReaL-style *recovery* full checkpoint named
-       ``recovery-<batch>``. Same weights+optimizer payload, but
-       ``checkpoint.keep_recovery`` deletes all but the newest few once the
-       save is recorded (:mod:`platoon.train.checkpoints.pruning`),
-       so the recovery cadence can run every step without growing the
-       checkpoint store.
-    3. otherwise - a weights-only update (no disk write in the gateway's
-       full mode), which cannot be resumed from.
-
-    Unlike tinker_cookbook's version this puts the wandb_run_id in the
-    checkpoint loop_state so WandB run resumption works.
-    """
     # Count steps completed since start_batch (1-indexed for human intuition)
     steps_completed = i_batch - start_batch + 1
     next_batch = i_batch + 1
-    if save_every is not None and steps_completed % save_every == 0:
-        checkpoint_kind, checkpoint_name = "permanent", f"{next_batch:06d}"
-    elif recovery_every is not None and steps_completed % recovery_every == 0:
-        checkpoint_kind = "recovery"
-        checkpoint_name = f"{RECOVERY_CHECKPOINT_PREFIX}{next_batch:06d}"
-    else:
-        checkpoint_kind, checkpoint_name = None, None
-
-    if checkpoint_name is None:
+    checkpoint_kind = checkpoint_kind_for_step(steps_completed, save_every, recovery_every)
+    if checkpoint_kind is None:
         logger.info(
             f"Saving weights only after completing batch {i_batch} "
             f"(steps_completed={steps_completed}, save_every={save_every}, "
             f"recovery_every={recovery_every})"
         )
-        try:
-            sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-        except Exception as e:
-            logger.exception(f"save_weights_and_get_sampling_client_async failed: {e}")
-            raise
-        logger.debug("Weights saved and sampling client created")
-        return sampling_client
+        return await save_weights_only(training_client)
 
     # Save a full (weights + optimizer) checkpoint with loop state.
+    checkpoint_name = (
+        f"{next_batch:06d}" if checkpoint_kind == "permanent" else f"{RECOVERY_CHECKPOINT_PREFIX}{next_batch:06d}"
+    )
     logger.info(
         f"Saving {checkpoint_kind} checkpoint {checkpoint_name} after completing batch {i_batch} "
         f"(steps_completed={steps_completed}, save_every={save_every}, "
         f"recovery_every={recovery_every})"
     )
+    policy_version = next_batch if policy_version is None else policy_version
+    optimizer_steps = next_batch if optimizer_steps is None else optimizer_steps
     try:
         # A full-parameter save_state takes minutes; keep the watchdog fed.
-        path_dict = await trainer._await_with_heartbeat(
-            checkpoint_utils.save_checkpoint_async(
-                training_client=training_client,
-                name=checkpoint_name,
-                log_path=trainer.run_log_path,
-                loop_state=await trainer._checkpoint_state(
-                    checkpoint_name,
-                    {
-                        "batch": next_batch,
-                        "wandb_run_id": trainer._stats_logger.wandb_run_id,
-                        "policy_version": next_batch if policy_version is None else policy_version,
-                        "optimizer_steps": next_batch if optimizer_steps is None else optimizer_steps,
-                    },
-                ),
-                kind="both",
-            ),
-            name="save_checkpoint",
-            watchdog=watchdog,
-            total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
+        path_dict = await save_run_checkpoint(
+            trainer,
+            training_client,
+            checkpoint_name,
+            batch=next_batch,
+            policy_version=policy_version,
+            optimizer_steps=optimizer_steps,
+            wait=_feeding(trainer, watchdog),
         )
     except Exception as e:
         logger.exception(f"save_checkpoint_async failed: {e}")
         raise
     if checkpoint_kind == "recovery":
-        trainer._recovery_saved(path_dict, next_batch if policy_version is None else policy_version)
-    logger.info(f"Checkpoint async completed. Creating sampling client from {path_dict['sampler_path']}")
-    try:
-        sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
-    except Exception as e:
-        logger.exception(f"create_sampling_client failed: {e}")
-        raise
-    logger.info("Sampling client created successfully")
-    return sampling_client
+        trainer._recovery_saved(path_dict, policy_version)
+    return sampler_from(training_client, path_dict)
 
 
 async def _checkpoint_state(

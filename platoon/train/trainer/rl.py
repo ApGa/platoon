@@ -1,5 +1,7 @@
 """The trainer (``PlatoonTinkerRLTrainer``): one start of training, from its training client and resume point
-through the train and evaluation loops to the last save.
+through the train and evaluation loops to the last save.  ``train()`` reads as the start's phases, each a method of the
+trainer, in the order they run: the checks, the training client at the start point, the rollouts' startup, the draws
+taken up, the launch save, what the loops share, the loops, the save at exit.
 
 What it does at each stage lives in the stage packages (``platoon.train.trainer``, ``.step``, ``.dispatch``,
 ``.checkpoints``, ``.evaluation``): each of those methods is a module function there that takes the trainer first,
@@ -26,8 +28,8 @@ from platoon.train.checkpoints.pruning import (
     check_recovery_pruning,
     read_checkpoint_records,
 )
-from platoon.train.checkpoints.resume import _resume_policy_counters
-from platoon.train.checkpoints.saving import SAVE_CHECKPOINT_TIMEOUT_S
+from platoon.train.checkpoints.resume import StartPoint
+from platoon.train.components import normalize_environment_configs
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, evaluates
 from platoon.train.dataloader import PlatoonTinkerDataloader, _run_steps
 from platoon.train.dataset_order import EpochOrder
@@ -39,6 +41,7 @@ from platoon.train.evaluation import plan as evaluation_plan
 from platoon.train.evaluation.plan import _evaluation_plan
 from platoon.train.evaluation.record import EVALUATIONS_NAME, completed_evaluation_steps
 from platoon.train.sampler_runtime import TaskSampling
+from platoon.train.startup import RolloutStartup
 from platoon.train.step import publish
 from platoon.train.step.batch_transforms import BatchTransform, build_default_batch_transforms
 from platoon.train.task_records import TaskRecorder, record_lost_state, resume_record
@@ -305,10 +308,50 @@ class PlatoonTinkerRLTrainer:
     _setup_signal_handlers = signals._setup_signal_handlers
 
     async def train(self, train_workflow: RolloutWorkflow, eval_workflow: RolloutWorkflow | None = None):
+        """Train this start of the run, from the checkpoint it resumes from (:class:`StartPoint`; none for a fresh run)
+        to the run's last step: open the training service and the training client, take up the draws the checkpoint
+        left outstanding, save the launch checkpoint, then run the train loop, and beside it the evaluation loop when
+        the start evaluates, and save once they stop.  Each phase is a method below, in the order it runs."""
+
+        self._require_entered()
+        self._check_before_start()
+        shutdown_event = asyncio.Event()
+
+        # Set up signal handlers for graceful Ctrl+C shutdown
+        self._setup_signal_handlers(shutdown_event)
+
+        # A key the service refuses (401, 403) ends training with one line that names the key and the service.
+        with key_refusals():
+            service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
+        start = StartPoint.read(self.run_log_path, self.config.train.num_minibatches)
+        with key_refusals(asked="a training client"):
+            training_client = await self._open_training_client(service_client, start.resume_info, stop=shutdown_event)
+        if training_client is None:
+            return  # stopped before training began: nothing to save
+
+        startup = await self._begin_rollout_startup(train_workflow, eval_workflow)
+        train_dataloader, end_batch = self._prepare_draws(start)
+        sampling_client = await self._launch(training_client, start)
+        # Also waits for the staging of the harness toolchains (startup.STAGING_WAIT_S at most), then starts the
+        # watchdog, which _run_loops stops.
+        shared_state = await self._loop_state(
+            start, shutdown_event, service_client, training_client, sampling_client, train_dataloader, startup
+        )
+        interrupted = await self._run_loops(shared_state, start, end_batch, train_workflow, eval_workflow)
+        await self._save_at_exit(shared_state, start.batch, end_batch, interrupted)
+        await self._close_after_training()
+
+    def _require_entered(self) -> None:
+        """train() runs inside ``async with trainer:``, which opens the stats logger and the train tracker."""
+
         if self._stats_logger is None or self._train_tracker is None:
             raise RuntimeError(
                 "Trainer must be used as an async context manager. Use 'async with trainer:' before calling train()."
             )
+
+    def _check_before_start(self) -> None:
+        """The config's checks before training opens its service: ``checkpoint.keep_recovery``'s rules, and a warning
+        that ``eval.at_start`` is ignored when evaluation during training is off."""
 
         # keep_recovery's rules again, before training opens its service: a config class that overrides the training
         # config's own checks loads without them (platoon train checks them first, in training_problems).
@@ -318,85 +361,85 @@ class PlatoonTinkerRLTrainer:
                 "eval.at_start is ignored: eval.every is 0, which turns evaluation during training off, the starting "
                 "policy's too"
             )
-        shutdown_event = asyncio.Event()
 
-        # Set up signal handlers for graceful Ctrl+C shutdown
-        self._setup_signal_handlers(shutdown_event)
+    async def _begin_rollout_startup(
+        self, train_workflow: RolloutWorkflow, eval_workflow: RolloutWorkflow | None
+    ) -> RolloutStartup:
+        """Begin readying the rollouts, ahead of the first one, while the trainer saves at launch: the toolchains the
+        environments' harnesses run from are staged on this node, and the rollout workers' fork servers start
+        importing (:mod:`platoon.train.startup`), the evaluation's only when the start evaluates.  No rollout starts
+        before the staging is done (:meth:`_loop_state` waits for it)."""
 
-        # A key the service refuses (401, 403) ends training with one line that names the key and the service.
-        with key_refusals():
-            service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
-
-        resume_info = checkpoint_utils.get_last_checkpoint(self.run_log_path)
-        start_batch = (resume_info.batch or 0) if resume_info else 0
-        policy_version, optimizer_steps = _resume_policy_counters(resume_info, self.config.train.num_minibatches)
-
-        with key_refusals(asked="a training client"):
-            training_client = await self._open_training_client(service_client, resume_info, stop=shutdown_event)
-        if training_client is None:
-            return  # stopped before training began: nothing to save
-
-        # Ahead of the first rollout, while the trainer saves at launch: the toolchains the environments' harnesses run
-        # from are staged on this node, and the rollout workers' fork servers start importing (platoon.train.startup).
-        # No rollout starts before the staging is done (startup.ready() below).
-        from platoon.train.components import normalize_environment_configs
-        from platoon.train.startup import RolloutStartup
-
-        startup = await RolloutStartup.begin(
+        return await RolloutStartup.begin(
             normalize_environment_configs(getattr(self.config, "environments", None)),
             [train_workflow, eval_workflow if self.eval_dataset is not None and evaluates(self.config) else None],
         )
 
+    def _prepare_draws(self, start: StartPoint) -> tuple[PlatoonTinkerDataloader, int]:
+        """Start the run's per-task statistics and the dispatcher of the training groups, both before the launch
+        save.  The training dataloader, and the end batch: the run's last step."""
+
         # The run's per-task statistics, those of the checkpoint it resumes from loaded before the launch save, which
         # saves them: a crash before the next full save loses none of them.
-        self._begin_task_records(resume_info, start_batch)
+        self._begin_task_records(start.resume_info, start.batch)
         # The dispatcher of the training groups, which takes up the draws the checkpoint left outstanding before the
         # launch save, which saves them again: its kept groups, the draws to draw again, and the order's position.
         train_dataloader = PlatoonTinkerDataloader(
             self.train_dataset, self.config.train.batch_size, order=self.train_order
         )
         end_batch = _run_steps(self.config, len(train_dataloader))
-        self._dispatcher = self._new_dispatcher(train_dataloader, start_batch, end_batch)
-        if resume_info is not None:
-            self._restore_dispatch(self._dispatcher, resume_info, policy_version)
+        self._dispatcher = self._new_dispatcher(train_dataloader, start.batch, end_batch)
+        if start.resume_info is not None:
+            self._restore_dispatch(self._dispatcher, start.resume_info, start.policy_version)
+        return train_dataloader, end_batch
+
+    async def _launch(self, training_client: tinker.TrainingClient, start: StartPoint) -> tinker.SamplingClient:
+        """Save the launch checkpoint, then start from it: the per-task statistics' events, the pruning of the run's
+        recovery checkpoints, and the first sampling client, of the launch save's weights, which the policy samples at
+        the checkpoint's policy version.  The sampling client."""
 
         # Initial sampling client to use (the watchdog is not running yet). The
         # launch save is a *recovery* checkpoint: every (re)launch writes one, so
         # naming it permanently would accumulate a ~490 GB checkpoint per restart.
-        launch_checkpoint_name = f"{RECOVERY_CHECKPOINT_PREFIX}{start_batch:06d}"
-        logger.info(f"Saving recovery checkpoint {launch_checkpoint_name} at launch (batch {start_batch})")
-        path_dict = await self._await_with_heartbeat(
-            checkpoint_utils.save_checkpoint_async(
-                training_client=training_client,
-                name=launch_checkpoint_name,
-                log_path=self.run_log_path,
-                loop_state=await self._checkpoint_state(
-                    launch_checkpoint_name,
-                    {
-                        "batch": start_batch,
-                        "wandb_run_id": self._stats_logger.wandb_run_id,
-                        "policy_version": policy_version,
-                        "optimizer_steps": optimizer_steps,
-                    },
-                ),
-                kind="both",
-            ),
-            name="save_checkpoint",
-            total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
+        launch_checkpoint_name = f"{RECOVERY_CHECKPOINT_PREFIX}{start.batch:06d}"
+        logger.info(f"Saving recovery checkpoint {launch_checkpoint_name} at launch (batch {start.batch})")
+        path_dict = await saving.save_run_checkpoint(
+            self,
+            training_client,
+            launch_checkpoint_name,
+            batch=start.batch,
+            policy_version=start.policy_version,
+            optimizer_steps=start.optimizer_steps,
+            wait=self._await_with_heartbeat,
         )
         self._task_records_started()
         # Pruning starts with the launch save, so a resumed run first deletes what its earlier starts left.
         self._recovery_pruner = self._start_recovery_pruning()
-        self._recovery_saved(path_dict, policy_version)
+        self._recovery_saved(path_dict, start.policy_version)
+        # Not saving.sampler_from, whose log lines the launch never wrote.
         sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
-        sampling_client_step = policy_version
-        sampling_client_updated_event = asyncio.Event()
-        sampling_client_updated_event.set()
 
         # Set initial version and update sampling client (without auto-incrementing)
-        self.model_info.llm.set_version(policy_version)
+        self.model_info.llm.set_version(start.policy_version)
         self.model_info.llm.update_sampling_client(sampling_client, increment_version=False)
+        return sampling_client
 
+    async def _loop_state(
+        self,
+        start: StartPoint,
+        shutdown_event: asyncio.Event,
+        service_client: tinker.ServiceClient,
+        training_client: tinker.TrainingClient,
+        sampling_client: tinker.SamplingClient,
+        train_dataloader: PlatoonTinkerDataloader,
+        startup: RolloutStartup,
+    ) -> TrainLoopSharedState:
+        """What the train and evaluation loops share (:class:`TrainLoopSharedState`), once the harness toolchains are
+        staged (``startup``): the optimizer's settings, the evaluation's dataloader, the clients, the first sampling
+        client (new: the evaluation loop's first wait passes at once), the watchdog, started when it is enabled, and
+        where the start begins."""
+
+        assert self._stats_logger is not None and self._train_tracker is not None  # train() checked (_require_entered)
         optimizer_params = tinker.AdamParams(
             learning_rate=self.config.train.optimizer.learning_rate,
             beta1=self.config.train.optimizer.beta1,
@@ -427,16 +470,18 @@ class PlatoonTinkerRLTrainer:
             )
             watchdog.start()
 
-        shared_state = TrainLoopSharedState(
+        sampling_client_updated_event = asyncio.Event()
+        sampling_client_updated_event.set()
+        return TrainLoopSharedState(
             config=self.config,
             shutdown_event=shutdown_event,
-            train_step=start_batch,
+            train_step=start.batch,
             optimizer_params=optimizer_params,
             service_client=service_client,
             training_client=training_client,
             sampling_client=sampling_client,
-            sampling_client_step=sampling_client_step,
-            optimizer_steps=optimizer_steps,
+            sampling_client_step=start.policy_version,
+            optimizer_steps=start.optimizer_steps,
             sampling_client_updated_event=sampling_client_updated_event,
             model_info=self._model_info,
             train_dataloader=train_dataloader,
@@ -444,24 +489,37 @@ class PlatoonTinkerRLTrainer:
             stats_logger=self._stats_logger,
             train_tracker=self._train_tracker,
             watchdog=watchdog,
-            start_step=start_batch,
+            start_step=start.batch,
             # A start that resumes does not run again the evaluation of the step it resumes at when an earlier start
             # completed it; a fresh run has none to leave out.
-            start_step_evaluated=resume_info is not None
-            and start_batch in completed_evaluation_steps(self.run_log_path),
+            start_step_evaluated=start.resume_info is not None
+            and start.batch in completed_evaluation_steps(self.run_log_path),
             evaluations_path=os.path.join(self.run_log_path, EVALUATIONS_NAME),
         )
 
+    async def _run_loops(
+        self,
+        shared_state: TrainLoopSharedState,
+        start: StartPoint,
+        end_batch: int,
+        train_workflow: RolloutWorkflow,
+        eval_workflow: RolloutWorkflow | None,
+    ) -> bool:
+        """Run the train loop to ``end_batch``, and beside it the evaluation loop when the start evaluates (its plan
+        logged), under this start's limit on the rollouts starting at once, until the loops stop; then stop the
+        watchdog.  Whether training was interrupted (a signal, a cancellation, a stop before an update)."""
+
         shared_state.eval_loop_running = self._evaluates_during_training(shared_state)
         if shared_state.eval_loop_running:
-            logger.log(*_evaluation_plan(shared_state, resumed=resume_info is not None, end=end_batch))
+            logger.log(*_evaluation_plan(shared_state, resumed=start.resume_info is not None, end=end_batch))
         _limit_starts(self.config, train_workflow, eval_workflow if shared_state.eval_loop_running else None)
 
+        watchdog = shared_state.watchdog
         interrupted = False
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(
-                    self._train_loop(tg, shared_state, start_batch, end_batch, train_workflow), name="train_loop"
+                    self._train_loop(tg, shared_state, start.batch, end_batch, train_workflow), name="train_loop"
                 )
                 if shared_state.eval_loop_running:
                     tg.create_task(self._eval_loop(shared_state, eval_workflow), name="eval_loop")
@@ -474,6 +532,14 @@ class PlatoonTinkerRLTrainer:
             # Stop watchdog
             if watchdog:
                 watchdog.stop()
+        return interrupted
+
+    async def _save_at_exit(
+        self, shared_state: TrainLoopSharedState, start_batch: int, end_batch: int, interrupted: bool
+    ) -> None:
+        """Once the loops stop: an interrupted start that trained a step saves a permanent checkpoint to resume from
+        (``<step>_interrupted``; one that trained none saves nothing), and a start that trained to ``end_batch`` the
+        final one; a start that had no step left to train says why."""
 
         # Save checkpoint
         current_step = shared_state.train_step
@@ -481,47 +547,27 @@ class PlatoonTinkerRLTrainer:
             # Save interrupt checkpoint so we can resume
             if current_step > start_batch:
                 logger.info(f"Saving permanent checkpoint {current_step:06d}_interrupted at step {current_step}...")
-                await self._await_with_heartbeat(
-                    checkpoint_utils.save_checkpoint_async(
-                        training_client=shared_state.training_client,
-                        name=f"{current_step:06d}_interrupted",
-                        log_path=self.run_log_path,
-                        kind="both",
-                        loop_state=await self._checkpoint_state(
-                            f"{current_step:06d}_interrupted",
-                            {
-                                "batch": current_step,
-                                "wandb_run_id": self._stats_logger.wandb_run_id,
-                                "policy_version": shared_state.model_info.llm.version,
-                                "optimizer_steps": shared_state.optimizer_steps,
-                            },
-                        ),
-                    ),
-                    name="save_checkpoint",
-                    total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
+                await saving.save_run_checkpoint(
+                    self,
+                    shared_state.training_client,
+                    f"{current_step:06d}_interrupted",
+                    batch=current_step,
+                    policy_version=shared_state.model_info.llm.version,
+                    optimizer_steps=shared_state.optimizer_steps,
+                    wait=self._await_with_heartbeat,
                 )
                 logger.info(f"Checkpoint saved. Resume training to continue from step {current_step}.")
         elif start_batch < end_batch:
             # Training completed normally - save final checkpoint
             logger.info(f"Saving permanent checkpoint final at step {end_batch}...")
-            await self._await_with_heartbeat(
-                checkpoint_utils.save_checkpoint_async(
-                    training_client=shared_state.training_client,
-                    name="final",
-                    log_path=self.run_log_path,
-                    kind="both",
-                    loop_state=await self._checkpoint_state(
-                        "final",
-                        {
-                            "batch": end_batch,
-                            "wandb_run_id": self._stats_logger.wandb_run_id,
-                            "policy_version": shared_state.model_info.llm.version,
-                            "optimizer_steps": shared_state.optimizer_steps,
-                        },
-                    ),
-                ),
-                name="save_checkpoint",
-                total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
+            await saving.save_run_checkpoint(
+                self,
+                shared_state.training_client,
+                "final",
+                batch=end_batch,
+                policy_version=shared_state.model_info.llm.version,
+                optimizer_steps=shared_state.optimizer_steps,
+                wait=self._await_with_heartbeat,
             )
             logger.info("Training complete successfully!")
         elif shared_state.eval_loop_running and shared_state.evaluation_due(start_batch):
@@ -535,6 +581,10 @@ class PlatoonTinkerRLTrainer:
                 )
         else:
             logger.info("Training was already complete; nothing to do")
+
+    async def _close_after_training(self) -> None:
+        """Stop the pruning of the run's recovery checkpoints, and close the per-task statistics."""
+
         if self._recovery_pruner is not None:
             await self._recovery_pruner.aclose()
         if (recorder := getattr(self, "_recorder", None)) is not None:

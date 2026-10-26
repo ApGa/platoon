@@ -19,6 +19,12 @@ This package hosts the seam between the trainer and a single rollout:
     ``python -m platoon.train.workers.entrypoint <request>``.
 ``supervisor``
     The parent side: launch, deadline, kill-the-tree, classify.
+``fork_servers``
+    The supervisor's fork server: which one forks a worker, and starting,
+    replacing, warming and closing it.
+``outcomes``
+    What a worker's exit comes to (``WorkerOutcome``), and removing what it
+    left beside its request.
 ``registry``
     The node-local record of the workers a trainer runs, so that a dead
     trainer's workers can be killed.
