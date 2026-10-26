@@ -297,7 +297,7 @@ def _dataset(
     """Fetch the entry's dataset into its lock (``platoon harbor fetch``'s rules), or read the lock it names; with
     the lock, the lines of its hold-out's report, if it has one."""
 
-    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed
+    from platoon.envs.harbor.fetch import FetchError, answering_lock, answering_lock_path, fetch_if_needed
     from platoon.envs.harbor.lock import LockError, read_lock
 
     locked = service.locked
@@ -326,7 +326,7 @@ def _dataset(
         if lock is None:
             return PrepareStep(where, "dataset", "missing", f"would fetch {settings.dataset}: {gap}"), None, []
         again = " (a local directory, which prepare fetches again)" if local else ""
-        detail = f"current: the lock {settings.lock_path()}, {_tasks(lock)}{again}"
+        detail = f"current: the lock {answering_lock_path(settings)}, {_tasks(lock)}{again}"
         step = PrepareStep(where, "dataset", "current", detail)
     else:
         fetched_before = local and answering_lock(settings) is not None  # a directory is fetched again every time
@@ -338,7 +338,9 @@ def _dataset(
             again = " again (a local directory's files may have changed)" if fetched_before else ""
             detail = f"fetched {settings.dataset}{again} into the lock {settings.lock_path()}, {_tasks(lock)}"
         else:
-            detail = f"current: the lock {settings.lock_path()} answers it and the cache holds its {_tasks(lock)}"
+            detail = (
+                f"current: the lock {answering_lock_path(settings)} answers it and the cache holds its {_tasks(lock)}"
+            )
         step = PrepareStep(where, "dataset", "done" if fetched else "current", detail)
     return step, lock, _report(where, service)
 
@@ -364,12 +366,12 @@ def _current(settings: Any) -> tuple[DatasetLock | None, str]:
     """The lock that answers ``settings`` when it is current (:func:`~platoon.envs.harbor.fetch.current_lock`), else
     None and why not."""
 
-    from platoon.envs.harbor.fetch import answering_lock, current_lock
+    from platoon.envs.harbor.fetch import answering_lock, answering_lock_path, current_lock
 
     lock = current_lock(settings)
     if lock is not None:
         return lock, ""
-    path = settings.lock_path()
+    path = answering_lock_path(settings)
     answering = answering_lock(settings)
     if answering is None:
         why = "it does not exist" if not path.exists() else "it was written for other fetch settings"

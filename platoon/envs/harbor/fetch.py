@@ -5,7 +5,7 @@
     tasks: [splits/phase0-smoldata.json]         # allowlists of task ids: only these are downloaded
     select: {source_dataset: [FineEnvs/SmolDataEnvs-harbor-train]}   # filters on the dataset index's fields
     overlays: [overlays/smoldata-run-before-copy]
-    refuse: {sidecars: true, gpus: true, agent_user: true, privileges: true, per_task_build: false,
+    refuse: {sidecars: false, gpus: true, agent_user: true, privileges: true, per_task_build: false,
              uploads_over_mb: 100}
     index: [{path: data/tasks.jsonl, fields: [split_group]}, {metadata: [kaggle_dataset_name]}]
 
@@ -180,9 +180,10 @@ class RefusePolicy:
     always records (``task_config``: multi-step and non-Linux tasks, a bad ``network_mode``, a stack's sidecar whose
     command platoon does not know, ...)."""
 
-    # Compose stacks with services beyond `main`, as `stack`; with `sidecars: false` they are locked as stacks, which a
-    # session runs on a provider that runs stacks (the stacks capability) and refuses elsewhere.
-    sidecars: bool = True
+    # Compose stacks with services beyond `main`, as `stack`; with `sidecars: false`, the default since platoon 0.5,
+    # they are locked as stacks, which a session runs on a provider that runs stacks (the stacks capability) and a run
+    # refuses elsewhere when it lists its tasks.
+    sidecars: bool = False
     gpus: bool = True  # tasks that ask for GPUs
     agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix (users to run as)
     per_task_build: bool = False  # Dockerfiles whose build prefix no other task shares
@@ -331,15 +332,36 @@ class FetchConfig:
     def lock_path(self) -> Path:
         return self.lock if self.lock is not None else self.cache / "locks" / f"{self.inputs_digest()[:16]}.lock.json"
 
+    def earlier_lock_path(self) -> Path | None:
+        """Where the lock is that platoon wrote for this config before ``refuse.sidecars`` defaulted to false
+        (:meth:`earlier_inputs_digest`): ``lock``, else the cache's lock named by that digest; None for a config that
+        refuses stacks."""
+
+        earlier = self.earlier_inputs_digest()
+        if earlier is None:
+            return None
+        return self.lock if self.lock is not None else self.cache / "locks" / f"{earlier[:16]}.lock.json"
+
     def inputs_digest(self) -> str:
         """SHA-256 over what the fetch is asked for, so a lock can tell whether it answers this config."""
 
+        return self._inputs_digest(self.refuse)
+
+    def earlier_inputs_digest(self) -> str | None:
+        """The inputs digest that this config, which refuses no stacks, had when it set no ``refuse.sidecars`` before
+        that defaulted to false: its digest with ``sidecars: true``.  A lock that records it still answers the config
+        where it refused no task as a stack (:func:`answers`).  None for a config that refuses stacks, whose digest has
+        not changed."""
+
+        return None if self.refuse.sidecars else self._inputs_digest(replace(self.refuse, sidecars=True))
+
+    def _inputs_digest(self, refuse: RefusePolicy) -> str:
         payload = {
             "dataset": self.dataset,
             "tasks": [_sha256_file(path) for path in self.tasks],
             "select": {key: list(values) for key, values in sorted(self.select.items())},
             "overlays": [Overlay.load(path).digest for path in self.overlays],
-            "refuse": self.refuse.inputs(),
+            "refuse": refuse.inputs(),
             "index": [index.__dict__ for index in self.index],
         }
         # Only when set, so that a lock written before these keys still answers a config that sets neither.
@@ -439,12 +461,44 @@ def is_pinned(dataset: str) -> bool:
     return is_local(dataset) or source_pinned(dataset)
 
 
-def answering_lock(config: FetchConfig) -> DatasetLock | None:
-    """The lock at ``config.lock_path()`` when it answers ``config`` (it was written for these fetch settings), else
-    None."""
+def answers(lock: DatasetLock, config: FetchConfig) -> bool:
+    """Whether ``lock`` was written for ``config``'s fetch settings: by its inputs digest, or, for a lock that platoon
+    wrote before ``refuse.sidecars`` defaulted to false, by the digest it had then
+    (:meth:`FetchConfig.earlier_inputs_digest`), where it refused no task as a stack (``stack``): the new default
+    changes nothing in it."""
 
-    existing = _read_if_present(config.lock_path())
-    return existing if existing is not None and existing.inputs == config.inputs_digest() else None
+    if lock.inputs == config.inputs_digest():
+        return True
+    earlier = config.earlier_inputs_digest()
+    return earlier is not None and lock.inputs == earlier and not any(_refused_as_stack(task) for task in lock.tasks)
+
+
+def _refused_as_stack(task: LockedTask) -> bool:
+    return task.refused is not None and task.refused.split(":")[0] == "stack"
+
+
+def answering_lock(config: FetchConfig) -> DatasetLock | None:
+    """The lock that answers ``config`` (:func:`answers`), else None: the one at ``config.lock_path()``, else one
+    written before ``refuse.sidecars`` defaulted to false (:meth:`FetchConfig.earlier_lock_path`)."""
+
+    located = _answering(config)
+    return located[1] if located is not None else None
+
+
+def answering_lock_path(config: FetchConfig) -> Path:
+    """Where the lock that answers ``config`` is (:func:`answering_lock`), else where a fetch of it writes its lock
+    (:meth:`FetchConfig.lock_path`)."""
+
+    located = _answering(config)
+    return located[0] if located is not None else config.lock_path()
+
+
+def _answering(config: FetchConfig) -> tuple[Path, DatasetLock] | None:
+    for path in dict.fromkeys(path for path in (config.lock_path(), config.earlier_lock_path()) if path is not None):
+        existing = _read_if_present(path)
+        if existing is not None and answers(existing, config):
+            return path, existing
+    return None
 
 
 def current_lock(config: FetchConfig) -> DatasetLock | None:
@@ -465,18 +519,18 @@ def ensure_lock(config: FetchConfig, *, fetch_allowed: bool, log: Callable[[str]
     where ``fetch_allowed``: the trainer, never a rollout worker)."""
 
     path = config.lock_path()
-    inputs = config.inputs_digest()
-    existing = _read_if_present(path)
-    if existing is not None and existing.inputs == inputs:
+    located = _answering(config)
+    if located is not None:
+        found, existing = located
         missing = (
             [task.name for task in existing.tasks if not (config.cache / task.path).is_dir()] if fetch_allowed else []
         )
         if not missing or not config.pinned:
             return existing
         logger.warning(
-            "The cache %s lacks %d task(s) of the lock %s; fetching them again", config.cache, len(missing), path
+            "The cache %s lacks %d task(s) of the lock %s; fetching them again", config.cache, len(missing), found
         )
-    why = "does not exist" if existing is None else "was written for other fetch settings"
+    why = _why_not(config, path)
     if not fetch_allowed:
         raise LockError(
             f"The Harbor lock {path} {why}: run `platoon prepare` on the run's config (or `platoon harbor fetch`), or "
@@ -489,12 +543,28 @@ def ensure_lock(config: FetchConfig, *, fetch_allowed: bool, log: Callable[[str]
             "`platoon harbor fetch CONFIG --update`, or name a commit (a revision or digest on the Harbor Hub)"
         )
     with _flock(fetch_lock_file(config)):
-        existing = _read_if_present(path)  # another process may have fetched while this one waited
-        if existing is not None and existing.inputs == inputs:
-            if all((config.cache / task.path).is_dir() for task in existing.tasks):
-                return existing
+        existing = answering_lock(config)  # another process may have fetched while this one waited
+        if existing is not None and all((config.cache / task.path).is_dir() for task in existing.tasks):
+            return existing
         (log or logger.info)(f"Fetching {config.dataset} into {config.cache} (lock {path})")
         return fetch(config, log=log)
+
+
+def _why_not(config: FetchConfig, path: Path) -> str:
+    """Why no lock answers ``config``, the lock at ``path`` being where a fetch writes it; naming a lock written for it
+    before ``refuse.sidecars`` defaulted to false that refused stacks, which a fetch now locks as runnable."""
+
+    why = "does not exist" if _read_if_present(path) is None else "was written for other fetch settings"
+    earlier = config.earlier_lock_path()
+    old = _read_if_present(earlier) if earlier is not None else None
+    stacks = sum(1 for task in old.tasks if _refused_as_stack(task)) if old is not None else 0
+    if stacks and old is not None and old.inputs == config.earlier_inputs_digest():
+        why += (
+            f" (the lock {earlier}, which platoon wrote for these settings before refuse.sidecars defaulted to false, "
+            f"refused {stacks} task(s) as stacks, which a fetch now locks as runnable; refuse: {{sidecars: true}} "
+            "keeps them refused)"
+        )
+    return why
 
 
 def fetch_lock_file(config: FetchConfig) -> Path:

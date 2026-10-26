@@ -19,7 +19,15 @@ from site_cache import use_site_cache
 
 from platoon.envs.harbor import HarborEnvironmentService, references, sources
 from platoon.envs.harbor.compose import COMPOSE_RULE
-from platoon.envs.harbor.fetch import FetchError, ensure_lock, fetch, fetch_config, fetch_if_needed, is_pinned
+from platoon.envs.harbor.fetch import (
+    FetchError,
+    answering_lock,
+    ensure_lock,
+    fetch,
+    fetch_config,
+    fetch_if_needed,
+    is_pinned,
+)
 from platoon.envs.harbor.hashing import HASH_RULE, content_hash
 from platoon.envs.harbor.lock import LockError, read_lock, verify_lock
 from platoon.envs.harbor.locked import LockedTasks
@@ -962,9 +970,14 @@ def test_a_registry_url_is_retried_on_a_server_error_and_not_on_a_missing_file(
 
 COMPOSE_FIXTURES = Path(__file__).parent / "fixtures" / "harbor-compose"
 STACK_FIXTURES = Path(__file__).parent / "fixtures" / "harbor-stacks" / "tasks"
-# Why a fetch refuses a stack by default (refuse.sidecars), and why it did before stacks ran (a lock of then says so).
+# Why a fetch refuses a stack with refuse: {sidecars: true}, and why it did before stacks ran (a lock of then says so).
 STACK_REFUSED = "stack: the compose file adds sidecar services (refuse: {sidecars: false} fetches it as a stack)"
 STACK_REFUSED_THEN = "stack: the compose file adds sidecar services, which platoon cannot run yet"
+# How a run that lists a fetched dataset's stacks where none may run ends its refusal.
+LEAVE_OUT = (
+    "run them on a provider that runs stacks, or leave them out (exclude_tasks, or a fetch whose refuse sets "
+    "sidecars: true, which locks them refused)"
+)
 
 
 def _publish(hub: FakeHub, task_dir: Path, name: str) -> str:
@@ -984,7 +997,7 @@ async def test_a_hub_task_with_a_compose_file_runs_from_the_stack_plan_its_lock_
     """A Hub task's compose file is planned at fetch as a local task's is, and the lock records each plan beside how
     the source resolved: a rollout worker runs the main-only task from its lock's plan (its init serves through
     grading, so the oracle scores) and never runs the CLI, and Harbor's hello-mcp, whose MCP server runs beside main,
-    is refused with its plan, as a fetch refuses a stack by default."""
+    is refused with its plan, as a fetch with ``refuse: {sidecars: true}`` refuses a stack."""
 
     serve = _publish(hub, COMPOSE_FIXTURES / "tasks" / "main-only-serve", "main-only-serve")
     mcp = _publish(hub, COMPOSE_FIXTURES / "upstream" / "examples" / "hello-mcp", "hello-mcp")
@@ -992,10 +1005,11 @@ async def test_a_hub_task_with_a_compose_file_runs_from_the_stack_plan_its_lock_
     use_site_cache(monkeypatch, tmp_path / "site")
     provider = ProcessProvider(root=tmp_path / "sandboxes")
 
-    trainer = HarborEnvironmentService(dataset="harbor://org/stacks@1", provider=provider)
+    refuse = {"sidecars": True}
+    trainer = HarborEnvironmentService(dataset="harbor://org/stacks@1", refuse=refuse, provider=provider)
     assert await trainer.list_tasks("train") == ["main-only-serve"]  # the trainer fetches the pinned revision
 
-    config = fetch_config("harbor://org/stacks@1")
+    config = fetch_config("harbor://org/stacks@1", refuse=refuse)
     lock = read_lock(config.lock_path())
     assert (lock.source["kind"], lock.source["digest"], lock.compose_rule) == ("harbor-hub", DIGEST, COMPOSE_RULE)
     assert {task.name: task.digest for task in lock.tasks} == {"hello-mcp": mcp, "main-only-serve": serve}
@@ -1008,7 +1022,7 @@ async def test_a_hub_task_with_a_compose_file_runs_from_the_stack_plan_its_lock_
     assert (written["source"], written["compose_rule"]) == (dict(lock.source), COMPOSE_RULE)
 
     calls = len(hub.calls())
-    worker = HarborEnvironmentService(dataset="harbor://org/stacks@1", provider=provider)  # a rollout worker's
+    worker = HarborEnvironmentService(dataset="harbor://org/stacks@1", refuse=refuse, provider=provider)  # a worker's
     session = await worker.open(await worker.get_task("main-only-serve"), rollout_id="rollout-1")
     try:
         assert session.sandbox.spec.env["GREETING"] == "hello from compose"  # from the lock's plan
@@ -1103,10 +1117,10 @@ async def test_a_fetched_stack_locks_as_a_local_one_and_runs_only_where_stacks_r
     source: str, hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A task whose compose file adds sidecars, from git or the Hub, is planned and locked as the same task fetched
-    from a directory: refused by default (``stack``), and with ``refuse: {sidecars: false}`` a runnable stack, its plan
+    from a directory: by default a runnable stack, and refused with ``refuse: {sidecars: true}`` (``stack``), its plan
     the same either way.  A run lists it where the provider runs stacks and stops when it lists the tasks with
-    ``stacks: refuse``, on a provider that runs none, and on a stack that no rollout could start; a rollout worker's
-    session runs it from the lock, the no-op scoring 0 and the oracle 1, and never fetches."""
+    ``stacks: refuse``, on a provider that runs none, naming what refuses it, and on a stack that no rollout could
+    start; a rollout worker's session runs it from the lock, the no-op scoring 0 and the oracle 1, and never fetches."""
 
     monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
     tasks = _stacks(tmp_path / "tasks")
@@ -1118,7 +1132,7 @@ async def test_a_fetched_stack_locks_as_a_local_one_and_runs_only_where_stacks_r
         hub.dataset("org/kv", 1, digests, ["latest"], DIGEST)
         dataset = "harbor://org/kv@1"
     cache = use_site_cache(monkeypatch, tmp_path / "site")
-    for refuse, refused in (({}, STACK_REFUSED), ({"sidecars": False}, None)):
+    for refuse, refused in (({"sidecars": True}, STACK_REFUSED), ({}, None)):
         local = fetch(fetch_config(str(tasks), cache=cache, lock=tmp_path / "local.json", refuse=refuse))
         lock = fetch(fetch_config(dataset, refuse=refuse))
         assert (lock.source["kind"], lock.compose_rule) == ({"git": "git", "hub": "harbor-hub"}[source], COMPOSE_RULE)
@@ -1130,7 +1144,7 @@ async def test_a_fetched_stack_locks_as_a_local_one_and_runs_only_where_stacks_r
                 assert getattr(fetched, field) == getattr(planned, field), field
 
     provider = ProcessProvider(root=tmp_path / "sandboxes")
-    settings: dict[str, Any] = {"dataset": dataset, "refuse": {"sidecars": False}}
+    settings: dict[str, Any] = {"dataset": dataset}  # the lock that a fetch writes by default: the stacks run
     runs = HarborEnvironmentService(provider=provider, **settings)
     assert sorted(await runs.list_tasks("train")) == ["app-kv", "commandless"]
     await runs.check_tasks("train", ["app-kv"])  # the process provider runs stacks
@@ -1148,8 +1162,11 @@ async def test_a_fetched_stack_locks_as_a_local_one_and_runs_only_where_stacks_r
         ),
     }
     for why, service in refusing.items():
-        with pytest.raises(EnvSetupError, match=rf"1 of the 1 tasks of split 'train' are multi-container .*{why}"):
+        with pytest.raises(
+            EnvSetupError, match=rf"1 of the 1 tasks of split 'train' are multi-container .*{why}"
+        ) as no:
             await service.check_tasks("train", ["app-kv"])
+        assert (no.value.failure_kind, str(no.value).endswith(LEAVE_OUT)) == ("env_config", True), str(no.value)
 
     calls = len(hub.calls())
     worker = HarborEnvironmentService(provider=provider, **settings)  # a rollout worker's: it reads the lock
@@ -1197,7 +1214,7 @@ def test_a_link_out_of_a_stack_fails_the_fetch_before_its_compose_file_is_planne
 
     monkeypatch.setattr("platoon.envs.harbor.fetch._plan_compose", planned)
     leaves = r"Harbor task 'app-kv': environment/kv/kv\.py is a symbolic link, or lies behind one, that leaves the task"
-    for refuse in ({}, {"sidecars": False}):
+    for refuse in ({"sidecars": True}, {}):
         cache = tmp_path / f"cache-{len(refuse)}"
         with pytest.raises(FetchError, match=leaves):
             fetch(fetch_config(dataset, cache=cache, refuse=refuse, **extra))
@@ -1207,7 +1224,7 @@ def test_a_link_out_of_a_stack_fails_the_fetch_before_its_compose_file_is_planne
 @pytest.mark.parametrize(
     ("refuse", "refused", "refetched"),
     [
-        ({}, STACK_REFUSED_THEN, STACK_REFUSED),
+        ({"sidecars": True}, STACK_REFUSED_THEN, STACK_REFUSED),
         (
             {"sidecars": False},
             "task_config: app-kv: environment/docker-compose.yaml makes the environment a multi-container stack "
@@ -1223,9 +1240,10 @@ async def test_a_lock_of_fetched_stacks_written_before_stacks_ran_still_reads_an
     refuse: dict[str, Any], refused: str, refetched: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A lock that a fetch from git wrote before platoon ran stacks reads and answers its config as it did: it differs
-    from today's only by its stack's refusal, which said then that platoon could not run it (``stack``, or with
-    ``refuse: {sidecars: false}`` ``task_config``).  Its main-only task runs from its plan, the stack stays refused and
-    unlisted, and a fetch that repairs the lock locks the stack as today's fetch does."""
+    from today's only by its stack's refusal, which said then that platoon could not run it (``stack`` with ``refuse:
+    {sidecars: true}``, or with ``sidecars: false`` ``task_config``).  Its main-only task runs from its plan, the stack
+    stays refused and unlisted, and a fetch that repairs the lock locks the stack as today's fetch does.  (One written
+    for an entry that set no ``refuse.sidecars``, which then defaulted to true, is the next test's.)"""
 
     monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
     url, commit = _repository(
@@ -1268,3 +1286,43 @@ async def test_a_lock_of_fetched_stacks_written_before_stacks_ran_still_reads_an
     repaired, fetched = fetch_if_needed(config, repair=True)
     assert fetched and repaired.get("app-kv").refused == refetched
     assert repaired.get("main-only-serve") == lock.get("main-only-serve")
+
+
+@pytest.mark.asyncio
+async def test_a_lock_of_fetched_stacks_written_for_an_entry_without_refuse_is_fetched_again_with_its_stacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A lock that platoon 0.4 wrote for an entry that set no ``refuse.sidecars``, which then defaulted to true, refused
+    the stack: it still reads, but no longer answers the entry, whose fetch now locks stacks as runnable.  A rollout
+    worker that finds no other lock says so, naming it; the trainer fetches the pinned commit again, into the lock of
+    today's settings, and lists the stack beside the main-only task; an entry that sets ``sidecars: true`` keeps it."""
+
+    monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
+    url, commit = _repository(
+        tmp_path / "upstream",
+        {},
+        directories={
+            "tasks/main-only-serve": COMPOSE_FIXTURES / "tasks" / "main-only-serve",
+            "tasks/app-kv": STACK_FIXTURES / "app-kv",
+        },
+    )
+    use_site_cache(monkeypatch, tmp_path / "site")
+    dataset = f"git+{url}@{commit}#tasks"
+    then_config = fetch_config(dataset, refuse={"sidecars": True})  # the digest an entry without refuse had then
+    fetch(then_config)
+    then = json.loads(then_config.lock_path().read_text())
+    for task in then["tasks"]:  # as 0.4 refused both: it ran no compose file but trivial ones
+        task["refused"] = STACK_REFUSED_THEN
+    then_config.lock_path().write_text(json.dumps(then, indent=1))
+
+    config = fetch_config(dataset)
+    assert config.earlier_lock_path() == then_config.lock_path() != config.lock_path()
+    assert read_lock(then_config.lock_path()).to_json() == then  # it still reads
+    with pytest.raises(LockError, match=r"refused 2 task\(s\) as stacks, which a fetch now locks as runnable"):
+        ensure_lock(config, fetch_allowed=False)  # as a rollout worker reads it
+    provider = ProcessProvider(root=tmp_path / "sandboxes")
+    trainer = HarborEnvironmentService(dataset=dataset, provider=provider)
+    assert sorted(await trainer.list_tasks("train")) == ["app-kv", "main-only-serve"]
+    assert ensure_lock(config, fetch_allowed=False).inputs == config.inputs_digest()
+    kept = answering_lock(then_config)  # an entry that sets sidecars: true keeps it
+    assert kept is not None and kept.to_json() == then

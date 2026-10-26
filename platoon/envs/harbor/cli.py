@@ -96,7 +96,7 @@ def fetch(
 
     from dataclasses import replace
 
-    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed
+    from platoon.envs.harbor.fetch import FetchError, answering_lock, answering_lock_path, fetch_if_needed
 
     given = {"--lock": lock, "--cache": cache}  # hidden: refused, with what replaces them
     removed = [
@@ -115,8 +115,8 @@ def fetch(
         remote = settings.immutable  # pinned, and not a directory: its files cannot change
         if remote and not (update or repair) and (old := answering_lock(settings)) and not old.records_input_files:
             _say(
-                f"{where}the lock {settings.lock_path()} records no input files, as locks written before platoon "
-                "recorded them do: fetching again to record them"
+                f"{where}the lock {answering_lock_path(settings)} records no input files, as locks written before "
+                "platoon recorded them do: fetching again to record them"
             )
         try:
             result, fetched = fetch_if_needed(settings, update=update, repair=repair, log=_say)
@@ -124,12 +124,15 @@ def fetch(
             raise ConfigError(f"{where}{exc}") from exc
         if not fetched:
             _say(
-                f"{where}the lock {settings.lock_path()} answers the config and the cache holds its "
+                f"{where}the lock {answering_lock_path(settings)} answers the config and the cache holds its "
                 f"{len(result.tasks)} task(s): nothing to fetch (--repair hashes them again)"
             )
         line: dict[str, Any] = {"environment": label}
         line.update(
-            lock=str(settings.lock_path()), tasks=len(result.tasks), runnable=len(result.runnable()), fetched=fetched
+            lock=str(answering_lock_path(settings)),
+            tasks=len(result.tasks),
+            runnable=len(result.runnable()),
+            fetched=fetched,
         )
         if (split := _split_report(service, label)) is not None:
             first, *rest = split.report()
@@ -240,7 +243,7 @@ def _fetch_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str, Fe
 def _verify_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str | None, Any, Path]]:
     """Each Harbor entry of a run config with a lock: the lock that answers its dataset, or the lock it names."""
 
-    from platoon.envs.harbor.fetch import answering_lock
+    from platoon.envs.harbor.fetch import answering_lock, answering_lock_path
     from platoon.envs.harbor.lock import LockError, read_lock
 
     targets: list[tuple[str | None, Any, Path]] = []
@@ -263,8 +266,9 @@ def _verify_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str | 
                 raise ConfigError(f"environments[{label}]: {exc}") from exc
         if service.holdout is not None and not dataset_lock.records_input_files:
             fix = f"run `platoon harbor fetch {config}` first" if locked.fetch is not None else "fetch it again"
+            path = answering_lock_path(locked.fetch) if locked.fetch is not None else locked.lock_path
             raise ConfigError(
-                f"environments[{label}]: the lock {locked.lock_path} records no input files, which its hold-out "
+                f"environments[{label}]: the lock {path} records no input files, which its hold-out "
                 f"needs to keep the tasks that share one on one side: {fix}"
             )
         targets.append((label, dataset_lock, locked.cache))

@@ -37,7 +37,7 @@ REDIS = (
     "    image: redis:7-alpine\n"
     "    expose: ['6379']\n"
 )
-LOCK_STACKS = {"sidecars": False}  # a fetch refuses stacks unless told to lock them
+LOCK_STACKS: dict[str, bool] = {}  # a fetch's default, which locks stacks as runnable
 
 
 @pytest.fixture

@@ -67,8 +67,8 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   that the grade's probes found (`services`). On the `process` provider, which isolates nothing, each declared port is
   a port outside the kernel's ephemeral range that the stack holds for its life, which a service learns from
   `PLATOON_PORT_<port>`, and `scheme://<service>:<port>` in environment values, healthchecks and collect hooks reaches
-  it. `stacks: refuse` refuses every stack; on a provider without the capability (`singularity` and `enroot` where pods
-  cannot run, below) stacks stay refused, and a fetch still refuses them unless its `refuse` sets `sidecars: false`.
+  it. `stacks: refuse` refuses every stack, and so does a provider without the capability (`singularity` and `enroot`
+  where pods cannot run, below); a fetch locks stacks as runnable unless its `refuse` sets `sidecars: true` (Changes).
   Stacks that no rollout could start (a dataset directory's registry sidecar that its compose file gives no command, or
   that builds from a context, neither of which a directory's missing image map can give) are skipped by a dataset
   directory and stop a run when a fetched dataset's tasks are listed
@@ -172,7 +172,7 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   the image its registry serves pinned by digest, with its `USER` and the owners its layers' tar headers give (whiteouts
   applied), which the sandboxes that honor users run. The record also tells such a sandbox its image's `USER`, which it
   cannot read itself. `SandboxSpec.file_owners` hands a manifest to hpc-sandbox 0.5, whose `fakeroot` sandboxes apply it
-  before anything runs; with an older one, such as the 0.4.0 that the lock keeps, a task whose image gives files to
+  before anything runs; with an older one, such as the 0.4.0 of platoon 0.4, a task whose image gives files to
   users other than root is refused when it is listed, naming 0.5. A task whose sandbox runs a user other than root, or
   anything as its image's `USER` (the agents' under `agent_user: honor`), is refused where the image has no record:
   built by platoon before 0.5, the `def` builder (Apptainer's) or the `oci` builder with a squashfs-tools before 4.4
@@ -192,15 +192,26 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   refused it (or ran it, when it only named `main`), and the fetch warns of it (`flags.unread_compose`); a task with a
   prebuilt image, no Dockerfile and such a file gets its `environment/` uploaded, as Harbor does.
 - A lock records each task's stack plan. A dataset pinned to a commit whose lock platoon 0.4.0 wrote keeps answering
-  its config, with its main-only tasks refused as 0.4.0 refused them (`stack`): fetch it again to run them
-  (`platoon harbor fetch CONFIG --repair`). A lock whose plans follow another compose rule (`compose_rule`) is not
-  read: fetch the dataset again.
-- A dataset directory's multi-container tasks are listed where the provider runs stacks, and skipped with a warning, as
-  before, where it runs none. A fetch's `refuse: {sidecars: false}` locks such tasks as runnable stacks, where it locked
-  them refused (`task_config`), and the reason a fetch refuses one by default reads `stack: the compose file adds
-  sidecar services (refuse: {sidecars: false} fetches it as a stack)`.
-- The `hpc` extra takes hpc-sandbox 0.5 too (`hpc-sandbox>=0.4.0,<0.6`), whose pods run stacks; the lock keeps 0.4.0,
-  with which the providers refuse stacks, naming 0.5.
+  its config where the lock refused no task as a stack (`stack`), and also, with its main-only tasks refused as 0.4.0
+  refused them, where the config sets `refuse: {sidecars: true}`: fetch it again to run them (`platoon harbor fetch
+  CONFIG --repair`). Where it refused stacks and the config sets no `refuse.sidecars`, the dataset is fetched again
+  (below). A lock whose plans follow another compose rule (`compose_rule`) is not read: fetch the dataset again.
+- **A fetch locks multi-container tasks as runnable stacks** (`refuse.sidecars` defaults to `false`), where platoon 0.4
+  refused them by default (`stack`), and with `sidecars: false` locked them refused (`task_config`). Where the
+  provider runs no stacks, a run stops when it lists its tasks, naming them: leave them out (`exclude_tasks`), or set
+  `refuse: {sidecars: true}`, which refuses them as before, as `stack: the compose file adds sidecar services (refuse:
+  {sidecars: false} fetches it as a stack)`. A lock written for an entry that sets no `refuse.sidecars` and that
+  refused stacks no longer answers it: `platoon prepare`, `platoon train` and `platoon eval` fetch a pinned dataset
+  again (its cached tasks are reused), and a rollout worker that finds no lock names the old one; a lock that refused
+  none still answers. A dataset directory's multi-container tasks are listed where the provider runs stacks, and
+  skipped with a warning, as before, where it runs none.
+- The `hpc` extra requires hpc-sandbox 0.5.1 (`hpc-sandbox>=0.5.1,<0.6`), where platoon 0.4 took 0.4 (`>=0.4.0,<0.5`):
+  0.5 has the pods that stacks run as and applies owner manifests, and 0.5.1 fixes pods for clusters: a sidecar that
+  switches users starts where the run's directory or the task's files are on storage that only one of your groups opens,
+  and reaches its binds under a umask such as 027, and a pod's `main` outlives an agent's `kill -9 -1`, which with 0.5.0
+  ended it and made the attempt an `error`. With an older hpc-sandbox, which an environment that installs platoon
+  without the extra may keep, stacks, and the tasks whose sandboxes need an owner manifest, are still refused when the
+  tasks are listed, naming 0.5 ([The hpc extra](docs/getting-started/install.md#the-hpc-extra)).
 - The `def` builder's images record their base image's configuration (`ENTRYPOINT`, `CMD`, `USER`, `HEALTHCHECK`,
   `EXPOSE`, ...), from its registry, under what the Dockerfile sets, since a definition file keeps none of it (a
   sidecar's image, whose command may be its base's, fails to build without it); and the `singularity` provider's

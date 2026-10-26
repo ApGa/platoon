@@ -76,7 +76,7 @@ KUMO_FILES = (
 )
 COUNT = int(os.environ.get("PLATOON_TEST_PODS_STACKS", "20"))
 CONCURRENCY = int(os.environ.get("PLATOON_TEST_PODS_CONCURRENCY", "8"))
-LOCK_STACKS = {"sidecars": False}  # a fetch refuses stacks unless told to lock them
+LOCK_STACKS: dict[str, bool] = {}  # a fetch's default, which locks stacks as runnable
 FETCH = (
     "import sys, urllib.request\n"
     "try:\n"

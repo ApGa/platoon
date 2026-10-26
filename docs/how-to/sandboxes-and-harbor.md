@@ -71,7 +71,7 @@ commands in a sandbox need a proxy, set its variables in the Harbor service's `e
 
 `rootfs_layout` picks how each sandbox gets its root filesystem, and `HPC_SANDBOX_ROOTFS_LAYOUT` in the job's
 environment sets it for every provider that does not. hpc-sandbox has the layouts from 0.3 on, and the `hpc` extra
-installs 0.4 ([The hpc extra](../getting-started/install.md#the-hpc-extra)); with an older one, every sandbox gets a
+installs 0.5.1 ([The hpc extra](../getting-started/install.md#the-hpc-extra)); with an older one, every sandbox gets a
 copy, and a run that sets `rootfs_layout`, even to `copy`, is refused when its tasks are listed. The layouts:
 
 | `rootfs_layout` | A sandbox's root filesystem | Start, alone / 64 at once on one node | Needs |
@@ -446,7 +446,7 @@ environments:
       select: {source_dataset: [data-analysis]}  # filters on the dataset index's fields
       tasks: [splits/phase0.json]          # optional allowlists of task ids (a JSON list or split manifest)
       overlays: [overlays/install-first]   # optional edits of task files, hashed into the lock
-      refuse: {sidecars: true, gpus: true, agent_user: true, privileges: true, per_task_build: true,
+      refuse: {sidecars: false, gpus: true, agent_user: true, privileges: true, per_task_build: true,
                uploads_over_mb: 100}
       index:                               # more index fields: from the dataset's files, and from task.toml
         - {path: data/tasks.jsonl, key: task_id, fields: [split_group]}
@@ -494,12 +494,12 @@ if it does: a compose file outside the subset platoon runs (`compose`, [Compose 
 `refuse` names (`stack`, `gpus`, `agent_user`, `per_task_build`, `uploads_over_mb`), and anything platoon's task
 loader cannot run (`task_config`: a bad `network_mode`, a separate verifier built from `tests/docker-compose.yaml`, an
 artifact path with `..` or of a compose service the task does not start, and the rest of [What platoon
-refuses](#what-platoon-refuses)), which would fail every rollout. With `sidecars: false`, a stack is locked as
-runnable, and runs where the provider runs stacks ([Multi-container tasks](#multi-container-tasks)); with
-`privileges: false`, so is a stack whose compose services ask for `privileged` or for a `cap_add` that a rootless
-service does not hold, which runs on the `docker` provider alone ([Stacks on Docker](#stacks-on-docker)). A refused
-task stays in the lock with its reason: it is never listed, and a split manifest that names it is an error.
-`refuse`'s switches take `true` or `false`; anything else is an error.
+refuses](#what-platoon-refuses)), which would fail every rollout. A stack is locked as runnable, and runs where the
+provider runs stacks ([Multi-container tasks](#multi-container-tasks)), unless `sidecars: true` refuses it (`stack`,
+the default before 0.5.0); with `privileges: false`, so is a stack whose compose services ask for `privileged` or for
+a `cap_add` that a rootless service does not hold, which runs on the `docker` provider alone ([Stacks on
+Docker](#stacks-on-docker)). A refused task stays in the lock with its reason: it is never listed, and a split
+manifest that names it is an error. `refuse`'s switches take `true` or `false`; anything else is an error.
 
 **Tasks that upload too much.** When a session opens, platoon copies a task's inputs into its sandbox: the sources of
 its Dockerfile's deferred `COPY` steps ([Build task images](#build-task-images)), or, for a task with a prebuilt
@@ -578,9 +578,9 @@ next update. Rollout workers never fetch from any source: they read the lock and
 checks out into a directory of its own in the Harbor cache, removed once its tasks are cached, and the lock records how
 it resolved (`source`: the package and its digest, the repositories and their commits, an adapter's command). Its
 tasks are cached and locked as any fetched task is, overlays, build plans and the stack plans of their compose files
-([Compose files](#compose-files)) included: a main-only task of the Hub runs on every provider, and one with sidecars,
-which a fetch refuses unless `refuse: {sidecars: false}`, runs as a stack where the provider runs stacks
-([Multi-container tasks](#multi-container-tasks)).
+([Compose files](#compose-files)) included: a main-only task of the Hub runs on every provider, and one with sidecars
+runs as a stack where the provider runs stacks ([Multi-container tasks](#multi-container-tasks)), unless the fetch's
+`refuse: {sidecars: true}` refuses it.
 
 ```yaml
 environments:
@@ -783,7 +783,7 @@ infinity"`), and a fetch records what it found in the lock: the kind (`flags.sta
 | `single` | none | one sandbox |
 | `trivial` | names only `main`, with nothing platoon applies (`services: {main: {}}`, or Harbor's base restated) | one sandbox |
 | `main_only` | names only `main`, and gives it settings | one sandbox, with what the file gives `main` (below) |
-| `sidecars` | names services besides `main`: a database, a judge, an MCP server | a stack, on a provider that runs stacks ([Multi-container tasks](#multi-container-tasks)); elsewhere the task is refused, never started without its services. A fetch refuses it by default (`stack`; `refuse: {sidecars: false}` locks it) |
+| `sidecars` | names services besides `main`: a database, a judge, an MCP server | a stack, on a provider that runs stacks ([Multi-container tasks](#multi-container-tasks)); elsewhere the task is refused, never started without its services. A fetch locks it as runnable (`refuse: {sidecars: true}` refuses it, as `stack`) |
 
 **A main-only file** gives the task's sandbox:
 
@@ -863,14 +863,21 @@ own ([below](#stacks-on-docker)); `singularity` and `enroot`, as rootless pods
 ([below](#stacks-as-pods-on-singularity-apptainer-and-enroot)); and `process`, for tests and for checking a dataset
 with a policy you trust ([below](#stacks-on-the-process-provider)). Elsewhere such a task is refused, never started
 without its services: a dataset directory skips it with a warning, and a fetched dataset's stacks stop a run when its
-tasks are listed. A fetch refuses stacks by default (`stack`); to lock them, set `refuse: {sidecars: false}`:
+tasks are listed, naming them. A fetch locks stacks as runnable; where the provider runs none, leave them out of the
+run (`exclude_tasks`), or fetch them refused (`stack`) with `refuse: {sidecars: true}`, as platoon before 0.5.0 did
+by default:
 
 ```yaml
     service_kwargs:
       dataset: ./tasks
-      refuse: {sidecars: false}  # lock the stacks
-      provider: singularity      # which runs them as pods (docker: as compose projects)
+      provider: singularity       # runs the stacks as pods (docker: as compose projects)
+      # refuse: {sidecars: true}  # on a provider that runs no stacks: lock them refused
 ```
+
+A lock that platoon before 0.5.0 wrote for an entry that sets no `refuse.sidecars` still answers it where it refused no
+task as a stack. Where it did, `platoon prepare`, `platoon train` and `platoon eval` fetch a pinned dataset again (its
+cached tasks are reused), which locks its stacks as runnable, and a rollout worker that finds no lock says which lock
+refused them; `refuse: {sidecars: true}` keeps that lock.
 
 **What each service gets.** `main` is the sandbox a main-only file would give the task ([Compose files](#compose-files)):
 its image, environment, working directory, resources, binds, command and healthchecks, with the harness's toolchain
@@ -1020,8 +1027,13 @@ nothing outside the pod reaches them: two stacks of one task on one node, their 
 other's. Pods need hpc-sandbox 0.5, whose pod services run as your uid or with your subordinate ids and whose pods take
 host aliases and expose ports to the host, and a node that lets unprivileged users nest user namespaces (the pod's,
 each service's inside it, and its runtime's own); with hpc-sandbox 0.4, or on a node that does not nest them, every
-stack is refused when the tasks are listed, naming what is missing. Pods on Apptainer and on enroot are
-*experimental*: `tests/integration/test_harbor_stacks_hpc.py` is what a site runs to check them.
+stack is refused when the tasks are listed, naming what is missing. The `hpc` extra installs 0.5.1, with which a sidecar
+that switches users (`subids`, below) also starts where the run's directory or the task's files are on storage that only
+one of your groups opens, and reaches the mount points made for its binds under a umask such as 027, and with which
+`main`, idle while the agents' commands run in it, outlives an agent's `kill -9 -1`, as a single sandbox does; with
+0.5.0, such a sidecar fails to start or to enter those directories, and such a kill ends `main` and makes the attempt an
+`error`. Pods on Apptainer and on enroot are *experimental*: `tests/integration/test_harbor_stacks_hpc.py` is what a
+site runs to check them.
 
 Each service runs in a **run mode**, which outcomes record in `metadata.services`:
 
@@ -1136,7 +1148,7 @@ environments:
   `oci` builder lists its layer's owners before it unpacks it, and a task's `docker_image` becomes a *pulled* entry, the
   image pinned by digest with its `USER` and the owners its registry's layers give, which the sessions run. hpc-sandbox
   0.5 applies a manifest in a `fakeroot` sandbox before anything runs there; with an older one, such as the 0.4.0 that
-  platoon's lock keeps, a task whose image gives files to users other than root is refused when it is listed, naming
+  platoon 0.4 installs, a task whose image gives files to users other than root is refused when it is listed, naming
   0.5. The image map's record also tells the image's `USER`, which a sandbox there cannot read. So a run refuses a task
   whose sandbox runs a user other than root, or anything as its image's `USER` (the agents' sandbox under `agent_user:
   honor`, tests whose `[verifier].user` is unset), where the image map records no manifest: a `docker_image` that
@@ -1177,8 +1189,8 @@ environments:
       verifier_provider_options: {rootfs_layout: copy, fakeroot: true}           # every separate verifier's sandbox
 ```
 
-On Singularity this needs an hpc-sandbox whose provider takes `fakeroot` (below): 0.4, which the `hpc` extra
-installs. With an older one, such as 0.3.0, a run with this config stops when it lists its tasks, with a message
+On Singularity this needs an hpc-sandbox whose provider takes `fakeroot` (below): 0.4 or later (the `hpc` extra
+installs 0.5.1). With an older one, such as 0.3.0, a run with this config stops when it lists its tasks, with a message
 that says what is missing.
 
 - **What `honor` takes.** A `[verifier].user` of root (`root`, `0`, `0:0` or `root:root`) in a task with a

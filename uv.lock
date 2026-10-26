@@ -955,11 +955,11 @@ wheels = [
 
 [[package]]
 name = "hpc-sandbox"
-version = "0.4.0"
+version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/25/e3/fbbb1e90d497731d6f14be52ef7619a602ed1e907aa672d8eae0207c84c7/hpc_sandbox-0.4.0.tar.gz", hash = "sha256:f57471a6dddb214528c24d34f3cedd2300c20bc27dfa67dcbf219709d5472c2d", size = 126935, upload-time = "2026-10-19T16:59:19.023Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/2b/4f74a559723b019563c48eb731ee82520d4045e8e9ca6cf745f8ad4e0466/hpc_sandbox-0.5.1.tar.gz", hash = "sha256:67e6cd4acbf4763560633d5280778f4431dd8697515709d387d2abbfc508e842", size = 146372, upload-time = "2026-10-26T14:50:36.294Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/72/94eb7e8153b5d66bd71b67c69741ad7af57b6e58590a9bf88fc5135c38dd/hpc_sandbox-0.4.0-py3-none-any.whl", hash = "sha256:e59e4936f81eaea64ee449871de85c29190a2ade5b99f876d1a6d18d19df25ae", size = 128388, upload-time = "2026-10-19T16:59:17.609Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/75/878e94ef490015f74c25bd02f25377f7d980509e00f09f996271f2e6e190/hpc_sandbox-0.5.1-py3-none-any.whl", hash = "sha256:9be3c59326a4930f59c4fdf98015ce92cbc4b43d0a2bdea87bb8fce1347bb4c6", size = 146485, upload-time = "2026-10-26T14:50:34.774Z" },
 ]
 
 [[package]]
@@ -2260,7 +2260,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=2.21" },
     { name = "datasets", marker = "python_full_version >= '3.14'", specifier = ">=4.4" },
     { name = "dill", marker = "python_full_version >= '3.14'", specifier = ">=0.4" },
-    { name = "hpc-sandbox", marker = "extra == 'hpc'", specifier = ">=0.4.0,<0.6" },
+    { name = "hpc-sandbox", marker = "extra == 'hpc'", specifier = ">=0.5.1,<0.6" },
     { name = "huggingface-hub", specifier = ">=0.25" },
     { name = "ipython", specifier = ">=9.4.0" },
     { name = "jinja2", specifier = ">=3.1" },
