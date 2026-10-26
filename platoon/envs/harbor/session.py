@@ -43,6 +43,18 @@ the service grades anyway (``on_sidecar_down: grade``).  What a sidecar writes i
 sandbox the tests run in once grading made its log directories afresh.  While the tests run in ``main``, the stack has
 the verifier's network.
 
+**Task MCP servers.**  The MCP servers a stack's task offers its agents (``[[environment.mcp_servers]]``) reach the
+agents two ways.  The tool plane serves each ``sse`` or ``streamable-http`` server whose ``http://`` URL names a
+service of the stack (:class:`TaskTools`): the session lists its tools as it opens, among its env tools
+(:func:`task_tool_name`: ``mcp_server__get_secret``), read-only where the tool says so (MCP's ``readOnlyHint``), and
+proxies each call to the server through the stack's connector (:meth:`~platoon.sandbox.stacks.Stack.connect`), in its
+turn on the gate as every tool call, so that function harnesses and harnesses that take the env's tools over MCP get
+them, filtered by their access level and recorded with their calls.  A server that does not list its tools fails the
+session's start (``sidecar_start``).  A harness in ``main`` may instead reach the servers itself, as Harbor's agents
+do, from the list that :attr:`HarborSession.task_mcp_servers` gives (``{task_mcp_servers}`` in a harness spec): every
+server, ``stdio`` ones too, which run in the harness's own sandbox and which nothing proxies, since that would take a
+streaming exec that no provider has.
+
 The agents' workdir is where the tests run (``shared``) and where the artifacts are (``separate``), so an attempt
 whose agents removed or moved it, left something else in its place or locked it scores 0 (``workdir_missing``) in
 either mode, without the tests: no command starts in a working directory that cannot be entered (docker and
@@ -57,21 +69,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
+import re
 import shutil
 import time
+import urllib.parse
 import uuid
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
+
 from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, EnvBusy, GateClosed, ToolGate, caller_or
 from platoon.envs.harbor import sidecars
 from platoon.envs.harbor.artifacts import ArtifactError, CollectedArtifact, collect_artifacts, materialize_artifacts
+from platoon.envs.harbor.mcp_client import McpClient, McpError
 from platoon.envs.harbor.sidecars import SidecarLogs
 from platoon.envs.harbor.task import CollectHook, HarborTask, McpServer, resolve_env
-from platoon.envs.harbor.tools import TOOL_SPECS, SandboxTools
+from platoon.envs.harbor.tools import DEFAULT_MAX_OUTPUT_CHARS, TOOL_SPECS, SandboxTools, truncate_output
 from platoon.envs.harbor.verifier import TEST_STDOUT, collect, output_tail, suspect_outcome, write_local
 from platoon.envs.harbor.views import SessionUsers, unviewed
 from platoon.envs.service import EnvSetupError, ForkMode, Outcome, ToolResult, ToolSpec
@@ -116,6 +135,14 @@ _WORKDIR_SCRIPT = (
 _WORKDIR_STATES = frozenset({"ok", "missing", "not_a_directory", "not_enterable"})
 _WORKDIR_TIMEOUT_S = 60.0
 _MAX_SKIPPED_REPORTED = 20  # of the artifact paths left out, the ones an outcome names
+
+#: What joins a task MCP server's name and its tool's in the env tool that serves it (:func:`task_tool_name`).
+TASK_TOOL_SEPARATOR = "__"
+#: The longest name of an env tool that serves a task MCP server's tool: the longest tool name model providers take.
+MAX_TASK_TOOL_NAME_CHARS = 64
+#: How long the listing of one task MCP server may take as a session opens: its connector, its session, its tools.
+TASK_TOOLS_LISTING_TIMEOUT_S = 60.0
+_NOT_IN_TOOL_NAMES = re.compile(r"[^A-Za-z0-9_]")
 
 _BACKGROUND: set[asyncio.Task[Any]] = set()  # teardowns whose callers stopped waiting
 _UNKILLABLE: set[type] = set()  # sandbox types without kill_processes, warned about once
@@ -201,17 +228,143 @@ class SandboxLease:
 class StackLease(SandboxLease):
     """A multi-container stack shared by a session and its shared forks: ``sandbox`` is its ``main``, and the last
     release stops the whole stack.  ``logs`` are the session's log directories that its sidecars bind, each a volume
-    of the stack."""
+    of the stack; ``task_tools`` the tools of the task's MCP servers in the stack, which the plane serves."""
 
     def __init__(
-        self, stack: Stack, spec: SandboxSpec, *, logs: list[SidecarLogs] | None = None, **options: Any
+        self,
+        stack: Stack,
+        spec: SandboxSpec,
+        *,
+        logs: list[SidecarLogs] | None = None,
+        task_tools: TaskTools | None = None,
+        **options: Any,
     ) -> None:
         super().__init__(stack.main, spec, **options)
         self.stack = stack
         self.logs = list(logs or ())
+        self.task_tools = task_tools
 
     async def _stop(self) -> None:
-        await self.stack.stop()
+        try:
+            if self.task_tools is not None:
+                await self.task_tools.close()
+        finally:
+            await self.stack.stop()
+
+
+class TaskTools:
+    """The tools of a task's MCP servers in its stack, as the tool plane serves them: those of each ``sse`` or
+    ``streamable-http`` server whose ``http://`` URL names a service of the stack, listed as the session opens
+    (:meth:`open`) through one session with each server (:class:`~platoon.envs.harbor.mcp_client.McpClient`), which
+    the stack's connector reaches and which closes with the stack.  ``specs`` are the env tools that serve them, each
+    named by :func:`task_tool_name`, read-only where the tool's ``readOnlyHint`` says so; none ends the episode, since
+    MCP has no hint for that."""
+
+    def __init__(self) -> None:
+        self.specs: list[ToolSpec] = []
+        self._tools: dict[str, tuple[McpServer, McpClient, str]] = {}  # each env tool's server, session, name there
+        self._clients: list[McpClient] = []
+
+    @classmethod
+    async def open(
+        cls, stack: Stack, harbor_task: HarborTask, *, timeout_s: float = TASK_TOOLS_LISTING_TIMEOUT_S
+    ) -> TaskTools | None:
+        """The tools of the task's servers that the plane serves in ``stack``; None when it serves none.  A server that
+        cannot be reached, or does not list its tools within ``timeout_s``, fails it, and so does a tool whose env
+        tool's name would be too long or another's: a ``RuntimeError`` that names them, once the sessions it opened
+        are closed."""
+
+        served = [
+            (server, address)
+            for server in harbor_task.mcp_servers
+            if (address := harbor_task.mcp_service(server)) is not None
+        ]
+        if not served:
+            return None
+        tools = cls()
+        try:
+            for server, (service, port) in served:
+                await tools._add(stack, server, service, port, timeout_s=timeout_s)
+        except BaseException:
+            await tools.close()
+            raise
+        return tools
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._tools
+
+    async def call(self, name: str, arguments: Mapping[str, Any], *, timeout_s: float) -> ToolResult:
+        """Call the env tool ``name``, one of :attr:`specs`, on its server, within ``timeout_s``: the server's result,
+        or an error result that says why there is none (the server's error, no answer)."""
+
+        server, client, tool = self._tools[name]
+        try:
+            result = await client.call_tool(tool, arguments, timeout_s=timeout_s)
+        except TimeoutError:
+            message = f"The task's MCP server {server.name} did not answer the call of {tool} within {timeout_s:g} s"
+            return ToolResult([{"type": "text", "text": message}], is_error=True, metadata={"error_reason": "timeout"})
+        except McpError as exc:
+            if exc.code is None:
+                logger.warning("The call of %s on the task's MCP server %s failed: %s", tool, server.name, exc)
+            return ToolResult.text(f"The task's MCP server {server.name}: {exc}", is_error=True)
+        except (aiohttp.ClientError, OSError) as exc:
+            logger.warning("The task's MCP server %s cannot be reached: %s", server.name, exc)
+            return ToolResult.text(f"The task's MCP server {server.name} cannot be reached: {exc}", is_error=True)
+        return _task_tool_result(result)
+
+    async def close(self) -> None:
+        """End every session with the servers; idempotent."""
+
+        clients, self._clients = self._clients, []
+        await asyncio.gather(*(client.close() for client in clients))
+
+    async def _add(self, stack: Stack, server: McpServer, service: str, port: int, *, timeout_s: float) -> None:
+        """Serve the tools of ``server``, which ``port`` of ``service`` serves."""
+
+        assert server.url is not None and server.transport != "stdio"
+        try:
+            async with asyncio.timeout(timeout_s):
+                endpoint = await stack.connect(service, port)
+                client = await McpClient.connect(server.url, transport=server.transport, endpoint=endpoint)
+                self._clients.append(client)
+                listed = await client.list_tools()
+        except Exception as exc:  # unreachable, a broken protocol, a port the service does not declare, too slow
+            failure = f" within {timeout_s:g} s" if isinstance(exc, TimeoutError) else f": {type(exc).__name__}: {exc}"
+            raise RuntimeError(
+                f"The task's MCP server {server.name} (port {port} of the service {service}) did not list its tools"
+                f"{failure}"
+            ) from exc
+        for tool in listed:
+            name = task_tool_name(server.name, tool["name"])
+            if (served := self._tools.get(name)) is not None:
+                why = f"as the tool {served[2]!r} of the server {served[0].name} is"
+            elif len(name) > MAX_TASK_TOOL_NAME_CHARS:
+                why = f"a name longer than {MAX_TASK_TOOL_NAME_CHARS} characters, which model providers refuse"
+            else:
+                self._tools[name] = (server, client, tool["name"])
+                self.specs.append(_task_tool_spec(name, tool))
+                continue
+            raise RuntimeError(
+                f"The task's MCP server {server.name} lists the tool {tool['name']!r}, which would be served as "
+                f"{name}, {why}"
+            )
+
+
+def task_tool_name(server: str, tool: str) -> str:
+    """The env tool that serves the tool ``tool`` of a task's MCP server ``server``: their names joined by ``__``, each
+    with an underscore in place of every character but an ASCII letter, a digit and an underscore, as model providers'
+    tool names and CodeAct's functions need: hello-mcp's ``mcp-server`` and ``get_secret`` make
+    ``mcp_server__get_secret``.  A name that is not all ASCII also ends with the start of its SHA-256, which keeps
+    names in other scripts apart, and a server's that starts with a digit gets an underscore before it, as a Python
+    function's name needs (``2fa`` makes ``_2fa__get_code``)."""
+
+    server = _fit_for_tool_names(server)
+    return f"{'_' if server[:1].isdigit() else ''}{server}{TASK_TOOL_SEPARATOR}{_fit_for_tool_names(tool)}"
+
+
+def _fit_for_tool_names(name: str) -> str:
+    fit = _NOT_IN_TOOL_NAMES.sub("_", name)
+    return fit if name.isascii() else f"{fit}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
 
 
 @dataclass
@@ -260,6 +413,7 @@ class HarborSession:
         # The task's multi-container stack, None for a single sandbox; sandbox is its main.
         self.stack: Stack | None = lease.stack if isinstance(lease, StackLease) else None
         self.mcp_servers: tuple[McpServer, ...] = harbor_task.mcp_servers
+        self._task_tools = lease.task_tools if isinstance(lease, StackLease) else None
         capabilities = service.provider.capabilities
         self.network_isolated = lease.spec.network == "none" and "network_none" in capabilities
         self.host_loopback = (
@@ -293,8 +447,24 @@ class HarborSession:
             return None
         return self.harbor_task.agent_timeout_s * self._service.agent_timeout_multiplier
 
+    @property
+    def task_mcp_servers(self) -> list[dict[str, Any]]:
+        """The task's MCP servers as a harness in the task's sandbox reaches them (``{task_mcp_servers}``): each one's
+        name and transport, and its URL, as rewritten for the stack's addressing (the ``process`` provider's ports), or
+        its command and arguments (``stdio``)."""
+
+        stack = self.stack
+        return [
+            server.described(_in_main(stack, server.url) if stack is not None and server.url else None)
+            for server in self.mcp_servers
+        ]
+
     async def tools(self) -> list[ToolSpec]:
-        return list(TOOL_SPECS)
+        """The generic tools, then those of the task's MCP servers that the plane serves (:class:`TaskTools`)."""
+
+        if self._task_tools is None or self._lease.closed:
+            return list(TOOL_SPECS)
+        return [*TOOL_SPECS, *self._task_tools.specs]
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """Run a tool in its turn on the sandbox: refused unrun when the session is closed or the call is not
@@ -330,6 +500,8 @@ class HarborSession:
     async def _run_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         if self.sandbox is None or self._lease.closed:  # closed while the call waited for its turn
             return _closed()
+        if self._task_tools is not None and name in self._task_tools:
+            return await self._task_tools.call(name, arguments, timeout_s=self._service.tool_timeout_s)
         return await self._tools.call(name, arguments)
 
     async def grade(self) -> Outcome:
@@ -882,6 +1054,71 @@ class HarborSession:
 
 def _closed() -> ToolResult:
     return ToolResult.text("The session is closed", is_error=True)
+
+
+def _task_tool_spec(name: str, tool: Mapping[str, Any]) -> ToolSpec:
+    """A task MCP server's tool (MCP's ``Tool``) as the env tool ``name``."""
+
+    annotations = tool.get("annotations")
+    meta = tool.get("_meta")
+    schema = tool.get("inputSchema")
+    return ToolSpec(
+        name=name,
+        description=str(tool.get("description") or ""),
+        input_schema=dict(schema) if isinstance(schema, Mapping) else {"type": "object"},
+        read_only=isinstance(annotations, Mapping) and annotations.get("readOnlyHint") is True,
+        meta=dict(meta) if isinstance(meta, Mapping) else None,
+    )
+
+
+def _task_tool_result(result: Mapping[str, Any]) -> ToolResult:
+    """A task MCP server's ``CallToolResult`` as an env tool's result: its content blocks (its structured content as
+    JSON text where it gives no block), and whether it is an error.  Images and audio stay as they are, and every other
+    block is text (:func:`_task_tool_block`), cut as the generic tools' output is
+    (:func:`~platoon.envs.harbor.tools.truncate_output`): text blocks longer together become one, cut, in the first
+    one's place."""
+
+    content = [_task_tool_block(block) for block in result.get("content") or () if isinstance(block, Mapping)]
+    if not content and "structuredContent" in result:
+        content = [{"type": "text", "text": json.dumps(result["structuredContent"])}]
+    texts = [index for index, block in enumerate(content) if block["type"] == "text"]
+    text = "\n".join(content[index]["text"] for index in texts)
+    if len(text) > DEFAULT_MAX_OUTPUT_CHARS:
+        content = [
+            {"type": "text", "text": truncate_output(text)} if index == texts[0] else block
+            for index, block in enumerate(content)
+            if index == texts[0] or index not in texts
+        ]
+    return ToolResult(content=content, is_error=result.get("isError") is True)
+
+
+def _task_tool_block(block: Mapping[str, Any]) -> dict[str, Any]:
+    """A content block of a task MCP server's result: an image or audio as it is, a text block's text, and any other
+    block (an embedded resource, a link, a block of no type or of one MCP does not have) as its JSON text, so that the
+    result's cut bounds what it holds."""
+
+    if block.get("type") in ("image", "audio") and isinstance(block.get("data"), str):
+        return dict(block)
+    if block.get("type") == "text" and isinstance(block.get("text"), str):
+        return {"type": "text", "text": block["text"]}
+    return {"type": "text", "text": json.dumps(block)}
+
+
+def _in_main(stack: Stack, url: str) -> str:
+    """A task MCP server's ``url`` as ``main`` reaches it in ``stack``: rewritten for the stack's addressing (the
+    ``process`` provider's ports), which finds a service's port where the URL names it, so http's port 80 is named for
+    the rewrite where the URL names none."""
+
+    parts = urllib.parse.urlsplit(url)
+    try:
+        names_a_port = parts.port is not None
+    except ValueError:  # it names one, if not as a number
+        names_a_port = True
+    if parts.scheme != "http" or not parts.hostname or names_a_port:
+        return stack.rewrite(url, service=MAIN)
+    named = parts._replace(netloc=f"{parts.netloc}:80").geturl()
+    rewritten = stack.rewrite(named, service=MAIN)
+    return url if rewritten == named else rewritten
 
 
 def _overlaps(path: str, other: str) -> bool:

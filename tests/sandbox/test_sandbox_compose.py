@@ -12,8 +12,11 @@ import asyncio
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,7 @@ from platoon.envs.harbor import HarborEnvironmentService
 from platoon.envs.harbor.builders import plan_images
 from platoon.envs.harbor.fetch import fetch, fetch_config
 from platoon.envs.harbor.images import ImageEntry, update_image_map
+from platoon.envs.harbor.session import TaskTools
 from platoon.envs.service import EnvSetupError
 from platoon.sandbox import StackStartError, cleanup, stack_refusal
 from platoon.sandbox.base import Mount, SandboxSpec
@@ -38,6 +42,7 @@ from platoon.sandbox.compose import (
 )
 from platoon.sandbox.docker import DockerProvider
 from platoon.sandbox.stacks import (
+    STACK_LABEL,
     Dependency,
     DrivenStack,
     Healthcheck,
@@ -62,6 +67,7 @@ FAKE_VARIABLES = (
     "FAKE_DOCKER_UNHEALTHY",
     "FAKE_DOCKER_NO_COMPOSE",
     "FAKE_DOCKER_SERVER_VERSION",
+    "FAKE_DOCKER_NO_PYTHON",
 )
 
 
@@ -519,14 +525,10 @@ async def test_services_start_in_dependency_order_and_after_the_service_whose_ne
 
 
 @pytest.mark.asyncio
-async def test_reaching_a_service_from_this_host_and_its_state_and_log(
-    docker: FakeDocker, provider: DockerProvider, tmp_path
-):
+async def test_a_services_state_and_log(docker: FakeDocker, provider: DockerProvider, tmp_path):
     stack = await start_compose_stack(provider, _spec(tmp_path))
     project = stack.id
 
-    assert await stack.connect("kv", 6379) == "tcp://172.30.0.3:6379"  # kv's address on the egress network
-    assert await stack.connect("probe", 6379) == "tcp://172.30.0.3:6379"  # probe is reached on kv's network
     assert stack.rewrite("http://kv:6379/x") == "http://kv:6379/x"  # services reach one another by name
     states = await stack.health()
     assert {name: state.status for name, state in states.items()} == {
@@ -536,10 +538,6 @@ async def test_reaching_a_service_from_this_host_and_its_state_and_log(
     }
     assert await stack.logs("kv") == f"the output of {project}-kv\nthe errors of {project}-kv\n"
 
-    await stack.set_network("none")
-    with pytest.raises(RuntimeError, match="Nothing on this host reaches the service 'kv' of a stack without egress"):
-        await stack.connect("kv", 6379)  # the internal network has no address on this host
-
     docker.run("kill", f"{project}-kv")  # killed outside platoon
     (state,) = (await stack.health(["kv"])).values()
     assert (state.status, state.exit_code, state.up) == ("exited", 137, False)
@@ -548,6 +546,137 @@ async def test_reaching_a_service_from_this_host_and_its_state_and_log(
     assert (state.status, state.exit_code) == ("exited", None)
     await stack.stop()
     assert _nothing_left(docker, provider)
+
+
+async def _echo_server() -> asyncio.Server:
+    """A TCP server on this host's loopback that answers each connection's first line upper-cased: the service's port,
+    as a relay reaches it, since the fake docker CLI runs relays on this host."""
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write((await reader.readline()).upper())
+        await writer.drain()
+        writer.close()
+
+    return await asyncio.start_server(answer, "127.0.0.1", 0)
+
+
+def _gone(pid: int, timeout_s: float = 5.0) -> bool:
+    """Whether the process ends (or is a zombie) within ``timeout_s``."""
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()[0] == "Z":
+                return True
+        except OSError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+async def _ask(url: str) -> bytes:
+    reader, writer = await asyncio.open_unix_connection(url.removeprefix("unix://"))
+    writer.write(b"hello\n")
+    await writer.drain()
+    try:
+        return await asyncio.wait_for(reader.readline(), 10)
+    finally:
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_this_host_reaches_a_services_port_through_a_relay_in_its_network(
+    docker: FakeDocker, provider: DockerProvider, tmp_path
+):
+    """A relay container in the network of the service that listens (``probe`` shares kv's), as root without
+    capabilities, serves a socket of the project's that only your uid reaches, with or without egress; one per port,
+    started once, and gone with the stack."""
+
+    server = await _echo_server()
+    port = server.sockets[0].getsockname()[1]
+    stack = await start_compose_stack(provider, _spec(tmp_path))
+    project = stack.id
+    docker.calls()
+    try:
+        urls = await asyncio.gather(stack.connect("kv", port), stack.connect("probe", port))
+        socket = provider.stack_root / project / "relay" / f"kv-{port}.sock"
+        handed = Path(urls[0].removeprefix("unix://"))  # the socket, or a link to it where its path is too long
+        assert urls[1] == urls[0] and (Path(os.readlink(handed)) if handed.is_symlink() else handed) == socket
+        assert await _ask(urls[0]) == b"HELLO\n"
+        assert (
+            stat.S_IMODE(socket.stat().st_mode) == 0o666
+            and stat.S_IMODE((provider.stack_root / project).stat().st_mode) == 0o700
+        )
+        (run,) = [call for call in docker.calls() if call[0] == "run"]
+        image = run.index("python:3.12-slim")  # kv's image, which has a Python
+        assert run[:3] == ["run", "--detach", f"--name={project}-relay-kv-{port}"]
+        assert {f"--network=container:{project}-kv", "--user=0:0", "--cap-drop=ALL", "--pull=never"} <= set(run)
+        assert f"--label={STACK_LABEL}={project}" in run and run[image - 1].endswith(":/run/platoon-relay")
+        assert run[image + 1 :][3:5] == [f"/run/platoon-relay/kv-{port}.sock", str(port)]
+        relay = docker.state()["containers"][f"{project}-relay-kv-{port}"]["pid"]
+
+        await stack.set_network("none")  # the relay reaches the port on the network's loopback, without egress
+        assert await stack.connect("kv", port) == urls[0] and await _ask(urls[0]) == b"HELLO\n"
+        assert not [call for call in docker.calls() if call[0] == "run"]
+    finally:
+        await stack.stop()
+        server.close()
+    assert _nothing_left(docker, provider) and _gone(relay)
+
+
+@pytest.mark.asyncio
+async def test_a_relay_runs_with_mains_image_where_the_services_has_no_python(
+    docker: FakeDocker, provider: DockerProvider, tmp_path, monkeypatch
+):
+    server = await _echo_server()
+    port = server.sockets[0].getsockname()[1]
+    main = ServiceSpec(sandbox=SandboxSpec(image="docker://python:3.12-slim", workdir="/app"))
+    tool = ServiceSpec(sandbox=SandboxSpec(image="busybox:1.36", workdir="/"), command=["sleep", "1000"])
+    stack = await start_compose_stack(provider, StackSpec(services={"main": main, "tool": tool}))
+    docker.calls()
+    try:
+        monkeypatch.setenv("FAKE_DOCKER_NO_PYTHON", "busybox:1.36")
+        url = await stack.connect("tool", port)
+        assert await _ask(url) == b"HELLO\n"
+        runs = [call for call in docker.calls() if call[0] in ("run", "rm")]
+        assert [call[0] for call in runs] == ["run", "rm", "run"]  # tool's image, then main's
+        assert "busybox:1.36" in runs[0] and "python:3.12-slim" in runs[2]
+
+        monkeypatch.setenv("FAKE_DOCKER_NO_PYTHON", "busybox:1.36,python:3.12-slim")
+        with pytest.raises(
+            RuntimeError, match=r"Could not relay this host to port 9 of the service tool: with busybox"
+        ):
+            await stack.connect("tool", 9)
+    finally:
+        await stack.stop()
+        server.close()
+    assert _nothing_left(docker, provider)
+
+
+@pytest.mark.asyncio
+async def test_a_relay_socket_too_long_for_an_address_is_handed_out_as_a_short_link(
+    docker: FakeDocker, tmp_path, monkeypatch
+):
+    server = await _echo_server()
+    port = server.sockets[0].getsockname()[1]
+    provider = DockerProvider(stack_root=tmp_path / ("d" * 100) / "stacks")
+    node = Path(tempfile.mkdtemp(prefix="pt-", dir="/tmp"))  # node scratch with a short path, as on a node
+    monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(node))
+    try:
+        stack = await start_compose_stack(provider, _spec(tmp_path))
+        try:
+            url = await stack.connect("kv", port)
+            link = Path(url.removeprefix("unix://"))
+            assert len(os.fsencode(link)) < 108 and link.parent.parent == node
+            assert os.readlink(link) == str(provider.stack_root / stack.id / "relay" / f"kv-{port}.sock")
+            assert await _ask(url) == b"HELLO\n"
+        finally:
+            await stack.stop()
+            server.close()
+        assert list(node.iterdir()) == []
+        assert _nothing_left(docker, provider)
+    finally:
+        node.rmdir()
 
 
 @pytest.mark.asyncio
@@ -1057,6 +1186,12 @@ def _readable_by_all(root: Path) -> None:
         path.chmod(mode | (0o555 if path.is_dir() or mode & 0o100 else 0o444))
 
 
+async def _serves_none(stack: Any, harbor_task: Any) -> None:
+    """In place of :meth:`TaskTools.open`: the tool plane serves none of a task's MCP servers, as no fake container
+    runs one (the relay tests above reach a service's port through a relay, and the Docker integration module the
+    servers of real stacks)."""
+
+
 @pytest.mark.parametrize("name", sorted(SESSIONS))
 @pytest.mark.asyncio
 async def test_each_fixture_becomes_its_compose_project(
@@ -1065,6 +1200,7 @@ async def test_each_fixture_becomes_its_compose_project(
     _, environment, failure = SESSIONS[name]
     for variable, value in environment.items():
         monkeypatch.setenv(variable, value)
+    monkeypatch.setattr(TaskTools, "open", _serves_none)
     service = _service(name, tmp_path, provider, monkeypatch)
     task = await service.get_task(name)
     outcome = "opened and closed"

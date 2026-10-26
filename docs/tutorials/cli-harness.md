@@ -136,6 +136,7 @@ written.
 | `{state_dir}` | a per-agent scratch directory for files, assets and logs | everywhere |
 | `{max_steps}` | the step budget: the task's or the rollout config's `max_steps`, else the spec's | everywhere |
 | `{toolchain}` | `[install] toolchain`: the path as written, or for a named toolchain its build path (in a task sandbox) or its local copy | everywhere, when `toolchain` is set |
+| `{task_mcp_servers}` | the MCP servers the task itself offers its agents, as JSON: a list of objects with each one's `name`, `transport` and `url` as the task's sandbox reaches it, or, for `stdio`, `command` and `args`; `[]` for a task without any and for a harness that runs locally, which reaches only the servers that the env's tools serve ([Task MCP servers](../how-to/sandboxes-and-harbor.md#task-mcp-servers)) | everywhere |
 | `{mcp_url}` | the gateway's MCP endpoint, without the key in it | `[mcp]` only |
 | `{mcp_config_path}` | the path of the written `config_file` | `[mcp]` only, when `config_template` is set |
 | `{options.NAME}` | the value of the spec's option `NAME` (`[options]`): a boolean as `true` or `false`, a number in decimal, a string as it is | `[launch]` argv, env and files, `[builtins.disable]` and `[mcp]` |

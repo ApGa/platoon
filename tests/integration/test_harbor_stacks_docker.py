@@ -13,6 +13,10 @@
   sidecar's log directory, an init job, a separate verifier with collect hooks and a sidecar's artifacts.
 - ``main`` reaches the model gateway's Unix socket through its route; a stack's egress follows its network; and a
   SIGKILLed worker's stack is removed by a reap of the worker's label.
+- The tool plane serves the tasks' MCP servers (hello-mcp's, and the fixtures ``mcp-http`` and ``mcp-sse``) through a
+  relay of the stack's: a function harness solves each through the plane (``tests/mcp_solver.py``), with its calls in
+  its trajectory's tool-call records, and a tool that an agent's access level hides cannot be called; a CLI harness in
+  ``main`` solves each at the URL that ``{task_mcp_servers}`` gives it.
 - After each test, nothing of it is left: no container, network or volume, and no project directory.
 
 It needs Docker with the compose plugin, and ``PLATOON_TEST_DOCKER_STACKS``: ``1`` runs it where Docker is, and
@@ -70,6 +74,15 @@ if (PROBLEM := _docker_problem()) is not None:
     pytest.skip(f"Docker cannot run stacks here: {PROBLEM} (CI's docker-stacks job runs it)", allow_module_level=True)
 
 import yaml  # noqa: E402
+from mcp_solver import (  # noqa: E402
+    DIRECT,
+    ROTATE_TOOL,
+    SECRET_TOOL,
+    SOLVER,
+    hidden_from_read_only,
+    solved,
+    solved_directly,
+)
 from no_model import no_model_gateway  # noqa: E402
 from site_cache import use_site_cache  # noqa: E402
 
@@ -90,7 +103,10 @@ TASKS = {
         name: FIXTURES / "harbor-stacks-docker" / "tasks" / name
         for name in ("app-redis", "app-redis-crash", "app-redis-unhealthy", "app-privileges")
     },
-    **{name: FIXTURES / "harbor-stacks" / "tasks" / name for name in ("app-kv", "app-kv-seeded", "sidecar-artifacts")},
+    **{
+        name: FIXTURES / "harbor-stacks" / "tasks" / name
+        for name in ("app-kv", "app-kv-seeded", "sidecar-artifacts", "mcp-http", "mcp-sse")
+    },
 }
 # Whether the internet answers from main: a connection to the Python package index.
 REACH_THE_WEB = "import socket; socket.create_connection(('pypi.org', 443), timeout=15).close()"
@@ -236,6 +252,39 @@ async def test_hello_mcp_scores_its_oracle_and_its_no_op(settings: dict[str, Any
     assert (oracle["misc"]["outcome"]["status"], oracle["reward"]) == ("scored", 1.0), oracle["misc"]
     assert oracle["misc"]["oracle"]["exit_code"] == 0
     assert (noop["misc"]["outcome"]["status"], noop["reward"]) == ("scored", 0.0), noop["misc"]
+
+
+# --- task MCP servers, through the tool plane ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("task", ["hello-mcp", "mcp-http", "mcp-sse"])
+async def test_a_function_harness_solves_the_mcp_tasks_through_the_tool_plane(
+    settings: dict[str, Any], tmp_path: Path, task: str
+):
+    assert solved(await _rollout(settings, SOLVER, task, tmp_path))  # with its tool calls in the trajectory
+
+
+@pytest.mark.parametrize("task", ["hello-mcp", "mcp-http", "mcp-sse"])
+async def test_a_harness_in_main_solves_the_mcp_tasks_at_the_urls_it_is_given(
+    settings: dict[str, Any], tmp_path: Path, task: str
+):
+    assert solved_directly(await _rollout(settings, DIRECT, task, tmp_path))  # {task_mcp_servers}, from main
+
+
+async def test_a_tool_the_agents_access_hides_cannot_be_called(settings: dict[str, Any]):
+    """hello-mcp's get_secret says nothing of being read-only, nor does the fixtures' rotate_secret: an agent with
+    ``read_only`` access sees neither, and cannot call them; the relay goes with the stack (``nothing_left``)."""
+
+    for task, tool in (("hello-mcp", SECRET_TOOL), ("mcp-sse", ROTATE_TOOL)):
+        session = await _open(settings, task)
+        try:
+            assert await hidden_from_read_only(session, tool)
+            stack = session.stack
+            assert stack is not None
+            relays = _docker("ps", "--quiet", "--filter", f"label=platoon.stack={stack.id}", "--filter", "name=relay")
+            assert len(relays.stdout.split()) == 1  # the listing reached the server through one relay
+        finally:
+            await session.close()
 
 
 # --- app-redis -----------------------------------------------------------------------------------------------------

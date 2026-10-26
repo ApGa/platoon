@@ -57,12 +57,16 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
+import shutil
+import tempfile
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from platoon.sandbox.base import ExecResult, Mount, Sandbox, SandboxSpec
+from platoon.utils import scratch
 from platoon.utils.stopping import let_finish
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,7 @@ ServiceStatus = Literal["running", "healthy", "unhealthy", "exited", "completed"
 LOG_TAIL_BYTES = 2000
 _HEALTH_DETAIL_CHARS = 500
 _COMPLETION_POLL_S = (0.05, 1.0)  # how often an init job is looked at: first, and at most (doubling)
+SOCKET_ADDRESS_BYTES = 108  # a Unix socket's path (sun_path), its terminating NUL included
 
 
 @dataclass(frozen=True)
@@ -325,6 +330,46 @@ def _volume_dir(name: str) -> str:
         for char in name
     )
     return f"%{escaped}" if escaped in (".", "..") else escaped
+
+
+class SocketLinks:
+    """Paths short enough for a Unix socket's address (:data:`SOCKET_ADDRESS_BYTES`) to the sockets on this host
+    through which a stack's :meth:`~Stack.connect` reaches its services: a socket's own path where it fits, else a link
+    to it in a private directory (0700) of node scratch, or of ``/tmp`` where node scratch's path is too long too, made
+    when a first link needs it and removed with the links by :meth:`close`."""
+
+    def __init__(self) -> None:
+        self._directory: Path | None = None
+
+    async def short(self, socket: str | Path, name: str) -> str:
+        """``socket``'s path, or a link to it named ``name`` (one name for one socket)."""
+
+        if len(os.fsencode(socket)) < SOCKET_ADDRESS_BYTES:
+            return str(socket)
+        if self._directory is None:
+            directory = await asyncio.to_thread(_links_directory, len(os.fsencode(name)))
+            if self._directory is None:
+                self._directory = directory
+            else:  # another connection made one meanwhile, which close() removes
+                await asyncio.to_thread(directory.rmdir)
+        link = self._directory / name
+        if not link.is_symlink():
+            link.symlink_to(socket)
+        return str(link)
+
+    async def close(self) -> None:
+        if self._directory is not None:
+            await asyncio.to_thread(shutil.rmtree, self._directory, ignore_errors=True)
+
+
+def _links_directory(name_bytes: int) -> Path:
+    """A new private directory for links to a stack's sockets, whose path leaves room in a socket's address for a link
+    named with ``name_bytes`` bytes: in node scratch, else in ``/tmp``."""
+
+    for root in (scratch.scratch_dir(), Path("/tmp")):
+        if len(os.fsencode(root)) + len("/platoon-sockets-XXXXXXXX/") + name_bytes < SOCKET_ADDRESS_BYTES:
+            return Path(tempfile.mkdtemp(prefix="platoon-sockets-", dir=root))
+    raise OSError("Neither node scratch nor /tmp has a path short enough for links to a stack's sockets")
 
 
 @dataclass(frozen=True)
@@ -790,6 +835,7 @@ __all__ = [
     "CONDITIONS",
     "MAIN",
     "SERVICE_LABEL",
+    "SOCKET_ADDRESS_BYTES",
     "STACKS",
     "STACK_LABEL",
     "Condition",
@@ -800,6 +846,7 @@ __all__ = [
     "ServiceHandle",
     "ServiceSpec",
     "ServiceState",
+    "SocketLinks",
     "Stack",
     "StackBackend",
     "StackNetwork",

@@ -237,6 +237,7 @@ class HarnessRunner:
                     max_steps=max_steps,
                     mcp_url=mcp_url,
                     options=options,
+                    task_mcp_servers=_task_mcp_servers(session, placement),
                 ),
                 disable_builtins=_disable_builtins(spec, builtins, placement),
             )
@@ -272,6 +273,16 @@ class HarnessRunner:
             if toolchain is not None and not await host.exists(toolchain):
                 raise HarnessSetupError(f"toolchain {toolchain} for {spec.ref} is not present")
             self._installed.add(key)
+
+
+def _task_mcp_servers(session: EnvSession, placement: Placement) -> list[dict[str, Any]]:
+    """The task's own MCP servers for ``{task_mcp_servers}``, as the session's sandbox reaches them (a session's
+    optional ``task_mcp_servers``): none for a harness that runs locally, which reaches only those that the env's tools
+    serve (a Harbor stack's ``http://`` servers), through those tools."""
+
+    if placement != "task_sandbox":
+        return []
+    return [dict(server) for server in getattr(session, "task_mcp_servers", None) or ()]
 
 
 async def _sandbox_urls(

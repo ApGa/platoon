@@ -70,6 +70,7 @@ from platoon.envs.harbor.compose import (
     image_healthcheck,
     resolve_argv,
     resolve_deferred,
+    service_aliases,
     service_binds,
 )
 from platoon.envs.harbor.images import SessionImage, docker_image_reference
@@ -460,9 +461,6 @@ def _service(
     user: str | None = None,
 ) -> ServiceSpec:
     network_mode = str(data.get("network_mode") or "")
-    aliases = [data["hostname"]] if data.get("hostname") else []
-    for settings in (data.get("networks") or {}).values():
-        aliases += (settings or {}).get("aliases") or []
     return ServiceSpec(
         sandbox=sandbox,
         command=command,
@@ -480,7 +478,7 @@ def _service(
             *volumes,
         ],
         ports=tuple(int(port.split("/")[0]) for port in data.get("expose") or () if port.endswith("/tcp")),
-        aliases=tuple(dict.fromkeys(alias for alias in aliases if alias)),
+        aliases=service_aliases(data),
         network_of=network_mode.removeprefix("service:") if network_mode.startswith("service:") else None,
         shm_mb=data.get("shm_mb"),
         ulimits={name: (int(limit[0]), int(limit[1])) for name, limit in (data.get("ulimits") or {}).items()},

@@ -622,7 +622,7 @@ async def test_reaping_a_stack_s_label_deletes_what_its_session_copied(make_task
 
 @pytest.mark.asyncio
 async def test_stacks_are_listed_where_they_run_and_skipped_where_they_do_not(provider: ProcessProvider, caplog):
-    tasks = ["app-kv", "app-kv-crash", "app-kv-seeded", "app-kv-unhealthy", "sidecar-artifacts"]
+    tasks = ["app-kv", "app-kv-crash", "app-kv-seeded", "app-kv-unhealthy", "mcp-http", "mcp-sse", "sidecar-artifacts"]
     assert sorted(await HarborEnvironmentService(STACKS, provider=provider).list_tasks("train")) == tasks
 
     class NoStacks(ProcessProvider):
@@ -1037,7 +1037,15 @@ def test_the_fixtures_lock_as_stacks(tmp_path: Path, monkeypatch: pytest.MonkeyP
     lock = fetch(fetch_config(str(STACKS), lock=tmp_path / "lock.json", refuse={"sidecars": False}))
     assert {task.name: (task.flags["stack"], task.refused) for task in lock.tasks} == {
         name: ("sidecars", None)
-        for name in ("app-kv", "app-kv-crash", "app-kv-seeded", "app-kv-unhealthy", "sidecar-artifacts")
+        for name in (
+            "app-kv",
+            "app-kv-crash",
+            "app-kv-seeded",
+            "app-kv-unhealthy",
+            "mcp-http",
+            "mcp-sse",
+            "sidecar-artifacts",
+        )
     }
     plan = lock.get("sidecar-artifacts").compose
     assert plan is not None and json.dumps(plan["services"]["api"]["expose"]) == '["8000/tcp"]'

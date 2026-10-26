@@ -323,6 +323,7 @@ class Stack(Protocol):
 | Start everything, or nothing | Make the stack's volumes, filled by their `fill` where they have one (the Harbor service copies the task's files that its services bind writable that way, so that they share one copy and the stack owns it), before any service starts: `platoon.sandbox.stacks.make_volumes(spec, root)` makes them below a directory of the stack's, and gives each service's mounts of them. Return once every service runs, each one with a healthcheck has passed it and each init job has completed within its `timeout_s`, as `docker compose up --wait` does, and a last probe finds every service up. A service that fails, exits or never turns healthy raises `StackStartError(service, message, log=<its log's tail>)`, which a session reports as `sidecar_start`, after the provider stopped every service it started; a cancelled start stops them too, also a service caught in the middle of its start, before it raises. Make each stop a cleanup that a stopping process lets finish (`platoon.utils.stopping.let_finish`). A `setup`'s own exception passes through as it is |
 | Tell each service's state | `health()` probes: an init job `completed` (or `exited` with another status), any other service `running`, `healthy` or `unhealthy` by its healthcheck, or `exited`. Harbor grading probes the sidecars before and after the tests, and a sidecar that is not up makes the outcome `invalid` (`sidecar_unhealthy`) |
 | Address the services | Where the services share a network of their own (a pod, a compose project), each reaches the others by name at their declared ports, and `rewrite` is the identity, and the stack says so (`host_loopback` false, as `drive_stack(..., host_loopback=False)` makes it): a harness in `main` then reaches the gateway only through its route. Where they share the host's network, give each declared port a port of the host that the stack holds for its life, which no other stack is given, and make `rewrite` turn `scheme://<service>:<port>` into the address that reaches it; environment values and healthchecks are rewritten so before the services start |
+| Reach a service from this host | `connect(service, port)` gives an endpoint on this host that reaches the port of that service, as the service's own network has it: `unix://<socket>`, a socket only your uid reaches, or `tcp://<host>:<port>`. Harbor's tool plane reaches a task's MCP servers through it. A socket's path holds at most 107 bytes: `platoon.sandbox.stacks.SocketLinks` hands out a short link to one whose path is longer |
 | Be reaped | Register the stack for cleanup as its sandboxes are (`platoon.sandbox.cleanup.register` before it starts, `attach` once it runs, `unregister` once it stopped), with this process's labels on every service's sandbox, and remove what a dead process's stacks left in `reap(labels)`, their volumes too |
 
 `platoon.sandbox.stacks.drive_stack(backend, spec, id=...)` does the first three for you, over a `StackBackend` that
@@ -336,10 +337,11 @@ stack holds for its life (a claim the kernel arbitrates between processes), whic
 unset. The `docker` provider's stacks use it too (`platoon/sandbox/compose.py`): each stack a `docker compose` project
 whose file it writes from the spec, each service a container that `docker compose create` makes once its dependencies
 hold and `docker start` starts, on a network of the project's own (so `rewrite` is the identity), with its volumes
-directories of the project's, which `volume_path` names. So do the `singularity` and `enroot` providers'
-(`platoon/sandbox/hpc_stacks.py`): each stack is an hpc-sandbox pod, whose services share one network namespace, with
-`main`'s upstreams relayed by the pod itself and each service's run mode chosen from its image's user and what the
-runtime and the node give. A provider class whose stacks need something of the host says why it has none in a
+directories of the project's, which `volume_path` names, and a relay container in a service's network for `connect`.
+So do the `singularity` and `enroot` providers' (`platoon/sandbox/hpc_stacks.py`): each stack is an hpc-sandbox pod,
+whose services share one network namespace, with `main`'s upstreams relayed by the pod itself, each service's run mode
+chosen from its image's user and what the runtime and the node give, and the pod's ports exposed as sockets for
+`connect`. A provider class whose stacks need something of the host says why it has none in a
 `stack_refusal(options)` class method, which `platoon.sandbox.stack_refusal` asks also of a built provider, with its
 `options` (the `docker` provider's: the CLI's compose plugin; the HPC providers': hpc-sandbox's pods, on a node that
 nests user namespaces).

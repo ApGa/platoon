@@ -31,9 +31,17 @@ the host's resolvers.  On it each service answers to its name and aliases, at th
 service:<x>``) starts after it, as compose orders them.  While the stack has egress, each service is also connected to
 ``<project>-egress``, a bridge network that reaches the web (and the host's addresses other than its loopback), made
 when the stack first needs it and disconnected again for a phase without egress
-(:meth:`~platoon.sandbox.stacks.Stack.set_network`).  ``connect(service, port)`` is the service's address on the egress
-network, which this host reaches while the stack has egress, where the daemon runs as root (a rootless daemon's
-networks are in a namespace of its own).
+(:meth:`~platoon.sandbox.stacks.Stack.set_network`).
+
+**Reaching a service from this host.**  ``connect(service, port)`` starts a **relay**: a container of its own,
+``<project>-relay-<service>-<port>``, that shares the network of the service that listens there (``--network
+container:``), so that it reaches the port on that network's loopback whatever the stack's networks are, and serves a
+Unix socket in the project's directory, ``relay/<service>-<port>.sock``, which only your uid reaches (through a link
+in node scratch where that path is too long for a socket's address), also from a rootless daemon, whose networks this
+host does not reach.  The relay
+runs platoon's forwarder (``platoon/sandbox/forwarder.py``) with the Python 3 of that service's image, else of
+``main``'s, as root without capabilities, and carries the stack's labels, so that the teardown and a reap remove it
+with the services; a stack whose images have no Python 3 cannot be reached so (a ``RuntimeError`` says why).
 
 **Volumes** are directories of the project's, a named one below ``volumes/`` for every service that names it, a
 service's own ones below ``services/``: made, and filled where they have a ``fill``, before any service starts, and
@@ -72,7 +80,7 @@ from platoon.sandbox import cleanup
 from platoon.sandbox._exec import run_command
 from platoon.sandbox.base import ExecResult, Mount
 from platoon.sandbox.docker import DockerProvider, DockerSandbox, image_reference
-from platoon.sandbox.routes import SandboxRoutes
+from platoon.sandbox.routes import FORWARDER, SandboxRoutes
 from platoon.sandbox.stacks import (
     MAIN,
     SERVICE_LABEL,
@@ -80,6 +88,7 @@ from platoon.sandbox.stacks import (
     Dependency,
     DrivenStack,
     ServiceSpec,
+    SocketLinks,
     StackNetwork,
     StackSpec,
     Volume,
@@ -107,6 +116,20 @@ _NOT_YAML = re.compile("[\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]")
 _LOG_LINES = 200  # how much of a container's log a stack's logs() reads
 _REMAINS = "/platoon-remains"  # where the container that deletes what services wrote mounts the directory
 _DNS_KEPT_IN = (25, 0, 5)  # the first daemon whose internal networks keep their DNS queries in (CVE-2024-29018)
+RELAY_DIR = "relay"  # the directory of a project's relay sockets, which each relay binds at _RELAY_TARGET
+_RELAY_TARGET = "/run/platoon-relay"
+_RELAY_START_TIMEOUT_S = 60.0
+# A relay's command: the first Python 3.6 or later on its image's PATH runs platoon's forwarder, $3, which serves the
+# socket $1 and relays each connection to port $2 of the loopback; exit 127 when the image has none.
+_RELAY_SCRIPT = r"""
+for python in python3 python; do
+  if command -v "$python" >/dev/null 2>&1 && "$python" -c 'import sys; sys.exit(sys.version_info < (3, 6))'; then
+    exec "$python" -I -c "$3" --serve-socket "$1" --port "$2"
+  fi
+done
+echo "no Python 3 to run platoon's relay" >&2
+exit 127
+"""
 
 
 async def start_compose_stack(provider: DockerProvider, spec: StackSpec) -> DrivenStack:
@@ -237,6 +260,9 @@ class _Project:
         self._egress_made = False
         self._creating = asyncio.Lock()  # one create at a time: the first makes the internal network
         self._changes: set[asyncio.Task[ExecResult]] = set()  # the docker commands still changing what the daemon holds
+        self._relays: dict[tuple[str, int], Path] = {}  # each relay's socket, by the service whose port it reaches
+        self._relaying = asyncio.Lock()  # one relay started at a time
+        self._links = SocketLinks()
 
     def container(self, service: str) -> str:
         return f"{self.name}-{service}"
@@ -351,16 +377,62 @@ class _Project:
                     raise errors[0]
 
     async def connect(self, service: str, port: int) -> str:
+        """A Unix socket on this host that reaches ``port`` of ``service``, through the relay of the service whose
+        network it is (the module docstring says how), started the first time."""
+
         owner = service
         while (shared := self.spec.services[owner].network_of) is not None:
             owner = shared
-        address = (await self._networks(self.container(owner))).get(self.egress, {}).get("IPAddress")
-        if not address:
-            raise RuntimeError(
-                f"Nothing on this host reaches the service {service!r} of a stack without egress: its network "
-                f"{self.internal} has no address on this host"
+        async with self._relaying:
+            socket = self._relays.get((owner, port))
+            if socket is None:
+                socket = self._relays[(owner, port)] = await self._start_relay(owner, port)
+        return f"unix://{await self._links.short(socket, socket.name)}"
+
+    async def _start_relay(self, owner: str, port: int) -> Path:
+        """Start the relay to ``port`` of ``owner``'s network, with the image of ``owner``, else of ``main``, that has a
+        Python 3, and return its socket on this host once it accepts connections."""
+
+        directory = self.directory / RELAY_DIR
+        await asyncio.to_thread(_relay_directory, directory)
+        name = f"{owner}-{port}.sock"
+        container = f"{self.name}-relay-{owner}-{port}"
+        images = dict.fromkeys(image_reference(self.spec.services[each].sandbox.image) for each in (owner, MAIN))
+        failures = []
+        for image in images:
+            run = self._docker(
+                *("run", "--detach", f"--name={container}", f"--network=container:{self.container(owner)}"),
+                *("--user=0:0", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pull=never"),
+                *(f"--label={key}={value}" for key, value in self.labels.items()),
+                *("--entrypoint=/bin/sh", f"--volume={directory}:{_RELAY_TARGET}", image),
+                *("-c", _RELAY_SCRIPT, "platoon-relay", f"{_RELAY_TARGET}/{name}", str(port), _forwarder_source()),
             )
-        return f"tcp://{address}:{port}"
+            result = await self._run_through(run)
+            if result.exit_code == 0 and not result.timed_out:
+                failure = await self._relay_failure(container, directory / name)
+                if failure is None:
+                    return directory / name
+            else:
+                failure = "it timed out" if result.timed_out else result.stderr.strip()
+            failures.append(f"with {image}, {failure}")
+            await self._remove(container)
+        raise RuntimeError(f"Could not relay this host to port {port} of the service {owner}: {'; '.join(failures)}")
+
+    async def _relay_failure(self, container: str, socket: Path) -> str | None:
+        """None once the relay ``container`` serves ``socket``; else why it does not: its command exited, or it did not
+        listen in time."""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _RELAY_START_TIMEOUT_S
+        while not await asyncio.to_thread(os.path.exists, socket):
+            running, code = await self.state(container)
+            if not running:
+                log = (await self.logs(container, 500)).strip()
+                return f"its relay exited with status {code}" + (f": {log}" if log else "")
+            if loop.time() > deadline:
+                return f"its relay did not listen within {_RELAY_START_TIMEOUT_S:g}s"
+            await asyncio.sleep(0.05)
+        return None
 
     def rewrite(self, value: str, *, service: str | None = None) -> str:
         """The services reach one another by name on the project's network: nothing to rewrite."""
@@ -372,6 +444,7 @@ class _Project:
 
     async def close(self) -> None:
         await self._settled()  # what a start given up asked of the daemon is there to remove, or never will be
+        await self._links.close()
         removed = await _remove_labelled(self.provider, [f"--filter=label={STACK_LABEL}={self.name}"])
         removed = await remove_directory(self.provider, self.directory, image=self._image) and removed
         if not removed:
@@ -510,6 +583,20 @@ def _volume_directories(spec: StackSpec, directory: Path) -> _VolumeDirectories:
                 own[(service, number)] = directory / "services" / urllib.parse.quote(service, safe="") / str(number)
                 made.append((own[(service, number)], volume))
     return _VolumeDirectories(named, own, made)
+
+
+def _relay_directory(directory: Path) -> None:
+    """Make a project's relay directory, where a relay's root writes its socket whichever uid the daemon maps it to
+    (0777: a daemon that remaps users makes it a uid of its own), inside the project's own 0700 directory, which no
+    other user enters."""
+
+    directory.mkdir(exist_ok=True)
+    directory.chmod(0o777)
+
+
+@functools.cache
+def _forwarder_source() -> str:
+    return FORWARDER.read_text(encoding="utf-8")
 
 
 def _bind(mount: Mount) -> dict[str, Any]:
@@ -707,6 +794,7 @@ __all__ = [
     "IDLE",
     "PROJECT_FILE",
     "PROJECT_PREFIX",
+    "RELAY_DIR",
     "RUN_MODE",
     "STACK_RECORD",
     "compose_refusal",

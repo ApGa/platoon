@@ -15,6 +15,10 @@ lock: the provider runs some commands at once), changing them as Docker would.
   for any value), ``rm`` and ``kill`` do as Docker does, which refuses to connect a container twice, to disconnect one
   that is not connected, or to remove a network in use; ``cp`` copies nothing, into a running container.
 - ``run --rm ... --volume=<dir>:/platoon-remains <image> -rf -- <paths>`` deletes those paths, as root could.
+- ``run --detach --name=<name> --network=container:<other> ... --volume=<dir>:<target> <image> <args>`` (a relay)
+  runs its entrypoint on this host, in the background, with the paths below ``<target>`` in its arguments taken to
+  ``<dir>``, so that its loopback is this host's; ``rm`` and ``kill`` kill it.  An image that
+  ``$FAKE_DOCKER_NO_PYTHON`` lists has no Python: its container exits with 127 at once.
 
 ``$FAKE_DOCKER_FAIL`` lists commands that fail (``create``, ``start``, ``network connect``, ...), with
 ``$FAKE_DOCKER_ERROR`` on stderr, and ``$FAKE_DOCKER_FAIL_ONCE`` names one whose first call fails.  The daemon's
@@ -25,11 +29,14 @@ outlives the CLI, as Docker completes a request whose CLI was killed (touching `
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
 import re
 import shutil
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -147,6 +154,8 @@ def _run(args: list[str], state: dict, document: Any) -> int:
             addresses = {name: {"IPAddress": f"172.30.0.{2 + n}"} for n, name in enumerate(container["networks"])}
             print(json.dumps(addresses))
         else:
+            if container.get("pid") is not None and not _alive(container["pid"]):
+                container.update(status="exited", exit=1, pid=None)
             print(f"{container['status']} {container['exit']}")
         return 0
     if args[0] == "exec":
@@ -159,6 +168,10 @@ def _run(args: list[str], state: dict, document: Any) -> int:
         names = [arg for arg in args[1:] if not arg.startswith("--")]
         missing = [name for name in names if name not in containers]
         for name in names:
+            if containers.get(name, {}).get("pid") is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(containers[name]["pid"], signal.SIGKILL)
+                containers[name]["pid"] = None
             if args[0] == "rm":
                 containers.pop(name, None)
             elif name in containers:
@@ -171,6 +184,8 @@ def _run(args: list[str], state: dict, document: Any) -> int:
             if _selected(container["labels"], args):
                 print(name if "--quiet" in args else container["labels"].get(STACK_LABEL, ""))
         return 0
+    if args[0] == "run" and "--detach" in args:
+        return _run_detached(args, containers)
     if args[0] == "run":
         return _remove_remains(args)
     if args[0] == "cp":
@@ -290,6 +305,52 @@ _Yaml12Loader.add_implicit_resolver(
     list("-+.0123456789"),
 )
 _Yaml12Loader.add_implicit_resolver("tag:yaml.org,2002:int", re.compile(r"^0o[0-7]+$"), ["0"])
+
+
+def _run_detached(args: list[str], containers: dict) -> int:
+    """``docker run --detach``: the container's entrypoint runs on this host, in the background (the module docstring
+    says how)."""
+
+    options = {arg.split("=", 1)[0]: arg.split("=", 1)[1] for arg in args[1:] if arg.startswith("--") and "=" in arg}
+    image_at = next(index for index, arg in enumerate(args[1:], 1) if not arg.startswith("--"))
+    image, command = args[image_at], args[image_at + 1 :]
+    name, network = options["--name"], options.get("--network", "")
+    if name in containers:
+        print(
+            f'docker: Error response from daemon: Conflict. The container name "/{name}" is already in use.',
+            file=sys.stderr,
+        )
+        return 125
+    other = containers.get(network.removeprefix("container:"))
+    if network.startswith("container:") and (other is None or other["status"] != "running"):
+        print(
+            f"docker: Error response from daemon: cannot join network of a non running container: {network}",
+            file=sys.stderr,
+        )
+        return 126
+    labels = dict(arg.removeprefix("--label=").split("=", 1) for arg in args if arg.startswith("--label="))
+    container = containers[name] = {"status": "running", "exit": 0, "labels": labels, "networks": [], "pid": None}
+    if image in os.environ.get("FAKE_DOCKER_NO_PYTHON", "").split(","):
+        container.update(status="exited", exit=127)
+        return 0
+    source, _, target = options["--volume"].partition(":")
+    command = [source + arg[len(target) :] if arg.startswith(target + "/") else arg for arg in command]
+    log = open(Path(os.environ["FAKE_DOCKER_LOG"]).with_name(f"{name}.log"), "w")
+    process = subprocess.Popen(
+        [options["--entrypoint"], *command], stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True
+    )
+    container["pid"] = process.pid
+    print(name)
+    return 0
+
+
+def _alive(pid: int) -> bool:
+    """Whether the process runs (a zombie is gone too)."""
+
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()[0] != "Z"
+    except OSError:
+        return False
 
 
 def _selected(labels: dict[str, str], args: list[str]) -> bool:

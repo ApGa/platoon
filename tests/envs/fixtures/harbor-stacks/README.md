@@ -14,3 +14,8 @@ address (a real stack's own network, where the other services reach it by name),
 | `app-kv-unhealthy` | a sidecar whose healthcheck never passes, so the stack never starts |
 | `app-kv-seeded` | an init job (`seed`, waited for with `service_completed_successfully`) writes a value that the agents must copy |
 | `sidecar-artifacts` | after Harbor's example of the same name: a separate verifier grades evidence collected from the sidecar, its own log and a snapshot that a collect hook takes |
+| `mcp-http` | after Harbor's hello-mcp: an MCP sidecar (`mcp-server`, a standard-library server) serves `get_secret`, read-only, and `rotate_secret` over streamable HTTP, and the agents must write the secret to `/app/secret.txt`, through the tool plane (`mcp_server__get_secret`) or by calling the server from `main` |
+| `mcp-sse` | the same, over the legacy SSE transport, Harbor's default for a task's MCP servers |
+
+`harnesses/mcp-direct.toml` is a CLI harness for these two and Harbor's hello-mcp that reaches the task's server from
+`main`, at the URL that `{task_mcp_servers}` gives it, over the server's transport, as Harbor's agents do.

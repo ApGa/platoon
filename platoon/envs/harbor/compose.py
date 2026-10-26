@@ -397,6 +397,15 @@ class MainService:
         return None if is_idle(argv) else argv
 
 
+def service_aliases(service: Mapping[str, Any]) -> tuple[str, ...]:
+    """The names a planned service answers to besides its own: its ``hostname``, then its networks' aliases."""
+
+    aliases = [service["hostname"]] if service.get("hostname") else []
+    for settings in (service.get("networks") or {}).values():
+        aliases += (settings or {}).get("aliases") or []
+    return tuple(dict.fromkeys(alias for alias in aliases if alias))
+
+
 @dataclass(frozen=True)
 class ComposePlan:
     """A task's compose file as platoon runs it, in the form a lock records (``compose`` of a locked task)."""
@@ -450,6 +459,16 @@ class ComposePlan:
         NET_ADMIN``): planned so by a fetch with ``refuse: {privileges: false}``, refused by every other."""
 
         return tuple(self.data.get("privileges") or ())
+
+    def service_named(self, host: str) -> str | None:
+        """The service that answers to ``host`` in the stack, by its name or one of its aliases
+        (:func:`service_aliases`), as a URL in a task names it; None for none."""
+
+        wanted = host.lower()
+        for name, service in self.services.items():
+            if wanted in (alias.lower() for alias in (name, *service_aliases(service))):
+                return name
+        return None
 
     @property
     def external(self) -> dict[str, str]:
