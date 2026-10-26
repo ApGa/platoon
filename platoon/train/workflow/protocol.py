@@ -2,11 +2,11 @@
 
 A workflow (:class:`RolloutWorkflow`) turns one draw's task row into its group's output with ``arun_episode``.  What a
 workflow class can do beyond that it declares (:class:`WorkflowCapabilities`), and the trainer reads it through
-:func:`capabilities_of`.  What a group's output gives the trainer besides its rows is its report
-(:class:`OutputReport`), which the trainer reads through :func:`report_of`; its rows, by the policy each trains, the
-trainer reads through :func:`rows_by_policy`.  Each reader also takes what was written before the contract was: a
-class's flags, an output's attributes (:func:`carried_report`), a plain list of datums, each read as the trainer read
-them then.
+:func:`capabilities_of`; ``platoon train`` builds a workflow class from a :class:`WorkflowSetup`.  What a group's output
+gives the trainer besides its rows is its report (:class:`OutputReport`), which the trainer reads through
+:func:`report_of`; its rows, by the policy each trains, the trainer reads through :func:`rows_by_policy`.  Each reader
+also takes what was written before the contract was: a class's flags, an output's attributes (:func:`carried_report`),
+a plain list of datums, each read as the trainer read them then.
 
 :class:`~platoon.train.workflow.group.GroupRolloutWorkflow` is platoon's workflow, and
 :class:`~platoon.train.workflow.output.GroupOutput` its output: a list of datums with its report.
@@ -15,9 +15,9 @@ This module loads neither ``tinker`` nor ``torch``.
 """
 
 import sys
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     import tinker
@@ -43,10 +43,9 @@ class RolloutWorkflow(Protocol):
       (``takes_start_limit``), and whose metrics an evaluation reports while it is set;
     - ``entry_configs``: each environment entry's settings, which ``platoon train`` sets on a workflow that applies
       them (``applies_entry_settings``);
-    - its capabilities: a ``capabilities`` class attribute, or the class flags of :class:`WorkflowCapabilities`.
-
-    A workflow gets what it needs through its constructor: ``platoon train`` builds the run's workflow class with
-    ``GroupRolloutWorkflow``'s keyword arguments.
+    - its capabilities: a ``capabilities`` class attribute, or the class flags of :class:`WorkflowCapabilities`;
+    - ``from_setup(setup)``, a class method: ``platoon train`` builds the run's workflow class with it, from a
+      :class:`WorkflowSetup`, and builds a class without one with ``GroupRolloutWorkflow``'s keyword arguments.
     """
 
     async def arun_episode(self, data: dict) -> "RolloutOutput | Sequence[tinker.Datum] | None": ...
@@ -122,6 +121,70 @@ class OutputReport:
     # What each member returned, and what the group trains or why it trains nothing (platoon.train.task_stats).
     members: tuple["MemberResult", ...] = ()
     verdict: str = "unknown"
+
+
+@dataclass(frozen=True)
+class WorkflowSetup:
+    """What ``platoon train`` builds one phase's workflow with (a workflow class's ``from_setup``), in place of
+    ``GroupRolloutWorkflow``'s keyword arguments, whose ``model_info`` cannot carry several policies: the phase's
+    settings and the run's components, and the policies its rollouts sample."""
+
+    phase: Literal["train", "eval"]
+    rollout_fn: Callable[..., Any]
+    get_task_fn: Callable[[str], Any]
+    # The phase's workflow settings (train.workflow_config or eval.workflow_config), and each environment entry's own
+    # laid over them, by entry (None: no entry sets its own; platoon.train.entry_settings).
+    config: Any
+    entry_configs: Mapping[str, Any] | None
+    # Each sampled policy's model info (its renderer, its tokenizer and the model gateway that samples it and keeps its
+    # version), by policy id, the agents' default policy first: with one policy, main's.
+    policies: Mapping[str, Any]
+    log_path: str
+    stats_scope: str
+    filter_errors: bool
+    reward_processor: Callable[..., Any]
+    # The environments' packages and the run's label column, for a workflow that runs rollout workers
+    # (WorkflowCapabilities.runs_rollout_workers; None for one that does not).
+    packages: Sequence[str] | None = None
+    label_by: str | None = None
+    # The environment's other arguments of the phase's workflow (workflow_kwargs, eval_workflow_kwargs), as given.
+    options: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _built_by_keywords(workflow_cls: Any, setup: WorkflowSetup) -> Any:
+    """A workflow of ``workflow_cls`` built as ``platoon train`` always built one: with the keyword arguments of
+    ``GroupRolloutWorkflow``'s constructor that ``setup`` stands for (:func:`_keywords`), and each environment entry's
+    own settings as its ``entry_configs`` when an entry sets any.  ``GroupRolloutWorkflow.from_setup`` builds it so, as
+    ``platoon train`` builds a class without ``from_setup``."""
+
+    workflow = workflow_cls(**_keywords(setup))
+    if setup.entry_configs is not None:
+        workflow.entry_configs = dict(setup.entry_configs)
+    return workflow
+
+
+def _keywords(setup: WorkflowSetup) -> dict[str, Any]:
+    """The keyword arguments of ``GroupRolloutWorkflow``'s constructor that ``setup`` stands for, in its order: the
+    first policy's model info as ``model_info``, ``packages`` and ``label_by`` when given, then the environment's
+    ``options``, which win over those two.  ``TypeError`` for options that repeat another."""
+
+    keywords = {
+        "rollout_fn": setup.rollout_fn,
+        "get_task_fn": setup.get_task_fn,
+        "config": setup.config,
+        "model_info": next(iter(setup.policies.values())),
+        "log_path": setup.log_path,
+        "stats_scope": setup.stats_scope,
+        "filter_errors": setup.filter_errors,
+        "reward_processor": setup.reward_processor,
+    }
+    if repeated := sorted(set(keywords) & set(setup.options)):
+        raise TypeError(f"got multiple values for keyword argument {repeated[0]!r} (the environment's options)")
+    if setup.packages is not None:
+        keywords["packages"] = setup.packages
+    if setup.label_by is not None:
+        keywords["label_by"] = setup.label_by
+    return {**keywords, **setup.options}
 
 
 class RolloutOutput(Protocol):

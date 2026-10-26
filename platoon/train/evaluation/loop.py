@@ -3,7 +3,8 @@ update held for step 0's evaluation, and the last step's evaluation let end befo
 
 The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
 name, so to replace one, replace the method, on the class or an instance, not the function.  The evaluation loop calls
-them through the trainer.
+them through the trainer.  What they read of the trainer and of the loops' shared state is
+:mod:`platoon.train.evaluation.protocol`'s.
 """
 
 import asyncio
@@ -11,33 +12,37 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import tinker
 
 from platoon.train.dispatch.permits import _Rows, _rows
 from platoon.train.dispatch.runner import _group_done
-from platoon.train.dispatch.settled import _output_label, _Settled, _settled
+from platoon.train.dispatch.settled import (
+    LABEL_STATS,
+    _count_every_reward_key,
+    _no_groups_yet,
+    _output_label,
+    _record_group_stats,
+    _Settled,
+    _settled,
+)
+from platoon.train.evaluation.protocol import EvaluatedTrainer, LoopState
 from platoon.train.evaluation.record import record_evaluation
 from platoon.train.labels import label_column, metric_labels, metric_prefix
-from platoon.train.step.metrics import LABEL_STATS, _count_every_reward_key, _no_groups_yet, _record_group_stats
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.trainer.signals import TerminateEvalLoop, TrainInterrupted
-from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.train.workflow.protocol import RolloutWorkflow, report_of
 from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.stats_tracker import StatsTracker
 from platoon.utils.stats_tracker import get as get_tracker
 
-if TYPE_CHECKING:
-    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
-
 logger = logging.getLogger(__name__)
 
 
 async def _rollout_workflow_worker_loop(
-    trainer: "PlatoonTinkerRLTrainer",
-    shared_state: TrainLoopSharedState,
+    trainer: EvaluatedTrainer,
+    shared_state: LoopState,
     workflow: RolloutWorkflow,
     task_data_queue: asyncio.Queue[dict],
     rollout_result_queue: asyncio.Queue[Any],
@@ -70,7 +75,7 @@ async def _rollout_workflow_worker_loop(
 
 
 async def _eval_completion_monitor(
-    trainer: "PlatoonTinkerRLTrainer",
+    trainer: EvaluatedTrainer,
     total_eval_tasks: int,
     eval_rollout_result_queue: asyncio.Queue[Any],
     tracker: StatsTracker | None = None,
@@ -90,7 +95,7 @@ async def _eval_completion_monitor(
     raise TerminateEvalLoop()
 
 
-async def _eval_loop(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState, workflow: RolloutWorkflow):
+async def _eval_loop(trainer: EvaluatedTrainer, shared_state: LoopState, workflow: RolloutWorkflow):
     """The evaluation loop of a start that evaluates during training (:class:`EvaluationLoop`), until a shutdown."""
 
     await EvaluationLoop(trainer, shared_state, workflow, Publication.of(shared_state)).run()
@@ -106,7 +111,7 @@ class Publication:
     sampling_client: Callable[[], tinker.SamplingClient]
 
     @classmethod
-    def of(cls, shared_state: TrainLoopSharedState) -> "Publication":
+    def of(cls, shared_state: LoopState) -> "Publication":
         """The publication of the policy that the train and evaluation loops share (``shared_state``)."""
 
         return cls(
@@ -125,8 +130,8 @@ class EvaluationLoop:
 
     def __init__(
         self,
-        trainer: "PlatoonTinkerRLTrainer",
-        shared_state: TrainLoopSharedState,
+        trainer: EvaluatedTrainer,
+        shared_state: LoopState,
         workflow: RolloutWorkflow,
         publication: Publication,
     ) -> None:
@@ -216,9 +221,11 @@ class EvaluationLoop:
         eval_rollout_result_queue = asyncio.Queue[Any]()  # each group's _Settled
 
         # Populate eval queue with all eval data upfront
+        eval_dataloader = shared_state.eval_dataloader
+        assert eval_dataloader is not None  # an evaluation runs only over the run's evaluation split
         total_eval_tasks = 0
-        for i_batch in range(len(shared_state.eval_dataloader)):
-            batch = shared_state.eval_dataloader.get_batch(i_batch)
+        for i_batch in range(len(eval_dataloader)):
+            batch = eval_dataloader.get_batch(i_batch)
             for data in batch:
                 eval_data_queue.put_nowait(data)
                 total_eval_tasks += 1
@@ -257,9 +264,7 @@ class EvaluationLoop:
         return total_eval_tasks, label_stats
 
 
-async def _wait_for_starting_policy_evaluation(
-    trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState
-) -> None:
+async def _wait_for_starting_policy_evaluation(trainer: EvaluatedTrainer, shared_state: LoopState) -> None:
     """Hold the first update of a run launched at step 0 until the evaluation loop has handled the step it started
     on, when that is due: the evaluation of the starting policy (``eval.at_start``).
 
@@ -281,7 +286,7 @@ async def _wait_for_starting_policy_evaluation(
         await _wait_for_event_or_stop(shared_state.eval_progress_event, shared_state.shutdown_event)
 
 
-async def _wait_for_last_step_evaluation(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState) -> None:
+async def _wait_for_last_step_evaluation(trainer: EvaluatedTrainer, shared_state: LoopState) -> None:
     """Let the evaluation loop handle the last training step before the loops stop.
 
     Stopping the loops cancels the evaluation loop, so without this wait an evaluation due at the last step

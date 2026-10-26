@@ -9,15 +9,9 @@ plugins    ``workflow/``, ``credit/``
 =========  ============================================================================================================
 
 Every import counts, a function's own, those under ``TYPE_CHECKING`` and relative ones (as the absolute import each
-is) included.  ``launch.py`` (which names the
-trainers), the package's exports (``platoon/train/__init__.py``) and the old paths' shims (``tinker/``) belong to no
-group.  The workflow's contract (``workflow/protocol.py``), which generic code calls the workflow through, is
-everyone's.
-
-:data:`ALLOWED` lists today's imports that break the rule, each with what it reads: the dispatcher, the evaluation,
-the resume and the draws' save still read the rl trainer and its loops' shared state, until the rollout source takes
-them over; a step's wait for its next group reads the shared state; and the admission rules' check reads a step
-helper of the loss.  An entry that no longer breaks the rule fails the test too, so that the list only shrinks.
+is) included.  ``launch.py`` (which names the trainers), the package's exports (``platoon/train/__init__.py``) and the
+old paths' shims (``tinker/``) belong to no group.  The workflow's contract (``workflow/protocol.py``), which generic
+code calls the workflow through, is everyone's.  No import breaks the rule.
 """
 
 from __future__ import annotations
@@ -26,8 +20,6 @@ import ast
 import functools
 import importlib.util
 from pathlib import Path
-
-import pytest
 
 PACKAGE = Path(__file__).resolve().parents[2] / "platoon" / "train"
 GENERIC_TRAINER_MODULES = {"api", "run", "registry", "hooks", "signals", "waiting"}
@@ -39,28 +31,6 @@ UNGROUPED = {"launch", "__init__", "tinker"}
 CONTRACTS = {"platoon.train.workflow.protocol"}
 # What each group may not import.
 FORBIDDEN = {"generic": {"trainers", "plugins"}, "plugins": {"trainers"}, "trainers": set()}
-
-# Today's imports that break the rule: (importer, imported) -> what it reads.
-ALLOWED = {
-    ("platoon.train.admissions", "platoon.train.step.batch_transforms"): "whether a loss's objective is zero for "
-    "zero advantages, a rule's check of the run's loss",
-    (
-        "platoon.train.checkpoints.resume",
-        "platoon.train.trainer.rl",
-    ): "the trainer, whose dispatcher takes up the draws",
-    ("platoon.train.checkpoints.saving", "platoon.train.trainer.rl"): "the trainer, whose draws a checkpoint saves",
-    ("platoon.train.dispatch.runner", "platoon.train.trainer.rl"): "the trainer, whose seams run a group",
-    ("platoon.train.dispatch.runner", "platoon.train.trainer.state"): "the loops' shared state",
-    ("platoon.train.dispatch.setup", "platoon.train.trainer.rl"): "the trainer, whose dispatcher it builds",
-    ("platoon.train.dispatch.setup", "platoon.train.trainer.state"): "the loops' shared state",
-    ("platoon.train.evaluation.loop", "platoon.train.step.metrics"): "the step's group statistics",
-    ("platoon.train.evaluation.loop", "platoon.train.trainer.rl"): "the trainer, whose seams run an evaluation",
-    ("platoon.train.evaluation.loop", "platoon.train.trainer.state"): "the loops' shared state",
-    ("platoon.train.evaluation.plan", "platoon.train.trainer.rl"): "the trainer, whose evaluation it plans",
-    ("platoon.train.evaluation.plan", "platoon.train.trainer.state"): "the loops' shared state",
-    ("platoon.train.trainer.waiting", "platoon.train.trainer.state"): "the loops' shared state, whose shutdown request "
-    "a step's wait for its next group reads",
-}
 
 
 def group(module: str) -> str | None:
@@ -135,14 +105,6 @@ def test_the_groups_are_as_rfc_0021_names_them():
 
 def test_generic_code_imports_no_trainer_or_plugin_and_plugins_no_trainer():
     found = breaks()
-    new = {pair: crossing for pair, crossing in found.items() if pair not in ALLOWED}
-    assert not new, "imports that break the dependency rule (RFC 0021, section 3.2):\n" + "\n".join(
-        f"  {importer} imports {imported} ({crossing})" for (importer, imported), crossing in sorted(new.items())
+    assert not found, "imports that break the dependency rule (RFC 0021, section 3.2):\n" + "\n".join(
+        f"  {importer} imports {imported} ({crossing})" for (importer, imported), crossing in sorted(found.items())
     )
-
-
-@pytest.mark.parametrize("pair", sorted(ALLOWED))
-def test_each_allowed_import_still_breaks_the_rule(pair):
-    """The list only shrinks: an entry that no longer breaks the rule is removed from it."""
-
-    assert pair in breaks(), f"{pair[0]} no longer imports {pair[1]}: remove it from ALLOWED"

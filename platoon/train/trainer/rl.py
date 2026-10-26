@@ -1,13 +1,16 @@
 """The rl trainer (``PlatoonTinkerRLTrainer``, ``trainer: rl``): GRPO-style training on the rollouts of the run's
 tasks, with evaluation during training.  Each start goes through the lifecycle every trainer shares
 (:class:`~platoon.train.trainer.run.TrainerRun`), which ``train()`` runs with the given workflows (``run()``, with the
-ones its setup builds); its hooks are the trainer's part, in the order they run: the checks, the policy's
-training client at the start point (through the trainer's seams), the rollouts' startup and the draws taken up, after
-the launch save the per-task statistics and the recovery pruning, what the loops share, the loops, and closing.
+ones the run builds from the trainer's setup); its hooks are the trainer's part, in the order they run: the checks, the
+policy's training client at the start point (through the trainer's seams), the rollouts' startup and the start's draws
+(its rollout source, :class:`_TrainerDraws`, which the run opens as it opens any trainer's), after the launch save the
+recovery pruning, what the loops share, the loops, and closing.
 
 What it does at each stage lives in the stage packages (``platoon.train.trainer``, ``.step``, ``.dispatch``,
-``.checkpoints``, ``.evaluation``): each of those methods is a module function there that takes the trainer first,
-and stays a method of the trainer under its name, so that subclasses and tests that replace one keep working.
+``.checkpoints``, ``.evaluation``): each of those methods is a module function there that takes the trainer first, and
+stays a method of the trainer under its name, so that subclasses and tests that replace one keep working.  Those of the
+start's draws take its rollout source instead: the source's steps of opening, saving and taking up the draws go through
+the trainer's methods of their names, which call those functions with the source.
 """
 
 import asyncio
@@ -23,16 +26,17 @@ from platoon.train import entry_settings
 from platoon.train.admissions import AdmissionSet
 from platoon.train.checkpoints import resume, saving
 from platoon.train.checkpoints.participants import RunCheckpoints
-from platoon.train.checkpoints.pruning import RecoveryCheckpointPruner, check_recovery_pruning, read_checkpoint_records
+from platoon.train.checkpoints.pruning import RecoveryCheckpointPruner, check_recovery_pruning
 from platoon.train.checkpoints.resume import StartPoint
-from platoon.train.checkpoints.saving import Draws
 from platoon.train.components import normalize_environment_configs
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, evaluates
-from platoon.train.dataloader import PlatoonTinkerDataloader, _run_steps
+from platoon.train.dataloader import PlatoonTinkerDataloader
 from platoon.train.dataset_order import EpochOrder
 from platoon.train.dispatch import runner, setup
+from platoon.train.dispatch import source as rollout_source
 from platoon.train.dispatch.dispatcher import Dispatcher
 from platoon.train.dispatch.permits import _group_sizes
+from platoon.train.dispatch.source import RolloutSource, training_tasks
 from platoon.train.evaluation import loop as evaluation_loop
 from platoon.train.evaluation import plan as evaluation_plan
 from platoon.train.evaluation.plan import _evaluation_plan
@@ -40,16 +44,16 @@ from platoon.train.evaluation.record import EVALUATIONS_NAME, completed_evaluati
 from platoon.train.policy import service
 from platoon.train.policy.policy import Policy, adam_params
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import policy_specs
-from platoon.train.sampler_runtime import TaskSampling
+from platoon.train.policy.spec import MAIN, policy_specs
+from platoon.train.sampler_runtime import SamplerSet, TaskSampling
 from platoon.train.startup import RolloutStartup
 from platoon.train.step import publish
 from platoon.train.step.batch_transforms import BatchTransform, build_default_batch_transforms
-from platoon.train.task_records import TaskRecorder, record_lost_state, resume_record
+from platoon.train.task_records import TaskRecorder
 from platoon.train.tinker.key_refusal import key_refusals
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.trainer import loops, waiting
-from platoon.train.trainer.api import StepPlan, TrainerBase, TrainerNeeds, TrainerSetup, Workflows
+from platoon.train.trainer.api import StepPlan, TaskSources, TrainerBase, TrainerNeeds, TrainerSetup, Workflows
 from platoon.train.trainer.run import StepClock, TrainerRun
 from platoon.train.trainer.signals import TerminateTrainLoop, TrainInterrupted, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState, _main_holding
@@ -92,17 +96,15 @@ def _limit_starts(config: Any, train_workflow: Any, eval_workflow: Any | None) -
 class PlatoonTinkerRLTrainer(TrainerBase):
     # Deletes the run's older recovery checkpoints while train() runs (checkpoint.keep_recovery); None without it.
     _recovery_pruner: RecoveryCheckpointPruner | None = None
-    # Starts the training groups of the start train() runs (platoon.train.dispatch.dispatcher); None before it.
-    _dispatcher: Dispatcher | None = None
+    # The draws of the start train() runs, its rollout source (_TrainerDraws), which prepare() opens; None before it.
+    # Its per-task statistics, dispatcher and admission rules are _recorder, _dispatcher and _admissions.
+    _rollouts: "_TrainerDraws | None" = None
     # The order training draws its tasks in, epoch by epoch, such as a mixture's weighted order; None: the dataloader
     # shuffles train_dataset (platoon.train.dataset_order).  The trainer counts its epochs by it.
     train_order: EpochOrder | None = None
     # How the run draws its training tasks through task samplers, as platoon train hands it the run's
     # (AutoDataset.training); None: each position of the dataloader's order, as it is.
     train_sampling: TaskSampling | None = None
-    # The group admission rules of the start train() runs, beside its dispatcher (platoon.train.dispatch.setup); None
-    # when every entry admits every group.  Unset before (read with getattr).
-    _admissions: AdmissionSet | None
     # The run's policies (platoon.train.policy): main, as train: declares it, with its model gateway.
     policies: PolicySet
     # The start that train() runs (TrainerRun), which train() records before it begins, so that the steps save through
@@ -212,15 +214,15 @@ class PlatoonTinkerRLTrainer(TrainerBase):
 
         return StatsLogger(stats_logger_config, exp_config=self.config)
 
-    # Methods whose code lives in the stage packages, as module functions that take the trainer first.  Each stays a
-    # method under its name, so that replacing it on the class or on an instance (a subclass, a test) replaces what the
-    # trainer calls; replacing the module function does not.  Here: waiting, running groups, the loops, evaluation and
-    # the checkpoint cadence (the heartbeat and the signal handlers are TrainerBase's).
-    _await_rollout_with_heartbeat = waiting._await_rollout_with_heartbeat
-    _run_group = runner._run_group
+    # Methods whose code lives in the stage packages, as module functions.  Each stays a method under its name, so
+    # that replacing it on the class or on an instance (a subclass, a test) replaces what the trainer calls; replacing
+    # the module function does not.  Those that take no trainer are static methods.  Here: running an evaluation's
+    # groups, the loops, evaluation and the checkpoint cadence (the heartbeat and the signal handlers are
+    # TrainerBase's).  A training group runs in the start's rollout source (platoon.train.dispatch.runner), not through
+    # _run_group, and no group waits through _await_rollout_with_heartbeat, which stays for the tests that call it.
+    _await_rollout_with_heartbeat = staticmethod(waiting._await_rollout_with_heartbeat)
+    _run_group = staticmethod(runner._run_group)
     _rollout_workflow_worker_loop = evaluation_loop._rollout_workflow_worker_loop
-    _run_training_group = runner._run_training_group
-    _settle_under_rule = runner._settle_under_rule
     _publish_worker_binding = staticmethod(publish._publish_worker_binding)
     _train_loop = loops._train_loop
     _next_rollout = staticmethod(waiting._next_rollout)
@@ -232,60 +234,109 @@ class PlatoonTinkerRLTrainer(TrainerBase):
     shutdown_loops = loops.shutdown_loops
     _save_checkpoint_and_get_sampling_client = saving._save_checkpoint_and_get_sampling_client
 
-    def _training_tasks(self) -> Any:
-        """Every task training draws from, once each, in pool order: a given order's tasks (a weighted order's, those
-        its first epoch leaves out included), else the training dataset's rows."""
+    # The start's draws: its rollout source (_TrainerDraws), which prepare() opens and the run starts and closes.  Its
+    # steps of opening, saving and taking up the draws, and its training tasks, go through the methods below, which
+    # tests replace; each calls the part of the source of its name (platoon.train.dispatch.source, .setup,
+    # platoon.train.checkpoints.saving, .resume) with the trainer's source.  The parts those parts call are module
+    # functions, not the trainer's methods: the task samplers (setup._samplers, which _samplers stays for the tests
+    # that call it), the kept groups and the saved samplings a resume reads, and a training group's run.
 
-        tasks = getattr(getattr(self, "train_order", None), "items", None)
-        if tasks is None:
-            tasks = getattr(self, "train_dataset", None)
-        return tasks
+    def _task_sources(self) -> TaskSources:
+        """The training tasks as the trainer holds them: its dataset, the order it draws them in and its task
+        samplers."""
+
+        return TaskSources(
+            train_dataset=getattr(self, "train_dataset", None),
+            train_order=self.train_order,
+            train_sampling=self.train_sampling,
+        )
+
+    def _training_tasks(self) -> Any:
+        """Every task training draws from, once each, in pool order
+        (:func:`~platoon.train.dispatch.source.training_tasks`)."""
+
+        return training_tasks(self._task_sources())
+
+    def _draws(self) -> RolloutSource:
+        """The start's draws, which prepare() opens.  A trainer that a test drives outside a start, made without its
+        constructor, has none: each use gets a source over its fields that no start opened (to go once the tests make
+        their trainers with the constructor)."""
+
+        return self._rollouts if self._rollouts is not None else _TrainerDraws(self, self.run_log_path)
+
+    @property
+    def _recorder(self) -> TaskRecorder | None:
+        return self._rollouts.recorder if self._rollouts is not None else None
+
+    @_recorder.setter
+    def _recorder(self, recorder: TaskRecorder | None) -> None:
+        # A test's _begin_task_records sets it, as the start's draws open.
+        assert self._rollouts is not None, "only the start's draws hold per-task statistics"
+        self._rollouts.recorder = recorder
+
+    @property
+    def _dispatcher(self) -> Dispatcher | None:
+        return self._rollouts.dispatcher if self._rollouts is not None else None
+
+    @property
+    def _admissions(self) -> AdmissionSet | None:
+        return self._rollouts.admissions if self._rollouts is not None else None
 
     def _begin_task_records(self, resume_info: Any, start_batch: int) -> None:
-        """Start this start's records of the run's per-task statistics (:class:`TaskRecorder`) over every task training
-        draws from, with those of the checkpoint ``resume_info`` resumes from, when it names a snapshot that reads back,
-        else those of the newest older checkpoint whose snapshot does, else from empty (:meth:`_task_records_started`
-        records why in ``lock.json``)."""
+        """Begin this start's per-task statistics (:func:`~platoon.train.dispatch.source._begin_task_records`)."""
 
-        tasks = self._training_tasks() or []
-        self._recorder = None
-        self._tasks_lost = None
-        try:
-            self._recorder, self._tasks_lost = TaskRecorder.begin(
-                run_dir=self.run_log_path,
-                config=self.config,
-                tasks=tasks,
-                records=read_checkpoint_records(self.run_log_path),
-                checkpoint=resume_info.name if resume_info is not None else None,
-                resume=resume_record(resume_info) if resume_info is not None else None,
-                batch=start_batch,
-            )
-        except Exception:  # the statistics never fail training
-            logger.warning("This start keeps no per-task statistics: they could not start", exc_info=True)
+        rollout_source._begin_task_records(self._draws(), resume_info, start_batch)
 
     def _task_records_started(self) -> None:
-        """The launch save succeeded: the start's events go to the event log, and a start that could not load the
-        statistics its checkpoint named says so in ``lock.json`` (``tasks_state_lost``).  Never raises."""
+        """The launch save succeeded: the start's per-task statistics log their beginning
+        (:func:`~platoon.train.dispatch.source._task_records_started`)."""
 
-        recorder = getattr(self, "_recorder", None)
-        if recorder is None:
-            return
-        try:
-            recorder.started()
-        except Exception:  # the statistics never fail training
-            logger.warning("Could not log the start of this start's per-task statistics", exc_info=True)
-        if (lost := getattr(self, "_tasks_lost", None)) is not None:
-            record_lost_state(self.run_log_path, lost)
+        rollout_source._task_records_started(self._draws())
 
-    # Moved methods, as above: what a full checkpoint holds, the dispatcher, and resuming.
-    _checkpoint_state = saving._checkpoint_state
-    _dispatch = setup._dispatch
-    _new_dispatcher = setup._new_dispatcher
-    _samplers = setup._samplers
-    _resume_position = staticmethod(resume._resume_position)
-    _restore_dispatch = resume._restore_dispatch
-    _saved_samplings = staticmethod(resume._saved_samplings)
-    _read_kept_groups = resume._read_kept_groups
+    async def _checkpoint_state(self, checkpoint: str, loop_state: dict[str, Any]) -> dict[str, Any]:
+        """``loop_state`` of full checkpoint ``checkpoint``, with what it saves of the draws first
+        (:func:`~platoon.train.checkpoints.saving._checkpoint_state`)."""
+
+        return await saving._checkpoint_state(self._draws(), checkpoint, loop_state)
+
+    def _new_dispatcher(self, train_dataloader: Any, start_batch: int, end_batch: int) -> Dispatcher:
+        """The dispatcher of this start's training groups (:func:`~platoon.train.dispatch.setup._new_dispatcher`)."""
+
+        return setup._new_dispatcher(self._draws(), train_dataloader, start_batch, end_batch)
+
+    def _samplers(self, train_dataloader: Any, sampler: str) -> SamplerSet:
+        """The task samplers the run draws through (:func:`~platoon.train.dispatch.setup._samplers`)."""
+
+        return setup._samplers(self._draws(), train_dataloader, sampler)
+
+    def _dispatch(
+        self,
+        task_group: asyncio.TaskGroup,
+        shared_state: TrainLoopSharedState,
+        start_batch: int,
+        end_batch: int,
+        train_workflow: RolloutWorkflow,
+        results: asyncio.Queue,
+    ) -> Dispatcher | None:
+        """Start the start's draws in the train loop's ``task_group`` (:meth:`RolloutSource.start`): the dispatcher
+        prepare() built, with what the checkpoint the start resumes from saved, its groups settling into ``results``
+        and feeding the loops' watchdog, until the loops' shutdown.  The draws hold the steps' range and the training
+        workflow (``train_workflow``, the start's).  The train loop's tests replace this method, put their groups in
+        ``results`` and return None: the loop then tells no dispatcher of its steps."""
+
+        return self._draws().start(
+            task_group,
+            results=results,
+            watchdog=shared_state.watchdog,
+            tracker=shared_state.train_tracker,
+            stop=shared_state.shutdown_event,
+        )
+
+    def _restore_dispatch(self, dispatcher: Dispatcher, resume_info: Any, policy_version: int) -> None:
+        """Take up the draws the checkpoint ``resume_info`` left outstanding
+        (:func:`~platoon.train.checkpoints.resume._restore_dispatch`)."""
+
+        resume._restore_dispatch(self._draws(), dispatcher, resume_info, policy_version)
 
     def _start_recovery_pruning(self) -> RecoveryCheckpointPruner | None:
         """The pruner of this run's recovery checkpoints (``checkpoint.keep_recovery``), which deletes them on a Tinker
@@ -318,19 +369,19 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         start train() runs, whose leader policy trains with ``training_client``.  A trainer that a test drives outside
         a start, made without its constructor, saves through checkpoints of its run directory over a policy that holds
         ``training_client``, with its draws (to go once the tests make their trainers with the constructor).  A trainer
-        whose start made its dispatcher, but which train() did not record, raises instead: saving outside that start
-        would lose its other participants."""
+        whose start opened its draws, but which train() did not record, raises instead: saving outside that start would
+        lose its other participants."""
 
         if self._run is not None:
             return self._run.checkpoints
-        if self._dispatcher is not None:
+        if self._rollouts is not None:
             raise RuntimeError("the rl trainer's steps save through the start train() runs, which it did not record")
         checkpoints = RunCheckpoints(
             self.run_log_path,
             PolicySet([_main_holding(training_client=training_client)]),
             wandb_run_id=lambda: self._stats_logger.wandb_run_id if self._stats_logger is not None else None,
         )
-        checkpoints.register(Draws(self))
+        checkpoints.register(self._draws())
         return checkpoints
 
     async def _create_training_client(
@@ -355,12 +406,11 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         )
 
     async def run(self) -> None:
-        """A start of a trainer built from its setup (:meth:`from_setup`): the training and evaluation workflows that
-        the setup builds on the trainer's policy, then :meth:`train`."""
+        """A start of a trainer built from its setup (:meth:`from_setup`): the lifecycle every trainer goes through,
+        whose run builds the training and evaluation workflows from the setup, on the trainer's policies, first."""
 
-        assert self.setup is not None  # a trainer that run() starts was built from its setup
-        workflows = self.setup.build_workflows(self.policies)
-        await self.train(train_workflow=workflows.train, eval_workflow=workflows.eval)
+        self._run = TrainerRun(self)
+        await self._run.execute()
 
     async def train(self, train_workflow: RolloutWorkflow, eval_workflow: RolloutWorkflow | None = None):
         """Train this start of the run, from the checkpoint it resumes from (:class:`StartPoint`; none for a fresh run)
@@ -396,22 +446,26 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         return True
 
     async def prepare(self, run: TrainerRun, start: StartPoint) -> StepPlan:
-        """5. Begin the rollouts' startup (:meth:`_begin_rollout_startup`), then start the draws: the per-task
-        statistics and the dispatcher (:meth:`_prepare_draws`), which take part in every full checkpoint from the launch
-        save on, and take up the draws the checkpoint left outstanding as they do (:class:`Draws`)."""
+        """5. Begin the rollouts' startup (:meth:`_begin_rollout_startup`), then open the start's draws before the
+        launch save, which saves them: its rollout source over the training workflow (:class:`_TrainerDraws`), which
+        the run opens as it opens any trainer's (:meth:`TrainerRun._open_draws`): the per-task statistics, the order
+        and the dispatcher of the training groups, which take up the draws the checkpoint left outstanding and take
+        part in every full checkpoint.  The training dataloader is the draws' order, and the steps end at theirs."""
 
-        assert run.workflows is not None  # train() runs the lifecycle with its workflows
+        assert run.workflows is not None  # train() runs the lifecycle with its workflows, run() with its setup's
         self._startup = await self._begin_rollout_startup(run.workflows.train, run.workflows.eval)
-        self._train_dataloader, end_batch = self._prepare_draws(start)
-        run.checkpoints.register(Draws(self))
-        return StepPlan(end_step=end_batch)
+        draws = _TrainerDraws(self, run.run_dir, workflow=run.workflows.train, leader=run.policies.leader)
+        self._rollouts = draws  # before it opens: a test's _begin_task_records sets its _recorder
+        run._open_draws(draws)
+        assert draws.order is not None  # opened
+        self._train_dataloader = draws.order
+        return StepPlan(end_step=draws.end_step)
 
     async def started(self, run: TrainerRun) -> None:
-        """6. The launch save succeeded: the per-task statistics' events go to the event log, and the pruning of the
-        run's recovery checkpoints starts with the launch save, so that a resumed run first deletes what its earlier
-        starts left."""
+        """6. The launch save succeeded, and the start's draws logged their start (the run's, through
+        :meth:`_task_records_started`): the pruning of the run's recovery checkpoints starts with the launch save, so
+        that a resumed run first deletes what its earlier starts left."""
 
-        self._task_records_started()
         self._recovery_pruner = self._start_recovery_pruning()
         self._recovery_saved(run.launch_save[self.policies.leader], run.start.policy_version)
 
@@ -487,23 +541,6 @@ class PlatoonTinkerRLTrainer(TrainerBase):
             normalize_environment_configs(getattr(self.config, "environments", None)),
             [train_workflow, eval_workflow if self.eval_dataset is not None and evaluates(self.config) else None],
         )
-
-    def _prepare_draws(self, start: StartPoint) -> tuple[PlatoonTinkerDataloader, int]:
-        """Start the run's per-task statistics and the dispatcher of the training groups, both before the launch
-        save.  The training dataloader, and the end batch: the run's last step."""
-
-        # The run's per-task statistics, those of the checkpoint it resumes from loaded before the launch save, which
-        # saves them: a crash before the next full save loses none of them.
-        self._begin_task_records(start.resume_info, start.batch)
-        # The dispatcher of the training groups, which takes up the draws the checkpoint left outstanding before the
-        # launch save (as the draws take part in the run's checkpoints, Draws.resume), which saves them again: its kept
-        # groups, the draws to draw again, and the order's position.
-        train_dataloader = PlatoonTinkerDataloader(
-            self.train_dataset, self.config.train.batch_size, order=self.train_order
-        )
-        end_batch = _run_steps(self.config, len(train_dataloader))
-        self._dispatcher = self._new_dispatcher(train_dataloader, start.batch, end_batch)
-        return train_dataloader, end_batch
 
     async def _loop_state(
         self,
@@ -595,9 +632,52 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         return interrupted
 
     async def _close_after_training(self) -> None:
-        """Stop the pruning of the run's recovery checkpoints, and close the per-task statistics."""
+        """Stop the pruning of the run's recovery checkpoints (the run closes the start's draws after it)."""
 
         if self._recovery_pruner is not None:
             await self._recovery_pruner.aclose()
-        if (recorder := getattr(self, "_recorder", None)) is not None:
-            recorder.close()
+
+
+class _TrainerDraws(RolloutSource):
+    """The rl trainer's draws: a rollout source over the trainer's config, training tasks and policies, whose steps of
+    opening, saving and taking up the draws go through the trainer's methods of their names, which tests replace (on
+    the class or an instance), and which call the source's parts: the per-task statistics' beginning
+    (``_begin_task_records``) and start (``_task_records_started``), the dispatcher (``_new_dispatcher``), the draws'
+    entries of a full checkpoint (``_checkpoint_state``) and their resume (``_restore_dispatch``); and its training
+    tasks are the trainer's (``_training_tasks``)."""
+
+    def __init__(
+        self,
+        trainer: PlatoonTinkerRLTrainer,
+        run_dir: str,
+        *,
+        workflow: RolloutWorkflow | None = None,
+        leader: str = MAIN,
+    ) -> None:
+        super().__init__(
+            trainer.config,
+            run_dir=run_dir,
+            tasks=trainer._task_sources(),
+            workflow=workflow,
+            versions=lambda: trainer.policies.versions(),
+            leader=leader,
+        )
+        self.trainer = trainer
+
+    def begin_task_records(self, record: Any, step: int) -> None:
+        self.trainer._begin_task_records(record, step)
+
+    def new_dispatcher(self, order: PlatoonTinkerDataloader, start_step: int, end_step: int) -> Dispatcher:
+        return self.trainer._new_dispatcher(order, start_step, end_step)
+
+    def training_tasks(self) -> Any:
+        return self.trainer._training_tasks()
+
+    def started(self) -> None:
+        self.trainer._task_records_started()
+
+    async def checkpoint_state(self, name: str) -> dict[str, Any]:
+        return await self.trainer._checkpoint_state(name, {})
+
+    def restore(self, dispatcher: Dispatcher, record: Any, policy_version: int) -> None:
+        self.trainer._restore_dispatch(dispatcher, record, policy_version)

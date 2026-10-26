@@ -46,6 +46,13 @@ class Policy:
     def id(self) -> PolicyId:
         return self.spec.id
 
+    @property
+    def version(self) -> int:
+        """The policy's version: how many samplers it published over the run (its model gateway counts them), which a
+        rollout's datums carry and the staleness of its groups is counted in."""
+
+        return self.info.llm.version
+
     def connect(self) -> None:
         """Open the policy's Tinker service client, a session on its service (``spec.tinker_base_url``).  A key the
         service refuses (401, 403) ends training with one line that names the key and the service."""

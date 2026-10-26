@@ -206,11 +206,12 @@ class Dispatcher:
     gives the row at each position, drawn as it is; ``steps`` the training steps this start runs; ``labels`` every
     label of the run's training tasks, which must be complete: the dispatcher draws only while one of them has room, and
     learns another one only by drawing it, so a label it is not given never counts as having room before its first
-    draw; ``recorder`` the run's per-task statistics, told of each draw and skip; ``version()`` the policy version now,
-    and ``step`` the training steps committed when this start began, which the samplers' contexts carry.  ``start``
-    numbers this start's draws, and the order starts at ``next_position``.  ``groups_per_step``, the cap of a run
-    under a group admission rule, makes it count its steps as the module docstring says (None: every group counts
-    toward the batch).  ``permit_release`` is ``train.permit_release``."""
+    draw; ``recorder`` the run's per-task statistics, told of each draw, at the version of the sampled policy
+    (``leader``), and of each skip; ``versions()`` the policies' versions now (``{main: v}``), and ``step`` the training
+    steps committed when this start began, which the samplers' contexts carry.  ``start`` numbers this start's draws,
+    and the order starts at ``next_position``.  ``groups_per_step``, the cap of a run under a group admission rule,
+    makes it count its steps as the module docstring says (None: every group counts toward the batch).
+    ``permit_release`` is ``train.permit_release``."""
 
     def __init__(
         self,
@@ -227,7 +228,8 @@ class Dispatcher:
         next_position: int = 0,
         backlog_limit: int | None = None,
         recorder: DrawRecorder | None = None,
-        version: Callable[[], int] = lambda: 0,
+        versions: Callable[[], Mapping[str, int]] = lambda: {MAIN: 0},
+        leader: str = MAIN,
         finish_batches: bool = False,
         sampler: str = "auto",
         fingerprint: Mapping[str, Any] | None = None,
@@ -255,7 +257,7 @@ class Dispatcher:
         self.next_position = next_position
         self.backlog_limit = backlog_limit if backlog_limit is not None else BACKLOG_BATCHES * batch_size
         self._recorder = recorder
-        self._version = version
+        self._versions, self._leader = versions, leader
         # With several updates per batch, a step that applied one finishes after a stop request, so the groups it still
         # needs must start: the dispatcher then goes on until the train loop's task group cancels it.
         self.finish_batches = finish_batches
@@ -274,8 +276,7 @@ class Dispatcher:
         # The draws that wait, by label, each in the order it was drawn: those a resume reissued, and those whose label
         # was at its limit (the label's backlog).
         self._waiting: dict[str | None, deque[BoundDraw]] = {}
-        # The groups that settled and no committed step consumed yet, by key, in the order they settled; a full
-        # checkpoint keeps them (kept).
+        # The settled groups no committed step consumed yet, by key, in the order they settled; a checkpoint keeps them.
         self._settled: dict[Key, Any] = {}
         # Every draw no committed step consumed, by key, in the order it was drawn: its task, its position, its row's
         # index in the task pool and the sampler that drew it.
@@ -297,9 +298,8 @@ class Dispatcher:
         self.groups_per_step = groups_per_step
         self.counted = 0
         self._markers_now = 0
-        # Under permit_release: rollout each group's lease returns a rollout's permit as the rollout ends, and with
-        # rolling (the trainer sets it for a workflow that runs its rollouts on the lease) a group is granted its
-        # permits one at a time as they free.
+        # Under permit_release: rollout each group's lease returns a rollout's permit as the rollout ends; with rolling
+        # (set for a workflow that runs its rollouts on the lease) a group is granted its permits one at a time.
         self.permit_release = permit_release
         self.rolling = False
         # The seconds it was held back since the metrics last read them, by reason (BLOCKED_REASONS), and the wait in
@@ -666,7 +666,7 @@ class Dispatcher:
             entry,
             room=self._has_room,
             step=self.step,
-            versions={MAIN: self._version()},
+            versions=self._versions(),
             fallback=token is not None and token.fallback,
             most=None if token is not None else size,
         )
@@ -742,7 +742,7 @@ class Dispatcher:
 
         position = self.next_position
         self.next_position += 1
-        decided = self.samplers.static(position, step=self.step, versions={MAIN: self._version()})
+        decided = self.samplers.static(position, step=self.step, versions=self._versions())
         if isinstance(decided, Owed):
             ticket = self._next_ticket
             self._next_ticket += 1
@@ -787,7 +787,7 @@ class Dispatcher:
                 draw.row,
                 seq=draw.seq,
                 position=draw.position,
-                version=self._version() if version is None else version,
+                version=self._versions()[self._leader] if version is None else version,
                 reissues=reissues,
                 sampler=draw.sampler,
                 reason=reason,
@@ -900,6 +900,12 @@ class Dispatcher:
         """The groups that settled and no committed step consumed, ``(key, item)`` each, in the order they settled."""
 
         return list(self._settled.items())
+
+    def holding(self, key: Key) -> Any:
+        """The group of draw ``key`` that settled and no committed step consumed yet, as :meth:`kept` lists it; None
+        when it holds none (a group a rule rejected as it settled is not held)."""
+
+        return self._settled.get(key)
 
     def restore(
         self,

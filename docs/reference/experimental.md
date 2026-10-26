@@ -32,6 +32,12 @@ lifecycle every trainer shares, calling its hooks in order, and `platoon.testing
 every full checkpoint of the run holds besides its counters comes from its participants
 (`CheckpointParticipant`), and a policy's rows train under an `Objective`.  `trainer:` selects the
 trainer; this release has one, `rl`.
+And the workflow contract (RFC 0021): what the trainer needs of a rollout workflow (`RolloutWorkflow`), what a
+workflow class can do beyond it (`WorkflowCapabilities`, read through `capabilities_of`), what
+`platoon train` builds a workflow class with (`WorkflowSetup`, which its `from_setup` takes), and how a
+group's output is read: its report (`OutputReport`, `report_of`) and its rows by policy
+(`RolloutOutput`, `rows_by_policy`).  A trainer that rolls out draws the run's groups through
+`run.rollouts()`.
 
 This module imports neither `tinker` nor `datasets`.
 
@@ -70,8 +76,8 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`rollout_lease`](#platoon-experimental-rollout-lease) | The lease of the training draw whose workflow runs in this asyncio context (`RolloutLease`). |
 | [`Trainer`](#platoon-experimental-trainer) | What `platoon train` runs: a trainer is resolved from the config's `trainer:` (`platoon.train.trainer.registry`), built from its setup, entered with `async with`, and run once per start. Supervising the run, its restarts, the reaping of what a dead start left, the run's lock, its config snapshot and its identity check stay `platoon train`'s. |
 | [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. |
-| [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it trains on rollouts of the run's training tasks (then the run lists them, and builds the training workflow). |
-| [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`): the loaded and checked config, read-only, whose `log_path`, `stats.experiment_name` and `stats.trial_name` name the run directory (`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares (`platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's policies (`workflow_builder`, which `build_workflows` calls). Building the setup does no I/O. |
+| [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens the start's draws when the trainer asks for them, `run.rollouts()`). |
+| [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`): the loaded and checked config, read-only, whose `log_path`, `stats.experiment_name` and `stats.trial_name` name the run directory (`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares (`platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's policies (`workflow_builder`, which `build_workflows` calls as the run begins, for a trainer that rolls out). Building the setup does no I/O. |
 | [`TaskSources`](#platoon-experimental-tasksources) | The run's tasks as `platoon train` lists them: the training tasks (`train_dataset`, a weighted order's first epoch or the listing a dataloader shuffles), the order they are drawn in epoch by epoch and the task samplers that draw them (None: the dataset as it is), and the evaluation's (None when the run evaluates nothing). |
 | [`Workflows`](#platoon-experimental-workflows) | A start's rollout workflows: training's, and the evaluation's (None when the start evaluates nothing). |
 | [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it). |
@@ -79,6 +85,14 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`MAIN`](#platoon-experimental-main) | The policy that `train:` declares. The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format. |
 | [`CheckpointParticipant`](#platoon-experimental-checkpointparticipant) | Part of the run's state that every full checkpoint saves, and that a start which resumes from one takes up. |
 | [`Objective`](#platoon-experimental-objective) | What a policy's rows train under: one of the Tinker service's built-in losses (`loss_fn`, such as `cispo`) with its keyword arguments, the loss inputs the datums carry for the trainer only, and the training metrics of each microbatch. |
+| [`RolloutWorkflow`](#platoon-experimental-rolloutworkflow) | What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group failed, and trains nothing). The output is a `RolloutOutput`, or a sequence of datums, all of the run's one trained policy (a `GroupOutput`, or a plain list). |
+| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five of them as flags. |
+| [`capabilities_of`](#platoon-experimental-capabilities-of) | What `workflow` (an instance or a class) can do: its `capabilities` when it declares them, else its class flags, a flag it does not set False. Each flag is read as the trainer read it before the contract was written down: `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True. |
+| [`WorkflowSetup`](#platoon-experimental-workflowsetup) | What `platoon train` builds one phase's workflow with (a workflow class's `from_setup`), in place of `GroupRolloutWorkflow`'s keyword arguments, whose `model_info` cannot carry several policies: the phase's settings and the run's components, and the policies its rollouts sample. |
+| [`RolloutOutput`](#platoon-experimental-rolloutoutput) | A group's output written to the contract: its rows, by the policy each trains, and its report. The other output a workflow may return is a sequence of datums (`GroupOutput`, a plain list). |
+| [`OutputReport`](#platoon-experimental-outputreport) | What the trainer reads of a group's output besides its rows, in one place: the per-task statistics and the group admission rules read its members and verdict, the step that consumes the group its statistics and its workload, and the label metrics its label. What an output does not give is None (`members` empty, `verdict` unknown). `workload` and its four counts come together: all set, or all None. |
+| [`report_of`](#platoon-experimental-report-of) | The report of a group's output: its `report` when it gives one (a `RolloutOutput`, a `GroupOutput`), else the one its attributes give (`carried_report`: an output written before the contract was, such as a workflow's own list subclass), which for a plain list of datums, or None for a group that failed, is empty. |
+| [`rows_by_policy`](#platoon-experimental-rows-by-policy) | A group's rows by the policy each trains. A list of datums (a `GroupOutput`, or a workflow's plain list), or any other output without `rows()` (a tuple of datums, say), is all `trained`'s, the run's one trained policy: `{trained: output}`, the output itself. Any other output answers `rows()`. The step reads every output's rows through this one function. |
 
 ## Task samplers
 
@@ -1128,7 +1142,9 @@ run's checkpoints registered here take up the start point before any training cl
 async def prepare(run: TrainerRun, start: StartPoint) -> platoon.train.trainer.api.StepPlan
 ```
 
-5. The policies are open at `start`: prepare the steps, and say where they end.
+5. The policies are open at `start`: prepare the steps, and say where they end.  A trainer that rolls out
+opens the start's draws here (`run.rollouts()`: the run's training groups, which take part in every full
+checkpoint), and starts them as its steps begin.
 
 #### `TrainerBase.started`
 
@@ -1175,7 +1191,8 @@ class TrainerNeeds
 ```
 
 What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it
-trains on rollouts of the run's training tasks (then the run lists them, and builds the training workflow).
+trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens
+the start's draws when the trainer asks for them, `run.rollouts()`).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -1194,7 +1211,8 @@ config, read-only, whose `log_path`, `stats.experiment_name` and `stats.trial_na
 (`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares
 (`platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always
 did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's
-policies (`workflow_builder`, which `build_workflows` calls).  Building the setup does no I/O.
+policies (`workflow_builder`, which `build_workflows` calls as the run begins, for a trainer that rolls
+out).  Building the setup does no I/O.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -1358,6 +1376,176 @@ def metrics(
 
 A microbatch's training metrics, from its datums as they trained (with their side channels) and the result
 of their forward_backward.
+
+<a id="platoon-experimental-rolloutworkflow"></a>
+
+### `platoon.experimental.RolloutWorkflow`
+
+```python
+class RolloutWorkflow(Protocol)
+```
+
+What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group
+failed, and trains nothing).  The output is a `RolloutOutput`, or a sequence of datums, all of the run's one
+trained policy (a `GroupOutput`, or a plain list).
+
+The optional members, which the trainer uses when a workflow has them:
+
+- `publish_model_binding(sampling_client, version)`: hand the sampling client of a new policy version to the
+  workflow's rollout workers (training does after each version it publishes, an evaluation before it starts);
+- `warm_up()`: start, as training starts, what its rollouts need before the first one (awaited);
+- `rollout_isolation`: `"process"` when its rollouts run in rollout workers, which read the published client;
+- `start_limit`: the run's limit on rollouts starting at once, which the trainer sets on a workflow that takes it
+  (`takes_start_limit`), and whose metrics an evaluation reports while it is set;
+- `entry_configs`: each environment entry's settings, which `platoon train` sets on a workflow that applies
+  them (`applies_entry_settings`);
+- its capabilities: a `capabilities` class attribute, or the class flags of `WorkflowCapabilities`;
+- `from_setup(setup)`, a class method: `platoon train` builds the run's workflow class with it, from a
+  `WorkflowSetup`, and builds a class without one with `GroupRolloutWorkflow`'s keyword arguments.
+
+#### `RolloutWorkflow.arun_episode`
+
+```python
+async def arun_episode(data: dict) -> RolloutOutput | Sequence[tinker.Datum] | None
+```
+
+<a id="platoon-experimental-workflowcapabilities"></a>
+
+### `platoon.experimental.WorkflowCapabilities`
+
+```python
+class WorkflowCapabilities
+```
+
+What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead
+of testing whether the class is a `GroupRolloutWorkflow`.  A class declares them in a `capabilities` class
+attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five of them as flags.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `applies_entry_settings` | `bool` | `False` | It applies an environment entry's own settings to the entry's groups (`entry_configs`): loading refuses an entry's settings beside a workflow that does not (platoon.train.entry_settings). |
+| `gives_verdicts` | `bool` | `False` | Its groups' outputs carry a verdict, which the group admission rule `informative` reads: resolution refuses the rule beside a workflow that gives none (platoon.train.admissions). |
+| `runs_rollouts_on_lease` | `bool` | `False` | It runs each rollout in a block of its draw's rollout lease, so that its groups start on their first free permit under `train.permit_release: rollout` (platoon.train.leases). |
+| `takes_start_limit` | `bool` | `False` | It takes the run's limit on rollouts starting at once as its `start_limit` (`train.max_starting_rollouts`). |
+| `runs_rollout_workers` | `bool` | `False` | Its rollouts can run in rollout workers: `platoon train` gives it the environments' `packages` and the run's `label_by` as arguments, and the `worker_preload` of its workers' fork server (platoon.train.launch). |
+| `binds_policies` | `bool` | `False` | Its `publish_model_binding` takes `policy=`, which a run that samples more than one policy needs. |
+
+<a id="platoon-experimental-capabilities-of"></a>
+
+### `platoon.experimental.capabilities_of`
+
+```python
+def capabilities_of(workflow: object) -> platoon.train.workflow.protocol.WorkflowCapabilities
+```
+
+What `workflow` (an instance or a class) can do: its `capabilities` when it declares them, else its class
+flags, a flag it does not set False.  Each flag is read as the trainer read it before the contract was written down:
+`applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True.
+
+Declared capabilities, a class's own or inherited, are all six, and win over every flag: over a subclass's own
+flags, and over `GroupRolloutWorkflow`'s rule that a subclass overriding how a member runs does not run its
+rollouts on the lease (`runs_rollouts_on_lease`), which sets the flag only.
+
+<a id="platoon-experimental-workflowsetup"></a>
+
+### `platoon.experimental.WorkflowSetup`
+
+```python
+class WorkflowSetup
+```
+
+What `platoon train` builds one phase's workflow with (a workflow class's `from_setup`), in place of
+`GroupRolloutWorkflow`'s keyword arguments, whose `model_info` cannot carry several policies: the phase's
+settings and the run's components, and the policies its rollouts sample.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `phase` | `Literal['train', 'eval']` | required |  |
+| `rollout_fn` | `Callable[..., Any]` | required |  |
+| `get_task_fn` | `Callable[[str], Any]` | required |  |
+| `config` | `Any` | required | The phase's workflow settings (train.workflow_config or eval.workflow_config), and each environment entry's own laid over them, by entry (None: no entry sets its own; platoon.train.entry_settings). |
+| `entry_configs` | `Mapping[str, Any] \| None` | required |  |
+| `policies` | `Mapping[str, Any]` | required | Each sampled policy's model info (its renderer, its tokenizer and the model gateway that samples it and keeps its version), by policy id, the agents' default policy first: with one policy, main's. |
+| `log_path` | `str` | required |  |
+| `stats_scope` | `str` | required |  |
+| `filter_errors` | `bool` | required |  |
+| `reward_processor` | `Callable[..., Any]` | required |  |
+| `packages` | `Sequence[str] \| None` | `None` | The environments' packages and the run's label column, for a workflow that runs rollout workers (WorkflowCapabilities.runs_rollout_workers; None for one that does not). |
+| `label_by` | `str \| None` | `None` |  |
+| `options` | `Mapping[str, Any]` | `{}` | The environment's other arguments of the phase's workflow (workflow_kwargs, eval_workflow_kwargs), as given. |
+
+<a id="platoon-experimental-rolloutoutput"></a>
+
+### `platoon.experimental.RolloutOutput`
+
+```python
+class RolloutOutput(Protocol)
+```
+
+A group's output written to the contract: its rows, by the policy each trains, and its report.  The other output
+a workflow may return is a sequence of datums (`GroupOutput`, a plain list).
+
+| Attribute | Type | Description |
+|---|---|---|
+| `report` | `platoon.train.workflow.protocol.OutputReport` | Read-only. |
+
+#### `RolloutOutput.rows`
+
+```python
+def rows() -> Mapping[str, Sequence['tinker.Datum']]
+```
+
+<a id="platoon-experimental-outputreport"></a>
+
+### `platoon.experimental.OutputReport`
+
+```python
+class OutputReport
+```
+
+What the trainer reads of a group's output besides its rows, in one place: the per-task statistics and the group
+admission rules read its members and verdict, the step that consumes the group its statistics and its workload,
+and the label metrics its label.  What an output does not give is None (`members` empty, `verdict` unknown).
+`workload` and its four counts come together: all set, or all None.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `label` | `str \| None` | `None` | The task's label (its value of the run's label column, `train.label_by`), by which the metrics break down, and the label of the environment entry whose settings the group ran with. |
+| `entry` | `str \| None` | `None` |  |
+| `workload` | `RolloutWorkload \| None` | `None` | What generating the group took, its rollouts (requested, observed, trainable) and the datums it kept. |
+| `requested_rollouts` | `int \| None` | `None` |  |
+| `observed_rollouts` | `int \| None` | `None` |  |
+| `trainable_rollouts` | `int \| None` | `None` |  |
+| `task_retained_datums` | `int \| None` | `None` |  |
+| `rollout_stats` | `RolloutStats \| None` | `None` | The group's rollout statistics, and what its workflow measured about it, which the step that consumes the group records (a group's statistics belong to that step, not to the one running when it completed). |
+| `group_stats` | `DeferredStats \| None` | `None` |  |
+| `members` | `tuple['MemberResult', ...]` | `()` | What each member returned, and what the group trains or why it trains nothing (platoon.train.task_stats). |
+| `verdict` | `str` | `"unknown"` |  |
+
+<a id="platoon-experimental-report-of"></a>
+
+### `platoon.experimental.report_of`
+
+```python
+def report_of(output: object) -> platoon.train.workflow.protocol.OutputReport
+```
+
+The report of a group's output: its `report` when it gives one (a `RolloutOutput`, a `GroupOutput`),
+else the one its attributes give (`carried_report`: an output written before the contract was, such as a
+workflow's own list subclass), which for a plain list of datums, or None for a group that failed, is empty.
+
+<a id="platoon-experimental-rows-by-policy"></a>
+
+### `platoon.experimental.rows_by_policy`
+
+```python
+def rows_by_policy(output: Any, trained: str) -> Mapping[str, Sequence['tinker.Datum']]
+```
+
+A group's rows by the policy each trains.  A list of datums (a `GroupOutput`, or a workflow's plain list), or
+any other output without `rows()` (a tuple of datums, say), is all `trained`'s, the run's one trained policy:
+`{trained: output}`, the output itself.  Any other output answers `rows()`.  The step reads every output's rows
+through this one function.
 
 ## The types these take and return
 

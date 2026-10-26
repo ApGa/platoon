@@ -52,7 +52,8 @@ class TaskSources:
 @dataclass(frozen=True)
 class TrainerNeeds:
     """What a trainer asks of the run, which ``platoon train`` reads before it lists any task: ``rollouts``, whether it
-    trains on rollouts of the run's training tasks (then the run lists them, and builds the training workflow)."""
+    trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens
+    the start's draws when the trainer asks for them, ``run.rollouts()``)."""
 
     rollouts: bool = False
 
@@ -64,7 +65,8 @@ class TrainerSetup:
     (:attr:`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares
     (:func:`~platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always
     did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's
-    policies (``workflow_builder``, which :meth:`build_workflows` calls).  Building the setup does no I/O."""
+    policies (``workflow_builder``, which :meth:`build_workflows` calls as the run begins, for a trainer that rolls
+    out).  Building the setup does no I/O."""
 
     config: Any
     policy_specs: Mapping[PolicyId, PolicySpec]
@@ -209,7 +211,9 @@ class TrainerBase:
         run's checkpoints registered here take up the start point before any training client opens."""
 
     async def prepare(self, run: "TrainerRun", start: "StartPoint") -> StepPlan:
-        """5. The policies are open at ``start``: prepare the steps, and say where they end."""
+        """5. The policies are open at ``start``: prepare the steps, and say where they end.  A trainer that rolls out
+        opens the start's draws here (``run.rollouts()``: the run's training groups, which take part in every full
+        checkpoint), and starts them as its steps begin."""
 
         raise NotImplementedError(f"{type(self).__name__} must say where its steps end (TrainerBase.prepare)")
 

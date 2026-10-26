@@ -255,6 +255,18 @@ platoon.experimental.Objective.loss_fn: attribute str
 platoon.experimental.Objective.loss_fn_config: attribute dict[str, Any]
 platoon.experimental.Objective.metrics: def metrics(originals: list['tinker.Datum'], result: tinker.ForwardBackwardOutput) -> dict[str, float]
 platoon.experimental.Objective.side_channels: attribute frozenset[str]
+platoon.experimental.OutputReport: @dataclass(frozen=True) class OutputReport
+platoon.experimental.OutputReport.entry: field str | None = None
+platoon.experimental.OutputReport.group_stats: field DeferredStats | None = None
+platoon.experimental.OutputReport.label: field str | None = None
+platoon.experimental.OutputReport.members: field tuple['MemberResult', ...] = ()
+platoon.experimental.OutputReport.observed_rollouts: field int | None = None
+platoon.experimental.OutputReport.requested_rollouts: field int | None = None
+platoon.experimental.OutputReport.rollout_stats: field RolloutStats | None = None
+platoon.experimental.OutputReport.task_retained_datums: field int | None = None
+platoon.experimental.OutputReport.trainable_rollouts: field int | None = None
+platoon.experimental.OutputReport.verdict: field str = "unknown"
+platoon.experimental.OutputReport.workload: field RolloutWorkload | None = None
 platoon.experimental.PolicySpec: @dataclass(frozen=True) class PolicySpec
 platoon.experimental.PolicySpec.context_window_length: field int | None = None
 platoon.experimental.PolicySpec.id: field str
@@ -271,6 +283,11 @@ platoon.experimental.PolicySpec.tinker_base_url: field str | None = None
 platoon.experimental.RolloutLease: class RolloutLease(Protocol)
 platoon.experimental.RolloutLease.rollout: def rollout(index: int) -> AbstractAsyncContextManager[float]
 platoon.experimental.RolloutLease.size: property int
+platoon.experimental.RolloutOutput: class RolloutOutput(Protocol)
+platoon.experimental.RolloutOutput.report: property platoon.train.workflow.protocol.OutputReport
+platoon.experimental.RolloutOutput.rows: def rows() -> Mapping[str, Sequence['tinker.Datum']]
+platoon.experimental.RolloutWorkflow: class RolloutWorkflow(Protocol)
+platoon.experimental.RolloutWorkflow.arun_episode: async def arun_episode(data: dict) -> RolloutOutput | Sequence[tinker.Datum] | None
 platoon.experimental.Sampler: class Sampler
 platoon.experimental.Sampler.__init__: def __init__(setup: SamplerSetup, options: Any = None) -> None
 platoon.experimental.Sampler.adaptive: constant bool = False
@@ -412,13 +429,37 @@ platoon.experimental.TrainerSetup.options: field Any = None
 platoon.experimental.TrainerSetup.policy_specs: field Mapping[str, platoon.train.policy.spec.PolicySpec]
 platoon.experimental.TrainerSetup.tasks: field platoon.train.trainer.api.TaskSources | None = None
 platoon.experimental.TrainerSetup.workflow_builder: field Callable[[PolicySet], Workflows] | None = None
+platoon.experimental.WorkflowCapabilities: @dataclass(frozen=True) class WorkflowCapabilities
+platoon.experimental.WorkflowCapabilities.applies_entry_settings: field bool = False
+platoon.experimental.WorkflowCapabilities.binds_policies: field bool = False
+platoon.experimental.WorkflowCapabilities.gives_verdicts: field bool = False
+platoon.experimental.WorkflowCapabilities.runs_rollout_workers: field bool = False
+platoon.experimental.WorkflowCapabilities.runs_rollouts_on_lease: field bool = False
+platoon.experimental.WorkflowCapabilities.takes_start_limit: field bool = False
+platoon.experimental.WorkflowSetup: @dataclass(frozen=True) class WorkflowSetup
+platoon.experimental.WorkflowSetup.config: field Any
+platoon.experimental.WorkflowSetup.entry_configs: field Mapping[str, Any] | None
+platoon.experimental.WorkflowSetup.filter_errors: field bool
+platoon.experimental.WorkflowSetup.get_task_fn: field Callable[[str], Any]
+platoon.experimental.WorkflowSetup.label_by: field str | None = None
+platoon.experimental.WorkflowSetup.log_path: field str
+platoon.experimental.WorkflowSetup.options: field Mapping[str, Any] = <factory dict>
+platoon.experimental.WorkflowSetup.packages: field Sequence[str] | None = None
+platoon.experimental.WorkflowSetup.phase: field Literal['train', 'eval']
+platoon.experimental.WorkflowSetup.policies: field Mapping[str, Any]
+platoon.experimental.WorkflowSetup.reward_processor: field Callable[..., Any]
+platoon.experimental.WorkflowSetup.rollout_fn: field Callable[..., Any]
+platoon.experimental.WorkflowSetup.stats_scope: field str
 platoon.experimental.Workflows: @dataclass(frozen=True) class Workflows
 platoon.experimental.Workflows.eval: field Any | None = None
 platoon.experimental.Workflows.train: field Any
+platoon.experimental.capabilities_of: def capabilities_of(workflow: object) -> platoon.train.workflow.protocol.WorkflowCapabilities
 platoon.experimental.group_admission: def group_admission(name: str, *, options: Any = None, check: Callable[[Any, AdmissionCheckContext], None] | None = None) -> Callable[[R], R]
 platoon.experimental.informative_at: def informative_at(alpha: float, beta: float, k: int) -> float
 platoon.experimental.pass_at: def pass_at(alpha: float, beta: float, k: int) -> float
+platoon.experimental.report_of: def report_of(output: object) -> platoon.train.workflow.protocol.OutputReport
 platoon.experimental.rollout_lease: def rollout_lease() -> RolloutLease
+platoon.experimental.rows_by_policy: def rows_by_policy(output: Any, trained: str) -> Mapping[str, Sequence['tinker.Datum']]
 platoon.experimental.task_sampler: def task_sampler(name: str, *, options: Any = None, check: Callable[[Any, SamplerCheckContext], None] | None = None) -> Callable[[S], S]
 platoon.get_harness: def get_harness(ref: str) -> Harness
 platoon.gym: module platoon.gym

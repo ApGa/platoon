@@ -28,6 +28,12 @@ lifecycle every trainer shares, calling its hooks in order, and ``platoon.testin
 every full checkpoint of the run holds besides its counters comes from its participants
 (:class:`CheckpointParticipant`), and a policy's rows train under an :class:`Objective`.  ``trainer:`` selects the
 trainer; this release has one, ``rl``.
+And the workflow contract (RFC 0021): what the trainer needs of a rollout workflow (:class:`RolloutWorkflow`), what a
+workflow class can do beyond it (:class:`WorkflowCapabilities`, read through :func:`capabilities_of`), what
+``platoon train`` builds a workflow class with (:class:`WorkflowSetup`, which its ``from_setup`` takes), and how a
+group's output is read: its report (:class:`OutputReport`, :func:`report_of`) and its rows by policy
+(:class:`RolloutOutput`, :func:`rows_by_policy`).  A trainer that rolls out draws the run's groups through
+``run.rollouts()``.
 
 This module imports neither ``tinker`` nor ``datasets``.
 """
@@ -74,6 +80,16 @@ from platoon.train.trainer.api import (
     TrainerSetup,
     Workflows,
 )
+from platoon.train.workflow.protocol import (
+    OutputReport,
+    RolloutOutput,
+    RolloutWorkflow,
+    WorkflowCapabilities,
+    WorkflowSetup,
+    capabilities_of,
+    report_of,
+    rows_by_policy,
+)
 
 __all__ = [
     # task samplers
@@ -117,4 +133,13 @@ __all__ = [
     "MAIN",
     "CheckpointParticipant",
     "Objective",
+    # the workflow contract (RFC 0021)
+    "RolloutWorkflow",
+    "WorkflowCapabilities",
+    "capabilities_of",
+    "WorkflowSetup",
+    "RolloutOutput",
+    "OutputReport",
+    "report_of",
+    "rows_by_policy",
 ]

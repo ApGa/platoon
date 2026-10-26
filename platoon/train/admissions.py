@@ -840,7 +840,7 @@ def loss_warnings(config: Any) -> list[str]:
     train its advantage-independent terms (a KL or an entropy term), and rejecting such groups removes their share of
     those terms from the objective, not only from its scale.  One line, or none."""
 
-    from platoon.train.step.batch_transforms import objective_is_zero_for_zero_advantages
+    from platoon.train.objectives.api import objective_is_zero_for_zero_advantages
 
     train = getattr(config, "train", None)
     if train is None or not rule_mode(config):
