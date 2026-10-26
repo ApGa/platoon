@@ -1,6 +1,8 @@
-"""The metrics a training step logs of the groups it dequeued, some of which an evaluation logs too: the statistics
-before any group, the reward keys trained so far, each group's own statistics and the programmatic-tool-calling
-counters.
+"""The metrics a training step logs, its last stage (the seventh), some of which an evaluation logs too: the
+statistics before any group, the reward keys trained so far, each group's own statistics and the
+programmatic-tool-calling counters; and the step's metrics in the order the step writes them
+(:func:`record_batch_stats`, :func:`record_task_metrics`, :func:`record_sampler_metrics`, :func:`record_label_limits`,
+:func:`record_batch_counts`), with what they carry from step to step (:class:`RunTotals`).
 
 And what a straggler policy censors (RFC 0020, :class:`Censoring`): each step's ``batch/censoring/*`` metrics, and each
 label's.
@@ -11,14 +13,26 @@ over the groups whose valid rollouts both passed and failed (``mixed_groups``), 
 valid rollout (``slowest_pass_rate``) against that of its others (``others_pass_rate``).  Slow rollouts fail more
 often, so a cut of slow rollouts keeps a sample that leans the way that gap does.  A run without a straggler policy logs
 none of them.
+
+The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, writes its metrics through these, then exports
+them with the run's counters and logs them.
 """
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
+from platoon.train.labels import metric_prefix
 from platoon.train.task_stats import MemberResult
 from platoon.utils.rollout_stats import REWARD_KEY_MISMATCH, REWARD_KEY_PREFIX, RolloutStats, outcome_counts
 from platoon.utils.stats_tracker import DeferredStats, StatsTracker
+
+if TYPE_CHECKING:
+    from platoon.train.dispatch.dispatcher import Dispatcher
+    from platoon.train.step.collect import StepTally
+    from platoon.train.task_records import TaskRecorder
+    from platoon.train.trainer.state import TrainLoopSharedState
 
 # What a label's own metrics (a step's ``batch/<column>/<label>/...``, an evaluation's ``<column>/<label>/...``) keep of
 # its groups' rollout statistics, beside their group and outcome counts (platoon.train.labels): the reward, and the
@@ -91,6 +105,103 @@ def _ptc_cell_guard_stats(stats_scope: str = "train") -> dict[str, float]:
     from platoon.train.workers.telemetry import local_telemetry
 
     return local_telemetry()
+
+
+@dataclass
+class RunTotals:
+    """What a start's step metrics carry from step to step: the reward keys trained so far, each logged every step once
+    it has trained (:func:`_count_every_reward_key`), and what the dispatcher had skipped by the last step."""
+
+    reward_keys: set[str] = field(default_factory=set)
+    # Draws a capped label's full backlog skipped, logged so far.
+    skipped_seen: Counter[str | None] = field(default_factory=Counter)
+    # Slots owed to adaptive entries that were skipped, logged so far.
+    skipped_slots_seen: int = 0
+
+
+def record_batch_stats(tracker: StatsTracker, tally: "StepTally", totals: RunTotals, column: str) -> None:
+    """The rollout statistics of the groups the step dequeued that are neither stale nor failed (under a group
+    admission rule, the rejected groups' markers too), the batch's and each logged label's, beside each label's stale
+    groups; each reward key trained so far among them, at zero when the step trained none."""
+
+    _count_every_reward_key(totals.reward_keys, [tally.rollout_stats, *tally.label_stats.values()])
+    tally.rollout_stats.record(tracker, prefix="batch")
+    for label, stats in tally.label_stats.items():
+        stats.record(tracker, prefix=f"batch/{metric_prefix(column, label)}")
+        tracker.scalar(**{f"batch/{metric_prefix(column, label)}/stale_groups": float(tally.label_stale[label])})
+
+
+def record_task_metrics(
+    tracker: StatsTracker, recorder: "TaskRecorder", tally: "StepTally", prefixes: Mapping[str, str], version: int
+) -> None:
+    """The per-task statistics' metrics of the step, at policy ``version``, once every settled group is taken in."""
+
+    recorder.flush()  # every settled group taken in first: a store that fails to stops the statistics
+    if not recorder.stopped:
+        # The kinds of the groups the step trained on, and what each label's tasks' groups say so far; nothing once
+        # the statistics stopped, rather than zeros that read as no informative groups.
+        for label, kinds in tally.kinds.items():
+            where = f"batch/{prefixes[label]}/" if label else "batch/"
+            for kind in ("informative", "all_pass", "all_fail", "uniform_mixed"):
+                tracker.scalar(**{f"{where}{kind}_groups": float(kinds[kind])})
+        tracker.scalar(**recorder.step_metrics(now=version, prefixes=prefixes))
+
+
+def record_sampler_metrics(
+    tracker: StatsTracker, dispatcher: "Dispatcher", totals: RunTotals, tally: "StepTally", version: int
+) -> dict[str, float]:
+    """What the task samplers drew since the last step and why, how long their decisions took, their own metrics, the
+    slots waiting for an adaptive entry's sampler and those skipped; and, of the groups the step consumed, the share
+    each sampler predicted would train against the share that did.  The samplers' own metrics, at policy ``version``,
+    which it returns."""
+
+    sampler_metrics = dispatcher.samplers.step_metrics(version)
+    tracker.scalar(**sampler_metrics)
+    for entry, count in dispatcher.tokens_by_entry().items():
+        where = dispatcher.samplers.prefix(dispatcher.samplers.entries[entry].name)
+        tracker.scalar(**{f"{where}tokens": float(count)})
+    skipped_slots = dispatcher.skipped_slots - totals.skipped_slots_seen
+    totals.skipped_slots_seen = dispatcher.skipped_slots
+    tracker.scalar(**{"sampler/skipped_slots": float(skipped_slots)})
+    for where, (scores, groups, trained) in tally.predictions.items():
+        tracker.scalar(
+            **{
+                f"{where}predicted_informative": scores / groups,
+                f"{where}informative_share": trained / groups,
+            }
+        )
+    return sampler_metrics
+
+
+def record_label_limits(
+    tracker: StatsTracker, dispatcher: "Dispatcher", totals: RunTotals, labels: Sequence[str], column: str
+) -> None:
+    """Draws a capped label's full backlog skipped since the last step: its share of the order asks for more groups
+    than its limit runs.  And the draws that wait for their label's limit now (parked)."""
+
+    skipped = dispatcher.skipped - totals.skipped_seen
+    totals.skipped_seen.update(skipped)
+    parked = dispatcher.parked_by_label()
+    tracker.scalar(**{"batch/skipped_rows": float(skipped.total()), "batch/parked_rows": float(parked.total())})
+    for label in labels:
+        where = f"batch/{metric_prefix(column, label)}"
+        tracker.scalar(**{f"{where}/skipped_rows": float(skipped[label]), f"{where}/parked_rows": float(parked[label])})
+
+
+def record_batch_counts(tracker: StatsTracker, tally: "StepTally", state: "TrainLoopSharedState") -> None:
+    """What the step dequeued and how often it stepped the optimizer, the policy's version and the run's updates."""
+
+    tracker.scalar(
+        **{
+            "batch/groups_dequeued": float(tally.total_tasks),
+            "batch/stale_groups": float(tally.stale_groups),
+            "batch/groups_without_stats": float(tally.groups_without_stats),
+            "batch/optimizer_updates": float(tally.optimizer_steps),
+            "batch/skipped_optimizer": float(tally.optimizer_steps == 0),
+            "policy/version": float(state.model_info.llm.version),
+            "optim/updates_total": float(getattr(state, "optimizer_steps", 0)),
+        }
+    )
 
 
 class _Counts:
