@@ -11,6 +11,11 @@ the sandbox lists when it starts, and the ones ``keep_processes`` keeps, with
 their descendants (:mod:`platoon.sandbox._processes`).
 Snapshots are committed images, removed when the sandbox they came from stops.
 
+A command runs as the container's user, the image's ``USER`` (else root), and :meth:`DockerSandbox.exec_as` runs one
+as any user of the image (``docker exec --user``).  The sandbox's own commands (the kills, the listing of its
+processes, the directories an upload makes, the look at what a download copies) run as root, whoever the image's
+``USER`` and the commands they act on run as.
+
 A container without a network (``--network none``) reaches a Unix-socket
 upstream through its directory, bound at ``/run/platoon/<name>``, and a
 forwarder on port 18080 of its own loopback (:mod:`platoon.sandbox.routes`).
@@ -53,6 +58,7 @@ EXEC_MARKER_ENV = "PLATOON_EXEC"  # each command's own marker, by which a timed-
 _PATH_KIND_SCRIPT = 'if [ -d "$1" ]; then echo dir; elif [ -e "$1" ]; then echo file; fi'
 # How docker and podman report removing a container that does not exist (in lower case).
 _NO_SUCH_CONTAINER = "no such container"
+ROOT = "0"  # the user the sandbox's own commands run as
 
 
 def image_reference(image: str) -> str:
@@ -122,10 +128,28 @@ class DockerSandbox:
         cwd: str | None = None,
         stdin: bytes | None = None,
     ) -> ExecResult:
+        return await self._exec(cmd, None, timeout_s=timeout_s, env=env, cwd=cwd, stdin=stdin)
+
+    async def exec_as(
+        self,
+        user: str,
+        cmd: str | list[str],
+        *,
+        timeout_s: float | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        stdin: bytes | None = None,
+    ) -> ExecResult:
+        """:meth:`exec` as ``user`` of the container (``docker exec --user``: a name or a uid, optionally with a group
+        or a gid), whatever the image's ``USER``."""
+
+        return await self._exec(cmd, user, timeout_s=timeout_s, env=env, cwd=cwd, stdin=stdin)
+
+    async def _exec(self, cmd: str | list[str], user: str | None, **options: Any) -> ExecResult:
         self._check_running()
         marker = f"{EXEC_MARKER_ENV}={uuid.uuid4().hex}"
         try:
-            result = await self._docker_exec(cmd, marker, timeout_s=timeout_s, env=env, cwd=cwd, stdin=stdin)
+            result = await self._docker_exec(cmd, marker, user=user, **options)
         except BaseException:  # cancelled: killing the client left the command running in the container
             await asyncio.shield(self._kill_command(marker))
             raise
@@ -138,6 +162,7 @@ class DockerSandbox:
         cmd: str | list[str],
         marker: str,
         *,
+        user: str | None = None,
         timeout_s: float | None = None,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
@@ -147,6 +172,8 @@ class DockerSandbox:
         argv += [f"--env={key}={value}" for key, value in (env or {}).items()]
         if stdin is not None:
             argv.append("--interactive")
+        if user is not None:
+            argv += ["--user", user]
         argv += [self.id, *(["bash", "-c", cmd] if isinstance(cmd, str) else cmd)]
         return await run_command(argv, timeout_s=timeout_s, stdin=stdin)
 
@@ -158,7 +185,9 @@ class DockerSandbox:
             return
         kill = kill_marked_command(marker)
         try:
-            result = await self._docker_exec(kill, f"{EXEC_MARKER_ENV}=kill", cwd="/", timeout_s=KILL_TIMEOUT_S)
+            result = await self._docker_exec(
+                kill, f"{EXEC_MARKER_ENV}=kill", user=ROOT, cwd="/", timeout_s=KILL_TIMEOUT_S
+            )
         except Exception as exc:
             result = ExecResult(exit_code=-1, stdout="", stderr=f"{type(exc).__name__}: {exc}")
         if result.exit_code != 0 or result.timed_out:
@@ -169,13 +198,13 @@ class DockerSandbox:
         self._check_running()
         source, target = Path(src), self._path(dst)
         parent = target if source.is_dir() else posixpath.dirname(target)
-        await self._checked(await self.exec(["mkdir", "-p", parent]), f"create {parent}")
+        await self._checked(await self.exec_as(ROOT, ["mkdir", "-p", parent]), f"create {parent}")
         await self._docker("cp", f"{source}/." if source.is_dir() else str(source), f"{self.id}:{target}")
 
     async def download(self, src: str, dst: str | Path) -> None:
         self._check_running()
         source, target = self._path(src), Path(dst)
-        kind = (await self.exec(["bash", "-c", _PATH_KIND_SCRIPT, "kind", source])).stdout.strip()
+        kind = (await self.exec_as(ROOT, ["bash", "-c", _PATH_KIND_SCRIPT, "kind", source])).stdout.strip()
         if not kind:
             raise FileNotFoundError(f"No such file or directory in sandbox {self.id}: {source}")
         if kind == "dir":
@@ -187,9 +216,9 @@ class DockerSandbox:
 
     async def note_own_processes(self) -> None:
         """Note what runs in the container now as its own, which :meth:`kill_processes` spares: once, as it starts,
-        before any command or route forwarder runs."""
+        before any command or route forwarder runs.  It lists them as root, whoever the image's ``USER`` is."""
 
-        self._own_processes = await own_processes(self)
+        self._own_processes = await own_processes(_AsRoot(self))
 
     def keep_processes(self, entries: Iterable[str]) -> None:
         """Spare the processes ``entries`` ("<pid>:<start time>" in the container) and their descendants from
@@ -199,7 +228,7 @@ class DockerSandbox:
 
     async def kill_processes(self) -> None:
         self._check_running()
-        await kill_other_processes(self, self._own_processes, self._kept)
+        await kill_other_processes(_AsRoot(self), self._own_processes, self._kept)
 
     async def snapshot(self) -> SandboxSnapshot:
         self._check_running()
@@ -234,6 +263,26 @@ class DockerSandbox:
     async def _checked(result: ExecResult, action: str) -> None:
         if result.exit_code != 0 or result.timed_out:
             raise RuntimeError(f"Could not {action}: {result.stderr.strip() or result.stdout.strip()}")
+
+
+class _AsRoot:
+    """A container's commands as root, for the helpers that list and kill its processes
+    (:mod:`platoon.sandbox._processes`)."""
+
+    def __init__(self, sandbox: DockerSandbox) -> None:
+        self.id = sandbox.id
+        self._sandbox = sandbox
+
+    async def exec(
+        self,
+        cmd: str | list[str],
+        *,
+        timeout_s: float | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        stdin: bytes | None = None,
+    ) -> ExecResult:
+        return await self._sandbox.exec_as(ROOT, cmd, timeout_s=timeout_s, env=env, cwd=cwd, stdin=stdin)
 
 
 class DockerProvider:

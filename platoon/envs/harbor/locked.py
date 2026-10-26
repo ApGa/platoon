@@ -20,10 +20,12 @@ from platoon.envs.harbor.dockerfile import DockerfileError, plan_dockerfile
 from platoon.envs.harbor.fetch import FetchConfig, ensure_lock, fetch_config
 from platoon.envs.harbor.holdout import HoldoutRow
 from platoon.envs.harbor.images import (
+    ImageEntry,
     ImageMap,
     ImageMapError,
     SessionImage,
     default_image_map,
+    planned_user,
     pulled_image,
     pulled_key,
     session_image,
@@ -197,7 +199,13 @@ class TaskImages:
 
         return self.load()
 
-    def for_task(self, task_dir: Path, *, docker_image: str | None, default_image: str | None) -> SessionImage | None:
+    def for_task(
+        self, task_dir: Path, *, docker_image: str | None, default_image: str | None, pulled: bool = False
+    ) -> SessionImage | None:
+        """The image of a task of the lock, from its build plan; None for a dataset directory's.  With ``pulled`` (a
+        sandbox that honors users), a ``docker_image`` runs its pulled entry, where the map has one
+        (:func:`~platoon.envs.harbor.images.session_image`)."""
+
         row = self._locked.row_for(task_dir) if self._locked is not None else None
         if row is None:
             return None
@@ -207,7 +215,16 @@ class TaskImages:
             image_map=self.image_map,
             docker_image=docker_image,
             default_image=default_image,
+            pulled=pulled,
         )
+
+    def pulled(self, reference: str) -> ImageEntry | None:
+        """The map's pulled entry of a registry ``reference`` that a task names as its ``docker_image``
+        (``docker://repo:tag``), which a sandbox that honors users runs, or None; a sidecar's pin is
+        :meth:`for_pulled`'s."""
+
+        image_map = self.image_map
+        return image_map.get(reference) if image_map is not None else None
 
     def for_service(
         self, task_dir: Path, service: str, build: Mapping[str, Any], *, task: str | None = None
@@ -243,7 +260,7 @@ class TaskImages:
             image=entry.image,
             env=dict(entry.env),
             workdir=entry.workdir,
-            user=config.get("user", entry.user),
+            user=planned_user(config, entry, entry.env),
             key=key,
             entrypoint=tuple(entrypoint) if entrypoint is not None else None,
             cmd=tuple(cmd) if cmd is not None else None,

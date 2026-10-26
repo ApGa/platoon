@@ -8,9 +8,11 @@ import inspect
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import platoon.sandbox
 from platoon.sandbox import (
     CWD_ERROR_EXIT_CODE,
     CWD_ERROR_PREFIX,
@@ -36,15 +38,16 @@ PROVIDERS = {"singularity": SingularityProvider, "enroot": EnrootProvider}
 IMAGES = {"singularity": "x.sif", "enroot": "x.sqsh"}
 
 
-def _fake_hpc_sandbox(calls: list[tuple], *, can_delete: bool = True) -> types.ModuleType:
+def _fake_hpc_sandbox(calls: list[tuple], *, can_delete: bool = True, file_owners: bool = False) -> types.ModuleType:
     """An ``hpc_sandbox`` stand-in whose types mirror the field names of platoon's, with a fake provider per
-    runtime that records its calls."""
+    runtime that records its calls; with ``file_owners``, its spec takes an image's owner manifest, as 0.5's does."""
 
     module = types.ModuleType("hpc_sandbox")
     module.Mount = dataclasses.make_dataclass("Mount", ["source", "target", "read_only"])
-    module.SandboxSpec = dataclasses.make_dataclass(
-        "SandboxSpec", ["image", "workdir", "env", "mounts", "network", "cpus", "memory_mb", "labels"]
-    )
+    fields: list[Any] = ["image", "workdir", "env", "mounts", "network", "cpus", "memory_mb", "labels"]
+    if file_owners:
+        fields.append(("file_owners", str | None, dataclasses.field(default=None)))
+    module.SandboxSpec = dataclasses.make_dataclass("SandboxSpec", fields)
     module.SandboxSnapshot = dataclasses.make_dataclass(
         "SandboxSnapshot", ["id", "provider", "path", "image", "metadata"]
     )
@@ -263,6 +266,8 @@ def test_both_providers_share_one_adapter():
 
 # Fields the adapter implements itself rather than passing to hpc-sandbox: upstreams become binds and forwarders.
 ADAPTER_FIELDS = {"SandboxSpec": {"upstreams"}}
+# Fields of a later hpc-sandbox, which the adapter passes only to one that has them: an image's owner manifest (0.5).
+LATER_FIELDS = {"SandboxSpec": {"file_owners"}}
 
 
 @pytest.mark.parametrize(
@@ -273,7 +278,8 @@ def test_hpc_sandbox_types_match_platoon(name: str):
 
     theirs = [field.name for field in dataclasses.fields(getattr(hpc_sandbox, name))]
     ours = [field.name for field in dataclasses.fields(getattr(base, name))]
-    assert theirs == [field for field in ours if field not in ADAPTER_FIELDS.get(name, set())]
+    later = LATER_FIELDS.get(name, set()) - set(theirs)
+    assert theirs == [field for field in ours if field not in ADAPTER_FIELDS.get(name, set()) | later]
 
 
 def test_enroot_passes_the_singularity_option_names_through(monkeypatch):
@@ -507,3 +513,43 @@ def test_the_published_enroot_provider_takes_digest_pins(tmp_path: Path):
         images.format.check(reference)  # what a sandbox start checks before it creates anything
         uri = images.format.pull_uri(reference)
         assert uri.endswith(f"task:{digest}") and "@" not in uri, uri
+
+
+@pytest.mark.asyncio
+async def test_an_owner_manifest_reaches_an_hpc_sandbox_that_applies_one(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", _fake_hpc_sandbox(calls, file_owners=True))
+    provider = get_provider("singularity", fakeroot=True)
+
+    await provider.start(SandboxSpec(image="x.sif", file_owners="/srv/images/x.owners"))
+    await provider.start(SandboxSpec(image="x.sif"))
+
+    owners = [call[1].file_owners for call in calls if call[0] == "start"]
+    assert owners == ["/srv/images/x.owners", None]
+    assert platoon.sandbox.file_owners_refusal("singularity", {"fakeroot": True}) is None
+    assert platoon.sandbox.loses_file_owners("singularity") and platoon.sandbox.loses_file_owners(provider)
+    assert not platoon.sandbox.loses_file_owners("docker")  # its images keep their owners
+
+
+@pytest.mark.asyncio
+async def test_an_hpc_sandbox_before_0_5_refuses_an_owner_manifest_and_runs_without_one(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", _fake_hpc_sandbox(calls))
+    provider = get_provider("singularity", fakeroot=True)
+
+    with pytest.raises(ValueError, match="SandboxSpec.file_owners.* Install hpc-sandbox 0.5"):
+        await provider.start(SandboxSpec(image="x.sif", file_owners="/srv/images/x.owners"))
+    await provider.start(SandboxSpec(image="x.sif"))
+
+    assert [call[0] for call in calls].count("start") == 1  # the refused one never started
+    assert "hpc-sandbox 0.5" in (platoon.sandbox.file_owners_refusal("singularity", {}) or "")
+    assert platoon.sandbox.file_owners_refusal("docker", {}) is None  # it needs none
+
+
+def test_the_owner_manifest_refusal_matches_the_installed_hpc_sandbox():
+    """Against the installed hpc-sandbox: a manifest is refused exactly when its SandboxSpec has no file_owners."""
+
+    hpc_sandbox = pytest.importorskip("hpc_sandbox")
+    takes = "file_owners" in {field.name for field in dataclasses.fields(hpc_sandbox.SandboxSpec)}
+
+    assert (platoon.sandbox.file_owners_refusal("singularity", {"fakeroot": True}) is None) is takes

@@ -128,7 +128,7 @@ from platoon.envs.harbor.compose import (
     unread_compose_files,
 )
 from platoon.envs.harbor.dataset import dataset_tasks
-from platoon.envs.harbor.dockerfile import BUILD_KEY_RULE, DockerfileError, plan_dockerfile
+from platoon.envs.harbor.dockerfile import BUILD_KEY_RULE, DockerfileError, copy_operands, plan_dockerfile
 from platoon.envs.harbor.hashing import (
     DEFAULT_IGNORES,
     GITIGNORE,
@@ -170,6 +170,8 @@ _REMOTE_PREFIXES = ("hf://", "harbor://", "git+", "adapter:")
 _PER_TASK_LISTING = 64  # list each task's directory below this many selected tasks per parent, else the parent
 _MAX_ATTEMPTS = 10
 MIB = 1 << 20  # refuse.uploads_over_mb counts MiB
+# How a refusal of users to run as says what fetches the task.
+_USERS_FETCHED = "refuse: {agent_user: false} fetches it, for an environment that honors or ignores its users"
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,7 @@ class RefusePolicy:
     # session runs on a provider that runs stacks (the stacks capability) and refuses elsewhere.
     sidecars: bool = True
     gpus: bool = True  # tasks that ask for GPUs
-    agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix
+    agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix (users to run as)
     per_task_build: bool = False  # Dockerfiles whose build prefix no other task shares
     # Compose services that ask for privileged, or for a cap_add beyond what a rootless service holds (compose); with
     # false they are planned as the stack's privileges, which only the docker provider grants.
@@ -1335,10 +1337,9 @@ def _inspect(
     elif flags["gpus"] > 0 and refuse.gpus:
         problem = f"gpus: the task asks for {flags['gpus']} GPU(s)"
     elif (flags["agent_user"] or flags["verifier_user"]) and refuse.agent_user:
-        problem = "agent_user: the task sets [agent].user or [verifier].user, which rootless sandboxes cannot honor"
+        problem = f"agent_user: the task sets [agent].user or [verifier].user ({_USERS_FETCHED})"
     elif suffix_users and refuse.agent_user:
-        user = suffix_users[0]
-        problem = f"agent_user: the Dockerfile ends with USER {user}, which rootless sandboxes cannot honor"
+        problem = f"agent_user: the Dockerfile ends with USER {suffix_users[0]} ({_USERS_FETCHED})"
     else:
         problem = _load_problem(task_dir, name, compose) or (f"image: {errors[0]}" if errors else None)
     limit = refuse.uploads_over_mb
@@ -1417,7 +1418,7 @@ def _plan_uploads(task_dir: Path, context: str, plan: Mapping[str, Any]) -> int:
     for step in plan.get("deferred") or ():
         if not step or step[0] != "COPY":
             continue
-        for source in step[1:-1]:
+        for source in copy_operands(step)[1]:
             relative = os.path.normpath(source.rstrip("/") or ".")
             if os.path.isabs(relative) or relative == ".." or relative.startswith("../"):
                 continue  # outside the build context: nothing a session would upload

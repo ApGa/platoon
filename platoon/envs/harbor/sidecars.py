@@ -688,11 +688,16 @@ def services_metadata(stack: Stack, states: Mapping[str, ServiceState]) -> dict[
 
 
 async def run_collect_hooks(
-    hooks: Sequence[CollectHook], *, main: Sandbox, stack: Stack | None, task_name: str
+    hooks: Sequence[CollectHook],
+    *,
+    main: Sandbox,
+    stack: Stack | None,
+    task_name: str,
+    users: Mapping[str, Sandbox] | None = None,
 ) -> list[str]:
-    """Run ``hooks`` in order, each in its service (``main``'s sandbox without a stack), best effort as Harbor runs
-    them: a hook that fails or times out is logged, and the grading goes on.  The hooks that failed, as
-    ``<service>: <command>``."""
+    """Run ``hooks`` in order, each in its service (``main``'s sandbox without a stack, or its view as the user a hook
+    names, from ``users``), best effort as Harbor runs them: a hook that fails or times out is logged, and the
+    grading goes on.  The hooks that failed, as ``<service>: <command>``."""
 
     failed = []
     for hook in hooks:
@@ -700,7 +705,7 @@ async def run_collect_hooks(
             sandbox = stack.services.get(hook.service)
             command = stack.rewrite(hook.command, service=hook.service)
         else:
-            sandbox, command = main, hook.command
+            sandbox, command = (users or {}).get(hook.user or "", main), hook.command
         if sandbox is None:
             failed.append(f"{hook.service}: {hook.command}")
             continue

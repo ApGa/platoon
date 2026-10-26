@@ -189,7 +189,10 @@ tasks](sandboxes-and-harbor.md#sandbox-providers).
 
 Harbor tasks whose verifier runs as root ([Verifiers that run as
 root](sandboxes-and-harbor.md#verifiers-that-run-as-root), since 0.3.0) need Singularity's `--fakeroot` for
-their verifiers, which works where the site gives your user subordinate ids. Check on a compute node that
+their verifiers, and so do the sandboxes of tasks whose users are honored ([Users in task
+sandboxes](sandboxes-and-harbor.md#users-in-task-sandboxes), since 0.5.0), which also need hpc-sandbox 0.5 for an image
+that gives files to users other than root, and util-linux's `nsenter` on the node. Both work where the site gives
+your user subordinate ids. Check on a compute node that
 `getsubids $USER` lists a range, and that `singularity exec --fakeroot IMAGE cat /proc/self/uid_map` shows a range
 that reaches uid 65534 (a line `1 <first subordinate id> 65536`, say), or that
 `singularity exec --fakeroot IMAGE setpriv --reuid=65534 --regid=65534 --clear-groups id -u` prints 65534. `id -u`

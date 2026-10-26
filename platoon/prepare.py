@@ -18,14 +18,19 @@ config that leaves ``log_path`` to its launcher prepares as it is.  For each ent
    from a registry, which prepare does not guess: the step fails and names the command that builds and pushes them.
    The map is the entry's default image map, ``images/<provider>.json`` in the Harbor cache, with the image files in
    ``images/<provider>/`` (:mod:`platoon.envs.harbor.images`).  An entry that serves a directory builds nothing: its
-   tasks run their ``docker_image`` or ``default_image``.  With ``verifier_user: honor``, an image that a verifier
-   which runs as root runs on, and that the ``oci`` builder of platoon before 0.3.0 built, fails the step, naming the
-   build that makes it again: prepare never replaces an image.  Then the **registry images** that the stacks'
-   sidecars run as written (``image: redis:7-alpine``), on any provider but ``process``, are pinned in the map: each by
-   the digest its registry serves for it, with its image's configuration (``ENTRYPOINT``, ``CMD``, ``ENV``, ``USER``,
-   ``HEALTHCHECK``, ...), which sessions run it with.  And where stacks run as pods with egress (``singularity``,
-   ``enroot``), the **pod tools**: slirp4netns, which ``hpc-sandbox fetch-tools`` downloads where no slirp4netns on
-   ``PATH`` does what pods need.  Run prepare on a node like the run's: what it finds on ``PATH`` is this node's.
+   tasks run their ``docker_image`` or ``default_image``.  Where the entry honors users (``agent_user`` or
+   ``verifier_user`` ``honor``), an image that its sandboxes which honor users run fails the step when the ``oci``
+   builder of platoon before 0.3.0 built it, or when it records no owner manifest and the provider loses the owners an
+   image gives its files (hpc-sandbox: images that platoon before 0.5, the ``def`` builder, or the ``oci`` builder
+   with a squashfs-tools before 4.4 built), naming the build that makes it again, since prepare never replaces an
+   image; and the ``docker_image`` references those sandboxes run are recorded as pulled entries, pinned with their
+   ``USER`` and owner manifest (:mod:`platoon.envs.harbor.owners`), which needs their registries.  Then the
+   **registry images** that the stacks' sidecars run as written (``image: redis:7-alpine``), on any provider but
+   ``process``, are pinned in the map: each by the digest its registry serves for it, with its image's configuration
+   (``ENTRYPOINT``, ``CMD``, ``ENV``, ``USER``, ``HEALTHCHECK``, ...), which sessions run it with.  And where stacks
+   run as pods with egress (``singularity``, ``enroot``), the **pod tools**: slirp4netns, which ``hpc-sandbox
+   fetch-tools`` downloads where no slirp4netns on ``PATH`` does what pods need.  Run prepare on a node like the
+   run's: what it finds on ``PATH`` is this node's.
 3. **The toolchains.** Each toolchain the entry's harness specs run from that is not built under the toolchain root
    is built there (:func:`platoon.harness.toolchains.ensure_toolchain`).  One built from another recipe is never
    replaced: a live run of another config, or of another platoon, may be staging its rollouts from it, so the step
@@ -382,25 +387,71 @@ def _images(
     where: str, service: HarborEnvironmentService, lock: DatasetLock, *, dry_run: bool, command: str, say: Say
 ) -> PrepareStep:
     """Build the images the lock's runnable tasks need and the entry's image map lacks, with its provider's builder.
-    With ``verifier_user: honor``, the step then fails for images that verifiers which run as root run on and that
-    the ``oci`` builder of platoon before 0.3.0 built, naming the build that makes them again
-    (:meth:`~platoon.envs.harbor.service.HarborEnvironmentService.root_images_closed`): prepare never replaces an
-    image, which a run may be using."""
+    Where the entry honors users, the step then fails for images that its sandboxes which honor users run and that the
+    ``oci`` builder of platoon before 0.3.0 built, or that record no owner manifest where the provider needs one,
+    naming the build that makes them again (prepare never replaces an image, which a run may be using), and records the
+    pulled images of such sandboxes (:func:`_pulled_images`)."""
 
     step = _missing_images(where, service, lock, dry_run=dry_run, command=command, say=say)
-    if step.status not in ("current", "done") or not (closed := service.root_images_closed()):
+    if step.status not in ("current", "done", "none"):
         return step
-    tasks = len({name for needing in closed.values() for name in needing})
-    build = f"platoon harbor images build {_config_part(command)} " + " ".join(f"--key {key}" for key in closed)
+    closed = service.closed_images()
+    unrecorded, pulled = service.owner_gaps()
+    if not (closed or unrecorded):
+        return _pulled_images(where, service, step, pulled, dry_run=dry_run, say=say)
+    keys = {**closed, **unrecorded}
+    tasks = len({name for needing in keys.values() for name in needing})
+    build = f"platoon harbor images build {_config_part(command)} " + " ".join(f"--key {key}" for key in keys)
+    why = (
+        f"{len(closed)} were built by the oci builder of platoon before 0.3.0, which unpacked them under the host's "
+        "umask (under one such as 027, their files keep out the users other than root)"
+        if closed
+        else ""
+    )
+    if unrecorded:
+        why += "; " if why else ""
+        why += (
+            f"{len(unrecorded)} record no owners of their files (built by platoon before 0.5, the def builder, or the "
+            "oci builder with a squashfs-tools before 4.4), which the users that a sandbox switches to need"
+        )
     return PrepareStep(
         where,
         "images",
         "failed",
-        f"{step.detail}; but {len(closed)} of them, which {tasks} task(s) run their verifier as root on, were built by "
-        "the oci builder of platoon before 0.3.0, which unpacked them under the host's umask (under one such as 027, "
-        f"their files keep out the users the tests switch to): build them again with `{build}`, then run `{command}` "
-        "again",
+        f"{step.detail}; but of the images that {tasks} task(s) honor users on, {why}: build them again with "
+        f"`{build}`, then run `{command}` again",
     )
+
+
+def _pulled_images(
+    where: str,
+    service: HarborEnvironmentService,
+    step: PrepareStep,
+    pulled: Mapping[str, list[str]],
+    *,
+    dry_run: bool,
+    say: Say,
+) -> PrepareStep:
+    """Record in the entry's image map the pulled images (``pulled``, by reference) that its sandboxes which honor
+    users run, as their registries serve them now (:func:`platoon.envs.harbor.owners.record_pulled`): pinned, with
+    their ``USER`` and the owners their layers give, which such a sandbox needs where its provider loses them."""
+
+    from platoon.envs.harbor.images import default_image_dir
+    from platoon.envs.harbor.owners import record_pulled
+
+    if not pulled:
+        return step
+    images = f"{len(pulled)} pulled image(s) that {len({name for each in pulled.values() for name in each})} task(s)"
+    if dry_run:
+        return PrepareStep(where, "images", "missing", f"{step.detail}; would record {images} honor users on")
+    path = service.task_images.path
+    assert path is not None and service.locked is not None  # owner gaps are a fetched dataset's
+    out = default_image_dir(service.locked.cache, service.provider_name)
+    try:
+        record_pulled(pulled, image_map=path, out_dir=out, log=say)
+    except ValueError as exc:
+        return PrepareStep(where, "images", "failed", f"{step.detail}; but {images} honor users on: {exc}")
+    return PrepareStep(where, "images", "done", f"{step.detail}; recorded {images} honor users on")
 
 
 def _missing_images(

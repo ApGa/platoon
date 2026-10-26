@@ -24,6 +24,7 @@ from platoon.envs.harbor.images import FileOp, ImageEntry, SessionImage, apply_i
 from platoon.envs.harbor.lock import read_lock
 from platoon.envs.harbor.task import HarborTask, HarborTaskError, is_root
 from platoon.envs.harbor.users import NOBODY, nobody_problem, root_problem
+from platoon.envs.harbor.views import root_view
 from platoon.envs.service import EnvSetupError
 from platoon.sandbox import ExecResult, SandboxSpec, get_provider, root_refusal, rootfs_layout_refusal
 from platoon.sandbox.process import ProcessProvider, ProcessSandbox
@@ -95,50 +96,50 @@ def test_honor_runs_a_separate_verifier_whose_user_is_root_as_root(make_task):
 def test_without_verifier_user_agent_user_decides_for_both_phases_as_before(make_task):
     task_dir = make_task("root", task_toml=ROOT_VERIFIER)
 
-    with pytest.raises(HarborTaskError, match=r"agent_user: ignore$"):  # the agent's user is refused too
+    with pytest.raises(HarborTaskError, match=r"sets agent_user: honor, .*or ignore, .*own user$"):  # both users
         HarborTask.load(task_dir)
     task = HarborTask.load(task_dir, agent_user="ignore")
     assert not task.verifier_root
     assert task.ignored_users == {"agent": "65534", "verifier": "root"}
 
     verifier_only = make_task("verifier-only", task_toml=ROOT_VERIFIER.replace('[agent]\nuser = "65534"\n', ""))
-    with pytest.raises(HarborTaskError, match="agent_user: ignore, or verifier_user: honor to run its tests as root"):
+    with pytest.raises(HarborTaskError, match=r"\[verifier\].user = 'root', .* sets agent_user: honor"):
         HarborTask.load(verifier_only)
 
 
 def test_verifier_user_decides_for_the_verifier_and_agent_user_for_the_agent(make_task):
     task_dir = make_task("root", task_toml=ROOT_VERIFIER)
 
-    with pytest.raises(HarborTaskError, match=r"\[agent\].user = '65534', but .* sets agent_user"):
+    with pytest.raises(HarborTaskError, match=r"\[agent\].user = '65534', and .* sets agent_user: honor"):
         HarborTask.load(task_dir, verifier_user="honor")
     task = HarborTask.load(task_dir, agent_user="ignore", verifier_user="ignore")
     assert (task.verifier_root, task.ignored_users) == (False, {"agent": "65534", "verifier": "root"})
-    with pytest.raises(HarborTaskError, match=r"\[verifier\].user = 'root'.*verifier_user: ignore, or honor"):
+    with pytest.raises(HarborTaskError, match=r"\[verifier\].user = 'root'.* sets verifier_user: honor, .*or ignore"):
         HarborTask.load(task_dir, agent_user="ignore", verifier_user="refuse")
     with pytest.raises(ValueError, match="verifier_user must be one of"):
         HarborTask.load(task_dir, verifier_user="obey")  # type: ignore[arg-type]
 
 
-def test_honor_takes_only_root(make_task):
+def test_honor_takes_any_user(make_task):
     nobody = make_task("nobody", task_toml=ROOT_VERIFIER.replace('user = "root"', 'user = "nobody"'))
 
-    with pytest.raises(HarborTaskError, match="honors only root; .* unless the environment sets verifier_user: ignore"):
-        HarborTask.load(nobody, agent_user="ignore", verifier_user="honor")
-    with pytest.raises(HarborTaskError, match=r"verifier_user: ignore$"):  # nor a root verifier in another group
-        HarborTask.load(
-            make_task("group", task_toml=ROOT_VERIFIER.replace('user = "root"', 'user = "root:1000"')),
-            agent_user="ignore",
-            verifier_user="honor",
-        )
-    assert not HarborTask.load(nobody, agent_user="ignore", verifier_user="ignore").verifier_root
+    task = HarborTask.load(nobody, agent_user="ignore", verifier_user="honor")
+    assert (task.honored_users, task.verifier_root) == ({"verifier": "nobody"}, False)
+    assert task.honors_users_in("verifier") and not task.honors_users_in("agents")
+    group = make_task("group", task_toml=ROOT_VERIFIER.replace('user = "root"', 'user = "root:1000"'))
+    assert not HarborTask.load(group, agent_user="ignore", verifier_user="honor").verifier_root  # another group
+    assert not HarborTask.load(nobody, agent_user="ignore", verifier_user="ignore").honored_users
 
 
-def test_honor_refuses_a_root_verifier_in_the_agents_own_sandbox(make_task):
+def test_honor_refuses_a_root_verifier_in_the_agents_own_sandbox_unless_the_agents_are_honored(make_task):
     shared = make_task("shared", task_toml='[verifier]\nuser = "root"\n')
 
-    with pytest.raises(HarborTaskError, match="graded in its agents' sandbox .* its agents would run as root too"):
+    with pytest.raises(HarborTaskError, match="graded in its agents' sandbox .* whose agents would run as root too"):
         HarborTask.load(shared, verifier_user="honor")
     assert HarborTask.load(shared, verifier_user="ignore").ignored_users == {"verifier": "root"}
+    honored = HarborTask.load(shared, agent_user="honor")  # the agents run as their user, the image's, else root
+    assert (honored.honored_users, honored.verifier_root) == ({"agent": None, "verifier": "root"}, True)
+    assert honored.honors_users_in("agents") and not honored.honors_users_in("verifier")
 
 
 def test_a_task_without_a_verifier_user_is_not_a_root_verifier(make_task):
@@ -301,12 +302,12 @@ class RootProcessProvider(ProcessProvider):
         uid, mapped = self.options["uid"], self.options["mapped"]
 
         async def exec(cmd: str | list[str], **options: Any) -> ExecResult:
-            if isinstance(cmd, list) and cmd[3:4] == ["platoon-root-check"]:
+            if isinstance(cmd, list) and "platoon-root-check" in cmd:
                 maps = "".join(
                     f"{kind}_map 0 1\n" + (f"{kind}_map 1 {mapped}\n" if mapped else "") for kind in ("uid", "gid")
                 )
                 return ExecResult(0, f"uid {uid}\n{maps}", "")
-            if isinstance(cmd, list) and cmd[3:4] == ["platoon-nobody-check"]:
+            if isinstance(cmd, list) and "platoon-nobody-check" in cmd:
                 return ExecResult(*self.options["nobody"])
             return await real(cmd, **options)
 
@@ -345,7 +346,7 @@ async def test_root_verifiers_are_refused_when_listed_on_a_provider_that_cannot_
     service = _service(tasks, "process", tmp_path / "sandboxes", verifier_user="honor")
     listed = await service.list_tasks("train")
 
-    with pytest.raises(EnvSetupError, match="4 of the 5 tasks of split 'train' cannot run their verifier") as refused:
+    with pytest.raises(EnvSetupError, match="4 of the 5 tasks of split 'train' cannot run as their") as refused:
         await service.check_tasks("train", listed)
 
     assert refused.value.failure_kind == "env_config"
@@ -364,7 +365,7 @@ async def test_a_root_verifier_opened_directly_is_refused_before_the_agent_runs(
     task = make_task("root", task_toml=ROOT_VERIFIER)
     service = _service([task], "process", tmp_path / "sandboxes", verifier_user="honor")
 
-    with pytest.raises(EnvSetupError, match="runs its verifier as root, and the verifiers' sandboxes") as refused:
+    with pytest.raises(EnvSetupError, match="its verifier runs as root, and the verifiers' sandboxes") as refused:
         await service.open(await service.get_task("root"), rollout_id="r")
 
     assert refused.value.failure_kind == "env_config"
@@ -376,14 +377,12 @@ async def test_tasks_whose_verifier_user_honor_refuses_at_load_are_named_when_li
     """A fetched dataset lists the tasks its lock lets through, users and all; with verifier_user: honor the service
     names those whose [verifier].user it cannot honor when the run lists them (here, as such a listing would)."""
 
-    nobody = make_task("nobody", task_toml=ROOT_VERIFIER.replace('user = "root"', 'user = "nobody"'))
-    service = _service([nobody], "process", tmp_path / "sandboxes", verifier_user="honor")
-    monkeypatch.setattr(
-        service, "_peek", lambda name: HarborTask.load(nobody, agent_user="ignore", verifier_user="honor")
-    )
+    shared = make_task("shared", task_toml='[verifier]\nuser = "root"\n')
+    service = _service([shared], "process", tmp_path / "sandboxes", verifier_user="honor")
+    monkeypatch.setattr(service, "_peek", lambda name: HarborTask.load(shared, verifier_user="honor"))
 
-    with pytest.raises(EnvSetupError, match="1 of the 1 tasks .* nobody: .*honors only root"):
-        await service.check_tasks("train", ["nobody"])
+    with pytest.raises(EnvSetupError, match="1 of the 1 tasks .* shared: .*whose agents would run as root too"):
+        await service.check_tasks("train", ["shared"])
 
 
 @pytest.mark.asyncio
@@ -566,12 +565,15 @@ async def test_a_verifier_sandbox_that_cannot_run_the_tests_as_root_is_an_error(
     assert not verifier.root.exists()  # stopped
 
 
-# Passes only where the image's private workdir stayed private, and what platoon made has Docker's modes.
+# Passes only where the image's private workdir stayed private, what platoon made has Docker's modes, the log directory
+# is root's and a test file keeps the host's mode, which keeps other users out: the code the tests run as another user
+# can neither write a reward nor read it.
 CHECK_PRIVATE_WORKDIR = f"""
 mode() {{ stat -c %a "{ROOT}$1"; }}
 found="app=$(mode /app) answer=$(mode /app/answer.txt) logs=$(mode /logs) verifier=$(mode /logs/verifier)"
+found="$found held-out=$(mode /tests/held-out.txt)"
 echo "$found"
-if [ "$found" = "app=700 answer=644 logs=755 verifier=755" ]; then echo 1; else echo 0; fi \\
+if [ "$found" = "app=700 answer=644 logs=755 verifier=755 held-out=640" ]; then echo 1; else echo 0; fi \\
   > {ROOT}/logs/verifier/reward.txt
 """
 
@@ -582,6 +584,8 @@ async def test_a_root_verifier_leaves_the_images_own_workdir_as_it_is(make_task,
     files the tests write there from the users they switch to.  What platoon makes gets Docker's modes."""
 
     task = make_task("root", task_toml=ROOT_VERIFIER, test_sh=CHECK_PRIVATE_WORKDIR)
+    (task / "tests" / "held-out.txt").write_text("42\n")
+    (task / "tests" / "held-out.txt").chmod(0o640)  # as a checkout under a umask of 027 gives it
     service = _service(
         [task],
         rootful,
@@ -624,18 +628,18 @@ async def test_a_verifier_whose_image_keeps_nobody_from_its_shell_is_an_error(ma
 
 
 @pytest.mark.asyncio
-async def test_deferred_workdirs_get_the_umask_they_are_given(tmp_path):
-    """A root verifier makes its image's deferred WORKDIR directories with Docker's umask, as a build makes them;
-    others keep the host's."""
+async def test_deferred_workdirs_get_dockers_umask_where_users_are_honored(tmp_path):
+    """A sandbox that honors users makes its image's deferred WORKDIR directories through its root's view, with
+    Docker's umask, as a build makes them; others keep the host's."""
 
     sandbox = await ProcessProvider(tmp_path / "sandboxes").start(SandboxSpec(image="local", workdir="/app"))
     previous = os.umask(0o027)
     try:
-        for umask, target, mode in (("022", "/app/docker/deep", 0o755), (None, "/app/host/deep", 0o750)):
+        for runs, target, mode in ((root_view(sandbox), "/app/docker/deep", 0o755), (sandbox, "/app/host/deep", 0o750)):
             image = SessionImage(image="local", env={}, workdir="/app", files=(FileOp("mkdir", target),))
-            await apply_image_files(sandbox, image, workdir="/app", umask=umask)
+            await apply_image_files(runs, image, workdir="/app")
             for path in (target, target.rsplit("/", 1)[0]):
-                assert sandbox.host_path(path).stat().st_mode & 0o777 == mode, (path, umask)
+                assert sandbox.host_path(path).stat().st_mode & 0o777 == mode, (path, runs)
     finally:
         os.umask(previous)
         await sandbox.stop()
@@ -698,8 +702,8 @@ async def test_root_verifiers_on_images_of_the_oci_builder_before_0_3_0_are_refu
         update_image_map(image_map, {verifier_key: verifier, task_key: ImageEntry(image="local", builder="oci")})
 
     mapped(ImageEntry(image="local", builder="oci", receipt={"builder_version": "4.4.1"}))
-    assert service.root_images_closed() == {verifier_key: ["root"]}
-    with pytest.raises(EnvSetupError, match="1 of the 2 tasks of split 'train' run their verifier as root") as refused:
+    assert service.closed_images() == {verifier_key: ["root"]}
+    with pytest.raises(EnvSetupError, match="1 of the 2 tasks of split 'train' honor users") as refused:
         await service.check_tasks("train", listed)
     assert refused.value.failure_kind == "env_config"
     assert f"`platoon harbor images build CONFIG --key {verifier_key}`" in str(refused.value)
@@ -712,8 +716,29 @@ async def test_root_verifiers_on_images_of_the_oci_builder_before_0_3_0_are_refu
     await service.check_tasks("train", listed)
     mapped(ImageEntry(image="local", builder="oci"))
     ignored = _fetched(tmp_path, rootful, "ignore", refuse={"agent_user": False})
-    assert ignored.root_images_closed() == {}
+    assert ignored.closed_images() == {}
     await ignored.check_tasks("train", await ignored.list_tasks("train"))
+
+
+@pytest.mark.asyncio
+async def test_a_root_verifier_needs_no_owners_of_an_image_whose_user_is_not_root(tmp_path, rootful, monkeypatch):
+    """Where the provider loses the owners an image gives its files, a separate verifier whose tests run as root, as
+    its task names them, runs nothing as the image's USER: it needs no owner manifest, as root verifiers ran before."""
+
+    monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "node"))
+    monkeypatch.setattr(RootProcessProvider, "loses_file_owners", True, raising=False)
+    use_site_cache(monkeypatch, tmp_path / "cache")
+    service = _fetched(tmp_path, rootful, refuse={"agent_user": False})
+    image_map = service.task_images.path
+    assert image_map is not None
+    listed = await service.list_tasks("train")
+    row = read_lock(tmp_path / "dataset.lock.json").get("root")
+    assert row.verifier_image is not None and row.image is not None
+    # As an oci build before 0.5 recorded them: no owner manifest, and a USER that is not root.
+    entry = ImageEntry(image="local", builder="oci", user="65534", receipt={"builder_revision": 1})
+    update_image_map(image_map, {row.verifier_image["key"]: entry, row.image["key"]: entry})
+
+    await service.check_tasks("train", listed)
 
 
 @pytest.mark.asyncio
@@ -736,7 +761,7 @@ async def test_honor_warns_of_root_verifiers_the_fetch_left_out(tmp_path, rootfu
         await service.check_tasks("eval", ["plain"])
 
     (warning,) = [record.getMessage() for record in caplog.records if "verifier_user: honor" in record.getMessage()]
-    assert "runs none of the 1 task(s)" in warning and "(root)" in warning
+    assert "runs none of the 1 task(s)" in warning and "that name users to run as (root)" in warning
     assert "refuse: {agent_user: false}" in warning
 
 

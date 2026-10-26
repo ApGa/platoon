@@ -217,7 +217,8 @@ def test_the_dataset_passes_agent_user_to_its_tasks(make_task, tmp_path: Path, c
 
     with caplog.at_level(logging.WARNING):
         assert HarborDataset(tmp_path / "tasks").names("train") == ["plain"]
-    assert "rootless sandboxes run every process as one user" in caplog.text
+    assert "the environment refuses tasks that name users" in caplog.text
     ignoring = HarborDataset(tmp_path / "tasks", agent_user="ignore")
     assert ignoring.names("train") == ["plain", "runs-as-user"]
+    assert HarborDataset(tmp_path / "tasks", agent_user="honor").names("train") == ["plain", "runs-as-user"]
     assert ignoring.get("runs-as-user").ignored_users == {"agent": "agent"}

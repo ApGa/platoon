@@ -53,12 +53,14 @@ Nothing an agent writes reaches the verifier except the artifacts' regular files
 trained on.
 
 A verifier that runs as root (`verifier_user: honor`, since 0.3.0: [Verifiers that run as
-root](sandboxes-and-harbor.md#verifiers-that-run-as-root)) starts in a sandbox of the verifiers' own options, which
-step 4 checks first: its commands must run as root with the other users mapped, and `nobody` must be able to run the
-image's shell, or the outcome is an `error` (`verifier_start`). Its directories are made, and its tests run, with
-Docker's umask (022): what platoon makes there gets Docker's modes, while what the image has keeps its own, as in
-Docker. Step 4 makes the artifacts readable by every user, so that tests which run the agent's code as another user
-work as in Docker; the outcome's metadata records `verifier_user: root`.
+root](sandboxes-and-harbor.md#verifiers-that-run-as-root)), or as another user it names (since 0.5.0), starts in a
+sandbox of the verifiers' own options, which step 4 checks first: its commands must run as root with the other users
+mapped, and `nobody` must be able to run the image's shell, or the outcome is an `error` (`verifier_start`). Its
+directories are made, and its tests run as their user, with Docker's umask (022): what platoon makes there gets
+Docker's modes, `/logs/verifier` every user's where the tests run as a user other than root (root's tests get it, and
+`/tests` with the host's modes, as root's), while what the image has keeps its own, as in Docker. Step 4 makes the
+artifacts readable by every user, so that tests which run the agent's code as another user work as in Docker; the
+outcome's metadata records `verifier_user: root` for a root verifier, and `users` for the users a task names.
 
 ## How grading keeps the agent out
 

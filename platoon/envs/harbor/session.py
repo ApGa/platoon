@@ -11,10 +11,18 @@ their sandbox (``main``), collects the task's artifacts from it as directories a
 there, and stops it on every path.  The agents never touch the grader's files, and no symlink of theirs reaches
 it.  When nothing else holds ``main`` (no shared fork, no call in flight), grading releases it as soon as the
 artifacts are collected, as Harbor stops it before verifying: the session then takes no more tool calls or forks,
-and grading it again reuses the collected artifacts.  A verifier that runs as root (``verifier_user: honor``) gets a
-sandbox that was checked to give it root and other users (:mod:`platoon.envs.harbor.users`); its commands run with
-Docker's umask, and its artifacts are readable by every user, since its tests may run the agent's code as another
-user, as they would in Docker.
+and grading it again reuses the collected artifacts.
+
+**Users.**  In a sandbox that honors the users a task names (``agent_user: honor``, ``verifier_user: honor``), checked
+when it starts to give root and other users (:mod:`platoon.envs.harbor.users`), the session's ``sandbox`` is the
+agents' view of it, which the harness, the env tools and the oracle use, while grading, the kills and platoon's own
+commands keep root's, and the tests run as theirs (:mod:`platoon.envs.harbor.views`): everything there runs with
+Docker's umask, and a separate verifier's artifacts are readable by every user, since the tests may run the agent's
+code as another user, as they would in Docker.  Tests that run as a user other than root get ``/tests`` as theirs and
+``/logs/verifier`` open to every user (Harbor's 777); tests that run as root get both as root's, ``/tests`` with the
+host's modes, as Harbor copies it, so that the agent's code they run as another user can neither read a test file the
+host keeps from it nor write a reward.  A copy fork of such a sandbox is refused where its provider loses the files'
+owners, which a snapshot would not keep.
 
 Grading takes the sandbox the tests run in away from the agents.  In the agents' own sandbox (Harbor's ``shared``
 verifier mode) it first kills every process they left running (``Sandbox.kill_processes``) and makes ``/tests`` and
@@ -64,9 +72,10 @@ from platoon.envs.harbor.artifacts import ArtifactError, CollectedArtifact, coll
 from platoon.envs.harbor.sidecars import SidecarLogs
 from platoon.envs.harbor.task import CollectHook, HarborTask, McpServer, resolve_env
 from platoon.envs.harbor.tools import TOOL_SPECS, SandboxTools
-from platoon.envs.harbor.users import DOCKER_UMASK
 from platoon.envs.harbor.verifier import TEST_STDOUT, collect, output_tail, suspect_outcome, write_local
+from platoon.envs.harbor.views import SessionUsers, unviewed
 from platoon.envs.service import EnvSetupError, ForkMode, Outcome, ToolResult, ToolSpec
+from platoon.sandbox import loses_file_owners
 from platoon.sandbox._processes import alive_processes
 from platoon.sandbox.base import CWD_ERROR_EXIT_CODE, ExecResult, Sandbox, SandboxSpec, cwd_error
 from platoon.sandbox.stacks import MAIN, ServiceState, Stack
@@ -83,6 +92,8 @@ TESTS_DIR = "/tests"
 SOLUTION_DIR = "/solution"
 VERIFIER_DIR = "/logs/verifier"
 LOG_DIRS = ("/logs/agent", VERIFIER_DIR, "/logs/artifacts")
+# Where the agents publish what they leave, which every user may write where users are honored (Harbor makes them 777).
+PUBLISHED_DIRS = ("/logs/agent", "/logs/artifacts")
 DEFAULT_CLOSE_TIMEOUT_S = 30.0
 # Makes /tests and /logs/verifier afresh, whatever the agents left there or in their place (a symlink to elsewhere
 # included: rm removes a symlink, not what it points to), after removing a /logs that is not a directory.  A
@@ -115,8 +126,9 @@ class SandboxLease:
 
     ``gate`` orders the operations on the sandbox (:mod:`platoon.envs.gate`); ``inflight`` holds the tool calls
     still running, which the last release waits for (at most ``close_timeout_s``) before it stops the sandbox.
-    ``init`` is the main-only compose file's init running in it ("<pid>:<start time>"), and ``scratch`` the host
-    directories its binds mount (copies of the task's files), deleted once it stops.
+    ``init`` is the main-only compose file's init running in it ("<pid>:<start time>"), ``scratch`` the host
+    directories its binds mount (copies of the task's files), deleted once it stops, and ``users`` who runs what in
+    it (``sandbox`` is their ``root``).
     """
 
     def __init__(
@@ -128,10 +140,12 @@ class SandboxLease:
         close_timeout_s: float = DEFAULT_CLOSE_TIMEOUT_S,
         init: str | None = None,
         scratch: list[Path] | None = None,
+        users: SessionUsers | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.spec = spec
         self.init = init
+        self.users = users if users is not None else SessionUsers.alone(sandbox)
         self.scratch = list(scratch or ())
         self.gate = ToolGate(queue_timeout_s=queue_timeout_s)
         self.close_timeout_s = close_timeout_s
@@ -214,13 +228,14 @@ class _KeptArtifacts:
 class HarborSession:
     """A rollout's view of a Harbor task: instruction, task sandbox, generic tools, grading and forks.
 
-    ``mcp_servers`` lists the task's own MCP servers for harnesses that can attach them.  ``network_isolated``
-    says the sandbox has no network: the task's ``network_mode`` is ``no-network`` and the provider enforces it
-    (its ``network_none`` capability), so a harness placed in the sandbox could not reach the model gateway.
-    ``host_loopback`` says the sandbox shares this host's network, so a harness placed in it reaches the gateway on
-    loopback: it has a network, its provider declares the ``host_loopback`` capability, and it is not the ``main`` of a
-    stack whose services have a network of their own (a pod's or a compose project's, whose ``main`` reaches the
-    gateway through its route).
+    ``sandbox`` is what the agents act on: the task's sandbox, or its view as the agents' user where the sandbox
+    honors users (:mod:`platoon.envs.harbor.views`).  ``mcp_servers`` lists the task's own MCP servers for harnesses
+    that can attach them.  ``network_isolated`` says the sandbox has no network: the task's ``network_mode`` is
+    ``no-network`` and the provider enforces it (its ``network_none`` capability), so a harness placed in the sandbox
+    could not reach the model gateway.  ``host_loopback`` says the sandbox shares this host's network, so a harness
+    placed in it reaches the gateway on loopback: it has a network, its provider declares the ``host_loopback``
+    capability, and it is not the ``main`` of a stack whose services have a network of their own (a pod's or a compose
+    project's, whose ``main`` reaches the gateway through its route).
     """
 
     # call_tool takes calls from every agent at once and orders them on the sandbox's gate (platoon.envs.gate).
@@ -240,7 +255,8 @@ class HarborSession:
         self.instruction = task.goal or harbor_task.instruction
         self.harbor_task = harbor_task
         self.rollout_id = rollout_id
-        self.sandbox: Sandbox | None = lease.sandbox
+        # What the agents act on: the sandbox, or its agents' view where it honors users (lease.sandbox is root's).
+        self.sandbox: Sandbox | None = lease.users.agents
         # The task's multi-container stack, None for a single sandbox; sandbox is its main.
         self.stack: Stack | None = lease.stack if isinstance(lease, StackLease) else None
         self.mcp_servers: tuple[McpServer, ...] = harbor_task.mcp_servers
@@ -253,7 +269,9 @@ class HarborSession:
         )
         self._service = service
         self._lease = lease
-        self._tools = SandboxTools(lease.sandbox, workdir=lease.spec.workdir, command_timeout_s=service.tool_timeout_s)
+        self._tools = SandboxTools(
+            lease.users.agents, workdir=lease.spec.workdir, command_timeout_s=service.tool_timeout_s
+        )
         # Separate verifier: the artifacts kept once main was released after collecting them, and that release.
         self._kept_artifacts: _KeptArtifacts | None = None
         self._main_release: asyncio.Task[Any] | None = None
@@ -274,13 +292,6 @@ class HarborSession:
         if self.harbor_task.agent_timeout_s is None:
             return None
         return self.harbor_task.agent_timeout_s * self._service.agent_timeout_multiplier
-
-    @property
-    def _umask(self) -> str:
-        """What the verifier's shell commands start with: a root verifier's set Docker's umask, so that what its tests
-        write as root is readable by the users they switch to (:mod:`platoon.envs.harbor.users`)."""
-
-        return f"umask {DOCKER_UMASK}; " if self.harbor_task.verifier_root else ""
 
     async def tools(self) -> list[ToolSpec]:
         return list(TOOL_SPECS)
@@ -347,9 +358,9 @@ class HarborSession:
             if separate:
                 outcome = await self._grade_separately()
             else:
-                sandbox = self._open_sandbox()
+                self._open_sandbox()
                 async with self._lease.gate.hold("exclusive"):
-                    outcome = await self._verify(sandbox)
+                    outcome = await self._verify(self._lease.users)
         except EnvBusy as busy:
             logger.warning(
                 "Grading Harbor session %s waited %.1fs for the calls in flight; gave up", self.id, busy.waited_s
@@ -370,6 +381,8 @@ class HarborSession:
             outcome.metadata["ignored_users"] = dict(self.harbor_task.ignored_users)  # ran as the sandbox's uid
         if self.harbor_task.verifier_root:
             outcome.metadata["verifier_user"] = "root"
+        if self.harbor_task.honored_users:
+            outcome.metadata["users"] = dict(self.harbor_task.honored_users)  # None: the image's user, else root
         return outcome
 
     async def run_solution(self) -> ExecResult:
@@ -384,7 +397,8 @@ class HarborSession:
 
         A session whose ``main`` its separate verifier released forks no more: fork before grading."""
 
-        sandbox = self._open_sandbox()
+        self._open_sandbox()
+        sandbox = self._lease.sandbox
         task = task or self.task
         if mode == "fresh":
             return await self._service.open(task, rollout_id=self.rollout_id)
@@ -405,16 +419,27 @@ class HarborSession:
             provider = self._service.provider
             if "snapshot" not in provider.capabilities:
                 raise NotImplementedError(f"The {provider.name!r} sandbox provider cannot snapshot for copy forks")
+            if self._lease.users.honors and loses_file_owners(provider):
+                raise NotImplementedError(
+                    f"Harbor task {self.harbor_task.name!r} honors users, and a snapshot of a {provider.name!r} "
+                    "sandbox keeps no file owners, which a restore would give to root: fork it shared or fresh"
+                )
             # The snapshot runs alone on the sandbox, so it never copies a call half-applied.
             snapshot = await self._lease.gate.run(
                 "exclusive", lambda grant: sandbox.snapshot(), inflight=self._lease.inflight
             )
             restored = await provider.restore(snapshot, self._lease.spec)
+            try:
+                users = await self._service.restored_users(restored, harbor_task, self._lease.spec)
+            except BaseException:
+                await asyncio.shield(restored.stop())
+                raise
             lease = SandboxLease(
-                restored,
+                users.root,
                 self._lease.spec,
                 queue_timeout_s=self._lease.gate.queue_timeout_s,
                 close_timeout_s=self._lease.close_timeout_s,
+                users=users,
             )
             return HarborSession(self._service, task, harbor_task, lease, rollout_id=self.rollout_id)
         raise ValueError(f"Unknown fork mode {mode!r}")
@@ -441,9 +466,10 @@ class HarborSession:
             raise RuntimeError(f"Harbor session {self.id} is closed")
         return self.sandbox
 
-    async def _verify(self, sandbox: Sandbox) -> Outcome:
-        """Grade in the agents' own sandbox (``shared`` mode)."""
+    async def _verify(self, users: SessionUsers) -> Outcome:
+        """Grade in the agents' own sandbox (``shared`` mode): platoon's commands as its root, the tests as theirs."""
 
+        sandbox = users.root
         try:
             env = resolve_env(self.harbor_task.verifier_env)
         except KeyError as exc:
@@ -456,9 +482,11 @@ class HarborSession:
         if (unusable := await self._check_workdir(sandbox)) is not None:
             return unusable
         reset = await sandbox.exec(["/bin/sh", "-c", _RESET_SCRIPT, "platoon-reset"], cwd="/")
+        if reset.exit_code == 0 and users.tests_as_user:  # the tests write there as their user
+            reset = await sandbox.exec(["chmod", "777", VERIFIER_DIR], cwd="/")
         if reset.exit_code != 0:
             return Outcome.infra("verifier_setup", reason=reset.stderr.strip())
-        await self._run_hooks(sandbox, self.harbor_task.collect)
+        await self._run_hooks(users, self.harbor_task.collect)
         stack = self.stack
         agents_network = stack.network if stack is not None else None
         try:
@@ -471,10 +499,10 @@ class HarborSession:
                 if (unread := await self._put_sidecar_logs(sandbox)) is not None:
                     return unread
             try:
-                await sandbox.upload(self.harbor_task.tests_dir, TESTS_DIR)
+                await self._upload_tests(users)
             except OSError as exc:
                 return Outcome.infra("verifier_setup", reason=f"cannot upload the tests: {exc}")
-            outcome = await self._run_tests(sandbox, env, agents_sandbox=True)
+            outcome = await self._run_tests(users, env, agents_sandbox=True)
             if stack is not None and (down := await self._probe("after the tests")) is not None:
                 down.metadata.update(
                     {key: value for key, value in outcome.metadata.items() if key not in down.metadata}
@@ -502,7 +530,8 @@ class HarborSession:
 
         if (kept := self._kept_artifacts) is not None:
             return await self._verify_separately(kept.collected, kept.skipped, kept.logs)
-        sandbox = self._open_sandbox()
+        self._open_sandbox()
+        sandbox = self._lease.sandbox
         into = Path(scratch.mkdtemp("platoon-harbor-artifacts-"))
         skipped: dict[str, str] = {}
         collected: list[CollectedArtifact] = []
@@ -555,7 +584,7 @@ class HarborSession:
         collected from another service is left out, the first kept), and copies of the sidecars' log directories."""
 
         hooks = self.harbor_task.collect
-        await self._run_hooks(sandbox, [hook for hook in hooks if hook.service == "main"])
+        await self._run_hooks(self._lease.users, [hook for hook in hooks if hook.service == "main"])
         collected = await collect_artifacts(
             sandbox,
             [artifact for artifact in self.harbor_task.artifacts if artifact.service is None],
@@ -564,7 +593,7 @@ class HarborSession:
             skipped=skipped,
             max_bytes=self._service.max_artifact_bytes,
         )
-        await self._run_hooks(sandbox, [hook for hook in hooks if hook.service != "main"])
+        await self._run_hooks(self._lease.users, [hook for hook in hooks if hook.service != "main"])
         stack = self.stack
         if stack is None:
             return collected, {}
@@ -590,14 +619,14 @@ class HarborSession:
                 collected.append(artifact)
         return collected, await self._copy_sidecar_logs(into / "sidecar-logs", owner=into)
 
-    async def _run_hooks(self, sandbox: Sandbox, hooks: Sequence[CollectHook]) -> None:
-        """Run collect ``hooks`` (:func:`~platoon.envs.harbor.sidecars.run_collect_hooks`), noting the ones that
-        failed in the outcome (``collect_failed``)."""
+    async def _run_hooks(self, users: SessionUsers, hooks: Sequence[CollectHook]) -> None:
+        """Run collect ``hooks`` (:func:`~platoon.envs.harbor.sidecars.run_collect_hooks`), ``main``'s as the image's
+        user or the one a hook names, noting the ones that failed in the outcome (``collect_failed``)."""
 
         if not hooks:
             return
         failed = await sidecars.run_collect_hooks(
-            hooks, main=sandbox, stack=self.stack, task_name=self.harbor_task.name
+            hooks, main=users.default, stack=self.stack, task_name=self.harbor_task.name, users=users.hooks
         )
         if failed:
             self._notes.setdefault("collect_failed", []).extend(failed)
@@ -665,32 +694,33 @@ class HarborSession:
         except KeyError as exc:
             return Outcome.infra("verifier_setup", reason=f"host variable {exc} is not set")
         try:
-            verifier, spec = await self._service.open_verifier(self.harbor_task, rollout_id=self.rollout_id)
+            users, spec = await self._service.open_verifier(self.harbor_task, rollout_id=self.rollout_id)
         except EnvSetupError as exc:
             return Outcome.infra("verifier_start", reason=str(exc), metadata={"setup_failure_kind": exc.failure_kind})
+        verifier = users.root
         try:
             bundled = (
                 self.harbor_task.verifier_environment is not None
                 and self.harbor_task.verifier_environment.bundled_tests
             )
             directories = [VERIFIER_DIR] if bundled else [TESTS_DIR, VERIFIER_DIR]
-            reset = f"{self._umask}rm -rf {' '.join(directories)} && mkdir -p {' '.join(directories)}"
+            reset = f"rm -rf {' '.join(directories)} && mkdir -p {' '.join(directories)}"
+            if users.tests_as_user:  # the tests write there as their user
+                reset += f" && chmod 777 {VERIFIER_DIR}"
             result = await verifier.exec(["/bin/sh", "-c", reset], cwd="/")
             if result.exit_code != 0:
                 return Outcome.infra("verifier_setup", reason=result.stderr.strip())
             try:
-                await materialize_artifacts(
-                    verifier, collected, workdir=spec.workdir, readable=self.harbor_task.verifier_root
-                )
+                await materialize_artifacts(verifier, collected, workdir=spec.workdir, readable=users.honors)
                 await sidecars.put_logs(verifier, logs or {})
             except (ArtifactError, OSError) as exc:
                 return Outcome.infra("verifier_setup", reason=str(exc))
             if not bundled:  # a verifier image built for the task holds its own /tests
                 try:
-                    await verifier.upload(self.harbor_task.tests_dir, TESTS_DIR)
+                    await self._upload_tests(users)
                 except OSError as exc:
                     return Outcome.infra("verifier_setup", reason=f"cannot upload the tests: {exc}")
-            outcome = await self._run_tests(verifier, env, agents_sandbox=False)
+            outcome = await self._run_tests(users, env, agents_sandbox=False)
             outcome.metadata["artifacts"] = sorted(artifact.target(spec.workdir) for artifact in collected)
             if skipped:
                 outcome.metadata["artifacts_skipped"] = dict(sorted(skipped.items())[:_MAX_SKIPPED_REPORTED])
@@ -699,14 +729,22 @@ class HarborSession:
         finally:
             await asyncio.shield(_in_background(verifier.stop()))
 
-    async def _run_tests(self, sandbox: Sandbox, env: dict[str, str], *, agents_sandbox: bool) -> Outcome:
-        """Run the tests in ``sandbox``, the agents' own (``shared``) or a separate verifier's, and read their
-        verdict."""
+    async def _upload_tests(self, users: SessionUsers) -> None:
+        """Upload the task's tests to ``/tests`` of the sandbox whose ``users`` these are: the tests' own where they run
+        as a user other than root, else root's with the host's modes, as Harbor's copy keeps them."""
 
+        uploader = users.tests if users.tests_as_user else unviewed(users.root)
+        await uploader.upload(self.harbor_task.tests_dir, TESTS_DIR)
+
+    async def _run_tests(self, users: SessionUsers, env: dict[str, str], *, agents_sandbox: bool) -> Outcome:
+        """Run the tests, as their user, in the agents' own sandbox (``shared``) or a separate verifier's (the sandbox
+        whose ``users`` these are), and read their verdict."""
+
+        sandbox = users.root
         timeout_s = self.harbor_task.verifier_timeout_s * self._service.verifier_timeout_multiplier
         started = time.monotonic()
-        result = await sandbox.exec(
-            f"{self._umask}bash {TESTS_DIR}/test.sh > {VERIFIER_DIR}/{TEST_STDOUT} 2>&1", timeout_s=timeout_s, env=env
+        result = await users.tests.exec(
+            f"bash {TESTS_DIR}/test.sh > {VERIFIER_DIR}/{TEST_STDOUT} 2>&1", timeout_s=timeout_s, env=env
         )
         metadata: dict[str, Any] = {
             "verifier_exit_code": result.exit_code,

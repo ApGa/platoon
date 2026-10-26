@@ -50,7 +50,7 @@ commands:
   - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, main]
   - [network, connect, <project>-egress, <project>-main]
   - [start, <project>-main]
-  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, /bin/sh, -c, <script>, platoon-list]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, --user, '0', <project>-main, /bin/sh, -c, <script>, platoon-list]
   - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /logs/agent, /logs/verifier, /logs/artifacts, /app]
   - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-main]
   - [rm, --force, --volumes, <project>-main]

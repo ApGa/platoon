@@ -328,6 +328,14 @@ echo "unexpected: $*" >&2; exit 2
 """
 FAKE_UNSQUASHFS = r"""#!/bin/bash
 set -e
+if [ "$1" = -lln ]; then  # the layer's listing: a workdir that the Dockerfile gives uid 1000, and a link of root's
+  echo "unsquashfs $*" >> "$FAKE_LOG"
+  echo "Parallel unsquashfs: Using 2 processors"
+  echo "drwxr-xr-x 0/0                    40 2026-01-01 00:00 squashfs-root"
+  echo "drwxr-x--- 1000/1000              20 2026-01-01 00:00 squashfs-root/workdir"
+  echo "lrwxrwxrwx 0/0                     7 2026-01-01 00:00 squashfs-root/bin -> usr/bin"
+  exit 0
+fi
 echo "unsquashfs $* (umask $(umask), work $(stat -c %a "$(dirname "$3")"))" >> "$FAKE_LOG"
 mkdir -p "$3/workdir"
 """
@@ -370,6 +378,7 @@ def test_oci_builds_extract_a_native_sif_and_record_the_config(lock, tmp_path: P
     loaded = ImageMap.load(image_map)
     shared = plan_images(lock, loaded).images[0]
     entry = loaded.get(shared.key)
+    assert entry is not None
     assert entry.image == str(tmp_path / "site" / "images" / f"{shared.key.removeprefix('sha256:')}.sif")
     assert Path(entry.image).read_text() == "native\n"
     assert entry.env == {"PATH": "/opt/extra/bin:/usr/bin", "FOO": "bar"} and entry.workdir == "/workdir"
@@ -377,8 +386,12 @@ def test_oci_builds_extract_a_native_sif_and_record_the_config(lock, tmp_path: P
     assert entry.receipt["builder_version"] == "singularity-ce version 4.4.1"
     assert entry.receipt["task"] == "a" and Path(entry.receipt["log"]).is_file()
     assert entry.receipt["builder_revision"] == 1 and not withholds_modes(entry)
+    # The owners the layer gives, listed before the layer is unpacked as this user, beside the image.
+    assert entry.file_owners == entry.image.removesuffix(".sif") + ".owners"
+    assert Path(entry.file_owners).read_text() == "1000 1000 /workdir\n"
     calls = (tmp_path / "calls.log").read_text()
     assert "build --oci" in calls and "sif dump 1" in calls and "unsquashfs -no-xattrs -d" in calls
+    assert calls.index("unsquashfs -lln") < calls.index("unsquashfs -no-xattrs -d")
     # unsquashfs, run as a user, would give the image's files the host's umask: it runs with none, in a build tree
     # that only its owner may enter, since the image's own modes may let anyone write.
     assert "(umask 0000, work 700)" in calls
@@ -387,6 +400,31 @@ def test_oci_builds_extract_a_native_sif_and_record_the_config(lock, tmp_path: P
     assert plan_images(lock, ImageMap.load(image_map)).missing == []
     assert build_images(lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "scratch") == {}
     assert not list((tmp_path / "scratch").glob("build-*"))  # build trees are removed
+
+
+# squashfs-tools 4.3's unsquashfs (RHEL 8's), which has no -lln: it prints its usage and exits 1.
+UNSQUASHFS_4_3 = FAKE_UNSQUASHFS.replace(
+    "set -e\n", 'set -e\nif [ "$1" = -lln ]; then echo "SYNTAX: unsquashfs [options] filesystem"; exit 1; fi\n', 1
+)
+
+
+def test_an_oci_build_with_an_unsquashfs_that_lists_no_owners_records_no_manifest(
+    lock, fake_singularity: Path, tmp_path: Path
+):
+    """An unsquashfs before 4.4 builds the image as before, with no owner manifest, which the sandboxes that honor
+    users on hpc-sandbox then refuse, naming squashfs-tools 4.4; the log says why."""
+
+    _install(tmp_path / "bin", "unsquashfs", UNSQUASHFS_4_3)
+    image_map = tmp_path / "site" / "images.json"
+
+    built = build_images(lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "s", shard=(0, 1))
+
+    assert len(built) == 2
+    entries = [entry for entry in ImageMap.load(image_map).entries.values()]
+    assert all(entry.file_owners is None and entry.builder == "oci" for entry in entries)
+    log = Path(entries[0].receipt["log"]).read_text()
+    assert "-lln needs squashfs-tools 4.4 or later" in log
+    assert "unsquashfs -no-xattrs -d" in fake_singularity.read_text()  # unpacked as before
 
 
 # A separate verifier that fetches a file at build time, as nuclear-fusion-rl's b03, b04 and b31 do: through an ARG,

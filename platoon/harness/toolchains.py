@@ -55,11 +55,13 @@ the forced build that replaces it (:func:`toolchain_problem`, ``platoon.train.au
 **Staging.** Before a rollout uses a named toolchain, :func:`stage` copies it to node-local disk, once per node and
 toolchain version: into a temporary directory under an exclusive ``flock``, checked against the tree hash, then
 renamed into place, so no rollout ever sees a partial copy and concurrent rollouts copy it once.  Each staging that
-takes the lock first removes the temporary directories that killed stagings of the same version left behind.  Staged
-copies live under ``$PLATOON_TOOLCHAIN_CACHE``, else under ``platoon-toolchains-<uid>`` in node-local scratch
-(:func:`platoon.utils.scratch.node_scratch`: ``$PLATOON_NODE_SCRATCH``, ``$PBS_LOCALDIR``, ``$SLURM_TMPDIR``,
-``$TMPDIR``, else ``/tmp``).  :func:`prepare` does both and returns the paths a launch renders: the build path in a
-task sandbox, the staged copy on the rollout host.
+takes the lock first removes the temporary directories that killed stagings of the same version left behind.  A copy
+is readable by every user, its directories and programs runnable by them (``a+rX``), so that a sandbox's other users
+run it too, such as an agent that runs as the user its Harbor task names; the tree hash records only the owner's
+executable bit, which this leaves as it is.  Staged copies live under ``$PLATOON_TOOLCHAIN_CACHE``, else under
+``platoon-toolchains-<uid>`` in node-local scratch (:func:`platoon.utils.scratch.node_scratch`:
+``$PLATOON_NODE_SCRATCH``, ``$PBS_LOCALDIR``, ``$SLURM_TMPDIR``, ``$TMPDIR``, else ``/tmp``).  :func:`prepare` does
+both and returns the paths a launch renders: the build path in a task sandbox, the staged copy on the rollout host.
 
 **A copy that outlives its job.**  Where the cache is node-local disk that outlives a job (``$PLATOON_TOOLCHAIN_CACHE``
 on such a disk, or ``/tmp`` on a node without job scratch), the next job on the node finds the copy and keeps it when
@@ -361,6 +363,7 @@ def _stage(toolchain: Toolchain, cache: str | os.PathLike[str] | None) -> tuple[
                 return _unchecked(target, toolchain, session, f"no stamp can be written beside it ({problem})")
             digest, files, size = tree_digest(target)
             if digest == toolchain.tree_hash:
+                _open_to_every_user(target)  # a copy that a platoon before 0.5 staged may keep them out
                 _write_stamp(target, digest, files, size, session)
                 _SERVED.add((str(target), toolchain.tree_hash, session))
                 return target, "verified"
@@ -370,6 +373,7 @@ def _stage(toolchain: Toolchain, cache: str | os.PathLike[str] | None) -> tuple[
         stale = None
         try:
             shutil.copytree(toolchain.path, partial, symlinks=True)
+            _open_to_every_user(partial)
             digest, files, size = tree_digest(partial)
             if toolchain.tree_hash is not None and digest != toolchain.tree_hash:
                 raise ToolchainError(
@@ -396,6 +400,22 @@ def _stage(toolchain: Toolchain, cache: str | os.PathLike[str] | None) -> tuple[
             _write_stamp(target, digest, files, size, session)
             _SERVED.add((str(target), toolchain.tree_hash, session))
     return target, action
+
+
+def _open_to_every_user(root: Path) -> None:
+    """Let every user read the tree at ``root``, and enter its directories and run what its owner may run (``chmod -R
+    a+rX``); links are left as they are."""
+
+    for directory, _, filenames in os.walk(root):  # never into a linked directory
+        for path in [Path(directory), *(Path(directory) / name for name in filenames)]:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            mode = info.st_mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+            if stat.S_ISDIR(info.st_mode) or info.st_mode & stat.S_IXUSR:
+                mode |= stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+            if mode != info.st_mode:
+                path.chmod(stat.S_IMODE(mode))
 
 
 def _stamp_path(target: Path) -> Path:

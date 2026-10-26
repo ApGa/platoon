@@ -19,11 +19,14 @@ fetches it as Docker does: it verifies an ``--checksum`` and never extracts a re
 network: the key covers such a step as written, the URL (or the ``ARG`` that holds it) and its checksum. A ``COPY``
 of one fails the plan, as it fails a Docker build.
 
-Deferred steps are JSON lists: ``["WORKDIR", path]``, ``["ENV", name, value]``, ``["ARG", name, value]`` and
-``["COPY", source, ..., destination]`` with sources relative to the build context. Variables in a destination,
-a ``WORKDIR`` or an ``ENV`` value are expanded when the session opens, against the image's environment, as a build
-would; a source must be literal. ``USER`` in the suffix is reported (``suffix_user``), never applied: rootless
-sandboxes run as one uid. Anything the planner cannot defer safely stays in the prefix.
+Deferred steps are JSON lists: ``["WORKDIR", path]``, ``["ENV", name, value]``, ``["ARG", name, value]``,
+``["USER", user]`` and ``["COPY", source, ..., destination]`` with sources relative to the build context,
+``["COPY", "--chown=<owner>", source, ..., destination]`` for one that gives its files an owner. Variables in a
+destination, an owner, a ``USER``, a ``WORKDIR`` or an ``ENV`` value are expanded when the session opens, against the
+image's environment, as a build would; a source must be literal. ``USER`` in the suffix is also reported
+(``suffix_user``) and recorded in the plan's ``config``: a session that honors users runs its agents as it, and gives
+the directories that a later ``WORKDIR`` makes to it, as BuildKit does; its copies' owners apply there only. Anything
+the planner cannot defer safely stays in the prefix.
 
 **Image configuration.** The metadata of the suffix (``CMD``, ``ENTRYPOINT``, ``HEALTHCHECK``, ``USER``, ``EXPOSE``,
 ``STOPSIGNAL``, ``VOLUME``) is never built, so the plan records what it sets (``config``,
@@ -61,7 +64,7 @@ METADATA = frozenset(
     {"LABEL", "EXPOSE", "CMD", "ENTRYPOINT", "HEALTHCHECK", "STOPSIGNAL", "VOLUME", "SHELL", "MAINTAINER", "ONBUILD"}
 )
 _SHELL_ESCAPES = {'"': '\\"', "`": "\\`", "\\": "\\\\", "$": "\\$"}  # literal in a double-quoted shell word
-_COPY_FLAGS_DEFERRABLE = frozenset({"chown", "link"})  # same files in a single-uid sandbox
+_COPY_FLAGS_DEFERRABLE = frozenset({"chown", "link"})  # an owner, which a session that honors users applies; a layer
 _ARCHIVE_MAGIC = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"\x28\xb5\x2f\xfd")
 # BuildKit's git transports: a URL scheme (http and https only with a path ending in .git), or ssh's user@host:path.
 _URL_SCHEME = re.compile(r"^([A-Za-z0-9]+)://")
@@ -120,7 +123,7 @@ class DockerfilePlan:
     prefix: tuple[Instruction, ...]
     deferred: tuple[tuple[str, ...], ...]
     base_images: tuple[str, ...]  # the FROM references of the prefix, ARG defaults expanded
-    suffix_user: str | None = None  # a USER in the deferred suffix: rootless sandboxes cannot honor it
+    suffix_user: str | None = None  # a USER in the deferred suffix: the agents' user where users are honored
     context_files: tuple[str, ...] = ()  # context paths the prefix reads ("." for the whole context)
     notes: tuple[str, ...] = field(default=())  # why steps stayed in the prefix, for `images plan`
     # What the suffix's metadata sets in the image configuration (a whole plan: what the last stage sets over its
@@ -134,7 +137,8 @@ class DockerfilePlan:
         the image; ``.`` for the whole context), then the sources of the deferred ``COPY`` steps, which a session
         uploads.  Relative to the context, without a trailing slash."""
 
-        sources = [source.rstrip("/") or "." for step in self.deferred if step[0] == "COPY" for source in step[1:-1]]
+        copies = [copy_operands(step)[1] for step in self.deferred if step[0] == "COPY"]
+        sources = [source.rstrip("/") or "." for each in copies for source in each]
         return tuple(dict.fromkeys([*self.context_files, *sources]))
 
     def prefix_dockerfile(self) -> str:
@@ -151,6 +155,14 @@ class DockerfilePlan:
             **({"config": dict(self.config)} if self.config else {}),
             **({"whole": True} if self.whole else {}),
         }
+
+
+def copy_operands(step: Sequence[str]) -> tuple[str | None, list[str], str]:
+    """A deferred ``COPY`` step's owner (its ``--chown`` as written, None without one), sources and destination."""
+
+    operands = list(step[1:])
+    owner = operands.pop(0).removeprefix("--chown=") if operands[0].startswith("--chown=") else None
+    return owner, operands[:-1], operands[-1]
 
 
 def parse_dockerfile(text: str) -> Dockerfile:
@@ -299,9 +311,11 @@ def image_config(scoped: Sequence[tuple[Instruction, Mapping[str, str]]], *, sta
     ``/bin/sh -c``), ``healthcheck`` (``{"test": [...], "interval": ...}`` with Docker's option names, ``test``
     ``["NONE"]`` for ``HEALTHCHECK NONE``), ``user``, ``expose`` (ports added, as ``"8000/tcp"``),
     ``stop_signal`` and ``volumes`` (added).  An ``ENTRYPOINT`` empties the ``CMD`` the stage inherits unless the stage
-    sets one before it (Docker's ``cmdSet``), which ``cmd`` records as ``[]``.  ``start`` is where a deferred suffix
-    starts: what the stage set before it is the built prefix's own configuration, but a ``CMD`` there still keeps a
-    later ``ENTRYPOINT`` from emptying it, and a ``SHELL`` there still holds."""
+    sets one before it (Docker's ``cmdSet``), which ``cmd`` records as ``[]``.  A ``user`` that names a variable not
+    in scope, which the base image's environment sets, is recorded as written, for the session to expand
+    (:func:`platoon.envs.harbor.images.planned_user`).  ``start`` is where a deferred suffix starts: what the stage
+    set before it is the built prefix's own configuration, but a ``CMD`` there still keeps a later ``ENTRYPOINT`` from
+    emptying it, and a ``SHELL`` there still holds."""
 
     configs: dict[str, dict[str, Any]] = {}  # stage name -> what it set, for a stage built FROM it
     shells: dict[str, tuple[str, ...]] = {}  # stage name -> its SHELL at its end
@@ -338,7 +352,9 @@ def image_config(scoped: Sequence[tuple[Instruction, Mapping[str, str]]], *, sta
         elif keyword == "HEALTHCHECK":
             config["healthcheck"] = _healthcheck(instruction)
         elif keyword == "USER":
-            config["user"] = expand(instruction.arguments.strip(), variables)
+            # One that names the base image's environment (USER ${NB_UID}) expands when the session opens, against it.
+            user = instruction.arguments.strip()
+            config["user"] = expand(user, variables) if variables_defined(user, variables) else user
         elif keyword == "EXPOSE":
             ports = [expand(word, variables) for word in instruction.arguments.split()]
             config.setdefault("expose", []).extend(port if "/" in port else f"{port}/tcp" for port in ports)
@@ -661,12 +677,13 @@ def _deferred_steps(instruction: Instruction, scope: _Scope) -> tuple[list[tuple
         for name, value in parse_assignments(instruction.arguments, "ARG"):
             steps.append(("ARG", name, scope.global_args.get(name, "") if value is None else value))
         return steps, None
-    if keyword == "USER":
-        return [], instruction.arguments.strip()
+    if keyword == "USER":  # where it falls: the WORKDIR steps after it make their directories as it
+        return [("USER", instruction.arguments.strip())], instruction.arguments.strip()
     if keyword in ("COPY", "ADD"):
-        _, operands = instruction.flags_and_operands()
+        flags, operands = instruction.flags_and_operands()
         sources = [_normalize_source(source) for source in operands[:-1]]
-        return [("COPY", *sources, operands[-1])], None
+        owner = (f"--chown={flags['chown']}",) if flags.get("chown") else ()
+        return [("COPY", *owner, *sources, operands[-1])], None
     return [], None  # metadata: no effect on files or the environment
 
 
