@@ -1,5 +1,6 @@
-"""The groups a full checkpoint keeps (``platoon.train.tinker.kept_groups``): a kept group reads back as it settled, its
-datums exactly, a failed group as failed, and a file that is lost, changed or not what it says is refused with why."""
+"""The groups a full checkpoint keeps (``platoon.train.checkpoints.kept_groups``): a kept group reads back as it
+settled, its datums exactly, a failed group as failed, and a file that is lost, changed or not what it says is refused
+with why."""
 
 from __future__ import annotations
 
@@ -13,8 +14,7 @@ import pytest
 import tinker
 import torch
 
-from platoon.train.task_stats import GroupRecord, MemberResult
-from platoon.train.tinker.kept_groups import (
+from platoon.train.checkpoints.kept_groups import (
     _encode_output,
     decode_group,
     encode_group,
@@ -22,7 +22,8 @@ from platoon.train.tinker.kept_groups import (
     read_kept,
     write_kept,
 )
-from platoon.train.tinker.workflows.group_rollout_workflow import _TaskRolloutOutput
+from platoon.train.task_stats import GroupRecord, MemberResult
+from platoon.train.workflow.output import _TaskRolloutOutput
 from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import DeferredStats, ReduceType, StatsTracker

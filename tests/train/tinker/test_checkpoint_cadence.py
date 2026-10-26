@@ -23,9 +23,9 @@ os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
 from tinker_cookbook import checkpoint_utils  # noqa: E402
 
-from platoon.train.tinker import rl as rl_module  # noqa: E402
-from platoon.train.tinker.config_defs import CheckpointConfig  # noqa: E402
-from platoon.train.tinker.rl import PlatoonTinkerRLTrainer  # noqa: E402
+from platoon.train.config_defs import CheckpointConfig  # noqa: E402
+from platoon.train.trainer import rl as rl_module  # noqa: E402
+from platoon.train.trainer.rl import PlatoonTinkerRLTrainer  # noqa: E402
 
 
 class _FakeTrainingClient:

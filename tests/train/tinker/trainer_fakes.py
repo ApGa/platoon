@@ -16,8 +16,8 @@ import torch
 import yaml
 
 from platoon.train.components import task_ids_to_dataset
-from platoon.train.tinker import rl
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.config import resolve_config
 from platoon.utils.stats_tracker import get as get_tracker
 
@@ -136,9 +136,9 @@ def make_trainer(
         saves.append(name)
         return {"state_path": f"tinker://m/weights/{name}", "sampler_path": f"tinker://m/sampler_weights/{name}"}
 
-    monkeypatch.setattr(rl.checkpoint_utils, "save_checkpoint_async", save_checkpoint_async)
-    monkeypatch.setattr(rl.tinker, "ServiceClient", lambda **kwargs: SimpleNamespace())
-    trainer = object.__new__(rl.PlatoonTinkerRLTrainer)
+    monkeypatch.setattr(rl_module.checkpoint_utils, "save_checkpoint_async", save_checkpoint_async)
+    monkeypatch.setattr(rl_module.tinker, "ServiceClient", lambda **kwargs: SimpleNamespace())
+    trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
     trainer.config = config
     trainer.train_dataset = task_ids_to_dataset([f"train:{index}" for index in range(tasks)])
     trainer.eval_dataset = task_ids_to_dataset([f"val:{index}" for index in range(eval_tasks)]) if eval_tasks else None

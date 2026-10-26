@@ -13,20 +13,14 @@ from typing import Any
 
 import pytest
 
+from platoon.train.checkpoints.dispatch_state import STATE_FORMAT, read_state, save_state, saved_draws
 from platoon.train.components import ENVIRONMENT_COLUMN
+from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
+from platoon.train.dispatch.permits import PermitPool
 from platoon.train.labels import task_label
 from platoon.train.sampler_runtime import SamplerSet, TaskPool, TaskSampling
 from platoon.train.samplers import SamplerChoice, UniformSampler, WeightedSampler
 from platoon.train.task_stats import EntryInfo
-from platoon.train.tinker.dispatcher import (
-    STATE_FORMAT,
-    BoundDraw,
-    Dispatcher,
-    read_state,
-    save_state,
-    saved_draws,
-)
-from platoon.train.tinker.permits import PermitPool
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "resume-0.3.0"
 
@@ -178,7 +172,8 @@ from platoon.experimental import (  # noqa: E402
     Sampler,
     Slot,  # noqa: E402
 )
-from platoon.train.tinker.dispatcher import Token, saved_fallback_slots, saved_token_positions  # noqa: E402
+from platoon.train.checkpoints.dispatch_state import saved_fallback_slots, saved_token_positions  # noqa: E402
+from platoon.train.dispatch.dispatcher import Token  # noqa: E402
 
 
 class Chooser(Sampler):

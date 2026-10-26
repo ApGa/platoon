@@ -20,8 +20,9 @@ from platoon.envs.service import Outcome
 from platoon.gateway.core import AgentSession
 from platoon.gateway.trace import build_trajectory_collection
 from platoon.task import Task
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import output as output_module
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import get as get_tracker
 from platoon.utils.tinker_data_processing import (
@@ -47,9 +48,9 @@ def _datum(reward: float) -> tinker.Datum:
     )
 
 
-def _member(kind: str, reward: float) -> grw._SingleRolloutOutcome:
+def _member(kind: str, reward: float) -> output_module._SingleRolloutOutcome:
     if kind == CRASHED:
-        return grw._SingleRolloutOutcome(
+        return output_module._SingleRolloutOutcome(
             result=None, workload=RolloutWorkload(), observed=False, disposition="worker_crashed"
         )
     completed = kind == COMPLETED
@@ -82,10 +83,10 @@ def _member(kind: str, reward: float) -> grw._SingleRolloutOutcome:
         policy_eligible_datums=1 if completed else 0,
         post_sampling_datums=1 if completed else 0,
     )
-    return grw._SingleRolloutOutcome(result=result, workload=workload, observed=True)
+    return output_module._SingleRolloutOutcome(result=result, workload=workload, observed=True)
 
 
-class _Workflow(grw.GroupRolloutWorkflow):
+class _Workflow(group_module.GroupRolloutWorkflow):
     def __init__(self, config: WorkflowConfig, kinds: list[str], rewards: list[float], scope: str) -> None:
         super().__init__(
             rollout_fn=None,

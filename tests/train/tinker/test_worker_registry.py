@@ -24,21 +24,17 @@ import pytest
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.workers.protocol import (
-    PROTOCOL_VERSION,
-    ConversionPolicy,
-    ModelBinding,
-    RolloutWorkerRequest,
-)
-from platoon.train.tinker.workers.registry import (
+from platoon.train.trainer import rl as rl_module
+from platoon.train.trainer import signals as signals_module
+from platoon.train.workers.protocol import PROTOCOL_VERSION, ConversionPolicy, ModelBinding, RolloutWorkerRequest
+from platoon.train.workers.registry import (
     WorkerRecord,
     process_start_time,
     record_worker,
     registry_dir,
     sweep_orphaned_workers,
 )
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor, signal_live_workers
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor, signal_live_workers
 
 STUB_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -234,13 +230,13 @@ def test_the_trainer_signals_its_live_workers(tmp_path):
 
 def test_the_watchdog_tells_the_workers_to_stop_before_it_exits(monkeypatch):
     events: list[object] = []
-    watchdog = rl_module.Watchdog(timeout_seconds=0.2, exit_code=2)
+    watchdog = signals_module.Watchdog(timeout_seconds=0.2, exit_code=2)
 
     def fake_exit(code: int) -> None:
         events.append(("exit", code))
         watchdog._running = False  # end the monitor loop instead of the process
 
-    monkeypatch.setattr(rl_module, "_stop_rollout_workers", lambda: events.append("stop workers"))
+    monkeypatch.setattr(signals_module, "_stop_rollout_workers", lambda: events.append("stop workers"))
     monkeypatch.setattr(rl_module.os, "_exit", fake_exit)
     watchdog.start()
     deadline = time.monotonic() + 10

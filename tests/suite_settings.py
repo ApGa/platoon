@@ -11,7 +11,7 @@ import pytest
 
 #: The environment variables a test must leave as it found them, beside ``sys.executable`` and ``sys.path``: the
 #: rollout worker marker, with which an in-process rollout enters the Python overlay of a worker process
-#: (``platoon.train.tinker.workers.run``), and the variables that overlay sets (``platoon.utils.rollout_python_env``).
+#: (``platoon.train.workers.run``), and the variables that overlay sets (``platoon.utils.rollout_python_env``).
 PROCESS_ENVIRONMENT = (
     "PLATOON_TINKER_ROLLOUT_WORKER",
     "PATH",

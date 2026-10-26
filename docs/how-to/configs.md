@@ -19,7 +19,7 @@ environment that ships with platoon. `platoon config` itself never contacts a tr
 | The file has | Schema | Used by |
 |---|---|---|
 | an `inference:` section | `PlatoonEvalConfig` (`platoon/eval/run.py`) | `platoon eval`, `platoon rollout` |
-| a `train:` section | `PlatoonTinkerRLTrainerConfig` (`platoon/train/tinker/config_defs.py`) | `platoon train`, `platoon rollout` |
+| a `train:` section | `PlatoonTinkerRLTrainerConfig` (`platoon/train/config_defs.py`) | `platoon train`, `platoon rollout` |
 | neither | none: plain YAML, only meant to be extended | `extends:` |
 
 The top-level keys of a training config:

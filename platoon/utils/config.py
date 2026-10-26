@@ -748,7 +748,7 @@ def _deprecations(value: Any, annotation: Any, path: str) -> list[Deprecation]:
 # default: a class attribute ``LAID_OVER = {"<section>.<field>": function}`` (a ClassVar).  The function takes the
 # sections built so far, by name, and the field's default, and returns the instance the field is laid over; the
 # sections it names are built after the others.  A training config lays ``eval.workflow_config`` over
-# ``train.workflow_config``'s rollout and worker settings (``platoon.train.tinker.config_defs``).
+# ``train.workflow_config``'s rollout and worker settings (``platoon.train.config_defs``).
 LAID_OVER = "LAID_OVER"
 # The attribute in which a section the loader built keeps the mapping the config gave for it (given_mapping).
 _GIVEN = "_platoon_given"

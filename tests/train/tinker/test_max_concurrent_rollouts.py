@@ -13,7 +13,7 @@ import signal
 import pytest
 from trainer_fakes import datum, make_trainer, trainer_config
 
-from platoon.train.tinker.config_defs import EvalConfig, TrainConfig, WorkflowConfig, concurrent_groups
+from platoon.train.config_defs import EvalConfig, TrainConfig, WorkflowConfig, concurrent_groups
 from platoon.utils.config import ConfigError
 
 

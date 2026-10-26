@@ -309,7 +309,7 @@ the problem, and so does an option a harness does not take (`harness_options`, w
 | `platoon/harness/` | the agent contract, function harnesses, TOML specs and their runner, subagents, budgets, verifiers and the built-in harnesses |
 | `platoon/gateway/` | the model gateway: rendering, sampling, parsing and recording every model call, and the MCP tool plane |
 | `platoon/programs.py`, `platoon/gym.py` | episode programs, and adapters from step environments |
-| `platoon/train/tinker/` | the Tinker trainer, rollout workflows, credit assignment and rollout workers |
+| `platoon/train/` | training: the trainer (`trainer/`), a training step (`step/`), what starts the training groups (`dispatch/`), the rollout workflow (`workflow/`), credit assignment (`credit/`), the rollout workers (`workers/`), checkpoints (`checkpoints/`), evaluation during training (`evaluation/`), the config and task selection; the policy client and its renderers (`tinker/`) |
 | `platoon/eval/` | `platoon eval` |
 | `platoon/sandbox/` | task sandboxes: `process`, `docker`, `singularity` and `enroot` |
 | `platoon/hooks.py` | named hooks through which extensions plug into core |

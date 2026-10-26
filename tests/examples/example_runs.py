@@ -11,7 +11,7 @@ from typing import Any
 def load_config(path: str | Path, *overrides: str) -> Any:
     """A training config, validated like ``platoon config validate`` validates it."""
 
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     return resolve_config(Path(path), overrides, PlatoonTinkerRLTrainerConfig).config

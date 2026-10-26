@@ -150,7 +150,7 @@ modules that keep none belong in the preload, and why nothing is derived under `
 rollouts import their environments inside a Python overlay of their own. `platoon train` starts the server as soon as
 its training client is open, so that it imports while the trainer saves at launch, and stages the harness toolchains
 on the node meanwhile.
-Right after the fork, the child becomes the process `python -m platoon.train.tinker.workers.entrypoint` would be: a
+Right after the fork, the child becomes the process `python -m platoon.train.workers.entrypoint` would be: a
 session of its own, `/dev/null` as stdin, its log file, the trainer's working directory and exactly the environment
 an exec'd worker gets, new seeds for numpy's and torch's generators and for every `random.Random` the server's
 imports seeded from the OS (sympy's, datasets' fingerprint generator), the worker invariants and the startup alarm;
@@ -183,7 +183,7 @@ singularity provider's `gpu: nv`), not from its environment.
 | `platoon/gateway/` | `ModelGateway` and `AgentSession` (`core.py`), the HTTP server (`server.py`), the MCP tool plane (`mcp.py`), trajectories from agent records (`trace.py`), wire dialects (`dialects/`) |
 | `platoon/harness/` | the agent contract (`agent.py`), `@harness` (`function.py`), the inline runtime (`inline.py`), subagents (`agents.py`), budgets (`budget.py`), verifiers (`verify.py`), `harness_rollout` (`rollout.py`), TOML specs (`spec.py`, `runner.py`), the registry (`registry/`) and the built-in harnesses (`builtin/`) |
 | `platoon/programs.py`, `platoon/rewards.py`, `platoon/gym.py` | episode programs, the reward processor and finalizer for recursive agents, and gym adapters |
-| `platoon/train/tinker/` | the trainer, its config, the rollout workflows, the rollout workers and the renderers |
+| `platoon/train/` | the trainer (`trainer/`), a training step (`step/`), the dispatcher and the rollout permits (`dispatch/`), the rollout workflow (`workflow/`), a group's credit (`credit/`), the rollout workers (`workers/`), checkpoints and resume (`checkpoints/`), evaluation during training (`evaluation/`), the config (`config_defs.py`) and task selection; the policy client and the renderers (`tinker/`) |
 | `platoon/eval/` | `platoon eval` |
 | `platoon/cli.py`, `platoon/utils/config.py` | the CLI and the config loader |
 | `platoon/hooks.py` | named hooks for extensions |
@@ -763,7 +763,7 @@ trainer, the rollout workers and the gateway all render through the renderer tha
 
 ## Config and CLI
 
-The schema is the trainer and evaluation config dataclasses (`platoon/train/tinker/config_defs.py`,
+The schema is the trainer and evaluation config dataclasses (`platoon/train/config_defs.py`,
 `platoon/eval/config_defs.py`). Loading is strict: unknown keys fail with their dotted path and a did-you-mean
 suggestion, values are type-checked, and every problem is reported at once.
 

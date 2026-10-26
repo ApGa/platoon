@@ -10,9 +10,10 @@ from types import SimpleNamespace
 import tinker
 import torch
 
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.config_defs import CheckpointConfig, EvalConfig
-from platoon.train.tinker.workflows.group_rollout_workflow import _TaskRolloutOutput
+from platoon.train.config_defs import CheckpointConfig, EvalConfig
+from platoon.train.trainer import rl as rl_module
+from platoon.train.trainer import state as state_module
+from platoon.train.workflow.output import _TaskRolloutOutput
 from platoon.utils.rollout_stats import OUTCOME_STATUSES, outcome_counts, summarize_rollout_group
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import StatsTracker
@@ -77,7 +78,7 @@ def test_an_evaluation_logs_every_label_of_its_tasks_also_at_zero():
     trainer._rollout_workflow_worker_loop = worker
 
     async def run() -> None:
-        state = rl_module.TrainLoopSharedState(
+        state = state_module.TrainLoopSharedState(
             config=trainer.config,
             shutdown_event=asyncio.Event(),
             train_step=0,

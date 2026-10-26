@@ -23,10 +23,10 @@ from platoon import registry as registry_module
 from platoon.experimental import Draw, Sampler, task_sampler
 from platoon.extensions import ExtensionError, run_components
 from platoon.train.auto import AutoDataset
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.sampler_api import REGISTRY_KIND, resolve_task_sampler
 from platoon.train.samplers import PassRateOptions, PassRateSampler, UniformSampler, WeightedSampler, choose_samplers
 from platoon.train.sampling import fingerprint_changes, sampling_fingerprint
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import ConfigError, resolve_config
 
 HERE = __name__

@@ -14,7 +14,7 @@ themselves, as before.  ``platoon eval`` stages the same way while it lists its 
 rollout's own staging then finds the copy current (:func:`platoon.harness.toolchains.stage`).
 
 **What a fork server imports and builds ahead.**  A fork server (:mod:`platoon.utils.forkserver`) imports the worker's
-stack once (``WORKER_PRELOAD`` and the environments' packages, :mod:`platoon.train.tinker.workers.supervisor`), and each
+stack once (``WORKER_PRELOAD`` and the environments' packages, :mod:`platoon.train.workers.supervisor`), and each
 worker it forks starts with those modules imported.  A worker then opened its environment and its harness, which
 imported far more: an ORS environment's ``openreward`` SDK pulls in ``anthropic``, ``openai`` and ``opentelemetry``
 (about 3,300 modules), the CodeAct harness IPython, prompt_toolkit and jedi (about 400), in each worker again, each
@@ -297,7 +297,7 @@ def _module_of_component(kind: str, spec: str | None) -> list[str]:
     if spec is None:
         return []
     from platoon.registry import resolve_component
-    from platoon.train.tinker.workers.protocol import validated_ref
+    from platoon.train.workers.protocol import validated_ref
 
     try:
         return _module_of_ref(validated_ref(resolve_component(kind, spec), what=f"{kind} {spec!r}"))

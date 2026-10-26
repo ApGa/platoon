@@ -44,16 +44,16 @@ from trace_scenarios import BASE_CONFIG, SCENARIOS, Scenario, check_trains
 
 from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.train.components import task_ids_to_dataset
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, training_problems
 from platoon.train.labels import label_column
+from platoon.train.launch import arun_tinker_training
 from platoon.train.task_stats import EVENTS_NAME, TASKS_DIR
 from platoon.train.tinker import proxy
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, training_problems
-from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.rollout_metrics import reset_monitors_for_tests
-from platoon.train.tinker.train import arun_tinker_training
-from platoon.train.tinker.workers import run as worker_run
-from platoon.train.tinker.workers import telemetry
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
+from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+from platoon.train.workers import run as worker_run
+from platoon.train.workers import telemetry
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils import stats_tracker
 from platoon.utils.config import resolve_config
 from platoon.utils.stats_logger import StatsLogger

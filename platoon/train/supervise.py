@@ -84,7 +84,7 @@ def run_training(config_path: str | os.PathLike[str], run_dir: str | os.PathLike
                 max_restarts=max_restarts,
                 watchdog_exit_code=config.watchdog.exit_code if config.watchdog.enabled else None,
             )
-        from platoon.train.tinker import train as training  # the Tinker stack: imported only to train
+        from platoon.train import launch as training  # the Tinker stack: imported only to train
 
         training.run_tinker_training(["--config", str(config_path)])
     return 0
@@ -255,7 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from platoon.utils.config import ConfigError
 
     try:
-        from platoon.train.tinker import train as training  # the Tinker stack
+        from platoon.train import launch as training  # the Tinker stack
 
         training.run_tinker_training(["--config", args[0]])
     except NotPrepared as exc:  # with the platoon prepare command for the snapshot, which holds the run's overrides

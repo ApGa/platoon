@@ -810,7 +810,7 @@ class names its deprecated keys in a class attribute, with `DeprecatedKey` from 
 0.3.0 named `train.task_order`, the former name of `train.task_sampler`:
 
 ```python
-# platoon/train/tinker/config_defs.py, in TrainConfig (platoon 0.3.0)
+# platoon/train/config_defs.py, in TrainConfig (platoon 0.3.0)
 DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
     "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
 }
@@ -821,7 +821,9 @@ name it once on stderr, `lock.json` records it, `platoon config validate --stric
 config reference marks it. A Python name warns where it is used, with
 `warnings.warn(message, PlatoonDeprecationWarning, stacklevel=2)`. Say in the release's notes what each deprecation
 replaces, and before a minor release remove the forms it is due to remove: `grep -rn 'removed_in="0.5.0"' platoon`
-lists them for 0.5.0.
+lists them for 0.5.0. The module paths that platoon 0.5.0 moved go in 0.6.0: their shims are the modules under
+`platoon/train/tinker` that call `_moved` (`grep -rln '_moved(' platoon/train/tinker`), and
+`platoon/train/tinker/_moved.py`, whose `REMOVED_IN` names that release.
 
 Removing a form is a breaking change, in a commit marked as one (`!` and a `BREAKING CHANGE:` footer, [RFC 0017,
 section 2](docs/rfcs/0017-public-surface-and-conformance.md#2-the-version-policy)). Drop the key's field and the code
@@ -830,7 +832,7 @@ so that a config that still sets it does not load (exit 78) and says what replac
 (`train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`):
 
 ```python
-# platoon/train/tinker/config_defs.py, in TrainConfig
+# platoon/train/config_defs.py, in TrainConfig
 UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
     "task_order": removed_hint("0.4.0", "train.task_sampler"),
 }

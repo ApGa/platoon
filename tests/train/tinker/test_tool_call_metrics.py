@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.workflow import output as output_module
 from platoon.utils.generation import MODEL_GENERATIONS_KEY
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import StatsTracker
@@ -45,7 +45,7 @@ def test_a_trajectory_sums_its_calls_counts():
     }
 
 
-def _outcome(tool_calls: int, unparsed: int) -> grw._SingleRolloutOutcome:
+def _outcome(tool_calls: int, unparsed: int) -> output_module._SingleRolloutOutcome:
     stats = TrajectoryStats(
         trajectory_id="root",
         reward=1.0,
@@ -58,11 +58,11 @@ def _outcome(tool_calls: int, unparsed: int) -> grw._SingleRolloutOutcome:
         num_unparsed_tool_calls=unparsed,
     )
     result = TrajectoryCollectionResult(datums=[], task_reward=1.0, trajectory_stats=[stats], root_rewards_dict={})
-    return grw._SingleRolloutOutcome(result=result, workload=RolloutWorkload(), observed=True)
+    return output_module._SingleRolloutOutcome(result=result, workload=RolloutWorkload(), observed=True)
 
 
 def test_rollout_metrics_report_the_counts_per_trajectory():
-    stats = grw._summarize_outcomes([_outcome(3, 0), _outcome(1, 2)])
+    stats = output_module._summarize_outcomes([_outcome(3, 0), _outcome(1, 2)])
     tracker = StatsTracker("train")
     stats.record(tracker, prefix="rollout_completion")
     metrics = tracker.export()

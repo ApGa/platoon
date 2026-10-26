@@ -27,12 +27,12 @@ from trainer_fakes import Workflow, datum, make_trainer, trainer_config
 from platoon.testing import ScriptedPolicy, serve_policy, tool_call
 from platoon.train.auto import AutoDataset, AutoRollout, AutoTaskLoader
 from platoon.train.components import rollout_overhead_s
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.labels import label_column
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.workers.run import WORKER_ENV_MARKER, run_rollout_request
-from platoon.train.tinker.workers.supervisor import WorkerOutcome
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.train.tinker.workflows import group_rollout_workflow as workflow_module
+from platoon.train.workers.run import WORKER_ENV_MARKER, run_rollout_request
+from platoon.train.workers.supervisor import WorkerOutcome
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.config import resolve_config
 
 TASK_TOML = """version = "1.0"
@@ -190,7 +190,7 @@ def test_an_evaluation_that_names_only_every_rolls_out_with_trainings_rollout_an
     trainer.train_dataset, trainer.eval_dataset = train_dataset, eval_dataset
     trainer._model_info = SimpleNamespace(model_name="m", llm=trainer._model_info.llm)
     trainer._stats_logger = SimpleNamespace(wandb_run_id=None, log=lambda step, stats, force=False: None)
-    monkeypatch.setattr(workflow_module, "RolloutWorkerSupervisor", _Supervisor)
+    monkeypatch.setattr(group_module, "RolloutWorkerSupervisor", _Supervisor)
     monkeypatch.setattr(_Supervisor, "built", [])
     # The stand-in runs the requests in this process, which is no rollout worker: without the worker marker, the
     # requests' python_env_isolation (training's) leaves alone the per-process Python overlay, which a process enters

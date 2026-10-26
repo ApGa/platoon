@@ -22,8 +22,11 @@ from platoon.envs.service import EnvSetupError
 from platoon.sandbox.process import ProcessProvider
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.workflows.group_rollout_workflow import _TaskRolloutOutput
+from platoon.train.dispatch import setup as dispatch_setup
+from platoon.train.evaluation import loop as loop_module
+from platoon.train.trainer import loops as loops_module
+from platoon.train.trainer import rl as rl_module
+from platoon.train.workflow.output import _TaskRolloutOutput
 from platoon.utils.rollout_stats import (
     OUTCOME_STATUSES,
     REWARD_KEY_MISMATCH,
@@ -121,9 +124,11 @@ def _run_batches(
     trainer.batch_transforms = []
     trainer._save_checkpoint_and_get_sampling_client = AsyncMock(return_value=object())
     trainer.shutdown_loops = AsyncMock()
-    monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
-    monkeypatch.setattr(rl_module, "client_step_metrics", lambda scope: {})
-    monkeypatch.setattr(rl_module, "_ptc_cell_guard_stats", lambda scope: {})
+    monkeypatch.setattr(dispatch_setup, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loop_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_step_metrics", lambda scope: {})
+    monkeypatch.setattr(loops_module, "_ptc_cell_guard_stats", lambda scope: {})
     logged = []
 
     async def run():
@@ -196,8 +201,8 @@ def _completed_root(reward: float):
 def _workflow_output(rewards: list[float]):
     """A real ``GroupRolloutWorkflow`` group of uniform completed roots (zero advantages: no model pass)."""
 
-    from platoon.train.tinker.config_defs import WorkflowConfig
-    from platoon.train.tinker.workflows import GroupRolloutWorkflow
+    from platoon.train.config_defs import WorkflowConfig
+    from platoon.train.workflow.group import GroupRolloutWorkflow
 
     async def rollout(task, rollout_config):
         raise AssertionError("not run")
@@ -265,9 +270,9 @@ def test_a_step_whose_objective_is_zero_says_it_takes_no_optimizer_update(
     filter says, and the log says so in those words (the old "skipping forward/backward" read as a skipped
     microbatch only)."""
 
-    from platoon.train.tinker.rl import _no_update_reason
+    from platoon.train.step.publish import _no_update_reason
 
-    with caplog.at_level(logging.INFO, logger="platoon.train.tinker.rl"):
+    with caplog.at_level(logging.INFO, logger="platoon.train.trainer.loops"):
         (metrics,) = _run_batches(
             monkeypatch, [_group([1.0] * 4)], filter_zero_advantage_datums=filter_zero_advantage_datums
         )
@@ -353,9 +358,9 @@ def _members_output(members, data):
     """A real ``GroupRolloutWorkflow`` group whose members end as ``members``: ``(reward, status)`` for a member with
     a completed root, ``(None, status)`` for one that left no result."""
 
-    from platoon.train.tinker.config_defs import WorkflowConfig
-    from platoon.train.tinker.workflows import GroupRolloutWorkflow
-    from platoon.train.tinker.workflows.group_rollout_workflow import _SingleRolloutOutcome
+    from platoon.train.config_defs import WorkflowConfig
+    from platoon.train.workflow.group import GroupRolloutWorkflow
+    from platoon.train.workflow.output import _SingleRolloutOutcome
     from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 
     def member(reward, status):
@@ -468,9 +473,9 @@ def test_rollouts_whose_session_never_opened_count_as_errors_per_entry_and_in_th
 
     from platoon.config_defs import RolloutConfig
     from platoon.train.components import EnvironmentRoute
-    from platoon.train.tinker.config_defs import StragglerPolicy, WorkflowConfig
-    from platoon.train.tinker.workers import run as run_module
-    from platoon.train.tinker.workflows import GroupRolloutWorkflow
+    from platoon.train.config_defs import StragglerPolicy, WorkflowConfig
+    from platoon.train.workers import run as run_module
+    from platoon.train.workflow.group import GroupRolloutWorkflow
     from platoon.utils.stats_tracker import get as get_tracker
 
     # A scored root converts to one datum of reward 1, so that every advantage is 0 and the step runs no model pass.

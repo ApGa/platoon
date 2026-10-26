@@ -1,38 +1,24 @@
-"""Process-per-rollout support for the Tinker training path.
+"""Moved: platoon 0.5.0 moved process-per-rollout to :mod:`platoon.train.workers`.  The names this package exported, and
+its modules, still import from here, each with a ``PlatoonDeprecationWarning``, until platoon 0.6.0 removes them."""
 
-This package hosts the seam between the trainer and a single rollout:
+from platoon.train.tinker._moved import moved as _moved
 
-``protocol``
-    The request/response/diagnostic contract that crosses the process
-    boundary (pickle protocol 5 via node-local files).
-``workload``
-    The two raw-accounting helpers that must run wherever conversion runs.
-``run``
-    One implementation of a single rollout's body, used by both the
-    in-process path and the worker process.
-``binding``
-    Publishing and following the trainer's ``SamplingClient``.
-``entrypoint``
-    ``python -m platoon.train.tinker.workers.entrypoint <request>``.
-``supervisor``
-    The parent side: launch, deadline, kill-the-tree, classify.
-
-Nothing in this package may import
-``platoon.train.tinker.workflows.group_rollout_workflow``; the dependency runs
-the other way.
-"""
-
-from platoon.train.tinker.workers.protocol import (
-    PROTOCOL_VERSION,
-    ConversionPolicy,
-    ModelBinding,
-    RolloutWorkerRequest,
-    RolloutWorkerResponse,
-    callable_ref,
-    resolve_ref,
-    validated_ref,
+__getattr__, __dir__ = _moved(
+    globals(),
+    {
+        "PROTOCOL_VERSION": "platoon.train.workers",
+        "ConversionPolicy": "platoon.train.workers",
+        "ModelBinding": "platoon.train.workers",
+        "RolloutWorkerRequest": "platoon.train.workers",
+        "RolloutWorkerResponse": "platoon.train.workers",
+        "add_datum_funnel": "platoon.train.workers",
+        "callable_ref": "platoon.train.workers",
+        "resolve_ref": "platoon.train.workers",
+        "validated_ref": "platoon.train.workers",
+        "workload_from_raw_rollout": "platoon.train.workers",
+    },
+    submodules=("binding", "protocol", "registry", "run", "supervisor", "telemetry", "workload"),
 )
-from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
 
 __all__ = [
     "PROTOCOL_VERSION",

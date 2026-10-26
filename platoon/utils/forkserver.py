@@ -1,6 +1,6 @@
 """A fork server: a process that imports a worker's modules once, then forks one worker process per request.
 
-The rollout worker supervisor uses it (``worker_start_method: forkserver``, :mod:`platoon.train.tinker.workers`): an
+The rollout worker supervisor uses it (``worker_start_method: forkserver``, :mod:`platoon.train.workers`): an
 exec'd rollout worker spends most of its start importing the tinker / torch / transformers stack, 17-24 s alone and
 about a minute when 64 start at once on one node, which they contend for, CPUs and the shared filesystem the venv
 lives on alike.  Forked from a server that has imported that stack, a worker starts in a few seconds.
@@ -16,7 +16,11 @@ sympy's, datasets' fingerprint generator, aiohttp's websocket masks), as a fresh
 server's ``child_init`` functions (what a package init that the server already ran would have done in a fresh
 interpreter, with this environment), then runs the module as ``__main__``, as ``python -m`` does, and exits as the
 interpreter does: it waits for its non-daemon threads, runs the ``atexit`` handlers and flushes.  What it inherits
-from the server is what the imports left behind, and the server's hash seed.
+from the server is what the imports left behind, and the server's hash seed.  A preload may hold more than an exec'd
+worker imports before it runs its module: the rollout workers' (``platoon.train.workers.supervisor.WORKER_PRELOAD``)
+holds the trainer's modules, and with them datasets, pandas and requests, which an exec'd worker imports only if its
+rollout does; a forked worker holds them, and what their imports left (their loggers, warning filters and ``atexit``
+handlers).
 
 The server may also build, once, what each worker would otherwise build for itself (``prepare``): each worker it
 forks then holds its own copy, copy-on-write.  A build that fails is reported, and the workers build it themselves.

@@ -35,15 +35,17 @@ from test_permit_pool import _quiet
 from tinker import TensorData
 from trainer_fakes import make_trainer, trainer_config
 
+from platoon.train.config_defs import StragglerPolicy, WorkflowConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN
+from platoon.train.dispatch.permits import DrawLease, PermitPool
 from platoon.train.leases import NO_LEASE, holding, rollout_lease
+from platoon.train.step.metrics import Censoring
+from platoon.train.step.staleness import StaleWatch
 from platoon.train.task_stats import MemberResult
 from platoon.train.tinker import rollout_metrics
-from platoon.train.tinker.censoring import Censoring
-from platoon.train.tinker.config_defs import StragglerPolicy, WorkflowConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN
-from platoon.train.tinker.permits import DrawLease, PermitPool
-from platoon.train.tinker.staleness import StaleWatch
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import members as members_module
+from platoon.train.workflow import output as output_module
 from platoon.utils.config import ConfigError
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import get as get_tracker
@@ -80,7 +82,7 @@ def _datum(position: int, member: int, version: int) -> tinker.Datum:
 
 def _outcome(
     position: int, member: int, *, reward: float, version: int, seconds: float | None = None
-) -> grw._SingleRolloutOutcome:
+) -> output_module._SingleRolloutOutcome:
     result = TrajectoryCollectionResult(
         datums=[_datum(position, member, version)],
         task_reward=reward,
@@ -107,10 +109,10 @@ def _outcome(
         policy_eligible_datums=1,
         post_sampling_datums=1,
     )
-    return grw._SingleRolloutOutcome(result=result, workload=workload, observed=True, seconds=seconds)
+    return output_module._SingleRolloutOutcome(result=result, workload=workload, observed=True, seconds=seconds)
 
 
-class _Members(grw.GroupRolloutWorkflow):
+class _Members(group_module.GroupRolloutWorkflow):
     """The group workflow, each member's rollout a script: ``await script(row, member)`` is the rollout, and returns
     its reward, or ``(reward, seconds)``.  It runs inside the member's lease block, as a rollout does, counted as a
     rollout in flight; ``log`` records each member's start, end and cancellation."""
@@ -253,15 +255,15 @@ def test_which_subclasses_run_their_rollouts_on_the_lease():
     that class and its bases, so a grandchild inherits its parent's reading, and an override from a mixin or from
     another branch of a diamond reads as False unless the subclass's own body sets the flag."""
 
-    class Credit(grw.GroupRolloutWorkflow):
+    class Credit(group_module.GroupRolloutWorkflow):
         def compute_baselines(self, results):
             return super().compute_baselines(results)
 
-    class Rollouts(grw.GroupRolloutWorkflow):
+    class Rollouts(group_module.GroupRolloutWorkflow):
         async def _run_group_rollouts(self, data):
             return []
 
-    class Declared(grw.GroupRolloutWorkflow):
+    class Declared(group_module.GroupRolloutWorkflow):
         runs_rollouts_on_lease = True
 
         async def _run_group_member(self, data, rollout_number, admission):
@@ -283,12 +285,12 @@ def test_which_subclasses_run_their_rollouts_on_the_lease():
 
     class GrandchildOfDeclared(Declared): ...
 
-    class Mixin(Bypassing, grw.GroupRolloutWorkflow): ...
+    class Mixin(Bypassing, group_module.GroupRolloutWorkflow): ...
 
-    class MixinDeclared(Bypassing, grw.GroupRolloutWorkflow):
+    class MixinDeclared(Bypassing, group_module.GroupRolloutWorkflow):
         runs_rollouts_on_lease = True
 
-    class OwnMixin(DeclaringMixin, grw.GroupRolloutWorkflow): ...
+    class OwnMixin(DeclaringMixin, group_module.GroupRolloutWorkflow): ...
 
     class Diamond(Declared, Rollouts): ...
 
@@ -474,7 +476,7 @@ def test_a_member_s_start_delay_is_its_offset_behind_the_group_s_first_start():
     block waits and none waited; a waiting member's offset is at least the time it has waited so far."""
 
     async def run():
-        starts = grw._MemberStarts()
+        starts = members_module._MemberStarts()
         starts.created = 100.0
         assert starts.together() and starts.offset(2) == 0.0  # an override of _run_group_member records nothing
         for index in range(4):
@@ -486,7 +488,7 @@ def test_a_member_s_start_delay_is_its_offset_behind_the_group_s_first_start():
         assert starts.offset(2) == 0.5 and starts.least_offset(now=100.8) == pytest.approx(0.8)
         starts.started(3, 0.75)
         assert starts.offset(3) == 0.75 and not starts.together()
-        together = grw._MemberStarts()
+        together = members_module._MemberStarts()
         together.started(0, 0.0)
         together.started(1, 0.0)
         assert together.together()

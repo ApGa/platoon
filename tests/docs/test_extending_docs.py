@@ -477,7 +477,7 @@ def test_the_renderer_registers_and_takes_its_settings(snippets) -> None:
     finally:
         unregister_renderer("my_model")
     [config] = [code for code in blocks("renderers.md", "yaml") if "renderer_name: my_model" in code]
-    from platoon.train.tinker.config_defs import TrainConfig
+    from platoon.train.config_defs import TrainConfig
 
     fields = set(TrainConfig.__dataclass_fields__)
     assert set(yaml.safe_load(config)["train"]) <= fields
@@ -494,7 +494,7 @@ def test_the_hooks_register_and_pass_their_tests(snippets, monkeypatch) -> None:
     ran = run_test_functions(block("hooks-and-metrics.md", "# tests/test_my_hooks.py"), "test_my_hooks")
 
     assert f"{len(ran)} passed" in shown_output("hooks-and-metrics.md", "tests/test_my_hooks.py")
-    from platoon.train.tinker.workers.telemetry import local_telemetry
+    from platoon.train.workers.telemetry import local_telemetry
 
     assert local_telemetry() == {"my_harness_retries": 0.0}
 
@@ -595,7 +595,7 @@ def test_the_group_admission_guide_s_config_resolves_as_platoon_train_resolves_i
     resolves from the entry's package, and both rules' options and checks pass."""
 
     from platoon.extensions import run_components
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     snippets("group-admission.md", "# acme_rules/quota.py")
@@ -623,8 +623,8 @@ def test_the_worked_workflow_runs_each_attempt_on_a_permit_of_its_own(snippets) 
     grants its permits as they free, each attempt's permit comes back as the attempt ends; outside a training draw the
     same workflow runs as it is."""
 
+    from platoon.train.dispatch.permits import PermitPool
     from platoon.train.leases import holding
-    from platoon.train.tinker.permits import PermitPool
 
     snippets("rollout-leases.md", "# acme_workflows/attempts.py")
     attempts = importlib.import_module("acme_workflows.attempts")
@@ -660,7 +660,7 @@ def test_the_lease_guide_s_table_of_subclasses_says_which_keep_rolling_starts() 
     keeps ``runs_rollouts_on_lease``, one that overrides one of the second row's reads as False unless its own class
     body sets it."""
 
-    from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow
+    from platoon.train.workflow.group import GroupRolloutWorkflow
 
     text = (GUIDES / "rollout-leases.md").read_text(encoding="utf-8")
     rows = [line for line in text.splitlines() if line.startswith("| `")]

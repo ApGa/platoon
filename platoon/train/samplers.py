@@ -18,7 +18,7 @@
 Each static one is a function of its decision index and its setup, with caches only: ``state_dict()`` is ``{}``,
 and a fresh instance asked at decision ``n`` answers what the first one answered.  They draw the rows platoon 0.3.0
 drew: they repeat the arithmetic of its order classes (:class:`~platoon.train.components.WeightedOrder` with its
-cycling pools, and the shuffled passes, :class:`~platoon.train.tinker.dataset_order.ShuffledPasses` and
+cycling pools, and the shuffled passes, :class:`~platoon.train.dataset_order.ShuffledPasses` and
 ``PoolPasses``), which stay as they are, the trainer still counting epochs with them, and which the tests hold the
 samplers to.  The built-ins answer with a pool row's index (``_Row``), since a listing that repeats a task id is drawn
 row by row.
@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 # platoon 0.3.0's seeds, which the built-ins keep so that they draw its rows: a single environment's shuffled passes
 # and uniform's are Dataset.shuffle(42 + 101 p) (SHUFFLE_SEED and PASS_SEED_STRIDE of
-# platoon.train.tinker.dataset_order), and an entry's passes under weighted random.Random(seed + 10007 i + 101 p)
+# platoon.train.dataset_order), and an entry's passes under weighted random.Random(seed + 10007 i + 101 p)
 # (platoon.train.components.WeightedOrder).
 SHUFFLE_SEED = 42
 PASS_SEED_STRIDE = 101

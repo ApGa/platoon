@@ -26,13 +26,13 @@ import yaml
 from tinker_service_fakes import FakeTinkerService, make_pruning_trainer
 from trainer_fakes import TrainingClient, make_trainer
 
+from platoon.train import dataloader as dataloader_module
 from platoon.train.auto import AutoDataset
+from platoon.train.checkpoints.pruning import read_checkpoint_records
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN, SEQ_COLUMN
+from platoon.train.task_records import CHANGED_KEY
 from platoon.train.task_stats import read_events
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.checkpoint_pruning import read_checkpoint_records
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN, SEQ_COLUMN
-from platoon.train.tinker.task_records import CHANGED_KEY
 from platoon.utils.config import resolve_config
 
 HERE = __name__
@@ -204,7 +204,7 @@ def test_at_k_0_every_step_trains_exactly_the_rows_of_its_batch_of_0_3_0_s_order
     assert logged == list(range(1, steps + 1))
     assert [sorted(step) for step in client.steps] == [list(range(4 * step, 4 * step + 4)) for step in range(steps)]
     assert sorted(workflow.started) == list(range(4 * steps))
-    dataloader = rl_module.PlatoonTinkerDataloader(training.dataset, 4, order=training.order)
+    dataloader = dataloader_module.PlatoonTinkerDataloader(training.dataset, 4, order=training.order)
     expected = [_row_json(row) for step in range(steps) for row in dataloader.get_batch(step)]
     assert [workflow.rows[position] for position in range(4 * steps)] == expected
 
@@ -330,7 +330,7 @@ def test_a_run_interrupted_twice_consumes_every_position_exactly_once(tmp_path, 
     }
     draws = [e for e in events if e["event"] == "draw"]
     assert {e["reason"] for e in draws} == {"order", "reissue"} and all("sampler" in e for e in draws)
-    dataloader = rl_module.PlatoonTinkerDataloader(training.dataset, 2, order=training.order)
+    dataloader = dataloader_module.PlatoonTinkerDataloader(training.dataset, 2, order=training.order)
     expected = [_row_json(row) for step in range(10) for row in dataloader.get_batch(step)]
     assert all(row == expected[at] for at, row in rows.items())
 

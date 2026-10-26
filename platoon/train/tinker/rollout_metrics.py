@@ -50,7 +50,7 @@ asked for, and is the trainer waiting on them?*
     evaluation, under ``eval/``).  Also ``wait_seconds_p50`` / ``_p90`` /
     ``_max``, the waits of the rollouts that got a slot in the window (0 for
     one taken at once), and ``releases/<cause>``, the slots given back in the
-    window, by cause (``platoon.train.tinker.start_limit``).
+    window, by cause (``platoon.train.workflow.start_limit``).
 ``rollout_client/trainer_queue_wait_seconds_total`` / ``_mean`` / ``_max``
     How long the training loop blocked on the rollout result queue this step.
     This is the trainer's own view of "rollout-bound": if it is close to the
@@ -131,7 +131,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from platoon.train.tinker.start_limit import START_RELEASE_CAUSES
+from platoon.train.workflow.start_limit import START_RELEASE_CAUSES
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ class RolloutTimeline:
     calls: list[tuple[float, float, float, float]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Called once, as the tree's first model call is issued (``call_started``), from the thread that issues it: the
-    # release of the rollout's start slot (platoon.train.tinker.start_limit).
+    # release of the rollout's start slot (platoon.train.workflow.start_limit).
     on_first_call: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def call_started(self) -> None:
@@ -570,7 +570,7 @@ class ClientThroughputMonitor:
         except Exception:  # pragma: no cover
             pass
 
-    # -- the start limit (platoon.train.tinker.start_limit) ---------------------
+    # -- the start limit (platoon.train.workflow.start_limit) ---------------------
     @contextmanager
     def start_slot_wait(self) -> Generator[None, None, None]:
         """A rollout waits for a start slot while the block runs."""

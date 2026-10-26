@@ -16,6 +16,7 @@ import platoon.gateway.core  # noqa: F401  (real modules, imported before the lo
 import platoon.utils.rollout_stats  # noqa: F401
 from platoon.utils.stats_tracker import DeferredStats, StatsTracker
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
+from platoon.utils.trajectory_error_filtering import ERROR_ACTION_MASK_KEY
 from platoon.utils.trajectory_status import TRAJECTORY_CANCELLED_MISC_KEY
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -77,7 +78,7 @@ def _load_tinker_batch_transforms():
     name = "platoon_tinker_subagent_sampling_transform_test"
     spec = importlib.util.spec_from_file_location(
         name,
-        REPO_ROOT / "platoon/train/tinker/batch_transforms.py",
+        REPO_ROOT / "platoon/train/step/batch_transforms.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -116,18 +117,17 @@ def _load_tinker_group_workflow(monkeypatch, processing, tracker):
     env_module.Task = object
     monkeypatch.setitem(sys.modules, "platoon.task", env_module)
 
-    # Stub the tinker package itself (with a real __path__) so importing its
-    # light submodules -- notably ``workers.*``, which owns the single-rollout
-    # body -- does not execute the heavy package __init__ that would in turn
-    # import the stubbed config_defs.
+    # Stub the tinker package itself (with a real __path__) so importing the
+    # submodules the workflow uses (``proxy``, stubbed below, and
+    # ``rollout_metrics``) does not execute the package __init__.
     package_module = types.ModuleType("platoon.train.tinker")
     package_module.__path__ = [str(REPO_ROOT / "platoon/train/tinker")]
     monkeypatch.setitem(sys.modules, "platoon.train.tinker", package_module)
 
-    config_module = types.ModuleType("platoon.train.tinker.config_defs")
+    config_module = types.ModuleType("platoon.train.config_defs")
     config_module.RolloutConfig = object
     config_module.WorkflowConfig = object
-    monkeypatch.setitem(sys.modules, "platoon.train.tinker.config_defs", config_module)
+    monkeypatch.setitem(sys.modules, "platoon.train.config_defs", config_module)
 
     proxy_module = types.ModuleType("platoon.train.tinker.proxy")
     proxy_module.ModelInfo = object
@@ -148,10 +148,34 @@ def _load_tinker_group_workflow(monkeypatch, processing, tracker):
     processing_module.get_train_data_for_trajectory_collection = processing.get_train_data_for_trajectory_collection
     monkeypatch.setitem(sys.modules, "platoon.utils.tinker_data_processing", processing_module)
 
+    # The workflow's other modules and the group's credit, which GroupRolloutWorkflow's code runs through, loaded
+    # afresh against the stubs above, and dropped from sys.modules again after the test, as the one module they were
+    # split from was.
+    for package_name in ("platoon.train.workflow", "platoon.train.credit"):
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(REPO_ROOT / package_name.replace(".", "/"))]
+        monkeypatch.setitem(sys.modules, package_name, package)
+    for part_name in (
+        "platoon.train.workflow.start_limit",
+        "platoon.train.workflow.context",
+        "platoon.train.workflow.output",
+        "platoon.train.credit.group",
+        "platoon.train.workflow.requests",
+        "platoon.train.workflow.telemetry",
+        "platoon.train.workflow.members",
+    ):
+        package_name, _, part = part_name.rpartition(".")
+        part_spec = importlib.util.spec_from_file_location(part_name, REPO_ROOT / f"{part_name.replace('.', '/')}.py")
+        assert part_spec is not None and part_spec.loader is not None
+        part_module = importlib.util.module_from_spec(part_spec)
+        monkeypatch.setitem(sys.modules, part_name, part_module)
+        monkeypatch.setattr(sys.modules[package_name], part, part_module, raising=False)
+        part_spec.loader.exec_module(part_module)
+
     name = "platoon_tinker_subagent_sampling_workflow_test"
     spec = importlib.util.spec_from_file_location(
         name,
-        REPO_ROOT / "platoon/train/tinker/workflows/group_rollout_workflow.py",
+        REPO_ROOT / "platoon/train/workflow/group.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -299,7 +323,7 @@ def test_tinker_error_filter_uses_final_centered_advantage_sign(monkeypatch):
     processing = _load_tinker_data_processing(monkeypatch)
     tracker = _RecordingTracker()
     workflow_module = _load_tinker_group_workflow(monkeypatch, processing, tracker)
-    sidechannel = workflow_module.ERROR_ACTION_MASK_KEY
+    sidechannel = ERROR_ACTION_MASK_KEY
 
     mixed = _datum(attention_tokens=4, loss_tokens=4, depth=None, start=False)
     mixed.loss_fn_inputs["advantages"] = DummyTensorData(torch.tensor([1.0, -1.0, 0.0, 2.0]))
@@ -342,7 +366,7 @@ def test_tinker_group_filters_errors_only_after_leave_one_out_centering(monkeypa
     processing = _load_tinker_data_processing(monkeypatch)
     tracker = _RecordingTracker()
     workflow_module = _load_tinker_group_workflow(monkeypatch, processing, tracker)
-    sidechannel = workflow_module.ERROR_ACTION_MASK_KEY
+    sidechannel = ERROR_ACTION_MASK_KEY
 
     def result(trajectory_id: str, reward: float):
         datum = _datum(attention_tokens=2, loss_tokens=2, depth=None, start=False)
@@ -1234,7 +1258,7 @@ def test_tinker_sampling_does_not_keep_rollout_with_zero_pre_sampling_datums(mon
     # patched there.  The assertions below are unchanged.
     from platoon.config_defs import RolloutConfig
 
-    run_module = sys.modules["platoon.train.tinker.workers.run"]
+    run_module = sys.modules["platoon.train.workers.run"]
     monkeypatch.setattr(run_module, "TinkerLLMProxySession", FakeProxySession)
     monkeypatch.setattr(run_module, "get_train_data_for_trajectory_collection", lambda **_kwargs: empty_result)
 
@@ -1447,7 +1471,7 @@ def test_tinker_workflow_sampling_config_defaults_off_and_validates_inputs():
     name = "platoon_tinker_sampling_config_test"
     spec = importlib.util.spec_from_file_location(
         name,
-        REPO_ROOT / "platoon/train/tinker/config_defs.py",
+        REPO_ROOT / "platoon/train/config_defs.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -1470,7 +1494,7 @@ def test_tinker_workflow_sampling_config_defaults_off_and_validates_inputs():
 def test_tinker_non_submitted_metric_requires_complete_workload_metadata():
     """Legacy plain-list workflows must not yield a negative exact count."""
 
-    source = (REPO_ROOT / "platoon/train/tinker/rl.py").read_text()
+    source = (REPO_ROOT / "platoon/train/trainer/loops.py").read_text()
     tree = ast.parse(source)
     guards = [
         node
@@ -1485,7 +1509,7 @@ def test_tinker_non_submitted_metric_requires_complete_workload_metadata():
 
 
 def test_tinker_zero_filter_remains_after_depth_transform_and_runs_once():
-    source = (REPO_ROOT / "platoon/train/tinker/rl.py").read_text()
+    source = (REPO_ROOT / "platoon/train/trainer/loops.py").read_text()
     assert source.count("task_rollout_results = filter_zero_advantage_datums(task_rollout_results)") == 1
     assert source.index("task_rollout_results = run_batch_transforms(") < source.index(
         "task_rollout_results = filter_zero_advantage_datums(task_rollout_results)"

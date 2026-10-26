@@ -16,8 +16,9 @@ import tinker
 import torch
 from tinker import TensorData
 
-from platoon.train.tinker.config_defs import StragglerPolicy, WorkflowConfig
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.config_defs import StragglerPolicy, WorkflowConfig
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import output as output_module
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import get as get_tracker
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
@@ -35,7 +36,7 @@ def _datum(reward: float) -> tinker.Datum:
     )
 
 
-def _outcome(reward: float) -> grw._SingleRolloutOutcome:
+def _outcome(reward: float) -> output_module._SingleRolloutOutcome:
     result = TrajectoryCollectionResult(
         datums=[_datum(reward)],
         task_reward=reward,
@@ -62,10 +63,10 @@ def _outcome(reward: float) -> grw._SingleRolloutOutcome:
         policy_eligible_datums=1,
         post_sampling_datums=1,
     )
-    return grw._SingleRolloutOutcome(result=result, workload=workload, observed=True)
+    return output_module._SingleRolloutOutcome(result=result, workload=workload, observed=True)
 
 
-class _FakeWorkflow(grw.GroupRolloutWorkflow):
+class _FakeWorkflow(group_module.GroupRolloutWorkflow):
     """Replaces the rollout with fake fast/slow coroutines."""
 
     def __init__(
@@ -250,7 +251,7 @@ def test_environment_policy_cancels_only_algorithmic_tail_and_does_not_insert_ze
     class WorkflowWithFailures(_FakeWorkflow):
         async def arun_episode_single(self, data, rollout_number=0):
             if rollout_number < failed_fast_members:
-                return grw._SingleRolloutOutcome(
+                return output_module._SingleRolloutOutcome(
                     result=None, workload=RolloutWorkload(), observed=False, disposition="worker_crashed"
                 )
             return await super().arun_episode_single(data, rollout_number)

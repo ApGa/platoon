@@ -9,7 +9,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
     "platoon_tinker_dataset_order_test",
-    REPO_ROOT / "platoon/train/tinker/dataset_order.py",
+    REPO_ROOT / "platoon/train/dataset_order.py",
 )
 assert _spec is not None and _spec.loader is not None
 _dataset_order = importlib.util.module_from_spec(_spec)

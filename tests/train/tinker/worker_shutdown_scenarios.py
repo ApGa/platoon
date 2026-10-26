@@ -23,8 +23,8 @@ import pytest
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker.workers.entrypoint import TERMINATION_SECONDS
-from platoon.train.tinker.workers.protocol import (
+from platoon.train.workers.entrypoint import TERMINATION_SECONDS
+from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
@@ -40,8 +40,8 @@ EXIT_SLACK_SECONDS = 4.0
 TRAINER = """
 import asyncio, sys
 import platoon.train.tinker  # noqa: F401
-from platoon.train.tinker.workers.protocol import load_request
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
+from platoon.train.workers.protocol import load_request
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 
 request_path, scratch, logs, pid_path = sys.argv[1:5]
 supervisor = RolloutWorkerSupervisor(scratch_dir=scratch, log_dir=logs, parent_grace_seconds=600.0)

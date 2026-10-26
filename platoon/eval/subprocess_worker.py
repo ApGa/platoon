@@ -174,7 +174,7 @@ def run_rollout_subprocess(
     signal.alarm(_hard_timeout_seconds(rollout_config_dict, task, rollout_fn_ref))
     try:
         from platoon.config_defs import RolloutConfig
-        from platoon.train.tinker.workers.protocol import resolve_ref
+        from platoon.train.workers.protocol import resolve_ref
 
         rollout_fn = resolve_ref(rollout_fn_ref)
         global _installed_policy

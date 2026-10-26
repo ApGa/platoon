@@ -159,7 +159,7 @@ def _exit_code(argv: list[str]) -> int:
 
 def test_train_snapshots_the_resolved_config_into_the_run_dir_and_trains_from_it(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     config = _train_config(tmp_path)
 
     cli.main(["train", str(config), "train.batch_size=64", "stats.trial_name=7"])
@@ -175,7 +175,7 @@ def test_train_snapshots_the_resolved_config_into_the_run_dir_and_trains_from_it
 
 def test_a_config_error_exits_78_with_a_suggestion_before_training(tmp_path, monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
 
     assert _exit_code(["train", str(_train_config(tmp_path)), "train.bach_size=64"]) == cli.EXIT_CONFIG
 
@@ -185,7 +185,7 @@ def test_a_config_error_exits_78_with_a_suggestion_before_training(tmp_path, mon
 
 def test_a_trainer_config_that_does_not_resolve_exits_78_before_training(tmp_path, monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     entry = {**_environment("tree"), "trainer_config": "no_such_plugin.config:TrainerConfig"}
     config = _train_config(tmp_path, environments=[entry])
     problem = (
@@ -231,7 +231,7 @@ EVAL_OUTPUT_DIR = "eval.workflow_config.rollout_config.output_dir"
 
 
 def test_train_warns_that_it_replaces_a_configured_rollout_output_dir(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     config = _train_config(tmp_path)
 
     cli.main(["train", str(config), f"{TRAIN_OUTPUT_DIR}=/elsewhere", f"{EVAL_OUTPUT_DIR}=/elsewhere"])
@@ -243,7 +243,7 @@ def test_train_warns_that_it_replaces_a_configured_rollout_output_dir(tmp_path, 
 
 
 def test_train_with_its_own_workflow_class_leaves_the_rollout_output_dir_to_it(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     environment = {**_environment("tree"), "workflow": f"{__name__}:MyWorkflow"}
     config = _train_config(tmp_path, environments=[environment])
 
@@ -543,7 +543,7 @@ def test_config_validate_lists_a_deprecated_key_once_and_fails_on_it_with_strict
 
 
 def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, monkeypatch, capsys, retiring):
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import load_config
 
     loaded = []
@@ -551,7 +551,7 @@ def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, 
     def run_tinker_training(args):  # training loads its snapshot of the config again
         loaded.append(load_config(args, PlatoonTinkerRLTrainerConfig)[0])
 
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", run_tinker_training)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", run_tinker_training)
     config = _with_legacy_key(_train_config(tmp_path))
 
     with warnings.catch_warnings(record=True) as caught:
@@ -588,7 +588,7 @@ def test_a_0_2_0_defaults_dump_is_refused_for_its_task_order_alone(tmp_path, mon
     it, beside ``train.task_sampler`` too, where 0.3.0 ignored it, before the run directory is made.  It is the dump's
     one problem: without it, the dump loads, with nothing deprecated."""
 
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: pytest.fail("it trained"))
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("it trained"))
     monkeypatch.chdir(tmp_path)  # the dump's log_path, logs, is relative to the working directory
     dump = _defaults_0_2_0(tmp_path)
 
@@ -626,7 +626,7 @@ def test_eval_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, m
 
 
 def test_a_config_without_deprecated_keys_records_none(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
 
     cli.main(["train", str(_train_config(tmp_path))])
 
@@ -636,7 +636,7 @@ def test_a_config_without_deprecated_keys_records_none(tmp_path, monkeypatch, ca
 
 def test_an_error_warning_filter_makes_a_deprecated_key_a_config_error(tmp_path, monkeypatch, capsys, retiring):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     config = _with_legacy_key(_train_config(tmp_path))
 
     with warnings.catch_warnings():
@@ -648,7 +648,7 @@ def test_an_error_warning_filter_makes_a_deprecated_key_a_config_error(tmp_path,
 
 
 def test_a_command_s_deprecation_filters_end_with_it(tmp_path, monkeypatch, retiring):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     before = list(warnings.filters)
 
     cli.main(["train", str(_with_legacy_key(_train_config(tmp_path)))])

@@ -13,7 +13,7 @@ What a config chooses (:class:`AdmissionChoice`, :func:`choose_admissions`): ``t
 and each entry's own ``group_admission`` (an entry that sets none inherits the run's rule and options), each resolved,
 its options parsed and its ``check`` run; and ``train.refill.max_groups_per_step``, the cap.  "Rule mode" is a run where
 the rule of some entry is not ``all``: its steps train the first ``batch_size`` admitted groups they dequeue that are
-not stale, within the cap (:mod:`platoon.train.tinker.rl`, :mod:`platoon.train.tinker.dispatcher`).  It is decided by
+not stale, within the cap (:mod:`platoon.train.trainer`, :mod:`platoon.train.dispatch.dispatcher`).  It is decided by
 the names the config gives (:func:`is_all`), so that loading a config, which resolves no rule, and its start agree: a
 rule named by reference is a rule, even one that resolves to :class:`AdmitAll`.
 
@@ -418,7 +418,7 @@ class AdmissionSet:
         return TaskStatsView(TaskStatsStore([], {}, column=self.label_column), now=now, live=False)
 
     def at_settle(self, draw: Any, rollout: Any, record: GroupRecord | None, *, now: int) -> tuple[Admission, str]:
-        """The decision on the group of ``draw`` (a :class:`~platoon.train.tinker.dispatcher.BoundDraw`) that settled
+        """The decision on the group of ``draw`` (a :class:`~platoon.train.dispatch.dispatcher.BoundDraw`) that settled
         with ``rollout`` (None: its workflow failed), whose record in the statistics is ``record`` (None when they
         stopped or never started), and the qualified name of the rule that decides it.  A failed group is rejected
         with reason ``failed``, its rule not asked.  Otherwise the rule decides on the record, or on one built from the
@@ -467,7 +467,7 @@ class AdmissionSet:
     def _record(self, draw: Any, rollout: Any) -> GroupRecord:
         """A record of the group of ``draw`` when the statistics have none: built from the draw and its output."""
 
-        from platoon.train.tinker.task_records import group_record
+        from platoon.train.task_records import group_record
 
         info = self._infos.get(draw.entry) if draw.entry is not None else None
         return group_record(
@@ -490,8 +490,8 @@ class AdmissionSet:
     def dequeued(self, label: str | None, kind: str, item: Any) -> None:
         """Count an item the current step dequeued, of ``label``: an ``admitted`` group (with the reason it was admitted
         with), a ``stale`` one, a kept ``failed`` one, or a ``marker`` of a group rejected or failed when it settled
-        (``item``, the step's :class:`~platoon.train.tinker.rl._Settled`); and, of those with an output, whether it was
-        informative (``admission/.../informative_rate``)."""
+        (``item``, the step's :class:`~platoon.train.dispatch.settled._Settled`); and, of those with an output,
+        whether it was informative (``admission/.../informative_rate``)."""
 
         step = self.step
         output = getattr(item, "rollout", None)
@@ -839,7 +839,7 @@ def loss_warnings(config: Any) -> list[str]:
     train its advantage-independent terms (a KL or an entropy term), and rejecting such groups removes their share of
     those terms from the objective, not only from its scale.  One line, or none."""
 
-    from platoon.train.tinker.batch_transforms import objective_is_zero_for_zero_advantages
+    from platoon.train.step.batch_transforms import objective_is_zero_for_zero_advantages
 
     train = getattr(config, "train", None)
     if train is None or not rule_mode(config):

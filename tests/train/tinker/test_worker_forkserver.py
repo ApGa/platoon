@@ -31,14 +31,9 @@ import pytest
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker.workers import supervisor as supervisor_module
-from platoon.train.tinker.workers.protocol import (
-    PROTOCOL_VERSION,
-    ConversionPolicy,
-    ModelBinding,
-    RolloutWorkerRequest,
-)
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
+from platoon.train.workers import supervisor as supervisor_module
+from platoon.train.workers.protocol import PROTOCOL_VERSION, ConversionPolicy, ModelBinding, RolloutWorkerRequest
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 from platoon.utils import forkserver as forkserver_module
 from platoon.utils.forkserver import MAX_MESSAGE_BYTES, ForkServer, ForkServerError
 
@@ -1033,7 +1028,7 @@ def test_the_supervisor_forks_many_workers_at_once(tmp_path):
 
 
 def test_the_fork_server_builds_the_run_s_tokenizer_and_renderer_ahead(tmp_path):
-    from platoon.train.tinker.workers.protocol import ModelBinding as Binding
+    from platoon.train.workers.protocol import ModelBinding as Binding
 
     supervisor = RolloutWorkerSupervisor(scratch_dir=str(tmp_path), start_method="forkserver")
     bound = dataclasses.replace(
