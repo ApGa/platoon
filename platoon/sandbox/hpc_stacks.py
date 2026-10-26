@@ -41,11 +41,8 @@ import dataclasses
 import functools
 import importlib
 import logging
-import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -60,13 +57,13 @@ from platoon.sandbox.stacks import (
     DrivenStack,
     RunMode,
     ServiceSpec,
+    SocketLinks,
     StackNetwork,
     StackSpec,
     StackVolumes,
     drive_stack,
     make_volumes,
 )
-from platoon.utils import scratch
 from platoon.utils.stopping import let_finish
 
 if TYPE_CHECKING:
@@ -89,8 +86,6 @@ for depth in range(3):
     uid = gid = 0
 """
 _NESTING_TIMEOUT_S = 60.0
-_SOCKET_ADDRESS_BYTES = 108  # a Unix socket's path (sun_path), its terminating NUL included
-_LINK_BYTES = len("/platoon-pod-XXXXXXXX/65535.sock")  # what a link adds to its root
 _CALLERS_NOTED: set[str] = set()  # the providers whose sidecars run as the caller, warned about once
 
 
@@ -272,7 +267,7 @@ class _PodBackend:
         self.volumes = volumes
         self.run_modes = dict(run_modes)
         self.labels = dict(labels)
-        self._links: Path | None = None  # where connect() links to the pod's sockets, made when one needs it
+        self._links = SocketLinks()  # where connect() links to the pod's sockets when their paths are long
 
     @classmethod
     async def start(
@@ -343,18 +338,7 @@ class _PodBackend:
         when the pod's path is too long for a socket's address."""
 
         socket = await self.pod.expose(port)
-        if len(os.fsencode(socket)) < _SOCKET_ADDRESS_BYTES:
-            return f"unix://{socket}"
-        if self._links is None:
-            links = await asyncio.to_thread(_links_directory)
-            if self._links is None:
-                self._links = links
-            else:  # another connection's made one meanwhile, which the stop removes
-                await asyncio.to_thread(links.rmdir)
-        link = self._links / f"{port}.sock"
-        if not link.is_symlink():
-            link.symlink_to(socket)
-        return f"unix://{link}"
+        return f"unix://{await self._links.short(socket, f'{port}.sock')}"
 
     def rewrite(self, value: str, *, service: str | None = None) -> str:
         return value  # every service reaches the others by name, at the ports they declare
@@ -366,8 +350,7 @@ class _PodBackend:
         try:
             await self.pod.stop()
         finally:
-            if self._links is not None:
-                await asyncio.to_thread(shutil.rmtree, self._links, ignore_errors=True)
+            await self._links.close()
 
 
 class _PodService:
@@ -412,16 +395,6 @@ async def _stop_when_done(making: asyncio.Future[Any], pod: Any, on_stop: Callab
         await pod.stop()
     finally:
         on_stop()
-
-
-def _links_directory() -> Path:
-    """A new private directory for links to a pod's sockets, whose path leaves room in a socket's address for a link's
-    name: in node scratch, else in ``/tmp``."""
-
-    for root in (scratch.scratch_dir(), Path("/tmp")):
-        if len(os.fsencode(root)) + _LINK_BYTES < _SOCKET_ADDRESS_BYTES:
-            return Path(tempfile.mkdtemp(prefix="platoon-pod-", dir=root))
-    raise OSError("Neither node scratch nor /tmp has a path short enough for the links to a pod's sockets")
 
 
 def _fields(kind: Any) -> set[str]:

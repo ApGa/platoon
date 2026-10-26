@@ -184,6 +184,30 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   (`loses_file_owners`) and whether it can apply a manifest (`file_owners_refusal(options)`;
   `platoon.sandbox.loses_file_owners`, `file_owners_refusal`)
   ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
+- **A Harbor stack's MCP servers are env tools.** Each `sse` or `streamable-http` server of a task's
+  `[[environment.mcp_servers]]` whose `http://` URL names a service of its stack (`http://mcp-server:8000/mcp`) serves
+  its tools through the tool plane, as the session's env tools, each named for the server and the tool in ASCII letters,
+  digits and underscores (`mcp_server__get_secret`): read-only where the tool's `readOnlyHint` says so, filtered by the
+  agent's access level, recorded with the agent's tool calls, called in their turn with the generic tools within
+  `tool_timeout_s`, and their text cut as the generic tools' output is. platoon's own MCP client speaks both transports,
+  streamable HTTP and the legacy SSE transport, Harbor's default for task servers, with the protocol versions the
+  gateway serves, reads no answer or listing longer than 16 MiB, follows a server's redirects within its origin alone,
+  sends each request on a connection of its own (one that a server's keep-alive ends as a call arrives would lose it),
+  and brings no `mcp` package into the rollout workers. The session lists the tools as it opens: a server that cannot be
+  reached or does not list its tools fails its start (`sidecar_start`), naming it, rather than run the rollout without
+  them ([Task MCP servers](docs/how-to/sandboxes-and-harbor.md#task-mcp-servers)).
+- **This host reaches a stack's services on every stack provider.** `Stack.connect(service, port)` gives the docker
+  provider's stacks a relay: a container in the network of the service that listens there, running platoon's forwarder
+  with the Python 3 of that service's image, else of `main`'s, which serves a Unix socket in the project's directory,
+  whatever the stack's networks, also from a rootless daemon; a pod's port is the socket that hpc-sandbox 0.5 exposes;
+  the `process` provider's is the port of the host that the stack holds. A socket path too long for an address is
+  handed out as a link in node scratch (`platoon.sandbox.stacks.SocketLinks`)
+  ([Write a sandbox provider](docs/extending/sandbox-providers.md#run-multi-container-stacks)).
+- **Harness specs get a task's own MCP servers.** `{task_mcp_servers}` renders the MCP servers a task offers its agents,
+  as a JSON list of each one's `name`, `transport` and `url` as the task's sandbox reaches it (or a `stdio` server's
+  `command` and `args`), for a harness in the task's sandbox that reaches them itself, as Harbor's agents do; a harness
+  that runs locally gets `[]`, and reaches only the servers that the env's tools serve. A session gives them as
+  `task_mcp_servers`, an optional attribute ([Placeholders](docs/tutorials/cli-harness.md#placeholders)).
 
 ### Changes
 

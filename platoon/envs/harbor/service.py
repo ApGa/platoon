@@ -47,9 +47,11 @@ from platoon.envs.harbor.session import (
     DEFAULT_CLOSE_TIMEOUT_S,
     LOG_DIRS,
     PUBLISHED_DIRS,
+    TASK_TOOLS_LISTING_TIMEOUT_S,
     HarborSession,
     SandboxLease,
     StackLease,
+    TaskTools,
 )
 from platoon.envs.harbor.task import (
     _PLANNED_HERE,
@@ -158,7 +160,8 @@ class HarborEnvironmentService:
     Separate verifiers' sandboxes start with ``verifier_provider_options`` laid over ``provider_options``, such as
     Singularity's ``fakeroot`` for verifiers that run as root.
 
-    Agents sharing a sandbox take turns on it: its tools run one at a time,
+    Agents sharing a sandbox take turns on it: its tools run one at a time, the
+    tools of a stack's MCP servers too (:class:`~platoon.envs.harbor.session.TaskTools`),
     except those named in ``concurrent_tools`` (``bash`` and ``view`` may
     overlap other calls; ``write`` and ``edit`` read, change and write a file,
     so overlapping edits of one file can lose one). ``queue_timeout_s``
@@ -1014,7 +1017,7 @@ class HarborEnvironmentService:
         timeout (times ``verifier_timeout_multiplier``), the grading commands around them, its collect hooks'
         timeouts, and the close.  For a stack, its services' starts, health waits (their images' healthchecks too) and
         init jobs' runs (each bounded by a start budget) count along their dependencies' longest path, and so do three
-        probes of its sidecars.  Deadlines on whole rollouts add it
+        probes of its sidecars and the listing of its MCP servers' tools.  Deadlines on whole rollouts add it
         (:func:`platoon.train.components.rollout_overhead_s`)."""
 
         return self._limits(task_id)[1]
@@ -1041,6 +1044,8 @@ class HarborEnvironmentService:
                 health += own.worst_case_s
             start = sidecars.start_bound_s(harbor_task, checks, start_s=budget, main_health_s=health, job_s=budget)
             start += 3 * sidecars.probe_bound_s(checks)
+            served = [server for server in harbor_task.mcp_servers if harbor_task.mcp_service(server) is not None]
+            start += len(served) * TASK_TOOLS_LISTING_TIMEOUT_S  # their tools are listed as the session opens
         else:
             main = harbor_task.main
             if main is not None and main.healthcheck is not None:  # main's compose healthcheck runs before it
@@ -1121,9 +1126,10 @@ class HarborEnvironmentService:
     async def _open_stack(
         self, task: Task, harbor_task: HarborTask, spec: SandboxSpec, *, rollout_id: str
     ) -> HarborSession:
-        """Start the task's stack (:mod:`platoon.envs.harbor.sidecars`), ``spec`` being main's sandbox; on any failure
-        everything it started is stopped and an ``EnvSetupError`` says why: ``sidecar_start`` for a sidecar that did
-        not start, ``env_config`` where no stack may run or a service cannot."""
+        """Start the task's stack (:mod:`platoon.envs.harbor.sidecars`), ``spec`` being main's sandbox, and list the
+        tools of its MCP servers that the tool plane serves (:class:`TaskTools`); on any failure everything it started
+        is stopped and an ``EnvSetupError`` says why: ``sidecar_start`` for a sidecar that did not start or an MCP
+        server that did not list its tools, ``env_config`` where no stack may run or a service cannot."""
 
         provider = self.provider
         refusal = self.stacks_refusal() or stack_refusal(provider)
@@ -1155,6 +1161,13 @@ class HarborEnvironmentService:
             raise
         except Exception as exc:
             raise _start_failure(exc) from exc
+        try:
+            task_tools = await TaskTools.open(stack, harbor_task)
+        except BaseException as exc:
+            await asyncio.shield(stack.stop())
+            if not isinstance(exc, Exception):
+                raise
+            raise EnvSetupError("sidecar_start", str(exc)) from exc
         lease = StackLease(
             stack,
             spec,
@@ -1162,6 +1175,7 @@ class HarborEnvironmentService:
             close_timeout_s=self.close_timeout_s,
             init=init,
             logs=plan.logs,
+            task_tools=task_tools,
         )
         return HarborSession(self, task, harbor_task, lease, rollout_id=rollout_id)
 

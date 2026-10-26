@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import tomllib
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -108,6 +109,30 @@ class McpServer:
     url: str | None = None  # sse and streamable-http
     command: str | None = None  # stdio
     args: tuple[str, ...] = ()
+
+    @property
+    def http_address(self) -> tuple[str, int] | None:
+        """The host and port of an ``sse`` or ``streamable-http`` server's ``http://`` URL (port 80 unless it names
+        one); None for a ``stdio`` server, or a URL of another scheme."""
+
+        if self.transport == "stdio" or self.url is None:
+            return None
+        parts = urllib.parse.urlsplit(self.url)
+        try:
+            port = parts.port
+        except ValueError:  # a port that is not a number
+            return None
+        if parts.scheme != "http" or not parts.hostname:
+            return None
+        return parts.hostname, port if port is not None else 80
+
+    def described(self, url: str | None = None) -> dict[str, Any]:
+        """The server as ``{task_mcp_servers}`` lists it: its name and transport, and its URL (``url`` where a harness
+        reaches it at another) or its command and arguments."""
+
+        if self.transport == "stdio":
+            return {"name": self.name, "transport": self.transport, "command": self.command, "args": list(self.args)}
+        return {"name": self.name, "transport": self.transport, "url": url or self.url}
 
 
 @dataclass(frozen=True)
@@ -225,6 +250,18 @@ class HarborTask:
         """Whether the task's compose file names services besides ``main``: it runs as a multi-container stack."""
 
         return self.compose is not None and self.compose.kind == "sidecars"
+
+    def mcp_service(self, server: McpServer) -> tuple[str, int] | None:
+        """The service of the task's stack, and its port, that an MCP server's ``http://`` URL names
+        (``http://mcp-server:8000/mcp``: the service ``mcp-server``, or the one with that alias, at 8000), where this
+        host reaches it through the stack; None for a ``stdio`` server, another URL, or a task that is no stack."""
+
+        address = server.http_address
+        if address is None or not self.is_stack:
+            return None
+        assert self.compose is not None
+        service = self.compose.service_named(address[0])
+        return (service, address[1]) if service is not None else None
 
     def honors_users_in(self, sandbox: Literal["agents", "verifier"]) -> bool:
         """Whether one of the task's sandboxes honors users, and so needs root and other users: the agents' sandbox

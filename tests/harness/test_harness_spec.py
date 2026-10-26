@@ -185,7 +185,7 @@ def test_toolchain_placeholder_and_install_commands():
             launch={"argv": ["{toolchain}/bin/toy"]},
         )
     )
-    assert spec.render(RenderContext(**{**CONTEXT.__dict__, "toolchain": "/opt/toolchains/toy"})).argv == (
+    assert spec.render(dataclasses.replace(CONTEXT, toolchain="/opt/toolchains/toy")).argv == (
         "/opt/toolchains/toy/bin/toy",
     )
     assert spec.install.commands == ("echo ${HOME} {not-a-template}",)

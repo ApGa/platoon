@@ -1,0 +1,21 @@
+# Written for platoon, after Harbor's hello-mcp: an MCP sidecar, served over streamable HTTP, whose get_secret tool
+# answers the secret that the agents must write to /app/secret.txt.
+services:
+  main:
+    environment:
+      MCP_URL: http://mcp-server:8000/mcp
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+  mcp-server:
+    image: python:3.12-slim
+    command: ["python3", "/srv/mcp/server.py", "--transport", "streamable-http"]
+    expose:
+      - "8000"
+    volumes:
+      - ./mcp:/srv/mcp:ro
+    healthcheck:
+      test: ["CMD", "python3", "/srv/mcp/health.py", "http://mcp-server:8000/"]
+      interval: 100ms
+      timeout: 5s
+      retries: 100

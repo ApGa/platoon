@@ -209,7 +209,7 @@ configs](configs.md#2-build-on-it-with-extends)):
 | `default_image` | none | The image for tasks without `docker_image`, used as written (a task's own `docker_image` gets a `docker://` prefix unless it names a scheme or is a `.sif` or `.sqsh` file or an absolute path) |
 | `workdir` | `/app` | The working directory for tasks that do not set one |
 | `env`, `mounts` | none | Extra environment variables, and `{source, target, read_only}` host mounts, for every sandbox |
-| `tool_timeout_s` | 300 | The limit of one tool call (`bash`, `view`, `write`, `edit`) for harnesses that use the env's tools |
+| `tool_timeout_s` | 300 | The limit of one tool call (`bash`, `view`, `write`, `edit`, and the tools of the task's MCP servers) for harnesses that use the env's tools |
 | `verifier_timeout_multiplier` | 1.0 | Scales each task's `[verifier] timeout_sec` (default 600) |
 | `agent_timeout_multiplier` | 1.0 | Scales each task's `[agent] timeout_sec`, which bounds the harness ([below](#harness-timeouts-and-crashes)) and, without a rollout `timeout`, a rollout's deadline ([Run it](#4-run-it)) |
 | `reward` | `{primary: reward}` | The [reward contract](#rewards-the-reward-contract-and-log-classifiers): `{primary, components, range, check}`, a reward name, or a list of the names that may train |
@@ -1070,8 +1070,11 @@ the tools' message; where your user has no subordinate ids, the sidecars run as 
   `platoon harbor images build CONFIG --builder docker --push REGISTRY/NAME`.
 - **What a pod does not give:** an address per service (two services on one port collide, so a fetch refuses two that
   declare one, and every connection between services comes from `127.0.0.1`: below), GPUs, a sidecar's image `USER` as
-  its own uid (a `caller` sidecar runs as yours), snapshots (so `copy` forks stay refused), and capabilities over the
-  stack's network (`NET_ADMIN`, `NET_RAW`, which a fetch refuses).
+  its own uid (a `caller` sidecar runs as yours), snapshots (so `copy` forks stay refused), capabilities over the
+  stack's network (`NET_ADMIN`, `NET_RAW`, which a fetch refuses), and other users in `main`, which runs as root of a
+  namespace that maps your uid alone: a command there that gives files to another user fails, such as a `tar` that
+  root runs, which gives the files their archive's owners (uv's installer, which hello-mcp's tests run, fails so). An
+  overlay that installs such a tool in the image when it is built avoids it.
 - **One loopback, so one client address.** Every connection between a pod's services comes from `127.0.0.1`, `main`'s
   too, where under compose `main` connects from an address of its own network. So a sidecar that trusts loopback, or
   listens on it alone, is open to what the agents run in `main`: the official postgres image, given a
@@ -1085,6 +1088,64 @@ the tools' message; where your user has no subordinate ids, the sidecars run as 
 
 A pod's services stop with it, in milliseconds, and a pod dies with the process that started it; a reap by a run's
 labels stops a live process's pods and sweeps those a dead one left, giving back what other users wrote first.
+
+### Task MCP servers
+
+*Since 0.5.0.* The MCP servers a task offers its agents (`[[environment.mcp_servers]]`, such as hello-mcp's sidecar at
+`http://mcp-server:8000/mcp`) reach them two ways.
+
+**Through the tool plane.** Each `sse` or `streamable-http` server whose `http://` URL names a service of the task's
+stack (by its name, its `hostname` or a network alias; port 80 when the URL names none) serves its tools as env tools,
+after `bash`, `view`, `write` and `edit`. Each is named for the server and the tool, joined by `__`, with an underscore
+in place of every character but an ASCII letter, a digit and an underscore, as model providers' tool names and
+CodeAct's functions need: hello-mcp's `mcp-server` serves `get_secret` as `mcp_server__get_secret`. A name that is not
+all ASCII also ends with the start of its SHA-256, which keeps names in other scripts apart, and a server's name that
+starts with a digit gets an underscore before it (`_2fa__get_code`). The session proxies each call to the server, so
+function harnesses, and CLI harnesses that take the environment's tools over MCP (`[mcp]`), get them like any env tool:
+
+- filtered by the agent's access level: a tool is read-only where its `readOnlyHint` says so, so a `read_only` agent
+  sees only those, and a call of a tool the agent does not see never reaches the server. No task tool is terminal, as
+  MCP has no hint for a tool that ends the episode. The access level shapes the tools a harness is given, not what its
+  agent can reach: commands in `main` share the stack's network (on `process`, the host's loopback), so they can call
+  any tool of a server directly, as they can run anything else there;
+- recorded with the agent's tool calls (`misc.tool_calls` of its trajectory);
+- in their turn with the other tools, one at a time (`concurrent_tools` names generic tools only), so none runs while
+  the task is graded; a call that fails, or gets no answer within `tool_timeout_s`, is an error result;
+- with their text cut as the generic tools' output is (30,000 characters), where every block but an image or audio is
+  text (an embedded resource, a link or a block of a type MCP does not have as its JSON); an answer longer than 16 MiB
+  fails the call unread.
+
+platoon's own client speaks both transports (no `mcp` package enters the rollout workers), with the protocol versions
+the gateway serves (2024-11-05 to 2025-11-25), and sends each request with the server's own URL and `Host`, as `main`
+would, following the server's redirects (307 and 308) within its origin alone, on a connection of its own: a server ends
+a connection that idles longer than its keep-alive (hello-mcp's, on uvicorn, after 5 seconds), and a call sent on one as
+it ends would get no answer. It answers no more than 16 of the server's own requests (`ping`) at once. The session lists
+the tools as it opens, through one session with each server, closed with the stack. A server that cannot be reached,
+does not list its tools within 60 seconds, lists more than 16 MiB of them or a page it listed before, or lists a tool
+that would be served under another's name or under one longer than 64 characters, fails the session's start
+(`sidecar_start`), naming it, so the rollout is an `error` that never trains, whatever its harness does; give a server a
+healthcheck that `main` waits for (`condition: service_healthy`), as hello-mcp does, so that it listens once the stack
+has started. A rollout's deadline counts the listing ([Run it](#4-run-it)). A task that is no stack serves none of its
+servers this way.
+
+This host reaches a stack's service through the stack (`Stack.connect`), which no agent can reach or stop:
+
+| Provider | How this host reaches a service's port |
+|---|---|
+| `process` | the port of this host that the stack holds for the service |
+| `docker` | a **relay**: a container per port, in the network of the service that listens there, which serves a Unix socket in the project's directory, which only your uid reaches, whatever the stack's networks, also from a rootless daemon, whose networks this host does not reach. It runs platoon's forwarder with the Python 3 of that service's image, else of `main`'s, as root without capabilities, and goes with the stack; a stack whose images have no Python 3 cannot be reached so |
+| `singularity`, `enroot` | the pod's port, which hpc-sandbox 0.5 exposes as a Unix socket in the pod's directory |
+
+A socket whose path is too long for a socket's address is handed out as a link in a private directory of node scratch.
+
+**Directly, from `main`.** A harness in the task's sandbox may reach the servers itself, as Harbor's agents do:
+`{task_mcp_servers}` renders them in a harness spec, as a JSON list of each server's `name`, `transport` and `url`, as
+`main` reaches it (on the `process` provider, the port of the host that the stack holds), or, for a `stdio` server,
+its `command` and `args`, which the harness starts in its own sandbox
+([Placeholders](../tutorials/cli-harness.md#placeholders)). A harness that runs locally gets `[]`: it reaches only the
+servers that the plane serves, through the env's tools, and no `stdio` server, server outside the stack, or server of
+a task that is no stack. `stdio` servers are never proxied, since that would take a streaming exec that no provider
+has.
 
 ## Users in task sandboxes
 
@@ -1890,10 +1951,10 @@ an absolute path, is used as written; any other reference without a scheme gets 
 ## What comes next
 
 [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md) is the design behind this page. What it proposes
-beyond what is described here: serving a task's own MCP servers through the tool plane, running stacks on the host
-network on sites without unprivileged user namespaces, and stacks whose services run as the users a task names. Until
-then, multi-container tasks run as `docker compose` projects, as rootless pods on Singularity, Apptainer and enroot,
-and on the `process` provider ([Multi-container tasks](#multi-container-tasks)), main-only compose files on every
+beyond what is described here: running stacks on the host network on sites without unprivileged user namespaces, and
+stacks whose services run as the users a task names. Until then, multi-container tasks run as `docker compose`
+projects, as rootless pods on Singularity, Apptainer and enroot, and on the `process` provider, with their MCP servers
+served through the tool plane ([Multi-container tasks](#multi-container-tasks)), main-only compose files on every
 provider ([Compose files](#compose-files)), and a task's users in single sandboxes ([Users in task
 sandboxes](#users-in-task-sandboxes)). The [RFC index](../rfcs/README.md) lists every proposal and explains how one
 moves from draft to implemented; comment on the RFC, or open a new one, to shape what gets built.

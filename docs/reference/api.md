@@ -610,7 +610,10 @@ gateway through the sandbox's route (`session.sandbox.routes["gateway"]`, which 
 loopback.  The runner refuses to place a harness in a sandbox that does not (`host_loopback = False`) and has
 no route; a session that does not say keeps the earlier rule, that a sandbox with a network shares the host's.
 A session may also give `agent_timeout_s` (optional): the task's own time limit for its agent in seconds, or
-None, which harness rollouts cap the root's harness with, as they do with the rollout's `timeout`.
+None, which harness rollouts cap the root's harness with, as they do with the rollout's `timeout`.  And
+`task_mcp_servers` (optional): the MCP servers the task itself offers, as a harness in its sandbox reaches them
+(each a mapping with `name`, `transport`, and `url` or `command` and `args`), which harness specs render
+as `{task_mcp_servers}`.
 
 | Attribute | Type | Description |
 |---|---|---|

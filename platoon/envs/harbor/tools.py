@@ -216,10 +216,17 @@ class SandboxTools:
         return posixpath.join(self._workdir, _string(arguments, "path"))
 
     def _truncate(self, text: str) -> str:
-        if len(text) <= self._max_output_chars:
-            return text
-        half = self._max_output_chars // 2
-        return f"{text[:half]}\n[... {len(text) - 2 * half} characters truncated ...]\n{text[-half:]}"
+        return truncate_output(text, self._max_output_chars)
+
+
+def truncate_output(text: str, max_chars: int = DEFAULT_MAX_OUTPUT_CHARS) -> str:
+    """A tool's output cut to ``max_chars``, as the model gets it: its start and its end, with a note of what is left
+    out between them."""
+
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return f"{text[:half]}\n[... {len(text) - 2 * half} characters truncated ...]\n{text[-half:]}"
 
 
 def _string(arguments: dict[str, Any], key: str) -> str:

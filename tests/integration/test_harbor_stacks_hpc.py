@@ -1,16 +1,20 @@
 """Harbor stacks as hpc-sandbox pods on a real runtime, end to end (RFC 0010 M7's checks): the stack fixtures and
 Harbor's hello-mcp score their oracles and their no-ops, names resolve, the relay reaches a host socket, the host
-reaches a service's port, one stack cannot reach another's services, a kill of every process in main grades as in a
+reaches a service's port, the tool plane serves the tasks' MCP servers through the sockets the pods expose (a function
+harness solves hello-mcp, ``mcp-http`` and ``mcp-sse`` through it, and an agent's access level hides what it should),
+a CLI harness in ``main`` solves them at the URLs that ``{task_mcp_servers}`` gives it,
+one stack cannot reach another's services, a kill of every process in main grades as in a
 single sandbox, database images switch users in their sidecars, a judge's record that only its own user reads reaches
 the tests, a published task's main reaches its judge sidecar and shares its logs, and nothing is left behind, also
 after stacks cancelled while they start.  With an hpc-sandbox older than 0.5, stacks are refused instead, naming 0.5.
 
 Skipped unless ``PLATOON_TEST_PODS=1`` on a compute node with the runtime of ``PLATOON_TEST_PODS_PROVIDER``
 (``singularity``, the default, with SingularityCE or Apptainer on ``PATH``, or ``enroot``; ``PLATOON_TEST_PODS_BINARY``
-names the executable, such as ``apptainer``) and hpc-sandbox.  Never run it on a login node: it starts containers.  The
-images come from the network: the nodes pull ``docker://`` references, the registry gives the configurations that pins
-record, hello-mcp's and kumo's images are built (the oci builder, or def on Apptainer; enroot, which builds none, skips
-them), hello-mcp's tests install their dependencies, and kumo's task is downloaded from GitHub.  ``HPC_SANDBOX_SCRATCH``
+names the executable, such as ``apptainer``) and hpc-sandbox; the rollouts that solve the MCP tasks go through platoon's
+model gateway, which needs the ``tinker`` extra.  Never run it on a login node: it starts containers.  The images come
+from the network: the nodes pull ``docker://`` references, the registry gives the configurations that pins record,
+hello-mcp's and kumo's images are built (the oci builder, or def on Apptainer; enroot, which builds none, skips them),
+hello-mcp's tests install their dependencies, and kumo's task is downloaded from GitHub.  ``HPC_SANDBOX_SCRATCH``
 (node-local disk) and ``HPC_SANDBOX_IMAGE_CACHE`` say where sandboxes and images go; ``PLATOON_TEST_PODS_STACKS`` and
 ``PLATOON_TEST_PODS_CONCURRENCY`` size the test of many stacks (20 and 8).  Sidecars run with your subordinate ids where
 your user has them (``getsubids $USER``), else as your own uid: the checks of their users follow the run mode each got.
@@ -33,15 +37,20 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from mcp_solver import DIRECT, ROTATE_TOOL, SECRET_TOOL, SOLVER, hidden_from_read_only, solved, solved_directly
+from no_model import no_model_gateway
 from site_cache import use_site_cache
 
+from platoon.config_defs import RolloutConfig
 from platoon.envs.harbor import HarborEnvironmentService, HarborSession
 from platoon.envs.harbor.builders import build_images, pin_images, provider_builder
 from platoon.envs.harbor.fetch import fetch, fetch_config
 from platoon.envs.harbor.images import default_image_dir, default_image_map
 from platoon.envs.service import EnvSetupError, SessionNeeds
+from platoon.harness.rollout import run_harness_rollout
 from platoon.sandbox import Sandbox, cleanup, stack_refusal
 from platoon.task import Task
+from platoon.train.components import EnvironmentRoute
 
 PROVIDER = os.environ.get("PLATOON_TEST_PODS_PROVIDER", "singularity")
 BINARY = os.environ.get("PLATOON_TEST_PODS_BINARY")
@@ -74,6 +83,15 @@ KUMO_FILES = (
     "tests/score.py",
     "tests/expected.json",
 )
+# hello-mcp's tests' own uv, installed in main's image at its build (the overlay of the hello-mcp test).
+UV_IN_MAIN = r"""
+description = "Install the uv that hello-mcp's tests run in main's image"
+[[edit]]
+file = "environment/Dockerfile"
+pattern = '^WORKDIR /app$'
+replace = 'RUN curl -LsSf https://astral.sh/uv/0.9.7/install.sh | sh\nWORKDIR /app'
+count = 1
+"""
 COUNT = int(os.environ.get("PLATOON_TEST_PODS_STACKS", "20"))
 CONCURRENCY = int(os.environ.get("PLATOON_TEST_PODS_CONCURRENCY", "8"))
 LOCK_STACKS: dict[str, bool] = {}  # a fetch's default, which locks stacks as runnable
@@ -417,14 +435,21 @@ async def test_hello_mcp_scores_its_oracle_and_its_no_op(
     scratch: Path, registered: set[int], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Harbor's hello-mcp, its images built as platoon prepare builds them (its MCP server's context whole); its
-    solution and tests download uv and install packages, through the pod's egress."""
+    solution and tests install packages through the pod's egress.  Its tests install uv with uv's installer, whose
+    ``tar``, run as root, gives the files their archive's owners, which ``main``, root of a namespace that maps one id,
+    cannot: an overlay installs it in ``main``'s image instead (as a dataset's overlay would), so that the tests run
+    after the no-op too, not only after the solution, which installs uv in a way that works there."""
 
     _skip_without_pods(scratch)
     builder = provider_builder(PROVIDER)
     if builder is None:
         pytest.skip(f"the {PROVIDER} provider runs registry images only: hello-mcp's would be built and pushed")
     cache = use_site_cache(monkeypatch, tmp_path / "cache")
-    lock = fetch(fetch_config(str(HELLO_MCP), lock=tmp_path / "lock.json", refuse=LOCK_STACKS))
+    overlay = tmp_path / "overlays" / "install-uv"
+    overlay.mkdir(parents=True)
+    (overlay / "overlay.toml").write_text(UV_IN_MAIN)
+    settings: dict[str, Any] = {"lock": str(tmp_path / "lock.json"), "refuse": LOCK_STACKS, "overlays": [str(overlay)]}
+    lock = fetch(fetch_config(str(HELLO_MCP), **settings))
     build_images(
         lock,
         cache=cache,
@@ -433,11 +458,67 @@ async def test_hello_mcp_scores_its_oracle_and_its_no_op(
         builder=builder,
         scratch=tmp_path / "build",
     )
-    service = _service(scratch, dataset=str(HELLO_MCP), lock=str(tmp_path / "lock.json"), refuse=LOCK_STACKS)
+    service = _service(scratch, dataset=str(HELLO_MCP), **settings)
     [task_id] = await service.list_tasks("train")
     await service.check_tasks("train", [task_id])
     metadata = await _oracle_and_no_op(service, task_id)
     assert set(metadata["services"]) == {"main", "mcp-server"}
+    # Through the tool plane, which reaches the server through the socket the pod exposes: hello-mcp's get_secret
+    # says nothing of being read-only, so a read-only agent cannot call it.  And from main, at the server's own URL.
+    assert solved(await _rollout_of(SOLVER, service, task_id, tmp_path / "plane"))
+    assert solved_directly(await _rollout_of(DIRECT, service, task_id, tmp_path / "direct"))
+    session = await _open(service, task_id)
+    try:
+        assert await hidden_from_read_only(session, SECRET_TOOL)
+    finally:
+        await session.close()
+    await _nothing_left(service, scratch, registered)
+
+
+# --- task MCP servers, through the tool plane ---------------------------------------------------------------------
+
+_BUILT: dict[str, HarborEnvironmentService] = {}
+
+
+def built_service(*, key: str) -> HarborEnvironmentService:
+    """A service that a test built, for its rollouts' route (``service: <this module>:built_service``), so that the
+    test's checks of what is left see what their sessions left."""
+
+    return _BUILT[key]
+
+
+async def _rollout_of(harness: str, service: HarborEnvironmentService, task_id: str, tmp_path: Path) -> dict[str, Any]:
+    """A rollout of one of the harnesses that solve the task (``tests/mcp_solver.py``: through the tool plane, or from
+    main), on the rollout path: its root trajectory."""
+
+    _BUILT[task_id] = service
+    route = EnvironmentRoute(
+        name="pods", service=f"{__name__}:built_service", service_kwargs={"key": task_id}, harness=harness
+    )
+    config = RolloutConfig(output_dir=str(tmp_path / "out"), return_dict=True, verbose=False)
+    task = route.attach(await service.get_task(task_id))
+    collection = await run_harness_rollout(task, config, gateway=no_model_gateway())
+    assert isinstance(collection, dict)
+    (root,) = collection["trajectories"].values()
+    return root
+
+
+async def test_the_mcp_fixtures_are_solved_through_the_tool_plane(scratch: Path, registered: set[int], tmp_path: Path):
+    """mcp-http and mcp-sse, an MCP sidecar over each transport: a function harness solves each through the tool plane,
+    which reaches the sidecar through the socket the pod exposes, and main's own clients (the oracle's, and a CLI
+    harness's at the URL it is given) reach it by name; a read-only agent cannot call the tool that changes the
+    secret."""
+
+    service = _service(scratch, dataset_dir=STACKS)
+    for task_id in ("mcp-http", "mcp-sse"):
+        assert solved(await _rollout_of(SOLVER, service, task_id, tmp_path / task_id / "plane"))
+        assert solved_directly(await _rollout_of(DIRECT, service, task_id, tmp_path / task_id / "direct"))
+        await _oracle_and_no_op(service, task_id)
+        session = await _open(service, task_id)
+        try:
+            assert await hidden_from_read_only(session, ROTATE_TOOL)
+        finally:
+            await session.close()
     await _nothing_left(service, scratch, registered)
 
 
