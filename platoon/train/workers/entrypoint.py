@@ -80,7 +80,7 @@ import threading
 import time
 from collections.abc import Coroutine
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from platoon.utils.stopping import (
     cleanups,
@@ -88,6 +88,9 @@ from platoon.utils.stopping import (
     kill_process_groups,
     register_descendant_groups,
 )
+
+if TYPE_CHECKING:
+    from platoon.train.workers.protocol import ModelBinding, RolloutWorkerRequest
 
 _PR_SET_PDEATHSIG = 1
 
@@ -422,6 +425,9 @@ HEADER_TEMPLATE = (
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the rollout of the request at the one path in ``argv``, and write its response where the request says;
+    returns the exit code.  Its steps run in this order, and each says why it comes where it does."""
+
     from platoon.train.workers.env import process_start_monotonic
 
     # Not time.monotonic(): by the time main() runs, `python -m
@@ -435,33 +441,49 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     request_path = arguments[0]
 
-    # 1. Own process group.  ``start_new_session=True`` already did setsid;
-    #    this is defensive so a directly-invoked worker is still killable as a
-    #    group (that group is what bounds a runaway PTC cell).
+    _become_worker_process()  # 1. its own process group, dying with the trainer, the worker invariants
+    request = _load_request(request_path)  # 2. read, unlinked at once (the API key), its diag marker and cleanup files
+    _arm_startup_deadline(request, started)  # 3. the rest of the startup budget, under the full alarm handler
+    extra_allow = _import_stack()  # 4. tinker, torch and the policy client, which R3 needs
+    _import_environment_packages(request)  # 5. what registers the environments' harnesses, programs and loaders
+    llm = _build_llm(request.model)  # 6. the policy, following the trainer's sampling client
+    startup_seconds = time.monotonic() - started
+    _print_header(request, startup_seconds=startup_seconds, extra_allow=extra_allow)  # 7. the header line
+    return _run(request, llm, startup_seconds=startup_seconds, extra_allow=extra_allow)  # 8. ready, then the rollout
+
+
+def _become_worker_process() -> None:
+    """Make this process a rollout worker: the leader of its own process group, dying with the trainer, with the
+    worker invariants in its environment."""
+
+    # Own process group.  ``start_new_session=True`` already did setsid;
+    # this is defensive so a directly-invoked worker is still killable as a
+    # group (that group is what bounds a runaway PTC cell).
     try:
         os.setpgrp()
     except OSError:
         pass
 
-    # 2. Die with the trainer.
+    # Die with the trainer.
     _install_parent_death_signal()
 
-    # 3. Environment invariants.  Already applied by ``workers.env`` from the
-    #    package init, which is the only point ahead of the tinker/torch
-    #    imports; repeated here so the requirement is stated where it is used.
+    # Environment invariants.  Already applied by ``workers.env`` from the
+    # package init, which is the only point ahead of the tinker/torch
+    # imports; repeated here so the requirement is stated where it is used.
     _apply_environment_invariants()
 
-    # 4. Load the request and unlink it immediately -- it carries the gateway
-    #    API key inside the pickled sampling client.  The alarm is deliberately
-    #    split into a startup phase and a rollout phase: a single alarm
-    #    covering both would let time spent queueing or fighting a
-    #    shared-filesystem stall silently eat the rollout's budget and turn a
-    #    slow start into a hard timeout with no data.
+
+def _load_request(path: str) -> RolloutWorkerRequest:
+    """Load the request at ``path`` and unlink it immediately: it carries the gateway API key inside the pickled
+    sampling client.  Then open its diagnostic marker, and say where the supervisor finds what the rollout opens, in
+    case this worker is killed before it can close it: its remote env sessions and its sandboxes, labelled as this
+    worker's."""
+
     from platoon.train.workers.protocol import load_request
 
-    request = load_request(request_path)
+    request = load_request(path)
     try:
-        os.unlink(request_path)
+        os.unlink(path)
     except OSError:
         pass
 
@@ -476,13 +498,23 @@ def main(argv: list[str] | None = None) -> int:
     # them, so the supervisor can when this worker cannot stop them itself.
     sandbox_cleanup.set_labels({**request.sandbox_labels, sandbox_cleanup.WORKER_LABEL: request.request_id})
     sandbox_cleanup.mirror_to(request.sandboxes_path)
+    return request
+
+
+def _arm_startup_deadline(request: RolloutWorkerRequest, started: float) -> None:
+    """Arm what is left of the request's startup budget, under the full alarm handler (:func:`_alarm_handler`).
+
+    The alarm is deliberately split into a startup phase and a rollout phase: a single alarm covering both would let
+    time spent queueing or fighting a shared-filesystem stall silently eat the rollout's budget and turn a slow start
+    into a hard timeout with no data."""
+
+    global _PHASE, _PHASE_STARTED
     signal.signal(signal.SIGALRM, _alarm_handler)
     # The pre-import deadline armed by ``workers.env`` (from the environment)
     # already covered the imports; re-arm the remainder under the richer
     # handler.  A worker launched without that environment gets its whole
     # deadline here, and one that already blew it dies immediately with an
     # attributable marker instead of silently eating the rollout's budget.
-    global _PHASE, _PHASE_STARTED
     _PHASE, _PHASE_STARTED = "startup", started
     remaining = request.startup_budget_seconds - (time.monotonic() - started)
     _refresh_diag_payload()
@@ -490,12 +522,17 @@ def main(argv: list[str] | None = None) -> int:
         _alarm_handler(signal.SIGALRM, None)
     signal.setitimer(signal.ITIMER_REAL, max(0.05, remaining))
 
-    # 5. Now import the stack.  This module import applies the extra='allow'
-    #    SampleResponse patch and registers the platoon renderers.
-    import tinker  # noqa: E402  (must follow the proxy import)
+
+def _import_stack() -> bool:
+    """Import the stack, pin torch to one thread, and check that tinker's ``SampleResponse`` is ``extra='allow'``,
+    which the policy client's import makes it (R3); returns that it is."""
+
+    import tinker  # noqa: E402
     import torch  # noqa: E402
 
-    from platoon.train.tinker import proxy
+    # This module import applies the extra='allow' SampleResponse patch and
+    # registers the platoon renderers.
+    from platoon.train.tinker import proxy  # noqa: F401  (for the patch it applies, checked below)
 
     # interop must be set before any parallel work is scheduled.
     try:
@@ -510,21 +547,29 @@ def main(argv: list[str] | None = None) -> int:
             "R3: tinker.types.SampleResponse is not extra='allow' in this rollout worker, so the "
             "gateway's routing_id would be dropped and every datum would lose its routing_handle"
         )
+    return extra_allow
 
-    # 5b. Import what registers the environments' harnesses, programs and loaders (environments[].package), as
-    #     the trainer did when it loaded the config: the rollout looks them up by name.  Inside the startup
-    #     budget, before the parent's admission slot is released.  Installed extensions' components load by name
-    #     from their entry points when the rollout names them.
+
+def _import_environment_packages(request: RolloutWorkerRequest) -> None:
+    """Import what registers the environments' harnesses, programs and loaders (environments[].package), as the
+    trainer did when it loaded the config: the rollout looks them up by name.  Inside the startup budget, before the
+    parent's admission slot is released.  Installed extensions' components load by name from their entry points when
+    the rollout names them."""
+
     if request.packages:
         from platoon.train.auto import import_environment_packages
 
         import_environment_packages(request.packages)
 
-    # 6. Build the LLM.  NEVER register_tinker_llm(): it constructs a
-    #    ServiceClient, i.e. a second gateway session per rollout.
+
+def _build_llm(binding: ModelBinding) -> Any:
+    """The policy the rollout samples, following the trainer's sampling client, set as the process default; None when
+    the binding names no model.  NEVER register_tinker_llm(): it constructs a ServiceClient, i.e. a second gateway
+    session per rollout."""
+
+    from platoon.train.tinker import proxy  # imported with the stack (_import_stack)
     from platoon.train.workers.binding import FollowingSamplingClient
 
-    binding = request.model
     llm = None
     if binding.model_name:
         sampling_client = FollowingSamplingClient(
@@ -555,8 +600,15 @@ def main(argv: list[str] | None = None) -> int:
         # silently reaching some other policy.
         logger_message = "[rollout-worker] no model bound; running without a sampling provider"
         print(logger_message, flush=True)
+    return llm
 
-    startup_seconds = time.monotonic() - started
+
+def _print_header(request: RolloutWorkerRequest, *, startup_seconds: float, extra_allow: bool) -> None:
+    """Print the worker's header line (:data:`HEADER_TEMPLATE`): its request, its process, the invariants it checked
+    and its startup seconds."""
+
+    import torch  # imported with the stack (_import_stack)
+
     print(
         HEADER_TEMPLATE.format(
             request=request.request_id,
@@ -570,8 +622,14 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    # 7. Ready: release the parent's admission slot, then swap to the rollout
-    #    deadline so the rollout gets its full budget from the moment it begins.
+
+def _run(request: RolloutWorkerRequest, llm: Any, *, startup_seconds: float, extra_allow: bool) -> int:
+    """Release the parent's admission slot, run the rollout under its own deadline until it ends or the worker stops
+    (:func:`_run_until_terminated`), write its response, and end the process groups it left running; returns the exit
+    code."""
+
+    # Ready: release the parent's admission slot, then swap to the rollout
+    # deadline so the rollout gets its full budget from the moment it begins.
     _signal_ready(request.ready_path)
     _arm_alarm(request.rollout_budget_seconds, phase="rollout")
     _start_monitor_thread(request.rss_soft_limit_bytes)
