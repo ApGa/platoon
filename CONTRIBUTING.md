@@ -143,6 +143,20 @@ On a 32-core machine the suite takes about 8 minutes in one process and a little
 time goes to tests that start worker processes, which import the tinker/torch stack, and wait for them.
 `pytest tests/` without `-n` still runs every test, the `serial` ones too, one after another.
 
+One more CI job, `docker-stacks`, runs Harbor stacks on Docker, end to end
+(`tests/integration/test_harbor_stacks_docker.py`), on a runner with Docker and its compose plugin, after the `uv sync`
+of core's tests, with `PLATOON_TEST_DOCKER_STACKS` set to `require`, under which the module fails, rather than skips,
+where Docker cannot run stacks:
+
+```bash
+docker version && docker compose version
+uv run pytest tests/integration/test_harbor_stacks_docker.py -v -rs --junitxml=docker-stacks.xml
+test -s docker-stacks.xml && ! grep -q '<skipped' docker-stacks.xml
+```
+
+The last command fails the job if any of its tests was skipped. Elsewhere the module skips, saying why; set
+`PLATOON_TEST_DOCKER_STACKS=1` to run it where Docker is (it pulls and builds images, and needs the network).
+
 While you work, run only what you touch:
 
 ```bash
@@ -166,6 +180,7 @@ Most of the suite is self-contained. A few groups of tests need files you may no
 | `tests/renderers`, `tests/train/tinker/test_gateway_tools_routing.py` | The tokenizers and chat templates of the Qwen3.6 and Qwen3.8 snapshots named in `tests/renderers/renderer_cases.py` | The Hugging Face cache, or `PLATOON_TEST_HF_HUB` (another hub cache directory that holds them) and `QWEN36_PRESERVE_THINKING_SNAPSHOT` |
 | Parts of `tests/sandbox/test_sandbox_hpc.py`, and the test of `tests/envs/test_harbor_providers.py` that checks the root filesystem layouts a run refuses against the provider | hpc-sandbox | `uv sync --dev --extra tinker --extra ors --extra hpc` |
 | One test each in `tests/gateway/test_gateway_mcp.py` and `tests/envs/test_ors_concurrency.py` | The OpenHands SDK and fastmcp clients | Run them in an environment that has both, or set `PLATOON_CLIENT_VENV` to that environment's directory |
+| `tests/integration/test_harbor_stacks_docker.py` | Docker with its compose plugin, and the network: it pulls and builds images and runs stacks of containers | Set `PLATOON_TEST_DOCKER_STACKS=1`; CI's `docker-stacks` job sets it to `require`, which fails the module where Docker cannot run stacks |
 | `tests/envs/test_harbor_root_verifier_singularity.py` | Singularity or Apptainer, hpc-sandbox, and a node where `--fakeroot` works (your user has subordinate ids): it starts real sandboxes | Set `PLATOON_TEST_SINGULARITY_IMAGE` to an image with `sh`, `find`, `chown` and `setpriv` or `su` (a local `.sif`, or a `docker://` reference the node can pull), and run it on such a node, never a login node; `HPC_SANDBOX_SCRATCH` puts the sandboxes on node-local disk |
 
 The tests look for snapshots in the standard Hugging Face cache: `HF_HUB_CACHE`, else `HF_HOME/hub`, else

@@ -38,7 +38,10 @@ variable's path.  Harbor's egress-control sidecar is never emulated: platoon has
 (:data:`IGNORED_KEYS`: ``container_name``, ``restart``, ``init``, ``stdin_open``, ``tty``, ``labels``, ``logging``,
 ``stop_grace_period``, ``pull_policy``, and ``platform`` when it is this host's), and every other key is refused,
 security-relevant ones (``privileged``, ``devices``, ``pid``, ``ipc``, ``security_opt``, ``sysctls``, ``user``, ...)
-included.  Published ``ports`` are kept as ``expose``: nothing is ever published on the host.  A service with
+included.  A fetch with ``refuse: {privileges: false}`` plans ``privileged`` and a ``cap_add`` of other capabilities
+(``NET_ADMIN``, ...) instead, as the stack's **privileges** (:attr:`ComposePlan.privileges`), which only a sandbox
+provider with the ``privileged`` capability (``docker``) grants: the task loader refuses such a task elsewhere.
+Published ``ports`` are kept as ``expose``: nothing is ever published on the host.  A service with
 ``profiles`` is not started (Harbor starts none), and is left out.  A dataset's overlay may set, replace or unset a
 service's keys (``[[compose]]``, :class:`ComposeEdit`), which the plan records.
 
@@ -151,14 +154,14 @@ IGNORED_KEYS = frozenset(
     }
 )
 # Capabilities a service's root holds over its own namespaces, which compose may add: those Docker grants by default,
-# and the few a rootless container's root holds over its own processes and files.  NET_ADMIN and NET_RAW over the
-# stack's network, and everything else, are refused unless an overlay drops them.
+# and SYS_PTRACE, over the service's own processes.  NET_ADMIN and NET_RAW over the stack's network, and everything
+# else, are refused unless an overlay drops them, DAC_READ_SEARCH among them: where a service's root is the host's (a
+# rootful Docker), it reads any file of the host by its handle (open_by_handle_at).
 HELD_CAPABILITIES = frozenset(
     {
         "AUDIT_WRITE",
         "CHOWN",
         "DAC_OVERRIDE",
-        "DAC_READ_SEARCH",
         "FOWNER",
         "FSETID",
         "KILL",
@@ -175,7 +178,10 @@ HELD_CAPABILITIES = frozenset(
 # Why a key that matters to a task's security, or to what it measures, is refused; every key that is neither accepted
 # nor ignored is refused too, as outside the subset.
 REFUSED_KEYS = {
-    "privileged": "gives the service every privilege of the host, which platoon never grants",
+    "privileged": (
+        "gives the service every privilege of the host, which platoon grants only on the docker provider, to a "
+        "dataset fetched with refuse: {privileges: false}"
+    ),
     "devices": "gives the service host devices, which platoon never grants",
     "gpus": "asks for GPUs; a task asks for them with [environment].gpus, and a stack's services get none",
     "pid": "shares a PID namespace other than the service's own",
@@ -439,6 +445,13 @@ class ComposePlan:
         return bool(self.data.get("egress", True))
 
     @property
+    def privileges(self) -> tuple[str, ...]:
+        """What its services ask for that only the docker provider grants (``judge.privileged``, ``main.cap_add
+        NET_ADMIN``): planned so by a fetch with ``refuse: {privileges: false}``, refused by every other."""
+
+        return tuple(self.data.get("privileges") or ())
+
+    @property
     def external(self) -> dict[str, str]:
         """The services an overlay marks as served by a node service (``external``), with that node service."""
 
@@ -581,12 +594,15 @@ def plan_compose(
     edits: Sequence[ComposeEdit] = (),
     host_env: Iterable[str] = (),
     with_keys: bool = True,
+    privileges: bool = False,
 ) -> ComposePlan | None:
     """The stack plan of the task at ``task_dir`` (None when it has no compose file), from its compose file as Harbor
     layers it: over a ``main`` built from ``environment/`` (prebuilt from ``docker_image`` when given), interpolated
     with Harbor's variables, the task's ``env`` and the listed ``host_env``, after the overlays' ``edits``.  ``cpus``
     and ``memory_mb`` are the task's ``[environment]`` resources (``CPUS``, ``MEMORY``).  ``with_keys`` plans the
-    build keys of the services' build contexts (a fetch records them; a session needs none).
+    build keys of the services' build contexts (a fetch records them; a session needs none).  ``privileges`` plans
+    ``privileged``, and a ``cap_add`` of a capability that a rootless service's root does not hold, as the plan's
+    :attr:`~ComposePlan.privileges`, where both are refused otherwise.
 
     Raises :class:`ComposeError` for a file outside the subset, naming the service and key."""
 
@@ -623,6 +639,7 @@ def plan_compose(
         memory_mb=memory_mb,
         host_env=frozenset(host_env),
         with_keys=with_keys,
+        privileges=privileges,
     )
     return planner.plan(document, external=external, edits=applied)
 
@@ -881,10 +898,13 @@ class _Planner:
         memory_mb: int | None,
         host_env: frozenset[str],
         with_keys: bool,
+        privileges: bool,
     ) -> None:
         self.task_dir = task_dir
         self.docker_image = docker_image
         self.with_keys = with_keys
+        self.privileges = privileges  # plan privileged and the other capabilities, for the docker provider
+        self.granted: list[str] = []  # those the services ask for, as "<service>.privileged", "<service>.cap_add X"
         self.notes: list[str] = []
         self.ignored: list[str] = []
         self.deferred: set[str] = set()
@@ -950,6 +970,8 @@ class _Planner:
         for key, values in (("ignored", self.ignored), ("notes", self.notes), ("edits", edits)):
             if values:
                 data[key] = list(values)
+        if self.granted:
+            data["privileges"] = list(self.granted)
         if self.deferred:
             data["deferred"] = sorted(self.deferred)
         return ComposePlan(data)
@@ -968,7 +990,7 @@ class _Planner:
         for key in raw:
             if not isinstance(key, str):
                 raise ComposeError(where, f"key {key!r} is not a name")
-            if key.startswith("x-") or key in SERVICE_KEYS:
+            if key.startswith("x-") or key in SERVICE_KEYS or (key == "privileged" and self.privileges):
                 continue
             if key in IGNORED_KEYS:
                 self._ignored(name, key, raw[key])
@@ -1018,7 +1040,15 @@ class _Planner:
         if "ulimits" in values:
             service["ulimits"] = _ulimits(values["ulimits"], f"{name}.ulimits")
         if "cap_add" in values:
-            service["cap_add"] = _capabilities(values["cap_add"], f"{name}.cap_add")
+            service["cap_add"] = _capabilities(values["cap_add"], f"{name}.cap_add", held_only=not self.privileges)
+            self.granted += [f"{name}.cap_add {cap}" for cap in service["cap_add"] if cap not in HELD_CAPABILITIES]
+        if "privileged" in raw:  # planned with privileges only: the keys' check refused it otherwise
+            privileged = self._interpolated(raw["privileged"], f"{name}.privileged")
+            if not isinstance(privileged, bool):
+                raise ComposeError(f"{name}.privileged", "must be true or false")
+            if privileged:
+                service["privileged"] = True
+                self.granted.append(f"{name}.privileged")
         if "stop_signal" in values:
             service["stop_signal"] = _string(values["stop_signal"], f"{name}.stop_signal")
         if "tmpfs" in values:
@@ -1559,7 +1589,13 @@ def _main_service(data: Mapping[str, Any], *, egress: bool = True, stack: bool =
     ]
     unsupported = []
     if not stack:  # a stack provider applies these, where its runtime can
-        planned = {"cap_add": "cap_add", "shm_size": "shm_mb", "ulimits": "ulimits", "network_mode": "network_mode"}
+        planned = {
+            "cap_add": "cap_add",
+            "privileged": "privileged",
+            "shm_size": "shm_mb",
+            "ulimits": "ulimits",
+            "network_mode": "network_mode",
+        }
         unsupported += [key for key, field in planned.items() if data.get(field)]  # as the compose file names them
         if any(mount["type"] == "tmpfs" for mount in data.get("volumes") or ()):
             unsupported.append("tmpfs")
@@ -1845,18 +1881,22 @@ def _ulimits(raw: Any, where: str) -> dict[str, list[int]]:
     return limits
 
 
-def _capabilities(raw: Any, where: str) -> list[str]:
+def _capabilities(raw: Any, where: str, *, held_only: bool = True) -> list[str]:
+    """The capabilities a ``cap_add`` names; with ``held_only``, a ``ComposeError`` for one that a service's root does
+    not hold over the stack."""
+
     names = [raw] if isinstance(raw, str) else raw
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
         raise ComposeError(where, "must list capabilities")
     capabilities = []
     for name in names:
         capability = name.upper().removeprefix("CAP_")
-        if capability not in HELD_CAPABILITIES:
+        if held_only and capability not in HELD_CAPABILITIES:
             raise ComposeError(
                 where,
                 f"adds {capability}, which a service's root does not hold over the stack (only capabilities over its "
-                "own processes and files: SYS_PTRACE, SYS_CHROOT, ...); an overlay may drop it",
+                "own processes and files: SYS_PTRACE, SYS_CHROOT, ...); an overlay may drop it, and a fetch with "
+                "refuse: {privileges: false} keeps it for the docker provider",
             )
         capabilities.append(capability)
     return capabilities

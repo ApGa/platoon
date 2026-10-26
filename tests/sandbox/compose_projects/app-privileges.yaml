@@ -1,0 +1,67 @@
+outcome: opened and closed
+project:
+  name: <project>
+  services:
+    main:
+      image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+      container_name: <project>-main
+      entrypoint: [sleep, infinity]
+      working_dir: /app
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-privileges, platoon.task: platoon/app-privileges, platoon.stack: <project>, platoon.service: main}
+      volumes:
+      - {type: bind, source: <tmp>/stacks/<project>/volumes/shared, target: /shared, read_only: false}
+      networks:
+        internal: {}
+      cpus: 1
+      mem_limit: 512m
+    router:
+      image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+      container_name: <project>-router
+      entrypoint: [sleep, infinity]
+      working_dir: /
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-privileges, platoon.task: platoon/app-privileges, platoon.stack: <project>, platoon.service: router}
+      networks:
+        internal: {}
+      cap_add: [NET_ADMIN]
+    judge:
+      image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+      container_name: <project>-judge
+      entrypoint: [sleep, infinity]
+      working_dir: /
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-privileges, platoon.task: platoon/app-privileges, platoon.stack: <project>, platoon.service: judge}
+      volumes:
+      - {type: bind, source: <tmp>/stacks/<project>/volumes/shared, target: /shared, read_only: false}
+      networks:
+        internal: {}
+      privileged: true
+  networks:
+    internal:
+      name: <project>-internal
+      internal: true
+      driver_opts: {com.docker.network.bridge.inhibit_ipv4: 'true'}
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-privileges, platoon.task: platoon/app-privileges, platoon.stack: <project>}
+commands:
+  <project>:
+  - [compose, version]
+  - [version, --format, '{{.Server.Version}}']
+  - [ps, --all, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, ls, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, rm, <project>-internal]
+  router:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, router]
+  - [start, <project>-router]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-router]
+  - [rm, --force, --volumes, <project>-router]
+  judge:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, judge]
+  - [start, <project>-judge]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-judge]
+  - [rm, --force, --volumes, <project>-judge]
+  main:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, main]
+  - [start, <project>-main]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, /bin/sh, -c, <script>, platoon-list]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /logs/agent, /logs/verifier, /logs/artifacts, /app]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /shared]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-main]
+  - [rm, --force, --volumes, <project>-main]

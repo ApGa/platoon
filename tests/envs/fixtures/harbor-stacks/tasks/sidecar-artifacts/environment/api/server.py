@@ -44,4 +44,7 @@ class Orders(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ORDERS.parent.mkdir(parents=True, exist_ok=True)
-    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("PLATOON_PORT_8000", "8000"))), Orders).serve_forever()
+    # The process provider's listen variable, on the host's loopback; else every address, where the others reach it.
+    listen = os.environ.get("PLATOON_PORT_8000")
+    address = ("127.0.0.1", int(listen)) if listen else ("0.0.0.0", 8000)
+    ThreadingHTTPServer(address, Orders).serve_forever()

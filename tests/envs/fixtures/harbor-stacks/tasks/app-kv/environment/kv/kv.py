@@ -51,4 +51,7 @@ class Store(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     DATA.mkdir(parents=True, exist_ok=True)
     WRITES.parent.mkdir(parents=True, exist_ok=True)
-    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("PLATOON_PORT_6379", "6379"))), Store).serve_forever()
+    # The process provider's listen variable, on the host's loopback; else every address, where the others reach it.
+    listen = os.environ.get("PLATOON_PORT_6379")
+    address = ("127.0.0.1", int(listen)) if listen else ("0.0.0.0", 6379)
+    ThreadingHTTPServer(address, Store).serve_forever()

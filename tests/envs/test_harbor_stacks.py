@@ -25,6 +25,7 @@ from platoon.envs.harbor.images import SessionImage
 from platoon.envs.harbor.task import HarborTask, HarborTaskError
 from platoon.envs.service import EnvSetupError
 from platoon.sandbox import cleanup
+from platoon.sandbox import compose as docker_compose
 from platoon.sandbox.process import ProcessProvider
 from platoon.sandbox.stacks import DrivenStack
 
@@ -585,9 +586,10 @@ async def test_a_fetched_stack_is_refused_when_the_tasks_are_listed_where_no_sta
 async def test_fetched_stacks_that_no_rollout_could_start_are_refused_when_the_tasks_are_listed(
     tmp_path: Path, provider: ProcessProvider, monkeypatch: pytest.MonkeyPatch
 ):
-    """A registry sidecar without a command, one that builds its image from a context the image map lacks (nothing
-    builds a sidecar's image yet), and a dependency on the health of a sidecar without a healthcheck: locked as
-    stacks, refused when a run lists them, and each session open is a configuration error, never an infra one."""
+    """A registry sidecar without a command, one that builds its image from a context the image map lacks (which
+    platoon prepare builds: until then the run is not prepared), and a dependency on the health of a sidecar without a
+    healthcheck: locked as stacks, refused when a run lists them, and each session open is a configuration error,
+    never an infra one."""
 
     use_site_cache(monkeypatch, tmp_path / "cache")
     dataset = tmp_path / "dataset"
@@ -610,12 +612,22 @@ async def test_fetched_stacks_that_no_rollout_could_start_are_refused_when_the_t
         "refuse": {"sidecars": False},
     }
     service = HarborEnvironmentService(provider=provider, **settings)
-    for name, message in (
-        ("registry", "the service kv runs the command of its image docker://python:3.12-slim, which platoon does"),
-        ("built", "Harbor task 'platoon/built': the service kv builds its image from environment/kv/Dockerfile"),
-        ("unchecked", "The service 'main' waits for 'kv' to be healthy, and 'kv' has no healthcheck"),
+    unrunnable = "are multi-container stacks that no rollout can start"
+    for name, listed, message in (
+        (
+            "registry",
+            unrunnable,
+            "the service kv runs the command of its image docker://python:3.12-slim, which platoon does",
+        ),
+        (
+            "built",
+            "build their images from Dockerfiles, which no image map holds",
+            "Harbor task 'platoon/built': the service kv builds its image from environment/kv/Dockerfile .*: platoon "
+            "prepare builds it",
+        ),
+        ("unchecked", unrunnable, "The service 'main' waits for 'kv' to be healthy, and 'kv' has no healthcheck"),
     ):
-        with pytest.raises(EnvSetupError, match="1 of the 1 tasks of split 'train' are multi-container stacks that"):
+        with pytest.raises(EnvSetupError, match=f"1 of the 1 tasks of split 'train' {listed}"):
             await service.check_tasks("train", [name])
         with pytest.raises(EnvSetupError, match=message) as error:
             await _open(service, name)
@@ -852,3 +864,52 @@ def test_the_fixtures_lock_as_stacks(tmp_path: Path, monkeypatch: pytest.MonkeyP
     }
     plan = lock.get("sidecar-artifacts").compose
     assert plan is not None and json.dumps(plan["services"]["api"]["expose"]) == '["8000/tcp"]'
+
+
+# --- privileges, for the docker provider alone ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_stack_fetched_with_its_privileges_runs_on_docker_alone(
+    tmp_path: Path, provider: ProcessProvider, monkeypatch: pytest.MonkeyPatch
+):
+    """A fetch with ``refuse: {privileges: false}`` locks a stack whose services ask for privileges; a run on a
+    provider that gives none refuses it when it lists the tasks, and as it opens, and the docker provider's spec of it
+    gives each service what it asks for."""
+
+    use_site_cache(monkeypatch, tmp_path / "cache")
+    dataset = tmp_path / "dataset"
+    judged = _variant("judged", dataset)
+    compose = judged / "environment" / "docker-compose.yaml"
+    _edit(
+        compose,
+        "\n  kv:\n    image: python:3.12-slim\n",
+        "\n    cap_add: [NET_ADMIN]\n  kv:\n    privileged: true\n    image: python:3.12-slim\n",
+    )
+    settings: dict[str, Any] = {
+        "dataset": str(dataset),
+        "lock": str(tmp_path / "lock.json"),
+        "refuse": {"sidecars": False, "privileges": False},
+    }
+    lock = fetch(fetch_config(settings["dataset"], lock=settings["lock"], refuse=settings["refuse"]))
+    judged_row = lock.get("judged")
+    assert judged_row.refused is None and judged_row.compose is not None
+    assert judged_row.compose["privileges"] == ["main.cap_add NET_ADMIN", "kv.privileged"]
+
+    on_process = HarborEnvironmentService(provider=provider, **settings)
+    with pytest.raises(EnvSetupError, match=r"stacks whose services ask for privileges \(such as judged: main.cap_"):
+        await on_process.check_tasks("train", ["judged"])
+    with pytest.raises(EnvSetupError, match="the 'process' sandbox provider gives no service such privileges") as error:
+        await _open(on_process, "judged")
+    assert error.value.failure_kind == "env_config"
+
+    monkeypatch.setattr(docker_compose, "compose_refusal", lambda binary: None)  # a docker CLI with compose, if any
+    on_docker = HarborEnvironmentService(provider="docker", **settings)  # never built: no stack starts here
+    harbor_task = on_docker._lookup("judged")
+    spec = on_docker._stack_plan(harbor_task, on_docker._sandbox_spec(harbor_task, "check"), setup=_nothing).spec
+    assert (spec.services["main"].cap_add, spec.services["main"].privileged) == (("NET_ADMIN",), False)
+    assert (spec.services["kv"].cap_add, spec.services["kv"].privileged) == ((), True)
+
+
+async def _nothing(sandbox) -> None:
+    pass

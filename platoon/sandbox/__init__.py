@@ -111,13 +111,15 @@ def rootfs_layout_refusal(provider: str | SandboxProvider, options: Mapping[str,
 def stack_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | None = None) -> str | None:
     """Why ``provider`` (a name with its ``options``, or a built provider) would start no stack, a task's services
     together (:mod:`platoon.sandbox.stacks`), read without building it; None when it starts stacks, or cannot tell
-    before it is built.  A built provider tells by its capabilities (``stacks``, with a ``start_stack`` method); a
-    provider class by a ``stack_refusal(options)`` class method, else by capabilities it declares on the class."""
+    before it is built.  A built provider tells by its capabilities (``stacks``, with a ``start_stack`` method), then
+    as its class does; a provider class by a ``stack_refusal(options)`` class method (the ``docker`` provider's says
+    whether its CLI has the compose plugin), else by capabilities it declares on the class."""
 
     if not isinstance(provider, str):
-        if STACKS in provider.capabilities and callable(getattr(provider, "start_stack", None)):
-            return None
-        return f"the {provider.name!r} sandbox provider runs no multi-container stacks"
+        if STACKS not in provider.capabilities or not callable(getattr(provider, "start_stack", None)):
+            return f"the {provider.name!r} sandbox provider runs no multi-container stacks"
+        refusal = getattr(type(provider), "stack_refusal", None)
+        return refusal(dict(getattr(provider, "options", None) or {})) if callable(refusal) else None
     try:
         kind = provider_class(provider)
     except (ImportError, AttributeError, ValueError):
@@ -131,6 +133,25 @@ def stack_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | 
     if STACKS in capabilities and callable(getattr(kind, "start_stack", None)):
         return None
     return f"the {provider!r} sandbox provider runs no multi-container stacks"
+
+
+def privilege_refusal(provider: str | SandboxProvider) -> str | None:
+    """Why ``provider`` (a name, or a built provider) would not give a stack's services the privileges a Harbor task
+    fetched with ``refuse: {privileges: false}`` may ask for: a privileged container, or a capability that a rootless
+    service does not hold over the stack (``NET_ADMIN``, ...); None when it declares the ``privileged`` capability
+    (``docker``).  Read from the class without building it; a provider that does not import grants none."""
+
+    if isinstance(provider, str):
+        try:
+            kind = provider_class(provider)
+        except (ImportError, AttributeError, ValueError):
+            return f"the {provider!r} sandbox provider does not import"
+        name, capabilities = provider, getattr(kind, "capabilities", None)
+    else:
+        name, capabilities = provider.name, provider.capabilities
+    if isinstance(capabilities, frozenset | set) and "privileged" in capabilities:
+        return None
+    return f"the {name!r} sandbox provider gives no service such privileges (the docker provider does)"
 
 
 def root_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | None = None) -> str | None:
@@ -177,6 +198,7 @@ __all__ = [
     "cwd_error",
     "get_provider",
     "network_none_refusal",
+    "privilege_refusal",
     "provider_class",
     "provider_unavailable",
     "root_refusal",

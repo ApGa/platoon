@@ -1,10 +1,11 @@
 # Stack fixtures
 
 Harbor tasks written for platoon, whose compose files make them multi-container stacks: `main` and sidecar services
-that the tests of `tests/envs/test_harbor_stacks.py` run on the `process` provider. Their services are standard-library
-Python programs that platoon's process provider runs on the host, so each listens on its listen variable
-(`PLATOON_PORT_<port>`) when it is set and on its declared port otherwise, and writes below `$PLATOON_SANDBOX_ROOT`
-when that is set; real stacks leave both unset.
+that the tests of `tests/envs/test_harbor_stacks.py` run on the `process` provider. Their services are
+standard-library Python programs that platoon's process provider runs on the host, so each listens on its listen
+variable (`PLATOON_PORT_<port>`) on the host's loopback when it is set, and otherwise on its declared port of every
+address (a real stack's own network, where the other services reach it by name), and writes below
+`$PLATOON_SANDBOX_ROOT` when that is set; real stacks leave both unset.
 
 | Task | What it checks |
 |---|---|

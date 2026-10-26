@@ -14,7 +14,7 @@ harbor-local/
     │   ├── instruction.md          #   what the agent is asked to do
     │   ├── tests/test.sh           #   the verifier: writes /logs/verifier/reward.txt
     │   └── solution/solve.sh       #   a reference solution (never shown to the agent)
-    └── needs-a-database/           # a task refused here: its compose file adds a sidecar service
+    └── needs-a-database/           # a task refused here: its compose file adds a database service
         └── environment/docker-compose.yaml
 ```
 
@@ -42,14 +42,20 @@ harbor-local/
    uv run platoon eval eval.yaml environments.0.service_kwargs.provider=enroot
    ```
 
-2. Read the log. `needs-a-database` is skipped before anything runs, since the provider runs no multi-container
-   stacks ([Multi-container tasks](../../docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)):
+2. Read the log. `needs-a-database` is skipped before anything runs, never started without its database
+   ([Multi-container tasks](../../docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)). Docker runs such
+   tasks, each as a `docker compose` project, but not this one yet: its database runs the command of its image,
+   `postgres:16`, which platoon does not record yet, as the log says:
 
    ```text
    WARNING | platoon.envs.harbor.dataset | Skipping Harbor task .../tasks/needs-a-database: ...
-   environment/docker-compose.yaml makes the environment a multi-container stack (sidecar services), and the
-   'docker' sandbox provider runs no multi-container stacks; the task is refused, never started without them
+   environment/docker-compose.yaml makes the environment a multi-container stack (sidecar services) whose service db
+   runs the command of its registry image postgres:16, which platoon does not know yet (a pulled image's
+   configuration is not recorded): give it a command (an overlay's [[compose]] replace); the task is refused
    ```
+
+   Singularity, Apptainer and enroot run no multi-container tasks yet: there the log says that the provider runs no
+   multi-container stacks.
 
 3. Read the summary that `platoon eval` prints. A policy that solves the task prints:
 

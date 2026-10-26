@@ -66,6 +66,7 @@ from platoon.sandbox import (
     StackStartError,
     get_provider,
     network_none_refusal,
+    privilege_refusal,
     root_refusal,
     rootfs_layout_refusal,
     stack_refusal,
@@ -440,8 +441,8 @@ class HarborEnvironmentService:
         could not run as their ``[verifier].user`` asks (:meth:`_check_users`), or whose verifier would run as root
         on an image that may keep its files from other users (:meth:`_check_root_images`), so that the run stops when
         it lists its tasks rather than lose every rollout of theirs, or that are multi-container stacks no rollout
-        could start (:meth:`_check_stacks`, :meth:`_check_stack_specs`); and, with :class:`EnvNotPrepared`, tasks of a
-        fetched dataset whose images the image map lacks (:meth:`_check_images`)."""
+        could start (:meth:`_check_stacks`, :meth:`_check_privileges`, :meth:`_check_stack_specs`); and, with
+        :class:`EnvNotPrepared`, tasks of a fetched dataset whose images the image map lacks (:meth:`_check_images`)."""
 
         if task_ids and (refusal := rootfs_layout_refusal(self._provider, self._provider_options)):
             raise EnvSetupError("env_config", f"the {self._provider_name()} provider would start no sandbox: {refusal}")
@@ -454,6 +455,7 @@ class HarborEnvironmentService:
                     f"verifier_provider_options: {refusal}",
                 )
         self._check_stacks(task_ids, split)
+        self._check_privileges(task_ids, split)
         self._check_networks(task_ids, split)
         self._check_users(task_ids, split)
         self._check_images(task_ids, split)
@@ -461,11 +463,12 @@ class HarborEnvironmentService:
         self._check_root_images(task_ids, split)
 
     def _check_images(self, names: Sequence[str], split: str) -> None:
-        """Refuse tasks of a fetched dataset that build their image, or their separate verifier's, from a Dockerfile
-        whose image the image map lacks (or whose image file is gone, or is not the size its build recorded): a run
-        never builds an image, and every rollout of theirs would fail when its session opens.  ``platoon prepare``
-        builds them.  Tasks of a dataset directory plan their images when a session opens, and are not checked; nor
-        are tasks that run a prebuilt image.  Each image is looked at once, however many tasks share it."""
+        """Refuse tasks of a fetched dataset that build their image, their separate verifier's or a stack sidecar's
+        from a Dockerfile whose image the image map lacks (or whose image file is gone, or is not the size its build
+        recorded): a run never builds an image, and every rollout of theirs would fail when its session opens.
+        ``platoon prepare`` builds them.  Tasks of a dataset directory plan their images when a session opens, and are
+        not checked; nor are tasks that run a prebuilt image.  Each image is looked at once, however many tasks share
+        it."""
 
         path = self._images.path
         if self._locked is None or path is None or not names:
@@ -479,7 +482,7 @@ class HarborEnvironmentService:
         missing: dict[str, list[str]] = {}  # build key -> the tasks that need its image
         for name in names:
             row = dataset.lock.get(name)
-            for plan in (row.image, row.verifier_image or {}):
+            for plan in (row.image, row.verifier_image or {}, *row.service_builds()):
                 key = plan.get("key")
                 if not key:
                     continue
@@ -533,12 +536,32 @@ class HarborEnvironmentService:
                 "(exclude_tasks)",
             )
 
+    def _check_privileges(self, names: Sequence[str], split: str) -> None:
+        """Refuse the stacks of a fetched dataset whose services ask for privileges (a fetch with ``refuse:
+        {privileges: false}`` plans them) that the provider would not give (:func:`platoon.sandbox.privilege_refusal`):
+        every rollout of theirs would be refused as it opens."""
+
+        if self._locked is None or not names or (refusal := privilege_refusal(self._provider)) is None:
+            return
+        lock = self._locked.dataset(fetch_allowed=False).lock
+        asking = {
+            name: privileges for name in names if (privileges := (lock.get(name).compose or {}).get("privileges"))
+        }
+        if asking:
+            name, privileges = next(iter(asking.items()))
+            raise EnvSetupError(
+                "env_config",
+                f"{len(asking)} of the {len(names)} tasks of split {split!r} are stacks whose services ask for "
+                f"privileges (such as {name}: {', '.join(privileges)}), and {refusal}; run them on the docker "
+                "provider, or leave them out (exclude_tasks)",
+            )
+
     def _check_stack_specs(self, names: Sequence[str], split: str) -> None:
         """Refuse the multi-container stacks among the tasks that no rollout could start, as a session would find
-        when it opens (:func:`platoon.envs.harbor.sidecars.stack_spec`, which starts nothing): a sidecar whose image
-        the image map lacks (nothing builds a sidecar's image in this release), whose image's command platoon does not
-        know, a dependency on the health of a service without a healthcheck, an unset host variable.  Where no stack
-        runs, :meth:`_check_stacks` refused them already."""
+        when it opens (:func:`platoon.envs.harbor.sidecars.stack_spec`, which starts nothing): a sidecar whose image's
+        command platoon does not know, a dependency on the health of a service without a healthcheck, an unset host
+        variable.  Where no stack runs, :meth:`_check_stacks` refused them already, and a sidecar's image that the
+        image map lacks :meth:`_check_images`."""
 
         if not names or self._stack_refusal() is not None:
             return
@@ -1062,6 +1085,7 @@ class HarborEnvironmentService:
             index=index,
             compose=compose,
             stack_refusal=self._stack_refusal(),
+            privilege_refusal=privilege_refusal(self._provider),
         )
 
     def _lookup(self, task_id: str) -> HarborTask:

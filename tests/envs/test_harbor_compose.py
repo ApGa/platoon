@@ -1216,3 +1216,102 @@ async def test_a_dataset_of_main_only_tasks_lists_them_both(service: HarborEnvir
     assert task.compose is not None and task.compose.kind == "main_only"
     assert task.main is not None and task.main.init(None) == ["python3", "/opt/data/serve.py"]
     assert service.rollout_overhead_s("main-only-serve") > service.sandbox_start_budget_s
+
+
+# --- privileges, for the docker provider alone ---------------------------------------------------------------------
+
+
+def test_privileges_are_planned_only_when_a_fetch_keeps_them(tmp_path: Path):
+    """``privileged`` and a ``cap_add`` of a capability that a rootless service does not hold are refused, naming the
+    switch that keeps them; planned with ``privileges``, the plan lists them, by service, for the loader to refuse
+    wherever the provider gives none."""
+
+    task_dir = _adapter_task(tmp_path, "cybergym")
+    with pytest.raises(ComposeError, match=r"refuse: \{privileges: false\} keeps it for the docker provider"):
+        plan_compose(task_dir)
+
+    plan = _plan(task_dir, privileges=True)
+
+    assert plan.privileges == ("main.cap_add NET_ADMIN",) and plan.services["main"]["cap_add"] == ["NET_ADMIN"]
+    stack = _task(
+        tmp_path,
+        "judged",
+        "services:\n  main:\n    cap_add: [SYS_PTRACE]\n  judge:\n    image: judge:1\n    command: [judge]\n"
+        "    privileged: true\n  quiet:\n    image: judge:1\n    command: [judge]\n    privileged: false\n",
+    )
+    plan = _plan(stack, privileges=True)
+    assert plan.privileges == ("judge.privileged",)  # SYS_PTRACE is a rootless root's own, and false asks for nothing
+    assert plan.services["judge"]["privileged"] is True and "privileged" not in plan.services["quiet"]
+    with pytest.raises(ComposeError, match="judge.privileged: gives the service every privilege of the host"):
+        plan_compose(stack)
+
+
+def test_a_capability_that_reads_the_hosts_files_is_a_privilege(tmp_path: Path):
+    """DAC_READ_SEARCH lets a root that is the host's (a rootful Docker) open any file of the host by its handle."""
+
+    task_dir = _task(tmp_path, "handles", "services:\n  main:\n    cap_add: [CAP_DAC_READ_SEARCH]\n")
+
+    with pytest.raises(ComposeError, match="main.cap_add: adds DAC_READ_SEARCH, which a service's root does not hold"):
+        plan_compose(task_dir)
+    plan = _plan(task_dir, privileges=True)
+    assert plan.privileges == ("main.cap_add DAC_READ_SEARCH",)
+
+
+def test_a_stack_that_asks_for_privileges_loads_only_where_the_provider_gives_them(tmp_path: Path):
+    from platoon.sandbox import privilege_refusal
+
+    task_dir = _adapter_task(tmp_path, "cybergym")
+    plan = _plan(task_dir, privileges=True)
+
+    assert privilege_refusal("docker") is None
+    for provider in ("process", "singularity", "enroot"):
+        refusal = privilege_refusal(provider)
+        assert (
+            refusal == f"the {provider!r} sandbox provider gives no service such privileges (the docker provider does)"
+        )
+        with pytest.raises(HarborTaskError, match=r"ask for privileges \(main.cap_add NET_ADMIN\), and the "):
+            HarborTask.load(task_dir, compose=plan, privilege_refusal=refusal)
+    assert HarborTask.load(task_dir, compose=plan, privilege_refusal=None).is_stack
+
+
+def test_one_sandbox_gives_main_no_privileges(tmp_path: Path):
+    task_dir = _task(tmp_path, "main-only", "services:\n  main:\n    privileged: true\n    working_dir: /srv\n")
+    plan = _plan(task_dir, privileges=True)
+
+    assert plan.kind == "main_only" and plan.privileges == ("main.privileged",)
+    with pytest.raises(HarborTaskError, match="gives main privileged, which platoon does not apply to the one sandbox"):
+        HarborTask.load(task_dir, compose=plan)
+
+
+def test_a_fetch_keeps_privileges_with_its_switch_and_old_locks_still_answer(tmp_path: Path):
+    from platoon.envs.harbor.fetch import RefusePolicy
+
+    dataset = tmp_path / "dataset"
+    _adapter_task(dataset, "cybergym")
+    kept = fetch(
+        fetch_config(
+            str(dataset),
+            cache=tmp_path / "cache",
+            lock=tmp_path / "kept.json",
+            refuse={"sidecars": False, "privileges": False},
+        )
+    )
+    default = fetch(
+        fetch_config(str(dataset), cache=tmp_path / "cache", lock=tmp_path / "default.json", refuse={"sidecars": False})
+    )
+
+    task = kept.get("cybergym")
+    assert (
+        task.refused is None and task.compose is not None and task.compose["privileges"] == ["main.cap_add NET_ADMIN"]
+    )
+    assert (default.get("cybergym").refused or "").startswith("compose: main.cap_add: adds NET_ADMIN")
+    # The switch enters what a lock answers only when it is set: a lock fetched before it existed still answers.
+    assert RefusePolicy.from_mapping({}).inputs() == {
+        "sidecars": True,
+        "gpus": True,
+        "agent_user": True,
+        "per_task_build": False,
+    }
+    assert RefusePolicy.from_mapping({"privileges": False}).inputs()["privileges"] is False
+    with pytest.raises(FetchError, match="refuse.privileges must be true or false"):
+        RefusePolicy.from_mapping({"privileges": "no"})

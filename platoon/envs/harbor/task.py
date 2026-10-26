@@ -240,6 +240,7 @@ class HarborTask:
         index: Mapping[str, Any] | None = None,
         compose: ComposePlan | Mapping[str, Any] | None | object = _PLANNED_HERE,
         stack_refusal: str | None = None,
+        privilege_refusal: str | None = None,
     ) -> HarborTask:
         """Read a task directory; ``HarborTaskError`` says why platoon cannot run it.
 
@@ -250,7 +251,8 @@ class HarborTask:
         ``HarborTask.index``.  ``compose`` is the task's stack plan as its lock records it (None: the task has no
         compose file), which a dataset's overlays may have edited; without it, the task's compose file is planned
         here.  ``stack_refusal`` says why no stack could run (the caller's sandbox provider starts none), which
-        refuses a task whose compose file makes it one.
+        refuses a task whose compose file makes it one; ``privilege_refusal`` why the provider could not give a
+        stack's services the privileges its plan asks for (:attr:`ComposePlan.privileges`), which refuses it too.
         """
 
         if agent_user not in AGENT_USER_POLICIES:
@@ -272,7 +274,7 @@ class HarborTask:
         agent = _value(config, "agent", dict, "task.toml") or {}
         _check_linux(environment, f"{config_path}")
         settings = _environment_settings(environment, "[environment]")
-        plan = _compose_plan(task_dir, environment, settings, compose, stack_refusal)
+        plan = _compose_plan(task_dir, environment, settings, compose, stack_refusal, privilege_refusal)
         users = {
             phase: str(user)
             for phase, table in (("agent", agent), ("verifier", verifier))
@@ -389,10 +391,16 @@ _WARNED_UNREAD: set[str] = set()  # the compose file names that Harbor does not 
 
 
 def _compose_plan(
-    task_dir: Path, environment: dict[str, Any], settings: dict[str, Any], compose: Any, stack_refusal: str | None
+    task_dir: Path,
+    environment: dict[str, Any],
+    settings: dict[str, Any],
+    compose: Any,
+    stack_refusal: str | None,
+    privilege_refusal: str | None,
 ) -> ComposePlan | None:
     """The task's stack plan: ``compose`` when the caller has it (a lock's), else planned from the task's files; a
-    plan that platoon cannot run (yet, or where no stack runs: ``stack_refusal``) refuses the task."""
+    plan that platoon cannot run (yet, or where no stack runs: ``stack_refusal``, or not with the privileges it asks
+    for: ``privilege_refusal``) refuses the task."""
 
     if compose is _PLANNED_HERE:
         for name in unread_compose_files(task_dir):
@@ -445,6 +453,11 @@ def _compose_plan(
             raise HarborTaskError(f"{stack} whose services depend on one another in a cycle ({' -> '.join(cycle)})")
         if (problem := _sidecars_problem(plan, planned_here=compose is _PLANNED_HERE)) is not None:
             raise HarborTaskError(f"{stack} {problem}; the task is refused")
+        if plan.privileges and privilege_refusal is not None:
+            raise HarborTaskError(
+                f"{stack} whose services ask for privileges ({', '.join(plan.privileges)}), and {privilege_refusal}; "
+                "the task is refused"
+            )
     main = plan.main()
     if main is not None and main.unsupported:
         sandbox = "main in a stack" if plan.kind == "sidecars" else "the one sandbox of a main-only task"
@@ -482,7 +495,8 @@ def _sidecars_problem(plan: ComposePlan, *, planned_here: bool) -> str | None:
             return (
                 f"whose service {name} builds its image from {build.get('context', 'environment')}/"
                 f"{build.get('dockerfile', 'Dockerfile')}, and a dataset directory's task has no image map that could "
-                "hold it (nothing builds a sidecar's image in this release)"
+                "hold it: serve the directory as a dataset to fetch (service_kwargs.dataset), whose images platoon "
+                "prepare builds"
             )
         for bind in service_binds(service):
             if bind.logs is not None and bind.read_only:

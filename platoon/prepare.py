@@ -10,16 +10,16 @@ config that leaves ``log_path`` to its launcher prepares as it is.  For each ent
    dataset pinned to a commit whose lock answers the entry, and whose tasks the cache holds, is left alone, and a
    local directory is fetched again, since its files may have changed.  An entry with a hold-out prints its report.
    An entry that names a lock alone reads it; one that serves a directory has nothing to fetch.
-2. **The images.** The images that the lock's runnable tasks, and their separate verifiers, build from Dockerfiles
-   and that the entry's image map lacks are built with the builder of the entry's sandbox provider and recorded in
-   the map: ``oci`` for ``singularity``, ``docker`` for ``docker``.  The ``process`` provider runs no image, so their
-   keys are recorded as ``local``.  Any other provider pulls its images from a registry, which prepare does not
-   guess: the step fails and names the command that builds and pushes them.  The map is the entry's default image
-   map, ``images/<provider>.json`` in the Harbor cache, with the image files in ``images/<provider>/``
-   (:mod:`platoon.envs.harbor.images`).  An entry that serves a directory builds nothing: its tasks run their
-   ``docker_image`` or ``default_image``.  With ``verifier_user: honor``, an image that a verifier
-   which runs as root runs on, and that the ``oci`` builder of platoon before 0.3.0 built, fails the step, naming the
-   build that makes it again: prepare never replaces an image.
+2. **The images.** The images that the lock's runnable tasks, their separate verifiers and their stacks' sidecars build
+   from Dockerfiles (a sidecar's ``build:`` context, whole) and that the entry's image map lacks are built with the
+   builder of the entry's sandbox provider and recorded in the map, so that no rollout builds one: ``oci`` for
+   ``singularity``, ``docker`` for ``docker``.  The ``process`` provider runs no image, so their keys are recorded as
+   ``local``.  Any other provider pulls its images from a registry, which prepare does not guess: the step fails and
+   names the command that builds and pushes them.  The map is the entry's default image map, ``images/<provider>.json``
+   in the Harbor cache, with the image files in ``images/<provider>/`` (:mod:`platoon.envs.harbor.images`).  An entry
+   that serves a directory builds nothing: its tasks run their ``docker_image`` or ``default_image``.  With
+   ``verifier_user: honor``, an image that a verifier which runs as root runs on, and that the ``oci`` builder of
+   platoon before 0.3.0 built, fails the step, naming the build that makes it again: prepare never replaces an image.
 3. **The toolchains.** Each toolchain the entry's harness specs run from that is not built under the toolchain root
    is built there (:func:`platoon.harness.toolchains.ensure_toolchain`).  One built from another recipe is never
    replaced: a live run of another config, or of another platoon, may be staging its rollouts from it, so the step

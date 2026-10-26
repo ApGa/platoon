@@ -226,7 +226,7 @@ class TaskImages:
             missing = f"which the image map {self._path} lacks" if image_map is not None else "and no image map exists"
             raise ImageMapError(
                 f"Harbor task {name!r}: the service {service} builds its image from {context} (build key {key}), "
-                f"{missing}; nothing builds a sidecar's image in this release (platoon prepare builds the tasks' own)"
+                f"{missing}: platoon prepare builds it (or platoon harbor images build)"
             )
         config = build.get("config") or {}
         entrypoint = config.get("entrypoint", entry.entrypoint)

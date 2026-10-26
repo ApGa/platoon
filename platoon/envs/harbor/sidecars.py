@@ -423,6 +423,7 @@ def _service(
         shm_mb=data.get("shm_mb"),
         ulimits={name: (int(limit[0]), int(limit[1])) for name, limit in (data.get("ulimits") or {}).items()},
         cap_add=tuple(data.get("cap_add") or ()),
+        privileged=bool(data.get("privileged")),
         stop_signal=data.get("stop_signal"),
         setup=setup,
         timeout_s=timeout_s,

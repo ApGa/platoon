@@ -10,34 +10,17 @@ from typing import Any
 
 import pytest
 from harness_fakes import FakeService
+from no_model import no_model_gateway
 from site_cache import use_site_cache
 from test_harness_rollout import rollout_config, runner
 
 from platoon.envs.harbor.fetch import fetch, fetch_config
-from platoon.gateway import ModelGateway
-from platoon.harness.rollout import EmbeddedGateway, run_harness_rollout
+from platoon.harness.rollout import run_harness_rollout
 from platoon.task import Task
 from platoon.train.components import EnvironmentRoute
 
 HELLO = Path(__file__).resolve().parents[1] / "envs" / "fixtures" / "harbor" / "hello-file"
 STACKS = Path(__file__).resolve().parents[1] / "envs" / "fixtures" / "harbor-stacks" / "tasks"
-
-
-class NoModel:
-    """A renderer for a gateway that must never render: these harnesses make no model calls."""
-
-    def build_generation_prompt(self, messages, role="assistant", prefill=None):
-        raise AssertionError("no model call expected")
-
-    def parse_response(self, tokens):
-        raise AssertionError("no model call expected")
-
-    def get_stop_sequences(self):
-        return []
-
-
-def gateway() -> EmbeddedGateway:
-    return EmbeddedGateway(ModelGateway(sampler=None, renderer=NoModel(), tokenizer=None, model_name="none"))
 
 
 def dataset(tmp_path: Path, *, solve: str | None = None, agent_timeout: float | None = None) -> Path:
@@ -67,7 +50,7 @@ async def play(tmp_path: Path, harness: str, data: Path | None, *, task_id: str 
         resolve_task=True,
     )
     collection = await run_harness_rollout(
-        route.attach(Task(id=task_id)), rollout_config(tmp_path), gateway=gateway(), runner=runner(tmp_path)
+        route.attach(Task(id=task_id)), rollout_config(tmp_path), gateway=no_model_gateway(), runner=runner(tmp_path)
     )
     (root,) = collection["trajectories"].values()
     return root
@@ -150,7 +133,7 @@ async def test_the_oracle_needs_a_session_with_a_reference_solution(tmp_path):
     )
 
     collection = await run_harness_rollout(
-        route.attach(Task(id="train-0")), rollout_config(tmp_path), gateway=gateway(), runner=runner(tmp_path)
+        route.attach(Task(id="train-0")), rollout_config(tmp_path), gateway=no_model_gateway(), runner=runner(tmp_path)
     )
 
     (root,) = collection["trajectories"].values()
