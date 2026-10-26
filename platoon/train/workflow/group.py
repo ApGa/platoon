@@ -52,7 +52,13 @@ from tinker import TensorData
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN, row_entry
 from platoon.train.config_defs import RolloutConfig, WorkflowConfig
-from platoon.train.credit.group import _filter_positive_centered_error_tokens, group_baselines
+from platoon.train.credit.group import (
+    # Re-exported: tests read it from this module.  filter_error_tokens looks it up in credit.group, so patch it there.
+    _filter_positive_centered_error_tokens,  # noqa: F401
+    filter_error_tokens,
+    group_baselines,
+    group_verdict,
+)
 from platoon.train.labels import task_label
 from platoon.train.startup import WorkerPreload
 from platoon.train.tinker.proxy import ModelInfo
@@ -84,6 +90,23 @@ _LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
 # names importable.
 _workload_from_raw_rollout = workload_from_raw_rollout
 _add_datum_funnel = add_datum_funnel
+
+
+def as_member_outcomes(raw_outcomes: Sequence) -> list[_SingleRolloutOutcome]:
+    """What ``_run_group_rollouts`` returned, as one outcome per member.  The canonical single-rollout path always
+    returns an outcome; a legacy test or custom override may return the old result type (a
+    ``TrajectoryCollectionResult``, or None), which becomes an outcome with its datum funnel, observed unless None."""
+
+    return [
+        outcome
+        if isinstance(outcome, _SingleRolloutOutcome)
+        else _SingleRolloutOutcome(
+            result=outcome,
+            workload=_add_datum_funnel(RolloutWorkload(), outcome),
+            observed=outcome is not None,
+        )
+        for outcome in raw_outcomes
+    ]
 
 
 class GroupRolloutWorkflow:
@@ -329,21 +352,16 @@ class GroupRolloutWorkflow:
         return output
 
     async def _run_group(self, data: dict) -> list[tinker.Datum]:
+        """Run the group's members (``_run_group_rollouts``), then compute its credit, in the order
+        :mod:`platoon.train.credit.group` describes: collect the members' datums; stop at the first reason the group
+        trains nothing before any credit (``_untrainable_verdict``); center each member's datums on its baseline
+        (``_assign_credit``, through ``assign_advantages``); filter the error tokens; and say what the group trains.
+        Every return is the group's output (``_make_task_output``), with its verdict and what each member returned."""
+
         with self._monitor().group_in_flight():
             raw_outcomes = await self._run_group_rollouts(data)
-        # Accept legacy test/custom overrides that return the old result type,
-        # while the canonical single-rollout path always returns an outcome.
-        outcomes = [
-            outcome
-            if isinstance(outcome, _SingleRolloutOutcome)
-            else _SingleRolloutOutcome(
-                result=outcome,
-                workload=_add_datum_funnel(RolloutWorkload(), outcome),
-                observed=outcome is not None,
-            )
-            for outcome in raw_outcomes
-        ]
-        valid_results = [outcome.result for outcome in outcomes if outcome.result is not None]
+        outcomes = as_member_outcomes(raw_outcomes)
+        results = [outcome.result for outcome in outcomes if outcome.result is not None]
         # What each member returned, read before any datum is filtered (the per-task statistics).
         members = tuple(_member(outcome) for outcome in outcomes)
 
@@ -352,16 +370,46 @@ class GroupRolloutWorkflow:
                 datums, outcomes=outcomes, trainable_rollouts=trainable_rollouts, verdict=verdict, members=members
             )
 
-        # Filter out None results and collect data
+        datums = self._collect_datums(results)
+        if (verdict := self._untrainable_verdict(data, outcomes, results, datums)) is not None:
+            return output([], verdict)
+
+        # The completed roots' rewards as the members returned them, for group_verdict's DEBUG line: an override of
+        # assign_advantages may change them.
+        completed_rewards = [result.task_reward for result in results if result.task_reward_valid]
+        self._assign_credit(data, results)
+        datums, error_filter_totals, _ = filter_error_tokens(results)
+        if error_filter_totals:
+            self._group_stats().scalar(**error_filter_totals)
+        verdict, trainable_rollouts = group_verdict(datums, results, completed_rewards, self.config, data)
+        if verdict == "no_datums":  # no datum the filter kept has a policy action token
+            return output([], verdict)
+        return output(datums, verdict, trainable_rollouts)
+
+    def _collect_datums(self, results: list[TrajectoryCollectionResult]) -> list[tinker.Datum]:
+        """The members' datums, in member order.  Records the group's subagent sampling counts when its settings sample
+        subagent datums (``subagent_datum_keep_probability``)."""
+
         all_data: list[tinker.Datum] = []
         subagent_sampling_stats = SubagentDatumSamplingStats()
-
-        for result in valid_results:
+        for result in results:
             all_data.extend(result.datums)
             subagent_sampling_stats.merge(result.subagent_sampling_stats)
-
         if self._subagent_datum_sampler() is not None:
             self._group_stats().scalar(**subagent_sampling_stats.to_metrics())
+        return all_data
+
+    def _untrainable_verdict(
+        self,
+        data: dict,
+        outcomes: list[_SingleRolloutOutcome],
+        results: list[TrajectoryCollectionResult],
+        datums: list[tinker.Datum],
+    ) -> str | None:
+        """Why the group trains nothing, decided before any credit, with a warning, in this order: its members trained
+        different reward keys (``reward_key_mismatch``), none returned a result (``no_results``), too few are trainable
+        (``below_min``, counted as ``group_size_rejected``), no root completed (``no_completed_root``), or they left no
+        datum (``no_datums``).  None: the group goes on to its credit."""
 
         if len(keys := _trained_keys(outcomes)) > 1:
             # Its rewards are not on one scale: the group's members trained different names of the reward contract's
@@ -371,14 +419,14 @@ class GroupRolloutWorkflow:
                 data["task_id"],
                 ", ".join(sorted(keys)),
             )
-            return output([], "reward_key_mismatch")
+            return "reward_key_mismatch"
 
-        if not valid_results:
+        if not results:
             logger.warning(f"No results found for task {data['task_id']}")
-            return output([], "no_results")
+            return "no_results"
 
         min_successful = getattr(self.config, "min_successful_group_size", 1)
-        trainable_members = sum(1 for result in valid_results if result.task_reward_valid)
+        trainable_members = sum(1 for result in results if result.task_reward_valid)
         if min_successful > 1 and trainable_members < min_successful:
             # Too few trainable members for a meaningful within-task baseline: only a rollout whose root completed
             # with a scored outcome counts, so an untrainable member (an invalid, error, timeout or cancelled root)
@@ -391,86 +439,32 @@ class GroupRolloutWorkflow:
                 data["task_id"],
                 trainable_members,
                 len(outcomes),
-                len(valid_results),
+                len(results),
                 min_successful,
             )
             self._group_stats().scalar(group_size_rejected=1.0)
-            return output([], "below_min")
-
-        # === Now compute advantages and filter ===
+            return "below_min"
 
         # Interrupted roots carry partial task rewards. They stay in rollout
         # statistics but never enter a baseline, so a group trains only when at
         # least one of its roots completed.
-        valid_task_rewards = [result.task_reward for result in valid_results if result.task_reward_valid]
-        if not valid_task_rewards:
+        if not trainable_members:
             logger.warning(
                 "No completed root rewards available for task %s; retaining rollout stats but skipping training",
                 data["task_id"],
             )
-            return output([], "no_completed_root")
+            return "no_completed_root"
 
-        if not all_data:
+        if not datums:
             logger.warning(f"No train data found for task {data['task_id']}")
-            return output([], "no_datums")
+            return "no_datums"
+        return None
+
+    def _assign_credit(self, data: dict, valid_results: list[TrajectoryCollectionResult]) -> None:
+        """The group's credit, over the members that returned a result (``valid_results``) of the group of task row
+        ``data``: each member's datums centered on its baseline (:meth:`assign_advantages`)."""
 
         self.assign_advantages(valid_results)
-
-        error_filter_totals: dict[str, float] = {}
-        error_filter_active = False
-        for result in valid_results:
-            retained_datums: list[tinker.Datum] = []
-            for datum in result.datums:
-                keep, metrics = _filter_positive_centered_error_tokens(datum)
-                if metrics:
-                    error_filter_active = True
-                    for key, value in metrics.items():
-                        error_filter_totals[key] = error_filter_totals.get(key, 0.0) + value
-                if keep:
-                    retained_datums.append(datum)
-            result.datums[:] = retained_datums
-        if error_filter_active:
-            self._group_stats().scalar(**{f"error_filter/{key}": value for key, value in error_filter_totals.items()})
-        all_data = [datum for result in valid_results for datum in result.datums]
-
-        # Full-tree rollout statistics intentionally include empty and
-        # policy-ineligible trajectories. The train/no-train decision must not:
-        # a sampled-out or invalid-verifier child with a different reward cannot
-        # turn an otherwise zero-signal retained batch into an optimizer step.
-        retained_action_advantages = [
-            datum.loss_fn_inputs["advantages"].to_torch()[datum.loss_fn_inputs["mask"].to_torch() > 0]
-            for datum in all_data
-        ]
-        retained_action_advantages = [values for values in retained_action_advantages if values.numel() > 0]
-        if not retained_action_advantages:
-            logger.debug("No retained policy action tokens for task %s", data["task_id"])
-            return output([], "no_datums")
-        flattened_advantages = torch.cat(retained_action_advantages)
-        if getattr(self.config, "filter_zero_advantage_datums", True) and bool(torch.all(flattened_advantages == 0)):
-            logger.debug(
-                "Deferring all-zero policy datums for task %s to the post-transform "
-                "trainer filter (mean task reward %.2f)",
-                data["task_id"],
-                sum(valid_task_rewards) / len(valid_task_rewards),
-            )
-            # Keep these candidates until the trainer has assembled the
-            # cross-task microbatch. They must participate in depth-frequency
-            # normalization and the original action-token denominator even
-            # though they can be omitted from the expensive model pass.
-
-        trainable_rollouts = sum(
-            any(
-                bool(
-                    torch.any(
-                        datum.loss_fn_inputs["advantages"].to_torch()[datum.loss_fn_inputs["mask"].to_torch() > 0] != 0
-                    )
-                )
-                for datum in result.datums
-            )
-            for result in valid_results
-        )
-        # Every retained advantage zero: the group trains nothing (a uniform group).
-        return output(all_data, "trained" if trainable_rollouts else "uniform", trainable_rollouts)
 
     def compute_baselines(self, results: list[TrajectoryCollectionResult]) -> list[float]:
         """Return one baseline per usable rollout of a task group.
