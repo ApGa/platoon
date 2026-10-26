@@ -114,6 +114,13 @@ A kind gets a group when a second independent user needs a short name for it: ea
 the version policy then covers. Named environments hide most of the remaining import strings (a service class, a
 prompt builder) from configs anyway.
 
+[RFC 0021](0021-trainers-credit-and-policies.md) proposes two more kinds under the same discovery rule: trainers,
+selected by `trainer:`, and credit estimators, selected per environment entry by `credit:`. Each resolves from a core
+name (`rl`, `sft`, `interleaved`; `group`, `keyed`, `reverse_kl`), a name that a `package:` module registers, or
+`module:Class`, and is recorded in `lock.json`. Trainers also get the entry-point group `platoon.trainers`, because
+packages outside platoon already write their own trainers; credit estimators get a group when an outside package needs
+a short name for one.
+
 ### 3. One discovery rule
 
 ```text
