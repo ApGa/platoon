@@ -35,8 +35,8 @@ import torch
 from platoon.sandbox import SandboxSpec, get_provider
 from platoon.train.components import task_ids_to_dataset
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.policy import service as service_module
 from platoon.train.trainer import rl as rl_module
-from platoon.train.trainer import service as service_module
 from platoon.utils.config import load_config
 
 STATE = Path(os.environ["FAKE_TINKER"])
