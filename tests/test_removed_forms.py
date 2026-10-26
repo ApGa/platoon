@@ -36,7 +36,7 @@ import pytest
 import yaml
 
 from platoon import cli
-from platoon.train.tinker.config_defs import EvalConfig, PlatoonTinkerRLTrainerConfig, TrainConfig
+from platoon.train.config_defs import EvalConfig, PlatoonTinkerRLTrainerConfig, TrainConfig
 from platoon.utils.config import ConfigError, resolve_config
 
 TASK_ORDER = "train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler"
@@ -174,7 +174,7 @@ def test_a_config_that_sets_a_removed_key_or_value_does_not_load_and_says_what_r
 
 
 def test_platoon_train_refuses_a_removed_key_before_it_makes_anything(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: pytest.fail("it trained"))
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("it trained"))
     config = _training(tmp_path, train={"rollout_group_key": "suite"})
 
     assert _exit_code(["train", str(config)]) == cli.EXIT_CONFIG
@@ -261,7 +261,7 @@ def test_a_harbor_entry_that_sets_a_removed_option_is_refused_by_each_command_th
     tmp_path, monkeypatch, capsys, option, value
 ):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: pytest.fail("it trained"))
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("it trained"))
     config = _harbor(tmp_path, **{option: value})
     problem = f"environments.0.service_kwargs.{option}: unknown key; {HARBOR[option]}"
 

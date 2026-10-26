@@ -32,14 +32,14 @@ import pytest
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker.workers.protocol import (
+from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
     RolloutWorkerRequest,
     RolloutWorkerResponse,
 )
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 from platoon.utils.rollout_workload import RolloutWorkload
 
 STUB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -440,7 +440,7 @@ def test_exec_of_a_missing_module_is_retried_once_and_never_raises(tmp_path):
 
 
 def test_a_pre_exec_failure_is_retried_once_then_reported(tmp_path, monkeypatch):
-    from platoon.train.tinker.workers import supervisor as supervisor_module
+    from platoon.train.workers import supervisor as supervisor_module
 
     scratch = tmp_path / "ipc"
     scratch.mkdir()

@@ -133,7 +133,7 @@ def routed(harness: str, *, service_kwargs: dict | None = None, **task) -> Task:
 @pytest.mark.asyncio
 async def test_the_gateway_ends_the_run_at_the_step_budget_and_the_episode_is_graded(tmp_path, budget_gateway):
     from platoon.harness.rollout import harness_rollout
-    from platoon.train.tinker.workers.run import run_rollout_request
+    from platoon.train.workers.run import run_rollout_request
 
     FakeService.root = tmp_path / "sandboxes"
     FakeService.sessions.clear()

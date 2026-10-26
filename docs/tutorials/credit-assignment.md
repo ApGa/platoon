@@ -107,7 +107,7 @@ adds `platoon.utils.subagent_rewards.propagate_root_success` itself, where its o
 Take a group of four rollouts of one task whose roots score `[1, 0, 1, 1]`:
 
 ```python
-from platoon.train.tinker.workflows.group_rollout_workflow import group_baselines
+from platoon.train.workflow import group_baselines
 
 rewards, completed = [1.0, 0.0, 1.0, 1.0], [True, True, True, True]
 print(group_baselines(rewards, completed, leave_one_out=False))
@@ -233,10 +233,10 @@ sets them for its groups, laid over `train.workflow_config`
 zero-advantage filter act on microbatches, which mix entries' groups, so they stay the run's.
 
 To estimate advantages another way, subclass
-`platoon.train.tinker.workflows.group_rollout_workflow.GroupRolloutWorkflow`, override `compute_baselines` or
+`platoon.train.workflow.GroupRolloutWorkflow`, override `compute_baselines` or
 `assign_advantages`, and select the class with `environments[0].workflow: package.module.MyWorkflow`. Inside an
 override, `self.config` holds the settings of the group's environment entry, and
-`platoon.train.tinker.workflows.group_rollout_workflow.current_entry()` names that entry.
+`platoon.train.workflow.current_entry()` names that entry.
 
 ## Next steps
 

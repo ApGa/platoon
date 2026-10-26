@@ -696,7 +696,7 @@ def opened(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, l
         return rollout
 
     monkeypatch.setattr("platoon.train.tinker.proxy.build_renderer", build_renderer)
-    monkeypatch.setattr("platoon.train.tinker.train.PlatoonTinkerRLTrainer", trainer)
+    monkeypatch.setattr("platoon.train.launch.PlatoonTinkerRLTrainer", trainer)
     monkeypatch.setattr("platoon.eval.run.EvalRunner", Runner)
     monkeypatch.setattr(cli, "_eval_policy_class", lambda: _Policy)
     monkeypatch.setattr(AutoRollout, "from_config", route)
@@ -953,7 +953,7 @@ def test_a_supervised_run_with_prepare_prepares_once_before_its_first_start(
             from pathlib import Path
 
             import platoon.prepare
-            import platoon.train.tinker.train as training
+            import platoon.train.launch as training
             from platoon.train import supervise
 
             def prepare(*args, **kwargs):

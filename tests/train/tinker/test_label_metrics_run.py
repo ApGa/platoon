@@ -22,9 +22,9 @@ from trainer_fakes import make_trainer
 
 from platoon.testing import ScriptedPolicy, serve_policy, tool_call
 from platoon.train.auto import AutoDataset, AutoRollout, AutoTaskLoader
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.labels import check_labels, label_column
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.config import resolve_config
 
 # Each source's tests: alpha's tasks score 1 as reward in reward.txt when hello.txt says hello, beta's 0 as

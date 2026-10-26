@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 from trainer_fakes import TrainingClient, Workflow, make_trainer, trainer_config
 
-from platoon.train.tinker import rl
+from platoon.train.trainer import rl as rl_module
+from platoon.train.trainer import signals as signals_module
 from platoon.utils.stats_tracker import get as get_tracker
 
 NO_PERMANENT_CHECKPOINTS = "checkpoint={every: 100}"
@@ -98,7 +99,7 @@ def test_the_stop_a_supervisor_passes_on_is_a_first_signal_that_never_counts_as_
     start may get besides the signal itself, in either order: one stop at the step boundary either way."""
 
     exits: list[int] = []
-    monkeypatch.setattr(rl.os, "_exit", exits.append)
+    monkeypatch.setattr(rl_module.os, "_exit", exits.append)
     config = trainer_config(tmp_path, "train.max_training_steps=20", NO_PERMANENT_CHECKPOINTS)
     client = TrainingClient()
     trainer, saves, logged = make_trainer(monkeypatch, config, training_client=client)
@@ -113,8 +114,8 @@ def test_the_stop_a_supervisor_passes_on_is_a_first_signal_that_never_counts_as_
 def test_the_stop_at_once_a_supervisor_passes_on_forces_the_exit(tmp_path, monkeypatch):
     exits: list[int] = []
     stopped: list[bool] = []
-    monkeypatch.setattr(rl.os, "_exit", exits.append)  # records instead of exiting; training then goes on
-    monkeypatch.setattr(rl, "_stop_rollout_workers", lambda: stopped.append(True))
+    monkeypatch.setattr(rl_module.os, "_exit", exits.append)  # records instead of exiting; training then goes on
+    monkeypatch.setattr(signals_module, "_stop_rollout_workers", lambda: stopped.append(True))
     config = trainer_config(tmp_path, "train.max_training_steps=2", NO_PERMANENT_CHECKPOINTS)
     trainer, saves, logged = make_trainer(monkeypatch, config)
 
@@ -127,7 +128,7 @@ def test_the_stop_at_once_a_supervisor_passes_on_forces_the_exit(tmp_path, monke
 def test_after_a_shutdown_request_an_evaluation_s_rollout_workers_take_no_task(num_minibatches):
     # Training never waits for an evaluation after the request, whatever its updates per batch (training's groups,
     # which a batch with several updates may still need, start through the dispatcher): they return at once.
-    trainer: Any = object.__new__(rl.PlatoonTinkerRLTrainer)
+    trainer: Any = object.__new__(rl_module.PlatoonTinkerRLTrainer)
     trainer.config = SimpleNamespace(train=SimpleNamespace(num_minibatches=num_minibatches))
     shared: Any = SimpleNamespace(shutdown_event=asyncio.Event(), train_tracker=get_tracker("train"), watchdog=None)
     shared.shutdown_event.set()

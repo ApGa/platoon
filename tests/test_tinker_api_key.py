@@ -29,8 +29,8 @@ import yaml
 from platoon import cli
 from platoon.eval.config_defs import TinkerKeyError, TinkerKeyRefusedError, tinker_key_refused
 from platoon.task import Task
+from platoon.train import launch as train_module
 from platoon.train import reaping, supervise
-from platoon.train.tinker import train as train_module
 from platoon.utils.config import ConfigError
 
 LISTED: list[str] = []

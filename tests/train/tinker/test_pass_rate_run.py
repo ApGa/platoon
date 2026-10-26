@@ -43,15 +43,15 @@ from platoon.experimental import Draw, Sampler
 from platoon.task import Task
 from platoon.train import entry_settings
 from platoon.train.auto import AutoDataset
+from platoon.train.checkpoints.pruning import read_checkpoint_records
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN
+from platoon.train.task_records import CHANGED_KEY
 from platoon.train.task_stats import TaskStatsStore, read_events
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.checkpoint_pruning import read_checkpoint_records
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN
-from platoon.train.tinker.task_records import CHANGED_KEY
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.train.tinker.workflows import group_rollout_workflow as workflow_module
+from platoon.train.trainer import rl as rl_module
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workflow import members as members_module
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.config import resolve_config
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
@@ -171,7 +171,7 @@ def _fake_rollouts(monkeypatch: pytest.MonkeyPatch, policy: Any) -> None:
             rollout_seconds=0.1,
         )
 
-    monkeypatch.setattr(workflow_module, "run_rollout_request", run_rollout_request)
+    monkeypatch.setattr(members_module, "run_rollout_request", run_rollout_request)
 
 
 class _Workflow(GroupRolloutWorkflow):

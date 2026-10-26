@@ -23,8 +23,8 @@ import httpx
 import tinker
 
 from platoon.train.components import task_ids_to_dataset
-from platoon.train.tinker import rl
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.stats_tracker import get as get_tracker
 
 
@@ -179,8 +179,8 @@ def make_pruning_trainer(
     the start trains a new training run, and ``logged`` collects each logged step with its stats."""
 
     logged: list[tuple[int, dict]] = []
-    monkeypatch.setattr(rl.tinker, "ServiceClient", service.service_client)
-    trainer: Any = object.__new__(rl.PlatoonTinkerRLTrainer)  # its fakes are not the attributes' types
+    monkeypatch.setattr(rl_module.tinker, "ServiceClient", service.service_client)
+    trainer: Any = object.__new__(rl_module.PlatoonTinkerRLTrainer)  # its fakes are not the attributes' types
     trainer.config = config
     trainer.train_dataset = task_ids_to_dataset([f"train:{index}" for index in range(tasks)])
     trainer.eval_dataset = None

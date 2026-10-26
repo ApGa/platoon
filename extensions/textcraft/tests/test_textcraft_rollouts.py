@@ -294,7 +294,7 @@ async def test_the_rao_recipes_recursive_arms_run_through_harness_rollout(arm, h
 
     from platoon.harness.rollout import EmbeddedGateway, run_harness_rollout
     from platoon.train.auto import AutoEnvironment, AutoTaskLoader
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import load_config
 
     from platoon_textcraft.env import TextCraftSynthEnvironment

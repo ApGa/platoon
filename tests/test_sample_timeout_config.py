@@ -29,10 +29,11 @@ from platoon.eval.run import arun_eval  # noqa: E402
 from platoon.gateway import core  # noqa: E402
 from platoon.task import Task  # noqa: E402
 from platoon.testing import TOY_MODEL_NAME, toy_tokenizer  # noqa: E402
-from platoon.train.tinker import proxy, rl  # noqa: E402
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig  # noqa: E402
-from platoon.train.tinker.train import arun_tinker_training  # noqa: E402
-from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow  # noqa: E402
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig  # noqa: E402
+from platoon.train.launch import arun_tinker_training  # noqa: E402
+from platoon.train.tinker import proxy
+from platoon.train.trainer import rl as rl_module  # noqa: E402
+from platoon.train.workflow.group import GroupRolloutWorkflow  # noqa: E402
 from platoon.utils.config import ConfigError, build_config, load_config  # noqa: E402
 
 VARIABLE = "TINKER_SAMPLE_TIMEOUT_SECONDS"
@@ -181,7 +182,7 @@ def test_the_trainers_policy_samples_under_the_key_else_the_variable_else_600(
         monkeypatch.setenv(VARIABLE, variable)
     config = build_config(PlatoonTinkerRLTrainerConfig, _train_settings(tmp_path, sample_timeout_seconds=key))
 
-    trainer = rl.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
+    trainer = rl_module.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
 
     assert trainer.model_info.llm.sample_timeout_seconds == bound
     assert core.default_gateway().sample_timeout_seconds == bound  # the gateway harness rollouts are served
@@ -194,7 +195,7 @@ def test_a_rollout_worker_is_bound_by_the_trainers_bound_not_its_own_environment
 
     monkeypatch.setenv(VARIABLE, "300")
     config = build_config(PlatoonTinkerRLTrainerConfig, _train_settings(tmp_path))
-    trainer = rl.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
+    trainer = rl_module.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
     workflow = GroupRolloutWorkflow(
         rollout_fn=no_rollout,
         get_task_fn=load_task,

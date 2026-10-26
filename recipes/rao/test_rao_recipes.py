@@ -20,8 +20,8 @@ from platoon.registry import import_from_string
 from platoon.rewards import DELEGATION_REWARD_CAP
 from platoon.train.auto import AutoDataset, AutoEnvironment, AutoRewardProcessor, AutoRollout, AutoTaskLoader
 from platoon.train.components import HARNESS_ROLLOUT
-from platoon.train.tinker.batch_transforms import DepthLevelWeightingTransform, build_default_batch_transforms
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, concurrent_groups
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, concurrent_groups
+from platoon.train.step.batch_transforms import DepthLevelWeightingTransform, build_default_batch_transforms
 from platoon.utils.config import load_config, load_yaml_config
 
 ARMS_DIR = Path(__file__).resolve().parent / "textcraft-synth"

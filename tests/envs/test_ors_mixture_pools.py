@@ -20,7 +20,7 @@ from platoon import cli
 from platoon.eval.run import arun_eval
 from platoon.train.auto import check_mixture_pools
 from platoon.train.components import normalize_environment_configs
-from platoon.train.tinker.train import arun_tinker_training
+from platoon.train.launch import arun_tinker_training
 from platoon.utils.config import ConfigError
 
 POOL = "http://10.0.0.1:8080"

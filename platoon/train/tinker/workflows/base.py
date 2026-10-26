@@ -1,12 +1,6 @@
-from typing import Protocol
+"""Moved: platoon 0.5.0 moved this module to :mod:`platoon.train.workflow.protocol`.  Its names still import from
+here, each with a ``PlatoonDeprecationWarning``, until platoon 0.6.0 removes this module."""
 
-import tinker
+from platoon.train.tinker._moved import moved as _moved
 
-
-class RolloutWorkflow(Protocol):
-    """Protocol for rollout workflows used in tinker RL training.
-
-    Implementations should receive model_info and other dependencies via constructor.
-    """
-
-    async def arun_episode(self, data: dict) -> list[tinker.Datum] | None: ...
+__getattr__, __dir__ = _moved(globals(), "platoon.train.workflow.protocol")

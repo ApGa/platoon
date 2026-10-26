@@ -35,7 +35,7 @@ its expected pass@k.  The ``tasks/`` metrics of each step average these over the
 in its ``loop_state`` (``tasks``); a start that resumes from the row loads it (:func:`read_snapshot`), or, when it
 cannot, the newest older one that reads back (:func:`readable_snapshot`).  A snapshot holds the draws no committed
 step had consumed (outstanding).  The checkpoint saves where those draws stand in a file of the dispatcher's own
-(:mod:`platoon.train.tinker.dispatcher`, which its row names as ``dispatch``), and a resume takes them up from it: the
+(:mod:`platoon.train.dispatch.dispatcher`, which its row names as ``dispatch``), and a resume takes them up from it: the
 steps after it train the groups the checkpoint kept as they are, and it draws the others again
 (:meth:`TaskStatsStore.reissue` moves each to its new draw).  A resume from a checkpoint without that file (one saved
 before platoon 0.3.0, or whose write failed) counts them as lost, as one does the draws of an older snapshot loaded in
@@ -95,7 +95,7 @@ SNAPSHOT_FORMAT = 1
 TASKS_DIR = "tasks"
 EVENTS_NAME = "events.jsonl"
 # The key of a checkpoint row's loop_state that names its snapshot, and the one that names the state of the
-# dispatcher's draws (platoon.train.tinker.dispatcher): each record names the start that wrote it.
+# dispatcher's draws (platoon.train.dispatch.dispatcher): each record names the start that wrote it.
 LOOP_STATE_KEY = "tasks"
 DISPATCH_KEY = "dispatch"
 # The main policy, by whose versions evidence ages until a run trains several policies.

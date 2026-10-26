@@ -148,7 +148,7 @@ def test_a_single_environment_is_described_and_warns_of_nothing():
     [(3, None, 30), (None, 7, 7), (3, 25, 25), (3, 40, 30), (None, None, None)],
 )
 def test_planned_steps_count_as_the_trainer_does(epochs, steps, expected):
-    from platoon.train.tinker.rl import _run_steps
+    from platoon.train.dataloader import _run_steps
 
     train = SimpleNamespace(num_epochs=epochs, max_training_steps=steps)
     assert planned_steps(train, 10) == expected
@@ -203,7 +203,7 @@ def _config(tmp_path: Path, **weights) -> Path:
 
 
 def test_platoon_train_logs_the_plan_and_warns_once_it_lists_the_tasks(monkeypatch, tmp_path, caplog):
-    from platoon.train.tinker import train as train_module
+    from platoon.train import launch as train_module
 
     def trainer(**kwargs):
         raise _ReachedTrainer()

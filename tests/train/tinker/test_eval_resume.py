@@ -25,8 +25,8 @@ from tinker_service_fakes import FakeTinkerService, make_pruning_trainer
 from trainer_fakes import Workflow, trainer_config
 
 from platoon.train.components import task_ids_to_dataset
-from platoon.train.tinker import rl
-from platoon.train.tinker.evaluation_record import EVALUATIONS_NAME, completed_evaluation_steps, record_evaluation
+from platoon.train.evaluation.record import EVALUATIONS_NAME, completed_evaluation_steps, record_evaluation
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.jsonl import read_jsonl
 
 
@@ -141,7 +141,7 @@ def test_a_fresh_run_evaluates_its_starting_policy_only_with_at_start(
 ):
     config = _run_config(tmp_path, f"eval.at_start={str(at_start).lower()}")
 
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    with caplog.at_level(logging.INFO, logger=rl_module.__name__):
         trainer, steps, crash = _start(monkeypatch, config, FakeTinkerService())
 
     assert crash is None and steps == evaluated
@@ -163,7 +163,7 @@ def test_a_restart_does_not_run_again_an_evaluation_that_completed_where_it_resu
     )
     assert crash is not None and steps == [2] and _resume_point(first) == 2
 
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    with caplog.at_level(logging.INFO, logger=rl_module.__name__):
         second, steps, crash = _start(monkeypatch, config, service)
 
     assert crash is None and steps == [4]
@@ -183,7 +183,7 @@ def test_a_restart_runs_again_the_evaluation_a_crash_cut_short_where_it_resumes(
     assert crash is not None and steps == [] and _resume_point(first) == 2
     assert completed_evaluation_steps(first.run_log_path) == set()
 
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    with caplog.at_level(logging.INFO, logger=rl_module.__name__):
         _second, steps, crash = _start(monkeypatch, config, service)
 
     assert crash is None and steps == [2, 4]
@@ -201,7 +201,7 @@ def test_a_restart_between_two_multiples_evaluates_at_the_next(tmp_path, monkeyp
     )
     assert crash is not None and steps == [2] and _resume_point(first) == 3
 
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    with caplog.at_level(logging.INFO, logger=rl_module.__name__):
         _second, steps, crash = _start(monkeypatch, config, service)
 
     assert crash is None and steps == [4]
@@ -219,12 +219,12 @@ def test_a_restart_after_a_crash_in_the_last_evaluation_runs_it_and_a_later_star
     first, steps, crash = _start(monkeypatch, config, service, evaluation=_Evaluation(crash_at=3))  # step 4's first
     assert crash is not None and steps == [2] and _resume_point(first) == 4
 
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    with caplog.at_level(logging.INFO, logger=rl_module.__name__):
         second, steps, crash = _start(monkeypatch, config, service)
     assert crash is None and steps == [4]
     assert "Training was already complete; this start ran the evaluation due at step 4" in caplog.text
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    with caplog.at_level(logging.INFO, logger=rl_module.__name__):
         third, steps, crash = _start(monkeypatch, config, service)
     assert crash is None and steps == []
     assert "no other is due by the run's last step, 4" in caplog.text
@@ -241,14 +241,15 @@ def test_an_every_past_the_last_step_evaluates_nothing_but_the_starting_policy_a
 
     config = _run_config(tmp_path, "eval.every=10", f"eval.at_start={str(at_start).lower()}")
 
-    with caplog.at_level(logging.INFO, logger=rl.__name__):
+    # The trainer's loggers: one per module of platoon.train that holds its code (the training loop's among them).
+    with caplog.at_level(logging.INFO, logger="platoon.train"):
         _trainer, steps, crash = _start(monkeypatch, config, FakeTinkerService())
 
     assert crash is None and steps == evaluated
     warnings = [
         record.getMessage()
         for record in caplog.records
-        if record.name == rl.__name__ and record.levelno >= logging.WARNING
+        if record.name.startswith("platoon.train.") and record.levelno >= logging.WARNING
     ]
     if at_start:
         assert "(eval.at_start), and no other by the run's last step, 4" in caplog.text and not warnings
@@ -291,7 +292,7 @@ def test_a_restart_at_step_0_after_the_starting_policy_was_evaluated_does_not_ev
 def test_at_start_without_evaluation_is_ignored_with_a_warning(tmp_path, monkeypatch, caplog, off):
     config = _run_config(tmp_path, off, "eval.at_start=true")
 
-    with caplog.at_level(logging.WARNING, logger=rl.__name__):
+    with caplog.at_level(logging.WARNING, logger=rl_module.__name__):
         trainer, logged = make_pruning_trainer(monkeypatch, config, FakeTinkerService())
         asyncio.run(asyncio.wait_for(trainer.train(train_workflow=Workflow(delay=0.01)), timeout=60))
 

@@ -1,6 +1,6 @@
 """The real worker process: isolation, environment invariants, and its own kill.
 
-These launch ``python -m platoon.train.tinker.workers.entrypoint`` for real, so
+These launch ``python -m platoon.train.workers.entrypoint`` for real, so
 they are slow (each worker imports the tinker/torch stack).  They are also the
 only place the ordering guarantees in ``entrypoint.main`` are actually
 observed from inside a worker, which is the point: every one of them is a
@@ -26,8 +26,8 @@ import pytest
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker.workers.entrypoint import HEADER_TEMPLATE  # noqa: F401
-from platoon.train.tinker.workers.protocol import (
+from platoon.train.workers.entrypoint import HEADER_TEMPLATE  # noqa: F401
+from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
@@ -38,7 +38,7 @@ from platoon.train.tinker.workers.protocol import (
 )
 
 STUB_DIR = os.path.dirname(os.path.abspath(__file__))
-ENTRYPOINT = "platoon.train.tinker.workers.entrypoint"
+ENTRYPOINT = "platoon.train.workers.entrypoint"
 HEADER_RE = re.compile(
     r"^\[rollout-worker\] request=(?P<request>\S+) pid=(?P<pid>\d+) pgid=(?P<pgid>\d+) "
     r"extra_allow=(?P<extra_allow>\d) telemetry=(?P<telemetry>\S+) "

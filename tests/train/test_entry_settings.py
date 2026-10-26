@@ -21,7 +21,7 @@ from platoon.train.components import (
     EntryWorkflowSettings,
     EnvironmentConfig,
 )
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig, training_problems
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig, training_problems
 from platoon.utils.config import ConfigError, given_mapping, resolve_config
 
 # A mix of a quick environment with a calibrated step budget and a slow one whose groups take many steps.

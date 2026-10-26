@@ -64,7 +64,7 @@ def test_platoons_temporary_files_and_ipc_go_to_node_scratch(unset, tmp_path):
 
     from platoon.harness.runner import HarnessRunner
     from platoon.sandbox.process import ProcessProvider
-    from platoon.train.tinker.workers.protocol import IPC_DIRNAME, ipc_dir
+    from platoon.train.workers.protocol import IPC_DIRNAME, ipc_dir
 
     unset.setenv("TMPDIR", str(tmp_path / "tmp"))
     unset.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
@@ -79,7 +79,7 @@ def test_the_ipc_directory_in_shared_scratch_is_this_users_alone(unset, tmp_path
     """Node scratch may be shared by a node's users (/tmp): the rollout workers' files, which hold the gateway's key
     and which the trainer unpickles, go to a directory of this user's own, never to one that someone else made."""
 
-    from platoon.train.tinker.workers.protocol import IPC_DIRNAME, ipc_dir
+    from platoon.train.workers.protocol import IPC_DIRNAME, ipc_dir
 
     unset.setenv("PLATOON_NODE_SCRATCH", str(tmp_path))
     mine = tmp_path / f"{IPC_DIRNAME}-{os.getuid()}"

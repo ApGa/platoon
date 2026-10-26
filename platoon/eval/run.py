@@ -1,6 +1,6 @@
 """``platoon eval``: evaluate a policy on the environments a config selects.
 
-The evaluation counterpart of :mod:`platoon.train.tinker.train`: the config's
+The evaluation counterpart of :mod:`platoon.train.launch`: the config's
 ``environments`` select the tasks and their rollout (``harness_rollout`` for an
 environment with a service and a harness), the ``inference`` section names the
 policy (a Tinker model with its renderer and optional checkpoint, or a hosted

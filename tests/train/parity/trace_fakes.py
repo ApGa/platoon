@@ -25,7 +25,7 @@ from trace_format import Masks, OneLine, to_data
 
 from platoon.task import Task
 from platoon.train.tinker import proxy
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 

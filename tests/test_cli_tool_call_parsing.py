@@ -59,7 +59,7 @@ class Policy:
 @pytest.fixture
 def no_tinker(monkeypatch):
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # eval serves a policy: past its key check
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     monkeypatch.setattr(sys.modules[cli._evaluation().__package__], "EvalPolicy", Policy, raising=False)
     monkeypatch.setattr("platoon.eval.config_defs.EvalPolicy.install", lambda self: None)
 
@@ -172,7 +172,7 @@ def test_a_template_no_parser_reads_is_a_configuration_error_before_training(tmp
     from platoon.train.tinker.renderers import ToolCallParserError
 
     trained = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", trained.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", trained.append)
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # train checks its key before anything else: past it
 
     def refuse(model_name, renderer_name, renderer_kwargs=None):

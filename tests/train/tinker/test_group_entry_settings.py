@@ -12,12 +12,14 @@ from platoon.eval.config_defs import EvalWorkflowConfig
 from platoon.eval.workflow import DefaultEvalGroupWorkflow
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.workflow import context as context_module
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import output as output_module
 from platoon.utils.rollout_workload import RolloutWorkload
 
 
-class _Recording(grw.GroupRolloutWorkflow):
+class _Recording(group_module.GroupRolloutWorkflow):
     """Records what each member sees, and returns no result: the group trains nothing."""
 
     def __init__(self, config: WorkflowConfig, **kwargs) -> None:
@@ -34,14 +36,14 @@ class _Recording(grw.GroupRolloutWorkflow):
     async def arun_episode_single(self, data: dict, rollout_number: int = 0):
         self.seen.append(
             (
-                grw.current_entry(),
+                context_module.current_entry(),
                 self.config.group_size,
                 self._filter_errors(),
                 self._subagent_datum_sampler(),
             )
         )
         await asyncio.sleep(0)
-        return grw._SingleRolloutOutcome(result=None, workload=RolloutWorkload(), observed=False)
+        return output_module._SingleRolloutOutcome(result=None, workload=RolloutWorkload(), observed=False)
 
 
 def test_each_group_reads_its_entry_s_settings_and_outside_a_group_the_run_s():
@@ -66,7 +68,7 @@ def test_each_group_reads_its_entry_s_settings_and_outside_a_group_the_run_s():
     assert seen == {"quick": {(2, True, True)}, "slow": {(3, False, False)}}
     assert len(workflow.seen) == 5  # two members of a quick group, three of a slow one
     assert (quick.entry, slow.entry) == ("quick", "slow")
-    assert workflow.config is run and grw.current_entry() is None  # outside a group: the run's
+    assert workflow.config is run and context_module.current_entry() is None  # outside a group: the run's
 
 
 def test_an_entry_s_subagent_sampler_is_built_once_and_the_run_s_is_reused():
@@ -112,7 +114,7 @@ def test_a_workflow_without_entries_runs_every_group_with_its_own_config_and_nam
     output = asyncio.run(workflow.arun_episode({"task_id": "a::t", ENVIRONMENT_COLUMN: "a"}))
 
     assert workflow.seen[0][:2] == ("a", 1) and output.entry == "a"
-    assert grw.GroupRolloutWorkflow.applies_entry_settings is True
+    assert group_module.GroupRolloutWorkflow.applies_entry_settings is True
 
 
 SEEN: list[tuple[str, int | None, int | None, int | None]] = []

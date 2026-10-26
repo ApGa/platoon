@@ -15,7 +15,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
-from platoon.train.tinker.workers.workload import add_datum_funnel, workload_from_raw_rollout
+from platoon.train.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.utils.rollout_workload import RolloutWorkload, trajectory_collection_shape
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 
@@ -137,9 +137,13 @@ def test_add_datum_funnel_of_none_is_the_identity():
 def test_workload_module_imports_without_the_workflow_package():
     """Import-cycle guard.
 
-    ``group_rollout_workflow`` imports ``workers.run``, so nothing under
+    ``platoon.train.workflow`` imports ``workers.run``, so nothing under
     ``workers/`` may import the workflow.  A cycle would surface as a worker
-    that cannot start, long after the code review that introduced it.
+    that cannot start, long after the code review that introduced it.  The one
+    exception is the start limit's module, ``platoon.train.workflow.start_limit``
+    (stdlib only, behind a package init that imports nothing): the client
+    monitor, ``platoon.train.tinker.rollout_metrics``, which ``workers.protocol``
+    imports, names its release causes.
     """
 
     package_dir = pathlib.Path(__file__).resolve().parents[3] / "platoon" / "train" / "tinker"
@@ -148,9 +152,9 @@ import sys, types
 
 import platoon.train  # real parent package, so the stub below has a parent
 
-# Stand in for the tinker package so its eager __init__ (which imports rl.py
-# and therefore the workflows package) never runs; this isolates the question
-# to "do workers/* themselves reach for the workflow?".
+# Stand in for the tinker package so its __init__ never runs (before platoon
+# 0.5.0 it imported the trainer, and therefore the workflows); this isolates the
+# question to "do workers/* themselves reach for the workflow?".
 package = types.ModuleType("platoon.train.tinker")
 package.__path__ = [{str(package_dir)!r}]
 sys.modules["platoon.train.tinker"] = package
@@ -158,16 +162,19 @@ sys.modules["platoon.train.tinker"] = package
 
 class BlockWorkflows:
     def find_spec(self, name, path=None, target=None):
-        if name.startswith("platoon.train.tinker.workflows"):
+        if name.startswith("platoon.train.workflow") and name not in (
+            "platoon.train.workflow",
+            "platoon.train.workflow.start_limit",
+        ):
             raise AssertionError("workers/* must not import the workflow: " + name)
         return None
 
 
 sys.meta_path.insert(0, BlockWorkflows())
 
-import platoon.train.tinker.workers.protocol as protocol
-import platoon.train.tinker.workers.run as run
-import platoon.train.tinker.workers.workload as workload
+import platoon.train.workers.protocol as protocol
+import platoon.train.workers.run as run
+import platoon.train.workers.workload as workload
 
 assert workload.add_datum_funnel is not None
 assert run.run_rollout_request is not None

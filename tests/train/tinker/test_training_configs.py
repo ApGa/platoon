@@ -10,7 +10,7 @@ import yaml
 
 from platoon import cli
 from platoon.task import Task
-from platoon.train.tinker import train as train_module
+from platoon.train import launch as train_module
 from platoon.utils.config import ConfigError
 
 TASKS = {"train": ["a", "b", "c", "d"], "eval": ["e"]}

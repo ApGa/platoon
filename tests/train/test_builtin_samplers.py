@@ -21,15 +21,14 @@ import orders_0_3_0
 import pytest
 import yaml
 
-from platoon.train import components, samplers
+from platoon.train import components, dataset_order, samplers
 from platoon.train.auto import AutoDataset
 from platoon.train.components import ENVIRONMENT_COLUMN, EnvironmentConfig, WeightedOrder
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.sampler_api import SamplerContext, SamplerSetup, decision_key
 from platoon.train.sampler_runtime import Owed, SamplerSet, TaskPool, TaskSampling
 from platoon.train.samplers import SamplerChoice, UniformSampler, WeightedSampler
 from platoon.train.task_stats import EntryInfo
-from platoon.train.tinker import dataset_order
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import resolve_config
 
 HERE = __name__

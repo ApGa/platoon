@@ -14,7 +14,7 @@ import time
 from trainer_fakes import Workflow, make_trainer, trainer_config
 
 from platoon.train import startup
-from platoon.train.tinker import rl
+from platoon.train.trainer import rl as rl_module
 
 
 class _WarmWorkflow(Workflow):
@@ -38,13 +38,13 @@ def _staging(monkeypatch, events: list[str], seconds: float = 0.3) -> None:
 
 
 def _record_saves(monkeypatch, events: list[str]) -> None:
-    save = rl.checkpoint_utils.save_checkpoint_async
+    save = rl_module.checkpoint_utils.save_checkpoint_async
 
     async def recording(**kwargs):
         events.append(f"save {kwargs['name']}")
         return await save(**kwargs)
 
-    monkeypatch.setattr(rl.checkpoint_utils, "save_checkpoint_async", recording)
+    monkeypatch.setattr(rl_module.checkpoint_utils, "save_checkpoint_async", recording)
 
 
 def test_no_rollout_starts_before_the_toolchains_are_staged_and_both_begin_before_the_launch_save(

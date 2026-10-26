@@ -15,8 +15,9 @@ import yaml
 from platoon import cli
 from platoon.eval.config_defs import EvalPolicy
 from platoon.task import Task
-from platoon.train.tinker import proxy, rl
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.tinker import proxy
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.config import build_config
 
 BASE_URL = "http://self-hosted:8000"
@@ -80,7 +81,7 @@ def test_register_tinker_llm_opens_its_session_on_the_given_server(sessions):
 def test_the_trainer_registers_its_policy_on_the_configured_server(sessions):
     config = build_config(PlatoonTinkerRLTrainerConfig, _settings(tinker_base_url=BASE_URL))
 
-    rl.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
+    rl_module.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
 
     assert sessions == [{"base_url": BASE_URL}]
 
@@ -105,7 +106,7 @@ def test_without_tinker_base_url_every_client_reads_the_environment_as_before(tm
     config = tmp_path / "train.yaml"
     config.write_text(yaml.safe_dump(_settings(log_path=str(tmp_path / "logs"))))
 
-    rl.PlatoonTinkerRLTrainer(config=build_config(PlatoonTinkerRLTrainerConfig, _settings()), train_dataset=[])
+    rl_module.PlatoonTinkerRLTrainer(config=build_config(PlatoonTinkerRLTrainerConfig, _settings()), train_dataset=[])
     cli.main(["rollout", str(config), "--task", "t1", "--output-dir", str(tmp_path / "run")])
 
     assert sessions == [{}, {}]

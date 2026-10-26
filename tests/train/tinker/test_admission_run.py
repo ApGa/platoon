@@ -39,13 +39,13 @@ from test_dispatch_run import _crash_after, _Groups, _Recording, _run, _state
 from tinker_service_fakes import FakeTinkerService, make_pruning_trainer
 from trainer_fakes import make_trainer
 
+from platoon.train.checkpoints.pruning import read_checkpoint_records
 from platoon.train.components import ENVIRONMENT_COLUMN
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN, Dispatcher
+from platoon.train.task_records import CHANGED_KEY
 from platoon.train.task_stats import MAIN, MemberResult, read_events
-from platoon.train.tinker.checkpoint_pruning import read_checkpoint_records
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN, Dispatcher
-from platoon.train.tinker.task_records import CHANGED_KEY
-from platoon.train.tinker.workflows.group_rollout_workflow import _TaskRolloutOutput
+from platoon.train.workflow.output import _TaskRolloutOutput
 from platoon.utils.config import resolve_config
 from platoon.utils.rollout_workload import RolloutWorkload
 
@@ -1171,8 +1171,8 @@ def test_a_resume_that_cannot_read_the_dispatcher_s_state_goes_on_where_the_orde
     (a step under a rule draws up to its cap's worth of positions, so the checkpoint's batch lags behind it), so that no
     position the run trained or rejected is drawn again."""
 
-    from platoon.train.tinker import dispatcher as dispatcher_module
-    from platoon.train.tinker import rl as rl_module
+    from platoon.train.checkpoints import dispatch_state as dispatch_state_module
+    from platoon.train.trainer import rl as rl_module
 
     service = FakeTinkerService()
     config = _config(
@@ -1188,7 +1188,10 @@ def test_a_resume_that_cannot_read_the_dispatcher_s_state_goes_on_where_the_orde
     )
     first, _logged = make_pruning_trainer(monkeypatch, config, service, tasks=40)
     run_dir = Path(first.run_log_path)
-    write, checkpoint_state = dispatcher_module.write_tasks_file, rl_module.PlatoonTinkerRLTrainer._checkpoint_state
+    write, checkpoint_state = (
+        dispatch_state_module.write_tasks_file,
+        rl_module.PlatoonTinkerRLTrainer._checkpoint_state,
+    )
     captured: dict[str, int] = {}
 
     def refused(directory, name, content):
@@ -1202,11 +1205,11 @@ def test_a_resume_that_cannot_read_the_dispatcher_s_state_goes_on_where_the_orde
             captured["events"] = len(list(read_events(run_dir)))
         return await checkpoint_state(self, checkpoint, loop_state)
 
-    monkeypatch.setattr(dispatcher_module, "write_tasks_file", refused)
+    monkeypatch.setattr(dispatch_state_module, "write_tasks_file", refused)
     monkeypatch.setattr(rl_module.PlatoonTinkerRLTrainer, "_checkpoint_state", capture)
     verdict = by_hash(0.3, "degraded")
     _run(first, _VerdictGroups(first._model_info.llm, verdict=verdict))
-    monkeypatch.setattr(dispatcher_module, "write_tasks_file", write)
+    monkeypatch.setattr(dispatch_state_module, "write_tasks_file", write)
     monkeypatch.setattr(rl_module.PlatoonTinkerRLTrainer, "_checkpoint_state", checkpoint_state)
     rows = _crash_after(run_dir, "recovery-000004")
     assert "dispatch" not in rows[-1] and rows[-1]["next_position"] == captured["next_position"] > 4 * 2
@@ -1343,7 +1346,7 @@ def test_a_rule_still_decides_when_the_statistics_stopped(tmp_path, monkeypatch)
 
 
 def test_group_record_that_raises_admits_the_group_and_nothing_escapes(tmp_path, monkeypatch):
-    from platoon.train.tinker import task_records
+    from platoon.train import task_records
 
     def broken(**kwargs):
         raise RuntimeError("cannot build a record")
@@ -1374,9 +1377,9 @@ def test_the_rule_s_view_never_takes_the_held_records_in():
     from datasets import Dataset
     from trainer_fakes import trainer_config
 
+    from platoon.train.dispatch.dispatcher import SEQ_COLUMN
     from platoon.train.sampler_runtime import SamplerSet, TaskPool
-    from platoon.train.tinker.dispatcher import SEQ_COLUMN
-    from platoon.train.tinker.task_records import TaskRecorder
+    from platoon.train.task_records import TaskRecorder
 
     with tempfile.TemporaryDirectory() as directory:
         config = trainer_config(Path(directory))

@@ -13,7 +13,7 @@ from platoon.harness.builtin.codeact import CodeActOptions
 from platoon.registry import import_from_string
 from platoon.train.auto import AutoDataset, AutoEnvironment, AutoRollout
 from platoon.train.components import HARNESS_ROLLOUT
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import load_config
 
 from platoon_textcraft import env

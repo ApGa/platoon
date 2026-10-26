@@ -10,7 +10,7 @@ import pytest
 from test_subagents_example import CONFIG, TASK, tool_call, vault_policy
 from vault_env import parse_keys
 
-from platoon.train.tinker.workflows.group_rollout_workflow import group_baselines
+from platoon.train.credit.group import group_baselines
 
 
 def careless_root(prompt: str) -> str:

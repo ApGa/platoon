@@ -30,19 +30,20 @@ import pytest
 import platoon.hooks
 import platoon.train.tinker  # noqa: F401
 from platoon.task import Task
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.rl import _ptc_cell_guard_stats
-from platoon.train.tinker.workers import telemetry as telemetry_module
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
-from platoon.train.tinker.workers.run import cell_guard_cumulative
-from platoon.train.tinker.workers.supervisor import WorkerOutcome
-from platoon.train.tinker.workers.telemetry import (
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.step.metrics import _ptc_cell_guard_stats
+from platoon.train.workers import telemetry as telemetry_module
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workers.run import cell_guard_cumulative
+from platoon.train.workers.supervisor import WorkerOutcome
+from platoon.train.workers.telemetry import (
     local_telemetry,
     record_worker_cell_guard,
     reset_for_tests,
     worker_cell_guard_stats,
 )
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import telemetry as workflow_telemetry
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import get as get_tracker
 
@@ -66,7 +67,7 @@ def _cell_guard_snapshot():
 
 
 def _workflow(scope: str):
-    return grw.GroupRolloutWorkflow(
+    return group_module.GroupRolloutWorkflow(
         rollout_fn=None,
         get_task_fn=lambda task_id: Task(goal="g", id=task_id),
         config=WorkflowConfig(group_size=1),
@@ -367,7 +368,7 @@ def test_each_run_in_one_process_keeps_its_own_routing_id_state(caplog):
 def test_a_workflow_built_without_its_constructor_keeps_its_routing_id_state(caplog):
     """Custom workflows may build the class with ``__new__`` and set only the attributes they use."""
 
-    workflow = grw.GroupRolloutWorkflow.__new__(grw.GroupRolloutWorkflow)
+    workflow = group_module.GroupRolloutWorkflow.__new__(group_module.GroupRolloutWorkflow)
     workflow.stats_scope = "tel_routing_new"
     workflow.tracker = get_tracker("tel_routing_new")
     with caplog.at_level(logging.WARNING):
@@ -386,7 +387,7 @@ def test_a_failing_routing_id_check_costs_the_rollout_none_of_its_other_telemetr
         raise RuntimeError("the routing id check is broken")
 
     monkeypatch.setattr(workflow, "_warn_of_missing_routing_ids", broken)
-    with caplog.at_level(logging.INFO, logger=grw.__name__):
+    with caplog.at_level(logging.INFO, logger=workflow_telemetry.__name__):
         _report(workflow, 0)
     scalars = _scalars("tel_routing_check_fails")
     assert scalars["rollout_worker_routing_id_coverage"] == 0.0
@@ -412,7 +413,7 @@ def test_two_rollouts_that_report_at_once_from_threads_warn_once(caplog):
                 time.sleep(0.5)
 
     handler = Holding(logging.WARNING)
-    grw.logger.addHandler(handler)
+    workflow_telemetry.logger.addHandler(handler)
     start = threading.Barrier(2, timeout=30)  # a thread that never comes fails the test rather than hang it
 
     def report(number):
@@ -424,7 +425,7 @@ def test_two_rollouts_that_report_at_once_from_threads_warn_once(caplog):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 list(pool.map(report, range(2)))
     finally:
-        grw.logger.removeHandler(handler)
+        workflow_telemetry.logger.removeHandler(handler)
 
     assert len(held) == 1
     assert len(_routing_warnings(caplog)) == 1
@@ -530,12 +531,8 @@ def test_an_over_allocating_worker_is_classified_as_an_oom_not_a_crash(tmp_path,
     from dataclasses import asdict
 
     from platoon.config_defs import RolloutConfig
-    from platoon.train.tinker.workers.protocol import (
-        ConversionPolicy,
-        ModelBinding,
-        RolloutWorkerRequest,
-    )
-    from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
+    from platoon.train.workers.protocol import ConversionPolicy, ModelBinding, RolloutWorkerRequest
+    from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 
     stub_dir = os.path.dirname(os.path.abspath(__file__))
     scratch = tmp_path / "ipc"

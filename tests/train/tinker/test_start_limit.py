@@ -1,4 +1,4 @@
-"""The start limit alone (``train.max_starting_rollouts``, :mod:`platoon.train.tinker.start_limit`).
+"""The start limit alone (``train.max_starting_rollouts``, :mod:`platoon.train.workflow.start_limit`).
 
 - At most ``limit`` slots are held (checked at every grant), granted first come, first served, training's and
   evaluation's takers alike.
@@ -27,10 +27,10 @@ import pytest
 
 from platoon.train.tinker import rollout_metrics
 from platoon.train.tinker.rollout_metrics import ClientThroughputMonitor
-from platoon.train.tinker.start_limit import NO_START_SLOT, StartLimit, held_slot
-from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow
+from platoon.train.workflow.group import GroupRolloutWorkflow
+from platoon.train.workflow.start_limit import NO_START_SLOT, StartLimit, held_slot
 
-LOGGER = "platoon.train.tinker.start_limit"
+LOGGER = "platoon.train.workflow.start_limit"
 
 
 class _JumpingSelector(selectors.DefaultSelector):

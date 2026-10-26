@@ -18,7 +18,7 @@ import yaml
 
 import platoon as pt
 from platoon.deprecations import DeprecatedKey, Deprecation, PlatoonDeprecationWarning
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import (
     IMAGE_PULLS_ENV,
     LOCK_NAME,
@@ -698,7 +698,7 @@ def test_the_deprecation_warning_is_a_future_warning_that_python_shows_by_defaul
     load = (
         "from platoon.config_defs import RolloutConfig\n"
         "from platoon.deprecations import DeprecatedKey\n"
-        "from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig\n"
+        "from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig\n"
         "from platoon.utils.config import resolve_config\n"
         f"RolloutConfig.DEPRECATED_KEYS = {RETIRING!r}\n"
         f"resolve_config({str(run)!r}, [], PlatoonTinkerRLTrainerConfig)\n"

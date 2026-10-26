@@ -23,8 +23,8 @@ from worker_shutdown_scenarios import (
     _request,
 )
 
-from platoon.train.tinker.workers.entrypoint import TERMINATION_SECONDS
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
+from platoon.train.workers.entrypoint import TERMINATION_SECONDS
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 
 
 @pytest.mark.parametrize("releases_it", [True, False], ids=["released", "never-released"])

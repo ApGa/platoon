@@ -31,18 +31,13 @@ import platoon.train.tinker  # noqa: F401  (import order: package before data pr
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
 from platoon.train.components import normalize_environment_configs
+from platoon.train.config_defs import WorkflowConfig
 from platoon.train.startup import WorkerPreload, worker_preload
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.worker_env import NO_CUDA_DRIVER
-from platoon.train.tinker.workers import supervisor as supervisor_module
-from platoon.train.tinker.workers.protocol import (
-    PROTOCOL_VERSION,
-    ConversionPolicy,
-    ModelBinding,
-    RolloutWorkerRequest,
-)
-from platoon.train.tinker.workers.supervisor import WORKER_PRELOAD, RolloutWorkerSupervisor
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
+from platoon.train.workers import supervisor as supervisor_module
+from platoon.train.workers.env import NO_CUDA_DRIVER
+from platoon.train.workers.protocol import PROTOCOL_VERSION, ConversionPolicy, ModelBinding, RolloutWorkerRequest
+from platoon.train.workers.supervisor import WORKER_PRELOAD, RolloutWorkerSupervisor
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.forkserver import ForkServer
 
 STUB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -416,7 +411,7 @@ def test_the_preload_is_derived_only_for_forked_workers_outside_a_python_overlay
     rollouts, exec'd workers and rollouts that import their environments inside a Python overlay of their own
     (``worker_python_env_isolation``) it derives none, and warns that a ``worker_preload`` set there has no effect."""
 
-    from platoon.train.tinker.train import set_worker_preload
+    from platoon.train.launch import set_worker_preload
 
     monkeypatch.syspath_prepend(ENVS_DIR)
     environments = normalize_environment_configs(

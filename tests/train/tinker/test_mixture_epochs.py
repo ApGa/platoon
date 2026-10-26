@@ -18,10 +18,12 @@ from types import SimpleNamespace
 import pytest
 from trainer_fakes import Workflow, make_trainer, trainer_config
 
+from platoon.train import dataloader as dataloader_module
 from platoon.train.auto import AutoDataset
 from platoon.train.components import EnvironmentConfig
-from platoon.train.tinker import rl
-from platoon.train.tinker.dispatcher import POSITION_COLUMN
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN
+from platoon.train.evaluation import loop as loop_module
+from platoon.train.trainer import loops as loops_module
 
 HERE = __name__
 
@@ -61,14 +63,14 @@ def _training(batch_size: int):
 
 def _record_batches(monkeypatch) -> list[tuple[int, list[str]]]:
     drawn: list[tuple[int, list[str]]] = []
-    get_batch = rl.PlatoonTinkerDataloader.get_batch
+    get_batch = dataloader_module.PlatoonTinkerDataloader.get_batch
 
     def recording(self, batch_num):
         batch = get_batch(self, batch_num)
         drawn.append((batch_num, [row["task_id"] for row in batch]))
         return batch
 
-    monkeypatch.setattr(rl.PlatoonTinkerDataloader, "get_batch", recording)
+    monkeypatch.setattr(dataloader_module.PlatoonTinkerDataloader, "get_batch", recording)
     return drawn
 
 
@@ -236,9 +238,9 @@ def test_platoon_train_hands_the_trainer_the_mixtures_order(monkeypatch, tmp_pat
     import yaml
 
     from platoon import cli
+    from platoon.train import launch as train_module
     from platoon.train.components import WeightedOrder
-    from platoon.train.tinker import train as train_module
-    from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
+    from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
 
     built: dict = {}
 
@@ -306,7 +308,7 @@ def test_each_steps_metrics_break_down_by_the_labels_of_tasks_the_first_epoch_le
     assert training.order is not None and sorted(row["kind"] for row in training.order.items) == kinds
     assert {row["kind"] for row in training.dataset} < set(kinds)  # a gets 4 of the first epoch's 8 slots, for 6 tasks
     logged_labels: list[list[str]] = []
-    metric_labels = rl.metric_labels
+    metric_labels = loops_module.metric_labels
 
     def recording(dataset, column, **kwargs):
         labels = metric_labels(dataset, column, **kwargs)
@@ -314,7 +316,8 @@ def test_each_steps_metrics_break_down_by_the_labels_of_tasks_the_first_epoch_le
             logged_labels.append(labels)
         return labels
 
-    monkeypatch.setattr(rl, "metric_labels", recording)
+    monkeypatch.setattr(loop_module, "metric_labels", recording)
+    monkeypatch.setattr(loops_module, "metric_labels", recording)
     _train(monkeypatch, tmp_path, training, "train.label_by=kind")
 
     assert logged_labels == [kinds]

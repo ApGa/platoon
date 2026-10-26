@@ -727,7 +727,7 @@ applies to every config that sets `rollout_group_limits`, with or without settin
 
 **Custom workflows.** A `GroupRolloutWorkflow` subclass applies an entry's settings without changes: inside a group,
 `self.config` holds the group's entry's settings, and
-`platoon.train.tinker.workflows.group_rollout_workflow.current_entry()` names the entry. Code that reads
+`platoon.train.workflow.current_entry()` names the entry. Code that reads
 `self.config` from a thread of `loop.run_in_executor` gets the run's. A workflow class that is no `GroupRolloutWorkflow`
 must apply them itself and declare `applies_entry_settings = True`: otherwise a config whose entries set any does not
 load into `platoon train` (exit 78), rather than ignore them.

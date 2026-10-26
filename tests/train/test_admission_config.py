@@ -24,8 +24,8 @@ from platoon.train import entry_settings
 from platoon.train.admission_api import REGISTRY_KIND
 from platoon.train.admissions import AdmitAll, Informative, choose_admissions, plan_line, rule_mode
 from platoon.train.auto import AutoDataset
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.sampling import fingerprint_changes, sampling_fingerprint
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import ConfigError, resolve_config
 
 HERE = __name__
@@ -194,7 +194,7 @@ def test_num_minibatches_loads_beside_all_and_num_microbatches_beside_a_rule(tmp
 
 def test_a_config_built_in_code_is_refused_as_a_loaded_one_is():
     from platoon.train.components import EnvironmentConfig
-    from platoon.train.tinker.config_defs import TrainConfig
+    from platoon.train.config_defs import TrainConfig
 
     with pytest.raises(ConfigError, match="train.num_minibatches: 2 takes 2 optimizer steps a batch"):
         PlatoonTinkerRLTrainerConfig(
@@ -213,7 +213,7 @@ def test_a_config_built_in_code_is_refused_as_a_loaded_one_is():
 
 @pytest.mark.parametrize("refill", [None, 3, "3.0"])
 def test_a_train_section_built_in_code_takes_a_refill_section_or_its_mapping_only(refill):
-    from platoon.train.tinker.config_defs import RefillConfig, TrainConfig
+    from platoon.train.config_defs import RefillConfig, TrainConfig
 
     with pytest.raises(ValueError, match="train.refill must be a mapping"):
         TrainConfig(model_name="m", renderer_name="r", refill=refill)
