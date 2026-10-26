@@ -56,6 +56,7 @@ from platoon.train.task_stats import (
     snapshot_name,
     write_snapshot,
 )
+from platoon.train.workflow.protocol import report_of
 from platoon.utils.config import LOCK_NAME, update_run_lock
 
 logger = logging.getLogger(__name__)
@@ -477,13 +478,12 @@ def group_record(
     output: Any,
 ) -> GroupRecord:
     """The record of a group of draw ``(start, seq)`` of ``task_id`` that settled with ``output`` (None for a workflow
-    that raised or returned nothing: verdict ``failed``): its members and verdict as the output gives them (an output
-    without a verdict, such as a plain list of datums, has verdict ``unknown``), its group size ``group_size`` (its
-    members' number when None).  What the per-task statistics take in (:meth:`TaskRecorder.settle`), and what a group
-    admission rule decides on when the statistics stopped or never started."""
+    that raised or returned nothing: verdict ``failed``): its members and verdict as the output's report gives them (an
+    output without a verdict, such as a plain list of datums, has verdict ``unknown``), its group size ``group_size``
+    (its members' number when None).  What the per-task statistics take in (:meth:`TaskRecorder.settle`), and what a
+    group admission rule decides on when the statistics stopped or never started."""
 
-    verdict = getattr(output, "verdict", None) if output is not None else "failed"
-    members = tuple(getattr(output, "members", ()) or ())
+    report = report_of(output)
     return GroupRecord(
         start=start,
         seq=seq,
@@ -491,14 +491,14 @@ def group_record(
         entry=entry,
         labels=dict(labels),
         harness=None,
-        group_size=group_size if group_size is not None else len(members),
+        group_size=group_size if group_size is not None else len(report.members),
         sampler=sampler,
         reason=reason,
         score=score,
         position=position,
         drawn_at=dict(drawn_at),
-        members=members,
-        verdict=verdict if isinstance(verdict, str) else "unknown",
+        members=report.members,
+        verdict=report.verdict if output is not None else "failed",
     )
 
 

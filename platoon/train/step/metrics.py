@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING, Any
 
 from platoon.train.labels import metric_prefix
 from platoon.train.task_stats import MemberResult
+from platoon.train.workflow.protocol import report_of
 from platoon.utils.rollout_stats import REWARD_KEY_MISMATCH, REWARD_KEY_PREFIX, RolloutStats, outcome_counts
-from platoon.utils.stats_tracker import DeferredStats, StatsTracker
+from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
     from platoon.train.dispatch.dispatcher import Dispatcher
@@ -59,15 +60,15 @@ def _count_every_reward_key(seen: set[str], stats: Iterable[RolloutStats]) -> No
 
 
 def _record_group_stats(rollout: Any, tracker: StatsTracker) -> None:
-    """Record what a group's workflow measured about the group (its ``group_stats``) in the consuming step.
+    """Record what a group's workflow measured about the group (its report's ``group_stats``) in the consuming step.
 
     ``GroupRolloutWorkflow`` keeps a group's completion statistics, credit and workload distributions with the
     group instead of recording them when it completes: with prefetching, groups of the next step complete during
     this one, and their statistics would land in this step (a step counting 20 rollouts against the 16 it trained).
     """
 
-    group_stats = getattr(rollout, "group_stats", None)
-    if isinstance(group_stats, DeferredStats):
+    group_stats = report_of(rollout).group_stats
+    if group_stats is not None:
         group_stats.record(tracker)
 
 

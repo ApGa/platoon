@@ -5,6 +5,8 @@ and its draw, and the markers of the groups an admission rule decided when they 
 from dataclasses import dataclass
 from typing import Any
 
+from platoon.train.workflow.protocol import OutputReport, report_of
+
 
 @dataclass(frozen=True)
 class _Settled:
@@ -46,8 +48,10 @@ def carries_datums(output: Any) -> bool:
 
 def emptied(output: Any) -> Any:
     """A rejected group's output as its marker carries it: a list (a ``GroupRolloutWorkflow`` output, any list
-    subclass) emptied of its datums in place, its other attributes kept; any other output, or a list that refuses to be
-    emptied, replaced by an empty list.  Never raises."""
+    subclass) emptied of its datums in place, its other attributes kept; any other output (a ``RolloutOutput``)
+    replaced by an empty list that keeps its report (:class:`_Emptied`), so that the step that dequeues the marker
+    reads of it what it reads of a list's; a list that refuses to be emptied replaced by an empty list.  Never
+    raises."""
 
     if isinstance(output, list):
         try:
@@ -55,19 +59,28 @@ def emptied(output: Any) -> Any:
             return output
         except Exception:
             return []
-    return []
+    return _Emptied(report_of(output))
+
+
+class _Emptied(list):
+    """A rejected group's output that is no list, as its marker carries it: no datums, and the output's report."""
+
+    def __init__(self, report: OutputReport) -> None:
+        super().__init__()
+        self.report = report
 
 
 def _output_label(rollout: Any) -> str | None:
-    """The label a group's output carries (``GroupRolloutWorkflow``'s ``label``), if any."""
+    """The label a group's output gives in its report (``GroupRolloutWorkflow``'s ``label``), if any."""
 
-    return getattr(rollout, "label", None)
+    return report_of(rollout).label
 
 
 def _settled(item: Any) -> _Settled:
     """A result queue item as a worker's :class:`_Settled`: itself, or a bare output (a test's or a custom loop's),
-    whose entry and label are its own (``GroupRolloutWorkflow``'s ``entry`` and ``label``), when it has them."""
+    whose entry and label are its report's (``GroupRolloutWorkflow``'s ``entry`` and ``label``), when it gives them."""
 
     if isinstance(item, _Settled):
         return item
-    return _Settled(getattr(item, "entry", None), getattr(item, "label", None), item)
+    report = report_of(item)
+    return _Settled(report.entry, report.label, item)

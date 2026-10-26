@@ -53,6 +53,7 @@ from platoon.train.admission_api import (
 )
 from platoon.train.sampler_api import TaskStatsView
 from platoon.train.task_stats import GroupRecord, TaskStatsStore
+from platoon.train.workflow.protocol import report_of
 
 if TYPE_CHECKING:
     from platoon.train.sampler_runtime import SamplerSet
@@ -496,7 +497,7 @@ class AdmissionSet:
         step = self.step
         output = getattr(item, "rollout", None)
         record = getattr(item, "record", None)
-        verdict = record.verdict if record is not None else getattr(output, "verdict", "unknown")
+        verdict = record.verdict if record is not None else report_of(output).verdict
         entry = getattr(item, "entry", None)
         if kind == "admitted":
             reason = getattr(item, "admitted", None) or "admitted"

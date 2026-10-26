@@ -354,6 +354,34 @@ def test_a_stale_group_counts_in_no_environment(monkeypatch):
     assert stale["train/batch/outcome/scored"] == 0
 
 
+class _Rows:
+    """A group's output written to the contract that is no list: its rows by policy, and its report."""
+
+    def __init__(self, rows, report):
+        self._rows, self.report = rows, report
+
+    def rows(self):
+        return self._rows
+
+
+def test_a_step_trains_the_main_rows_of_an_output_written_to_the_contract_and_no_other_policy_s(monkeypatch, caplog):
+    """An output that is no list gives its rows by policy: the step trains its main rows and counts its report's
+    statistics; it trains nothing of an empty group's, which gives no rows; and it leaves out another policy's rows,
+    with a warning."""
+
+    from platoon.train.workflow.protocol import OutputReport
+
+    def output(policies):
+        group = _group([1.0, 0.0])
+        return _Rows({policy: list(group) for policy in policies}, OutputReport(rollout_stats=group.rollout_stats))
+
+    with caplog.at_level(logging.WARNING, logger="platoon.train.step.datums"):
+        main, empty, teacher = _run_batches(monkeypatch, [output(["main"]), output([]), output(["teacher"])])
+    assert [step["train/total_datums_per_batch"] for step in (main, empty, teacher)] == [2.0, 0.0, 0.0]
+    assert [step["train/batch/groups"] for step in (main, empty, teacher)] == [1, 1, 1]
+    assert caplog.text.count("gives rows of teacher, which this run does not train") == 1
+
+
 def _members_output(members, data):
     """A real ``GroupRolloutWorkflow`` group whose members end as ``members``: ``(reward, status)`` for a member with
     a completed root, ``(None, status)`` for one that left no result."""

@@ -8,30 +8,32 @@ and the state of the dispatcher's draws that it saves beside them names the file
 and the steps after it train them as they are, each once.
 
 What a group keeps: its datums, exactly (token ids, and every loss input; floats as their bytes), and what the step
-that consumes it reads of it besides: for a ``GroupRolloutWorkflow`` group, its workload, rollout counts, rollout
-statistics, deferred group statistics, label, entry, members and verdict; for a workflow that returns a plain list of
-datums, the list; for a group whose workflow failed, that it failed, so that the step after a resume consumes it as
-failed, as the run would have without one.  Any other output is not kept: a resume draws its task again.  The file is
-gzip-compressed JSON, as the snapshot is JSON: no pickle, so reading a run directory runs no code.  Writing it costs
-about ten bytes per token of the groups it keeps, which every full save writes again while they wait for a step.
+that consumes it reads of it besides, by the codec of its output's exact type (:func:`register_codec`): for a
+``GroupRolloutWorkflow`` group (``GroupOutput``, whose codec :mod:`platoon.train.workflow.output` registers), its
+workload, rollout counts, rollout statistics, deferred group statistics, label, entry, members and verdict; for a
+workflow that returns a plain list of datums, the list; for a group whose workflow failed, that it failed, so that the
+step after a resume consumes it as failed, as the run would have without one.  An output of any other type is not
+kept: a resume draws its task again.  The file is gzip-compressed JSON, as the snapshot is JSON: no pickle, so reading
+a run directory runs no code.  Writing it costs about ten bytes per token of the groups it keeps, which every full save
+writes again while they wait for a step.
 """
 
 from __future__ import annotations
 
 import base64
-import dataclasses
 import gzip
 import json
 import logging
 import math
 import os
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import tinker
 
-from platoon.train.task_stats import GroupRecord, MemberResult, read_tasks_file, write_tasks_file
+from platoon.train.task_stats import GroupRecord, read_tasks_file, write_tasks_file
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def encode_group(
     key: tuple[int, int], *, entry: str | None, label: str | None, record: GroupRecord | None, output: Any
 ) -> dict[str, Any] | None:
     """A settled group as JSON data (``output`` None for a group whose workflow failed), or None for one that cannot
-    be kept: its workflow returned something neither a ``GroupRolloutWorkflow`` output nor a plain list of datums."""
+    be kept: no codec keeps an output of its type (:func:`register_codec`), or its codec does not keep this one."""
 
     encoded = _encode_output(output)
     if encoded is None:
@@ -153,67 +155,91 @@ def read_kept(run_dir: str | os.PathLike[str], record: Mapping[str, Any]) -> lis
     return data["groups"]
 
 
-# --- outputs ----------------------------------------------------------------------------------------------------------
+# --- outputs: a codec for each type of output -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Codec:
+    """How a full checkpoint keeps an output of one type (``cls``): its tag in the file (its ``type``), its data as
+    JSON (``encode``; None for an output it does not keep), and the output read back from that data (``decode``)."""
+
+    cls: type
+    tag: str
+    encode: Callable[[Any], dict[str, Any] | None]
+    decode: Callable[[Mapping[str, Any]], Any]
+
+
+# The codecs, by the exact type of the output they keep (a subclass, whose own fields would be lost, is not kept) and
+# by their tag.
+_BY_TYPE: dict[type, _Codec] = {}
+_BY_TAG: dict[str, _Codec] = {}
+
+
+def register_codec(
+    cls: type, tag: str, encode: Callable[[Any], dict[str, Any] | None], decode: Callable[[Mapping[str, Any]], Any]
+) -> None:
+    """Keep each output whose type is exactly ``cls`` as ``{"type": tag, **encode(output)}`` (``encode`` returns None
+    for one it does not keep, and its data names no ``type`` of its own), and read it back with ``decode``, which gets
+    that data.  Datums keep exactly with :func:`encode_datum` and :func:`decode_datum`.  A tag is one class's: another
+    class's is refused, and ``failed`` is a failed group's.  The same class registered again, as a module run again
+    registers it (a reload, or a test that loads the module afresh), keeps the codec it was first registered with for
+    reading."""
+
+    if tag == "failed":
+        raise ValueError(f"the kept-group tag 'failed' is a failed group's, not {_name(cls)}'s")
+    first = _BY_TAG.get(tag)
+    if first is not None and _name(first.cls) != _name(cls):
+        raise ValueError(f"the kept-group tag {tag!r} is {_name(first.cls)}'s, not {_name(cls)}'s")
+    codec = _Codec(cls, tag, encode, decode)
+    _BY_TYPE[cls] = codec
+    _BY_TAG.setdefault(tag, codec)
+
+
+def _name(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
 def _encode_output(output: Any) -> dict[str, Any] | None:
-    from platoon.train.workflow.output import _TaskRolloutOutput
-
     if output is None:  # its workflow failed
         return {"type": "failed"}
-    if type(output) is _TaskRolloutOutput:
-        stats = output.rollout_stats
-        return {
-            "type": "group",
-            "datums": [_encode_datum(datum) for datum in output],
-            "workload": dataclasses.asdict(output.workload),
-            "requested_rollouts": output.requested_rollouts,
-            "observed_rollouts": output.observed_rollouts,
-            "trainable_rollouts": output.trainable_rollouts,
-            "task_retained_datums": output.task_retained_datums,
-            "rollout_stats": dataclasses.asdict(stats) if stats is not None else None,
-            "group_stats": output.group_stats.to_json(),
-            "label": output.label,
-            "entry": output.entry,
-            "members": [member.to_json() for member in output.members],
-            "verdict": output.verdict,
-        }
-    if type(output) is list and all(isinstance(datum, tinker.Datum) for datum in output):
-        return {"type": "datums", "datums": [_encode_datum(datum) for datum in output]}
-    return None
+    codec = _BY_TYPE.get(type(output))
+    if codec is None:
+        return None
+    data = codec.encode(output)
+    if data is None:
+        return None
+    if "type" in data:
+        raise ValueError(f"the {codec.tag!r} codec's data names a type of its own")
+    return {"type": codec.tag, **data}
 
 
 def _decode_output(data: Mapping[str, Any]) -> Any:
     if data["type"] == "failed":
         return None
-    datums = [_decode_datum(datum) for datum in data["datums"]]
-    if data["type"] == "datums":
-        return datums
-    if data["type"] != "group":
+    codec = _BY_TAG.get(data["type"])
+    if codec is None:
         raise ValueError(f"not a kept output: {data['type']!r}")
-    from platoon.train.workflow.output import _TaskRolloutOutput
-    from platoon.utils.rollout_stats import RolloutStats
-    from platoon.utils.rollout_workload import RolloutWorkload
-    from platoon.utils.stats_tracker import DeferredStats
+    return codec.decode(data)
 
-    stats = data["rollout_stats"]
-    return _TaskRolloutOutput(
-        datums,
-        workload=RolloutWorkload(**data["workload"]),
-        requested_rollouts=int(data["requested_rollouts"]),
-        observed_rollouts=int(data["observed_rollouts"]),
-        trainable_rollouts=int(data["trainable_rollouts"]),
-        task_retained_datums=int(data["task_retained_datums"]),
-        rollout_stats=RolloutStats(**stats) if stats is not None else None,
-        group_stats=DeferredStats.from_json(data["group_stats"]),
-        label=data["label"],
-        entry=data["entry"],
-        members=tuple(MemberResult.from_json(member) for member in data["members"]),
-        verdict=str(data["verdict"]),
-    )
+
+def _encode_datums(output: list[Any]) -> dict[str, Any] | None:
+    """A workflow's plain list of datums as it is kept; None for a list that holds anything else."""
+
+    if not all(isinstance(datum, tinker.Datum) for datum in output):
+        return None
+    return {"datums": [encode_datum(datum) for datum in output]}
+
+
+def _decode_datums(data: Mapping[str, Any]) -> list[tinker.Datum]:
+    return [decode_datum(datum) for datum in data["datums"]]
+
+
+register_codec(list, "datums", _encode_datums, _decode_datums)
 
 
 def _encode_datum(datum: tinker.Datum) -> dict[str, Any]:
+    """A datum as JSON data that reads back exactly (:func:`decode_datum`): its model input, and every loss input."""
+
     return {
         "model_input": datum.model_input.model_dump(mode="json"),
         "loss_fn_inputs": {name: _encode_tensor(value) for name, value in datum.loss_fn_inputs.items()},
@@ -221,10 +247,18 @@ def _encode_datum(datum: tinker.Datum) -> dict[str, Any]:
 
 
 def _decode_datum(data: Mapping[str, Any]) -> tinker.Datum:
+    """The datum :func:`encode_datum` wrote."""
+
     return tinker.Datum(
         model_input=tinker.ModelInput.model_validate(data["model_input"]),
         loss_fn_inputs={str(name): _decode_tensor(value) for name, value in data["loss_fn_inputs"].items()},
     )
+
+
+# A datum as a codec keeps it (register_codec), and reads it back.  The private names are the module's in platoon
+# 0.4.0, which its old path still reaches.
+encode_datum = _encode_datum
+decode_datum = _decode_datum
 
 
 def _encode_tensor(value: tinker.TensorData) -> dict[str, Any]:

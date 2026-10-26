@@ -38,6 +38,7 @@ from platoon.train.startup import worker_preload
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
 from platoon.train.workflow.group import GroupRolloutWorkflow
+from platoon.train.workflow.protocol import capabilities_of
 from platoon.utils.config import ConfigError, load_config, update_run_lock
 
 logger = logging.getLogger(__name__)
@@ -267,23 +268,24 @@ def _build_workflows(
 
 def worker_package_kwargs(workflow_cls: type, config: Any) -> dict[str, Any]:
     """The environments' packages (``AutoEnvironment.packages``) as workflow arguments, for a workflow whose
-    rollout workers import them (a ``GroupRolloutWorkflow``); nothing for any other workflow class."""
+    rollout workers import them (``runs_rollout_workers``, as a ``GroupRolloutWorkflow``); nothing for any other
+    workflow class."""
 
-    if not (isinstance(workflow_cls, type) and issubclass(workflow_cls, GroupRolloutWorkflow)):
+    if not capabilities_of(workflow_cls).runs_rollout_workers:
         return {}
     return {"packages": AutoEnvironment.packages(config)}
 
 
 def set_worker_preload(workflow: Any, environments: Any, *, phase: Phase, tasks: Any) -> None:
-    """Give a workflow whose rollouts run in workers forked from a fork server (a ``GroupRolloutWorkflow`` with
-    ``rollout_isolation: process`` and ``worker_start_method: forkserver``) what that server imports and builds ahead
-    of them: what ``phase``'s rollouts of ``environments`` import and build when they open, and its settings'
-    ``worker_preload`` (:func:`~platoon.train.startup.worker_preload`).  ``tasks`` are the phase's task rows.
-    Nothing for any other workflow, nor under ``worker_python_env_isolation``, whose rollouts import their
-    environments and harnesses inside a Python overlay of their own (its interpreter, ``PATH`` and packages), which
-    an import in the server would not see; a ``worker_preload`` that has no effect is warned about."""
+    """Give a workflow whose rollouts run in workers forked from a fork server (one that runs rollout workers, as a
+    ``GroupRolloutWorkflow`` does, with ``rollout_isolation: process`` and ``worker_start_method: forkserver``) what
+    that server imports and builds ahead of them: what ``phase``'s rollouts of ``environments`` import and build when
+    they open, and its settings' ``worker_preload`` (:func:`~platoon.train.startup.worker_preload`).  ``tasks`` are
+    the phase's task rows.  Nothing for any other workflow, nor under ``worker_python_env_isolation``, whose rollouts
+    import their environments and harnesses inside a Python overlay of their own (its interpreter, ``PATH`` and
+    packages), which an import in the server would not see; a ``worker_preload`` that has no effect is warned about."""
 
-    if not isinstance(workflow, GroupRolloutWorkflow):
+    if not capabilities_of(workflow).runs_rollout_workers:
         return
     settings = workflow.config
     extra = tuple(getattr(settings, "worker_preload", ()) or ())
@@ -312,9 +314,9 @@ def set_worker_preload(workflow: Any, environments: Any, *, phase: Phase, tasks:
 
 def label_kwargs(workflow_cls: type, config: Any) -> dict[str, Any]:
     """The run's label column (``train.label_by``) as a workflow argument, for a workflow whose straggler policies key
-    on it (a ``GroupRolloutWorkflow``); nothing for any other workflow class."""
+    on it (``runs_rollout_workers``, as a ``GroupRolloutWorkflow``); nothing for any other workflow class."""
 
-    if not (isinstance(workflow_cls, type) and issubclass(workflow_cls, GroupRolloutWorkflow)):
+    if not capabilities_of(workflow_cls).runs_rollout_workers:
         return {}
     return {"label_by": label_column(config)}
 

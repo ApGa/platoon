@@ -1,19 +1,24 @@
 """A group's output and its members': a member's outcome (``_SingleRolloutOutcome``), the group's datum list with its
-workload and statistics (``_TaskRolloutOutput``), and what each member returned, for the per-task statistics.
+workload and statistics (``_TaskRolloutOutput``, the contract's ``GroupOutput``), what each member returned, for the
+per-task statistics, and how a full checkpoint keeps the group's output (its codec, registered with
+:func:`~platoon.train.checkpoints.kept_groups.register_codec`).
 
 The functions here that take the workflow first are its methods still: ``GroupRolloutWorkflow`` keeps each under its
 name, so to replace one, replace the method, on the class or an instance, not the function.
 """
 
-from collections.abc import Sequence
+import dataclasses
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import tinker
 import torch
 
+from platoon.train.checkpoints.kept_groups import decode_datum, encode_datum, register_codec
 from platoon.train.task_stats import MAIN, MemberResult
 from platoon.train.workers.protocol import RolloutWorkerResponse
+from platoon.train.workflow.protocol import OutputReport, carried_report
 from platoon.utils.rollout_stats import (
     REWARD_KEY_MISMATCH,
     TOOL_CALL_STATS,
@@ -76,6 +81,9 @@ class _TaskRolloutOutput(list[tinker.Datum]):
     say what each member returned and
     ``verdict`` what the group trains, or why it trains nothing, for the per-task
     statistics (``platoon.train.task_stats``).
+
+    It is the workflow contract's ``GroupOutput`` (:mod:`platoon.train.workflow.protocol`): its datums are all the
+    run's one trained policy's (:meth:`rows`), and :attr:`report` reads its attributes.
     """
 
     def __init__(
@@ -106,6 +114,24 @@ class _TaskRolloutOutput(list[tinker.Datum]):
         self.entry = entry
         self.members = members
         self.verdict = verdict
+
+    @property
+    def report(self) -> OutputReport:
+        """What the trainer reads of the group besides its datums: its attributes as they are when it is read, each
+        checked as any output's that carries them (:func:`~platoon.train.workflow.protocol.carried_report`)."""
+
+        return carried_report(self)
+
+    def rows(self) -> Mapping[str, Sequence[tinker.Datum]]:
+        """Its datums, all one policy's: ``{"main": self}``.  The group does not know which policy the run trains, so
+        it names it ``main``, as a run of one policy does; the step does not ask it, but reads it as a list, whose
+        datums are all the trained policy's (:func:`~platoon.train.workflow.protocol.rows_by_policy`)."""
+
+        return {MAIN: self}
+
+
+# The contract's name of the class: the same class object, by whose exact type a full checkpoint keeps the group.
+GroupOutput = _TaskRolloutOutput
 
 
 def _summarize_outcomes(outcomes: list[_SingleRolloutOutcome]) -> RolloutStats:
@@ -279,3 +305,47 @@ def _outcome_from_response(
         success_reward=getattr(response, "success_reward", None),
         seconds=response.rollout_seconds,
     )
+
+
+def _encode_group_output(output: GroupOutput) -> dict[str, Any]:
+    """A group's output as a full checkpoint keeps it: its datums exactly, and every attribute that the step that
+    consumes it reads."""
+
+    stats = output.rollout_stats
+    return {
+        "datums": [encode_datum(datum) for datum in output],
+        "workload": dataclasses.asdict(output.workload),
+        "requested_rollouts": output.requested_rollouts,
+        "observed_rollouts": output.observed_rollouts,
+        "trainable_rollouts": output.trainable_rollouts,
+        "task_retained_datums": output.task_retained_datums,
+        "rollout_stats": dataclasses.asdict(stats) if stats is not None else None,
+        "group_stats": output.group_stats.to_json(),
+        "label": output.label,
+        "entry": output.entry,
+        "members": [member.to_json() for member in output.members],
+        "verdict": output.verdict,
+    }
+
+
+def _decode_group_output(data: Mapping[str, Any]) -> GroupOutput:
+    """A kept group's output as it settled (:func:`_encode_group_output`'s data)."""
+
+    stats = data["rollout_stats"]
+    return _TaskRolloutOutput(
+        [decode_datum(datum) for datum in data["datums"]],
+        workload=RolloutWorkload(**data["workload"]),
+        requested_rollouts=int(data["requested_rollouts"]),
+        observed_rollouts=int(data["observed_rollouts"]),
+        trainable_rollouts=int(data["trainable_rollouts"]),
+        task_retained_datums=int(data["task_retained_datums"]),
+        rollout_stats=RolloutStats(**stats) if stats is not None else None,
+        group_stats=DeferredStats.from_json(data["group_stats"]),
+        label=data["label"],
+        entry=data["entry"],
+        members=tuple(MemberResult.from_json(member) for member in data["members"]),
+        verdict=str(data["verdict"]),
+    )
+
+
+register_codec(GroupOutput, "group", _encode_group_output, _decode_group_output)
