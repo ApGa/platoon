@@ -2,9 +2,19 @@
 
 | | |
 |---|---|
-| Status | Draft |
+| Status | Draft; superseded in part by [RFC 0021](0021-trainers-credit-and-policies.md) |
 | Created | 2026-10-13 |
 | Builds on | [Architecture](../architecture.md): the model gateway, credit and prefix merging; [RFC 0001](0001-native-multi-agent.md) roles; [RFC 0006](0006-backend-profiles-and-sdk-upgrade.md) backends |
+
+**Superseded in part by [RFC 0021](0021-trainers-credit-and-policies.md)**, which implements milestones M1, M2 and M4
+with these changes. The policy table uses today's `train.*` field names (`model_name`, `renderer_name`,
+`tinker_base_url`, `load_checkpoint_path`), with each policy's optimizer, loss and staleness bound flat on its entry;
+`backends` waits for RFC 0006. Each policy names its own Tinker service URL and opens its own session. The
+`PolicyCoordinator` becomes `train.stepping`: `lockstep`, the default, or `independent`; `leader` is not built. The
+barrier is the leader's checkpoint row naming the other policies' rows, and under `independent` every full save of
+any policy commits. Frozen policies may also score, for distillation. Multi-LoRA needs no key: policies with the same
+base model on one URL are its adapters. RFC 0021 answers open questions 1, 4, 5 and 6. The rest of this RFC stands as
+written.
 
 ## Summary
 
