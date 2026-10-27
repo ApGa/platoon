@@ -51,11 +51,21 @@ class TaskSources:
 
 @dataclass(frozen=True)
 class TrainerNeeds:
-    """What a trainer asks of the run, which ``platoon train`` reads before it lists any task: ``rollouts``, whether it
-    trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens
-    the start's draws when the trainer asks for them, ``run.rollouts()``)."""
+    """What a trainer asks of the run, which ``platoon train`` reads before it lists any task (RFC 0021, rule 10 for
+    the second and third)."""
 
+    # Whether it trains on rollouts of the run's training tasks: then the run lists them, builds the training workflow,
+    # and opens the start's draws when the trainer asks for them (run.rollouts()).
     rollouts: bool = False
+    # Whether its steps reach a checkpoint whole or not at all: once a step sent training work, an interrupt saves no
+    # <step>_interrupted checkpoint of it, and the resume starts from the last full one.  The rl trainer's are not.
+    atomic_steps: bool = True
+    # Whether an optimizer step that the service skipped, or whose metrics are not finite, raises (UpdateRejected)
+    # before anything publishes, for every update, the step hooks' too.  The rl trainer only logs such metrics.
+    fail_closed_updates: bool = True
+    # Whether each training episode sees its draw (ctx.draw: platoon.programs.DrawInfo), the key that a step's end
+    # names it by (StepEnd.consumed).  Off, the rollouts' requests are as they always were.
+    draw_provenance: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,9 +101,12 @@ class TrainerSetup:
 
 @dataclass(frozen=True)
 class StepPlan:
-    """Where a start's steps end: ``end_step``, the step after the run's last one (the start trains up to it)."""
+    """Where a start's steps end: ``end_step``, the step after the run's last one (the start trains up to it); and
+    ``steps_per_epoch``, the steps of one pass over what the trainer trains on, by which ``checkpoint.strategy: epoch``
+    counts (None: a pass is a step)."""
 
     end_step: int
+    steps_per_epoch: int | None = None
 
 
 class Trainer(Protocol):
@@ -212,7 +225,8 @@ class TrainerBase:
 
     def check(self, run: "TrainerRun") -> None:
         """1. Before any service opens: raise ``ConfigError`` for what the trainer cannot run.  Participants of the
-        run's checkpoints registered here take up the start point before any training client opens."""
+        run's checkpoints registered here (``run.checkpoints.register``) take up the start point before any training
+        client opens; step hooks may register here too (``run.hooks.register``), or in ``prepare``."""
 
     async def prepare(self, run: "TrainerRun", start: "StartPoint") -> StepPlan:
         """5. The policies are open at ``start``: prepare the steps, and say where they end.  A trainer that rolls out
@@ -232,14 +246,16 @@ class TrainerBase:
 
     async def run_steps(self, run: "TrainerRun") -> None:
         """8. The steps, from ``run.clock.step`` to ``run.clock.end``, stopping at a step boundary once a stop is asked
-        for (``run.shutdown``).  Steps that the stop request stopped short of the end were interrupted: the run then
-        saves ``<step>_interrupted``, also when they did not set ``run.interrupted``, which an interrupt of their own
-        sets."""
+        for (``run.shutdown``).  Each step ends with ``run.end_step``: the step hooks, the publication of the policies
+        it updated, and the clock's advance.  Steps that the stop request stopped short of the end were interrupted:
+        the run then saves ``<step>_interrupted``, also when they did not set ``run.interrupted``, which an interrupt
+        of their own sets, and so does a ``TrainInterrupted`` they raise."""
 
         raise NotImplementedError(f"{type(self).__name__} must write its steps (TrainerBase.run_steps)")
 
     async def close(self, run: "TrainerRun") -> None:
-        """10. After the save at exit: close what the trainer opened."""
+        """10. After the save at exit, and after a failure too (``run.ended`` says which): close what the trainer
+        opened.  The run's step hooks and participants close after it."""
 
     # What the lifecycle calls through the trainer, so that a subclass or a test may replace it on the class or an
     # instance: the waiter of the run's saves, the signal handlers, how the policies open, and what a start that had

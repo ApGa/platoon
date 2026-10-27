@@ -1,0 +1,19 @@
+# The quickstart's GuessTheNumber training, with a step hook that replays supervised conversations at the end of
+# every other step (replay_sft.py), attached to the rl trainer from the config.
+#
+#   cd examples/quickstart
+#   PYTHONPATH=.:../replay-sft-hook uv run platoon train ../replay-sft-hook/train.yaml    # needs TINKER_API_KEY
+#
+# Each step's RL updates and its replay update publish together, as one new policy version.
+
+extends: ../quickstart/train.yaml
+
+trainer_options:
+  hooks:
+    - hook: replay_sft:ReplaySFT       # the class, as an import path; PYTHONPATH names its directory
+      options:
+        every: 2                       # the end of every other step
+        learning_rate: 1.0e-5          # the replay updates' own; the RL updates keep train.optimizer's
+
+stats:
+  trial_name: guess-qwen3-4b-replay-sft

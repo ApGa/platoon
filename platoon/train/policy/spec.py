@@ -35,8 +35,11 @@ class PolicySpec:
     # Its Tinker service; None: TINKER_BASE_URL, else hosted Tinker.
     tinker_base_url: str | None = None
     lora_rank: int = 32
-    # The weights a new run starts from (not its optimizer's state); None: the base model's.
+    # The weights a new run starts from; None: the base model's.
     load_checkpoint_path: str | None = None
+    # With load_checkpoint_path: whether the new run takes that checkpoint's optimizer state too (Adam's moments), a
+    # new trial that goes on from it; else its optimizer starts fresh.
+    load_optimizer_state: bool = False
     # Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the
     # loss's keyword arguments; each None: the run's train.optimizer, train.loss_fn or train.loss_fn_config, which
     # policy_specs puts in its place, so that the trainer reads them from the spec alone.
@@ -48,8 +51,9 @@ class PolicySpec:
 def policy_specs(config: Any) -> dict[PolicyId, PolicySpec]:
     """The run's policies, in order: ``main``, as ``train:`` declares it (``train.model_name``, ``renderer_name``,
     ``renderer_kwargs``, ``context_window_length``, ``sample_timeout_seconds``, ``lora_rank``, ``optimizer``,
-    ``loss_fn`` and ``loss_fn_config``), with the run's ``tinker_base_url`` and the weights
-    ``checkpoint.load_checkpoint_path`` starts it from."""
+    ``loss_fn`` and ``loss_fn_config``), with the run's ``tinker_base_url``, and the weights
+    ``checkpoint.load_checkpoint_path`` starts it from, with their optimizer state when
+    ``checkpoint.load_optimizer_state`` says so."""
 
     train = config.train
     main = PolicySpec(
@@ -62,6 +66,7 @@ def policy_specs(config: Any) -> dict[PolicyId, PolicySpec]:
         tinker_base_url=config.tinker_base_url,
         lora_rank=train.lora_rank,
         load_checkpoint_path=config.checkpoint.load_checkpoint_path,
+        load_optimizer_state=config.checkpoint.load_optimizer_state,
         optimizer=train.optimizer,
         loss_fn=train.loss_fn,
         loss_fn_config=train.loss_fn_config,

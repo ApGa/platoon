@@ -1183,7 +1183,10 @@ from: without a hold-out or a split manifest, every split lists every task, so t
 sees.
 
 **Start from trained weights** with `checkpoint.load_checkpoint_path: tinker://...`: it loads the weights with a
-fresh optimizer, and applies only when the run directory has no checkpoint of its own yet.
+fresh optimizer, and applies only when the run directory has no checkpoint of its own yet. With
+`checkpoint.load_optimizer_state: true` beside it, the new run takes that checkpoint's optimizer state too, Adam's
+moments, as a new trial that goes on from it (the path must be a full checkpoint's `state_path`). Either way the new
+run's counters start at 0, and nothing else of the other run's state is taken up.
 
 **Evaluate a checkpoint** by passing its `sampler_path` as `inference.model_path` (or `--model-path` to
 `platoon rollout`).

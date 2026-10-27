@@ -32,6 +32,14 @@ lifecycle every trainer shares, calling its hooks in order, and `platoon.testing
 every full checkpoint of the run holds besides its counters comes from its participants
 (`CheckpointParticipant`), and a policy's rows train under an `Objective`.  `trainer:` selects the
 trainer; this release has one, `rl`.
+And step hooks (RFC 0021): work at the end of each step of any trainer (`StepHook`, `StepHookBase`),
+which hears what the step did (`StepEnd`): it drains side work, adds optimizer updates of the step's policy
+(`end.train`, `end.learner`), and hears what the step published; the rl trainer attaches those its config names
+(`trainer_options.hooks`).  A hook's interruptible wait raises `TrainInterrupted` on a stop request when
+the trainer's steps are atomic (`TrainerNeeds.atomic_steps`); when they are not, it runs to its end.  Side inference
+samples a policy's published sampler through a `PolicySnapshot`, which refuses a sample once the policy has
+published again (`PolicyMoved`); and a training episode sees its draw (`ctx.draw`, a `DrawInfo`) when
+its trainer asks for it.  `docs/extending/step-hooks.md` is the guide.
 And the workflow contract (RFC 0021): what the trainer needs of a rollout workflow (`RolloutWorkflow`), what a
 workflow class can do beyond it (`WorkflowCapabilities`, read through `capabilities_of`), what
 `platoon train` builds a workflow class with (`WorkflowSetup`, which its `from_setup` takes), and how a
@@ -76,15 +84,22 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`rollout_lease`](#platoon-experimental-rollout-lease) | The lease of the training draw whose workflow runs in this asyncio context (`RolloutLease`). |
 | [`Trainer`](#platoon-experimental-trainer) | What `platoon train` runs: a trainer is resolved from the config's `trainer:` (`platoon.train.trainer.registry`), built from its setup, entered with `async with`, and run once per start. Supervising the run, its restarts, the reaping of what a dead start left, the run's lock, its config snapshot and its identity check stay `platoon train`'s. |
 | [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. |
-| [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens the start's draws when the trainer asks for them, `run.rollouts()`). |
+| [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task (RFC 0021, rule 10 for the second and third). |
 | [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`). Building the setup does no I/O. |
 | [`TaskSources`](#platoon-experimental-tasksources) | The run's tasks as `platoon train` lists them: the training tasks (`train_dataset`, a weighted order's first epoch or the listing a dataloader shuffles), the order they are drawn in epoch by epoch and the task samplers that draw them (None: the dataset as it is), and the evaluation's (None when the run evaluates nothing). |
 | [`Workflows`](#platoon-experimental-workflows) | A start's rollout workflows: training's, and the evaluation's (None when the start evaluates nothing). |
-| [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it). |
+| [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it); and `steps_per_epoch`, the steps of one pass over what the trainer trains on, by which `checkpoint.strategy: epoch` counts (None: a pass is a step). |
 | [`PolicySpec`](#platoon-experimental-policyspec) | One policy, as the config declares it: the model, how its prompts are rendered and sampled, its Tinker service, how a new run trains it (its adapter's rank, the weights it starts from), and how each step updates it (its optimizer, and the loss its rows train under). |
 | [`MAIN`](#platoon-experimental-main) | The policy that `train:` declares. The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format. |
 | [`CheckpointParticipant`](#platoon-experimental-checkpointparticipant) | Part of the run's state that every full checkpoint saves, and that a start which resumes from one takes up. |
 | [`Objective`](#platoon-experimental-objective) | What a policy's rows train under: one of the Tinker service's built-in losses (`loss_fn`, such as `cispo`) with its keyword arguments, the loss inputs the datums carry for the trainer only, and the training metrics of each microbatch. |
+| [`StepHook`](#platoon-experimental-stephook) | Work at the end of each step of any trainer, after the step's own updates and its commit, before it publishes. A class of this protocol defines all four methods; subclass `StepHookBase`, whose methods are empty, to leave some out. `critical` is optional (True when left out). A hook with state to resume is also a `CheckpointParticipant`. Register it in the trainer's `check()` or `prepare()`. |
+| [`StepHookBase`](#platoon-experimental-stephookbase) | An optional base of step hooks: every method empty, critical, and `from_run`, which builds a hook that the config names. |
+| [`StepEnd`](#platoon-experimental-stepend) | What the end of a step tells its hooks. `hook_updates` is platoon's own count of the hooks' updates: the optimizer steps each policy took since the step's end began, whatever a hook counts. `train`, `learner` and `wait` are the run's; a test builds a step's end with `for_test`. |
+| [`TrainInterrupted`](#platoon-experimental-traininterrupted) | A shutdown signal stopped the train loop where the last completed step is a consistent checkpoint. |
+| [`PolicySnapshot`](#platoon-experimental-policysnapshot) | A policy's published sampler at `version`, with what renders and parses its calls. On a fully fine-tuned service a sampling client samples the newest weights whatever its path, so `sample` checks the version around each call; a trainer that samples during a step stops that work in its hook's `drain()`, before the step publishes. The check reads the version, not the weights: there, the step's own optimizer steps change what the sampler samples before the step publishes, so a sample is its version's only up to the step's first update. |
+| [`PolicyMoved`](#platoon-experimental-policymoved) | A snapshot refused a sample: its policy published a newer sampler before the call, or while it ran, so the sample would not be its version's. |
+| [`DrawInfo`](#platoon-experimental-drawinfo) | The run and the training draw an episode belongs to (`ctx.draw`), when its trainer asks for them (RFC 0021's draw provenance, `TrainerNeeds.draw_provenance`); never in an evaluation. A draw's key `(start, seq)` is never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by it (`StepEnd.consumed`). |
 | [`RolloutWorkflow`](#platoon-experimental-rolloutworkflow) | What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group failed, and trains nothing). The output is a `RolloutOutput`, or a sequence of datums, all of the run's one trained policy (a `GroupOutput`, or a plain list). |
 | [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five of them as flags. |
 | [`capabilities_of`](#platoon-experimental-capabilities-of) | What `workflow` (an instance or a class) can do: its `capabilities` when it declares them, else its class flags, a flag it does not set False. Each flag is read as the trainer read it before the contract was written down: `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True. |
@@ -1134,7 +1149,8 @@ def check(run: TrainerRun) -> None
 ```
 
 1. Before any service opens: raise `ConfigError` for what the trainer cannot run.  Participants of the
-run's checkpoints registered here take up the start point before any training client opens.
+run's checkpoints registered here (`run.checkpoints.register`) take up the start point before any training
+client opens; step hooks may register here too (`run.hooks.register`), or in `prepare`.
 
 #### `TrainerBase.prepare`
 
@@ -1170,9 +1186,10 @@ async def run_steps(run: TrainerRun) -> None
 ```
 
 8. The steps, from `run.clock.step` to `run.clock.end`, stopping at a step boundary once a stop is asked
-for (`run.shutdown`).  Steps that the stop request stopped short of the end were interrupted: the run then
-saves `<step>_interrupted`, also when they did not set `run.interrupted`, which an interrupt of their own
-sets.
+for (`run.shutdown`).  Each step ends with `run.end_step`: the step hooks, the publication of the policies
+it updated, and the clock's advance.  Steps that the stop request stopped short of the end were interrupted:
+the run then saves `<step>_interrupted`, also when they did not set `run.interrupted`, which an interrupt
+of their own sets, and so does a `TrainInterrupted` they raise.
 
 #### `TrainerBase.close`
 
@@ -1180,7 +1197,8 @@ sets.
 async def close(run: TrainerRun) -> None
 ```
 
-10. After the save at exit: close what the trainer opened.
+10. After the save at exit, and after a failure too (`run.ended` says which): close what the trainer
+opened.  The run's step hooks and participants close after it.
 
 <a id="platoon-experimental-trainerneeds"></a>
 
@@ -1190,13 +1208,15 @@ async def close(run: TrainerRun) -> None
 class TrainerNeeds
 ```
 
-What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it
-trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens
-the start's draws when the trainer asks for them, `run.rollouts()`).
+What a trainer asks of the run, which `platoon train` reads before it lists any task (RFC 0021, rule 10 for
+the second and third).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `rollouts` | `bool` | `False` |  |
+| `rollouts` | `bool` | `False` | Whether it trains on rollouts of the run's training tasks: then the run lists them, builds the training workflow, and opens the start's draws when the trainer asks for them (run.rollouts()). |
+| `atomic_steps` | `bool` | `True` | Whether its steps reach a checkpoint whole or not at all: once a step sent training work, an interrupt saves no <step>_interrupted checkpoint of it, and the resume starts from the last full one. The rl trainer's are not. |
+| `fail_closed_updates` | `bool` | `True` | Whether an optimizer step that the service skipped, or whose metrics are not finite, raises (UpdateRejected) before anything publishes, for every update, the step hooks' too. The rl trainer only logs such metrics. |
+| `draw_provenance` | `bool` | `False` | Whether each training episode sees its draw (ctx.draw: platoon.programs.DrawInfo), the key that a step's end names it by (StepEnd.consumed). Off, the rollouts' requests are as they always were. |
 
 <a id="platoon-experimental-trainersetup"></a>
 
@@ -1276,11 +1296,14 @@ A start's rollout workflows: training's, and the evaluation's (None when the sta
 class StepPlan
 ```
 
-Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it).
+Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it); and
+`steps_per_epoch`, the steps of one pass over what the trainer trains on, by which `checkpoint.strategy: epoch`
+counts (None: a pass is a step).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `end_step` | `int` | required |  |
+| `steps_per_epoch` | `int \| None` | `None` |  |
 
 <a id="platoon-experimental-policyspec"></a>
 
@@ -1304,7 +1327,8 @@ optimizer, and the loss its rows train under).
 | `sample_timeout_seconds` | `float \| None` | `None` |  |
 | `tinker_base_url` | `str \| None` | `None` | Its Tinker service; None: TINKER_BASE_URL, else hosted Tinker. |
 | `lora_rank` | `int` | `32` |  |
-| `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from (not its optimizer's state); None: the base model's. |
+| `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from; None: the base model's. |
+| `load_optimizer_state` | `bool` | `False` | With load_checkpoint_path: whether the new run takes that checkpoint's optimizer state too (Adam's moments), a new trial that goes on from it; else its optimizer starts fresh. |
 | `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments; each None: the run's train.optimizer, train.loss_fn or train.loss_fn_config, which policy_specs puts in its place, so that the trainer reads them from the spec alone. |
 | `loss_fn` | `str \| None` | `None` |  |
 | `loss_fn_config` | `dict[str, Any] \| None` | `None` |  |
@@ -1380,6 +1404,302 @@ def metrics(
 
 A microbatch's training metrics, from its datums as they trained (with their side channels) and the result
 of their forward_backward.
+
+<a id="platoon-experimental-stephook"></a>
+
+### `platoon.experimental.StepHook`
+
+```python
+class StepHook(Protocol)
+```
+
+Work at the end of each step of any trainer, after the step's own updates and its commit, before it publishes.
+A class of this protocol defines all four methods; subclass `StepHookBase`, whose methods are empty, to
+leave some out.  `critical` is optional (True when left out).  A hook with state to resume is also a
+`CheckpointParticipant`.  Register it in the trainer's `check()` or `prepare()`.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` | Its log lines, its waits and its metrics' prefix (`<name>/`); no two hooks of a run share one. |
+
+#### `StepHook.drain`
+
+```python
+async def drain(end: StepEnd) -> None
+```
+
+Finish or stop the side work that samples the current sampler, before the step's hooks update the policy
+and it publishes.  Raising fails the start before anything publishes.
+
+#### `StepHook.update`
+
+```python
+async def update(end: StepEnd) -> None
+```
+
+Optimizer updates of the run's policies, through `end.train(...)` or `end.learner(...)` only.  Raising
+fails the start before anything publishes.
+
+#### `StepHook.published`
+
+```python
+async def published(end: StepEnd) -> None
+```
+
+At every step's end, after it published (`end.published`, empty when nothing did); and once after the
+launch's first sampler (`end.kind` `"launch"`).
+
+#### `StepHook.aclose`
+
+```python
+async def aclose() -> None
+```
+
+At the start's end, also after a failure: close what the hook opened.
+
+<a id="platoon-experimental-stephookbase"></a>
+
+### `platoon.experimental.StepHookBase`
+
+```python
+class StepHookBase
+```
+
+An optional base of step hooks: every method empty, critical, and `from_run`, which builds a hook that
+the config names.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` |  |
+| `critical` | `ClassVar[bool]` | False: the hook only hears publications (`published`, `aclose`), and an error it raises there is logged while training goes on; it may not drain or update. |
+
+#### `StepHookBase.from_run`
+
+```python
+@classmethod
+def from_run(run: TrainerRun, options: Mapping[str, Any]) -> Self
+```
+
+The hook that the config attaches (`trainer_options.hooks`), built as the run checks its trainer, before
+any service opens, with the options the config gives it: by default `cls()`, which takes none.
+
+#### `StepHookBase.drain`
+
+```python
+async def drain(end: StepEnd) -> None
+```
+
+Nothing to drain.
+
+#### `StepHookBase.update`
+
+```python
+async def update(end: StepEnd) -> None
+```
+
+No update.
+
+#### `StepHookBase.published`
+
+```python
+async def published(end: StepEnd) -> None
+```
+
+Nothing to hear.
+
+#### `StepHookBase.aclose`
+
+```python
+async def aclose() -> None
+```
+
+Nothing to close.
+
+<a id="platoon-experimental-stepend"></a>
+
+### `platoon.experimental.StepEnd`
+
+```python
+class StepEnd
+```
+
+What the end of a step tells its hooks.  `hook_updates` is platoon's own count of the hooks' updates: the
+optimizer steps each policy took since the step's end began, whatever a hook counts.  `train`, `learner` and
+`wait` are the run's; a test builds a step's end with `for_test`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `kind` | `Literal['launch', 'step']` | required | "step": the end of a step; "launch": the start's first samplers, which the hooks hear once (published()). |
+| `step` | `int` | required | The step that ends (the clock's step before it advances); at launch, the start's first step. |
+| `step_updates` | `Mapping[str, int]` | required | The step's own optimizer updates, by policy, before any hook's (rl: its policy-gradient updates). |
+| `consumed` | `Mapping[tuple[int, int], str]` | required | The draws the step committed, by key, each with its fate (consumed, stale or failed). |
+| `tracker` | `StatsTracker` | required | The step's metrics row: what a hook records here is logged with the step. |
+| `published` | `Mapping[str, int]` | `{}` | Who published at the end of this step, at which new version; set before the hooks hear it. |
+| `hook_updates` | `dict[str, int]` | | The hooks' optimizer updates so far, by policy, as platoon counts them. Read-only. |
+
+#### `StepEnd.for_test`
+
+```python
+@classmethod
+def for_test(
+    *,
+    kind: Literal['launch', 'step'] = "step",
+    step: int = 0,
+    step_updates: Mapping[str, int] | None = None,
+    consumed: Mapping[tuple[int, int], str] | None = None,
+    tracker: StatsTracker | None = None,
+    published: Mapping[str, int] | None = None,
+    learner: Any = None,
+) -> StepEnd
+```
+
+A step's end built by hand, to test a hook alone: `end.learner(...)`, and so `end.train(...)`, hand
+out `learner` whatever the policy and the objective (a fake of
+`platoon.train.policy.learner.Learner` that records what the hook sends; None: they raise),
+`end.wait` awaits, and `hook_updates` is empty.  `tracker` defaults to a fresh `StatsTracker`.
+
+#### `StepEnd.learner`
+
+```python
+def learner(policy: str, *, objective: Objective) -> Learner
+```
+
+The learner of `policy` under `objective`, for the hook whose `update()` runs, which may use it there
+only (it refuses to send anything after, in a later step too, and so does a learner made from it under another
+objective): the policy's training client and optimizer parameters, the ones the step's own updates used,
+failing closed when the trainer's needs say so, its metrics under `<hook name>/` in the step's row.
+
+#### `StepEnd.train`
+
+```python
+async def train(
+    policy: str,
+    datums: Sequence[Any],
+    *,
+    objective: Objective,
+    adam_params: Any = None,
+) -> None
+```
+
+One optimizer update of `policy` on `datums` (`tinker.Datum`, sent as given) under `objective`:
+one forward_backward of them all, then one optimizer step, with `adam_params` (a `tinker.AdamParams`) for
+this update alone (None: the policy's, `train.optimizer`'s).  `end.learner` sends several microbatches
+into one update.
+
+#### `StepEnd.wait`
+
+```python
+async def wait(
+    awaitable: Awaitable[Any],
+    *,
+    name: str,
+    timeout: float | None = None,
+    interruptible: bool = False,
+) -> Any
+```
+
+Await `awaitable` as the run's waits do (`run.wait`): a log line and a watchdog heartbeat every minute,
+for at most `timeout` seconds.  With `interruptible`, `TrainInterrupted` once a stop is asked for, when
+the trainer's steps are atomic (`needs().atomic_steps`: the run then saves nothing of the step).  When they
+are not (the rl trainer's), a stop request does not end the wait, and the hook cannot see it: the wait runs to
+its end, or to `timeout` (`TimeoutError`, which fails the start), so bound what may not end by itself; the
+stop takes effect at the next step's boundary, so that no checkpoint saves half a step.
+
+<a id="platoon-experimental-traininterrupted"></a>
+
+### `platoon.experimental.TrainInterrupted`
+
+```python
+class TrainInterrupted(Exception)
+```
+
+A shutdown signal stopped the train loop where the last completed step is a consistent checkpoint.
+
+<a id="platoon-experimental-policysnapshot"></a>
+
+### `platoon.experimental.PolicySnapshot`
+
+```python
+class PolicySnapshot
+```
+
+A policy's published sampler at `version`, with what renders and parses its calls.  On a fully fine-tuned
+service a sampling client samples the newest weights whatever its path, so `sample` checks the version
+around each call; a trainer that samples during a step stops that work in its hook's `drain()`, before the step
+publishes.  The check reads the version, not the weights: there, the step's own optimizer steps change what the
+sampler samples before the step publishes, so a sample is its version's only up to the step's first update.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `policy` | `str` | required |  |
+| `version` | `int` | required |  |
+| `sampling_client` | `Any` | required | a tinker.SamplingClient |
+| `renderer` | `Any` | required |  |
+| `tokenizer` | `Any` | required |  |
+| `model_name` | `str` | required |  |
+| `context_window_length` | `int \| None` | `None` |  |
+| `sample_timeout_seconds` | `float \| None` | `None` | The bound on each sampling call through the gateway (None: TINKER_SAMPLE_TIMEOUT_SECONDS, else the default). |
+| `version_now` | `Callable[[], int] \| None` | `None` | The policy's version now, read at each check (None: the snapshot never moves, as a test's may not). |
+
+#### `PolicySnapshot.current`
+
+```python
+def current() -> bool
+```
+
+Whether the policy published nothing since: its version is still the snapshot's.
+
+#### `PolicySnapshot.sample`
+
+```python
+async def sample(prompt: Any, params: Any, *, num_samples: int = 1) -> Any
+```
+
+`num_samples` samples of `prompt` (a `tinker.ModelInput`) under `params` (`tinker.SamplingParams`)
+from the snapshot's sampler; `PolicyMoved` when the policy published before the call or by the time it
+returned, so that "this sample came from version v" holds.
+
+#### `PolicySnapshot.gateway`
+
+```python
+def gateway(*, context_window_length: int | None = None) -> ModelGateway
+```
+
+A model gateway (render, prepare, sample and parse calls) on the snapshot's sampler, with no recorder: its
+context window the policy's, or `context_window_length` when that is smaller.
+
+<a id="platoon-experimental-policymoved"></a>
+
+### `platoon.experimental.PolicyMoved`
+
+```python
+class PolicyMoved(RuntimeError)
+```
+
+A snapshot refused a sample: its policy published a newer sampler before the call, or while it ran, so the
+sample would not be its version's.
+
+<a id="platoon-experimental-drawinfo"></a>
+
+### `platoon.experimental.DrawInfo`
+
+```python
+class DrawInfo
+```
+
+The run and the training draw an episode belongs to (`ctx.draw`), when its trainer asks for them (RFC 0021's
+draw provenance, `TrainerNeeds.draw_provenance`); never in an evaluation.  A draw's key `(start, seq)` is
+never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by
+it (`StepEnd.consumed`).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `run_dir` | `str` | required | The run directory, where a program may write the files of its draw that its trainer reads. |
+| `start` | `int` | required | The start of the run that drew it, and its number among that start's draws. |
+| `seq` | `int` | required |  |
+| `position` | `int \| None` | required | Its position in the run's order of training tasks (None: a draw that a task sampler decided by itself). |
+| `step` | `int` | required | The training step that was current when its group started. |
+| `key` | `tuple[int, int]` | | Read-only. |
 
 <a id="platoon-experimental-rolloutworkflow"></a>
 

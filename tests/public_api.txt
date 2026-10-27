@@ -70,6 +70,7 @@ platoon.EpisodeContext: class EpisodeContext(Protocol)
 platoon.EpisodeContext.add_finalizer: def add_finalizer(fn: Finalizer) -> None
 platoon.EpisodeContext.behavior_judge: attribute SubagentBehaviorJudge | None
 platoon.EpisodeContext.config: attribute RolloutConfig
+platoon.EpisodeContext.draw: attribute DrawInfo | None
 platoon.EpisodeContext.grade: async def grade() -> Outcome
 platoon.EpisodeContext.judge_endpoint: def judge_endpoint() -> ModelEndpoint
 platoon.EpisodeContext.judges: attribute bool
@@ -191,6 +192,13 @@ platoon.experimental.Draw: @dataclass(frozen=True) class Draw
 platoon.experimental.Draw.reason: field str = "order"
 platoon.experimental.Draw.score: field float | None = None
 platoon.experimental.Draw.task_id: field str
+platoon.experimental.DrawInfo: @dataclass(frozen=True) class DrawInfo
+platoon.experimental.DrawInfo.key: property tuple[int, int]
+platoon.experimental.DrawInfo.position: field int | None
+platoon.experimental.DrawInfo.run_dir: field str
+platoon.experimental.DrawInfo.seq: field int
+platoon.experimental.DrawInfo.start: field int
+platoon.experimental.DrawInfo.step: field int
 platoon.experimental.EntryInfo: @dataclass(frozen=True) class EntryInfo
 platoon.experimental.EntryInfo.group_size: field int
 platoon.experimental.EntryInfo.index: field int | None = None
@@ -267,10 +275,25 @@ platoon.experimental.OutputReport.task_retained_datums: field int | None = None
 platoon.experimental.OutputReport.trainable_rollouts: field int | None = None
 platoon.experimental.OutputReport.verdict: field str = "unknown"
 platoon.experimental.OutputReport.workload: field RolloutWorkload | None = None
+platoon.experimental.PolicyMoved: class PolicyMoved(RuntimeError)
+platoon.experimental.PolicySnapshot: @dataclass(frozen=True) class PolicySnapshot
+platoon.experimental.PolicySnapshot.context_window_length: field int | None = None
+platoon.experimental.PolicySnapshot.current: def current() -> bool
+platoon.experimental.PolicySnapshot.gateway: def gateway(*, context_window_length: int | None = None) -> ModelGateway
+platoon.experimental.PolicySnapshot.model_name: field str
+platoon.experimental.PolicySnapshot.policy: field str
+platoon.experimental.PolicySnapshot.renderer: field Any
+platoon.experimental.PolicySnapshot.sample: async def sample(prompt: Any, params: Any, *, num_samples: int = 1) -> Any
+platoon.experimental.PolicySnapshot.sample_timeout_seconds: field float | None = None
+platoon.experimental.PolicySnapshot.sampling_client: field Any
+platoon.experimental.PolicySnapshot.tokenizer: field Any
+platoon.experimental.PolicySnapshot.version: field int
+platoon.experimental.PolicySnapshot.version_now: field Callable[[], int] | None = None
 platoon.experimental.PolicySpec: @dataclass(frozen=True) class PolicySpec
 platoon.experimental.PolicySpec.context_window_length: field int | None = None
 platoon.experimental.PolicySpec.id: field str
 platoon.experimental.PolicySpec.load_checkpoint_path: field str | None = None
+platoon.experimental.PolicySpec.load_optimizer_state: field bool = False
 platoon.experimental.PolicySpec.lora_rank: field int = 32
 platoon.experimental.PolicySpec.loss_fn: field str | None = None
 platoon.experimental.PolicySpec.loss_fn_config: field dict[str, Any] | None = None
@@ -327,8 +350,35 @@ platoon.experimental.SamplerSetup.seed: field int
 platoon.experimental.SamplerSetup.task_ids: field tuple[str, ...]
 platoon.experimental.Slot: @dataclass(frozen=True) class Slot
 platoon.experimental.Slot.entry: field str
+platoon.experimental.StepEnd: @dataclass(eq=False) class StepEnd
+platoon.experimental.StepEnd.consumed: field Mapping[tuple[int, int], str]
+platoon.experimental.StepEnd.for_test: classmethod def for_test(*, kind: Literal['launch', 'step'] = "step", step: int = 0, step_updates: Mapping[str, int] | None = None, consumed: Mapping[tuple[int, int], str] | None = None, tracker: StatsTracker | None = None, published: Mapping[str, int] | None = None, learner: Any = None) -> StepEnd
+platoon.experimental.StepEnd.hook_updates: property dict[str, int]
+platoon.experimental.StepEnd.kind: field Literal['launch', 'step']
+platoon.experimental.StepEnd.learner: def learner(policy: str, *, objective: Objective) -> Learner
+platoon.experimental.StepEnd.published: field Mapping[str, int] = <factory dict>
+platoon.experimental.StepEnd.step: field int
+platoon.experimental.StepEnd.step_updates: field Mapping[str, int]
+platoon.experimental.StepEnd.tracker: field StatsTracker
+platoon.experimental.StepEnd.train: async def train(policy: str, datums: Sequence[Any], *, objective: Objective, adam_params: Any = None) -> None
+platoon.experimental.StepEnd.wait: async def wait(awaitable: Awaitable[Any], *, name: str, timeout: float | None = None, interruptible: bool = False) -> Any
+platoon.experimental.StepHook: class StepHook(Protocol)
+platoon.experimental.StepHook.aclose: async def aclose() -> None
+platoon.experimental.StepHook.drain: async def drain(end: StepEnd) -> None
+platoon.experimental.StepHook.name: attribute str
+platoon.experimental.StepHook.published: async def published(end: StepEnd) -> None
+platoon.experimental.StepHook.update: async def update(end: StepEnd) -> None
+platoon.experimental.StepHookBase: class StepHookBase
+platoon.experimental.StepHookBase.aclose: async def aclose() -> None
+platoon.experimental.StepHookBase.critical: constant bool = True
+platoon.experimental.StepHookBase.drain: async def drain(end: StepEnd) -> None
+platoon.experimental.StepHookBase.from_run: classmethod def from_run(run: TrainerRun, options: Mapping[str, Any]) -> Self
+platoon.experimental.StepHookBase.name: attribute str
+platoon.experimental.StepHookBase.published: async def published(end: StepEnd) -> None
+platoon.experimental.StepHookBase.update: async def update(end: StepEnd) -> None
 platoon.experimental.StepPlan: @dataclass(frozen=True) class StepPlan
 platoon.experimental.StepPlan.end_step: field int
+platoon.experimental.StepPlan.steps_per_epoch: field int | None = None
 platoon.experimental.TaskSampler: class TaskSampler(Protocol)
 platoon.experimental.TaskSampler.adaptive: attribute ClassVar[bool]
 platoon.experimental.TaskSampler.load_state_dict: def load_state_dict(state: Mapping[str, Any]) -> None
@@ -396,6 +446,7 @@ platoon.experimental.TaskStatsView.posterior: def posterior(task_id: str) -> tup
 platoon.experimental.TaskStatsView.task: def task(task_id: str) -> TaskStats
 platoon.experimental.TaskStatsView.task_ids: def task_ids() -> tuple[str, ...]
 platoon.experimental.TaskStatsView.threshold: def threshold(entry: str | None) -> float
+platoon.experimental.TrainInterrupted: class TrainInterrupted(Exception)
 platoon.experimental.Trainer: class Trainer(Protocol)
 platoon.experimental.Trainer.__aenter__: async def __aenter__() -> Self
 platoon.experimental.Trainer.__aexit__: async def __aexit__(exc_type: Any, exc_val: Any, exc_tb: Any) -> bool | None
@@ -421,6 +472,9 @@ platoon.experimental.TrainerBase.run_steps: async def run_steps(run: TrainerRun)
 platoon.experimental.TrainerBase.setup: constant NoneType = None
 platoon.experimental.TrainerBase.started: async def started(run: TrainerRun) -> None
 platoon.experimental.TrainerNeeds: @dataclass(frozen=True) class TrainerNeeds
+platoon.experimental.TrainerNeeds.atomic_steps: field bool = True
+platoon.experimental.TrainerNeeds.draw_provenance: field bool = False
+platoon.experimental.TrainerNeeds.fail_closed_updates: field bool = True
 platoon.experimental.TrainerNeeds.rollouts: field bool = False
 platoon.experimental.TrainerSetup: @dataclass(frozen=True) class TrainerSetup
 platoon.experimental.TrainerSetup.build_workflows: def build_workflows(policies: PolicySet) -> platoon.train.trainer.api.Workflows

@@ -74,6 +74,8 @@ package.
   count toward the batch, and check it with `check_group_admission`.
 - [Run rollouts on the lease](extending/rollout-leases.md) (experimental): return each rollout's permit as it ends,
   from a workflow of your own, under `train.permit_release: rollout`.
+- [Write a step hook](extending/step-hooks.md) (experimental): add work at the end of each training step, such as
+  supervised updates of the policy RL trains, attached to the `rl` trainer from the config.
 
 ## Reference
 

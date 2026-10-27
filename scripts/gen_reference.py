@@ -834,6 +834,8 @@ def _class_members(cls: type, level: int) -> list[str]:
     if dataclasses.is_dataclass(cls):
         hints = {item.name: item.type for item in dataclasses.fields(cls)}
         for item in dataclasses.fields(cls):
+            if item.name.startswith("_"):  # private: neither a field to set nor one to read
+                continue
             if item.default is not dataclasses.MISSING:
                 default = f"`{_default_repr(item.default)}`"
             elif item.default_factory is not dataclasses.MISSING:

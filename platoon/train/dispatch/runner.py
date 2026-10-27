@@ -82,7 +82,7 @@ async def _run_training_group(source: "RolloutSource", draw: BoundDraw, lease: D
     start_time = time.perf_counter()
     try:
         with holding(lease):
-            rollout = await _run_group(source.workflow, draw.row, watchdog=watchdog, tracker=tracker)
+            rollout = await _run_group(source.workflow, source.episode_row(draw), watchdog=watchdog, tracker=tracker)
     finally:
         lease()
     _group_done(rollout, time.perf_counter() - start_time, draw.task_id, tracker, watchdog)

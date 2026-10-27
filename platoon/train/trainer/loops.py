@@ -5,9 +5,10 @@ The loop starts the dispatcher, whose groups settle into the queue the steps deq
 and sets up what its steps share (:class:`StepContext`).  Then it runs one :class:`TrainStep` per step to the end
 batch.  A step reads top to bottom (:meth:`TrainStep.run`), in seven stages: it collects settled groups into
 microbatches, prepares each microbatch's datums and sends them, updates the policy once per minibatch through its
-learner (:mod:`platoon.train.policy.learner`), under its objective (:mod:`platoon.train.objectives`), then commits,
-publishes the new policy, moves on to the next step and logs its metrics.  The parts of each stage are in
-:mod:`platoon.train.step`.
+learner (:mod:`platoon.train.policy.learner`), under its objective (:mod:`platoon.train.objectives`), then commits, and
+ends: the run's step hooks drain and update the policy, the step publishes the new policy once, the hooks hear of it,
+and the step moves on to the next (:func:`~platoon.train.trainer.hooks.finish_step`; with no hook, the publication and
+the move); then it logs its metrics.  The parts of each stage are in :mod:`platoon.train.step`.
 
 The step's flow stays in this module, beside the loop, because tests read it here: the source of the batch transforms
 before the one zero-advantage filter (:meth:`TrainStep.prepare`) and of the exact non-submitted guard
@@ -25,7 +26,7 @@ import asyncio
 import dataclasses
 import logging
 import time
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -40,7 +41,7 @@ from platoon.train.objectives.api import objective_is_zero_for_zero_advantages
 from platoon.train.objectives.policy_gradient import PolicyGradient, compute_training_metrics
 from platoon.train.policy.learner import Learner
 from platoon.train.policy.policy import Policy
-from platoon.train.policy.spec import MAIN, PolicySpec
+from platoon.train.policy.spec import MAIN, PolicyId, PolicySpec
 from platoon.train.step.batch_transforms import (
     BatchTransformContext,
     depth_credit_metrics,
@@ -69,6 +70,7 @@ from platoon.train.step.publish import _no_update_reason, publish_policy
 from platoon.train.step.staleness import StaleFilter, StaleWatch
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
+from platoon.train.trainer.hooks import StepEnd, StepHooks, finish_step
 from platoon.train.trainer.run import StepClock
 from platoon.train.trainer.signals import TerminateTrainLoop, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState
@@ -80,6 +82,7 @@ if TYPE_CHECKING:
     from platoon.train.policy.checkpoints import Waiter
     from platoon.train.task_records import TaskRecorder
     from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+    from platoon.train.trainer.run import TrainerRun
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +170,9 @@ class StepContext:
       them;
     - ``stale_filter``: each entry's bound on a group's staleness;
     - ``learner``: what updates the policy the steps train, under its objective;
-    - ``clock``: the run's clock, which the end of each step advances.
+    - ``clock``: the run's clock, which the end of each step advances;
+    - ``run``: the start the trainer runs (None for a trainer a test drives outside one), and ``hooks``: its step
+      hooks, which run at each step's end.
 
     Two of them count as the steps go.  ``censoring`` counts what the straggler policy censors in a step, until the
     step's metrics are logged.  ``stale_watch`` counts the stale groups of the last steps, for the staleness warning."""
@@ -190,6 +195,8 @@ class StepContext:
     stale_watch: StaleWatch
     learner: Learner
     clock: "StepClock | _StateClock"
+    run: "TrainerRun | None"
+    hooks: StepHooks
 
     @classmethod
     def build(
@@ -217,6 +224,7 @@ class StepContext:
         settings = entry_settings.run_settings(trainer.config)
         # The leader of the loops' policies; in a state a test made as platoon 0.4.0 did, the policy it holds.
         policy = _test_state_policy(shared_state, trainer.config) or _trained_policy(shared_state)
+        clock, run = _step_clock(shared_state), trainer._run
         return cls(
             trainer=trainer,
             state=shared_state,
@@ -242,15 +250,10 @@ class StepContext:
             # The stale filter's bound for each entry's groups: its own max_staleness, else the run's.
             stale_filter=StaleFilter(run_bound, {label: own.max_staleness for label, own in settings.items()}),
             stale_watch=StaleWatch(run_bound),
-            # What updates the policy once per minibatch, under its objective, each result under its train.* deadline.
-            learner=Learner(
-                policy,
-                objective=_objective(policy.spec),
-                timeouts=trainer.config.train,
-                wait=_update_waiter(trainer, shared_state.watchdog),
-                tracker=shared_state.train_tracker,
-            ),
-            clock=_step_clock(shared_state),
+            learner=_step_learner(trainer, shared_state, policy, clock, start_batch),
+            clock=clock,
+            run=run,
+            hooks=run.hooks if run is not None else StepHooks(),
         )
 
     def version(self) -> int:
@@ -274,7 +277,9 @@ class TrainStep:
 
     async def run(self) -> None:
         """The step, top to bottom: collect each microbatch, prepare it and send it, and update the policy once per
-        minibatch; then commit, publish the policy, move on to the next step and log."""
+        minibatch; then commit, end the step (the step hooks, the policy's publication, the next step) and log.  The
+        end advances the run's clock, which moves the draws' horizon on and wakes the evaluation loop, also after a
+        step that published nothing: evaluation's cadence counts consumed batches, zero-signal ones included."""
 
         # One optimizer update per minibatch.
         for minibatch_num in range(self.geometry.num_minibatches):
@@ -300,14 +305,14 @@ class TrainStep:
                 )
                 continue
 
-            await self.before_first_update()
-            await update.apply(self.tally)
+            await update.apply(self.tally)  # after the starting policy's evaluation, when one is due (the learner's)
 
         record_workload_metrics(self.tally, self.state.train_tracker)
         self.counting.step_closed()
         self.commit()
-        await self.publish()
-        self.advance()
+        context = self.context
+        hooks, clock = context.hooks, context.clock
+        await finish_step(hooks, self.step_end, clock=clock, source=context.dispatch, publish=self.publish)
         self.log()
 
     # --- collect: settled groups into a microbatch -------------------------------------------------------------------
@@ -409,13 +414,14 @@ class TrainStep:
         return True
 
     def _record_fate(self, settled: _Settled, fate: str) -> None:
-        """The fate of a group the step took (not a marker, whose fate the rule gave it) in the per-task statistics,
-        which the step commits; and, of a consumed group, its kind and its task sampler's prediction."""
+        """The fate of a group the step took (not a marker, whose fate the rule gave it), which the step commits to
+        the per-task statistics and its end names; and, of a consumed group, its kind and its task sampler's
+        prediction."""
 
+        self.tally.record_fate(settled.key, fate)  # the step's end names it (StepEnd.consumed)
         recorder, record = self.context.recorder, settled.record
         if recorder is None:
             return
-        self.tally.record_fate(settled.key, fate)
         if record is not None and fate == "consumed":
             if (kind := record.kind(recorder.threshold(record.entry))) is not None:
                 self.tally.count_kind(kind, settled.label)
@@ -555,13 +561,6 @@ class TrainStep:
 
         return compute_training_metrics(**inputs)
 
-    async def before_first_update(self) -> None:
-        """Before the run's first update: an evaluation of its starting policy (eval.at_start) must sample that
-        policy throughout."""
-
-        if self.context.start_batch == 0 and self.state.optimizer_steps == 0:
-            await self.context.trainer._wait_for_starting_policy_evaluation(self.state)
-
     def commit(self) -> None:
         """The step commits what became of each of its groups, with the fates it decided, to the start's draws
         (:meth:`~platoon.train.dispatch.source.RolloutSource.committed`), before a full checkpoint saves the statistics
@@ -569,14 +568,33 @@ class TrainStep:
 
         self.context.dispatch.committed(self.tally.keys, self.tally.fates)
 
-    async def publish(self) -> None:
-        """Publish the step's policy, or say why the step took no update: consuming an all-zero batch does not change
-        the policy, and in particular must not age slower, useful rollouts as stale."""
+    def step_end(self) -> StepEnd:
+        """What the step's end tells the step hooks, when it has any (they run in the step's run): the step, its own
+        optimizer updates, the draws it committed with their fates, and the step's learner, which a hook's learner
+        shares the barrier of the starting policy's evaluation with."""
+
+        learner, run = self.context.learner, self.context.run
+        assert run is not None  # a step outside a run has no hooks
+        return run._step_end(
+            "step",
+            step=self.state.train_step,
+            step_updates={learner.policy.id: self.tally.optimizer_steps},
+            consumed=dict(self.tally.fates),
+            learner_of=lambda _policy: learner,
+        )
+
+    async def publish(self, end: StepEnd | None) -> dict[PolicyId, int]:
+        """Publish the step's policy when the step or its hooks (``end``'s, None without hooks) updated it, once, or
+        say why the step took no update: consuming an all-zero batch does not change the policy, and in particular must
+        not age slower, useful rollouts as stale.  Who published, at which version."""
 
         state = self.state
         update_start = time.perf_counter()
-        if self.tally.optimizer_steps:
+        published: dict[PolicyId, int] = {}
+        if self.tally.optimizer_steps or (end is not None and any(end.hook_updates.values())):
             await publish_policy(self.context)
+            if end is not None:  # who published, which the hooks hear
+                published = {self.context.learner.policy.id: self.context.version()}
         else:
             logger.info(
                 "Batch %s (step %s) takes no optimizer update: %s; the policy stays at version %s",
@@ -591,14 +609,7 @@ class TrainStep:
             )
         update_elapsed = time.perf_counter() - update_start
         state.train_tracker.scalar(update_weights_time=update_elapsed)
-
-    def advance(self) -> None:
-        """The next step starts: the run's clock advances (:meth:`~platoon.train.trainer.run.StepClock.advance`), the
-        draws' horizon moves on (:meth:`~platoon.train.dispatch.source.RolloutSource.step_started`), and the evaluation
-        loop and the watchdog hear of it.  Evaluation's cadence counts consumed batches, zero-signal ones included,
-        whose sampler may be unchanged."""
-
-        self.context.clock.advance(consumed=self.context.dispatch)
+        return published
 
     # --- log: the step's metrics, then its line ----------------------------------------------------------------------
 
@@ -669,6 +680,43 @@ def _trained_policy(shared_state: TrainLoopSharedState) -> Policy:
     return policies[policies.leader]
 
 
+def _step_learner(
+    trainer: "PlatoonTinkerRLTrainer",
+    shared_state: TrainLoopSharedState,
+    policy: Policy,
+    clock: "StepClock | _StateClock",
+    start_batch: int,
+) -> Learner:
+    """What updates the policy the steps train once per minibatch, under its objective: each result under its
+    ``train.*`` deadline and the trainer's heartbeat, the starting policy's evaluation awaited before the run's first
+    update (:func:`_starting_policy_barrier`), the step opened on ``clock`` by its first submission, and failing closed
+    when the trainer's needs say so (a subclass's: the rl trainer's do not)."""
+
+    return Learner(
+        policy,
+        objective=_objective(policy.spec),
+        timeouts=trainer.config.train,
+        wait=_update_waiter(trainer, shared_state.watchdog),
+        tracker=shared_state.train_tracker,
+        fail_closed=trainer.needs(trainer.config, trainer.options).fail_closed_updates,
+        before_update=_starting_policy_barrier(trainer, shared_state, start_batch),
+        clock=clock,
+    )
+
+
+def _starting_policy_barrier(
+    trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState, start_batch: int
+) -> Callable[[], Awaitable[None]]:
+    """What the run's first update of any kind awaits, the step hooks' too: an evaluation of its starting policy
+    (``eval.at_start``) must sample that policy throughout (the trainer's ``_wait_for_starting_policy_evaluation``)."""
+
+    async def before_update() -> None:
+        if start_batch == 0 and shared_state.optimizer_steps == 0:
+            await trainer._wait_for_starting_policy_evaluation(shared_state)
+
+    return before_update
+
+
 def _objective(spec: PolicySpec) -> PolicyGradient:
     """The objective the steps update a policy under: the policy-gradient loss its spec names, with its config, which
     the trainer took from ``train.loss_fn`` and ``train.loss_fn_config`` when it was built
@@ -722,10 +770,15 @@ class _StateClock:
 
     def __init__(self, state: Any) -> None:
         self.state = state
+        self.step_open = False
+        self.ending = False
+        self.open_updates: dict[PolicyId, Any] = {}
 
     def advance(self, *, consumed: StepDispatch | None = None) -> None:
         state = self.state
         state.train_step += 1
+        self.step_open = False
+        self.ending = False
         if consumed is not None:
             consumed.step_started()
         state.sampling_client_updated_event.set()

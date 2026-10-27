@@ -258,6 +258,51 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   workflow class from a `WorkflowSetup`, with its `from_setup` when it has one (`GroupRolloutWorkflow` does), else with
   `GroupRolloutWorkflow`'s keyword arguments, as before. Nothing a run does changes.
 
+- **Step hooks: work at the end of each training step (experimental).** A step hook (`platoon.experimental.StepHook`,
+  `StepHookBase`) runs at the end of every step of any trainer, after the step's own updates and its commit and before
+  it publishes: each hook drains its side work (`drain`), adds optimizer updates of the step's policy on the same
+  training client and Adam state (`update`, through `end.train(policy, datums, objective=...)` or
+  `end.learner(policy, objective=...)`), and hears what the step published (`published`, also when nothing did, and
+  once after the launch). Platoon counts the hooks' updates from the policy's optimizer steps, and the step publishes
+  each policy it or a hook updated once, as one new version, so the hooks spend no staleness budget; the step's row
+  gains `batch/hook_optimizer_updates`, and each hook's metrics go under `<name>/`. An update takes Adam parameters of
+  its own (`PolicyUpdate.apply(adam_params=...)`, `end.train(..., adam_params=...)`). A hook alone is tested on
+  `StepEnd.for_test(learner=...)` ([Write a step hook](docs/extending/step-hooks.md), `examples/replay-sft-hook`).
+- **Attaching step hooks.** The rl trainer attaches the hooks its options name, from the config:
+  `trainer_options: {hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]}`, checked when the config loads and
+  built with the class's `from_run(run, options)` before the training service opens; a hook that does not import,
+  build or register stops the run with exit code 78. A trainer of its own registers its hooks in `check()`
+  (`run.hooks.register`, which also makes a hook with `keys` a participant of the run's checkpoints) and ends each step
+  with `run.end_step()`: the hooks, then each policy that the step's updates through `run.learner` or a hook's moved
+  publishes once (`run.publish`: a full checkpoint on the cadence, else a weights-only save), and the rollout workers
+  of the draws the run opened get each new sampler, the launch's first.
+- **Failures and interrupts around step hooks.** A hook that raises in `drain` or `update` fails the start before
+  anything publishes; one that is not `critical` only hears publications, and its errors are logged. A hook's learner
+  sends and counts during the `update()` that took it only, under another objective too, the trainer's `run.learner`
+  sends nothing while the hooks run, a policy takes one update at a time, and a step's end refuses an update left open
+  (sent, not applied), with hooks or without. A hook's `end.wait(..., interruptible=True)` raises
+  `TrainInterrupted` (now in `platoon.experimental`) on a stop request when the trainer's steps are atomic; when they
+  are not, the rl trainer's, the step ends first, and an interrupt that comes as the hooks run all the same saves no
+  checkpoint of the step, so that none saves half a step.
+- **The rules of a run's checkpoints and close.** A participant's keys are its own (`run.checkpoints.register` refuses
+  the counters', those kept for several policies and another participant's), those registered in `check()` take up the
+  start point before any training client opens, and a key of the resumed row that nothing claims stops the start (exit
+  78). The trainer's `close` now runs in `finally`, also after a failure (`run.ended` tells them apart), then each
+  hook's and participant's `aclose`, in reverse order of registration; a start that failed raises its error as it was,
+  the close's errors noted on it.
+- **What a trainer asks of the run (rule 10).** `TrainerNeeds` gains `atomic_steps` (an interrupt inside a step that
+  sent training work saves no `<step>_interrupted` checkpoint of it, and the resume starts from the last full one),
+  `fail_closed_updates` (an optimizer step that the service skipped, or whose metrics are not finite, raises
+  `UpdateRejected` before it counts) and `draw_provenance` (each training episode sees its draw as `ctx.draw`, a
+  `platoon.experimental.DrawInfo`, which a step's end names in `StepEnd.consumed`). The rl trainer keeps the first two
+  off, as before.
+- **Side inference and warm starts.** `Policy.snapshot()` (`platoon.experimental.PolicySnapshot`) samples a policy's
+  published sampler and refuses a sample once the policy has published again (`PolicyMoved`); `Policy.renderer` and
+  `.tokenizer` are its model's. `checkpoint.load_optimizer_state: true` starts a new run from `load_checkpoint_path`'s
+  weights and its optimizer state. `platoon.testing.check_trainer` runs a step hook of its own at each step's end
+  (`runs step hooks`) and stops a run as the hooks drain a step (`keeps steps whole`). Nothing a run without hooks does
+  changes.
+
 ### Changes
 
 - A `process` sandbox whose working directory is `/` runs in its own `/tmp`, since no path maps to the host's root; the
@@ -390,6 +435,18 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   the constructor. A group reads the settings that a partial workflow config may lack through
   `platoon.train.workflow.settings.GroupSettings`: a missing one reads as `WorkflowConfig`'s default, which is the
   default each reader had.
+- **A trainer on `TrainerBase` keeps its steps atomic and its updates failing closed** (experimental): the defaults of
+  `TrainerNeeds.atomic_steps` and `fail_closed_updates` are True, so a trainer of 0.4.0's experimental API that keeps
+  `TrainerBase.needs` now saves no `<step>_interrupted` checkpoint of a step that sent training work, and raises
+  `UpdateRejected` on a skipped or nonfinite optimizer result of a learner of the run's; its `needs()` may turn either
+  off. A step that sends training work by hand, outside `run.learner`, says so (`run.clock.step_open = True`), and
+  `run.learner` is built once the run's clock started (`ready()`). `TrainerBase.close` runs after a failure too.
+- The rl trainer's step ends through the step hooks' sequence (`platoon.train.trainer.hooks.finish_step`), which runs
+  its publication and its clock's advance as before when no hook is registered: `TrainStep.publish` takes the step's
+  end and returns who published, and `TrainStep.advance` and `TrainStep.before_first_update` are gone, the barrier of
+  the starting policy's evaluation being the learner's (`Learner(before_update=...)`, awaited by `PolicyUpdate.apply`,
+  whose step tally is now optional). The rl trainer's `close` stops its recovery pruning after steps that ended
+  (`run.ended`), as before, and does nothing after a failure.
 - **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
   format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
   `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),

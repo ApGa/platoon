@@ -313,9 +313,14 @@ fake Tinker service whose saves the run's `checkpoints.jsonl` records as a real 
 rolls out, over 16 tasks whose every group is one datum with a nonzero advantage. It raises one `AssertionError` that names every
 check that failed: `trains` (a run of two steps saves its launch checkpoint at step 0 and its final one at step 2, each
 row with the run's counters), `interrupts` (a stop request in the third optimizer step of a run of four ends it at a
-step boundary, with `<step>_interrupted` saved there) and `resumes` (the next start resumes from that row and trains to
-the run's end). Call it outside a running event loop; it puts back the signal handlers it found. `check_trainer`
-checks the experimental trainer API (`platoon.experimental`), and changes with it.
+step boundary, with `<step>_interrupted` saved there), `resumes` (the next start resumes from that row and trains to
+the run's end), `runs step hooks` (a hook of the check's own, which adds one optimizer update at each step's end,
+hears the launch and each step's end in order, each step publishes once, and the run counts the hook's updates: end
+each step with `run.end_step`) and `keeps steps whole` (a stop request as that hook drains step 1, after the step's
+own updates, saves no checkpoint of the step when the trainer's steps are atomic, `needs().atomic_steps`, and lets the
+step end first when they are not, saving `000002_interrupted`). Call it outside a running event loop; it puts back the
+signal handlers it found. `check_trainer` checks the experimental trainer API (`platoon.experimental`), and changes
+with it.
 
 ## Reference
 

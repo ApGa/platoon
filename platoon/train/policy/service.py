@@ -53,7 +53,8 @@ async def create_training_client(
 ) -> tinker.TrainingClient:
     """Ask the policy's service (``service_client``) once for the training client of the policy ``spec`` declares: the
     one a resume takes up (``resume_info``: its weights and its optimizer's state), else a new run's, from the weights
-    ``spec.load_checkpoint_path`` names (with a new optimizer), else a new LoRA adapter of its model."""
+    ``spec.load_checkpoint_path`` names (with their optimizer's state when ``spec.load_optimizer_state`` says so, else
+    a new optimizer), else a new LoRA adapter of its model."""
 
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation
@@ -61,6 +62,12 @@ async def create_training_client(
             resume_info.state_path
         )
         logger.info(f"Resumed training from {resume_info.state_path}")
+    elif spec.load_checkpoint_path and spec.load_optimizer_state:
+        # A new trial that goes on from a checkpoint: its weights and its optimizer's state
+        training_client = await service_client.create_training_client_from_state_with_optimizer_async(
+            spec.load_checkpoint_path
+        )
+        logger.info(f"Loaded weights and optimizer state from {spec.load_checkpoint_path}")
     elif spec.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
         training_client = await service_client.create_training_client_from_state_async(spec.load_checkpoint_path)

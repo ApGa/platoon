@@ -1,5 +1,6 @@
 """One policy in the trainer process (:class:`Policy`): its spec, its state as training moves it on, and what each start
-does with it: open its training client at the start point, save it whole (a checkpoint) or for its sampler.
+does with it: open its training client at the start point, save it whole (a checkpoint) or for its sampler, and take a
+snapshot of its published sampler for inference outside the rollouts.
 
 Rollout workers never hold one: they sample the sampling client that the trainer publishes for them
 (:mod:`platoon.train.policy.binding`).
@@ -13,6 +14,7 @@ from tinker_cookbook import checkpoint_utils
 
 from platoon.train.policy import service
 from platoon.train.policy.checkpoints import Waiter, save_full_checkpoint, save_weights_only
+from platoon.train.policy.snapshot import PolicySnapshot
 from platoon.train.policy.spec import PolicyId, PolicySpec
 from platoon.train.tinker.key_refusal import key_refusals
 from platoon.train.tinker.proxy import ModelInfo
@@ -52,6 +54,19 @@ class Policy:
         rollout's datums carry and the staleness of its groups is counted in."""
 
         return self.info.llm.version
+
+    @property
+    def renderer(self) -> Any:
+        """The renderer of the policy's model (a ``tinker_cookbook`` renderer), which a step hook renders its own
+        datums with."""
+
+        return self.info.llm.renderer
+
+    @property
+    def tokenizer(self) -> Any:
+        """The tokenizer of the policy's model."""
+
+        return self.info.llm.tokenizer
 
     def connect(self) -> None:
         """Open the policy's Tinker service client, a session on its service (:meth:`new_service_client`).  A key the
@@ -105,6 +120,24 @@ class Policy:
         (:func:`~platoon.train.policy.checkpoints.save_weights_only`)."""
 
         return await save_weights_only(self.training_client)
+
+    def snapshot(self) -> PolicySnapshot:
+        """The policy's published sampler as it is now, at its version, with its renderer, tokenizer, model name,
+        context window and sample timeout (:class:`~platoon.train.policy.snapshot.PolicySnapshot`), whose samples
+        are refused once the policy publishes again."""
+
+        llm = self.info.llm
+        return PolicySnapshot(
+            policy=self.id,
+            version=self.version,
+            sampling_client=self.sampling_client,
+            renderer=self.renderer,
+            tokenizer=self.tokenizer,
+            model_name=llm.model_name,
+            context_window_length=llm.context_window_length,
+            sample_timeout_seconds=llm.sample_timeout_seconds,
+            version_now=lambda: self.version,
+        )
 
 
 def adam_params(optimizer: "AdamParams") -> tinker.AdamParams:

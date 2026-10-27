@@ -5,13 +5,13 @@ Each start of a run (its first launch, or a resume) goes through :class:`~platoo
 lifecycle every trainer shares.  ``train()`` runs it with the workflows it is given; ``run()`` builds them from the
 trainer's setup first.  The lifecycle calls this trainer's hooks in this order (the numbers are ``TrainerRun``'s):
 
-1. ``check``: the trainer's checks;
+1. ``check``: the trainer's checks, then the step hooks its options attach;
 4. ``_open_policies``: the policy's training client at the start point, through the trainer's seams;
 5. ``prepare``: the rollouts' startup, and the start's draws (:class:`_TrainerDraws`, its rollout source);
 6. ``started``, after the launch save: the recovery checkpoint pruning;
 7. ``ready``: the state the loops share;
 8. ``run_steps``: the training and evaluation loops;
-10. ``close``.
+10. ``close``: closing, after steps that ended.
 
 The code of each stage lives in a stage package (``platoon.train.trainer``, ``.step``, ``.dispatch``,
 ``.checkpoints``, ``.evaluation``), as a module function that takes the trainer first.  Each stays a method of the
@@ -23,7 +23,8 @@ same names.
 import asyncio
 import logging
 import os
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Self
 
 import tinker
 from datasets import Dataset
@@ -61,6 +62,8 @@ from platoon.train.tinker.key_refusal import key_refusals
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.trainer import loops, waiting
 from platoon.train.trainer.api import StepPlan, TaskSources, TrainerBase, TrainerNeeds, TrainerSetup, Workflows
+from platoon.train.trainer.hook_config import HookSpec, attach_hooks
+from platoon.train.trainer.registry import trainer_options
 from platoon.train.trainer.run import StepClock, TrainerRun
 from platoon.train.trainer.signals import TerminateTrainLoop, TrainInterrupted, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState, _main_holding
@@ -145,12 +148,14 @@ class PlatoonTinkerRLTrainer(TrainerBase):
 
     @classmethod
     def needs(cls, config: Any, options: Any) -> TrainerNeeds:
-        """It trains on rollouts of the run's training tasks."""
+        """It trains on rollouts of the run's training tasks.  Its steps are not atomic and its updates do not fail
+        closed (RFC 0021, open question 8): an interrupt inside a step saves ``<step>_interrupted``, and nonfinite
+        optimizer metrics are logged, as they always were.  A subclass may ask for both."""
 
-        return TrainerNeeds(rollouts=True)
+        return TrainerNeeds(rollouts=True, atomic_steps=False, fail_closed_updates=False)
 
     @classmethod
-    def from_setup(cls, setup: TrainerSetup) -> "PlatoonTinkerRLTrainer":
+    def from_setup(cls, setup: TrainerSetup) -> Self:
         """The trainer over the setup's tasks, the order they are drawn in and their task samplers, whose ``run()``
         builds its workflows with the setup.  Its constructor registers the policies its config declares, so a setup
         that declares others is refused.  (``platoon train`` builds this trainer with its constructor instead, and
@@ -167,7 +172,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
             train_order=tasks.train_order,  # the epochs the trainer counts
             train_sampling=tasks.train_sampling,  # the task samplers it draws through, which draw the order's rows
         )
-        trainer.setup = setup
+        trainer.setup, trainer.options = setup, setup.options
         return trainer
 
     def _build_batch_transforms(
@@ -424,10 +429,24 @@ class PlatoonTinkerRLTrainer(TrainerBase):
     # The lifecycle's hooks (TrainerBase), each a phase of the start or a step of one, in the order the run calls them.
 
     def check(self, run: TrainerRun) -> None:
-        """1. Inside ``async with trainer:``, the config's checks before training opens its service."""
+        """1. Inside ``async with trainer:``, the config's checks before training opens its service; then the step hooks
+        its options attach (:meth:`_attached_hooks`), each built and registered with the run, one with state to resume
+        (``keys``) with the run's checkpoints too, which it then takes up before any training client opens."""
 
         self._require_entered()
         self._check_before_start()
+        attach_hooks(self._attached_hooks(), run)
+
+    def _attached_hooks(self) -> tuple[HookSpec, ...]:
+        """The step hooks the trainer's options name (``hooks``): those it was built with (a setup's,
+        ``check_trainer``'s), read as the rl trainer's (``RLOptions``) when they are a mapping, and a subclass's own
+        options' ``hooks`` when they have them; else, for a trainer built without options (``platoon train`` builds it
+        with its constructor), the config's ``trainer_options``.  A subclass that attaches more calls this first."""
+
+        options = self.options if self.options is not None else self.config.trainer_options
+        if options is None or isinstance(options, Mapping):
+            options = trainer_options(options)
+        return tuple(getattr(options, "hooks", ()))
 
     async def _open_policies(self, run: TrainerRun, start: StartPoint) -> bool:
         """4. Open the trained policy's training client on its service, at its start point: the one its checkpoint
@@ -459,7 +478,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         run._open_draws(draws)
         assert draws.order is not None  # opened
         self._train_dataloader = draws.order
-        return StepPlan(end_step=draws.end_step)
+        return StepPlan(end_step=draws.end_step, steps_per_epoch=len(draws.order))
 
     async def started(self, run: TrainerRun) -> None:
         """6. The launch save succeeded, and the start's draws logged their start (the run's, through
@@ -502,11 +521,6 @@ class PlatoonTinkerRLTrainer(TrainerBase):
                 )
         else:
             logger.info("Training was already complete; nothing to do")
-
-    async def close(self, run: TrainerRun) -> None:
-        """10. Close what the start opened (:meth:`_close_after_training`)."""
-
-        await self._close_after_training()
 
     def _require_entered(self) -> None:
         """train() runs inside ``async with trainer:``, which opens the stats logger and the train tracker."""
@@ -630,6 +644,13 @@ class PlatoonTinkerRLTrainer(TrainerBase):
             if watchdog:
                 watchdog.stop()
         return interrupted
+
+    async def close(self, run: TrainerRun) -> None:
+        """10. After steps that ended, close what the start opened (:meth:`_close_after_training`); after a failure,
+        nothing, as before."""
+
+        if run.ended:
+            await self._close_after_training()
 
     async def _close_after_training(self) -> None:
         """Stop the pruning of the run's recovery checkpoints (the run closes the start's draws after it)."""

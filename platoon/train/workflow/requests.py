@@ -11,6 +11,7 @@ import uuid
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from platoon.programs import DRAW_KEY
 from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.task import Task
 from platoon.train.components import harness_time_limit_s, known_rollout_overhead_s, rollout_overhead_s
@@ -54,13 +55,17 @@ def _model_binding(workflow: "GroupRolloutWorkflow", checkpoint_version: int) ->
 def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int) -> RolloutWorkerRequest:
     """Everything the parent must decide before a rollout can run, in process or in a worker.  It resolves the task
     parent-side, which also removes the shared-mutable-``Task`` aliasing some plugin datasets have.  It applies
-    ``max_steps``, snapshots the checkpoint version and joins ``output_dir`` with it."""
+    ``max_steps``, snapshots the checkpoint version and joins ``output_dir`` with it.  A training draw's provenance in
+    ``data`` (under ``DRAW_KEY``, when the trainer asks for it) goes into the rollout config's ``extra``, where the
+    episode reads it (``ctx.draw``)."""
 
     task_id = data["task_id"]
     task = workflow.get_task_fn(task_id)
     rollout_config = workflow._get_rollout_config()
     if rollout_config.max_steps is not None:
         task.max_steps = rollout_config.max_steps
+    if (draw := data.get(DRAW_KEY)) is not None:  # the trainer asked for draw provenance: the episode's ctx.draw
+        rollout_config.extra = {**rollout_config.extra, DRAW_KEY: asdict(draw)}
 
     # Get checkpoint version from the LLM
     checkpoint_version = workflow.model_info.llm.version

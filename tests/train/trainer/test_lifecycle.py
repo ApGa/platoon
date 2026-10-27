@@ -69,14 +69,16 @@ class _Counting(px.TrainerBase):
 
 
 async def _step(run: TrainerRun) -> None:
-    """One step of the leader policy: an optimizer step on the fake service, published as a new version."""
+    """One step of the leader policy: an optimizer step on the fake service, sent by hand, outside a learner of the
+    run's, so that the step says it is open (rule 10); then the step's end, which publishes it as a new version
+    (``run.end_step``)."""
 
     policy = run.policies[run.policies.leader]
     client: Any = policy.training_client  # the fake service's
+    run.clock.step_open = True
     await (await client.optim_step_async(None)).result_async()
     policy.optimizer_steps += 1
-    policy.info.llm.update_sampling_client(await policy.save_for_sampler())
-    run.clock.advance()
+    await run.end_step()
 
 
 class _AsS4Sketches(_Counting):
@@ -89,7 +91,7 @@ class _AsS4Sketches(_Counting):
 
 
 class _Unstoppable(_Counting):
-    """It never hears a stop request."""
+    """It never hears a stop request, not even inside a step's hooks."""
 
     async def run_steps(self, run: TrainerRun) -> None:
         run.shutdown = asyncio.Event()
@@ -170,10 +172,16 @@ def test_participants_take_up_the_row_a_start_resumes_from_by_its_step_and_its_r
 
 def test_the_conformance_check_passes_a_trainer_that_keeps_the_lifecycle_and_names_what_one_breaks():
     check_trainer(_Counting)
-    with pytest.raises(
-        AssertionError, match=r"fails 1 check\(s\):\n  interrupts: saved \['recovery-000000', 'final'\]"
-    ):
+    with pytest.raises(AssertionError) as failed:
         check_trainer(_Unstoppable)
+    assert str(failed.value).splitlines()[:3] == [
+        "trainer _Unstoppable fails 2 check(s):",
+        "  interrupts: saved ['recovery-000000', 'final']: its last row is not <step>_interrupted at the step it "
+        "stopped at",
+        "  keeps steps whole: its steps are atomic, but a stop as step 1 drained its hooks, after the step's own 1 "
+        "update(s), saved ['recovery-000000', 'final'], not the launch checkpoint alone: a step is open once it sends "
+        "training work (run.learner's open it; work sent by hand sets run.clock.step_open)",
+    ]
 
 
 def test_steps_that_a_stop_request_stopped_short_of_their_end_save_an_interrupted_checkpoint_not_the_final_one():
@@ -328,4 +336,8 @@ def test_the_experimental_api_exports_the_trainer_api_and_the_policy_spec_as_the
     )
     assert px.PolicySpec is spec_module.PolicySpec and px.MAIN is spec_module.MAIN
     assert issubclass(PlatoonTinkerRLTrainer, px.TrainerBase)
-    assert PlatoonTinkerRLTrainer.needs(None, None) == px.TrainerNeeds(rollouts=True)
+    # The rl trainer's steps are not atomic and its updates do not fail closed, as they never were (RFC 0021, open
+    # question 8).
+    assert PlatoonTinkerRLTrainer.needs(None, None) == px.TrainerNeeds(
+        rollouts=True, atomic_steps=False, fail_closed_updates=False
+    )

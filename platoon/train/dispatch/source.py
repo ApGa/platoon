@@ -10,7 +10,9 @@ A source holds one start's draws:
 - once started, the queue the groups settle into (the groups a resume kept first), where the steps that consume them
   dequeue them.
 
-It runs the training workflow's ``arun_episode`` for each draw.  It takes part in every full checkpoint of the run
+It runs the training workflow's ``arun_episode`` for each draw, on the draw's row, with the draw's provenance in it
+when the trainer asks for it (:meth:`RolloutSource.episode_row`).  It remembers the draws each step committed, with
+their fates (``consumed``), until the next step starts.  It takes part in every full checkpoint of the run
 (``loop_state``'s ``tasks``, ``next_position`` and ``dispatch``), which a start that resumes takes up.
 
 Each part is a module function that takes the source:
@@ -31,6 +33,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from platoon.programs import DRAW_KEY, DrawInfo
 from platoon.train.checkpoints import resume, saving
 from platoon.train.checkpoints.pruning import read_checkpoint_records
 from platoon.train.dataloader import PlatoonTinkerDataloader, _run_steps
@@ -44,7 +47,7 @@ from platoon.utils.stats_tracker import get as get_tracker
 if TYPE_CHECKING:
     from platoon.train.admissions import AdmissionSet
     from platoon.train.checkpoints.resume import StartPoint
-    from platoon.train.dispatch.dispatcher import Dispatcher
+    from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
     from platoon.train.trainer.api import TaskSources
     from platoon.train.trainer.signals import Watchdog
     from platoon.utils.stats_tracker import StatsTracker
@@ -80,6 +83,11 @@ class RolloutSource:
         self.workflow = workflow
         self.versions = versions
         self.leader = leader
+        # Whether each draw's row carries its provenance (DrawInfo), which the trainer asks for (TrainerNeeds); the
+        # run sets it as it opens the source.
+        self.draw_provenance = False
+        # The draws the steps committed since the last step started, by key, each with its fate.
+        self.consumed: dict[Key, str] = {}
         # Opened with the start (open): the per-task statistics (None when the run keeps none, or they could not start;
         # tasks_lost then says what a resume could not read), the order of the training tasks and the step after the
         # run's last, the group admission rules (None: every entry admits every group) and the dispatcher.
@@ -168,6 +176,17 @@ class RolloutSource:
 
     # --- running its groups ----------------------------------------------------------------------------------------
 
+    def episode_row(self, draw: "BoundDraw") -> dict[str, Any]:
+        """The row the group of ``draw`` runs on: the draw's own, or, when the trainer asks for draw provenance, a copy
+        with the draw's :class:`~platoon.programs.DrawInfo` under ``DRAW_KEY``, which the workflow passes on to each
+        episode (``ctx.draw``)."""
+
+        if not self.draw_provenance:
+            return draw.row
+        assert self.dispatcher is not None  # it started the draw's group
+        info = DrawInfo(self.run_dir, draw.start, draw.seq, draw.position, self.dispatcher.step)
+        return {**draw.row, DRAW_KEY: info}
+
     def start(
         self,
         task_group: asyncio.TaskGroup,
@@ -215,6 +234,12 @@ class RolloutSource:
         until then, however the step dequeued them (:meth:`take`, or ``results``)."""
 
         self.record_fates(keys, fates=fates)
+        for key in keys:
+            if key is None:
+                continue
+            group = self.dispatcher.holding(key) if fates is None and self.dispatcher is not None else None
+            if (fate := fates.get(key) if fates is not None else _fate_of(group)) is not None:
+                self.consumed[key] = fate
         if self.dispatcher is not None:
             self.dispatcher.committed(keys)
 
@@ -240,8 +265,10 @@ class RolloutSource:
 
     def step_started(self, policy: str | None = None) -> None:
         """The next step started (:meth:`~platoon.train.trainer.run.StepClock.advance`): the horizon moves one batch
-        on.  ``policy``: whose horizon, under independent stepping (not built yet); with one policy, None."""
+        on, and the draws the last step committed are forgotten (``consumed``).  ``policy``: whose horizon, under
+        independent stepping (not built yet); with one policy, None."""
 
+        self.consumed = {}
         if self.dispatcher is not None:
             self.dispatcher.step_started()
 
