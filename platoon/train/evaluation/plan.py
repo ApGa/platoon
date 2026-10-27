@@ -2,20 +2,20 @@
 evaluates first.
 
 The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.
+name, so to replace one, replace the method, on the class or an instance, not the function.  What they read of the
+trainer and of the loops' shared state is :mod:`platoon.train.evaluation.protocol`'s.
 """
 
 import logging
 from typing import TYPE_CHECKING
 
 from platoon.train.evaluation.record import EVALUATIONS_NAME
-from platoon.train.trainer.state import TrainLoopSharedState
 
 if TYPE_CHECKING:
-    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+    from platoon.train.evaluation.protocol import EvaluatedTrainer, LoopState
 
 
-def _evaluation_plan(state: TrainLoopSharedState, *, resumed: bool, end: int) -> tuple[int, str]:
+def _evaluation_plan(state: "LoopState", *, resumed: bool, end: int) -> tuple[int, str]:
     """The log line that says when a start of the run that evaluates evaluates first, and why, with its level: a
     warning when a fresh run evaluates nothing, as its first evaluation would come after its last step, ``end``."""
 
@@ -55,7 +55,7 @@ def _evaluation_plan(state: TrainLoopSharedState, *, resumed: bool, end: int) ->
     return logging.INFO, f"Resuming at step {start}: the next evaluation is at step {first}"
 
 
-def _evaluates_during_training(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState) -> bool:
+def _evaluates_during_training(trainer: "EvaluatedTrainer", shared_state: "LoopState") -> bool:
     """Whether an evaluation loop runs beside training: there is an eval split, and ``eval`` triggers (its
     ``every`` is positive)."""
 

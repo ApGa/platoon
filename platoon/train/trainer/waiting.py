@@ -1,8 +1,9 @@
 """What a start waits for: a call, with heartbeats and a deadline; a rollout group, with watchdog heartbeats; the next
 settled group, or a shutdown.
 
-The functions here that take the trainer first are its methods still (``_await_with_heartbeat`` every trainer's, on
-``TrainerBase``): to replace one, replace the method, on the class or an instance, not the function.
+``_await_with_heartbeat`` takes the trainer first and is a method of every trainer still (on ``TrainerBase``): to
+replace it, replace the method, on the class or an instance, not the function.  The other two take no trainer: a rollout
+source (:mod:`platoon.train.dispatch.source`) calls them, and so do the rl trainer's loops, through its static methods.
 """
 
 import asyncio
@@ -14,7 +15,6 @@ from platoon.train.trainer.signals import TrainInterrupted, Watchdog
 
 if TYPE_CHECKING:
     from platoon.train.trainer.api import TrainerBase
-    from platoon.train.trainer.state import TrainLoopSharedState
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +72,12 @@ async def _await_with_heartbeat(
 
 
 async def _await_rollout_with_heartbeat(
-    trainer: "TrainerBase",
     coro,
     watchdog: Watchdog | None,
     heartbeat_interval: float | None = None,
 ):
-    """Await an in-flight rollout group while feeding the watchdog.
+    """Await an in-flight rollout group while feeding the watchdog, a training group's (its rollout source runs it)
+    or an evaluation's.
 
     A group is bounded by the per-member rollout timeout plus the straggler
     grace and the judge/reward tail, which can exceed the watchdog timeout;
@@ -103,17 +103,17 @@ async def _await_rollout_with_heartbeat(
 
 
 async def _next_rollout(
-    queue: asyncio.Queue, shared_state: "TrainLoopSharedState", *, interruptible: bool, ready: bool = False
+    queue: asyncio.Queue, shutdown_event: asyncio.Event | None, *, interruptible: bool, ready: bool = False
 ):
-    """The next rollout result; with ``interruptible`` (no update of the current batch applied yet),
-    ``TrainInterrupted`` once a shutdown is requested instead, since the feeders stop on it and the batch
-    may never complete.  The batch is then dropped whole: a resume from the last completed step redoes it.
+    """The next rollout result from ``queue``, where a start's training groups settle; with ``interruptible`` (no
+    update of the current batch applied yet), ``TrainInterrupted`` once a shutdown is requested (``shutdown_event``;
+    None: never) instead, since the feeders stop on it and the batch may never complete.  The batch is then dropped
+    whole: a resume from the last completed step redoes it.
     With ``ready`` (a step under a group admission rule), a result already queued is taken without letting
     other tasks run first: a step takes the queued markers in one go, so that groups that end at once cannot start
     again in the slots those markers free and queue more markers between two of them.
     """
 
-    shutdown_event = getattr(shared_state, "shutdown_event", None)
     if ready and not queue.empty():
         if interruptible and shutdown_event is not None and shutdown_event.is_set():
             raise TrainInterrupted()

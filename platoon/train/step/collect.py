@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from platoon.train.step.metrics import LABEL_STATS, _no_groups_yet
+from platoon.train.dispatch.settled import LABEL_STATS, _no_groups_yet
 from platoon.train.workflow.protocol import malformed_counts, report_of
 from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -20,6 +20,7 @@ from platoon.utils.rollout_workload import RolloutWorkload
 if TYPE_CHECKING:
     from platoon.train.dispatch.dispatcher import Dispatcher
     from platoon.train.dispatch.settled import _Settled
+    from platoon.train.dispatch.source import RolloutSource
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +73,8 @@ class StepTally:
     total_task_retained_datums: int = 0
     stale_groups: int = 0
     label_stale: Counter[str | None] = field(default_factory=Counter)
-    # The step's groups in the per-task statistics, each with its record and its draw, and its fate once the step
-    # commits.
-    fates: list[tuple[Any, tuple[int, int] | None, str]] = field(default_factory=list)
+    # The fate of each of the step's groups in the per-task statistics, by draw, which the step commits.
+    fates: dict[tuple[int, int], str] = field(default_factory=dict)
     # The kinds of the groups the step trained on, by label ("" for the whole batch).
     kinds: dict[str, Counter[str]]
     # Of the consumed groups a task sampler drew with a score, by the sampler's metric prefix: the sum of the scores
@@ -132,19 +132,12 @@ class StepTally:
             self.total_task_retained_datums += workload_payload.task_retained_datums
         return rollout_stats
 
-    def record_fate(self, record: Any, key: tuple[int, int] | None, fate: str) -> None:
-        """A group in the per-task statistics, with its record and its draw: its fate once the step commits."""
+    def record_fate(self, key: tuple[int, int] | None, fate: str) -> None:
+        """The fate of the group of draw ``key`` in the per-task statistics, once the step commits (a group without a
+        draw, which a test queued, has none)."""
 
-        self.fates.append((record, key, fate))
-
-    def commit_fates(self, recorder: Any) -> None:
-        """Tell the per-task statistics (``recorder``) what became of each of the step's groups, as the step commits."""
-
-        for record, key, fate in self.fates:
-            if record is not None:
-                recorder.fate(record, fate)
-            elif key is not None:  # a group a start kept after its statistics stopped: no record of its own
-                recorder.fate_of(key, fate)
+        if key is not None:
+            self.fates[key] = fate
 
     def count_stale(self, label: str | None) -> None:
         """A group of ``label`` that the stale filter dropped."""
@@ -185,12 +178,16 @@ class StepTally:
 
 
 class StepDispatch:
-    """The dispatcher (:mod:`platoon.train.dispatch.dispatcher`) as a step tells it what it dequeued, took and
-    committed, and that the next step started; or none, when a test replaces the trainer's ``_dispatch`` and queues the
-    groups itself: then nothing is told, a group admission rule counts every group a step takes, and no step logs the
-    task samplers' metrics."""
+    """The start's draws (:class:`~platoon.train.dispatch.source.RolloutSource`) and their dispatcher
+    (:mod:`platoon.train.dispatch.dispatcher`) as a step tells them what it dequeued, took and committed, and that the
+    next step started, and reads where the task samplers' metrics go and what held the dispatcher back.  When a test
+    replaces the trainer's ``_dispatch`` and queues the groups itself, the loop has no dispatcher (None): then it is
+    told nothing (the draws' per-task statistics, when the start keeps them, still get each group's fate), a group
+    admission rule counts every group a step takes, and no step logs the task samplers' metrics.  A trainer that a test
+    drives outside a start has no draws either (None)."""
 
-    def __init__(self, dispatcher: "Dispatcher | None") -> None:
+    def __init__(self, draws: "RolloutSource | None", dispatcher: "Dispatcher | None") -> None:
+        self.draws = draws
         self.dispatcher = dispatcher
 
     def dequeued(self) -> None:
@@ -209,17 +206,23 @@ class StepDispatch:
 
         return self.dispatcher.samplers.prefix(sampler) if self.dispatcher is not None else None
 
-    def committed(self, keys: list[tuple[int, int] | None]) -> None:
-        """The step committed: the groups it dequeued are consumed, and a checkpoint no longer keeps them."""
+    def committed(self, keys: list[tuple[int, int] | None], fates: dict[tuple[int, int], str]) -> None:
+        """The step committed: each of its groups' fate (``fates``, by draw) goes to the draws' statistics, and the
+        dispatcher no longer keeps the groups it dequeued (:meth:`RolloutSource.committed`); without the loop's
+        dispatcher, the fates alone (:meth:`RolloutSource.record_fates`)."""
 
+        if self.draws is None:
+            return
         if self.dispatcher is not None:
-            self.dispatcher.committed(keys)
+            self.draws.committed(keys, fates=fates)
+        else:
+            self.draws.record_fates(keys, fates=fates)
 
     def step_started(self) -> None:
-        """The step published its policy: the horizon moves one batch on."""
+        """The step published its policy: the draws' horizon moves one batch on (:meth:`RolloutSource.step_started`)."""
 
-        if self.dispatcher is not None:
-            self.dispatcher.step_started()
+        if self.draws is not None and self.dispatcher is not None:
+            self.draws.step_started()
 
     def blocked_shares(self) -> dict[str, float]:
         """What held the dispatcher back from starting groups since the last step (its ``dispatch/blocked_share/*``

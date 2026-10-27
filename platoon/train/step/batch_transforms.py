@@ -18,22 +18,10 @@ from tinker import TensorData
 
 # Internal per-datum metadata used to preserve Tinker's original action-token loss denominator after zero-gradient
 # datums are removed from model compute: one of the loss inputs only the trainer reads, which the objective names.
-from platoon.train.objectives.api import LOSS_NORMALIZATION_TOKENS_KEY
+from platoon.train.objectives.api import LOSS_NORMALIZATION_TOKENS_KEY, objective_is_zero_for_zero_advantages
 
 if TYPE_CHECKING:
     from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
-
-
-def objective_is_zero_for_zero_advantages(loss_fn: str, loss_fn_config: dict) -> bool:
-    """Whether zero advantages guarantee a zero objective for a known RL loss.
-
-    Unknown options may add an advantage-independent KL/entropy/other term.
-    Be conservative until their semantics are explicitly supported here.
-    """
-
-    return loss_fn in {"cispo", "ppo", "importance_sampling"} and not (
-        set(loss_fn_config) - {"clip_low_threshold", "clip_high_threshold"}
-    )
 
 
 def has_zero_objective(datums: list[tinker.Datum], loss_fn: str, loss_fn_config: dict) -> bool:

@@ -33,12 +33,13 @@ from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, evaluates, t
 from platoon.train.exclusion import TaskExclusion, record_exclusions
 from platoon.train.identity import check_training_run
 from platoon.train.labels import check_labels, label_column
+from platoon.train.policy.spec import MAIN
 from platoon.train.sampling import log_sampling_plan
 from platoon.train.startup import worker_preload
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
 from platoon.train.workflow.group import GroupRolloutWorkflow
-from platoon.train.workflow.protocol import capabilities_of
+from platoon.train.workflow.protocol import WorkflowSetup, _built_by_keywords, capabilities_of
 from platoon.utils.config import ConfigError, load_config, update_run_lock
 
 logger = logging.getLogger(__name__)
@@ -219,44 +220,20 @@ def _build_workflows(
     training: TrainingTasks,
     eval_dataset: Any,
 ) -> tuple[Any, Any]:
-    """The training and the evaluation workflow, of the run's workflow class: each rolls out its split's tasks on the
-    policy (``model_info``), into the run directory; under entries with settings of their own, each group runs with
-    its entry's; and a workflow whose rollout workers fork from a fork server gets what that server imports and builds
-    ahead of them (:func:`set_worker_preload`, over the training tasks and ``eval_dataset``)."""
+    """The training and the evaluation workflow, of the run's workflow class, each built from its phase's
+    :class:`~platoon.train.workflow.protocol.WorkflowSetup` (:func:`_workflow_setup`, :func:`_built`): each rolls out
+    its split's tasks on the policy (``model_info``), into the run directory; under entries with settings of their
+    own, each group runs with its entry's; and a workflow whose rollout workers fork from a fork server gets what that
+    server imports and builds ahead of them (:func:`set_worker_preload`, over the training tasks and
+    ``eval_dataset``)."""
 
-    # The run directory, the trainer's run_log_path.
-    log_path = os.path.join(config.log_path, config.stats.experiment_name, config.stats.trial_name)
     workflow_cls = components.workflow_cls
     group_kwargs = {**worker_package_kwargs(workflow_cls, config), **label_kwargs(workflow_cls, config)}
-    workflow_kwargs = {**group_kwargs, **components.workflow_kwargs}
-    train_workflow = workflow_cls(
-        rollout_fn=components.rollout_fn,
-        get_task_fn=components.get_task_fn,
-        config=config.train.workflow_config,
-        model_info=model_info,
-        log_path=log_path,
-        stats_scope=workflow_kwargs.pop("stats_scope", "train"),
-        filter_errors=workflow_kwargs.pop("filter_errors", config.train.workflow_config.filter_errors),
-        reward_processor=components.reward_processor,
-        **workflow_kwargs,
-    )
-
-    eval_workflow_kwargs = {**group_kwargs, **components.eval_workflow_kwargs}
-    eval_workflow = workflow_cls(
-        rollout_fn=components.eval_rollout_fn,
-        get_task_fn=components.eval_get_task_fn,
-        config=config.eval.workflow_config,
-        model_info=model_info,
-        log_path=log_path,
-        stats_scope=eval_workflow_kwargs.pop("stats_scope", "eval"),
-        filter_errors=eval_workflow_kwargs.pop("filter_errors", config.eval.workflow_config.filter_errors),
-        reward_processor=components.reward_processor,
-        **eval_workflow_kwargs,
-    )
-    if entry_settings.sets_settings(config.environments):
-        # Each group runs with its entry's settings (GroupRolloutWorkflow.config inside the group).
-        train_workflow.entry_configs = {label: own.train for label, own in settings.items()}
-        eval_workflow.entry_configs = {label: own.eval for label, own in settings.items() if own.eval is not None}
+    setups = [
+        _workflow_setup(phase, config, components, model_info, settings, group_kwargs) for phase in ("train", "eval")
+    ]
+    train_workflow = _built(workflow_cls, setups[0])
+    eval_workflow = _built(workflow_cls, setups[1])
     # What the fork server of each workflow's rollout workers imports and builds ahead of them.
     environments = AutoEnvironment.environments(config)
     set_worker_preload(train_workflow, environments, phase="train", tasks=training.tasks)
@@ -264,6 +241,55 @@ def _build_workflows(
         eval_workflow, environments, phase="eval", tasks=eval_dataset if eval_dataset is not None else ()
     )
     return train_workflow, eval_workflow
+
+
+def _workflow_setup(
+    phase: Phase,
+    config: PlatoonTinkerRLTrainerConfig,
+    components: _Components,
+    model_info: ModelInfo,
+    settings: dict[str, entry_settings.EntrySettings],
+    group_kwargs: dict[str, Any],
+) -> WorkflowSetup:
+    """What ``phase``'s workflow is built with: the phase's rollout function, task loader and settings (``train`` or
+    ``eval``), each entry's own when an entry sets any, the run's one policy (``model_info``), the run directory, the
+    phase's stats scope and ``filter_errors`` (an environment's workflow arguments may set either), the reward
+    processor, the environments' packages and the run's label column for a workflow that runs rollout workers
+    (``group_kwargs``), and the environment's other workflow arguments."""
+
+    training = phase == "train"
+    section = config.train if training else config.eval
+    options = {**group_kwargs, **(components.workflow_kwargs if training else components.eval_workflow_kwargs)}
+    entry_configs = None
+    if entry_settings.sets_settings(config.environments):  # each group runs with its entry's settings
+        if training:
+            entry_configs = {label: own.train for label, own in settings.items()}
+        else:
+            entry_configs = {label: own.eval for label, own in settings.items() if own.eval is not None}
+    return WorkflowSetup(
+        phase=phase,
+        rollout_fn=components.rollout_fn if training else components.eval_rollout_fn,
+        get_task_fn=components.get_task_fn if training else components.eval_get_task_fn,
+        config=section.workflow_config,
+        entry_configs=entry_configs,
+        policies={MAIN: model_info},
+        # The run directory, the trainer's run_log_path.
+        log_path=os.path.join(config.log_path, config.stats.experiment_name, config.stats.trial_name),
+        stats_scope=options.pop("stats_scope", phase),
+        filter_errors=options.pop("filter_errors", section.workflow_config.filter_errors),
+        reward_processor=components.reward_processor,
+        packages=options.pop("packages", None),
+        label_by=options.pop("label_by", None),
+        options=options,
+    )
+
+
+def _built(workflow_cls: Any, setup: WorkflowSetup) -> Any:
+    """The workflow of ``workflow_cls`` for ``setup``: its ``from_setup`` when it has one, as ``GroupRolloutWorkflow``
+    does; else built as platoon train always built it, with ``GroupRolloutWorkflow``'s keyword arguments."""
+
+    from_setup = getattr(workflow_cls, "from_setup", None)
+    return from_setup(setup) if from_setup is not None else _built_by_keywords(workflow_cls, setup)
 
 
 def worker_package_kwargs(workflow_cls: type, config: Any) -> dict[str, Any]:

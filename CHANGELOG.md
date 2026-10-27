@@ -247,6 +247,17 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   selects the trainer; this release has one, `rl`, the default (`sft` and `interleaved` are reserved). Nothing a run
   does changes.
 
+- **Any trainer draws the run's rollouts, and the workflow contract (experimental).** A trainer whose
+  `needs()` say it rolls out gets the start's draws from its run, `run.rollouts()`
+  (`platoon.train.dispatch.source.RolloutSource`): the run's task order and samplers, the group admission rules, the
+  per-task statistics, the dispatcher with its rollout permits and exact resume, and the groups they settle into
+  (`take`, which ends on the run's shutdown request, `committed` and `step_started`), which take part in every full
+  checkpoint; the run builds its workflows from its setup.
+  `platoon.experimental` exports the workflow contract: `RolloutWorkflow`, `WorkflowCapabilities`, `capabilities_of`,
+  `WorkflowSetup`, `RolloutOutput`, `OutputReport`, `report_of` and `rows_by_policy`. `platoon train` builds the run's
+  workflow class from a `WorkflowSetup`, with its `from_setup` when it has one (`GroupRolloutWorkflow` does), else with
+  `GroupRolloutWorkflow`'s keyword arguments, as before. Nothing a run does changes.
+
 ### Changes
 
 - A `process` sandbox whose working directory is `/` runs in its own `/tmp`, since no path maps to the host's root; the
@@ -359,6 +370,18 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `Training complete successfully!`) come from `platoon.train.trainer.run`, and its `run_log_path`, `async with` and
   `_await_with_heartbeat` are `TrainerBase`'s, whose lines (`This run labels its sandboxes ...`) come from
   `platoon.train.trainer.api`.
+- The rl trainer's draws are a rollout source too, which the run opens, starts and closes as it does any trainer's:
+  `PlatoonTinkerRLTrainer` keeps `_recorder`, `_dispatcher` and `_admissions` as properties of its source, its steps
+  commit their groups and move the horizon on through the source, and the source's steps of opening, saving and taking
+  up the draws go through the trainer's methods of their names (`_begin_task_records`, `_training_tasks`,
+  `_new_dispatcher`, `_task_records_started`, `_checkpoint_state`, `_restore_dispatch`; `_dispatch` starts them).
+  Those call the source's parts, in `platoon.train.dispatch.source`, `.setup`, `.runner` and
+  `platoon.train.checkpoints.saving`, `.resume`, which take the source in place of the trainer, and call what they need
+  as module functions, no longer through the trainer: replacing its `_samplers`, `_run_group` or
+  `_await_rollout_with_heartbeat` changes no training group (`_run_group` still runs an evaluation's groups), and the
+  trainer has no `_run_training_group`, `_settle_under_rule`, `_read_kept_groups`, `_saved_samplings` or
+  `_resume_position` any more. The lines of the per-task statistics' start (`This start keeps no per-task statistics
+  ...`) come from `platoon.train.dispatch.source`.
 - **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
   format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
   `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),

@@ -34,8 +34,9 @@ import tinker
 from platoon.train import entry_settings
 from platoon.train.admissions import AdmissionSet
 from platoon.train.dispatch.permits import _rollouts_at_once
-from platoon.train.dispatch.settled import _output_label, _Settled, _settled
+from platoon.train.dispatch.settled import _output_label, _record_group_stats, _Settled, _settled
 from platoon.train.labels import label_column, metric_labels, metric_prefix
+from platoon.train.objectives.api import objective_is_zero_for_zero_advantages
 from platoon.train.objectives.policy_gradient import PolicyGradient, compute_training_metrics
 from platoon.train.policy.learner import Learner
 from platoon.train.policy.policy import Policy
@@ -46,7 +47,6 @@ from platoon.train.step.batch_transforms import (
     filter_zero_advantage_datums,
     get_datum_counts,
     has_zero_objective,
-    objective_is_zero_for_zero_advantages,
     run_batch_transforms,
     set_loss_normalization_token_counts,
     summarize_depths,
@@ -58,7 +58,6 @@ from platoon.train.step.metrics import (
     Censoring,
     RunTotals,
     _ptc_cell_guard_stats,
-    _record_group_stats,
     record_batch_counts,
     record_batch_stats,
     record_label_limits,
@@ -155,13 +154,13 @@ async def shutdown_loops(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainL
 @dataclass(frozen=True)
 class StepContext:
     """What the steps of a start share, set up before the first: the trainer, whose seams they call, and the loops'
-    shared state; the training workflow, the queue its groups settle into and the dispatcher that starts them; the
-    start's first and end batch; the labels the metrics break down by (``column``'s values, and each one's metric
-    prefix) and the labels' limits; the run's per-task statistics (``recorder``) and group admission rules, when it
-    keeps them; the stale filter; the learner that updates the policy the steps train, under its objective; and the
-    run's clock, which each step's end advances.  Two of them count as the steps go: what the straggler policy censors
-    (``censoring``, of each step until its metrics are logged), and the staleness warning, over the last steps
-    (``stale_watch``)."""
+    shared state; the training workflow, the queue its groups settle into, and the start's draws with the dispatcher
+    that starts their groups (``dispatch``), which the steps tell what they dequeued and committed; the start's first
+    and end batch; the labels the metrics break down by (``column``'s values, and each one's metric prefix) and the
+    labels' limits; the run's per-task statistics (``recorder``) and group admission rules, when it keeps them; the
+    stale filter; the learner that updates the policy the steps train, under its objective; and the run's clock, which
+    each step's end advances.  Two of them count as the steps go: what the straggler policy censors (``censoring``, of
+    each step until its metrics are logged), and the staleness warning, over the last steps (``stale_watch``)."""
 
     trainer: "PlatoonTinkerRLTrainer"
     state: TrainLoopSharedState
@@ -213,7 +212,7 @@ class StepContext:
             state=shared_state,
             workflow=train_workflow,
             queue=queue,
-            dispatch=StepDispatch(dispatcher),
+            dispatch=StepDispatch(trainer._rollouts, dispatcher),
             start_batch=start_batch,
             end_batch=end_batch,
             column=column,
@@ -326,7 +325,7 @@ class TrainStep:
             settled = _settled(
                 await self.context.trainer._next_rollout(
                     self.context.queue,
-                    self.state,
+                    getattr(self.state, "shutdown_event", None),  # a state a test made may have none: never interrupted
                     interruptible=self.tally.optimizer_steps == 0,
                     ready=self.context.admissions is not None,
                 )
@@ -410,7 +409,7 @@ class TrainStep:
         recorder, record = self.context.recorder, settled.record
         if recorder is None:
             return
-        self.tally.record_fate(record, settled.key, fate)
+        self.tally.record_fate(settled.key, fate)
         if record is not None and fate == "consumed":
             if (kind := record.kind(recorder.threshold(record.entry))) is not None:
                 self.tally.count_kind(kind, settled.label)
@@ -558,12 +557,11 @@ class TrainStep:
             await self.context.trainer._wait_for_starting_policy_evaluation(self.state)
 
     def commit(self) -> None:
-        """The step commits: what became of each of its groups, before a full checkpoint saves the statistics and
-        keeps the groups that settled and no step consumed."""
+        """The step commits what became of each of its groups, with the fates it decided, to the start's draws
+        (:meth:`~platoon.train.dispatch.source.RolloutSource.committed`), before a full checkpoint saves the statistics
+        and keeps the groups that settled and no step consumed."""
 
-        if self.context.recorder is not None:
-            self.tally.commit_fates(self.context.recorder)
-        self.context.dispatch.committed(self.tally.keys)
+        self.context.dispatch.committed(self.tally.keys, self.tally.fates)
 
     async def publish(self) -> None:
         """Publish the step's policy, or say why the step took no update: consuming an all-zero batch does not change
@@ -590,8 +588,9 @@ class TrainStep:
 
     def advance(self) -> None:
         """The next step starts: the run's clock advances (:meth:`~platoon.train.trainer.run.StepClock.advance`), the
-        dispatcher's horizon moves on, and the evaluation loop and the watchdog hear of it.  Evaluation's cadence counts
-        consumed batches, zero-signal ones included, whose sampler may be unchanged."""
+        draws' horizon moves on (:meth:`~platoon.train.dispatch.source.RolloutSource.step_started`), and the evaluation
+        loop and the watchdog hear of it.  Evaluation's cadence counts consumed batches, zero-signal ones included,
+        whose sampler may be unchanged."""
 
         self.context.clock.advance(consumed=self.context.dispatch)
 

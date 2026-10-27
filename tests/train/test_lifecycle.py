@@ -215,7 +215,7 @@ def test_the_rl_trainer_s_steps_save_through_the_start_it_runs_whatever_a_subcla
 
 def test_a_start_s_steps_never_save_outside_the_start_that_train_runs():
     trainer: Any = object.__new__(PlatoonTinkerRLTrainer)
-    trainer._dispatcher = object()  # a start's prepare() made it, but train() did not record that start
+    trainer._rollouts = object()  # a start's prepare() opened its draws, but train() did not record that start
     with pytest.raises(RuntimeError, match="steps save through the start train"):
         trainer._checkpoints(object())
 

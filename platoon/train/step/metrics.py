@@ -1,8 +1,9 @@
-"""The metrics a training step logs, its last stage (the seventh), some of which an evaluation logs too: the
-statistics before any group, the reward keys trained so far, each group's own statistics and the
-programmatic-tool-calling counters; and the step's metrics in the order the step writes them
-(:func:`record_batch_stats`, :func:`record_task_metrics`, :func:`record_sampler_metrics`, :func:`record_label_limits`,
-:func:`record_batch_counts`), with what they carry from step to step (:class:`RunTotals`).
+"""The metrics a training step logs, its last stage (the seventh): the programmatic-tool-calling counters, which an
+evaluation logs too, and the step's metrics in the order the step writes them (:func:`record_batch_stats`,
+:func:`record_task_metrics`, :func:`record_sampler_metrics`, :func:`record_label_limits`, :func:`record_batch_counts`),
+with what they carry from step to step (:class:`RunTotals`).  What the settled groups add to them, which an
+evaluation's metrics share (the statistics before any group, the reward keys trained so far, each group's own
+statistics), is :mod:`platoon.train.dispatch.settled`'s.
 
 And what a straggler policy censors (RFC 0020, :class:`Censoring`): each step's ``batch/censoring/*`` metrics, and each
 label's.
@@ -19,14 +20,13 @@ them with the run's counters and logs them.
 """
 
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from platoon.train.dispatch.settled import _count_every_reward_key
 from platoon.train.labels import metric_prefix
 from platoon.train.task_stats import MemberResult
-from platoon.train.workflow.protocol import report_of
-from platoon.utils.rollout_stats import REWARD_KEY_MISMATCH, REWARD_KEY_PREFIX, RolloutStats, outcome_counts
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
@@ -34,42 +34,6 @@ if TYPE_CHECKING:
     from platoon.train.step.collect import StepTally
     from platoon.train.task_records import TaskRecorder
     from platoon.train.trainer.state import TrainLoopSharedState
-
-# What a label's own metrics (a step's ``batch/<column>/<label>/...``, an evaluation's ``<column>/<label>/...``) keep of
-# its groups' rollout statistics, beside their group and outcome counts (platoon.train.labels): the reward, and the
-# steps of each trajectory, which an entry's own step limit shapes.
-LABEL_STATS = ("task_reward", "num_steps")
-
-
-def _no_groups_yet() -> RolloutStats:
-    """A step's statistics, or a label's, before any group: no groups, no rollout of any outcome status and no group
-    whose rollouts trained different reward keys, so that each count is logged every step, also at zero."""
-
-    return RolloutStats(counts={**outcome_counts(()), REWARD_KEY_MISMATCH: 0})
-
-
-def _count_every_reward_key(seen: set[str], stats: Iterable[RolloutStats]) -> None:
-    """Add the ``reward_key/<key>`` counts of ``stats`` to ``seen``, the reward keys trained so far, and give each of
-    ``stats`` every key seen, at zero when it trained none: each key is logged every step once it has trained."""
-
-    stats = list(stats)
-    seen.update(name for item in stats for name in item.counts if name.startswith(REWARD_KEY_PREFIX))
-    for item in stats:
-        for name in seen:
-            item.counts.setdefault(name, 0)
-
-
-def _record_group_stats(rollout: Any, tracker: StatsTracker) -> None:
-    """Record what a group's workflow measured about the group (its report's ``group_stats``) in the consuming step.
-
-    ``GroupRolloutWorkflow`` keeps a group's completion statistics, credit and workload distributions with the
-    group instead of recording them when it completes: with prefetching, groups of the next step complete during
-    this one, and their statistics would land in this step (a step counting 20 rollouts against the 16 it trained).
-    """
-
-    group_stats = report_of(rollout).group_stats
-    if group_stats is not None:
-        group_stats.record(tracker)
 
 
 def _ptc_cell_guard_stats(stats_scope: str = "train") -> dict[str, float]:

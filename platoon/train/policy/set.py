@@ -48,6 +48,12 @@ class PolicySet(Mapping[PolicyId, Policy]):
         )
         return cls([Policy(spec, info)])
 
+    def versions(self) -> dict[PolicyId, int]:
+        """Each policy's version, by id (:attr:`Policy.version`): ``{main: v}`` for a run's one policy, what the
+        dispatcher's task samplers are told the policies are at."""
+
+        return {policy.id: policy.version for policy in self._policies.values()}
+
     def connect(self) -> None:
         """Open each policy's Tinker service client (:meth:`Policy.connect`)."""
 

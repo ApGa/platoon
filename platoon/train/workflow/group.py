@@ -43,7 +43,7 @@ import os
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from types import MappingProxyType
-from typing import Callable, ClassVar
+from typing import Callable, ClassVar, Self
 
 import tinker
 import torch
@@ -71,6 +71,7 @@ from platoon.train.workflow import members, requests, telemetry
 from platoon.train.workflow import output as group_output
 from platoon.train.workflow.context import _group_config, _group_entry, _group_stats
 from platoon.train.workflow.output import _member, _SingleRolloutOutcome, _TaskRolloutOutput, _trained_keys
+from platoon.train.workflow.protocol import WorkflowSetup, _built_by_keywords
 from platoon.train.workflow.start_limit import StartLimit
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import DeferredStats, StatsTracker
@@ -238,6 +239,13 @@ class GroupRolloutWorkflow:
         self._supervisor = None
         self._admission: asyncio.Semaphore | None = None
         self._admission_limit = 0
+
+    @classmethod
+    def from_setup(cls, setup: WorkflowSetup) -> Self:
+        """The workflow of one phase of a run, as ``platoon train`` builds it: with the keyword arguments the setup
+        stands for, and the environment entries' own settings (``entry_configs``) when they set any."""
+
+        return _built_by_keywords(cls, setup)
 
     @property
     def config(self) -> WorkflowConfig:

@@ -5,10 +5,11 @@
 :mod:`platoon.train.trainer.signals`, :mod:`platoon.train.trainer.state`, :mod:`platoon.train.trainer.waiting`,
 :mod:`platoon.train.step.collect`, :mod:`platoon.train.step.datums`, :mod:`platoon.train.step.metrics`,
 :mod:`platoon.train.step.publish`, :mod:`platoon.train.dispatch.permits`, :mod:`platoon.train.dispatch.runner`,
-:mod:`platoon.train.dispatch.settled`, :mod:`platoon.train.dispatch.setup`, :mod:`platoon.train.checkpoints.saving`,
-:mod:`platoon.train.checkpoints.resume`, :mod:`platoon.train.evaluation.loop`, :mod:`platoon.train.evaluation.plan`,
-:mod:`platoon.train.dataloader`.  Its names still import from here, and so do the names it imported, each with a
-``PlatoonDeprecationWarning`` that names its new module, until platoon 0.6.0 removes this module."""
+:mod:`platoon.train.dispatch.settled`, :mod:`platoon.train.dispatch.setup`, :mod:`platoon.train.dispatch.source`,
+:mod:`platoon.train.checkpoints.saving`, :mod:`platoon.train.checkpoints.resume`, :mod:`platoon.train.evaluation.loop`,
+:mod:`platoon.train.evaluation.plan`, :mod:`platoon.train.dataloader`.  Its names still import from here, and so do
+the names it imported, each with a ``PlatoonDeprecationWarning`` that names its new module, until platoon 0.6.0 removes
+this module."""
 
 from platoon.train.tinker._moved import moved as _moved
 
@@ -24,7 +25,7 @@ __getattr__, __dir__ = _moved(
         "_TaskWorkloadPayload": "platoon.train.step.collect",
         "_get_task_workload_payload": "platoon.train.step.collect",
         "_no_update_reason": "platoon.train.step.publish",
-        "LABEL_STATS": "platoon.train.step.metrics",
+        "LABEL_STATS": "platoon.train.dispatch.settled",
         "ORDER_POSITION_KEY": "platoon.train.checkpoints.saving",
         "_Settled": "platoon.train.dispatch.settled",
         "carries_datums": "platoon.train.dispatch.settled",
@@ -41,9 +42,9 @@ __getattr__, __dir__ = _moved(
         "_run_steps": "platoon.train.dataloader",
         "_step_datums": "platoon.train.step.datums",
         "_group_done": "platoon.train.dispatch.runner",
-        "_no_groups_yet": "platoon.train.step.metrics",
-        "_count_every_reward_key": "platoon.train.step.metrics",
-        "_record_group_stats": "platoon.train.step.metrics",
+        "_no_groups_yet": "platoon.train.dispatch.settled",
+        "_count_every_reward_key": "platoon.train.dispatch.settled",
+        "_record_group_stats": "platoon.train.dispatch.settled",
         "_ptc_cell_guard_stats": "platoon.train.step.metrics",
         "compute_training_metrics": "platoon.train.objectives.policy_gradient",
         "SAVE_CHECKPOINT_TIMEOUT_S": "platoon.train.policy.checkpoints",
@@ -81,6 +82,7 @@ __getattr__, __dir__ = _moved(
         "platoon.train.dispatch.runner",
         "platoon.train.dispatch.settled",
         "platoon.train.dispatch.setup",
+        "platoon.train.dispatch.source",
         "platoon.train.checkpoints.saving",
         "platoon.train.checkpoints.resume",
         "platoon.train.evaluation.loop",

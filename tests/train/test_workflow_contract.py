@@ -7,7 +7,6 @@ exact type, in a trainer's process too."""
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 import logging
@@ -22,12 +21,13 @@ import tinker
 from platoon.train import launch
 from platoon.train.checkpoints import kept_groups
 from platoon.train.checkpoints.kept_groups import decode_group, encode_group, register_codec
-from platoon.train.dispatch import setup as dispatch_setup
 from platoon.train.dispatch.settled import _settled, emptied
+from platoon.train.dispatch.source import RolloutSource
 from platoon.train.entry_settings import workflow_problems
 from platoon.train.step.collect import _get_task_workload_payload
 from platoon.train.step.datums import trained_rows
 from platoon.train.task_stats import MAIN, MemberResult
+from platoon.train.trainer.api import TaskSources
 from platoon.train.trainer.rl import _limit_starts
 from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.train.workflow.output import GroupOutput, _TaskRolloutOutput
@@ -205,11 +205,12 @@ def _starts_rolling(cls: type) -> bool:
         def create_task(self, coroutine, name=None):
             coroutine.close()
 
-    dispatcher = Dispatcher()
-    trainer: Any = SimpleNamespace(_dispatcher=dispatcher)
-    tasks: Any = Tasks()
-    state: Any = SimpleNamespace(shutdown_event=None)
-    dispatch_setup._dispatch(trainer, tasks, state, 0, 1, _workflow(cls), asyncio.Queue())
+    dispatcher: Any = Dispatcher()
+    tasks = TaskSources(train_dataset=[])
+    source = RolloutSource(None, run_dir="", tasks=tasks, workflow=_workflow(cls), versions=dict)
+    source.dispatcher = dispatcher
+    task_group: Any = Tasks()
+    source.start(task_group)
     return dispatcher.rolling is True
 
 

@@ -1,8 +1,9 @@
 """One training group's run: its workflow awaited with watchdog heartbeats, what it adds to the statistics, and its
 settling, or its decision first under the run's group admission rule.
 
-The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.
+The functions here take the start's rollout source (:class:`~platoon.train.dispatch.source.RolloutSource`), whose
+dispatcher started the group, and read its parts: its workflow, per-task statistics, admission rules, watchdog and
+tracker.  ``_run_group`` runs any group of a workflow, an evaluation's too.
 """
 
 import asyncio
@@ -11,23 +12,23 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from platoon.train.admissions import AdmissionSet
-from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
+from platoon.train.dispatch.dispatcher import BoundDraw
 from platoon.train.dispatch.permits import DrawLease
 from platoon.train.dispatch.settled import _Settled, carries_datums, emptied
 from platoon.train.leases import holding
-from platoon.train.trainer.state import TrainLoopSharedState
+from platoon.train.trainer.waiting import _await_rollout_with_heartbeat
 from platoon.train.workflow.protocol import RolloutWorkflow, report_of
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
-    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+    from platoon.train.dispatch.source import RolloutSource
 
 logger = logging.getLogger(__name__)
 
 
 def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracker, watchdog: Any) -> None:
     """What a group that ended adds to the statistics: its time, with the group's own statistics when its report gives
-    them (the step that consumes it records them, :func:`~platoon.train.step.metrics._record_group_stats`), else in
+    them (the step that consumes it records them, :func:`~platoon.train.dispatch.settled._record_group_stats`), else in
     ``tracker`` at once (a failed group, or a workflow's plain list); a log line for a slow one; and a watchdog
     heartbeat."""
 
@@ -46,9 +47,7 @@ def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracke
         watchdog.heartbeat()
 
 
-async def _run_group(
-    trainer: "PlatoonTinkerRLTrainer", workflow: RolloutWorkflow, row: dict[str, Any], *, watchdog, tracker
-) -> Any:
+async def _run_group(workflow: RolloutWorkflow, row: dict[str, Any], *, watchdog, tracker) -> Any:
     """Run the group of ``row`` and return its workflow's output; None for a workflow that raised, or whose own
     await was cancelled while this group was not (an inner task it awaited was cancelled): the group failed,
     which ``tracker`` records at once (``rollout_completion/failed_rollouts``), no group output carrying it to the
@@ -56,7 +55,7 @@ async def _run_group(
 
     task_id = row.get("task_id", "unknown")
     try:
-        return await trainer._await_rollout_with_heartbeat(workflow.arun_episode(row), watchdog=watchdog)
+        return await _await_rollout_with_heartbeat(workflow.arun_episode(row), watchdog=watchdog)
     except asyncio.CancelledError:
         current = asyncio.current_task()
         if current is None or current.cancelling():
@@ -68,49 +67,34 @@ async def _run_group(
     return None
 
 
-async def _run_training_group(
-    trainer: "PlatoonTinkerRLTrainer",
-    shared_state: TrainLoopSharedState,
-    workflow: RolloutWorkflow,
-    dispatcher: Dispatcher,
-    draw: BoundDraw,
-    lease: DrawLease,
-) -> None:
-    """Run the group of one of the dispatcher's draws, whose label slot and rollout permits are taken, with the
-    draw's ``lease`` as its workflow's :func:`~platoon.train.leases.rollout_lease`: release them once its workflow
-    returns (calling ``lease``), record the group in the run's per-task statistics, and hand its output to the step
-    that dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group
-    admission rule, the group is decided first (:meth:`_settle_under_rule`)."""
+async def _run_training_group(source: "RolloutSource", draw: BoundDraw, lease: DrawLease) -> None:
+    """Run the group of one of the source's draws, whose label slot and rollout permits are taken, with the draw's
+    ``lease`` as its workflow's :func:`~platoon.train.leases.rollout_lease`: release them once its workflow returns
+    (calling ``lease``), record the group in the run's per-task statistics, and hand its output to the step that
+    dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group admission
+    rule, the group is decided first (:func:`_settle_under_rule`)."""
 
+    dispatcher, tracker, watchdog = source.dispatcher, source.tracker, source.watchdog
+    assert dispatcher is not None and tracker is not None  # the source started it
     start_time = time.perf_counter()
     try:
         with holding(lease):
-            rollout = await trainer._run_group(
-                workflow, draw.row, watchdog=shared_state.watchdog, tracker=shared_state.train_tracker
-            )
+            rollout = await _run_group(source.workflow, draw.row, watchdog=watchdog, tracker=tracker)
     finally:
         lease()
-    _group_done(
-        rollout, time.perf_counter() - start_time, draw.task_id, shared_state.train_tracker, shared_state.watchdog
-    )
-    recorder = getattr(trainer, "_recorder", None)
+    _group_done(rollout, time.perf_counter() - start_time, draw.task_id, tracker, watchdog)
+    recorder = source.recorder
     record = (
         recorder.settle(draw.row, entry=draw.entry, label=draw.label, output=rollout) if recorder is not None else None
     )
-    if (admissions := getattr(trainer, "_admissions", None)) is not None:
-        trainer._settle_under_rule(admissions, shared_state, dispatcher, draw, rollout, record)
+    if (admissions := source.admissions) is not None:
+        _settle_under_rule(source, admissions, draw, rollout, record)
         return
     dispatcher.settle(draw, _Settled(draw.entry, draw.label, rollout, record, draw.key))
 
 
 def _settle_under_rule(
-    trainer: "PlatoonTinkerRLTrainer",
-    admissions: AdmissionSet,
-    shared_state: TrainLoopSharedState,
-    dispatcher: Dispatcher,
-    draw: BoundDraw,
-    rollout: Any,
-    record: Any,
+    source: "RolloutSource", admissions: AdmissionSet, draw: BoundDraw, rollout: Any, record: Any
 ) -> None:
     """Decide a settled group by the run's group admission rule (RFC 0019, section 6): an admitted group settles
     as any group does, with its reason; a rejected or failed one gets its fate at once (with the rule and its
@@ -119,7 +103,9 @@ def _settle_under_rule(
     at once, keeps it until a step dequeues its marker.  Synchronous, and never raises: nothing runs between the
     fate and the reject, so a checkpoint finds the statistics' outstanding draws and the dispatcher's alike."""
 
-    decision, rule = admissions.at_settle(draw, rollout, record, now=shared_state.model_info.llm.version)
+    dispatcher = source.dispatcher
+    assert dispatcher is not None  # the source started it
+    decision, rule = admissions.at_settle(draw, rollout, record, now=source.version())
     if decision.admit:
         dispatcher.settle(draw, _Settled(draw.entry, draw.label, rollout, record, draw.key, admitted=decision.reason))
         return
@@ -135,7 +121,7 @@ def _settle_under_rule(
         held=held,
     )
     fate = "failed" if rollout is None else "rejected"
-    recorder = getattr(trainer, "_recorder", None)
+    recorder = source.recorder
     if recorder is not None and record is not None:
         recorder.fate(record, fate, rule=rule, admission=decision.reason)
     elif recorder is not None:

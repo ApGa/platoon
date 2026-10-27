@@ -4,19 +4,22 @@ hooks use; and the run's step clock (:class:`StepClock`).
 :meth:`TrainerRun.execute` reads as the start's phases, in the order they run.  Each phase that is the trainer's own
 calls its hook (:class:`~platoon.train.trainer.api.TrainerBase`):
 
+0. the start's workflows, which the trainer's setup builds on its policies, when the trainer rolls out and was given
+   none (``platoon train`` builds the rl trainer's itself, and hands them to its ``train()``);
 1. the trainer's checks (``check``);
 2. the signal handlers: a first signal asks the steps to stop at the next step boundary (``run.shutdown``);
 3. each policy's service client, and where the start begins (:class:`~platoon.train.checkpoints.resume.StartPoint`),
    which the participants of the run's checkpoints registered so far take up;
 4. each policy's training client at the start point; a start stopped before the service accepted it ends here;
-5. the trainer prepares its steps (``prepare``), and says where they end;
-6. the launch save, a full checkpoint every start writes, then the trainer starts from it (``started``), and each
-   policy's first sampling client, of the launch save's weights;
+5. the trainer prepares its steps (``prepare``), and says where they end; a trainer that rolls out opens the start's
+   draws there (:meth:`TrainerRun.rollouts`);
+6. the launch save, a full checkpoint every start writes, then the draws and the trainer start from it (``started``),
+   and each policy's first sampling client, of the launch save's weights;
 7. the trainer readies its steps (``ready``), and the run's clock starts;
 8. the steps (``run_steps``);
 9. the save at exit: ``<step>_interrupted`` after an interrupt (the trainer's, or a stop request its steps stopped
    on short of their end), ``final`` at the run's end;
-10. the trainer closes what it opened (``close``).
+10. the trainer closes what it opened (``close``), then the run its draws.
 """
 
 import asyncio
@@ -26,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from platoon.train.checkpoints.participants import RunCheckpoints
 from platoon.train.checkpoints.pruning import RECOVERY_CHECKPOINT_PREFIX
 from platoon.train.checkpoints.resume import PolicyStart, StartPoint
+from platoon.train.dispatch.source import RolloutSource
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.spec import PolicyId
 from platoon.train.trainer.api import StepPlan, Workflows
@@ -88,9 +92,11 @@ class StepClock:
 
 class TrainerRun:
     """One start of ``trainer``, through the lifecycle every trainer shares (:meth:`execute`), with the given
-    workflows (None: the trainer rolls out none).  What its hooks use: the config, the run directory, the policies,
-    the run's checkpoints (:class:`~platoon.train.checkpoints.participants.RunCheckpoints`), the shutdown request,
-    where the start begins and where its steps end, the launch save, and the step clock with its watchdog."""
+    workflows (None: those the trainer's setup builds, when it rolls out).  What its hooks use: the config, the run
+    directory, the policies, the workflows, the run's checkpoints
+    (:class:`~platoon.train.checkpoints.participants.RunCheckpoints`), the shutdown request, where the start begins and
+    where its steps end, the start's draws (:meth:`rollouts`), the launch save, and the step clock with its
+    watchdog."""
 
     # Set as the phases run: the shutdown request (2), the start point (3), the plan (5), the paths of the launch save
     # by policy (6), the clock (7: start_clock, or the trainer's own), and whether an interrupt stopped the steps (8).
@@ -108,10 +114,47 @@ class TrainerRun:
         self.workflows = workflows
         self.checkpoints = RunCheckpoints(self.run_dir, self.policies, wandb_run_id=self._wandb_run_id)
         self.interrupted = False
+        # The start's draws, once the trainer opened them (rollouts); None before, and for a trainer that rolls out
+        # none.
+        self.source: RolloutSource | None = None
 
     def _wandb_run_id(self) -> str | None:
         stats_logger = self.trainer._stats_logger
         return stats_logger.wandb_run_id if stats_logger is not None else None
+
+    def rollouts(self) -> RolloutSource:
+        """The start's training draws (:class:`~platoon.train.dispatch.source.RolloutSource`): opened at the start's
+        point over the run's training tasks, ``train.*`` and the training workflow, and registered with the run's
+        checkpoints, which hands it the start point, so that it takes up the draws the checkpoint left outstanding.
+        Call it in ``prepare()``, once, and start it (``start``) as the steps begin; the run starts its per-task
+        statistics after the launch save and closes them after the trainer's ``close``.  Only a trainer whose
+        ``needs()`` say it rolls out may call it."""
+
+        trainer, workflows = self.trainer, self.workflows
+        if not trainer.needs(self.config, trainer.options).rollouts:
+            raise RuntimeError(f"{type(trainer).__name__} rolls out nothing (its needs() say so): it has no draws")
+        assert trainer.setup is not None and trainer.setup.tasks is not None and workflows is not None
+        source = RolloutSource(
+            self.config,
+            run_dir=self.run_dir,
+            tasks=trainer.setup.tasks,
+            workflow=workflows.train,
+            versions=self.policies.versions,
+            leader=self.policies.leader,
+        )
+        return self._open_draws(source)
+
+    def _open_draws(self, source: RolloutSource) -> RolloutSource:
+        """Open ``source`` as the start's draws, at the start's point, and register it with the run's checkpoints, which
+        hands it the start point: it takes up the draws the checkpoint left outstanding.  The run starts its per-task
+        statistics after the launch save and closes them after the trainer's ``close``.  :meth:`rollouts` opens a
+        trainer's draws through it, and the rl trainer its own (a source whose steps go through its methods)."""
+
+        assert self.source is None, "a start opens its draws once"
+        source.open(self.start)
+        self.checkpoints.register(source)
+        self.source = source
+        return source
 
     def start_clock(self) -> StepClock:
         """Start the run's clock at the start's step, towards the plan's end (:meth:`StepClock.started`)."""
@@ -123,6 +166,8 @@ class TrainerRun:
         """The start's phases, in order (the module's docstring numbers them)."""
 
         trainer = self.trainer
+        if self.workflows is None:  # 0
+            self.workflows = self._built_workflows()
         trainer.check(self)  # 1
         self.shutdown = asyncio.Event()  # 2: graceful Ctrl+C, and what platoon train passes on
         trainer._setup_signal_handlers(self.shutdown)
@@ -137,7 +182,20 @@ class TrainerRun:
         await trainer.ready(self)  # 7
         await trainer.run_steps(self)  # 8
         await self._save_at_exit()  # 9
-        await trainer.close(self)  # 10
+        # 10.  Only after steps that ended: a start that failed keeps its teardown as before (RFC 0021, section 5).
+        await trainer.close(self)
+        if self.source is not None:
+            self.source.close()
+
+    def _built_workflows(self) -> Workflows | None:
+        """0. The start's workflows, which the trainer's setup builds on its policies
+        (:meth:`~platoon.train.trainer.api.TrainerSetup.build_workflows`), for a trainer that rolls out; None for one
+        that rolls out none, or that was built outside ``platoon train``, without a setup."""
+
+        trainer = self.trainer
+        if trainer.setup is None or not trainer.needs(self.config, trainer.options).rollouts:
+            return None
+        return trainer.setup.build_workflows(self.policies)
 
     async def _launch(self) -> None:
         """6. Save the launch checkpoint, then start from it: the trainer's ``started``, and each policy's first
@@ -151,6 +209,8 @@ class TrainerRun:
         self.launch_save = await self._save(
             name, step=start.step, policy_version=start.policy_version, optimizer_steps=start.optimizer_steps
         )
+        if self.source is not None:
+            self.source.started()
         await self.trainer.started(self)
         for policy in self.policies.values():
             _first_sampler(policy, self.launch_save[policy.id], start.policies[policy.id])
@@ -170,15 +230,13 @@ class TrainerRun:
                 await self._save(
                     f"{step:06d}_interrupted",
                     step=step,
-                    policy_version=leader.info.llm.version,
+                    policy_version=leader.version,
                     optimizer_steps=leader.optimizer_steps,
                 )
                 logger.info(f"Checkpoint saved. Resume training to continue from step {step}.")
         elif first < end:
             logger.info(f"Saving permanent checkpoint final at step {end}...")
-            await self._save(
-                "final", step=end, policy_version=leader.info.llm.version, optimizer_steps=leader.optimizer_steps
-            )
+            await self._save("final", step=end, policy_version=leader.version, optimizer_steps=leader.optimizer_steps)
             logger.info("Training complete successfully!")
         else:
             self.trainer._nothing_to_train(self)
