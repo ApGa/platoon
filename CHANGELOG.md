@@ -317,7 +317,8 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   .root_images_closed()` is `closed_images()`, which covers every sandbox that honors users.
 - **The training code lives in packages named after the stages of a run.** `platoon/train/tinker/` held the trainer,
   its config, the rollout workflows and the rollout workers; they are now packages of `platoon.train`: `trainer` (one
-  start of training: the trainer, the training loop, the training client, signals and the watchdog), `step` (one
+  start of training: the trainer, the training loop, signals and the watchdog), `policy` (the model training samples
+  and steps: its spec, its state, its training client and its own saves), `step` (one
   training step: its metrics, the staleness warning, the batch transforms, the update's metrics), `dispatch` (what
   starts the training groups: the dispatcher, the rollout permits, running and settling a group), `workflow` (one group
   of rollouts: `GroupRolloutWorkflow` and its parts), `credit` (a group's baselines and error-token filter), `workers`
@@ -327,6 +328,15 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   checkpoints and the files a resume reads are as before. `platoon.train.tinker` keeps the policy client (`proxy`), its
   renderers, `key_refusal` and `rollout_metrics`, until a later release moves them, and the shims of the old paths
   (below).
+- **The trainer reads the model it trains from its config once, as it is built.** Its policy (`platoon.train.policy`)
+  takes the model, the renderer, `tinker_base_url`, `train.lora_rank` and `checkpoint.load_checkpoint_path` from the
+  config when `PlatoonTinkerRLTrainer` is made, where it registered its model gateway before: a change to the config
+  after that and before `train()` no longer reaches its training client or its recovery pruner. `TrainLoopSharedState`
+  holds the run's policies (`policies`), and `model_info`, `service_client`, `training_client`, `sampling_client`,
+  `optimizer_params` and `optimizer_steps` are properties of the policy it trains, so `dataclasses.fields()` lists
+  `policies` in their place. It is made with keyword arguments only, and still takes those six instead of
+  `policies`, but not beside it: given both, it raises `TypeError`, and so does `dataclasses.replace()` of it. A
+  `copy.copy()` of it shares the original's policies.
 - **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
   format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
   `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),
@@ -374,8 +384,8 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   - `platoon.train.tinker.rl`: by stage, `PlatoonTinkerRLTrainer` and `Watchdog` to `platoon.train` (they live in
     `platoon.train.trainer.rl` and `.signals`), the loops' exceptions to `platoon.train.trainer.signals`,
     `TrainLoopSharedState` to `platoon.train.trainer.state`, `PlatoonTinkerDataloader` to `platoon.train.dataloader`,
-    `compute_training_metrics` to `platoon.train.step.update`, and the rest to `platoon.train.trainer`, `.step`,
-    `.dispatch`, `.checkpoints` and `.evaluation`;
+    `compute_training_metrics` to `platoon.train.step.update`, and the rest to `platoon.train.trainer`, `.policy`,
+    `.step`, `.dispatch`, `.checkpoints` and `.evaluation`;
   - `platoon.train.tinker.config_defs`, `.dataset_order`, `.task_records`: `platoon.train.config_defs`,
     `.dataset_order`, `.task_records`; `platoon.train.tinker.train`: `platoon.train.launch`;
   - `platoon.train.tinker.batch_transforms`, `.staleness`, `.censoring`: `platoon.train.step.batch_transforms`,

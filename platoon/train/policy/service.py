@@ -1,21 +1,21 @@
-"""The training service: a start's training client (new, from a checkpoint's weights, or from the state a resume
-takes up), asked again after each refusal that asking again may change.
+"""A policy's training service: the training client a start opens on it (new, from a checkpoint's weights, or from the
+state a resume takes up: :func:`create_training_client`), asked again after each refusal that asking again may change
+(:func:`open_training_client`).
 
-The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.
+``PlatoonTinkerRLTrainer`` opens main's through its methods ``_open_training_client`` and ``_create_training_client``,
+which call these: to replace one, replace the method, on the class or an instance, not the function.
 """
 
 import asyncio
 import contextlib
 import logging
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
 
 import tinker
 from tinker_cookbook import checkpoint_utils
 
-if TYPE_CHECKING:
-    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+from platoon.train.policy.spec import PolicySpec
 
 logger = logging.getLogger(__name__)
 
@@ -46,44 +46,38 @@ def _service_refusal(exc: BaseException) -> bool:
     return isinstance(error, (tinker.TinkerError, ConnectionError, TimeoutError))
 
 
-async def _create_training_client(
-    trainer: "PlatoonTinkerRLTrainer",
+async def create_training_client(
     service_client: tinker.ServiceClient,
     resume_info: checkpoint_utils.CheckpointRecord | None,
+    spec: PolicySpec,
 ) -> tinker.TrainingClient:
+    """Ask the policy's service (``service_client``) once for the training client of the policy ``spec`` declares: the
+    one a resume takes up (``resume_info``: its weights and its optimizer's state), else a new run's, from the weights
+    ``spec.load_checkpoint_path`` names (with a new optimizer), else a new LoRA adapter of its model."""
+
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation
         training_client = await service_client.create_training_client_from_state_with_optimizer_async(
             resume_info.state_path
         )
         logger.info(f"Resumed training from {resume_info.state_path}")
-    elif trainer.config.checkpoint.load_checkpoint_path:
+    elif spec.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-        training_client = await service_client.create_training_client_from_state_async(
-            trainer.config.checkpoint.load_checkpoint_path
-        )
-        logger.info(f"Loaded weights from {trainer.config.checkpoint.load_checkpoint_path}")
+        training_client = await service_client.create_training_client_from_state_async(spec.load_checkpoint_path)
+        logger.info(f"Loaded weights from {spec.load_checkpoint_path}")
     else:
-        training_client = await service_client.create_lora_training_client_async(
-            trainer.config.train.model_name, rank=trainer.config.train.lora_rank
-        )
-        logger.info(
-            f"Created new training client for {trainer.config.train.model_name} "
-            f"with rank {trainer.config.train.lora_rank}"
-        )
+        training_client = await service_client.create_lora_training_client_async(spec.model_name, rank=spec.lora_rank)
+        logger.info(f"Created new training client for {spec.model_name} with rank {spec.lora_rank}")
 
     return training_client
 
 
-async def _open_training_client(
-    trainer: "PlatoonTinkerRLTrainer",
-    service_client: tinker.ServiceClient,
-    resume_info: checkpoint_utils.CheckpointRecord | None,
-    stop: asyncio.Event | None = None,
+async def open_training_client(
+    create: Callable[[], Awaitable[tinker.TrainingClient]], stop: asyncio.Event | None = None
 ) -> tinker.TrainingClient | None:
-    """:meth:`_create_training_client`, asked again after each refusal until the service accepts it, for up to
-    :data:`TRAINING_CLIENT_OPEN_TIMEOUT_S`, each refusal logged; None once ``stop`` is set between two asks
-    (training was asked to stop before it began).
+    """The training client ``create`` asks the service for, asked again after each refusal until the service accepts
+    it, for up to :data:`TRAINING_CLIENT_OPEN_TIMEOUT_S`, each refusal logged; None once ``stop`` is set between two
+    asks (training was asked to stop before it began).
 
     A service may refuse a start while it still holds the session of a start that died, until that session
     expires, or answer nothing while it restarts.  A refusal that asking again cannot change
@@ -96,7 +90,7 @@ async def _open_training_client(
     while True:
         attempt += 1
         try:
-            return await trainer._create_training_client(service_client, resume_info)
+            return await create()
         except Exception as exc:
             waited = time.monotonic() - first
             left = TRAINING_CLIENT_OPEN_TIMEOUT_S - waited

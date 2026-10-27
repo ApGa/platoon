@@ -290,8 +290,9 @@ import platoon.train.tinker.workers.entrypoint as old_entrypoint
 import platoon.train.tinker.workflows.group_rollout_workflow as old_group
 from platoon.train.checkpoints import saving
 from platoon.train.credit import group as credit
+from platoon.train.policy import service
 from platoon.train.trainer import rl as trainer
-from platoon.train.trainer import service, signals, waiting
+from platoon.train.trainer import signals, waiting
 from platoon.train.workers import entrypoint, supervisor
 from platoon.train.workflow import context, group
 

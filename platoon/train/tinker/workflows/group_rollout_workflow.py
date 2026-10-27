@@ -1,8 +1,8 @@
 """Moved: platoon 0.5.0 split this module into :mod:`platoon.train.workflow.group`,
 :mod:`platoon.train.workflow.members`, :mod:`platoon.train.workflow.requests`, :mod:`platoon.train.workflow.output`,
-:mod:`platoon.train.credit.group`, :mod:`platoon.train.workflow.telemetry`, :mod:`platoon.train.workflow.context`.
-Its names still import from here, and so do the names it imported, each with a ``PlatoonDeprecationWarning`` that
-names its new module, until platoon 0.6.0 removes this module."""
+:mod:`platoon.train.credit.group`, :mod:`platoon.train.workflow.telemetry`, :mod:`platoon.train.workflow.context`,
+:mod:`platoon.train.policy.binding`.  Its names still import from here, and so do the names it imported, each with a
+``PlatoonDeprecationWarning`` that names its new module, until platoon 0.6.0 removes this module."""
 
 from platoon.train.tinker._moved import moved as _moved
 
@@ -41,6 +41,7 @@ __getattr__, __dir__ = _moved(
         "platoon.train.credit.group",
         "platoon.train.workflow.telemetry",
         "platoon.train.workflow.context",
+        "platoon.train.policy.binding",
     ),
     public={
         "current_entry": "platoon.train.workflow",

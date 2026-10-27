@@ -14,6 +14,7 @@ from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.task import Task
 from platoon.train.components import harness_time_limit_s, known_rollout_overhead_s, rollout_overhead_s
 from platoon.train.config_defs import RolloutConfig
+from platoon.train.policy.binding import model_binding
 from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
@@ -32,35 +33,15 @@ def _slug(workflow: "GroupRolloutWorkflow", value: str) -> str:
 
 
 def _model_binding(workflow: "GroupRolloutWorkflow", checkpoint_version: int) -> ModelBinding:
-    """Describe the sampling model for a rollout host.
+    """Describe the sampling model for a rollout host: the binding of the workflow's policy
+    (:func:`~platoon.train.policy.binding.model_binding`), whose file only a worker follows, so only ``process`` mode
+    resolves (and creates) the directory that holds it, for the same reason as the scratch paths in
+    ``_build_worker_request``."""
 
-    Never pickles the ``Renderer``: ``Renderer.__reduce__`` carries only
-    ``(renderer_name, model_name, has_image_processor)`` and drops
-    ``renderer_kwargs``, which ``register_tinker_llm`` applies by
-    ``setattr``.  Today's values happen to equal the class defaults, so
-    shipping the object is a latent silent-drift bug that fires the day
-    someone sets ``preserve_thinking: false``.
-    """
-
-    llm = getattr(workflow.model_info, "llm", None)
-    bare_model_name = getattr(llm, "model_name", None) or str(getattr(workflow.model_info, "model_name", "") or "")
-    return ModelBinding(
-        # Same reason as the scratch paths in ``_build_worker_request``:
-        # only a worker follows this file, so only ``process`` mode resolves
-        # (and creates) the directory that holds it.
+    return model_binding(
+        workflow.model_info,
         binding_path=workflow._binding_path if workflow._isolation == "process" else "",
-        bootstrap_blob=b"",
         follow_poll_seconds=float(getattr(workflow.config, "worker_binding_poll_seconds", 5.0)),
-        model_name=bare_model_name,
-        renderer_name=getattr(workflow.model_info, "renderer_name", "") or "",
-        renderer_kwargs=dict(getattr(workflow.model_info, "renderer_kwargs", {}) or {}),
-        context_window_length=getattr(llm, "context_window_length", None),
-        sample_timeout_seconds=getattr(llm, "sample_timeout_seconds", None),
-        max_tokens=int(getattr(llm, "max_tokens", 4096)),
-        temperature=float(getattr(llm, "temperature", 1.0)),
-        top_k=int(getattr(llm, "top_k", -1)),
-        top_p=float(getattr(llm, "top_p", 1.0)),
-        seed=getattr(llm, "seed", None),
         checkpoint_version=checkpoint_version,
     )
 

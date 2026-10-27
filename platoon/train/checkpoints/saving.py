@@ -1,7 +1,7 @@
 """Saving: the cadence after a step (a permanent or a recovery checkpoint, else the weights only), the one full
 checkpoint of the run that every save of a start writes (:func:`save_run_checkpoint`: at launch, by the cadence, when
-training is interrupted and at its end), which is its ``loop_state`` and then the save itself
-(:func:`save_full_checkpoint`, which reads nothing of the trainer), and a full checkpoint's ``loop_state``, with the
+training is interrupted and at its end), which is its ``loop_state`` and then the policy's own save
+(:func:`~platoon.train.policy.checkpoints.save_full_checkpoint`), and a full checkpoint's ``loop_state``, with the
 per-task statistics' snapshot and the dispatcher's state.
 
 ``_save_checkpoint_and_get_sampling_client`` and ``_checkpoint_state`` take the trainer first and are its methods still:
@@ -11,14 +11,14 @@ instance, not the function.  The other functions here call the trainer's methods
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any
 
 import tinker
-from tinker_cookbook import checkpoint_utils
 
 from platoon.train.checkpoints.dispatch_state import save_state
 from platoon.train.checkpoints.pruning import RECOVERY_CHECKPOINT_PREFIX
+from platoon.train.policy.checkpoints import Waiter, sampler_from, save_full_checkpoint, save_weights_only
 from platoon.train.task_stats import DISPATCH_KEY
 from platoon.train.trainer.signals import Watchdog
 
@@ -32,42 +32,6 @@ logger = logging.getLogger(__name__)
 # stood (the dispatcher's next position), so that a resume that cannot read the dispatcher's state goes on from there:
 # a step under a rule draws up to its cap's worth of positions, so the checkpoint's batch no longer says where.
 ORDER_POSITION_KEY = "next_position"
-
-
-# Upper bound for one save_checkpoint_async (full-parameter save_state of a
-# 35B model is ~490 GB and takes minutes at 1-2 GB/s).
-SAVE_CHECKPOINT_TIMEOUT_S = 7200.0
-
-
-# How a save is awaited: ``wait(awaitable, *, name, total_timeout)``, under the trainer's heartbeat
-# (``_await_with_heartbeat``), which logs while it waits and feeds the watchdog the waiter was given, if any.
-Waiter = Callable[..., Awaitable[Any]]
-
-
-async def save_full_checkpoint(
-    training_client: tinker.TrainingClient,
-    name: str,
-    *,
-    log_path: str,
-    loop_state: dict[str, Any],
-    wait: Waiter,
-) -> dict[str, str]:
-    """Save full checkpoint ``name`` (the weights and the optimizer's state, ``kind="both"``), which
-    ``checkpoints.jsonl`` in ``log_path`` records with ``loop_state``.  A full-parameter save takes minutes, so it runs
-    under ``wait``, for at most :data:`SAVE_CHECKPOINT_TIMEOUT_S`.  The paths the save wrote (``state_path``,
-    ``sampler_path``)."""
-
-    return await wait(
-        checkpoint_utils.save_checkpoint_async(
-            training_client=training_client,
-            name=name,
-            log_path=log_path,
-            loop_state=loop_state,
-            kind="both",
-        ),
-        name="save_checkpoint",
-        total_timeout=SAVE_CHECKPOINT_TIMEOUT_S,
-    )
 
 
 async def save_run_checkpoint(
@@ -130,31 +94,6 @@ def checkpoint_kind_for_step(steps_completed: int, save_every: int | None, recov
     if recovery_every is not None and steps_completed % recovery_every == 0:
         return "recovery"
     return None
-
-
-async def save_weights_only(training_client: tinker.TrainingClient) -> tinker.SamplingClient:
-    """The sampling client of the weights after a step that saves no full checkpoint, from a weights-only save."""
-
-    try:
-        sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-    except Exception as e:
-        logger.exception(f"save_weights_and_get_sampling_client_async failed: {e}")
-        raise
-    logger.debug("Weights saved and sampling client created")
-    return sampling_client
-
-
-def sampler_from(training_client: tinker.TrainingClient, path_dict: dict[str, str]) -> tinker.SamplingClient:
-    """The sampling client of the sampler weights that a full checkpoint saved (``path_dict["sampler_path"]``)."""
-
-    logger.info(f"Checkpoint async completed. Creating sampling client from {path_dict['sampler_path']}")
-    try:
-        sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
-    except Exception as e:
-        logger.exception(f"create_sampling_client failed: {e}")
-        raise
-    logger.info("Sampling client created successfully")
-    return sampling_client
 
 
 async def _save_checkpoint_and_get_sampling_client(

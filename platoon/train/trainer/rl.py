@@ -40,14 +40,18 @@ from platoon.train.evaluation import loop as evaluation_loop
 from platoon.train.evaluation import plan as evaluation_plan
 from platoon.train.evaluation.plan import _evaluation_plan
 from platoon.train.evaluation.record import EVALUATIONS_NAME, completed_evaluation_steps
+from platoon.train.policy import service
+from platoon.train.policy.policy import Policy
+from platoon.train.policy.set import PolicySet
+from platoon.train.policy.spec import policy_specs
 from platoon.train.sampler_runtime import TaskSampling
 from platoon.train.startup import RolloutStartup
 from platoon.train.step import publish
 from platoon.train.step.batch_transforms import BatchTransform, build_default_batch_transforms
 from platoon.train.task_records import TaskRecorder, record_lost_state, resume_record
 from platoon.train.tinker.key_refusal import key_refusals
-from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
-from platoon.train.trainer import loops, service, signals, waiting
+from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.trainer import loops, signals, waiting
 from platoon.train.trainer.signals import TerminateTrainLoop, TrainInterrupted, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.train.workflow import output as _group_output  # noqa: F401 - registers GroupOutput's kept-group codec
@@ -101,6 +105,8 @@ class PlatoonTinkerRLTrainer:
     # The group admission rules of the start train() runs, beside its dispatcher (platoon.train.dispatch.setup); None
     # when every entry admits every group.  Unset before (read with getattr).
     _admissions: AdmissionSet | None
+    # The run's policies (platoon.train.policy): main, as train: declares it, with its model gateway.
+    policies: PolicySet
 
     def __init__(
         self,
@@ -117,16 +123,9 @@ class PlatoonTinkerRLTrainer:
         self.train_order = train_order
         self.train_sampling = train_sampling
         self.batch_transforms = self._build_batch_transforms(batch_transforms)
-        self._model_info = register_tinker_llm(
-            self.config.train.model_name,
-            self.config.train.renderer_name,
-            context_window_length=self.config.train.context_window_length,
-            renderer_kwargs=self.config.train.renderer_kwargs,
-            base_url=self.config.tinker_base_url,  # the server train() opens its training client on
-            # The bound on each sampling call, resolved here once (the key, else TINKER_SAMPLE_TIMEOUT_SECONDS), which
-            # rollout workers take from the model binding.
-            sample_timeout_seconds=self.config.train.sample_timeout_seconds,
-        )
+        # The run's policies as the config declares them now (a later change of the config does not reach them), and
+        # main's model gateway, this process's default, on the service train() opens main's training client on.
+        self.policies = PolicySet.build(policy_specs(self.config))
         self._stats_logger: StatsLogger | None = None
         self._train_tracker: StatsTracker | None = None
         self._sandbox_labels: ExitStack | None = None
@@ -151,6 +150,29 @@ class PlatoonTinkerRLTrainer:
     def model_info(self) -> ModelInfo:
         """The model info containing the LLM proxy and renderer."""
         return self._model_info
+
+    def _leader(self) -> Policy:
+        """The policy this trainer trains, and its rollouts sample: the leader of the run's policies (``main``, the
+        one policy of a run)."""
+
+        return self.policies[self.policies.leader]
+
+    @property
+    def _model_info(self) -> ModelInfo:
+        """The model info of the policy the trainer trains (:meth:`_leader`), which the policy holds."""
+
+        return self._leader().info
+
+    @_model_info.setter
+    def _model_info(self, info: ModelInfo) -> None:
+        # Tests set it on a trainer they make without its constructor, which has no policies then: the leader's is
+        # made here, as the config declares it (the first policy), around the info they give.  To be removed once the
+        # tests make their trainers with the constructor or with fakes.
+        if getattr(self, "policies", None) is None:
+            leader = next(iter(policy_specs(self.config).values()))
+            self.policies = PolicySet([Policy(leader, info)])
+        else:
+            self._leader().info = info
 
     @property
     def run_log_path(self) -> str:
@@ -288,7 +310,8 @@ class PlatoonTinkerRLTrainer:
         max_staleness, _ = entry_settings.largest_staleness(self.config)
         if keep is None or max_staleness is None:  # loading refuses keep_recovery without max_staleness
             return None
-        base_url = self.config.tinker_base_url
+        # The service the policy trains on, as its spec read it when the trainer was built.
+        base_url = self._leader().spec.tinker_base_url
         return RecoveryCheckpointPruner(
             run_dir=self.run_log_path,
             keep=keep,
@@ -304,10 +327,29 @@ class PlatoonTinkerRLTrainer:
         if pruner is not None:
             pruner.recovery_saved(paths, policy_version)
 
-    # Moved methods, as above: the training client and the signal handlers.
-    _create_training_client = service._create_training_client
-    _open_training_client = service._open_training_client
+    # Moved methods, as above: the signal handlers.
     _setup_signal_handlers = signals._setup_signal_handlers
+
+    async def _create_training_client(
+        self, service_client: tinker.ServiceClient, resume_info: checkpoint_utils.CheckpointRecord | None
+    ) -> tinker.TrainingClient:
+        """Ask the trained policy's service once for its training client: the one ``resume_info`` resumes, else a new
+        run's (:func:`~platoon.train.policy.service.create_training_client`)."""
+
+        return await service.create_training_client(service_client, resume_info, self._leader().spec)
+
+    async def _open_training_client(
+        self,
+        service_client: tinker.ServiceClient,
+        resume_info: checkpoint_utils.CheckpointRecord | None,
+        stop: asyncio.Event | None = None,
+    ) -> tinker.TrainingClient | None:
+        """:meth:`_create_training_client`, asked again after each refusal that asking again may change
+        (:func:`~platoon.train.policy.service.open_training_client`); None once ``stop`` is set between two asks."""
+
+        return await service.open_training_client(
+            lambda: self._create_training_client(service_client, resume_info), stop=stop
+        )
 
     async def train(self, train_workflow: RolloutWorkflow, eval_workflow: RolloutWorkflow | None = None):
         """Train this start of the run, from the checkpoint it resumes from (:class:`StartPoint`; none for a fresh run)
@@ -323,22 +365,17 @@ class PlatoonTinkerRLTrainer:
         self._setup_signal_handlers(shutdown_event)
 
         # A key the service refuses (401, 403) ends training with one line that names the key and the service.
-        with key_refusals():
-            service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
+        self.policies.connect()
         start = StartPoint.read(self.run_log_path, self.config.train.num_minibatches)
-        with key_refusals(asked="a training client"):
-            training_client = await self._open_training_client(service_client, start.resume_info, stop=shutdown_event)
-        if training_client is None:
+        if not await self._open_policy(start, shutdown_event):
             return  # stopped before training began: nothing to save
 
         startup = await self._begin_rollout_startup(train_workflow, eval_workflow)
         train_dataloader, end_batch = self._prepare_draws(start)
-        sampling_client = await self._launch(training_client, start)
+        await self._launch(start)
         # Also waits for the staging of the harness toolchains (startup.STAGING_WAIT_S at most), then starts the
         # watchdog, which _run_loops stops.
-        shared_state = await self._loop_state(
-            start, shutdown_event, service_client, training_client, sampling_client, train_dataloader, startup
-        )
+        shared_state = await self._loop_state(start, shutdown_event, train_dataloader, startup)
         interrupted = await self._run_loops(shared_state, start, end_batch, train_workflow, eval_workflow)
         await self._save_at_exit(shared_state, start.batch, end_batch, interrupted)
         await self._close_after_training()
@@ -363,6 +400,19 @@ class PlatoonTinkerRLTrainer:
                 "eval.at_start is ignored: eval.every is 0, which turns evaluation during training off, the starting "
                 "policy's too"
             )
+
+    async def _open_policy(self, start: StartPoint, stop: asyncio.Event) -> bool:
+        """Open the trained policy's training client on its service, at the start point: the one its checkpoint
+        resumes, else a new run's (:meth:`_open_training_client`).  False when training was stopped before the service
+        accepted it."""
+
+        policy = self._leader()
+        with key_refusals(asked="a training client"):
+            training_client = await self._open_training_client(policy.service_client, start.resume_info, stop=stop)
+        if training_client is None:
+            return False
+        policy.training_client = training_client
+        return True
 
     async def _begin_rollout_startup(
         self, train_workflow: RolloutWorkflow, eval_workflow: RolloutWorkflow | None
@@ -395,11 +445,13 @@ class PlatoonTinkerRLTrainer:
             self._restore_dispatch(self._dispatcher, start.resume_info, start.policy_version)
         return train_dataloader, end_batch
 
-    async def _launch(self, training_client: tinker.TrainingClient, start: StartPoint) -> tinker.SamplingClient:
+    async def _launch(self, start: StartPoint) -> None:
         """Save the launch checkpoint, then start from it: the per-task statistics' events, the pruning of the run's
-        recovery checkpoints, and the first sampling client, of the launch save's weights, which the policy samples at
-        the checkpoint's policy version.  The sampling client."""
+        recovery checkpoints, and the trained policy's first sampling client, of the launch save's weights, which it
+        samples at the checkpoint's policy version, with the checkpoint's optimizer steps."""
 
+        policy = self._leader()
+        training_client = policy.training_client
         # Initial sampling client to use (the watchdog is not running yet). The
         # launch save is a *recovery* checkpoint: every (re)launch writes one, so
         # naming it permanently would accumulate a ~490 GB checkpoint per restart.
@@ -418,31 +470,29 @@ class PlatoonTinkerRLTrainer:
         # Pruning starts with the launch save, so a resumed run first deletes what its earlier starts left.
         self._recovery_pruner = self._start_recovery_pruning()
         self._recovery_saved(path_dict, start.policy_version)
-        # Not saving.sampler_from, whose log lines the launch never wrote.
+        # Not policy.checkpoints.sampler_from, whose log lines the launch never wrote.
         sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
 
         # Set initial version and update sampling client (without auto-incrementing)
-        self.model_info.llm.set_version(start.policy_version)
-        self.model_info.llm.update_sampling_client(sampling_client, increment_version=False)
-        return sampling_client
+        policy.info.llm.set_version(start.policy_version)
+        policy.info.llm.update_sampling_client(sampling_client, increment_version=False)
+        policy.sampling_client = sampling_client
+        policy.optimizer_steps = start.optimizer_steps
 
     async def _loop_state(
         self,
         start: StartPoint,
         shutdown_event: asyncio.Event,
-        service_client: tinker.ServiceClient,
-        training_client: tinker.TrainingClient,
-        sampling_client: tinker.SamplingClient,
         train_dataloader: PlatoonTinkerDataloader,
         startup: RolloutStartup,
     ) -> TrainLoopSharedState:
         """What the train and evaluation loops share (:class:`TrainLoopSharedState`), once the harness toolchains are
-        staged (``startup``): the optimizer's settings, the evaluation's dataloader, the clients, the first sampling
-        client (new: the evaluation loop's first wait passes at once), the watchdog, started when it is enabled, and
-        where the start begins."""
+        staged (``startup``): the run's policies, the trained one's with its optimizer's settings, the evaluation's
+        dataloader, the first sampling client's event (new: the evaluation loop's first wait passes at once), the
+        watchdog, started when it is enabled, and where the start begins."""
 
         assert self._stats_logger is not None and self._train_tracker is not None  # train() checked (_require_entered)
-        optimizer_params = tinker.AdamParams(
+        self._leader().optimizer_params = tinker.AdamParams(
             learning_rate=self.config.train.optimizer.learning_rate,
             beta1=self.config.train.optimizer.beta1,
             beta2=self.config.train.optimizer.beta2,
@@ -478,14 +528,9 @@ class PlatoonTinkerRLTrainer:
             config=self.config,
             shutdown_event=shutdown_event,
             train_step=start.batch,
-            optimizer_params=optimizer_params,
-            service_client=service_client,
-            training_client=training_client,
-            sampling_client=sampling_client,
+            policies=self.policies,
             sampling_client_step=start.policy_version,
-            optimizer_steps=start.optimizer_steps,
             sampling_client_updated_event=sampling_client_updated_event,
-            model_info=self._model_info,
             train_dataloader=train_dataloader,
             eval_dataloader=eval_dataloader,
             stats_logger=self._stats_logger,

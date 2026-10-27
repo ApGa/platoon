@@ -14,8 +14,8 @@ import httpx
 import pytest
 import tinker
 
+from platoon.train.policy import service as service_module
 from platoon.train.trainer import rl as rl_module
-from platoon.train.trainer import service as service_module
 
 
 def _request() -> httpx.Request:
