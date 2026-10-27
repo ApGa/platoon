@@ -625,10 +625,21 @@ def _check_sample_timeout(key: str, seconds: Any) -> None:
 
 @dataclass
 class PolicyConfig:
-    """A ``policies:`` entry: a model the run samples or scores with besides ``main``, under ``train:``'s names for the
-    same settings (experimental).  This release trains one policy, ``main``: every other one is frozen
-    (``trainable: false``), sampled by the agents ``agents:`` binds to it or scoring for a credit estimator (a
-    teacher), and never stepped, saved or pruned."""
+    """A ``policies:`` entry: a model the run trains, samples or scores with besides ``main``, under ``train:``'s names
+    for the same settings (experimental).  A policy the run trains (``trainable``, the default) steps in lockstep with
+    main: each step trains every trained policy on its rows of the step's groups, each on its own Tinker service with
+    its own optimizer and loss, and each checkpoint saves them all.  A frozen one (``trainable: false``) is sampled by
+    the agents ``agents:`` binds to it or scores for a credit estimator (a teacher), and is never stepped, saved or
+    pruned."""
+
+    # Keys that steer a policy's own clock, which lockstep does not have: every trained policy steps on the run's.
+    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
+        "batch_size": "not in this release: in lockstep every trained policy trains its rows of the step's "
+        "train.batch_size groups; a policy's own batch arrives with independent stepping (RFC 0021, milestone B4b)",
+        "checkpoint": "not in this release: in lockstep each checkpoint saves every trained policy together, at "
+        "checkpoint.every and checkpoint.recovery_every; a policy's own cadence arrives with independent stepping "
+        "(RFC 0021, milestone B4b)",
+    }
 
     # Hugging Face model name of the base model.
     model_name: str
@@ -643,17 +654,48 @@ class PolicyConfig:
     # Its Tinker service (None: the run's tinker_base_url, else TINKER_BASE_URL, else hosted Tinker).  It opens a
     # session of its own there, also on the run's service.
     tinker_base_url: str | None = None
-    # Whether the run trains it.  This release trains main only, so every other policy says false: a frozen policy.
-    # A trained policy's own adapter rank, optimizer and loss arrive with lockstep multi-policy training.
+    # Whether the run trains it (false: a frozen policy, which only samples or scores).
     trainable: bool = True
-    # The sampler a frozen policy serves (a ``tinker://`` sampler path; None: its base model).
+    # Rank of the LoRA adapter the run trains, as train.lora_rank (None: train.lora_rank).
+    lora_rank: int | None = None
+    # A trained policy's: the weights its new run starts from (a ``tinker://`` state path; None: its base model's). A
+    # frozen policy's: the sampler it serves (a ``tinker://`` sampler path; None: its base model).
     load_checkpoint_path: str | None = None
+    # With load_checkpoint_path, a trained policy's new run takes that checkpoint's optimizer state too (Adam's
+    # moments): a new trial that goes on from it. Otherwise its optimizer starts fresh.
+    load_optimizer_state: bool = False
+    # A trained policy's optimizer, as train.optimizer (None: train.optimizer).
+    optimizer: AdamParams | None = None
+    # The loss a trained policy's rows train under, as train.loss_fn (None: train.loss_fn), and its keyword arguments
+    # (None: train.loss_fn_config when the loss is train.loss_fn's, else none, the loss's own defaults).
+    loss_fn: str | None = None
+    loss_fn_config: dict | None = None
+    # How many of the trained policy's own versions old its rows may be and still train (None: their entry's bound,
+    # else train.max_staleness). The dispatcher's horizon counts the smallest bound of the trained policies that agents
+    # sample, train.max_staleness included when main's is unset.
+    max_staleness: int | None = None
 
     def __post_init__(self) -> None:
-        # As train:'s own; the loader checks the other keys' types, as it does train:'s.
-        _check_sample_timeout(
-            f"policies: the sample_timeout_seconds of the policy of {self.model_name}", self.sample_timeout_seconds
-        )
+        # As train:'s own; the loader checks the keys' types, as it does train:'s, and names the entry in front of a
+        # refusal (policies.<id>: ...), whose id the entry does not know.
+        _check_sample_timeout("sample_timeout_seconds", self.sample_timeout_seconds)
+        _check_training_keys(self)
+
+
+def _check_training_keys(policy: PolicyConfig) -> None:
+    """Refuse a ``policies:`` entry's training keys that no run could take, as ``train:``'s own are refused (the loader
+    checks their types): an adapter rank below 1, a negative staleness bound and an empty loss name, each named by its
+    key; the loader puts the entry's path in front (``policies.worker: lora_rank ...``), since the entry does not know
+    its id."""
+
+    rank = policy.lora_rank
+    if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int) or rank < 1):
+        raise ValueError(f"lora_rank must be a whole number, 1 or more, or null, got {rank!r}")
+    bound = policy.max_staleness
+    if bound is not None and (isinstance(bound, bool) or not isinstance(bound, int) or bound < 0):
+        raise ValueError(f"max_staleness must be a whole number of versions, 0 or more, or null, got {bound!r}")
+    if policy.loss_fn is not None and (not isinstance(policy.loss_fn, str) or not policy.loss_fn):
+        raise ValueError(f"loss_fn must name a Tinker loss, or be null, got {policy.loss_fn!r}")
 
 
 @dataclass
@@ -1001,8 +1043,9 @@ class PlatoonTinkerRLTrainerConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
-    # The run's other policies, by id (a lowercase name such as ``teacher``), besides main, which train: declares:
-    # frozen ones its agents sample or its credit estimators score with (experimental).
+    # The run's other policies, by id (a lowercase name such as ``teacher``), besides main, which train: declares: ones
+    # it trains in lockstep with main, and frozen ones its agents sample or its credit estimators score with
+    # (experimental).
     policies: dict[str, PolicyConfig] = field(default_factory=dict)
     # Which policy each agent samples, and which tools it may call, by role (experimental); without it, every agent
     # samples main and may call every tool.

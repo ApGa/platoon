@@ -9,12 +9,13 @@ the others here as module functions.
 """
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tinker_cookbook import checkpoint_utils
 
+from platoon.train.checkpoints.barrier import newest_barrier
 from platoon.train.checkpoints.dispatch_state import (
     ResumePlan,
     plan_resume,
@@ -68,8 +69,8 @@ class StartPoint:
     """Where a start of training begins: the checkpoint row it resumes from (``record``, the run's last one in
     ``checkpoints.jsonl``; None for a fresh run), the step it starts at (``step``, the row's ``batch``), the policy
     version and optimizer steps that row saved (:func:`_resume_policy_counters`), the whole ``loop_state`` it holds
-    (empty for a fresh run), where each part of the run's state finds the keys it saved, and where each policy begins
-    (``policies``: the run's one policy, from that row)."""
+    (empty for a fresh run), where each part of the run's state finds the keys it saved, and where each trained policy
+    begins (``policies``: the leader from that row, each other one from the row it names)."""
 
     record: checkpoint_utils.CheckpointRecord | None
     step: int
@@ -90,16 +91,41 @@ class StartPoint:
         return self.step
 
     @classmethod
-    def read(cls, run_dir: str, num_minibatches: int, *, leader: PolicyId = MAIN) -> "StartPoint":
+    def read(
+        cls, run_dir: str, num_minibatches: int, *, leader: PolicyId = MAIN, others: Sequence[PolicyId] = ()
+    ) -> "StartPoint":
         """The start point of a start of the run in ``run_dir``, whose steps take ``num_minibatches`` optimizer steps
-        each (what a checkpoint without the counters implies), for the run's one policy, ``leader``, whose rows the
-        run's ``checkpoints.jsonl`` holds."""
+        each (what a checkpoint without the counters implies): ``leader``'s newest row in the run's
+        ``checkpoints.jsonl``, for a run of one trained policy; with the run's other trained policies (``others``),
+        the newest whose rows of them each one still has, and each one's start from the row it names
+        (:func:`~platoon.train.checkpoints.barrier.newest_barrier`)."""
 
+        if others:
+            return cls._read_barrier(run_dir, num_minibatches, leader, others)
         resume_info = checkpoint_utils.get_last_checkpoint(run_dir)
         start_batch = (resume_info.batch or 0) if resume_info else 0
         policy_version, optimizer_steps = _resume_policy_counters(resume_info, num_minibatches)
         policies = {leader: PolicyStart(leader, resume_info, policy_version, optimizer_steps)}
         return cls(resume_info, start_batch, policy_version, optimizer_steps, _row_loop_state(resume_info), policies)
+
+    @classmethod
+    def _read_barrier(
+        cls, run_dir: str, num_minibatches: int, leader: PolicyId, others: Sequence[PolicyId]
+    ) -> "StartPoint":
+        """The start point of a run of several trained policies: the leader's row of the newest checkpoint whose rows
+        of the other policies hold, and each other policy's start from its row (a fresh run's at 0 without one)."""
+
+        barrier = newest_barrier(run_dir, others)
+        if barrier is None:  # a fresh run: every policy starts at 0
+            fresh = {policy: PolicyStart(policy, None, 0, 0) for policy in (leader, *others)}
+            return cls(None, 0, 0, 0, {}, fresh)
+        record = barrier.record
+        policy_version, optimizer_steps = _resume_policy_counters(record, num_minibatches)
+        policies = {leader: PolicyStart(leader, record, policy_version, optimizer_steps)}
+        for policy, row in barrier.rows.items():
+            version, steps = _resume_policy_counters(row, num_minibatches)
+            policies[policy] = PolicyStart(policy, row, version, steps)
+        return cls(record, record.batch or 0, policy_version, optimizer_steps, _row_loop_state(record), policies)
 
 
 def _row_loop_state(resume_info: checkpoint_utils.CheckpointRecord | None) -> dict[str, Any]:

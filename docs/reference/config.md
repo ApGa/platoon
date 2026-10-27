@@ -63,7 +63,7 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 | `checkpoint` | [CheckpointConfig](#checkpointconfig) | `CheckpointConfig()` |  |
 | `stats` | [StatsConfig](#statsconfig) | `StatsConfig()` |  |
 | `watchdog` | [WatchdogConfig](#watchdogconfig) | `WatchdogConfig()` |  |
-| `policies` | dict[str, [PolicyConfig](#policyconfig)] | `{}` | The run's other policies, by id (a lowercase name such as `teacher`), besides main, which train: declares: frozen ones its agents sample or its credit estimators score with (experimental). |
+| `policies` | dict[str, [PolicyConfig](#policyconfig)] | `{}` | The run's other policies, by id (a lowercase name such as `teacher`), besides main, which train: declares: ones it trains in lockstep with main, and frozen ones its agents sample or its credit estimators score with (experimental). |
 | `agents` | [AgentsConfig](#agentsconfig) | `AgentsConfig()` | Which policy each agent samples, and which tools it may call, by role (experimental); without it, every agent samples main and may call every tool. |
 
 <a id="trainconfig"></a>
@@ -255,10 +255,12 @@ The `watchdog:` section: a timer that ends a training process that stops making 
 
 In a training config: `policies.<key>`.
 
-A `policies:` entry: a model the run samples or scores with besides `main`, under `train:`'s names for the
-same settings (experimental).  This release trains one policy, `main`: every other one is frozen
-(`trainable: false`), sampled by the agents `agents:` binds to it or scoring for a credit estimator (a
-teacher), and never stepped, saved or pruned.
+A `policies:` entry: a model the run trains, samples or scores with besides `main`, under `train:`'s names
+for the same settings (experimental).  A policy the run trains (`trainable`, the default) steps in lockstep with
+main: each step trains every trained policy on its rows of the step's groups, each on its own Tinker service with
+its own optimizer and loss, and each checkpoint saves them all.  A frozen one (`trainable: false`) is sampled by
+the agents `agents:` binds to it or scores for a credit estimator (a teacher), and is never stepped, saved or
+pruned.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -268,8 +270,14 @@ teacher), and never stepped, saved or pruned.
 | `context_window_length` | int \| None | `null` | Its context window, as train.context_window_length. |
 | `sample_timeout_seconds` | float \| None | `null` | The bound on one of its sampling calls, as train.sample_timeout_seconds. |
 | `tinker_base_url` | str \| None | `null` | Its Tinker service (None: the run's tinker_base_url, else TINKER_BASE_URL, else hosted Tinker). It opens a session of its own there, also on the run's service. |
-| `trainable` | bool | `true` | Whether the run trains it. This release trains main only, so every other policy says false: a frozen policy. A trained policy's own adapter rank, optimizer and loss arrive with lockstep multi-policy training. |
-| `load_checkpoint_path` | str \| None | `null` | The sampler a frozen policy serves (a `tinker://` sampler path; None: its base model). |
+| `trainable` | bool | `true` | Whether the run trains it (false: a frozen policy, which only samples or scores). |
+| `lora_rank` | int \| None | `null` | Rank of the LoRA adapter the run trains, as train.lora_rank (None: train.lora_rank). |
+| `load_checkpoint_path` | str \| None | `null` | A trained policy's: the weights its new run starts from (a `tinker://` state path; None: its base model's). A frozen policy's: the sampler it serves (a `tinker://` sampler path; None: its base model). |
+| `load_optimizer_state` | bool | `false` | With load_checkpoint_path, a trained policy's new run takes that checkpoint's optimizer state too (Adam's moments): a new trial that goes on from it. Otherwise its optimizer starts fresh. |
+| `optimizer` | [AdamParams](#adamparams) \| None | `null` | A trained policy's optimizer, as train.optimizer (None: train.optimizer). |
+| `loss_fn` | str \| None | `null` | The loss a trained policy's rows train under, as train.loss_fn (None: train.loss_fn), and its keyword arguments (None: train.loss_fn_config when the loss is train.loss_fn's, else none, the loss's own defaults). |
+| `loss_fn_config` | dict \| None | `null` |  |
+| `max_staleness` | int \| None | `null` | How many of the trained policy's own versions old its rows may be and still train (None: their entry's bound, else train.max_staleness). The dispatcher's horizon counts the smallest bound of the trained policies that agents sample, train.max_staleness included when main's is unset. |
 
 <a id="agentsconfig"></a>
 
@@ -296,7 +304,7 @@ it judges and is limited by the lists of that child's spawner and its own role's
 
 `platoon.train.config_defs.AdamParams`
 
-In a training config: `train.optimizer`.
+In a training config: `train.optimizer`, `policies.<key>.optimizer`.
 
 The Adam optimizer's settings, applied by the Tinker service at each optimizer step.
 

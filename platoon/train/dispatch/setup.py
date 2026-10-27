@@ -19,6 +19,7 @@ from platoon.train.dispatch import runner
 from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
 from platoon.train.dispatch.permits import DrawLease, _rows
 from platoon.train.labels import dataset_labels, label_column
+from platoon.train.policy.spec import horizon_bound
 from platoon.train.sampler_runtime import SamplerSet, TaskPool
 from platoon.train.sampling import sampling_fingerprint
 from platoon.train.task_stats import next_start
@@ -77,9 +78,10 @@ def _dispatch(source: "RolloutSource", task_group: asyncio.TaskGroup, *, stop: a
 
 def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch: int, end_batch: int) -> Dispatcher:
     """The dispatcher of this start's training groups, from ``start_batch`` to ``end_batch``, over the run's order
-    (:func:`_samplers`), starting at the checkpoint's batch; and, for a run under a group admission rule, its rules
-    beside it (the source's ``admissions``, :class:`~platoon.train.admissions.AdmissionSet`), whose cap the dispatcher
-    counts its steps by."""
+    (:func:`_samplers`), starting at the checkpoint's batch, its horizon counting the smallest staleness bound of the
+    trained policies (:func:`~platoon.train.policy.spec.horizon_bound`); and, for a run under a group admission rule,
+    its rules beside it (the source's ``admissions``, :class:`~platoon.train.admissions.AdmissionSet`), whose cap the
+    dispatcher counts its steps by."""
 
     config = source.config
     batch_size = config.train.batch_size
@@ -114,7 +116,8 @@ def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch:
         rows=rows,
         samplers=samplers,
         batch_size=batch_size,
-        max_staleness=config.train.max_staleness,
+        # The smallest bound of the trained policies the agents sample: train.max_staleness with one policy.
+        max_staleness=horizon_bound(config),
         steps=max(0, end_batch - start_batch),
         limits=config.train.rollout_group_limits or {},
         labels=dataset_labels(tasks, column) if tasks is not None else (),

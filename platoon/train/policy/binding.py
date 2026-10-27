@@ -1,8 +1,8 @@
 """What a rollout worker needs to sample a policy (:func:`model_binding`), which each member's worker request carries
 (:mod:`platoon.train.workflow.requests`): the binding file it follows for the policy's sampling client, and the model,
-renderer and sampling settings it builds its own model gateway with; and the bindings of the frozen policies the
-agents sample, which the trainer publishes before the rollouts that may sample them
-(:func:`publish_frozen_bindings`)."""
+renderer and sampling settings it builds its own model gateway with; and the bindings of the policies the agents
+sample besides their default, which the trainer publishes before the rollouts that may sample them
+(:func:`publish_other_bindings`)."""
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -48,14 +48,14 @@ def model_binding(
     )
 
 
-def publish_frozen_bindings(
+def publish_other_bindings(
     policies: "PolicySet", workflow: Any, publish: Callable[..., None], *, required: bool = False
 ) -> None:
     """Publish, for ``workflow``'s rollout workers, the binding of each policy the agents sample besides their default
-    (``policies.agents.default``): the frozen ones, whose sampler never changes, unlike the default's, the policy the
-    run trains, whose binding each step publishes.  ``publish`` is the trainer's ``_publish_worker_binding``.  Called
-    before training's first group (``required``, as the default's first binding is) and before each evaluation;
-    nothing in a run whose agents sample one policy."""
+    (``policies.agents.default``, whose binding the caller publishes), at its sampler and version now: a frozen one's
+    never changes, and a trained one's is published again by each step that updates it.  ``publish`` is the trainer's
+    ``_publish_worker_binding``.  Called before training's first group (``required``, as the default's first binding
+    is) and before each evaluation; nothing in a run whose agents sample one policy."""
 
     for policy in policies.sampled():
         if policy.id != policies.agents.default:

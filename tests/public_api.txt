@@ -348,6 +348,7 @@ platoon.experimental.PolicySpec.load_optimizer_state: field bool = False
 platoon.experimental.PolicySpec.lora_rank: field int = 32
 platoon.experimental.PolicySpec.loss_fn: field str | None = None
 platoon.experimental.PolicySpec.loss_fn_config: field dict[str, Any] | None = None
+platoon.experimental.PolicySpec.max_staleness: field int | None = None
 platoon.experimental.PolicySpec.model_name: field str
 platoon.experimental.PolicySpec.optimizer: field AdamParams | None = None
 platoon.experimental.PolicySpec.renderer_kwargs: field dict[str, Any] = <factory dict>
@@ -628,7 +629,7 @@ platoon.testing.EpisodeRun.reward: property float
 platoon.testing.EpisodeRun.root: property Trajectory
 platoon.testing.EpisodeRun.trajectories: property list[Trajectory]
 platoon.testing.FakePolicyService: class FakePolicyService
-platoon.testing.FakePolicyService.__init__: def __init__(*, stop_at: int | None = None) -> None
+platoon.testing.FakePolicyService.__init__: def __init__(*, stop_at: int | None = None, name: str = "fake") -> None
 platoon.testing.FakePolicyService.create_lora_training_client_async: async def create_lora_training_client_async(base_model: str, rank: int = 32, **kwargs: Any) -> Any
 platoon.testing.FakePolicyService.create_rest_client: def create_rest_client() -> FakePolicyService
 platoon.testing.FakePolicyService.create_sampling_client: def create_sampling_client(base_model: str | None = None, model_path: str | None = None) -> _Scorer

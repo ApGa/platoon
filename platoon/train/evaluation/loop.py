@@ -30,7 +30,7 @@ from platoon.train.dispatch.settled import (
 from platoon.train.evaluation.protocol import EvaluatedTrainer, LoopState
 from platoon.train.evaluation.record import record_evaluation
 from platoon.train.labels import label_column, metric_labels, metric_prefix
-from platoon.train.policy.binding import publish_frozen_bindings
+from platoon.train.policy.binding import publish_other_bindings
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.trainer.signals import TerminateEvalLoop, TrainInterrupted
 from platoon.train.workflow.protocol import RolloutWorkflow, report_of
@@ -104,8 +104,9 @@ async def _eval_loop(trainer: EvaluatedTrainer, shared_state: LoopState, workflo
 
 @dataclass(frozen=True)
 class Publication:
-    """What the evaluation loop reads of the policy that training publishes: the event each publication sets
-    (``updated``), and the policy's version and sampling client as they are when it reads them."""
+    """What the evaluation loop reads of the policy that training publishes for the agents' default (``agents.policy``):
+    the event each step's end sets (``updated``), and the policy's version and sampling client as they are when it
+    reads them."""
 
     updated: asyncio.Event
     version: Callable[[], int]
@@ -113,12 +114,22 @@ class Publication:
 
     @classmethod
     def of(cls, shared_state: LoopState) -> "Publication":
-        """The publication of the policy that the train and evaluation loops share (``shared_state``)."""
+        """The publication of the agents' default policy among the run's policies that the train and evaluation loops
+        share (``shared_state``): the policy the loops train, unless ``agents.policy`` names another; the state's own
+        for a state a test made as platoon 0.4.0 did, without the run's policies."""
 
+        policies = getattr(shared_state, "policies", None)
+        if policies is None or policies.agents.default == policies.leader:
+            return cls(
+                updated=shared_state.sampling_client_updated_event,
+                version=lambda: shared_state.model_info.llm.version,
+                sampling_client=lambda: shared_state.sampling_client,
+            )
+        default = policies[policies.agents.default]
         return cls(
             updated=shared_state.sampling_client_updated_event,
-            version=lambda: shared_state.model_info.llm.version,
-            sampling_client=lambda: shared_state.sampling_client,
+            version=lambda: default.version,
+            sampling_client=lambda: default.sampling_client,
         )
 
 
@@ -175,6 +186,7 @@ class EvaluationLoop:
 
         shared_state, workflow = self.state, self.workflow
         eval_start = time.perf_counter()
+        versions = _versions(getattr(shared_state, "policies", None))  # in a run of several trained policies
         logger.info(f"Starting evaluation at step {shared_state.train_step}")
         limited = getattr(workflow, "start_limit", None) is not None  # train.max_starting_rollouts
         if limited:  # its start-limit metrics cover this evaluation
@@ -184,10 +196,10 @@ class EvaluationLoop:
         if getattr(workflow, "rollout_isolation", "inprocess") == "process":
             version = self.publication.version()
             self.trainer._publish_worker_binding(workflow, self.publication.sampling_client(), version)
-            # The frozen policies the agents sample, if any.  A state a test made as platoon 0.4.0 did has no
+            # The other policies the agents sample, if any.  A state a test made as platoon 0.4.0 did has no
             # policies and samples one, as the train loop allows (trainer.loops._test_state_policy).
             if (policies := getattr(shared_state, "policies", None)) is not None:
-                publish_frozen_bindings(policies, workflow, self.trainer._publish_worker_binding)
+                publish_other_bindings(policies, workflow, self.trainer._publish_worker_binding)
 
         total_eval_tasks, label_stats = await self._run_groups()
 
@@ -214,6 +226,7 @@ class EvaluationLoop:
                 logged_at=shared_state.train_step,
                 tasks=total_eval_tasks,
                 seconds=eval_elapsed,
+                **({"versions": versions} if versions else {}),
             )
 
     async def _run_groups(self) -> tuple[int, dict[str, RolloutStats]]:
@@ -267,6 +280,16 @@ class EvaluationLoop:
         except* TerminateEvalLoop:
             pass  # Expected - eval completed successfully
         return total_eval_tasks, label_stats
+
+
+def _versions(policies: Any) -> dict[str, int]:
+    """Each policy the agents sample at its version now, by policy, in a run that trains several policies, whose
+    evaluations record them (an evaluation samples each policy at its version then); none in any other run, whose
+    evaluations record its one trained policy's step."""
+
+    if policies is None or len(policies.trainable()) < 2:
+        return {}
+    return {policy.id: policy.version for policy in policies.sampled()}
 
 
 async def _wait_for_starting_policy_evaluation(trainer: EvaluatedTrainer, shared_state: LoopState) -> None:

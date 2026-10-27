@@ -11,12 +11,18 @@ What is never deleted (:func:`plan_deletions`):
 
 * a permanent checkpoint (``<batch>``, ``<batch>_interrupted``, ``final``), or anything a permanent record names;
 * the resume point: the newest record with a ``state_path``, which a start resumes from;
-* a recovery checkpoint a sampling client of this start may still use: one this start saved within the run's largest
-  staleness bound of the policy (``train.max_staleness``, or an environment entry's ``max_staleness`` above it), or
-  whose version is unknown. A checkpoint an earlier start saved serves no sampling client of this one, and under a
-  trainer that rolls nothing out (``trainer: sft``) none does;
+* a recovery checkpoint a sampling client of this start may still use: one this start saved and published within the
+  run's largest staleness bound of the policy (``train.max_staleness``, or an environment entry's ``max_staleness``
+  above it), or whose version is unknown. A checkpoint an earlier start saved serves no sampling client of this one,
+  and neither does one that saved a policy a step did not update, in a run of several trained policies (its unchanged
+  weights, saved for the checkpoint, whose sampler no rollout samples), and under a trainer that rolls nothing out
+  (``trainer: sft``) none does;
 * anything that ``checkpoints.jsonl`` of this run does not list: another run's checkpoints, or the checkpoint
-  ``load_checkpoint_path`` names.
+  ``load_checkpoint_path`` names;
+* in a run of several trained policies, a row of another policy than the leader that a leader row a resume may take
+  names: the leader's newest, or one of its newest ``keep_recovery`` recovery rows
+  (:func:`platoon.train.checkpoints.barrier.named_state_paths`). Each such policy has a pruner of its own, in its own
+  directory, on a session of its own on its own service.
 
 A deleted recovery checkpoint's files in the run's ``tasks`` directory go with it: the snapshot of the run's per-task
 statistics (``tasks``), and the state of the dispatcher's draws with the groups it kept (``dispatch``,
@@ -101,7 +107,7 @@ def recovery_pruning_problems(
         ]
     if recovery_every is None or keep_recovery * recovery_every > max_staleness:
         return []
-    largest = "" if bound == "train.max_staleness" else ", the run's largest staleness bound"
+    largest = ", the run's largest staleness bound" if bound.startswith("environments[") else ""
     return [
         f"checkpoint.keep_recovery: {keep_recovery} × checkpoint.recovery_every: {recovery_every} = "
         f"{keep_recovery * recovery_every} must exceed {bound}: {max_staleness}{largest}: a recovery checkpoint "
@@ -114,7 +120,8 @@ def recovery_pruning_problems(
 def config_pruning_problems(config: Any) -> list[str]:
     """The :func:`recovery_pruning_problems` of a training config, against the largest staleness bound of the run and
     its environment entries (:func:`platoon.train.entry_settings.largest_staleness`): a slow entry's group may still
-    sample from an old checkpoint.  None under a trainer that rolls nothing out, which no rollout samples."""
+    sample from an old checkpoint; and against each trained ``policies:`` entry's own bound, which its own pruner
+    keeps.  None under a trainer that rolls nothing out, which no rollout samples."""
 
     from platoon.train.entry_settings import largest_staleness
     from platoon.train.trainer.registry import rolls_out
@@ -122,10 +129,14 @@ def config_pruning_problems(config: Any) -> list[str]:
     checkpoint = getattr(config, "checkpoint", None)
     if getattr(config, "train", None) is None or not rolls_out(config):
         return []
+    keep, every = getattr(checkpoint, "keep_recovery", None), getattr(checkpoint, "recovery_every", None)
     largest, bound = largest_staleness(config)
-    return recovery_pruning_problems(
-        getattr(checkpoint, "keep_recovery", None), getattr(checkpoint, "recovery_every", None), largest, bound=bound
-    )
+    problems = recovery_pruning_problems(keep, every, largest, bound=bound)
+    for policy_id, policy in (getattr(config, "policies", None) or {}).items():
+        own = getattr(policy, "max_staleness", None)
+        if getattr(policy, "trainable", True) and own is not None and largest is not None:
+            problems += recovery_pruning_problems(keep, every, own, bound=f"policies.{policy_id}.max_staleness")
+    return problems
 
 
 def check_recovery_pruning(config: Any) -> None:
@@ -243,13 +254,16 @@ def plan_deletions(
     policy_version: int,
     max_staleness: int | None,
     this_start: Collection[str],
+    named: Collection[str] = (),
 ) -> list[tuple[RecordedCheckpoint, str]]:
     """The paths to delete now, oldest first, each with its checkpoint: the paths left of every recovery checkpoint
     but the newest ``keep`` a start could resume from, except what is never deleted (see the module docstring).
 
     ``records`` are ``checkpoints.jsonl``'s, in order; ``deleted`` the paths already deleted; ``this_start`` the
     first path (the state path) of each recovery checkpoint this start saved; ``policy_version`` the policy's
-    version now; ``max_staleness`` the run's largest staleness bound, or None when no rollout samples the policy.
+    version now; ``max_staleness`` the run's largest staleness bound, or None when no rollout samples the policy;
+    ``named`` the state paths of the checkpoints that a leader row a resume may take names (another policy's rows,
+    which the leader's commit).
     """
 
     if keep < 1:
@@ -266,7 +280,7 @@ def plan_deletions(
             and checkpoint.paths[0] in this_start
             and _maybe_sampled(checkpoint, policy_version, max_staleness)
         )
-        if sampled or checkpoint in kept:
+        if sampled or checkpoint in kept or checkpoint.paths[0] in named:
             protected.update(checkpoint.paths)
     return [
         (checkpoint, path)
@@ -305,13 +319,20 @@ class RecoveryCheckpointPruner:
     """
 
     def __init__(
-        self, *, run_dir: str, keep: int, max_staleness: int | None, service_client_factory: Callable[[], Any]
+        self,
+        *,
+        run_dir: str,
+        keep: int,
+        max_staleness: int | None,
+        service_client_factory: Callable[[], Any],
+        named: Callable[[], Collection[str]] | None = None,
     ) -> None:
         """``max_staleness`` is the run's largest staleness bound, or None when no rollout samples the policy (an sft
         run: ``k = 0``, and since its version never moves, none of this start's checkpoints is kept for a sampling
         client either).  ``service_client_factory`` opens the Tinker session the deletes go through (a
         ``tinker.ServiceClient`` of the training service): pruning calls it once, in a worker thread, before its first
-        delete."""
+        delete.  ``named``, for the pruner of another trained policy than the leader: the state paths of its rows that
+        a leader row a resume may take names, read at each pass, which it never deletes."""
 
         if keep < 1:
             raise ValueError("keep must be at least 1")
@@ -319,6 +340,7 @@ class RecoveryCheckpointPruner:
         self.keep = keep
         self.max_staleness = max_staleness
         self._service_client_factory = service_client_factory
+        self._named = named
         self._rest_client: Any = None
         self._deleted = read_deleted_paths(run_dir)
         self._this_start: set[str] = set()
@@ -348,12 +370,14 @@ class RecoveryCheckpointPruner:
 
         return self._stopped
 
-    def recovery_saved(self, paths: Mapping[str, str], policy_version: int) -> None:
+    def recovery_saved(self, paths: Mapping[str, str], policy_version: int, *, published: bool = True) -> None:
         """Note a recovery save of this start, which ``checkpoints.jsonl`` now records, at ``policy_version`` (the
-        policy's version now), and prune beside training. A pass still running runs once more when it ends."""
+        policy's version now), and prune beside training. A pass still running runs once more when it ends.
+        ``published`` False: a save of weights the step did not update (a policy of several that did not step), whose
+        sampler is never published, so no rollout samples it and it is pruned as any older checkpoint is."""
 
         first = paths.get("state_path") or paths.get("sampler_path")
-        if first:
+        if first and published:
             self._this_start.add(first)
         self._policy_version = max(self._policy_version, policy_version)
         if self._stopped:
@@ -416,6 +440,7 @@ class RecoveryCheckpointPruner:
             policy_version=self._policy_version,
             max_staleness=self.max_staleness,
             this_start=self._this_start,
+            named=self._named() if self._named is not None else (),
         )
         for checkpoint, path in doomed:
             if self._stopped:

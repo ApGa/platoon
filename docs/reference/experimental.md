@@ -1358,9 +1358,10 @@ optimizer, and the loss its rows train under).
 | `lora_rank` | `int` | `32` |  |
 | `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from; None: the base model's. A frozen policy's: the sampler it serves. |
 | `load_optimizer_state` | `bool` | `False` | With load_checkpoint_path: whether the new run takes that checkpoint's optimizer state too (Adam's moments), a new trial that goes on from it; else its optimizer starts fresh. |
-| `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments, for a policy the run trains (main's are train.optimizer, train.loss_fn and train.loss_fn_config, which policy_specs puts here, so that the trainer reads them from the spec alone). |
+| `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments, for a policy the run trains (each unset one train.optimizer, train.loss_fn and train.loss_fn_config, which policy_specs puts here, so that the trainer reads them from the spec alone). |
 | `loss_fn` | `str \| None` | `None` |  |
 | `loss_fn_config` | `dict[str, Any] \| None` | `None` |  |
+| `max_staleness` | `int \| None` | `None` | How many of its own versions old its rows may be and still train; None: their entry's bound, else train.max_staleness (the stale filter's, platoon.train.step.staleness). |
 
 <a id="platoon-experimental-main"></a>
 
@@ -2026,7 +2027,7 @@ What an estimator is built with, once per start of the process and environment e
 | `name` | `str` | required | Its name as the config gives it ("keyed", "acme.credit:ByRole"). |
 | `entry` | `str` | required | The label of the environment entry whose groups it credits. |
 | `settings` | `WorkflowConfig` | required | The entry's training settings (train.workflow_config with the entry's own laid over it). |
-| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id: main, the one the run trains in this release, then its frozen ones. |
+| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id: main, then each other policy that the config's policies: section declares, trained or frozen. |
 | `policy_views` | `Mapping[PolicyId, PolicyView]` | `{}` | Each policy as the estimator may read it (its renderer, its tokenizer, its scores), by id: what an estimator that scores with another policy (a teacher) reads it from. Empty outside a run (a test's setup). |
 
 <a id="platoon-experimental-creditcheckcontext"></a>

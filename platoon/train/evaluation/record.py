@@ -7,7 +7,8 @@ here for each evaluation once it has logged the evaluation's metrics::
     {"step": 40, "logged_at": 43, "tasks": 120, "seconds": 3912.4, "time": "2026-10-19T04:21:07+00:00"}
 
 ``step`` is the step it evaluated (its ``eval/step``), ``logged_at`` the step training had reached when its metrics
-were logged, and ``tasks`` and ``seconds`` its size and how long it took.  A start that resumes reads the steps back
+were logged, and ``tasks`` and ``seconds`` its size and how long it took.  A run that trains several policies adds
+``versions``, each sampled policy's version when the evaluation started.  A start that resumes reads the steps back
 (:func:`completed_evaluation_steps`) and does not evaluate the step it resumes at again when an earlier start
 completed that evaluation; one that a crash cut short runs again.  A crash between the metrics and the line leaves a
 logged evaluation out, so a start that resumes at its step runs it once more.  The record names steps, not policies:
@@ -21,7 +22,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping
 from datetime import datetime, timezone
+from typing import Any
 
 from platoon.utils.jsonl import append_jsonl_line, read_jsonl
 
@@ -41,17 +44,28 @@ def completed_evaluation_steps(run_dir: str | os.PathLike[str]) -> set[int]:
     }
 
 
-def record_evaluation(path: str | os.PathLike[str], *, step: int, logged_at: int, tasks: int, seconds: float) -> None:
-    """Append the evaluation of ``step``, which completed, to the record at ``path``.  A record that cannot be written
-    is logged and training goes on: a start that resumes at that step then evaluates it again."""
+def record_evaluation(
+    path: str | os.PathLike[str],
+    *,
+    step: int,
+    logged_at: int,
+    tasks: int,
+    seconds: float,
+    versions: Mapping[str, int] | None = None,
+) -> None:
+    """Append the evaluation of ``step``, which completed, to the record at ``path``, with the sampled policies'
+    ``versions`` when it started (a run of several trained policies gives them).  A record that cannot be written is
+    logged and training goes on: a start that resumes at that step then evaluates it again."""
 
-    record = {
+    record: dict[str, Any] = {
         "step": step,
         "logged_at": logged_at,
         "tasks": tasks,
         "seconds": round(seconds, 1),
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if versions is not None:
+        record["versions"] = dict(versions)
     try:
         append_jsonl_line(path, json.dumps(record))
     except OSError as exc:

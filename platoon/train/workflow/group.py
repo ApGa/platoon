@@ -586,9 +586,16 @@ class GroupRolloutWorkflow:
 
         estimator = self._entry_estimator() if self.entry_credit else None
         if estimator is None:
+            if len(self.trained_policies) > 1:
+                raise RuntimeError(
+                    "a run that trains several policies credits every group with an estimator, which tells each row's "
+                    f"policy, and the group of task {data['task_id']} has none: its workflow credits with hooks of its "
+                    "own (applies_credit is False), or its entry has no settings of its own"
+                )
             self.assign_advantages(valid_results)
             return None
-        return await assign_credit(estimator, self._credit_group(data, valid_results, tagged=estimator.needs_agents))
+        tagged = crediting.tags_rows(self, estimator)
+        return await assign_credit(estimator, self._credit_group(data, valid_results, tagged=tagged))
 
     def compute_baselines(self, results: list[TrajectoryCollectionResult]) -> list[float]:
         """Return one baseline per usable rollout of a task group.

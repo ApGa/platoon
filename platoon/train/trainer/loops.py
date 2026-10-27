@@ -1,21 +1,24 @@
 """The training loop of one start (``_train_loop``) and its step (:class:`TrainStep`); and stopping the loops
 (``shutdown_loops``).
 
-The loop starts the dispatcher, whose groups settle into the queue the steps dequeue from, publishes the first sampler,
-and sets up what its steps share (:class:`StepContext`).  Then it runs one :class:`TrainStep` per step to the end
-batch.  A step reads top to bottom (:meth:`TrainStep.run`), in seven stages: it collects settled groups into
-microbatches, prepares each microbatch's datums and sends them, updates the policy once per minibatch through its
-learner (:mod:`platoon.train.policy.learner`), under its objective (:mod:`platoon.train.objectives`), then commits, and
-ends: the run's step hooks drain and update the policy, the step publishes the new policy once, the hooks hear of it,
-and the step moves on to the next (:func:`~platoon.train.trainer.hooks.finish_step`; with no hook, the publication and
-the move); then it logs its metrics.  The parts of each stage are in :mod:`platoon.train.step`.
+The loop starts the dispatcher, whose groups settle into the queue the steps dequeue from, publishes the first sampler
+of each policy the agents sample, has each trained one hand its later samplers to the rollout workers, and sets up
+what its steps share (:class:`StepContext`).  Then it runs one :class:`TrainStep` per step to the end batch.  A step
+reads top to bottom (:meth:`TrainStep.run`), in seven stages: it collects settled groups into microbatches, prepares
+each microbatch's datums and sends them, updates each trained policy once per minibatch through its learner
+(:mod:`platoon.train.policy.learner`), under its objective (:mod:`platoon.train.objectives`), then commits, and ends:
+the run's step hooks drain and update the policies, the step publishes each policy that it or a hook updated once, the
+hooks hear of it, and the step moves on to the next (:func:`~platoon.train.trainer.hooks.finish_step`; with no hook,
+the publication and the move); then it logs its metrics.  In a run that trains several policies in lockstep, each
+policy's rows of each group go their own lane through those stages (:mod:`platoon.train.step.lanes`).  The parts of
+each stage are in :mod:`platoon.train.step`.
 
 The step's flow stays in this module, beside the loop, because tests read it here: the source of the batch transforms
-before the one zero-advantage filter (:meth:`TrainStep.prepare`) and of the exact non-submitted guard
-(:func:`record_workload_metrics`, with the loop's local names); the logger of the line that says why a step took no
-update; and the five globals the tests patch here, ``client_monitor``, ``client_step_metrics``,
-``_ptc_cell_guard_stats``, ``metric_labels`` and ``compute_training_metrics`` (which the objective computes its
-metrics with, through :meth:`TrainStep._training_metrics`, for that reason).
+before the one zero-advantage filter (:meth:`TrainStep.prepare`, then :meth:`TrainStep._with_nonzero_objective`) and
+of the exact non-submitted guard (:func:`record_workload_metrics`, with the loop's local names); the logger of the
+line that says why a step took no update; and the five globals the tests patch here, ``client_monitor``,
+``client_step_metrics``, ``_ptc_cell_guard_stats``, ``metric_labels`` and ``compute_training_metrics`` (which the
+objective computes its metrics with, through :meth:`TrainStep._training_metrics`, for that reason).
 
 ``_train_loop`` and ``shutdown_loops`` take the trainer first, and are its methods still: ``PlatoonTinkerRLTrainer``
 keeps each under its name, so to replace one, replace the method, on the class or an instance, not the function.  A
@@ -39,8 +42,8 @@ from platoon.train.dispatch.settled import _output_label, _record_group_stats, _
 from platoon.train.labels import label_column, metric_labels, metric_prefix
 from platoon.train.objectives.api import objective_is_zero_for_zero_advantages
 from platoon.train.objectives.policy_gradient import PolicyGradient, compute_training_metrics
-from platoon.train.policy.binding import publish_frozen_bindings
-from platoon.train.policy.learner import Learner
+from platoon.train.policy.binding import publish_other_bindings
+from platoon.train.policy.learner import PolicyUpdate
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.spec import MAIN, PolicyId, PolicySpec
 from platoon.train.step.batch_transforms import (
@@ -55,7 +58,8 @@ from platoon.train.step.batch_transforms import (
 )
 from platoon.train.step.collect import StepDispatch, StepTally
 from platoon.train.step.counting import GroupCounting
-from platoon.train.step.datums import _kept_datums, _step_datums, advantage_scale, scale_advantages, trained_rows
+from platoon.train.step.datums import _kept_datums, _step_datums, advantage_scale, policy_rows, scale_advantages
+from platoon.train.step.lanes import LaneTally, PolicyLane, policy_lanes
 from platoon.train.step.metrics import (
     Censoring,
     RunTotals,
@@ -67,7 +71,7 @@ from platoon.train.step.metrics import (
     record_task_metrics,
 )
 from platoon.train.step.microbatch import MicrobatchFill, Prepared, StepGeometry, zero_advantage_filter_metrics
-from platoon.train.step.publish import _no_update_reason, publish_policy
+from platoon.train.step.publish import _no_update_reason, publish_policies, subscribed_bindings
 from platoon.train.step.staleness import StaleFilter, StaleVerdict, StaleWatch
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
@@ -97,8 +101,10 @@ async def _train_loop(
     train_workflow: RolloutWorkflow,
 ):
     """Train this start's steps, ``start_batch`` to ``end_batch``: start the dispatcher of its training groups in
-    ``task_group``, publish the first sampler, then run one :class:`TrainStep` per step; then let the evaluation loop
-    handle the last step, and stop the loops (``shutdown_loops``, which ends this one with ``TerminateTrainLoop``)."""
+    ``task_group``, publish the first sampler of each policy the agents sample, then run one :class:`TrainStep` per
+    step, each trained policy handing the samplers it publishes to the rollout workers (``subscribed_bindings``); then
+    let the evaluation loop handle the last step, and stop the loops (``shutdown_loops``, which ends this one with
+    ``TerminateTrainLoop``)."""
 
     column = label_column(trainer.config)
     # Every task the run draws from, a weighted order's tasks that its first epoch leaves out included.
@@ -116,16 +122,7 @@ async def _train_loop(
     # against: max_concurrent_rollouts is a budget of rollouts, of which
     # a group takes its size in permits, and the monitor warns once when
     # more rollouts run at once.
-    trainer._publish_worker_binding(
-        train_workflow,
-        shared_state.sampling_client,
-        shared_state.model_info.llm.version,
-        required=True,
-    )
-    # The frozen policies the agents sample, if any.  A state a test made as platoon 0.4.0 did has no policies, and
-    # samples one (_test_state_policy).
-    if (policies := getattr(shared_state, "policies", None)) is not None:
-        publish_frozen_bindings(policies, train_workflow, trainer._publish_worker_binding, required=True)
+    _publish_first_bindings(trainer, shared_state, train_workflow)
     budget = trainer.config.train.max_concurrent_rollouts
     client_monitor("train").set_configured_concurrency(
         _rollouts_at_once(trainer.config, "train", budget), budget=budget
@@ -147,11 +144,31 @@ async def _train_loop(
         group_limits=group_limits,
     )
     totals = RunTotals()
-    while shared_state.train_step < end_batch:
-        await TrainStep(context, totals).run()
+    with subscribed_bindings(trainer, getattr(shared_state, "policies", None), train_workflow):
+        while shared_state.train_step < end_batch:
+            await TrainStep(context, totals).run()
 
-    await trainer._wait_for_last_step_evaluation(shared_state)
-    await trainer.shutdown_loops(shared_state)
+        await trainer._wait_for_last_step_evaluation(shared_state)
+        await trainer.shutdown_loops(shared_state)
+
+
+def _publish_first_bindings(
+    trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState, train_workflow: RolloutWorkflow
+) -> None:
+    """Before any group starts, give the rollout workers each sampled policy's sampler: the agents' default policy's
+    (``agents.policy``; the policy the loops train when the agents name none) as their default binding, then each
+    other one's (:func:`~platoon.train.policy.binding.publish_other_bindings`).  A state a test made as platoon 0.4.0
+    did has no policies, and samples the one it holds (_test_state_policy)."""
+
+    policies = getattr(shared_state, "policies", None)
+    if policies is None:
+        sampling_client, version = shared_state.sampling_client, shared_state.model_info.llm.version
+    else:
+        default = policies[policies.agents.default]
+        sampling_client, version = default.sampling_client, default.version
+    trainer._publish_worker_binding(train_workflow, sampling_client, version, required=True)
+    if policies is not None:
+        publish_other_bindings(policies, train_workflow, trainer._publish_worker_binding, required=True)
 
 
 async def shutdown_loops(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState):
@@ -173,9 +190,9 @@ class StepContext:
       one's metric prefix; ``group_limits``: the labels' limits;
     - ``recorder`` and ``admissions``: the run's per-task statistics and its group admission rules, when it keeps
       them;
-    - ``stale_filter``: each entry's bound on a group's staleness, judged per group or per datum
-      (``train.stale_filter``);
-    - ``learner``: what updates the policy the steps train, under its objective;
+    - ``lanes``: each trained policy's lane through a step, the leader's first
+      (:class:`~platoon.train.step.lanes.PolicyLane`): its learner, under its objective, and its stale filter, its
+      entries' bounds on a group's staleness, judged per group or per datum (``train.stale_filter``);
     - ``clock``: the run's clock, which the end of each step advances;
     - ``run``: the start the trainer runs (None for a trainer a test drives outside one), and ``hooks``: its step
       hooks, which run at each step's end.
@@ -197,9 +214,8 @@ class StepContext:
     recorder: "TaskRecorder | None"
     admissions: AdmissionSet | None
     censoring: Censoring
-    stale_filter: StaleFilter
     stale_watch: StaleWatch
-    learner: Learner
+    lanes: tuple[PolicyLane, ...]
     clock: "StepClock | _StateClock"
     run: "TrainerRun | None"
     hooks: StepHooks
@@ -222,14 +238,10 @@ class StepContext:
         """The context of a start's steps, once its dispatcher started (``dispatcher``; None when a test replaced the
         trainer's ``_dispatch``), over every task the run draws from (``tasks``)."""
 
-        # Each step's metrics break down by these labels of the training tasks (train.label_by), also at zero: those of
-        # every task the run draws from, a weighted order's tasks that its first epoch leaves out included.
+        # Each step's metrics break down by these labels (train.label_by) of every task the run draws from, also at 0.
         labels = metric_labels(tasks, column)
         recorder = trainer._recorder
-        run_bound = trainer.config.train.max_staleness
         settings = entry_settings.run_settings(trainer.config)
-        # The leader of the loops' policies; in a state a test made as platoon 0.4.0 did, the policy it holds.
-        policy = _test_state_policy(shared_state, trainer.config) or _trained_policy(shared_state)
         clock, run = _step_clock(shared_state), trainer._run
         return cls(
             trainer=trainer,
@@ -253,24 +265,23 @@ class StepContext:
                 trainer.config.train.workflow_config,
                 threshold=recorder.threshold if recorder is not None else None,
             ),
-            # The stale filter: each entry's groups' bound (its own max_staleness, else the run's), per datum or group.
-            stale_filter=StaleFilter.of_run(trainer.config.train, settings),
-            stale_watch=StaleWatch(run_bound),
-            learner=_step_learner(trainer, shared_state, policy, clock, start_batch),
+            stale_watch=StaleWatch(trainer.config.train.max_staleness),
+            lanes=_step_lanes(trainer, shared_state, settings, clock, start_batch),
             clock=clock,
             run=run,
             hooks=run.hooks if run is not None else StepHooks(),
         )
 
     def version(self) -> int:
-        """The policy's version: the one the steps' groups are sampled from, which each publication counts up."""
+        """The leader's version: the one the steps' groups are sampled from, which each publication counts up."""
 
         return self.state.model_info.llm.version
 
 
 class TrainStep:
-    """One training step: ``batch_size`` settled groups, in ``num_minibatches`` optimizer updates of
-    ``num_microbatches`` microbatches each; then the commit, the new policy and the step's metrics."""
+    """One training step: ``batch_size`` settled groups, in ``num_minibatches`` optimizer updates of each trained
+    policy, of ``num_microbatches`` microbatches each; then the commit, the policies it updated and the step's
+    metrics."""
 
     def __init__(self, context: StepContext, totals: RunTotals) -> None:
         self.context = context
@@ -280,38 +291,41 @@ class TrainStep:
         self.geometry = StepGeometry.of(context.trainer.config)
         self.tally = StepTally.empty(context.labels)
         self.counting = GroupCounting(context.admissions, context.dispatch, self.tally, self.state.train_step)
+        # What the step counts of each lane: the leader's counts are the step's own, each other lane's its own.
+        self.tallies = {lane.policy_id: self.tally if lane.leads else LaneTally() for lane in context.lanes}
+        # The step hooks' updates of each policy at the step's end, as platoon counted them (none without hooks).
+        self.hook_updates: dict[PolicyId, int] = {}
+
+    def tally_of(self, lane: PolicyLane) -> "StepTally | LaneTally":
+        """What the step counts of ``lane``: its optimizer steps, and its microbatches that sent nothing."""
+
+        return self.tallies[lane.policy_id]
 
     async def run(self) -> None:
-        """The step, top to bottom: collect each microbatch, prepare it and send it, and update the policy once per
-        minibatch; then commit, end the step (the step hooks, the policy's publication, the next step) and log.  The
-        end advances the run's clock, which moves the draws' horizon on and wakes the evaluation loop, also after a
-        step that published nothing: evaluation's cadence counts consumed batches, zero-signal ones included."""
+        """The step, top to bottom: collect each microbatch, prepare each lane's part of it and send it, and update each
+        trained policy once per minibatch; then commit, end the step (the step hooks, the publication of each policy
+        that it or a hook updated, the next step) and log.  The end advances the run's clock, which moves the draws'
+        horizon on and wakes the evaluation loop, also after a step that published nothing: evaluation's cadence counts
+        consumed batches, zero-signal ones included."""
 
         # One optimizer update per minibatch.
         for minibatch_num in range(self.geometry.num_minibatches):
-            update = self.context.learner.update()
+            updates = {lane.policy_id: lane.learner.update() for lane in self.context.lanes}
             # Its microbatches accumulate gradients, each sent as soon as its groups are collected, so that training
             # overlaps the rollouts of the same batch (besides the overlap across batches, train.max_staleness).
             for microbatch_num in range(self.geometry.num_microbatches):
                 if self.counting.closed:  # a step under a rule that counted its cap dequeues no more
                     break
                 fill = await self.collect_microbatch(minibatch_num, microbatch_num)
-                if not fill.datums and self.counting.closed:
+                if fill.empty() and self.counting.closed:
                     break  # a step under a rule closed on its cap with nothing more to send
-                prepared = self.prepare(fill, minibatch_num, microbatch_num)
-                if prepared is not None:
-                    await update.submit(
-                        prepared.datums, prepared.originals, minibatch=minibatch_num, microbatch=microbatch_num
-                    )
-
-            if not update.submitted:
-                logger.warning(
-                    f"Minibatch {minibatch_num} of batch {self.state.train_step} takes no optimizer update: "
-                    "none of its microbatches had a nonzero objective"
-                )
-                continue
-
-            await update.apply(self.tally)  # after the starting policy's evaluation, when one is due (the learner's)
+                for lane in self.context.lanes:  # each trained policy's datums go to its own service
+                    prepared = self.prepare(fill, minibatch_num, microbatch_num, lane)
+                    if prepared is not None:
+                        await updates[lane.policy_id].submit(
+                            prepared.datums, prepared.originals, minibatch=minibatch_num, microbatch=microbatch_num
+                        )
+            await self.update(updates, minibatch_num)
 
         record_workload_metrics(self.tally, self.state.train_tracker)
         self.counting.step_closed()
@@ -343,7 +357,7 @@ class TrainStep:
                 await self.context.trainer._next_rollout(
                     self.context.queue,
                     getattr(self.state, "shutdown_event", None),  # a state a test made may have none: never interrupted
-                    interruptible=self.tally.optimizer_steps == 0,
+                    interruptible=not any(tally.optimizer_steps for tally in self.tallies.values()),
                     ready=self.context.admissions is not None,
                 )
             )
@@ -355,22 +369,27 @@ class TrainStep:
         return fill
 
     def take_group(self, settled: _Settled, fill: MicrobatchFill, queue_wait_start: float) -> str:
-        """Take a group the step dequeued into ``fill``: count it, drop it when it is stale, count it under a rule, and
-        keep its datums when it trains (under the per-datum stale filter, those within the bound).  What the step took
-        it as: ``marker`` (of a group a rule decided when it settled), ``stale``, ``failed`` or ``admitted``."""
+        """Take a group the step dequeued into ``fill``: count it, drop each trained policy's rows of it that are stale
+        (the whole group when all its rows are), count it under a rule, and keep each policy's rows that train (under
+        the per-datum stale filter, those within the bound).  What the step took it as: ``marker`` (of a group a rule
+        decided when it settled), ``stale``, ``failed`` or ``admitted``."""
 
         rollout = settled.rollout
         # The group's label: its row's, else its output's.
         label = settled.label if settled.label is not None else _output_label(rollout)
-        # Its rows that the run trains, its one trained policy's: a list of datums is its own rows.  None: it failed.
-        rows = None if rollout is None else trained_rows(rollout)
+        # Its rows that the run trains, by trained policy: a list of datums is the leader's rows.  None: it failed.
+        rows = None if rollout is None else policy_rows(rollout, [lane.policy_id for lane in self.context.lanes])
         failed = rows is None
         # The group's own statistics belong to this step, which consumes it, stale or not.
         _record_group_stats(rollout, self.state.train_tracker)
         rollout_stats = self.tally.count_dequeued(settled)
         self._record_queue_wait(queue_wait_start)
-        verdict = self._filter_stale(settled, rows, label)
-        stale = verdict.stale
+        verdicts = self._filter_stale(settled, rows)
+        # Stale when every policy's rows it has are: a policy's stale rows alone are dropped, and the others train.
+        judged = [verdict for policy, verdict in verdicts.items() if rows is not None and rows[policy]]
+        stale = bool(judged) and all(verdict.stale for verdict in judged)
+        if stale:
+            self.tally.count_stale(label)
         # A marker of a group a rule rejected (or that failed) when it settled has its fate already.
         marker = settled.rejected is not None
         self.context.censoring.add(label, settled.record)
@@ -384,12 +403,23 @@ class TrainStep:
         if not (stale or failed):  # its statistics count, and its datums train (a marker keeps none)
             if rollout_stats is not None:
                 self.tally.merge_stats(rollout_stats, label)
-            datums = _step_datums(rows)
-            if verdict.masked:  # under the per-datum filter, without those beyond the bound
-                datums = _kept_datums(datums, verdict.masked)
-            fill.datums.extend(datums)
-            self.tally.total_datums += len(datums)
+            assert rows is not None  # not failed
+            for lane in self.context.lanes:
+                if not verdicts[lane.policy_id].stale:
+                    self._keep_rows(lane, rows[lane.policy_id], verdicts[lane.policy_id], fill)
         return taken
+
+    def _keep_rows(
+        self, lane: PolicyLane, rows: Sequence[tinker.Datum], verdict: StaleVerdict, fill: MicrobatchFill
+    ) -> None:
+        """Add a lane's rows of a group that trains to the microbatch, as the step trains them (each its own copy),
+        without the datums the per-datum stale filter masked."""
+
+        datums = _step_datums(rows)
+        if verdict.masked:  # under the per-datum filter, without those beyond the bound
+            datums = _kept_datums(datums, verdict.masked)
+        lane.add_rows(fill, datums)
+        self.tally.total_datums += len(datums)
 
     def _record_queue_wait(self, queue_wait_start: float) -> None:
         """How long the step waited for the group since ``queue_wait_start``, for the rollout client metrics."""
@@ -401,42 +431,55 @@ class TrainStep:
         if queue_wait_elapsed > 60.0:
             logger.warning(f"Waited {queue_wait_elapsed:.1f}s for rollout from queue (slow)")
 
-    def _filter_stale(self, settled: _Settled, rows: Sequence[tinker.Datum] | None, label: str | None) -> StaleVerdict:
-        """The stale filter's verdict on the group, of ``label``, whose rows are ``rows`` (None: it failed): whether it
-        is more policy versions old than its entry's bound, and under the per-datum filter, which of its datums are.
-        A stale group, and the datums masked of one that is not, are logged and counted here, and the caller drops
-        them."""
+    def _filter_stale(
+        self, settled: _Settled, rows: Mapping[str, Sequence[tinker.Datum]] | None
+    ) -> dict[str, StaleVerdict]:
+        """The stale filter's verdict on each trained policy's rows of the group (``rows``, by policy; None: it failed,
+        which only the leader's filter is asked of): whether they are more of their policy's versions old than its
+        bound, and under the per-datum filter, which of its datums are.  Stale rows, and the datums masked of rows that
+        are not, are logged and counted here, and the caller drops them."""
+
+        lanes = self.context.lanes if rows is not None else self.context.lanes[:1]
+        return {
+            lane.policy_id: self._judge(settled, lane, rows[lane.policy_id] if rows is not None else None)
+            for lane in lanes
+        }
+
+    def _judge(self, settled: _Settled, lane: PolicyLane, rows: Sequence[tinker.Datum] | None) -> StaleVerdict:
+        """The stale filter's verdict on a lane's rows of the group (:meth:`_filter_stale`), at its policy's version."""
 
         entry = settled.entry
         # Filter out stale rollouts, by the bound of the group's entry. TODO: Consider requeuing.
-        verdict = self.context.stale_filter.check(entry, rows, self.context.version())
+        verdict = lane.stale_filter.check(entry, rows, lane.version())
         if verdict.masked:
-            self._count_masked(verdict, rows, entry)
+            self._count_masked(verdict, rows, entry, lane)
         if not verdict.stale:
             return verdict
         # Under the per-datum filter, every datum is beyond the bound, and the version is the oldest datum's.
-        version = "oldest datum version" if self.context.stale_filter.per_datum else "rollout version"
+        version = "oldest datum version" if lane.stale_filter.per_datum else "rollout version"
         logger.info(
-            f"Stale rollout detected in batch {self.state.train_step}: "
+            f"Stale rollout detected in batch {self.state.train_step}{lane.policy_suffix}: "
             f"policy version {verdict.now}, "
             f"{version} {verdict.version}, beyond the bound of "
             f"{verdict.bound} versions"
             + (f" of environments[{entry}]" if entry is not None else "")
             + ". Filtering out."
         )
-        self.state.train_tracker.scalar(stale_rollouts=1.0)
-        self.tally.count_stale(label)
-        if self.context.stale_filter.per_datum and rows is not None:
+        lane.tracker.scalar(stale_rollouts=1.0)
+        if lane.stale_filter.per_datum and rows is not None:
             self.tally.stale_datums += len(rows)
         return verdict
 
-    def _count_masked(self, verdict: StaleVerdict, rows: Sequence[tinker.Datum] | None, entry: str | None) -> None:
-        """Log and count the datums the per-datum stale filter masked of a group that still trains."""
+    def _count_masked(
+        self, verdict: StaleVerdict, rows: Sequence[tinker.Datum] | None, entry: str | None, lane: PolicyLane
+    ) -> None:
+        """Log and count the datums the per-datum stale filter masked of a lane's rows that still train."""
 
         logger.info(
-            f"Stale datums masked in batch {self.state.train_step}: {len(verdict.masked)} of the group's "
-            f"{len(rows or ())}, the oldest at policy version {verdict.version}, beyond the bound of {verdict.bound} "
-            f"versions" + (f" of environments[{entry}]" if entry is not None else "") + f" at version {verdict.now}"
+            f"Stale datums masked in batch {self.state.train_step}{lane.policy_suffix}: {len(verdict.masked)} of the "
+            f"group's {len(rows or ())}, the oldest at policy version {verdict.version}, beyond the bound of "
+            f"{verdict.bound} versions" + (f" of environments[{entry}]" if entry is not None else "") + f" at version "
+            f"{verdict.now}"
         )
         self.tally.stale_datums += len(verdict.masked)
 
@@ -458,61 +501,81 @@ class TrainStep:
 
     # --- prepare: a microbatch's datums for forward_backward ---------------------------------------------------------
 
-    def prepare(self, fill: MicrobatchFill, minibatch_num: int, microbatch_num: int) -> Prepared | None:
-        """A collected microbatch's datums as they train and as they are sent: through the batch transforms and the
-        zero-advantage filter, then without the loss inputs forward_backward does not take and with their advantages
-        scaled.  None for a microbatch that sends nothing (counted and logged): it had no datums, the transforms or the
-        filter left it none, or its objective is zero."""
+    def prepare(
+        self, fill: MicrobatchFill, minibatch_num: int, microbatch_num: int, lane: PolicyLane
+    ) -> Prepared | None:
+        """A collected microbatch's datums of a lane as they train and as they are sent: through the batch transforms
+        and the zero-advantage filter, then without the loss inputs forward_backward does not take and with their
+        advantages scaled.  None for a microbatch that sends nothing of the lane (counted and logged): it had no datums,
+        the transforms or the filter left it none, or its objective is zero."""
 
-        if len(fill.datums) == 0:
-            logger.warning(f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num})")
-            self.tally.empty_microbatches += 1
+        tally, datums = self.tally_of(lane), lane.rows_in(fill)
+        if len(datums) == 0:
+            _nothing_sent(lane)(
+                f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num}){lane.policy_suffix}"
+            )
+            tally.empty_microbatches += 1
             return None
-        depths_before = summarize_depths(fill.datums)
+        depths_before = summarize_depths(datums)
         task_rollout_results = run_batch_transforms(
-            fill.datums, self.context.trainer.batch_transforms, self._transform_context(minibatch_num, microbatch_num)
+            datums, self.context.trainer.batch_transforms, self._transform_context(minibatch_num, microbatch_num)
         )
-        self._record_depth_credit(depths_before, task_rollout_results)
+        self._record_depth_credit(depths_before, task_rollout_results, lane.tracker)
         if task_rollout_results is None or len(task_rollout_results) == 0:
-            logger.warning(f"All datums were filtered out for microbatch {microbatch_num} (minibatch {minibatch_num})")
-            self.tally.empty_microbatches += 1
+            logger.warning(
+                f"All datums were filtered out for microbatch {microbatch_num} (minibatch {minibatch_num})"
+                f"{lane.policy_suffix}"
+            )
+            tally.empty_microbatches += 1
             return None
+
+        task_rollout_results = self._with_nonzero_objective(task_rollout_results, lane, minibatch_num, microbatch_num)
+        if task_rollout_results is None:
+            return None
+        return Prepared(task_rollout_results, self._to_send(task_rollout_results, fill, microbatch_num, lane))
+
+    def _with_nonzero_objective(
+        self, task_rollout_results: list[tinker.Datum], lane: PolicyLane, minibatch_num: int, microbatch_num: int
+    ) -> list[tinker.Datum] | None:
+        """A lane's transformed datums of a microbatch under its objective: without those whose every advantage is zero,
+        when the workflow config filters them and the objective is zero for them; None for a microbatch whose objective
+        is zero (counted and logged), which takes no forward/backward."""
 
         # Depth weighting is part of the objective, so zero-signal
         # datums participate in that normalization before being
         # removed from model compute. Moving this filter into the
         # task workflow would change per-depth gradient weights.
         config = self.context.trainer.config
-        objective = self.context.learner.objective  # the loss the microbatch is sent under
+        objective = lane.learner.objective  # the loss the microbatch is sent under
         loss_fn, loss_fn_config = objective.loss_fn, objective.loss_fn_config
         if config.train.workflow_config.filter_zero_advantage_datums and objective_is_zero_for_zero_advantages(
             loss_fn, loss_fn_config
         ):
             eligible = get_datum_counts(task_rollout_results)
             task_rollout_results = filter_zero_advantage_datums(task_rollout_results)
-            self._after_zero_advantage_filter(eligible, task_rollout_results)
+            self._after_zero_advantage_filter(eligible, task_rollout_results, lane.tracker)
 
         if len(task_rollout_results) == 0:
             logger.warning(
                 f"All datums had zero advantage for microbatch {microbatch_num} (minibatch "
-                f"{minibatch_num}): its objective is zero, so it takes no forward/backward"
+                f"{minibatch_num}){lane.policy_suffix}: its objective is zero, so it takes no forward/backward"
             )
-            self.tally.zero_objective_microbatches += 1
+            self.tally_of(lane).zero_objective_microbatches += 1
             return None
 
         # Kept datums or not (filter_zero_advantage_datums), a microbatch whose every advantage is
         # exactly zero has a zero objective under these losses: it is never sent.
         if has_zero_objective(task_rollout_results, loss_fn, loss_fn_config):
             logger.info(
-                "Zero policy-gradient objective for microbatch %s (minibatch %s): every advantage is "
+                "Zero policy-gradient objective for microbatch %s (minibatch %s)%s: every advantage is "
                 "exactly zero, so it takes no forward/backward and adds nothing to an optimizer step",
                 microbatch_num,
                 minibatch_num,
+                lane.policy_suffix,
             )
-            self.tally.zero_objective_microbatches += 1
+            self.tally_of(lane).zero_objective_microbatches += 1
             return None
-
-        return Prepared(task_rollout_results, self._to_send(task_rollout_results, fill, microbatch_num))
+        return task_rollout_results
 
     def _transform_context(self, minibatch_num: int, microbatch_num: int) -> BatchTransformContext:
         """Where the batch transforms find a microbatch: the run's config, and its step, minibatch and microbatch."""
@@ -524,25 +587,23 @@ class TrainStep:
             microbatch_num=microbatch_num,
         )
 
-    def _record_depth_credit(self, depths_before: Any, task_rollout_results: list[tinker.Datum] | None) -> None:
+    @staticmethod
+    def _record_depth_credit(depths_before: Any, task_rollout_results: list[tinker.Datum] | None, tracker: Any) -> None:
         """The batch transforms' depth-credit metrics, when the microbatch's datums carry trajectory depths
-        (``depths_before``, as they were before the transforms)."""
+        (``depths_before``, as they were before the transforms), in its lane's ``tracker``."""
 
         if depths_before is not None:
-            self.state.train_tracker.scalar(
-                **depth_credit_metrics(depths_before, summarize_depths(task_rollout_results or []))
-            )
+            tracker.scalar(**depth_credit_metrics(depths_before, summarize_depths(task_rollout_results or [])))
 
+    @staticmethod
     def _after_zero_advantage_filter(
-        self, eligible: tuple[int, int, int], task_rollout_results: list[tinker.Datum]
+        eligible: tuple[int, int, int], task_rollout_results: list[tinker.Datum], tracker: Any
     ) -> None:
         """After the zero-advantage filter dropped the datums whose every action token has a zero advantage: its
-        metrics, from the counts of the datums it had (``eligible``) and of those it kept; and the datums it kept
-        carry the action tokens of those it dropped."""
+        metrics, in the lane's ``tracker``, from the counts of the datums it had (``eligible``) and of those it kept;
+        and the datums it kept carry the action tokens of those it dropped."""
 
-        self.state.train_tracker.scalar(
-            **zero_advantage_filter_metrics(eligible, get_datum_counts(task_rollout_results))
-        )
+        tracker.scalar(**zero_advantage_filter_metrics(eligible, get_datum_counts(task_rollout_results)))
         if task_rollout_results:
             # Preserve the pre-filter action-token denominator;
             # otherwise removing zero terms would amplify every
@@ -554,16 +615,16 @@ class TrainStep:
             )
 
     def _to_send(
-        self, task_rollout_results: list[tinker.Datum], fill: MicrobatchFill, microbatch_num: int
+        self, task_rollout_results: list[tinker.Datum], fill: MicrobatchFill, microbatch_num: int, lane: PolicyLane
     ) -> list[tinker.Datum]:
-        """The datums a microbatch sends to forward_backward, counted: copies without the loss inputs that only the
-        trainer reads (the objective's side channels), their advantages scaled by the action tokens the microbatch
-        represents."""
+        """The datums of a lane's microbatch it sends to forward_backward, counted among the step's: copies without the
+        loss inputs that only the trainer reads (its objective's side channels), their advantages scaled by the action
+        tokens the lane's microbatch represents."""
 
         self.tally.count_submitted(*get_datum_counts(task_rollout_results))
 
         # Keep original datums for metrics computation (they have mask and logprobs).
-        side_channels = self.context.learner.objective.side_channels
+        side_channels = lane.learner.objective.side_channels
         filtered_datums = [
             tinker.Datum(
                 model_input=datum.model_input,
@@ -588,6 +649,34 @@ class TrainStep:
 
         return compute_training_metrics(**inputs)
 
+    async def update(self, updates: Mapping[str, PolicyUpdate], minibatch_num: int) -> None:
+        """Update each trained policy the minibatch sent microbatches of (``updates``, by policy), after the starting
+        policy's evaluation when one is due (the learners' barrier, awaited once): every one's optimizer step is
+        submitted first, then each one's results awaited and counted, so that their services work at the same time;
+        with one policy, its update's ``apply``, call for call.  A policy that sent none takes no update, logged.  A
+        service that fails fails the step (lockstep), naming its policy in a run of several."""
+
+        sent = []
+        for lane in self.context.lanes:
+            if updates[lane.policy_id].submitted:
+                sent.append(lane)
+            else:
+                _nothing_sent(lane)(
+                    f"Minibatch {minibatch_num} of batch {self.state.train_step} takes no optimizer update"
+                    f"{lane.policy_suffix}: none of its microbatches had a nonzero objective"
+                )
+        if not sent:
+            return
+        if not sent[0].named:  # the run's one trained policy
+            await updates[sent[0].policy_id].apply(self.tally)
+            return
+        if (barrier := sent[0].learner.before_update) is not None:  # every lane's learner shares it
+            await barrier()
+        for lane in sent:
+            await updates[lane.policy_id].submit_optim_step()
+        for lane in sent:
+            await updates[lane.policy_id].finish(self.tally_of(lane))
+
     def commit(self) -> None:
         """The step commits what became of each of its groups, with the fates it decided, to the start's draws
         (:meth:`~platoon.train.dispatch.source.RolloutSource.committed`), before a full checkpoint saves the statistics
@@ -596,44 +685,56 @@ class TrainStep:
         self.context.dispatch.committed(self.tally.keys, self.tally.fates)
 
     def step_end(self) -> StepEnd:
-        """What the step's end tells the step hooks, when it has any (they run in the step's run): the step, its own
-        optimizer updates, the draws it committed with their fates, and the step's learner, which a hook's learner
-        shares the barrier of the starting policy's evaluation with."""
+        """What the step's end tells the step hooks, when it has any (they run in the step's run): the step, the own
+        optimizer updates of each policy it trains, the draws it committed with their fates, and each trained policy's
+        learner, its lane's, which a hook's learner of that policy shares the training client, the metrics' prefix and
+        the barrier of the starting policy's evaluation with."""
 
-        learner, run = self.context.learner, self.context.run
+        lanes, run = self.context.lanes, self.context.run
         assert run is not None  # a step outside a run has no hooks
+        learners = {lane.policy_id: lane.learner for lane in lanes}
         return run._step_end(
             "step",
             step=self.state.train_step,
-            step_updates={learner.policy.id: self.tally.optimizer_steps},
+            step_updates={lane.policy_id: self.tally_of(lane).optimizer_steps for lane in lanes},
             consumed=dict(self.tally.fates),
-            learner_of=lambda _policy: learner,
+            learner_of=learners.__getitem__,
         )
 
     async def publish(self, end: StepEnd | None) -> dict[PolicyId, int]:
-        """Publish the step's policy when the step or its hooks (``end``'s, None without hooks) updated it, once, or
-        say why the step took no update: consuming an all-zero batch does not change the policy, and in particular must
-        not age slower, useful rollouts as stale.  Who published, at which version."""
+        """Publish each policy that the step or its hooks (``end``'s, None without hooks) updated, once
+        (:func:`~platoon.train.step.publish.publish_policies`), or say why one took no update: consuming an all-zero
+        batch does not change the policy, and in particular must not age slower, useful rollouts as stale.  Who
+        published, at which version."""
 
         state = self.state
         update_start = time.perf_counter()
+        self.hook_updates = dict(end.hook_updates) if end is not None else {}
+        updated = [
+            lane
+            for lane in self.context.lanes
+            if self.tally_of(lane).optimizer_steps or self.hook_updates.get(lane.policy_id)
+        ]
         published: dict[PolicyId, int] = {}
-        if self.tally.optimizer_steps or (end is not None and any(end.hook_updates.values())):
-            await publish_policy(self.context)
+        if updated:
+            await publish_policies(self.context, updated)
             if end is not None:  # who published, which the hooks hear
-                published = {self.context.learner.policy.id: self.context.version()}
-        else:
-            logger.info(
-                "Batch %s (step %s) takes no optimizer update: %s; the policy stays at version %s",
-                state.train_step,
-                state.train_step + 1,
-                _no_update_reason(
-                    self.tally.zero_objective_microbatches,
-                    self.tally.empty_microbatches,
-                    counted=self.counting.counted_without_admission(),
-                ),
-                self.context.version(),
-            )
+                published = {lane.policy_id: lane.version() for lane in updated}
+        for lane in self.context.lanes:
+            if all(lane.policy_id != other.policy_id for other in updated):
+                tally = self.tally_of(lane)
+                logger.info(
+                    "Batch %s (step %s) takes no optimizer update%s: %s; the policy stays at version %s",
+                    state.train_step,
+                    state.train_step + 1,
+                    lane.policy_suffix,
+                    _no_update_reason(
+                        tally.zero_objective_microbatches,
+                        tally.empty_microbatches,
+                        counted=self.counting.counted_without_admission(),
+                    ),
+                    lane.version(),
+                )
         update_elapsed = time.perf_counter() - update_start
         state.train_tracker.scalar(update_weights_time=update_elapsed)
         return published
@@ -659,7 +760,11 @@ class TrainStep:
         if context.group_limits and dispatcher is not None:
             record_label_limits(tracker, dispatcher, totals, context.labels, context.column)
         record_batch_counts(tracker, tally, state)
-        if context.stale_filter.per_datum:  # the datums it dropped as stale, of the groups it masked or dropped
+        for lane in context.lanes:
+            if not lane.leads:  # the leader's counts are among the step's
+                hooked = self.hook_updates.get(lane.policy_id, 0) if context.hooks else None
+                lane.record_counts(self.tally_of(lane), hook_updates=hooked)
+        if context.lanes[0].stale_filter.per_datum:  # the datums dropped as stale, of the groups it masked or dropped
             tracker.scalar(**{"batch/stale_datums": float(tally.stale_datums)})
         # What held the dispatcher back from starting groups, and what the straggler policy censored.
         blocked = context.dispatch.blocked_shares()
@@ -676,9 +781,10 @@ class TrainStep:
         step_stats["train/step"] = state.train_step
         step_stats["train/epoch"] = state.train_step // state.num_train_batches_per_epoch
         step_stats["progress/done_frac"] = state.train_step / context.end_batch
-        optimizer = context.learner.policy.spec.optimizer  # the settings the policy's optimizer steps with
-        assert optimizer is not None  # policy_specs gives each policy its own
-        step_stats["optim/lr"] = optimizer.learning_rate
+        for lane in context.lanes:
+            optimizer = lane.policy.spec.optimizer  # the settings the policy's optimizer steps with
+            assert optimizer is not None  # policy_specs gives each trained policy its own
+            step_stats[f"{lane.prefix}optim/lr"] = optimizer.learning_rate
         step_stats["timing/batch_total"] = batch_elapsed
         # Non-zero ``ptc_threads_leaked`` means rollout worker threads are gone
         # for good; see ``_ptc_cell_guard_stats``.
@@ -691,6 +797,8 @@ class TrainStep:
         if (pruner := context.trainer._recovery_pruner) is not None:
             # Recovery checkpoint pruning: paths deleted and deletes failed since the last step, and what is kept.
             step_stats.update(pruner.step_metrics())
+        for policy, pruner in context.trainer._policy_pruners.items():  # each other trained policy's
+            step_stats.update({f"policies/{policy}/{name}": value for name, value in pruner.step_metrics().items()})
         state.stats_logger.log(step=state.train_step, stats=step_stats)
 
         logger.info(
@@ -701,6 +809,13 @@ class TrainStep:
         )
 
 
+def _nothing_sent(lane: PolicyLane) -> Callable[[str], None]:
+    """How the step logs that a lane sent nothing: a warning for a run's one trained policy, DEBUG for each of several,
+    which often have no rows in a microbatch (an agent role its rollouts did not open)."""
+
+    return logger.debug if lane.named else logger.warning
+
+
 def _trained_policy(shared_state: TrainLoopSharedState) -> Policy:
     """The policy the steps train: the leader of the loops' policies."""
 
@@ -709,24 +824,31 @@ def _trained_policy(shared_state: TrainLoopSharedState) -> Policy:
     return policies[policies.leader]
 
 
-def _step_learner(
+def _step_lanes(
     trainer: "PlatoonTinkerRLTrainer",
     shared_state: TrainLoopSharedState,
-    policy: Policy,
+    settings: Any,
     clock: "StepClock | _StateClock",
     start_batch: int,
-) -> Learner:
-    """What updates the policy the steps train once per minibatch, under its objective: each result under its
-    ``train.*`` deadline and the trainer's heartbeat, the starting policy's evaluation awaited before the run's first
-    update (:func:`_starting_policy_barrier`), the step opened on ``clock`` by its first submission, and failing closed
-    when the trainer's needs say so (a subclass's: the rl trainer's do not)."""
+) -> tuple[PolicyLane, ...]:
+    """Each trained policy's lane through the start's steps, the leader's first (in a state a test made as platoon
+    0.4.0 did, the policy it holds): its learner, which updates its policy once per minibatch under the loss its spec
+    names, each result under its ``train.*`` deadline and the trainer's heartbeat, the starting policy's evaluation
+    awaited before the run's first update (:func:`_starting_policy_barrier`), the step opened on ``clock`` by its
+    first submission, failing closed when the trainer's needs say so (a subclass's: the rl trainer's do not); and its
+    stale filter, each entry's groups' bound (its own ``max_staleness``, else the run's: ``settings``), per datum or
+    group."""
 
-    return Learner(
-        policy,
-        objective=_objective(policy.spec),
+    leader = _test_state_policy(shared_state, trainer.config) or _trained_policy(shared_state)
+    return policy_lanes(
+        leader,
+        _other_trained(shared_state),
+        objective=_objective,
         timeouts=trainer.config.train,
         wait=_update_waiter(trainer, shared_state.watchdog),
         tracker=shared_state.train_tracker,
+        stale_filter=StaleFilter.of_run(trainer.config.train, settings),
+        leader_version=lambda: shared_state.model_info.llm.version,
         fail_closed=trainer.needs(trainer.config, trainer.options).fail_closed_updates,
         before_update=_starting_policy_barrier(trainer, shared_state, start_batch),
         clock=clock,
@@ -736,14 +858,23 @@ def _step_learner(
 def _starting_policy_barrier(
     trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState, start_batch: int
 ) -> Callable[[], Awaitable[None]]:
-    """What the run's first update of any kind awaits, the step hooks' too: an evaluation of its starting policy
-    (``eval.at_start``) must sample that policy throughout (the trainer's ``_wait_for_starting_policy_evaluation``)."""
+    """What the run's first update of any kind awaits, of any trained policy, the step hooks' too: an evaluation of its
+    starting policy (``eval.at_start``) must sample that policy throughout (the trainer's
+    ``_wait_for_starting_policy_evaluation``)."""
 
     async def before_update() -> None:
         if start_batch == 0 and shared_state.optimizer_steps == 0:
             await trainer._wait_for_starting_policy_evaluation(shared_state)
 
     return before_update
+
+
+def _other_trained(shared_state: Any) -> list[Policy]:
+    """The policies the steps train besides the leader, in the run's order; none in a state a test made as platoon
+    0.4.0 did, without the run's policies."""
+
+    policies = getattr(shared_state, "policies", None)
+    return [policy for policy in policies.trainable() if policy.id != policies.leader] if policies is not None else []
 
 
 def _objective(spec: PolicySpec) -> PolicyGradient:

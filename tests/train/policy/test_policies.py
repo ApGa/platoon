@@ -38,7 +38,7 @@ from platoon.train.policy.spec import (
 )
 from platoon.train.workers import protocol
 from platoon.train.workflow.group import GroupRolloutWorkflow
-from platoon.utils.config import ConfigError, build_config, validate_config
+from platoon.utils.config import ConfigError, build_config
 
 SETTINGS: dict[str, Any] = {
     "train": {
@@ -84,25 +84,11 @@ def test_a_policy_of_policies_uses_train_s_names_and_the_run_s_service_and_setti
     assert specs["judge"].tinker_base_url == "http://j:9"
 
 
-@pytest.mark.parametrize("key", ["lora_rank", "optimizer", "loss_fn", "loss_fn_config"])
-def test_a_frozen_policy_takes_no_training_keys_that_nothing_would_read(key):
-    data = {**copy.deepcopy(SETTINGS), "policies": {"teacher": {**TEACHER, key: None}}}
-    found = validate_config(data, PlatoonTinkerRLTrainerConfig)
-    assert any(problem.startswith(f"policies.teacher.{key}: unknown key") for problem in found), found
-
-
 def test_agents_bind_roles_to_policies_and_the_root_samples_main():
     bindings = agent_bindings(config(policies={"judge": TEACHER}, agents={"roles": {"judge": {"policy": "judge"}}}))
 
     assert bindings == AgentBindings(default=MAIN, roles={"judge": "judge"})
     assert bindings.sampled() == (MAIN, "judge")
-
-
-def test_a_second_trainable_policy_is_refused_naming_what_brings_it():
-    [problem] = problems(policies={"worker": {**TEACHER, "trainable": True}})
-    assert problem.startswith("policies.worker: this release trains one policy, main")
-    assert "set policies.worker.trainable: false" in problem
-    assert "lockstep multi-policy training (RFC 0021, milestone B4)" in problem
 
 
 @pytest.mark.parametrize(
@@ -165,8 +151,7 @@ def test_a_policy_s_sample_timeout_is_refused_as_train_s_is(seconds):
         config(train={**SETTINGS["train"], "sample_timeout_seconds": seconds})
     with pytest.raises(
         ValueError,
-        match=r"^policies: the sample_timeout_seconds of the policy of Qwen/Qwen3-32B must be a positive number of "
-        r"seconds or null, got ",
+        match=r"^policies\.teacher: sample_timeout_seconds must be a positive number of seconds or null, got ",
     ):
         config(policies={"teacher": {**TEACHER, "sample_timeout_seconds": seconds}})
 
@@ -258,14 +243,6 @@ def test_a_role_s_frozen_policy_is_served_by_the_default_gateway(opened):
     assert (policy, roles) == (MAIN, {"judge": "judge"})
     assert runtimes == {"judge": policies["judge"].info.llm.gateway}
     assert [p.id for p in policies.sampled()] == [MAIN, "judge"]
-
-
-def test_building_refuses_two_policies_to_train(opened):
-    main = PolicySpec(MAIN, model_name="m", renderer_name="r")
-    worker = PolicySpec("worker", model_name="w", renderer_name="r")
-    with pytest.raises(ValueError, match="trains one policy, not 2: main, worker"):
-        PolicySet.build({MAIN: main, "worker": worker})
-    assert opened == {"registered": [], "opened": []}
 
 
 def test_only_the_trained_policy_connects_and_opens(opened, monkeypatch):

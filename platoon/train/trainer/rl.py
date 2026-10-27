@@ -24,6 +24,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any, Self
 
 import tinker
@@ -33,6 +34,7 @@ from tinker_cookbook import checkpoint_utils
 from platoon.train import entry_settings
 from platoon.train.admissions import AdmissionSet
 from platoon.train.checkpoints import resume, saving
+from platoon.train.checkpoints.barrier import named_state_paths, policy_dir
 from platoon.train.checkpoints.participants import RunCheckpoints
 from platoon.train.checkpoints.pruning import RecoveryCheckpointPruner, check_recovery_pruning
 from platoon.train.checkpoints.resume import StartPoint
@@ -52,7 +54,7 @@ from platoon.train.evaluation.record import EVALUATIONS_NAME, completed_evaluati
 from platoon.train.policy import service
 from platoon.train.policy.policy import Policy, adam_params
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, agent_bindings, policy_specs
+from platoon.train.policy.spec import MAIN, PolicyId, agent_bindings, policy_specs
 from platoon.train.sampler_runtime import SamplerSet, TaskSampling
 from platoon.train.startup import RolloutStartup
 from platoon.train.step import publish
@@ -124,6 +126,8 @@ def _set_stale_filter(config: Any, train_workflow: Any) -> None:
 class PlatoonTinkerRLTrainer(TrainerBase):
     # Deletes the run's older recovery checkpoints while train() runs (checkpoint.keep_recovery); None without it.
     _recovery_pruner: RecoveryCheckpointPruner | None = None
+    # Likewise each other trained policy's, by policy, in a run of several (none in a run of one).
+    _policy_pruners: Mapping[PolicyId, RecoveryCheckpointPruner] = MappingProxyType({})
     # The draws of the start train() runs, its rollout source (_TrainerDraws), which prepare() opens; None before it.
     # Its per-task statistics, dispatcher and admission rules are _recorder, _dispatcher and _admissions.
     _rollouts: "_TrainerDraws | None" = None
@@ -386,12 +390,36 @@ class PlatoonTinkerRLTrainer(TrainerBase):
             service_client_factory=self._leader().new_service_client,
         )
 
-    def _recovery_saved(self, paths: dict[str, str], policy_version: int) -> None:
-        """Hand a recovery save that ``checkpoints.jsonl`` now records to the pruner, if any, which deletes the run's
-        older recovery checkpoints beside training."""
+    def _start_policy_pruning(self) -> dict[PolicyId, RecoveryCheckpointPruner]:
+        """The pruner of the recovery checkpoints of each trained policy but the leader (``checkpoint.keep_recovery``),
+        in its own directory, on a Tinker session of its own on its own service, which keeps every row of it that a
+        checkpoint of the run names, and every one its rollouts may still sample (within its own staleness bound, else
+        the run's largest); none without ``keep_recovery`` or in a run of one trained policy."""
 
-        if self._recovery_pruner is not None:
-            self._recovery_pruner.recovery_saved(paths, policy_version)
+        keep = self.config.checkpoint.keep_recovery
+        largest, _ = entry_settings.largest_staleness(self.config)
+        if keep is None or largest is None:  # loading refuses keep_recovery without max_staleness
+            return {}
+        return {
+            policy.id: _policy_pruner(self.run_log_path, policy, keep=keep, largest=largest)
+            for policy in self.policies.trainable()
+            if policy.id != self.policies.leader
+        }
+
+    def _recovery_saved(
+        self, paths: dict[str, str], policy_version: int, policy: PolicyId | None = None, *, published: bool = True
+    ) -> None:
+        """Hand a recovery save that ``checkpoints.jsonl`` now records to the pruner, if any, which deletes the run's
+        older recovery checkpoints beside training: the leader's, or ``policy``'s, another trained policy's;
+        ``published`` False for the save of a policy the step did not update, whose sampler no rollout samples."""
+
+        if policy is None or policy == self.policies.leader:
+            pruner = self._recovery_pruner
+        else:
+            pruner = self._policy_pruners.get(policy)
+        if pruner is not None:
+            # A published save makes the call a run of one policy always made, argument for argument.
+            pruner.recovery_saved(paths, policy_version, **({} if published else {"published": False}))
 
     def _checkpoints(self, training_client: tinker.TrainingClient) -> RunCheckpoints:
         """The full checkpoints that the start's steps save (``_save_checkpoint_and_get_sampling_client``): those of the
@@ -499,10 +527,23 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         return tuple(getattr(options, "hooks", ()))
 
     async def _open_policies(self, run: TrainerRun, start: StartPoint) -> bool:
-        """4. Open the trained policy's training client on its service, at its start point: the one its checkpoint
-        resumes, else a new run's, through the trainer's seams, which tests replace: :meth:`_open_training_client`,
-        which asks through :meth:`_create_training_client`.  False when training was stopped before the service
-        accepted it."""
+        """4. Open each trained policy's training client on its service, at its start point (the one its checkpoint
+        resumes, else a new run's), all at once (:meth:`~platoon.train.policy.set.PolicySet.each`): the leader's
+        through the trainer's seams (:meth:`_open_leader`), each other one's through the policy itself
+        (:meth:`~platoon.train.policy.policy.Policy.open`).  False when training was stopped before a service accepted
+        one."""
+
+        opening = {self.policies.leader: self._open_leader(run, start)}
+        for policy in self.policies.trainable():
+            if policy.id != self.policies.leader:
+                opening[policy.id] = policy.open(start.policies[policy.id], stop=run.shutdown)
+        opened = await self.policies.each(opening, doing="opening its training client")
+        return all(opened.values())
+
+    async def _open_leader(self, run: TrainerRun, start: StartPoint) -> bool:
+        """The leader's training client, through the trainer's seams, which tests replace:
+        :meth:`_open_training_client`, which asks through :meth:`_create_training_client`.  False when training was
+        stopped before the service accepted it."""
 
         policy = self._leader()
         with key_refusals(asked="a training client"):
@@ -537,6 +578,9 @@ class PlatoonTinkerRLTrainer(TrainerBase):
 
         self._recovery_pruner = self._start_recovery_pruning()
         self._recovery_saved(run.launch_save[self.policies.leader], run.start.policy_version)
+        self._policy_pruners = self._start_policy_pruning()
+        for policy in self._policy_pruners:
+            self._recovery_saved(run.launch_save[policy], run.start.policies[policy].version, policy=policy)
 
     async def ready(self, run: TrainerRun) -> None:
         """7. What the train and evaluation loops share (:meth:`_loop_state`), once the harness toolchains are staged;
@@ -626,9 +670,9 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         passes at once), and where the start begins."""
 
         assert self._stats_logger is not None and self._train_tracker is not None  # train() checked (_require_entered)
-        policy = self._leader()
-        assert policy.spec.optimizer is not None  # train.optimizer, as policy_specs took it when the trainer was built
-        policy.optimizer_params = adam_params(policy.spec.optimizer)
+        for policy in self.policies.trainable():
+            assert policy.spec.optimizer is not None  # its own, else train.optimizer, as policy_specs took them
+            policy.optimizer_params = adam_params(policy.spec.optimizer)
 
         eval_dataloader = None
         if self.eval_dataset is not None:
@@ -709,10 +753,26 @@ class PlatoonTinkerRLTrainer(TrainerBase):
             await self._close_after_training()
 
     async def _close_after_training(self) -> None:
-        """Stop the pruning of the run's recovery checkpoints (the run closes the start's draws after it)."""
+        """Stop the pruning of the run's recovery checkpoints, every trained policy's (the run closes the start's draws
+        after it)."""
 
         if self._recovery_pruner is not None:
             await self._recovery_pruner.aclose()
+        for pruner in self._policy_pruners.values():
+            await pruner.aclose()
+
+
+def _policy_pruner(run_dir: str, policy: Policy, *, keep: int, largest: int) -> RecoveryCheckpointPruner:
+    """The pruner of a trained policy's recovery checkpoints other than the leader's (:meth:`_start_policy_pruning`)."""
+
+    own = policy.spec.max_staleness
+    return RecoveryCheckpointPruner(
+        run_dir=policy_dir(run_dir, policy.id),
+        keep=keep,
+        max_staleness=own if own is not None else largest,
+        service_client_factory=policy.new_service_client,
+        named=lambda: named_state_paths(run_dir, policy.id, keep=keep),
+    )
 
 
 class _TrainerDraws(RolloutSource):
