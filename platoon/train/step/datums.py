@@ -1,8 +1,9 @@
-"""A group's datums as a step trains them, by their loss inputs: the rows of a group's output that the step trains
-(:func:`trained_rows`) and the copies it collects, whose loss inputs its batch transforms set in place
-(:func:`_step_datums`), the first stage of a step; and the scale of a microbatch's advantages by the action tokens its
-datums represent, as the step prepares it to send (:func:`advantage_scale`, :func:`scale_advantages`, the second
-stage).
+"""A group's datums as a step trains them, by their loss inputs.
+
+- The first stage of a step: the rows of a group's output that the step trains (:func:`trained_rows`), and the copies
+  it collects, whose loss inputs its batch transforms set in place (:func:`_step_datums`).
+- The second stage: the scale of a microbatch's advantages by the action tokens its datums represent, as the step
+  prepares it to send (:func:`advantage_scale`, :func:`scale_advantages`).
 """
 
 import logging

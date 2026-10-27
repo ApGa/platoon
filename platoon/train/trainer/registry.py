@@ -1,9 +1,9 @@
 """Which trainer a run trains with: the config's ``trainer:`` (:data:`CORE_TRAINERS`), checked when the config loads
 (:func:`trainer_problems`, exit 78 before anything runs).
 
-This release has one trainer, ``rl`` (the default): platoon train builds it from the config, as it always did.  Core's
-other names are reserved for the trainers platoon adds; a trainer that a package writes (RFC 0021) is selectable once
-platoon resolves those names.  Imports no Tinker.
+This release has one trainer, ``rl`` (the default), which platoon train builds from the config.  Core's other names
+are reserved for the trainers platoon adds; a trainer that a package writes (RFC 0021) is selectable once platoon
+resolves those names.  Imports no Tinker.
 """
 
 from typing import Any

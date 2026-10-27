@@ -77,7 +77,7 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`Trainer`](#platoon-experimental-trainer) | What `platoon train` runs: a trainer is resolved from the config's `trainer:` (`platoon.train.trainer.registry`), built from its setup, entered with `async with`, and run once per start. Supervising the run, its restarts, the reaping of what a dead start left, the run's lock, its config snapshot and its identity check stay `platoon train`'s. |
 | [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. |
 | [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens the start's draws when the trainer asks for them, `run.rollouts()`). |
-| [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`): the loaded and checked config, read-only, whose `log_path`, `stats.experiment_name` and `stats.trial_name` name the run directory (`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares (`platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's policies (`workflow_builder`, which `build_workflows` calls as the run begins, for a trainer that rolls out). Building the setup does no I/O. |
+| [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`). Building the setup does no I/O. |
 | [`TaskSources`](#platoon-experimental-tasksources) | The run's tasks as `platoon train` lists them: the training tasks (`train_dataset`, a weighted order's first epoch or the listing a dataloader shuffles), the order they are drawn in epoch by epoch and the task samplers that draw them (None: the dataset as it is), and the evaluation's (None when the run evaluates nothing). |
 | [`Workflows`](#platoon-experimental-workflows) | A start's rollout workflows: training's, and the evaluation's (None when the start evaluates nothing). |
 | [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it). |
@@ -1206,13 +1206,17 @@ the start's draws when the trainer asks for them, `run.rollouts()`).
 class TrainerSetup
 ```
 
-What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`): the loaded and checked
-config, read-only, whose `log_path`, `stats.experiment_name` and `stats.trial_name` name the run directory
-(`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares
-(`platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always
-did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's
-policies (`workflow_builder`, which `build_workflows` calls as the run begins, for a trainer that rolls
-out).  Building the setup does no I/O.
+What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`).  Building the setup
+does no I/O.
+
+- `config`: the loaded and checked config, read-only.  Its `log_path`, `stats.experiment_name` and
+  `stats.trial_name` name the run directory (`TrainerBase.run_log_path`).
+- `policy_specs`: the policies the config declares (`platoon.train.policy.spec.policy_specs`), which the
+  trainer's constructor registers.
+- `options`: the trainer's options (None: it takes none).
+- `tasks`: the run's tasks, when the trainer rolls them out.
+- `workflow_builder`: how the start's workflows are built on the trainer's policies, for a trainer that rolls
+  out.  `build_workflows` calls it as the run begins.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

@@ -21,16 +21,20 @@ LABEL_STATS = ("task_reward", "num_steps")
 @dataclass(frozen=True)
 class _Settled:
     """A group's output as a rollout group hands it to the step that consumes it, with the environment entry and the
-    label of the row it ran: the stale filter and the label metrics read them from the row, which the group holds,
-    and not from the output, which a custom workflow's plain list of datums cannot carry.  ``record`` is the group's
-    record in the run's per-task statistics, when the trainer keeps them, and ``key`` its draw's ``(start, seq)``,
-    which the dispatcher keeps it by until a committed step consumes it.
+    label of the row it ran.  The stale filter and the label metrics read those from the row, which the group holds,
+    not from the output: a custom workflow's plain list of datums cannot carry them.
 
-    Under a group admission rule (RFC 0019, section 6), ``admitted`` is an admitted group's reason, and a group
-    rejected or failed when it settled goes to the step as a marker: ``rejected`` its reason, ``window`` the step
-    current when it settled, no ``key``, its output without its datums (None for a failed group's), and ``held``
-    whether its group kept its slot of the horizon until a step dequeues it (a group that failed or carried no datum,
-    :meth:`~platoon.train.dispatch.dispatcher.Dispatcher.reject`)."""
+    - ``record``: the group's record in the run's per-task statistics, when the trainer keeps them;
+    - ``key``: its draw's ``(start, seq)``, by which the dispatcher keeps it until a committed step consumes it.
+
+    Under a group admission rule (RFC 0019, section 6), ``admitted`` is an admitted group's reason.  A group rejected
+    or failed when it settled goes to the step as a marker:
+
+    - ``rejected``: its reason;
+    - ``window``: the step current when it settled;
+    - no ``key``, and its output without its datums (None for a failed group's);
+    - ``held``: whether its group kept its slot of the horizon until a step dequeues it (a group that failed or
+      carried no datum, :meth:`~platoon.train.dispatch.dispatcher.Dispatcher.reject`)."""
 
     entry: str | None
     label: str | None
@@ -57,11 +61,13 @@ def carries_datums(output: Any) -> bool:
 
 
 def emptied(output: Any) -> Any:
-    """A rejected group's output as its marker carries it: a list (a ``GroupRolloutWorkflow`` output, any list
-    subclass) emptied of its datums in place, its other attributes kept; any other output (a ``RolloutOutput``)
-    replaced by an empty list that keeps its report (:class:`_Emptied`), so that the step that dequeues the marker
-    reads of it what it reads of a list's; a list that refuses to be emptied replaced by an empty list.  Never
-    raises."""
+    """A rejected group's output as its marker carries it, so that the step that dequeues the marker reads of it what
+    it reads of a list's.  Never raises.
+
+    - A list (a ``GroupRolloutWorkflow`` output, any list subclass) is emptied of its datums in place, its other
+      attributes kept.
+    - Any other output (a ``RolloutOutput``) is replaced by an empty list that keeps its report (:class:`_Emptied`).
+    - A list that refuses to be emptied is replaced by an empty list."""
 
     if isinstance(output, list):
         try:

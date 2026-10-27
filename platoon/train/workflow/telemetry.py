@@ -1,4 +1,5 @@
-"""The rollout workers' telemetry: a scalar per disposition, the cost, and the R3 routing-id coverage warnings.
+"""The rollout workers' telemetry, recorded as each member's worker is reaped (``rollout_isolation: process``): a scalar
+per disposition, the cost, and the R3 routing-id coverage warnings.
 
 The functions here that take the workflow first are its methods still: ``GroupRolloutWorkflow`` keeps each under its
 name, so to replace one, replace the method, on the class or an instance, not the function.
@@ -57,7 +58,7 @@ def _warn_of_missing_routing_ids(workflow: "GroupRolloutWorkflow", request_id: s
     same process keeps its own.
     """
 
-    scope = getattr(workflow, "stats_scope", "train")
+    scope = workflow.stats_scope
     with _routing_id_lock:
         # Made here rather than in ``__init__``, since custom workflows may build this class with ``__new__``.
         state = workflow.__dict__.setdefault("_routing_id_state", _RoutingIdState())
@@ -158,7 +159,7 @@ def _record_worker_telemetry(workflow: "GroupRolloutWorkflow", outcome: WorkerOu
                     "end the trainer's gateway session",
                     outcome.request_id,
                 )
-            record_worker_cell_guard(getattr(workflow, "stats_scope", "train"), response.cell_guard)
+            record_worker_cell_guard(workflow.stats_scope, response.cell_guard)
             workflow._monitor().record_rollout_timing(response.timing, startup_offset=outcome.launch_seconds)
             workflow._monitor().record_worker_peak_rss(response.peak_rss_bytes)
         elif outcome.diag:
@@ -166,7 +167,7 @@ def _record_worker_telemetry(workflow: "GroupRolloutWorkflow", outcome: WorkerOu
             # into the marker precisely because it cannot write a response;
             # without this the metric would read zero exactly when a cell
             # was killed for hanging.
-            record_worker_cell_guard(getattr(workflow, "stats_scope", "train"), outcome.diag)
+            record_worker_cell_guard(workflow.stats_scope, outcome.diag)
         workflow.tracker.scalar(**scalars)
         logger.info(
             "rollout worker %s pid=%s disposition=%s rc=%s launch=%.1fs wall=%.1fs log=%s",

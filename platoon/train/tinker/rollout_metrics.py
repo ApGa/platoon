@@ -669,15 +669,6 @@ class ClientThroughputMonitor:
         except Exception:  # pragma: no cover
             pass
 
-    def record_dequeue_to_first_model_call(self, seconds: float) -> None:
-        """Startup latency measured by the parent (covers worker launch)."""
-
-        try:
-            with self._lock:
-                self._first_call_seconds.append(max(0.0, float(seconds)))
-        except Exception:  # pragma: no cover
-            pass
-
     def record_worker_peak_rss(self, peak_rss_bytes: int) -> None:
         try:
             if peak_rss_bytes > 0:

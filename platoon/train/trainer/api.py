@@ -60,13 +60,17 @@ class TrainerNeeds:
 
 @dataclass(frozen=True)
 class TrainerSetup:
-    """What ``platoon train`` prepared for the trainer it builds (:meth:`Trainer.from_setup`): the loaded and checked
-    config, read-only, whose ``log_path``, ``stats.experiment_name`` and ``stats.trial_name`` name the run directory
-    (:attr:`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares
-    (:func:`~platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always
-    did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's
-    policies (``workflow_builder``, which :meth:`build_workflows` calls as the run begins, for a trainer that rolls
-    out).  Building the setup does no I/O."""
+    """What ``platoon train`` prepared for the trainer it builds (:meth:`Trainer.from_setup`).  Building the setup
+    does no I/O.
+
+    - ``config``: the loaded and checked config, read-only.  Its ``log_path``, ``stats.experiment_name`` and
+      ``stats.trial_name`` name the run directory (:attr:`TrainerBase.run_log_path`).
+    - ``policy_specs``: the policies the config declares (:func:`~platoon.train.policy.spec.policy_specs`), which the
+      trainer's constructor registers.
+    - ``options``: the trainer's options (None: it takes none).
+    - ``tasks``: the run's tasks, when the trainer rolls them out.
+    - ``workflow_builder``: how the start's workflows are built on the trainer's policies, for a trainer that rolls
+      out.  :meth:`build_workflows` calls it as the run begins."""
 
     config: Any
     policy_specs: Mapping[PolicyId, PolicySpec]
@@ -183,7 +187,7 @@ class TrainerBase:
         """Put back this process's sandbox labels as they were before the run, and close the stats logger; an error
         is not suppressed."""
 
-        sandbox_labels, self._sandbox_labels = getattr(self, "_sandbox_labels", None), None
+        sandbox_labels, self._sandbox_labels = self._sandbox_labels, None
         if sandbox_labels is not None:
             sandbox_labels.close()
         if self._stats_logger is not None:

@@ -1,16 +1,23 @@
 """The rl trainer (``PlatoonTinkerRLTrainer``, ``trainer: rl``): GRPO-style training on the rollouts of the run's
-tasks, with evaluation during training.  Each start goes through the lifecycle every trainer shares
-(:class:`~platoon.train.trainer.run.TrainerRun`), which ``train()`` runs with the given workflows (``run()``, with the
-ones the run builds from the trainer's setup); its hooks are the trainer's part, in the order they run: the checks, the
-policy's training client at the start point (through the trainer's seams), the rollouts' startup and the start's draws
-(its rollout source, :class:`_TrainerDraws`, which the run opens as it opens any trainer's), after the launch save the
-recovery pruning, what the loops share, the loops, and closing.
+tasks, with evaluation during training.
 
-What it does at each stage lives in the stage packages (``platoon.train.trainer``, ``.step``, ``.dispatch``,
-``.checkpoints``, ``.evaluation``): each of those methods is a module function there that takes the trainer first, and
-stays a method of the trainer under its name, so that subclasses and tests that replace one keep working.  Those of the
-start's draws take its rollout source instead: the source's steps of opening, saving and taking up the draws go through
-the trainer's methods of their names, which call those functions with the source.
+Each start of a run (its first launch, or a resume) goes through :class:`~platoon.train.trainer.run.TrainerRun`, the
+lifecycle every trainer shares.  ``train()`` runs it with the workflows it is given; ``run()`` builds them from the
+trainer's setup first.  The lifecycle calls this trainer's hooks in this order (the numbers are ``TrainerRun``'s):
+
+1. ``check``: the trainer's checks;
+4. ``_open_policies``: the policy's training client at the start point, through the trainer's seams;
+5. ``prepare``: the rollouts' startup, and the start's draws (:class:`_TrainerDraws`, its rollout source);
+6. ``started``, after the launch save: the recovery checkpoint pruning;
+7. ``ready``: the state the loops share;
+8. ``run_steps``: the training and evaluation loops;
+10. ``close``.
+
+The code of each stage lives in a stage package (``platoon.train.trainer``, ``.step``, ``.dispatch``,
+``.checkpoints``, ``.evaluation``), as a module function that takes the trainer first.  Each stays a method of the
+trainer under its name, so that subclasses and tests that replace one keep working.  The functions of the start's
+draws take the rollout source instead of the trainer; the source calls them through the trainer's methods of the
+same names.
 """
 
 import asyncio
@@ -74,7 +81,7 @@ def _limit_starts(config: Any, train_workflow: Any, eval_workflow: Any | None) -
     first come, first served.  Off, their ``start_limit`` is None, so that a workflow an earlier start used keeps no
     limit."""
 
-    limit = getattr(config.train, "max_starting_rollouts", None)
+    limit = config.train.max_starting_rollouts
     gate = StartLimit(limit) if limit is not None else None
     for workflow in (train_workflow, eval_workflow):
         if workflow is not None and capabilities_of(workflow).takes_start_limit:
@@ -133,10 +140,6 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         # The run's policies as the config declares them now (a later change of the config does not reach them), and
         # main's model gateway, this process's default, on the service train() opens main's training client on.
         self.policies = PolicySet.build(policy_specs(self.config))
-        self.setup = None
-        self._stats_logger = None
-        self._train_tracker = None
-        self._sandbox_labels = None
 
     @classmethod
     def needs(cls, config: Any, options: Any) -> TrainerNeeds:
@@ -147,9 +150,9 @@ class PlatoonTinkerRLTrainer(TrainerBase):
     @classmethod
     def from_setup(cls, setup: TrainerSetup) -> "PlatoonTinkerRLTrainer":
         """The trainer over the setup's tasks, the order they are drawn in and their task samplers, whose ``run()``
-        builds its workflows with the setup.  Its constructor registers the policies its config declares, as it always
-        did: a setup that declares others is refused.  ``platoon train`` builds it with its constructor, as it always
-        did, and hands it the workflows it builds (``train()``)."""
+        builds its workflows with the setup.  Its constructor registers the policies its config declares, so a setup
+        that declares others is refused.  (``platoon train`` builds this trainer with its constructor instead, and
+        hands it the workflows it builds, ``train()``.)"""
 
         if dict(setup.policy_specs) != policy_specs(setup.config):
             raise ValueError("the rl trainer trains the policies its config declares, not the setup's other ones")
@@ -169,12 +172,9 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         self,
         extra_batch_transforms: list[BatchTransform] | None = None,
     ) -> list[BatchTransform]:
-        """Build the ordered microbatch transform pipeline.
-
-        Tinker trainer transforms intentionally operate at the current
-        microbatch boundary (`task_rollout_results`) so the existing math is
-        preserved while allowing trainer-side customization.
-        """
+        """The batch transforms each microbatch of a step goes through, in order
+        (:meth:`~platoon.train.trainer.loops.TrainStep.prepare`): those the config selects
+        (:func:`build_default_batch_transforms`), then ``extra_batch_transforms``."""
 
         transforms = build_default_batch_transforms(self.config)
         if extra_batch_transforms:
@@ -342,7 +342,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         """The pruner of this run's recovery checkpoints (``checkpoint.keep_recovery``), which deletes them on a Tinker
         session of its own; None without ``keep_recovery``."""
 
-        keep = getattr(self.config.checkpoint, "keep_recovery", None)
+        keep = self.config.checkpoint.keep_recovery
         # The largest bound of the run and its entries: a slow entry's group may still sample an older checkpoint.
         max_staleness, _ = entry_settings.largest_staleness(self.config)
         if keep is None or max_staleness is None:  # loading refuses keep_recovery without max_staleness
@@ -360,9 +360,8 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         """Hand a recovery save that ``checkpoints.jsonl`` now records to the pruner, if any, which deletes the run's
         older recovery checkpoints beside training."""
 
-        pruner = getattr(self, "_recovery_pruner", None)
-        if pruner is not None:
-            pruner.recovery_saved(paths, policy_version)
+        if self._recovery_pruner is not None:
+            self._recovery_pruner.recovery_saved(paths, policy_version)
 
     def _checkpoints(self, training_client: tinker.TrainingClient) -> RunCheckpoints:
         """The full checkpoints that the start's steps save (``_save_checkpoint_and_get_sampling_client``): those of the
@@ -523,7 +522,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         # keep_recovery's rules again, before training opens its service: a config class that overrides the training
         # config's own checks loads without them (platoon train checks them first, in training_problems).
         check_recovery_pruning(self.config)
-        if getattr(self.config.eval, "at_start", False) and not evaluates(self.config):
+        if self.config.eval.at_start and not evaluates(self.config):
             logger.warning(
                 "eval.at_start is ignored: eval.every is 0, which turns evaluation during training off, the starting "
                 "policy's too"
@@ -538,7 +537,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         before the staging is done (:meth:`_loop_state` waits for it)."""
 
         return await RolloutStartup.begin(
-            normalize_environment_configs(getattr(self.config, "environments", None)),
+            normalize_environment_configs(self.config.environments),
             [train_workflow, eval_workflow if self.eval_dataset is not None and evaluates(self.config) else None],
         )
 
@@ -639,12 +638,16 @@ class PlatoonTinkerRLTrainer(TrainerBase):
 
 
 class _TrainerDraws(RolloutSource):
-    """The rl trainer's draws: a rollout source over the trainer's config, training tasks and policies, whose steps of
-    opening, saving and taking up the draws go through the trainer's methods of their names, which tests replace (on
-    the class or an instance), and which call the source's parts: the per-task statistics' beginning
-    (``_begin_task_records``) and start (``_task_records_started``), the dispatcher (``_new_dispatcher``), the draws'
-    entries of a full checkpoint (``_checkpoint_state``) and their resume (``_restore_dispatch``); and its training
-    tasks are the trainer's (``_training_tasks``)."""
+    """The rl trainer's draws: a rollout source over the trainer's config, training tasks and policies.
+
+    Its steps of opening, saving and taking up the draws go through the trainer's methods of their names, which tests
+    replace (on the class or an instance).  Those methods call the source's parts:
+
+    - ``_begin_task_records`` and ``_task_records_started``: the per-task statistics' beginning and start;
+    - ``_new_dispatcher``: the dispatcher;
+    - ``_checkpoint_state`` and ``_restore_dispatch``: the draws' entries of a full checkpoint, and their resume.
+
+    Its training tasks are the trainer's (``_training_tasks``)."""
 
     def __init__(
         self,

@@ -301,11 +301,10 @@ def _group_sizes(config: Any, phase: str) -> tuple[dict[str, int], int]:
     label, and the run's."""
 
     settings = entry_settings.run_settings(config)
-    run = getattr(getattr(config, phase, None), "workflow_config", None)
     sizes = {
         label: getattr(own, phase).group_size for label, own in settings.items() if getattr(own, phase) is not None
     }
-    return sizes, int(getattr(run, "group_size", 1))
+    return sizes, int(getattr(config, phase).workflow_config.group_size)
 
 
 def _groups_at_once(config: Any, phase: str, budget: int | None) -> tuple[int, int]:
