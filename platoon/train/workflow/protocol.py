@@ -183,6 +183,11 @@ class WorkflowSetup:
     # and the policies the run trains, whose agents alone make datums.  None and empty with one.
     agents: "AgentBindings | None" = None
     trained: frozenset[str] = frozenset()
+    # The tool name patterns of each agent role whose tools are limited (agents.roles.<role>.tools), by role; empty:
+    # every agent may call every tool.  Rollouts in the trainer's process get them from its gateway; a workflow that
+    # starts rollout workers sends them in their requests (PolicyRolloutWorkerRequest.role_tools), as
+    # GroupRolloutWorkflow does.
+    role_tools: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _built_by_keywords(workflow_cls: Any, setup: WorkflowSetup) -> Any:
@@ -191,8 +196,9 @@ def _built_by_keywords(workflow_cls: Any, setup: WorkflowSetup) -> Any:
     own settings as its ``entry_configs`` when an entry sets any, the entries' credit estimators as its
     ``entry_credit`` and the policies' views as its ``policy_views`` when an entry sets one, and, when its rollouts
     sample more than one policy (``agents``), the model infos of those but the agents' default as its
-    ``sampled_policies``, with its ``agents`` and ``trained_policies``.  ``GroupRolloutWorkflow.from_setup`` builds it
-    so, as ``platoon train`` builds a class without ``from_setup``."""
+    ``sampled_policies``, with its ``agents`` and ``trained_policies``; and the agent roles' limited tools as its
+    ``role_tools`` when a role lists some.  ``GroupRolloutWorkflow.from_setup`` builds it so, as ``platoon train``
+    builds a class without ``from_setup``."""
 
     workflow = workflow_cls(**_keywords(setup))
     if setup.entry_configs is not None:
@@ -205,6 +211,8 @@ def _built_by_keywords(workflow_cls: Any, setup: WorkflowSetup) -> Any:
         workflow.sampled_policies = {policy: info for policy, info in setup.policies.items() if policy != default}
         workflow.agents = setup.agents
         workflow.trained_policies = frozenset(setup.trained)
+    if setup.role_tools:
+        workflow.role_tools = dict(setup.role_tools)
     return workflow
 
 

@@ -76,8 +76,9 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
     ``max_steps``, snapshots the checkpoint version and joins ``output_dir`` with it.  A training draw's provenance in
     ``data`` (under ``DRAW_KEY``, when the trainer asks for it) goes into the rollout config's ``extra``, where the
     episode reads it (``ctx.draw``).  A rollout that samples several policies carries each one's binding, which agent
-    samples which and the policies the run trains, and a group whose entry's credit estimator reads agents asks for
-    each datum's tags: both are protocol 3's ``PolicyRolloutWorkerRequest``."""
+    samples which and the policies the run trains, one whose agent roles have limited tools carries those, and a group
+    whose entry's credit estimator reads agents asks for each datum's tags: all are protocol 3's
+    ``PolicyRolloutWorkerRequest``."""
 
     task_id = data["task_id"]
     task = workflow.get_task_fn(task_id)
@@ -135,13 +136,14 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
         signal_first_call=held_slot() is not None,
     )
     tag_datums = bool(workflow.entry_credit) and getattr(workflow._entry_estimator(), "needs_agents", False)
-    if workflow.sampled_policies:
+    if workflow.sampled_policies or workflow.role_tools:
         return PolicyRolloutWorkerRequest.extending(
             request,
             tag_datums=tag_datums,
             policies=workflow._policy_bindings(),
             agents=workflow.agents,
             trained=workflow.trained_policies,
+            role_tools=dict(workflow.role_tools),
         )
     if tag_datums:
         return PolicyRolloutWorkerRequest.tagging(request)

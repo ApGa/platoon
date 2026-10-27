@@ -10,7 +10,9 @@ harness through :func:`call_agent_tool`, is recorded on the agent (``agent.tool_
 
 Access levels filter listings on the env's tool hints: ``full`` lists every tool, ``no_terminal`` hides tools
 with ``terminal=True`` (submit tools), and ``read_only`` lists only tools with ``read_only=True``.  A tool the
-agent cannot see cannot be called.  ``ToolSpec.meta`` becomes the MCP tool's ``_meta``; a tool result's
+agent cannot see cannot be called.  The allowlists of the agent's role (``agents.roles.<role>.tools``,
+:mod:`platoon.utils.role_tools`) narrow its listings further, and a call to a tool they do not allow comes back as
+an error result, unrun.  ``ToolSpec.meta`` becomes the MCP tool's ``_meta``; a tool result's
 ``finished``, ``reward`` and ``metadata`` travel in ``_meta["platoon"]``, which MCP clients do not show the
 model.
 
@@ -47,6 +49,7 @@ from aiohttp import web
 from platoon.envs.gate import on_behalf_of
 from platoon.envs.service import ToolResult, ToolSpec
 from platoon.gateway.core import AgentClosedError, AgentSession, GatewayError, ToolAccess, UnknownAgentError
+from platoon.utils import role_tools
 
 if TYPE_CHECKING:
     from platoon.envs.service import EnvSession
@@ -187,17 +190,19 @@ def filter_tools(tools: Sequence[ToolSpec], access: ToolAccess) -> list[ToolSpec
 
 
 async def list_agent_tools(agent: AgentSession) -> list[ToolSpec]:
-    """The tools ``agent`` sees: none until bound, then filtered by its access and transformed."""
+    """The tools ``agent`` sees: none until bound, then filtered by its access, transformed, and filtered by its role's
+    allowlists."""
     if agent.tools is None:
         return []
-    return await agent.tools.visible(agent.tool_access)
+    return role_tools.visible(agent, await agent.tools.visible(agent.tool_access))
 
 
 async def call_agent_tool(agent: AgentSession, name: str, arguments: Mapping[str, Any]) -> ToolResult:
     """Call one of the agent's visible tools and record the call on the agent.
 
-    A tool that raises becomes an ``is_error`` result, as MCP reports tool execution errors.  Raises
-    :class:`UnknownToolError` for a tool the agent does not see and ``AgentClosedError`` for a closed agent.
+    A tool that raises becomes an ``is_error`` result, as MCP reports tool execution errors, and a tool its role does
+    not allow one that says so, which neither reaches the env nor is recorded (:func:`role_tools.refusal`).  Raises
+    :class:`UnknownToolError` for a tool its access or the env hides and ``AgentClosedError`` for a closed agent.
     """
     result, _ = await _call_and_record(agent, name, arguments)
     return result
@@ -241,6 +246,8 @@ async def _call_and_record(
     provider = agent.tools
     if provider is None or name not in {tool.name for tool in await provider.visible(agent.tool_access)}:
         raise UnknownToolError(f"Unknown tool: {name}")
+    if (refused := role_tools.refusal(agent, name)) is not None:
+        return ToolResult.text(refused, is_error=True), None
     arguments = dict(arguments)
     after_call_id = agent.calls[-1].call_id if agent.calls else None
     started_at = time.time()

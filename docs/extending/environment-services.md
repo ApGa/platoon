@@ -256,7 +256,11 @@ starts, as a configuration error (exit code 78).
 `terminal=True` and tools that never change state `read_only=True`: agents with `no_terminal` or `read_only` access
 are shown tools by these flags, and `platoon-react` and `platoon-codeact` route the final answer into the terminal
 tool. A `ToolResult` holds MCP-style content blocks; set `finished` and `reward` on the result that ends the episode.
-Report the policy's mistakes as error results (`is_error=True`) instead of raising.
+Report the policy's mistakes as error results (`is_error=True`) instead of raising. A service whose sessions always
+serve the same tools may name them in a class attribute (experimental), `declared_tools` (a tuple of names), so that
+loading warns of an agent role's tool pattern that matches none of them ([Limit the tools each role may
+call](../how-to/train-and-eval.md#limit-the-tools-each-role-may-call-experimental)); an ORS environment run in process
+declares its class's tools by itself.
 
 **Forks.** A subagent's session is `await session.fork(mode, task=child_task)`:
 

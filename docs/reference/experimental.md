@@ -1865,6 +1865,7 @@ settings and the run's components, and the policies its rollouts sample.
 | `policy_views` | `Mapping[str, Any]` | `{}` | The run's policies as the estimators read them, by id (platoon.train.credit.api.PolicyView), beside entry_credit; empty for the eval phase. |
 | `agents` | `AgentBindings \| None` | `None` | With more than one sampled policy: which policy each agent samples, whose default is the first of `policies`, and the policies the run trains, whose agents alone make datums. None and empty with one. |
 | `trained` | `frozenset[str]` | `frozenset()` |  |
+| `role_tools` | `Mapping[str, tuple[str, ...]]` | `{}` | The tool name patterns of each agent role whose tools are limited (agents.roles.<role>.tools), by role; empty: every agent may call every tool. Rollouts in the trainer's process get them from its gateway; a workflow that starts rollout workers sends them in their requests (PolicyRolloutWorkerRequest.role_tools), as GroupRolloutWorkflow does. |
 
 <a id="platoon-experimental-rolloutoutput"></a>
 

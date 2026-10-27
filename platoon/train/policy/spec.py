@@ -1,7 +1,7 @@
 """A policy as the config declares it (:class:`PolicySpec`), the run's policies as its config declares them
-(:func:`policy_specs`), which policy each agent samples (:class:`AgentBindings`, :func:`agent_bindings`), and what
-loading refuses of them (:func:`policy_problems`, and :func:`workflow_problems` against the run's workflow class) or
-warns of (:func:`policy_warnings`).  Imports no Tinker.
+(:func:`policy_specs`), which policy each agent samples (:class:`AgentBindings`, :func:`agent_bindings`) and which
+tools each agent role may call (:func:`role_tools`), and what loading refuses of them (:func:`policy_problems`, and
+:func:`workflow_problems` against the run's workflow class) or warns of (:func:`policy_warnings`).  Imports no Tinker.
 
 ``main`` is the policy ``train:`` declares: each field of its spec keeps its ``train.*`` name, so that one vocabulary
 names a policy wherever it is declared.  ``policies:`` declares the run's others under the same names (RFC 0021).  This
@@ -9,12 +9,15 @@ release trains ``main`` only: every other policy is frozen, sampled by the agent
 for a credit estimator, and never stepped, saved or pruned.
 """
 
+import difflib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
 from platoon.train import task_stats
+from platoon.utils.judges import JUDGE_ROLE, VERIFIER_ROLE
+from platoon.utils.role_tools import unmatched
 
 if TYPE_CHECKING:
     from platoon.train.config_defs import AdamParams
@@ -130,24 +133,41 @@ def agent_bindings(config: Any) -> AgentBindings:
     """Which policy each agent of the run samples, as ``agents:`` says (without it, every agent samples ``main``)."""
 
     agents = getattr(config, "agents", None)
-    roles = getattr(agents, "roles", None) or {}
     return AgentBindings(
         default=getattr(agents, "policy", None) or MAIN,
-        roles={role: bound.policy for role, bound in roles.items()},
+        roles={role: bound.policy for role, bound in _roles(config).items() if bound.policy is not None},
     )
+
+
+def role_tools(config: Any) -> dict[str, tuple[str, ...]]:
+    """The tools the agents of each role may see and call, as ``agents.roles.<role>.tools`` lists them (names or
+    ``fnmatch`` patterns, :mod:`platoon.utils.role_tools`), for the roles that list them: none without (every agent
+    may call every tool)."""
+
+    return {role: tuple(bound.tools) for role, bound in _roles(config).items() if bound.tools is not None}
+
+
+def _roles(config: Any) -> Mapping[str, Any]:
+    """The config's ``agents.roles`` entries, by role (none for a config built without the key)."""
+
+    return getattr(getattr(config, "agents", None), "roles", None) or {}
 
 
 # A policy's id: a lowercase letter, then lowercase letters, digits, ``_`` and ``-``, 32 characters at most.
 POLICY_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 # The root agent's role (the gateway's AgentSession.role), whose agent samples agents.policy whatever agents.roles says.
 ROOT_ROLE = "policy"
+# The roles platoon's own code opens agents with: the root agent's, that of a child a harness spawns unless it names
+# another (ctx.agents.spawn), a verifier's and a judge's.  A harness may mint agents of any other role.
+PLATOON_ROLES: Final = (ROOT_ROLE, "subagent", VERIFIER_ROLE, JUDGE_ROLE)
 
 
 def policy_problems(config: Any) -> list[str]:
     """What loading refuses of the config's ``policies:`` and ``agents:``, one entry each: an id that is no policy id
     (:data:`POLICY_ID`) or that names ``main``, which ``train:`` declares; a second policy the run would train, and
     a default policy of the agents other than main, which this release does not support (main publishes its binding
-    as the agents' default); and an agent role, or the agents' default, bound to a policy the run does not declare."""
+    as the agents' default); an agent role, or the agents' default, bound to a policy the run does not declare; and a
+    role's ``tools`` that is no list of names or patterns."""
 
     problems = []
     declared = _declared(config)
@@ -180,14 +200,32 @@ def policy_problems(config: Any) -> list[str]:
             "this release; bind a role to it (agents.roles.<role>.policy) instead. A default policy of another id "
             "arrives with lockstep multi-policy training (RFC 0021, milestone B4)"
         )
-    for role, bound in (getattr(agents, "roles", None) or {}).items():
+    for role, bound in _roles(config).items():
         if not isinstance(role, str) or not role:
             problems.append(f"agents.roles: a role is a non-empty name, got {role!r}")
-        elif bound.policy not in known:
+            continue
+        if bound.policy is not None and bound.policy not in known:
             problems.append(
                 f"agents.roles.{role}.policy: {bound.policy!r} is not a policy of the run ({', '.join(sorted(known))})"
             )
+        problems.extend(_tools_problems(role, bound.tools))
     return problems
+
+
+def _tools_problems(role: str, tools: Any) -> list[str]:
+    """What is wrong with ``agents.roles.<role>.tools``: a value that is no list, or an item that is no non-empty
+    string (a name or a pattern)."""
+
+    where = f"agents.roles.{role}.tools"
+    if tools is None:
+        return []
+    if not isinstance(tools, list | tuple):
+        return [f"{where}: a list of tool names or patterns (read_*), got {tools!r}; [] allows no tool"]
+    return [
+        f"{where}: a tool name or pattern is a non-empty string, got {item!r}"
+        for item in tools
+        if not isinstance(item, str) or not item
+    ]
 
 
 def workflow_problems(config: Any, workflow_cls: Any, reference: str) -> list[str]:
@@ -208,8 +246,11 @@ def workflow_problems(config: Any, workflow_cls: Any, reference: str) -> list[st
 
 def policy_warnings(config: Any) -> list[str]:
     """What loading warns of the config's ``policies:`` and ``agents:``, one line each: a frozen policy that no agent
-    samples and no entry's ``credit_options`` names (a teacher's), which the run opens and never uses; and a policy
-    bound to the role ``policy``, the root agent's, which the root never samples (it samples ``agents.policy``)."""
+    samples and no entry's ``credit_options`` names (a teacher's), which the run opens and never uses; a policy
+    bound to the role ``policy``, the root agent's, which the root never samples (it samples ``agents.policy``); a
+    role that looks like a misspelling of one of :data:`PLATOON_ROLES` (:func:`_role_typos`); and a role's tool
+    pattern that matches no tool of the run's environments, when each declares its tools up front
+    (:func:`_tool_warnings`)."""
 
     agents = agent_bindings(config)
     used = set(agents.sampled())
@@ -227,4 +268,53 @@ def policy_warnings(config: Any) -> list[str]:
             f"agents.policy ({agents.default}) whatever its role: only a subagent minted with the role {ROOT_ROLE} "
             "samples this policy"
         )
+    return [*lines, *_role_typos(config), *_tool_warnings(config)]
+
+
+def _role_typos(config: Any) -> list[str]:
+    """A role of ``agents.roles`` that is none of :data:`PLATOON_ROLES` but close to one (``subagents``): its settings
+    reach only the agents a harness mints with that very name, so it is likely misspelled."""
+
+    lines = []
+    for role in _roles(config):
+        if not isinstance(role, str) or role in PLATOON_ROLES:
+            continue
+        if close := difflib.get_close_matches(role.lower(), PLATOON_ROLES, n=1, cutoff=0.8):
+            lines.append(
+                f"agents.roles.{role}: platoon opens no agent of this role, so its settings reach only the agents a "
+                f"harness mints with it; did you mean {close[0]!r}?"
+            )
     return lines
+
+
+def _tool_warnings(config: Any) -> list[str]:
+    """A pattern of ``agents.roles.<role>.tools`` that matches none of the tools the run's environments serve, when
+    every environment declares its tools up front (:func:`~platoon.envs.service.service_declared_tools`): that pattern
+    allows nothing."""
+
+    tools = role_tools(config)
+    declared = _declared_tools(config) if tools else None
+    if declared is None:
+        return []
+    names = ", ".join(sorted(declared)) or "none"
+    return [
+        f"agents.roles.{role}.tools: {pattern!r} matches no tool of the run's environments ({names}), so it allows "
+        "nothing"
+        for role, patterns in tools.items()
+        for pattern in unmatched(patterns, declared)
+    ]
+
+
+def _declared_tools(config: Any) -> set[str] | None:
+    """The names of the tools the run's environments serve, when each declares them up front; else None."""
+
+    from platoon.envs.service import service_declared_tools  # imports the environments' classes: at load only
+
+    names: set[str] = set()
+    for environment in getattr(config, "environments", None) or ():
+        service = getattr(environment, "service", None)
+        declared = service_declared_tools(service) if isinstance(service, str) else None
+        if declared is None:
+            return None
+        names |= declared
+    return names

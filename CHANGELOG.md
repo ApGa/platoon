@@ -418,6 +418,24 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   teacher](docs/how-to/train-and-eval.md#distill-a-frozen-teacher-experimental);
   [`examples/on-policy-distillation`](examples/on-policy-distillation/README.md) distills Qwen3-32B into the
   quickstart's Qwen3-4B, the teacher on the student's service and on its own).
+- **A tool allowlist per agent role (experimental): `agents.roles.<role>.tools`.** A role's list of tool names or
+  `fnmatch` patterns (`read_*`; a Harbor task's MCP tools by the names agents see, `<server>__<tool>`) limits the agents
+  of that role, and every agent under them, to those tools: a child spawned or minted with the role, a program's `judge`
+  or `verifier` (which its spawner's lists limit, not those of the child it judges), and the root agent when the list is
+  under its role, `policy`. Their listings of env tools (`ctx.list_tools()`, MCP `tools/list`) hold only those, and the
+  gateway refuses a call to any other where it runs the call, for inline and MCP harnesses alike: the agent gets an
+  error result that says why, the environment never sees the call, the run goes on, and the agent's trajectory counts
+  the refusals in its misc (`tools_refused: {count, first}`). A role without `tools` keeps every tool, and `tools: []`
+  allows none; a role may give `tools` without a `policy` (`agents.roles.<role>.policy` is now optional, its agents then
+  sampling `agents.policy`'s). Rollout workers get the lists in their requests (worker protocol 3's `role_tools`), and
+  in-process rollouts from the trainer's gateway (`ModelGateway.limit_tools`). Loading, and `platoon config validate`,
+  refuse `tools` that is no list of non-empty names (exit 78), warn of a role that looks like a misspelling of one of
+  platoon's own (`subagents` for `subagent`), and of a pattern that matches no tool of the run's environments when each
+  declares its tools up front: an ORS environment run in process whose class lists them all, a task table, or a service
+  class with `declared_tools` ([Limit the tools each role may
+  call](docs/how-to/train-and-eval.md#limit-the-tools-each-role-may-call-experimental);
+  [`examples/subagents/read-only-subagents.yaml`](examples/subagents/read-only-subagents.yaml) trains the subagents
+  example with subagents that may only read). A run without `tools:` runs as before, request for request.
 
 ### Changes
 

@@ -52,6 +52,7 @@ from tinker_cookbook.tokenizer_utils import Tokenizer
 
 from platoon.harness.agent import CALL_KINDS, ToolAccess
 from platoon.utils.judges import JUDGE_ROLE, JUDGES_REFUSED_MISC_KEY
+from platoon.utils.role_tools import Allowlist, allowlists_of
 
 if TYPE_CHECKING:
     from platoon.gateway.mcp import AgentTools, ToolCallRecord
@@ -891,11 +892,11 @@ class AgentSession:
     """One agent: the identity its harness calls with, and the ordered record of its model calls.
 
     ``fork_step`` is the number of model calls the parent agent had made when this agent was opened.  ``tools``,
-    ``tool_access`` and ``tool_calls`` are the agent's tool plane (:mod:`platoon.gateway.mcp`): the env tools it
-    sees, which children inherit until they are rebound, and the record of its tool calls.  The harness layer
-    (``platoon.harness``) keeps the agent's tree position and step budget here, the kind of each call
-    (``policy``, ``aux`` or ``judge``), the harness's annotations, how its run ended and the agent's own outcome;
-    :mod:`platoon.gateway.trace` reads them all.
+    ``tool_access``, ``tool_allowlists`` and ``tool_calls`` are the agent's tool plane (:mod:`platoon.gateway.mcp`):
+    the env tools it sees, which children inherit until they are rebound, the names its role allows, and the record of
+    its tool calls.  The harness layer (``platoon.harness``) keeps the agent's tree position and step budget here, the
+    kind of each call (``policy``, ``aux`` or ``judge``), the harness's annotations, how its run ended and the agent's
+    own outcome; :mod:`platoon.gateway.trace` reads them all.
     """
 
     agent_id: str
@@ -921,6 +922,9 @@ class AgentSession:
     tools: AgentTools | None = field(default=None, repr=False)
     tool_access: ToolAccess = "full"
     tool_calls: list[ToolCallRecord] = field(default_factory=list, repr=False)
+    # The allowlists of its role and of the roles above it (ModelGateway.limit_tools): it sees and calls only the
+    # tools every one allows (platoon.utils.role_tools).  Empty: every tool its access allows.
+    tool_allowlists: tuple[Allowlist, ...] = ()
     # The rollout's default sampling (RolloutConfig.inference_params), for calls that leave it unset; inherited.
     sampling_defaults: SamplingOverrides | None = field(default=None, repr=False)
     # --- harness layer (platoon.harness)
@@ -1143,6 +1147,8 @@ class ModelGateway:
         self.policy: str | None = None
         self.runtimes: dict[str, ModelGateway] = {}
         self.role_policies: dict[str, str] = {}
+        # The tools each role's agents may see and call, as name patterns (limit_tools); a role left out: every tool.
+        self.role_tools: dict[str, tuple[str, ...]] = {}
 
     # ------------------------------------------------------------------ policies
 
@@ -1171,6 +1177,15 @@ class ModelGateway:
         if self.policy is None or root:
             return self.policy
         return self.role_policies.get(role, self.policy)
+
+    # ------------------------------------------------------------------ tools
+
+    def limit_tools(self, roles: Mapping[str, Sequence[str]]) -> None:
+        """Limit the tools of the agents of each role in ``roles`` to those its name patterns match, in every agent
+        this gateway opens from now on and in the agents under them (:mod:`platoon.utils.role_tools`); a role left
+        out keeps every tool."""
+
+        self.role_tools = {role: tuple(patterns) for role, patterns in roles.items()}
 
     # ------------------------------------------------------------------ render
 
@@ -1491,11 +1506,13 @@ class ModelGateway:
         unless they are given, and its parent's ``judges``: a ``judge``-role child of a parent whose judges are off
         is refused (:class:`JudgesOffError`).  A gateway that is shut down refuses (:class:`GatewayShutDownError`).
         In a gateway that serves several policies the agent samples, for its whole life, the default policy if it is
-        a root agent, else its role's (:meth:`serve_policies`).
+        a root agent, else its role's (:meth:`serve_policies`).  Its tools are those its parent's allowlists and its
+        own role's allow (:meth:`limit_tools`).
         """
         self._ensure_running()
         fork_step, depth, inherited_access, inherited_sampling = 0, 0, "full", None
         judges = True
+        allowlists: tuple[Allowlist, ...] = ()
         if parent_agent_id is not None:
             parent = self._agents_by_id.get(parent_agent_id)
             if parent is None:
@@ -1505,6 +1522,7 @@ class ModelGateway:
             fork_step, depth, inherited_access = len(parent.calls), parent.depth + 1, parent.tool_access
             inherited_sampling = parent.sampling_defaults
             judges = parent.judges
+            allowlists = parent.tool_allowlists
             if role == JUDGE_ROLE and not judges:
                 raise parent.refuse_judge("A judge agent")
         agent = AgentSession(
@@ -1522,6 +1540,7 @@ class ModelGateway:
             depth=depth,
             max_steps=max_steps,
             tool_access=access or inherited_access,
+            tool_allowlists=allowlists_of(role, self.role_tools, allowlists),
             sampling_defaults=inherited_sampling if sampling_defaults is None else sampling_defaults,
             judges=judges,
         )

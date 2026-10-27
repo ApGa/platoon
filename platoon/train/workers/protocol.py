@@ -200,21 +200,26 @@ class RolloutWorkerRequest:
 
 @dataclass(frozen=True)
 class PolicyRolloutWorkerRequest(RolloutWorkerRequest):
-    """A rollout whose datums carry who produced them, or that samples several policies (protocol 3).
+    """A rollout whose datums carry who produced them, that samples several policies, or whose agent roles have
+    limited tools (protocol 3).
 
     ``tag_datums`` has the conversion give every trajectory's agent and each datum's trajectory
     (``TrajectoryCollectionResult.agents``, ``datum_trajectories``), which a credit estimator that reads agents needs.
     A rollout of several policies also carries the binding of each sampled policy but the agents' default, whose
     binding is ``model`` (``policies``, by id), which agent samples which (``agents``), and the policies training
     trains (``trained``): the worker serves each policy from its own binding, and only the trained policies' agents
-    make datums, each stamped with its own policy's version.  The trainer sends it only for such groups; every other
-    rollout is protocol 2's :class:`RolloutWorkerRequest`, field for field as before."""
+    make datums, each stamped with its own policy's version.  ``role_tools`` are the tools each agent role may see and
+    call (``agents.roles.<role>.tools``), which the worker's gateway applies (``ModelGateway.limit_tools``).  The
+    trainer sends it only for such groups; every other rollout is protocol 2's :class:`RolloutWorkerRequest`, field
+    for field as before."""
 
     tag_datums: bool = True
     policies: dict[str, ModelBinding] = field(default_factory=dict)
     # Which policy each agent samples; None for a rollout of one policy.
     agents: AgentBindings | None = None
     trained: frozenset[str] = frozenset()
+    # The tool name patterns of each role whose tools are limited, by role; empty: every agent sees every tool.
+    role_tools: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @classmethod
     def tagging(cls, request: RolloutWorkerRequest) -> "PolicyRolloutWorkerRequest":

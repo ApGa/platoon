@@ -3,6 +3,8 @@
 
 - ``config``: a run's real config: :func:`~fakes.config.make_config` in memory, :func:`~fakes.config.trainer_config`
   from a file with ``key=value`` overrides, :func:`~fakes.config.mixture_config` for a mixture of environments;
+- ``launch``: the training and evaluation workflows ``platoon train`` builds for a config
+  (:func:`~fakes.launch.built_workflows`);
 - ``trainer``: the rl trainer over fake tasks on a fake Tinker service (:func:`~fakes.trainer.make_trainer`), whose
   saves it records (``SaveLog``) and whose logged steps it records (``StepLog``, the ``logged`` of every builder here);
   its workflow, datum and training client;

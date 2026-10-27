@@ -210,6 +210,9 @@ class GroupRolloutWorkflow:
     sampled_policies: Mapping[str, ModelInfo] = MappingProxyType({})
     agents: AgentBindings | None = None
     trained_policies: frozenset[str] = frozenset()
+    # The tool name patterns of each agent role whose tools are limited (agents.roles.<role>.tools), which ``platoon
+    # train`` sets after construction and the rollout workers' requests carry; empty: every agent sees every tool.
+    role_tools: Mapping[str, tuple[str, ...]] = MappingProxyType({})
     # The run's limit on rollouts starting at once (platoon.train.workflow.start_limit), which the trainer sets on its
     # training and evaluation workflows as training starts; None: no limit. _run_group_member takes the slots.
     start_limit: StartLimit | None = None

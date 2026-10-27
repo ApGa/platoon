@@ -323,6 +323,11 @@ def test_links_and_anchors_resolve(guide):
         ),
         ("platoon/train/sampling.py", "f\"{where}.group_admission: {old.get('rule')} -> {new.get('rule')}\""),
         ("platoon/train/checkpoints/resume.py", 'f"position {dispatcher.next_position}, where its row says it stood"'),
+        (
+            "platoon/utils/role_tools.py",
+            'f"Tool {name!r} is not allowed: {whose} {allowlist.role!r} may call {allowed}. The call was not run."',
+        ),
+        ("platoon/utils/role_tools.py", 'TOOLS_REFUSED_MISC_KEY = "tools_refused"'),
     ],
 )
 def test_the_quoted_messages_and_defaults_are_still_in_the_code(source, fragment):

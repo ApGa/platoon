@@ -658,21 +658,28 @@ class PolicyConfig:
 
 @dataclass
 class AgentRoleConfig:
-    """``agents.roles.<role>``: the policy the agents of that role sample."""
+    """``agents.roles.<role>``: the policy the agents of that role sample, and the tools they may see and call."""
 
-    # A policy of the run: main, or a policies: entry.
-    policy: str
+    # A policy of the run: main, or a policies: entry (None: agents.policy's).
+    policy: str | None = None
+    # The tools they, and the agents under them, may see and call (a verifier, which runs under the child it judges,
+    # takes the lists of that child's spawner instead): names or fnmatch patterns (``read_*``), as agents see them (a
+    # task MCP server's as ``<server>__<tool>``); an empty list allows none (None: every tool).
+    tools: list[str] | None = None
 
 
 @dataclass
 class AgentsConfig:
-    """``agents:``: which policy each agent samples, for its whole life (experimental).  The root agent samples
-    ``policy``; an agent its harness or program opens with a role samples that role's policy, and ``policy`` when
-    ``roles`` names none for it."""
+    """``agents:``: which policy each agent samples, for its whole life, and which tools it may call (experimental).
+    The root agent samples ``policy``; an agent its harness or program opens with a role samples that role's policy,
+    and ``policy`` when ``roles`` names none for it.  An agent of a role that lists ``tools`` (the root agent's role is
+    ``policy``) sees and calls only those, and so does every agent under it but a verifier, which runs under the child
+    it judges and is limited by the lists of that child's spawner and its own role's (``verifier``) instead."""
 
     # The root agent's policy, and that of every role roles leaves out (None: main).
     policy: str | None = None
-    # The policy of the agents of each role, by role (the role a harness mints a subagent with, such as ``judge``).
+    # The policy and the tools of the agents of each role, by role (the role a harness mints a subagent with, such as
+    # ``judge``).
     roles: dict[str, AgentRoleConfig] = field(default_factory=dict)
 
 
@@ -997,7 +1004,8 @@ class PlatoonTinkerRLTrainerConfig:
     # The run's other policies, by id (a lowercase name such as ``teacher``), besides main, which train: declares:
     # frozen ones its agents sample or its credit estimators score with (experimental).
     policies: dict[str, PolicyConfig] = field(default_factory=dict)
-    # Which policy each agent samples, by role (experimental); without it, every agent samples main.
+    # Which policy each agent samples, and which tools it may call, by role (experimental); without it, every agent
+    # samples main and may call every tool.
     agents: AgentsConfig = field(default_factory=AgentsConfig)
 
     def __post_init__(self):

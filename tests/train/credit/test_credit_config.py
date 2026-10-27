@@ -7,22 +7,17 @@ evaluation's never."""
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
+from fakes.launch import built_workflows
 
 from platoon.envs.named import FORBIDDEN_KEYS
 from platoon.extensions import run_components
 from platoon.task import Task
-from platoon.train import entry_settings, launch
-from platoon.train.auto import AutoEnvironment
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.credit.keyed import Keyed, KeyedOptions
-from platoon.train.policy.policy import Policy
-from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.utils.config import ConfigError, resolve_config
 
 HERE = __name__
@@ -155,23 +150,9 @@ def test_an_estimator_beside_a_workflow_that_does_not_apply_it_stops_the_run(tmp
     assert any(problem.startswith("environments[a].credit: the run's workflow") for problem in problems), problems
 
 
-def _workflows(config: Any) -> tuple[Any, Any]:
-    """The training and evaluation workflows ``platoon train`` builds for ``config``."""
-
-    AutoEnvironment.load(config)
-    settings = entry_settings.entry_settings(config)
-    components = launch._build_components(config, AutoEnvironment.from_config(config))
-    model_info: Any = SimpleNamespace(
-        model_name="m", renderer_name="r", renderer_kwargs={}, llm=SimpleNamespace(version=0)
-    )
-    policies = PolicySet([Policy(PolicySpec(MAIN, model_name="m", renderer_name="r"), model_info)])
-    training: Any = SimpleNamespace(tasks=[])
-    return launch._build_workflows(config, components, policies, settings, training, None)
-
-
 def test_the_training_workflow_credits_with_each_entry_s_estimator_and_the_evaluation_s_with_none(tmp_path):
     config = _load(tmp_path, _entry("hard", credit="keyed", credit_options={"key": ["role"]}), _entry("easy"))
-    train, evaluation = _workflows(config)
+    train, evaluation = built_workflows(config)
 
     assert list(train.entry_credit) == ["hard"]
     estimator = train.entry_credit["hard"]
@@ -183,6 +164,6 @@ def test_the_training_workflow_credits_with_each_entry_s_estimator_and_the_evalu
 
 
 def test_without_credit_the_workflows_are_built_as_before(tmp_path):
-    train, evaluation = _workflows(_load(tmp_path, _entry("a")))
+    train, evaluation = built_workflows(_load(tmp_path, _entry("a")))
     assert dict(train.entry_credit) == {} == dict(evaluation.entry_credit)
     assert dict(train.entry_configs) == {}
