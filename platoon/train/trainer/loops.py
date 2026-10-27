@@ -4,16 +4,17 @@
 The loop starts the dispatcher, whose groups settle into the queue the steps dequeue from, publishes the first sampler,
 and sets up what its steps share (:class:`StepContext`).  Then it runs one :class:`TrainStep` per step to the end
 batch.  A step reads top to bottom (:meth:`TrainStep.run`), in seven stages: it collects settled groups into
-microbatches, prepares each microbatch's datums and sends them, updates the policy once per minibatch, then commits,
+microbatches, prepares each microbatch's datums and sends them, updates the policy once per minibatch through its
+learner (:mod:`platoon.train.policy.learner`), under its objective (:mod:`platoon.train.objectives`), then commits,
 publishes the new policy, moves on to the next step and logs its metrics.  The parts of each stage are in
 :mod:`platoon.train.step`.
 
 The step's flow stays in this module, beside the loop, because tests read it here: the source of the batch transforms
-before the one zero-advantage filter (:meth:`TrainStep.prepare`), of the side-channel strip (``_to_send``) and of the
-exact non-submitted guard (:func:`record_workload_metrics`, with the loop's local names); the logger of the line that
-says why a step took no update; and the five globals the tests patch here, ``client_monitor``, ``client_step_metrics``,
-``_ptc_cell_guard_stats``, ``metric_labels`` and ``compute_training_metrics`` (which the update calls through
-:meth:`TrainStep._training_metrics` for that reason).
+before the one zero-advantage filter (:meth:`TrainStep.prepare`) and of the exact non-submitted guard
+(:func:`record_workload_metrics`, with the loop's local names); the logger of the line that says why a step took no
+update; and the five globals the tests patch here, ``client_monitor``, ``client_step_metrics``,
+``_ptc_cell_guard_stats``, ``metric_labels`` and ``compute_training_metrics`` (which the objective computes its
+metrics with, through :meth:`TrainStep._training_metrics`, for that reason).
 
 ``_train_loop`` and ``shutdown_loops`` take the trainer first, and are its methods still: ``PlatoonTinkerRLTrainer``
 keeps each under its name, so to replace one, replace the method, on the class or an instance, not the function.  A
@@ -21,9 +22,10 @@ step calls the trainer's other seams through the trainer too.
 """
 
 import asyncio
+import dataclasses
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -34,8 +36,11 @@ from platoon.train.admissions import AdmissionSet
 from platoon.train.dispatch.permits import _rollouts_at_once
 from platoon.train.dispatch.settled import _output_label, _Settled, _settled
 from platoon.train.labels import label_column, metric_labels, metric_prefix
+from platoon.train.objectives.policy_gradient import PolicyGradient, compute_training_metrics
+from platoon.train.policy.learner import Learner
+from platoon.train.policy.policy import Policy
+from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.train.step.batch_transforms import (
-    LOSS_NORMALIZATION_TOKENS_KEY,
     BatchTransformContext,
     depth_credit_metrics,
     filter_zero_advantage_datums,
@@ -63,15 +68,15 @@ from platoon.train.step.metrics import (
 from platoon.train.step.microbatch import MicrobatchFill, Prepared, StepGeometry, zero_advantage_filter_metrics
 from platoon.train.step.publish import _no_update_reason, publish_policy
 from platoon.train.step.staleness import StaleFilter, StaleWatch
-from platoon.train.step.update import OptimizerUpdate, compute_training_metrics
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
-from platoon.train.trainer.signals import TerminateTrainLoop
+from platoon.train.trainer.signals import TerminateTrainLoop, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.train.workflow.protocol import RolloutWorkflow
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
+    from platoon.train.policy.checkpoints import Waiter
     from platoon.train.task_records import TaskRecorder
     from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
 
@@ -152,10 +157,9 @@ class StepContext:
     shared state; the training workflow, the queue its groups settle into and the dispatcher that starts them; the
     start's first and end batch; the labels the metrics break down by (``column``'s values, and each one's metric
     prefix) and the labels' limits; the run's per-task statistics (``recorder``) and group admission rules, when it
-    keeps them; the stale filter; and what each update sends with (:meth:`optimizer_update`): the training client,
-    the loss and its config, and the optimizer's parameters.  Two of them count as the steps go: what the straggler
-    policy censors (``censoring``, of each step until its metrics are logged), and the staleness warning, over the
-    last steps (``stale_watch``)."""
+    keeps them; the stale filter; and the learner that updates the policy the steps train, under its objective.  Two
+    of them count as the steps go: what the straggler policy censors (``censoring``, of each step until its metrics
+    are logged), and the staleness warning, over the last steps (``stale_watch``)."""
 
     trainer: "PlatoonTinkerRLTrainer"
     state: TrainLoopSharedState
@@ -173,10 +177,7 @@ class StepContext:
     censoring: Censoring
     stale_filter: StaleFilter
     stale_watch: StaleWatch
-    training_client: tinker.TrainingClient
-    loss_fn: str
-    loss_fn_config: dict[str, Any]
-    optimizer_params: tinker.AdamParams
+    learner: Learner
 
     @classmethod
     def build(
@@ -202,8 +203,8 @@ class StepContext:
         recorder = getattr(trainer, "_recorder", None)
         run_bound = trainer.config.train.max_staleness
         settings = entry_settings.run_settings(trainer.config)
-        # The optimizer's parameters, which a test's state, whose steps take no update, may not have.
-        optimizer_params: Any = getattr(shared_state, "optimizer_params", None)
+        # The leader of the loops' policies; in a state a test made as platoon 0.4.0 did, the policy it holds.
+        policy = _test_state_policy(shared_state, trainer.config) or _trained_policy(shared_state)
         return cls(
             trainer=trainer,
             state=shared_state,
@@ -229,24 +230,15 @@ class StepContext:
             # The stale filter's bound for each entry's groups: its own max_staleness, else the run's.
             stale_filter=StaleFilter(run_bound, {label: own.max_staleness for label, own in settings.items()}),
             stale_watch=StaleWatch(run_bound),
-            # What every update of the start sends with, read once: nothing changes them during a start.  The loss as
-            # prepare() reads it.
-            training_client=shared_state.training_client,
-            loss_fn=getattr(trainer.config.train, "loss_fn", "cispo"),
-            loss_fn_config=getattr(trainer.config.train, "loss_fn_config", {}),
-            optimizer_params=optimizer_params,
-        )
-
-    def optimizer_update(self) -> OptimizerUpdate:
-        """A minibatch's optimizer update, through the start's training client, with its loss and optimizer."""
-
-        return OptimizerUpdate(
-            self.trainer,
-            self.state,
-            training_client=self.training_client,
-            loss_fn=self.loss_fn,
-            loss_fn_config=self.loss_fn_config,
-            optimizer_params=self.optimizer_params,
+            # What updates the policy, once per minibatch: through its training client, with its optimizer, under its
+            # objective, each result awaited under its train.*_timeout_seconds deadline.
+            learner=Learner(
+                policy,
+                objective=_objective(policy.spec),
+                timeouts=trainer.config.train,
+                wait=_update_waiter(trainer, shared_state.watchdog),
+                tracker=shared_state.train_tracker,
+            ),
         )
 
     def version(self) -> int:
@@ -274,7 +266,7 @@ class TrainStep:
 
         # We perform num_minibatches weight updates per batch.
         for minibatch_num in range(self.geometry.num_minibatches):
-            update = self.context.optimizer_update()
+            update = self.context.learner.update()
             # Microbatches are used for gradient accumulation. While gradient accumulation
             # may be less important with tinker, this can help performance.
             # Microbatches are processed as they become available, allowing us to overlap
@@ -289,7 +281,9 @@ class TrainStep:
                     break  # a step under a rule closed on its cap with nothing more to send
                 prepared = self.prepare(fill, minibatch_num, microbatch_num)
                 if prepared is not None:
-                    await update.submit(prepared, minibatch_num, microbatch_num)
+                    await update.submit(
+                        prepared.datums, prepared.originals, minibatch=minibatch_num, microbatch=microbatch_num
+                    )
 
             if not update.submitted:
                 logger.warning(
@@ -299,7 +293,7 @@ class TrainStep:
                 continue
 
             await self.before_first_update()
-            await update.apply(self.tally, training_metrics=self._training_metrics)
+            await update.apply(self.tally)
 
         record_workload_metrics(self.tally, self.state.train_tracker)
         self.counting.step_closed()
@@ -448,8 +442,8 @@ class TrainStep:
         # removed from model compute. Moving this filter into the
         # task workflow would change per-depth gradient weights.
         config = self.context.trainer.config
-        loss_fn = getattr(config.train, "loss_fn", "cispo")
-        loss_fn_config = getattr(config.train, "loss_fn_config", {})
+        objective = self.context.learner.objective  # the loss the microbatch is sent under
+        loss_fn, loss_fn_config = objective.loss_fn, objective.loss_fn_config
         if config.train.workflow_config.filter_zero_advantage_datums and objective_is_zero_for_zero_advantages(
             loss_fn, loss_fn_config
         ):
@@ -522,29 +516,17 @@ class TrainStep:
         self, task_rollout_results: list[tinker.Datum], fill: MicrobatchFill, microbatch_num: int
     ) -> list[tinker.Datum]:
         """The datums a microbatch sends to forward_backward, counted: copies without the loss inputs that only the
-        trainer reads, their advantages scaled by the action tokens the microbatch represents."""
+        trainer reads (the objective's side channels), their advantages scaled by the action tokens the microbatch
+        represents."""
 
         self.tally.count_submitted(*get_datum_counts(task_rollout_results))
 
-        # Filter out mask and checkpoint_version from loss_fn_inputs before forward_backward
-        # Neither is needed in forward_backward computation.
-        # mask is redundant since advantages are 0 for masked tokens.
         # Keep original datums for metrics computation (they have mask and logprobs).
+        side_channels = self.context.learner.objective.side_channels
         filtered_datums = [
             tinker.Datum(
                 model_input=datum.model_input,
-                loss_fn_inputs={
-                    k: v
-                    for k, v in datum.loss_fn_inputs.items()
-                    if k
-                    not in (
-                        "mask",
-                        "checkpoint_version",
-                        "traj_depth",
-                        "traj_start",
-                        LOSS_NORMALIZATION_TOKENS_KEY,
-                    )
-                },
+                loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k not in side_channels},
             )
             for datum in task_rollout_results
         ]
@@ -560,7 +542,7 @@ class TrainStep:
 
     @staticmethod
     def _training_metrics(**inputs: Any) -> dict[str, float]:
-        """A microbatch's training metrics, for the update: ``compute_training_metrics`` as this module names it at
+        """A microbatch's training metrics, for the objective: ``compute_training_metrics`` as this module names it at
         each call, where tests patch it."""
 
         return compute_training_metrics(**inputs)
@@ -656,7 +638,9 @@ class TrainStep:
         step_stats["train/step"] = state.train_step
         step_stats["train/epoch"] = state.train_step // state.num_train_batches_per_epoch
         step_stats["progress/done_frac"] = state.train_step / context.end_batch
-        step_stats["optim/lr"] = context.trainer.config.train.optimizer.learning_rate
+        optimizer = context.learner.policy.spec.optimizer  # the settings the policy's optimizer steps with
+        assert optimizer is not None  # policy_specs gives each policy its own
+        step_stats["optim/lr"] = optimizer.learning_rate
         step_stats["timing/batch_total"] = batch_elapsed
         # Non-zero ``ptc_threads_leaked`` means rollout worker threads are gone
         # for good; see ``_ptc_cell_guard_stats``.
@@ -677,6 +661,65 @@ class TrainStep:
             f"Batch time: {batch_elapsed:.1f}s | "
             f"Datums: {self.tally.total_datums}"
         )
+
+
+def _trained_policy(shared_state: TrainLoopSharedState) -> Policy:
+    """The policy the steps train: the leader of the loops' policies."""
+
+    policies = shared_state.policies
+    assert policies is not None  # a shared state given none makes its own
+    return policies[policies.leader]
+
+
+def _objective(spec: PolicySpec) -> PolicyGradient:
+    """The objective the steps update a policy under: the policy-gradient loss its spec names, with its config, which
+    the trainer took from ``train.loss_fn`` and ``train.loss_fn_config`` when it was built
+    (:func:`~platoon.train.policy.spec.policy_specs`).  Its training metrics are this module's
+    ``compute_training_metrics``, which tests patch here (:meth:`TrainStep._training_metrics`)."""
+
+    assert spec.loss_fn is not None and spec.loss_fn_config is not None  # policy_specs names each policy's
+    return PolicyGradient(spec.loss_fn, spec.loss_fn_config, training_metrics=TrainStep._training_metrics)
+
+
+def _test_state_policy(shared_state: Any, config: Any) -> Any:
+    """For a state that a test made as platoon 0.4.0 did: the policy the steps train, given the settings a run's policy
+    has in its spec; None for any other state.  It goes with the shared state's 0.4.0 fields, once the tests make their
+    states with the run's policies.
+
+    A state made without the run's policies (a ``SimpleNamespace`` with the policy's training client, optimizer
+    parameters and optimizer steps) is trained in the policy's place; the policy that a shared state makes from those
+    fields has a spec without the settings.  Each setting the spec lacks is the run's as the config has it now:
+    ``train.optimizer``, ``train.loss_fn`` and ``train.loss_fn_config``, the loss ``cispo`` with no config where a
+    test's config names none (as the step read them before the specs held them)."""
+
+    policies = getattr(shared_state, "policies", None)
+    policy = shared_state if policies is None else policies[policies.leader]
+    spec: PolicySpec = getattr(policy, "spec", None) or PolicySpec(MAIN, model_name="", renderer_name="")
+    settings = (spec.optimizer, spec.loss_fn, spec.loss_fn_config)
+    if policies is not None and all(setting is not None for setting in settings):
+        return None
+    train = config.train
+    policy.spec = dataclasses.replace(
+        spec,
+        optimizer=getattr(train, "optimizer", None) if spec.optimizer is None else spec.optimizer,
+        loss_fn=getattr(train, "loss_fn", "cispo") if spec.loss_fn is None else spec.loss_fn,
+        loss_fn_config=getattr(train, "loss_fn_config", {}) if spec.loss_fn_config is None else spec.loss_fn_config,
+    )
+    return policy
+
+
+def _update_waiter(trainer: "PlatoonTinkerRLTrainer", watchdog: Watchdog | None) -> "Waiter":
+    """How an update's results are awaited: under the trainer's heartbeat, looked up on the trainer at each wait, which
+    logs every 60 s while it waits and feeds ``watchdog``.  A save's waiter (``checkpoints.saving._feeding``) makes the
+    same call without ``heartbeat_interval``, its default; the update has always passed it, so the heartbeat, and a
+    test's replacement of it, is called with the same arguments as before."""
+
+    async def wait(awaitable: Awaitable[Any], *, name: str, total_timeout: float | None = None) -> Any:
+        return await trainer._await_with_heartbeat(
+            awaitable, name=name, heartbeat_interval=60.0, watchdog=watchdog, total_timeout=total_timeout
+        )
+
+    return wait
 
 
 def record_workload_metrics(tally: StepTally, tracker: StatsTracker) -> None:

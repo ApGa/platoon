@@ -7,7 +7,8 @@ beside the training loop that runs it; it reads top to bottom in seven stages an
    (``datums``);
 2. prepare each microbatch to send: the batch transforms (``batch_transforms``), the zero-advantage filter's metrics
    and the microbatch as it is sent (``microbatch``), and the scale of its advantages (``datums``);
-3. update the policy once per minibatch (``update``);
+3. update the policy once per minibatch, through its learner (:mod:`platoon.train.policy.learner`), under its
+   objective (:mod:`platoon.train.objectives`);
 4. commit what became of its groups;
 5. publish the new policy (``publish``);
 6. advance to the next step;
