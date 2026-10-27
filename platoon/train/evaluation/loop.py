@@ -140,7 +140,7 @@ class EvaluationLoop:
         # Each evaluation's metrics break down by these labels of the evaluation's tasks (train.label_by), as a
         # training step's do: eval/<column>/<label>/...
         self.column = label_column(trainer.config)
-        self.labels = metric_labels(getattr(trainer, "eval_dataset", None), self.column, split="evaluation")
+        self.labels = metric_labels(trainer.eval_dataset, self.column, split="evaluation")
         self.reward_keys: set[str] = set()
 
     async def run(self) -> None:
@@ -293,7 +293,7 @@ async def _wait_for_last_step_evaluation(trainer: EvaluatedTrainer, shared_state
     never ran, and one still running from an earlier step was cancelled.  A start that resumed a run at its last
     step trains none, and waits for the evaluation of that step if it is due: one that a crash cut short, which
     the run's evaluations.jsonl does not list.  There is nothing to wait for without an evaluation loop.  A
-    shutdown request ends the wait at once: the loops then stop as before, cancelling the evaluation, and the
+    shutdown request ends the wait at once: the loops then stop, cancelling the evaluation, and the
     final checkpoint is still saved.
     """
 

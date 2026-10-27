@@ -382,6 +382,14 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   trainer has no `_run_training_group`, `_settle_under_rule`, `_read_kept_groups`, `_saved_samplings` or
   `_resume_position` any more. The lines of the per-task statistics' start (`This start keeps no per-task statistics
   ...`) come from `platoon.train.dispatch.source`.
+- `platoon.train.components` no longer defines `DatasetLoader`, `TaskLoader`, `RolloutFn`, `RewardProcessor`,
+  `WorkflowFactory`, `TrainerConfigClass` and `LossFn`, which nothing used. `ClientThroughputMonitor` no longer has
+  `record_dequeue_to_first_model_call`, which nothing called.
+- `GroupRolloutWorkflow` declares at class level the defaults of what its constructor sets (`stats_scope`,
+  `rollout_isolation`, `label_by`, `packages`, `rollout_fn_ref`, `subagent_datum_sampler`), for a subclass that skips
+  the constructor. A group reads the settings that a partial workflow config may lack through
+  `platoon.train.workflow.settings.GroupSettings`: a missing one reads as `WorkflowConfig`'s default, which is the
+  default each reader had.
 - **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
   format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
   `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),

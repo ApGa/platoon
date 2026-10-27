@@ -1,5 +1,6 @@
 """What a member's rollout runs with: its worker request (the task, the rollout config, the model binding, the
-conversion policy, the budgets) and where a worker's files go.
+conversion policy, the budgets), and where a worker's files go.  The request is built as the member starts
+(``arun_episode_single``), for a rollout in process or in a rollout worker.
 
 The functions here that take the workflow first are its methods still: ``GroupRolloutWorkflow`` keeps each under its
 name, so to replace one, replace the method, on the class or an instance, not the function.
@@ -22,6 +23,7 @@ from platoon.train.workers.protocol import (
     RolloutWorkerRequest,
     ipc_dir,
 )
+from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import held_slot
 
 if TYPE_CHECKING:
@@ -29,6 +31,9 @@ if TYPE_CHECKING:
 
 
 def _slug(workflow: "GroupRolloutWorkflow", value: str) -> str:
+    """``value`` (a task id) as the start of a request id, which names a worker's files: its characters other than
+    letters, digits and ``._-`` replaced by ``-``."""
+
     return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(value)).strip("-") or "task"
 
 
@@ -41,19 +46,15 @@ def _model_binding(workflow: "GroupRolloutWorkflow", checkpoint_version: int) ->
     return model_binding(
         workflow.model_info,
         binding_path=workflow._binding_path if workflow._isolation == "process" else "",
-        follow_poll_seconds=float(getattr(workflow.config, "worker_binding_poll_seconds", 5.0)),
+        follow_poll_seconds=GroupSettings(workflow.config).worker_binding_poll_seconds,
         checkpoint_version=checkpoint_version,
     )
 
 
 def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int) -> RolloutWorkerRequest:
-    """Everything the parent must decide before a rollout can run.
-
-    Identical to what ``arun_episode_single`` used to do inline: resolve
-    the task parent-side (which also removes the shared-mutable-``Task``
-    aliasing some plugin datasets have), apply ``max_steps``, snapshot the
-    checkpoint version and join ``output_dir`` with it.
-    """
+    """Everything the parent must decide before a rollout can run, in process or in a worker.  It resolves the task
+    parent-side, which also removes the shared-mutable-``Task`` aliasing some plugin datasets have.  It applies
+    ``max_steps``, snapshots the checkpoint version and joins ``output_dir`` with it."""
 
     task_id = data["task_id"]
     task = workflow.get_task_fn(task_id)
@@ -77,8 +78,9 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
         ready_path = os.path.join(scratch, f"{request_id}.ready")
     else:
         response_path = ready_path = ""
+    settings = GroupSettings(workflow.config)
     depth_level_weighting = workflow.config.depth_level_weighting
-    depth_discount = getattr(workflow.config, "depth_level_discount_gamma", None) is not None
+    depth_discount = settings.depth_level_discount_gamma is not None
     return RolloutWorkerRequest(
         protocol_version=PROTOCOL_VERSION,
         request_id=request_id,
@@ -90,7 +92,7 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
         model=workflow._model_binding(checkpoint_version),
         conversion=ConversionPolicy(
             filter_errors=workflow._filter_errors(),
-            filter_message_actions=getattr(workflow.config, "filter_message_actions", False),
+            filter_message_actions=settings.filter_message_actions,
             include_traj_depth=depth_level_weighting or depth_discount,
             include_traj_start=depth_level_weighting,
             reward_processor_is_default=workflow._reward_processor_is_default,
@@ -99,11 +101,11 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
         ),
         response_path=response_path,
         ready_path=ready_path,
-        startup_budget_seconds=float(getattr(workflow.config, "worker_startup_budget_seconds", 300.0)),
+        startup_budget_seconds=settings.worker_startup_budget_seconds,
         rollout_budget_seconds=workflow._rollout_budget_seconds(rollout_config, task),
-        rss_soft_limit_bytes=int(getattr(workflow.config, "worker_rss_soft_limit_bytes", 24 * 1024**3)),
-        python_env_isolation=bool(getattr(workflow.config, "worker_python_env_isolation", False)),
-        packages=tuple(getattr(workflow, "packages", ())),
+        rss_soft_limit_bytes=settings.worker_rss_soft_limit_bytes,
+        python_env_isolation=settings.worker_python_env_isolation,
+        packages=tuple(workflow.packages),
         sandbox_labels=sandbox_cleanup.labels(),
         signal_first_call=held_slot() is not None,
     )
@@ -124,8 +126,9 @@ def _rollout_budget_seconds(
     rollout proper, so its alarm must outlast the rollout's time limit.
     """
 
-    grace = float(getattr(workflow.config, "worker_finalize_grace_seconds", 120.0))
-    unbounded = float(getattr(workflow.config, "worker_unbounded_rollout_budget_seconds", 24 * 3600.0))
+    settings = GroupSettings(workflow.config)
+    grace = settings.worker_finalize_grace_seconds
+    unbounded = settings.worker_unbounded_rollout_budget_seconds
     if rollout_config.timeout is not None:
         overhead = rollout_overhead_s(task) if task is not None else 0.0
         return float(rollout_config.timeout) + overhead + grace
@@ -139,7 +142,9 @@ def _rollout_budget_seconds(
 
 
 def _ipc_dir(workflow: "GroupRolloutWorkflow") -> str:
-    cached = getattr(workflow, "_ipc_dir_cache", None)
+    """The node-local directory of the workflow's rollout workers' files, made at the first call."""
+
+    cached = workflow._ipc_dir_cache
     if cached is None:
         cached = ipc_dir()
         workflow._ipc_dir_cache = cached
@@ -152,18 +157,18 @@ def _warm_up_request(workflow: "GroupRolloutWorkflow") -> RolloutWorkerRequest:
 
     return RolloutWorkerRequest(
         protocol_version=PROTOCOL_VERSION,
-        request_id=f"{getattr(workflow, 'stats_scope', 'train')}-warm-up",
+        request_id=f"{workflow.stats_scope}-warm-up",
         task_id="",
         rollout_number=0,
         task=Task(id="warm-up"),
         rollout_config={},
-        rollout_fn_ref=getattr(workflow, "rollout_fn_ref", None) or "",
+        rollout_fn_ref=workflow.rollout_fn_ref or "",
         model=workflow._model_binding(0),
         conversion=ConversionPolicy(),
         response_path="",
         ready_path="",
-        startup_budget_seconds=float(getattr(workflow.config, "worker_startup_budget_seconds", 300.0)),
-        packages=tuple(getattr(workflow, "packages", ())),
+        startup_budget_seconds=GroupSettings(workflow.config).worker_startup_budget_seconds,
+        packages=tuple(workflow.packages),
     )
 
 
@@ -176,4 +181,6 @@ def _worker_log_dir(workflow: "GroupRolloutWorkflow", checkpoint_version: int) -
 
 
 def _binding_path(workflow: "GroupRolloutWorkflow") -> str:
+    """The file of the published sampling client, which the workflow's rollout workers follow."""
+
     return os.path.join(workflow._ipc_dir(), "model_binding.pkl")

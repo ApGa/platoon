@@ -27,10 +27,13 @@ from typing import TYPE_CHECKING, Any
 from platoon.train.dispatch.settled import _count_every_reward_key
 from platoon.train.labels import metric_prefix
 from platoon.train.task_stats import MemberResult
+from platoon.train.workflow.settings import GroupSettings
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
+    from platoon.train.config_defs import WorkflowConfig
     from platoon.train.dispatch.dispatcher import Dispatcher
+    from platoon.train.entry_settings import EntrySettings
     from platoon.train.step.collect import StepTally
     from platoon.train.task_records import TaskRecorder
     from platoon.train.trainer.state import TrainLoopSharedState
@@ -209,7 +212,11 @@ class Censoring:
     which say where a straggler policy applies; ``threshold(entry)`` is the success threshold of an entry's groups."""
 
     def __init__(
-        self, settings: Mapping[str, Any], run: Any, *, threshold: Callable[[str | None], float] | None = None
+        self,
+        settings: Mapping[str, "EntrySettings"],
+        run: "WorkflowConfig",
+        *,
+        threshold: Callable[[str | None], float] | None = None,
     ) -> None:
         self._settings = settings
         self._run = run
@@ -237,11 +244,9 @@ class Censoring:
         return found
 
     def _policy_applies(self, entry: str | None, label: str | None) -> bool:
-        """Whether a straggler policy cuts the groups of ``entry`` and ``label``, as ``GroupRolloutWorkflow`` reads
-        it: the label's own policy in ``straggler_policies``, else the entry's ``straggler_timeout_seconds``."""
+        """Whether a straggler policy cuts the groups of ``entry`` and ``label``: the policy their members run under
+        (:meth:`~platoon.train.workflow.settings.GroupSettings.straggler_policy`) sets a timeout."""
 
         own = self._settings.get(entry) if entry is not None else None
-        workflow = own.train if own is not None else self._run
-        policy = workflow.straggler_policies.get(label)
-        timeout = policy.timeout_seconds if policy is not None else workflow.straggler_timeout_seconds
+        timeout, _ = GroupSettings(own.train if own is not None else self._run).straggler_policy(label)
         return timeout is not None

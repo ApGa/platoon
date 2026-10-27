@@ -1,17 +1,16 @@
 """The dispatcher of a training run: it starts each rollout group when the group can start (RFC 0019, section 4).
 
-It replaces the producer that drew a batch's rows ahead of the rollout workers, the pending queue they took them
-from, and the pool of long-lived workers: :meth:`Dispatcher.run` draws a task only when its group can start, and starts
-each group as a task of its own.  A group starts when three things allow it:
+The start's rollout source (:mod:`platoon.train.dispatch.source`) runs it beside the training loop.
+:meth:`Dispatcher.run` draws a task only when its group can start.  It starts each group as a task of its own, whose
+output settles into the queue the training steps dequeue from.  A group starts when three things allow it:
 
-- **The horizon.**  With ``k = train.max_staleness``, the groups dispatched and not yet dequeued by a step (the
-  pipeline: running, or settled and waiting for a step), plus those the current step has dequeued, stay below
-  ``(k + 1) × batch_size``: the lookahead the producer kept, which lets the rollouts of a step run at most ``k`` steps
-  ahead of training.  The count drops back when a step starts, after its policy is published.  Without a bound there
-  is no horizon.  Either way the dispatcher never starts more groups than the run's remaining steps consume, so no
-  group runs past the plan (under a group admission rule, a step that closes short consumes fewer: see below).  With
-  ``k = 0`` a step trains exactly the groups drawn for it, as the producer had it, unless a label's limit holds one of
-  them back.
+- **The horizon.**  Let ``k`` be ``train.max_staleness``.  The pipeline is the groups dispatched and not yet dequeued
+  by a step: running, or settled and waiting for a step.  The pipeline plus the groups the current step has dequeued
+  stay below ``(k + 1) × batch_size``, so the rollouts of a step run at most ``k`` steps ahead of training.  The count
+  drops back when a step starts, after its policy is published.  Without a bound there is no horizon.  Either way the
+  dispatcher never starts more groups than the run's remaining steps consume, so no group runs past the plan (under a
+  group admission rule, a step that closes short consumes fewer: see below).  With ``k = 0`` a step trains exactly the
+  groups drawn for it, unless a label's limit holds one of them back.
 - **Rollout permits** (``train.max_concurrent_rollouts``, :mod:`platoon.train.dispatch.permits`): a group reserves its
   entry's group size of them, first come first served, and starts once the permits can grant it something: all of
   them at once, or, under ``train.permit_release: rollout`` with a workflow that runs its rollouts on the lease, the
@@ -28,9 +27,9 @@ directly is drawn as it is.
 **Adaptive samplers.**  An adaptive sampler (one that reads the run's per-task statistics, such as ``pass_rate``)
 decides only when a group can start: within the horizon, with some label of its pool below its limit, and with the
 group's rollout permits already held, so that a decision is never made a group's duration before its group starts.
-Under ``weighted``, a slot whose entry samples adaptively consumes its position at once and waits as a **token** in
-the entry's own first-in, first-out queue until the entry can start a group (past the backlog limit it is skipped, and
-its position is used up); the token being started, which waits for its permits, is saved with the dispatcher's state
+Under ``weighted``, a slot whose entry samples adaptively consumes its position at once.  It waits as a **token** in
+the entry's own first-in, first-out queue until the entry can start a group; past the backlog limit it is skipped, and
+its position is used up.  The token being started waits for its permits, and is saved with the dispatcher's state
 first among its entry's, so no full save loses its position.  An adaptive run sampler decides over the whole pool,
 holding permits for the run's largest group, and its draw takes the next position when it binds.  A decision that
 finds nothing eligible decides nothing, and the dispatcher waits for a change.
@@ -59,8 +58,8 @@ each step.
 dispatcher keeps every draw no committed step consumed (outstanding) until a committed step consumes it.
 
 **Group admission** (RFC 0019, section 6; :mod:`platoon.train.admissions`).  In a run where some entry's rule is not
-``all``, a group is decided when it settles: an admitted one goes to the result queue as before; a rejected or failed
-one leaves the outstanding draws, and only a marker with its statistics goes to the queue (:meth:`Dispatcher.reject`).
+``all``, a group is decided when it settles.  An admitted group goes to the result queue.  A rejected or failed one
+leaves the outstanding draws, and only a marker with its statistics goes to the queue (:meth:`Dispatcher.reject`).
 A rejected group that carries datums frees its slot of the horizon at once, so that the next group starts while the
 trainer trains.  A failed group, or one that settled without a datum (``no_results`` and the like), keeps its slot
 until a step dequeues its marker, as in all mode: such groups can end at once (an outage), and freeing their slots
@@ -199,19 +198,23 @@ GroupRunner = Callable[[BoundDraw, DrawLease], Awaitable[None]]
 
 class Dispatcher:
     """Starts a training run's rollout groups as the horizon, the rollout permits and the label limits allow (see the
-    module docstring).
+    module docstring).  Its arguments:
 
-    ``rows`` reads each row's entry, label and group size and holds the run's rollout permits; ``samplers`` draws
-    each position of the run's order (:class:`~platoon.train.sampler_runtime.SamplerSet`), or ``order(position)``
-    gives the row at each position, drawn as it is; ``steps`` the training steps this start runs; ``labels`` every
-    label of the run's training tasks, which must be complete: the dispatcher draws only while one of them has room, and
-    learns another one only by drawing it, so a label it is not given never counts as having room before its first
-    draw; ``recorder`` the run's per-task statistics, told of each draw, at the version of the sampled policy
-    (``leader``), and of each skip; ``versions()`` the policies' versions now (``{main: v}``), and ``step`` the training
-    steps committed when this start began, which the samplers' contexts carry.  ``start`` numbers this start's draws,
-    and the order starts at ``next_position``.  ``groups_per_step``, the cap of a run under a group admission rule,
-    makes it count its steps as the module docstring says (None: every group counts toward the batch).
-    ``permit_release`` is ``train.permit_release``."""
+    - ``rows`` reads each row's entry, label and group size, and holds the run's rollout permits.
+    - ``samplers`` draws each position of the run's order (:class:`~platoon.train.sampler_runtime.SamplerSet`).
+      Instead, ``order(position)`` may give the row at each position, which is drawn as it is.
+    - ``steps``: the training steps this start runs.
+    - ``labels``: every label of the run's training tasks.  The list must be complete: the dispatcher draws only while
+      one of them has room, and learns of another label only by drawing it.  So a label it is not given never counts
+      as having room before its first draw.
+    - ``recorder``: the run's per-task statistics.  It is told of each skip, and of each draw at the version of the
+      sampled policy (``leader``).
+    - ``versions()``: the policies' versions now (``{main: v}``); ``step``: the training steps committed when this start
+      began.  The samplers' contexts carry both.
+    - ``start`` numbers this start's draws, and the order starts at ``next_position``.
+    - ``groups_per_step``: the cap of a run under a group admission rule.  With it, the dispatcher counts its steps as
+      the module docstring says (None: every group counts toward the batch).
+    - ``permit_release`` is ``train.permit_release``."""
 
     def __init__(
         self,
@@ -462,11 +465,15 @@ class Dispatcher:
         return shares
 
     def _horizon_has_room(self, label: str | None = None, *, waiting: bool = False) -> bool:
-        """Whether another group may be dispatched: the run's remaining steps consume more than the groups in the
-        pipeline and those the current step dequeued, and so does the horizon, ``(k + 1) × batch_size``, less the slots
-        held for the capped labels' next groups (:meth:`_held`), those held for ``label`` excepted for one of its
-        ``waiting`` draws, which they are held for; and, under a group admission rule at ``k = 0`` or on the last step,
-        the current step's cap more than what it counted, the groups in the pipeline and its queued markers."""
+        """Whether another group may be dispatched.  It may when all of these hold:
+
+        1. The run's remaining steps consume more groups than those in the pipeline and those the current step
+           dequeued.
+        2. Under a group admission rule, at ``k = 0`` or on the last step: the current step's cap is more than what it
+           counted, the groups in the pipeline and its queued markers.
+        3. The horizon, ``(k + 1) × batch_size``, is more than those groups and the slots held for the capped labels'
+           next groups (:meth:`_held`).  For one of ``label``'s ``waiting`` draws, the slots held for ``label`` do not
+           count: they are held for that draw.  Without a bound there is no horizon."""
 
         in_use = self.pipeline + self.admitted
         if in_use >= self._steps_left * self.batch_size:
@@ -527,12 +534,15 @@ class Dispatcher:
         return any(self._has_room(label) for label in self._labels)
 
     def _choose(self) -> BoundDraw | Token | _Ask | None:
-        """The next item to start, the horizon's room for it: the oldest waiting draw whose label has room, or token
-        whose entry can start; else, under an adaptive run sampler, a decision over the whole pool (:data:`ASK`) while
-        some label has room; else a new draw of the order, while some label has room (a new draw whose label is at its
-        limit waits, or past its backlog is skipped; a slot owed to an adaptive entry becomes a token, which starts at
-        once when the entry can start and none of its tokens waits, else waits in its entry's queue, or past the
-        backlog limit is skipped).  None when nothing can start now."""
+        """The next item to start, with room in the horizon for it; None when nothing can start now.  In this order:
+
+        1. The oldest of the waiting draws whose label has room and the tokens whose entry can start.
+        2. Else, under an adaptive run sampler, a decision over the whole pool (:data:`ASK`), while some label has
+           room.
+        3. Else a new draw of the order, while some label has room.  A new draw whose label is at its limit waits, or
+           is skipped past its backlog.  A slot owed to an adaptive entry becomes a token.  The token starts at once
+           when its entry can start and none of its tokens waits; else it waits in its entry's queue, or is skipped
+           past the backlog limit."""
 
         best: deque[Any] | None = None
         for label, waiting in self._waiting.items():
@@ -635,13 +645,20 @@ class Dispatcher:
         run_group: GroupRunner,
         stop: asyncio.Event | None = None,
     ) -> bool:
-        """Start the group of a token, or of a decision of the run's adaptive sampler: reserve the horizon's slot and
-        the group's rollout permits (the token's entry's group size, or the run's largest for a decision over the
-        pool), and once the group can start (:meth:`_reserve`) ask the sampler, bind its draw (a decision over the pool
-        takes the next position), resize the reservation to the drawn task's group size, take its label's slot and
-        start the group, all at once.  The token being started is saved first among its entry's while it waits for its
-        permits; a stop request or a cancellation that comes meanwhile puts it back, first in its queue, and so does a
-        decision that finds nothing eligible.  False when nothing was decided."""
+        """Start the group of a token, or of a decision of the run's adaptive sampler.  False when nothing was decided.
+
+        It reserves the horizon's slot and the group's rollout permits: the token's entry's group size, or the run's
+        largest for a decision over the pool.  Once the group can start (:meth:`_reserve`), it does all of this at
+        once:
+
+        1. ask the sampler;
+        2. bind its draw (a decision over the pool takes the next position);
+        3. resize the reservation to the drawn task's group size;
+        4. take its label's slot and start the group.
+
+        While it waits for its permits, the token being started is saved first among its entry's.  A stop request or a
+        cancellation that comes meanwhile puts it back, first in its queue; so does a decision that finds nothing
+        eligible."""
 
         token = item if isinstance(item, Token) else None
         entry = token.entry if token is not None else None
@@ -851,15 +868,23 @@ class Dispatcher:
     # --- checkpoints and resume ---------------------------------------------------------------------------------------
 
     def state(self) -> dict[str, Any]:
-        """What a full checkpoint saves of the dispatcher, beside the groups it keeps (:meth:`kept`): this start's
-        number, the sampler and the fingerprint of its inputs, the next position of the order, the outstanding draws
-        (``[start, seq, task id, position]`` each, in the order they were drawn), with the row each drew and the
-        sampler that drew it (``drawn``: ``[start, seq, pool index, sampler]`` each, in the same order; the index is
-        None for a row an order handed in), each label's waiting draws (``[start, seq]`` each, oldest first), each
-        adaptive entry's tokens (``tokens``: positions, oldest first, the one waiting for its permits first), and the
-        samplers' counts and states (``samplers``), and the positions of the tokens whose slot the run sampler's
-        fallback handed (``fallback_slots``: their draws are the run's fallback).  A resume draws again the outstanding
-        draws that neither wait nor are kept, from the rows they drew."""
+        """What a full checkpoint saves of the dispatcher, beside the groups it keeps (:meth:`kept`):
+
+        - ``start``, ``sampler`` and ``fingerprint``: this start's number, its sampler and the fingerprint of its
+          inputs;
+        - ``next_position``: the next position of the order;
+        - ``outstanding``: the outstanding draws, ``[start, seq, task id, position]`` each, in the order they were
+          drawn;
+        - ``drawn``: the row each of them drew and the sampler that drew it, ``[start, seq, pool index, sampler]``
+          each, in the same order (the index is None for a row an order handed in);
+        - ``waiting``: each label's waiting draws, ``[start, seq]`` each, oldest first;
+        - ``tokens``: the positions of each adaptive entry's tokens, oldest first, the one waiting for its permits
+          first;
+        - ``fallback_slots``: the positions of the tokens whose slot the run sampler's fallback handed (their draws
+          are the run's fallback);
+        - ``samplers``: the samplers' counts and states.
+
+        A resume draws again the outstanding draws that neither wait nor are kept, from the rows they drew."""
 
         outstanding = self._outstanding.items()
         return {
@@ -941,12 +966,16 @@ class Dispatcher:
         self, tokens: Mapping[str, Sequence[int]], *, version: int, fallbacks: Container[int] = ()
     ) -> dict[str, int]:
         """Take up the tokens a checkpoint saved (:meth:`state`'s ``tokens``: each entry's positions, the one that
-        waited for its permits first), after the outstanding draws: an entry whose sampler is adaptive gets them back
-        in its queue, in order; one whose sampler is static now binds them by it, in order, as waiting draws of their
-        labels; and those of an entry that no longer gets slots, or left the run, are dropped, each with a
-        ``slot_skipped`` event (``no_slots``, ``entry_left``).  A token whose position is in ``fallbacks``
-        (``fallback_slots``) had its slot from the run sampler's fallback, and its draw is the run's fallback.  Returns
-        how many tokens were restored, bound and dropped."""
+        waited for its permits first), after the outstanding draws.  Returns how many tokens were restored, bound and
+        dropped.
+
+        - An entry whose sampler is adaptive gets its tokens back in its queue, in order.
+        - An entry whose sampler is now static binds them by it, in order, as waiting draws of their labels.
+        - The tokens of an entry that no longer gets slots, or left the run, are dropped, each with a ``slot_skipped``
+          event (``no_slots``, ``entry_left``).
+
+        A token whose position is in ``fallbacks`` (``fallback_slots``) had its slot from the run sampler's fallback,
+        and its draw is the run's fallback."""
 
         found = {"restored": 0, "bound": 0, "dropped": 0}
         for entry, positions in tokens.items():

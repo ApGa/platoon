@@ -295,7 +295,7 @@ it.
 | M3 renderer | `chat_template` parses with the chosen parser; reasoning from the prompt | `tests/renderers`: the 864 saved token fixtures, and `test_tool_parsing_templates.py` on every cached template, including the four Qwen drops | |
 | M4 loud failures | Unparsed calls in the content, counts in the generation record | `tests/gateway`, `tests/train/tinker/test_gateway_tools_routing.py`, the CodeAct goldens | |
 | M5 start and lock | Chosen in `build_tinker_llm` and by the CLI, recorded in `lock.json`, exit 78 | `tests/test_cli_tool_call_parsing.py` | |
-| M6 metrics | Per-trajectory sums and rollout statistics | `tests/train/tinker/test_tool_call_metrics.py` | |
+| M6 metrics | Per-trajectory sums and rollout statistics | `tests/train/workflow/test_tool_call_metrics.py` | |
 | M7 validation | A Qwen3.6 or Qwen3.8 training run through a self-hosted server | Tool-call counts per step against the same samples parsed by the old parser; no unparsed spikes | |
 
 ## Open questions

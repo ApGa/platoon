@@ -1,14 +1,14 @@
 """One rollout's body -- the single implementation both hosts use.
 
-``GroupRolloutWorkflow.arun_episode_single`` used to inline this.  It now
-builds a :class:`RolloutWorkerRequest` and hands it either to this function
+``GroupRolloutWorkflow.arun_episode_single`` builds a
+:class:`RolloutWorkerRequest` and hands it either to this function
 directly (``rollout_isolation: inprocess``) or to a worker process that calls
 exactly this function (``rollout_isolation: process``).  **One code path, two
 hosts** is what makes in-process mode a real fallback instead of a divergent
 branch that rots.
 
-The branch order below reproduces the pre-split behaviour exactly, including
-``add_datum_funnel`` immediately after conversion.  See
+The rollout, its conversion into datums and ``add_datum_funnel`` run here in
+that order, the funnel immediately after conversion.  See
 :mod:`platoon.train.workers.workload` for why omitting it is total data
 loss rather than a metrics regression.
 """
@@ -49,7 +49,7 @@ WORKER_ENV_MARKER = "PLATOON_TINKER_ROLLOUT_WORKER"
 
 
 def default_reward_processor(trajectory: dict) -> tuple[float, dict]:
-    """The historical default: the trajectory's own reward, no components."""
+    """The default: the trajectory's own reward, no components."""
 
     return trajectory["reward"], {}
 

@@ -661,7 +661,8 @@ async def test_processes_the_agent_left_running_cannot_race_the_tests(service: H
             "bash",
             {
                 "command": f"nohup sh -c '{symlink_loop}' >/dev/null 2>&1 & echo $! > /tmp/loop.pid; "
-                f"setsid sh -c 'echo $$ > /tmp/detached.pid; {copy_loop}' </dev/null >/dev/null 2>&1 & sleep 0.2"
+                f"setsid sh -c 'echo $$ > /tmp/detached.pid; {copy_loop}' </dev/null >/dev/null 2>&1 & "
+                "while [ ! -s /tmp/detached.pid ]; do sleep 0.01; done"  # a busy runner can take longer than any sleep
             },
         )
         assert not started.is_error, _text(started)
@@ -693,7 +694,11 @@ async def test_a_process_left_rewriting_reward_txt_during_grading_earns_nothing(
     session = await _open(service, "hello-file")
     try:
         started = await session.call_tool(
-            "bash", {"command": f"{launch} sh -c '{writer}' </dev/null >/dev/null 2>&1 & sleep 0.2"}
+            "bash",
+            {
+                "command": f"{launch} sh -c '{writer}' </dev/null >/dev/null 2>&1 & "
+                "while [ ! -s /tmp/writer.pid ]; do sleep 0.01; done"
+            },
         )
         assert not started.is_error, _text(started)
         writer_pid = int(_host(session, "/tmp/writer.pid").read_text())

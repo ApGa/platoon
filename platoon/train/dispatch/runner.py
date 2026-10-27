@@ -22,11 +22,12 @@ from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
     from platoon.train.dispatch.source import RolloutSource
+    from platoon.train.trainer.signals import Watchdog
 
 logger = logging.getLogger(__name__)
 
 
-def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracker, watchdog: Any) -> None:
+def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracker, watchdog: "Watchdog | None") -> None:
     """What a group that ended adds to the statistics: its time, with the group's own statistics when its report gives
     them (the step that consumes it records them, :func:`~platoon.train.dispatch.settled._record_group_stats`), else in
     ``tracker`` at once (a failed group, or a workflow's plain list); a log line for a slow one; and a watchdog
@@ -47,7 +48,9 @@ def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracke
         watchdog.heartbeat()
 
 
-async def _run_group(workflow: RolloutWorkflow, row: dict[str, Any], *, watchdog, tracker) -> Any:
+async def _run_group(
+    workflow: RolloutWorkflow, row: dict[str, Any], *, watchdog: "Watchdog | None", tracker: StatsTracker
+) -> Any:
     """Run the group of ``row`` and return its workflow's output; None for a workflow that raised, or whose own
     await was cancelled while this group was not (an inner task it awaited was cancelled): the group failed,
     which ``tracker`` records at once (``rollout_completion/failed_rollouts``), no group output carrying it to the

@@ -25,7 +25,7 @@ import asyncio
 import dataclasses
 import logging
 import time
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -76,6 +76,7 @@ from platoon.train.workflow.protocol import RolloutWorkflow
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
+    from platoon.train.dispatch.dispatcher import Dispatcher
     from platoon.train.policy.checkpoints import Waiter
     from platoon.train.task_records import TaskRecorder
     from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
@@ -153,14 +154,23 @@ async def shutdown_loops(trainer: "PlatoonTinkerRLTrainer", shared_state: TrainL
 
 @dataclass(frozen=True)
 class StepContext:
-    """What the steps of a start share, set up before the first: the trainer, whose seams they call, and the loops'
-    shared state; the training workflow, the queue its groups settle into, and the start's draws with the dispatcher
-    that starts their groups (``dispatch``), which the steps tell what they dequeued and committed; the start's first
-    and end batch; the labels the metrics break down by (``column``'s values, and each one's metric prefix) and the
-    labels' limits; the run's per-task statistics (``recorder``) and group admission rules, when it keeps them; the
-    stale filter; the learner that updates the policy the steps train, under its objective; and the run's clock, which
-    each step's end advances.  Two of them count as the steps go: what the straggler policy censors (``censoring``, of
-    each step until its metrics are logged), and the staleness warning, over the last steps (``stale_watch``)."""
+    """What the steps of a start share, set up before the first step:
+
+    - ``trainer``, whose seams the steps call, and ``state``, what the loops share;
+    - ``workflow``, the training workflow, and ``queue``, the queue its groups settle into;
+    - ``dispatch``: the start's draws and the dispatcher that starts their groups.  The steps tell it what they
+      dequeued and committed;
+    - ``start_batch`` and ``end_batch``: the start's first batch and its end;
+    - ``column``, ``labels`` and ``prefixes``: the labels the metrics break down by (``column``'s values) and each
+      one's metric prefix; ``group_limits``: the labels' limits;
+    - ``recorder`` and ``admissions``: the run's per-task statistics and its group admission rules, when it keeps
+      them;
+    - ``stale_filter``: each entry's bound on a group's staleness;
+    - ``learner``: what updates the policy the steps train, under its objective;
+    - ``clock``: the run's clock, which the end of each step advances.
+
+    Two of them count as the steps go.  ``censoring`` counts what the straggler policy censors in a step, until the
+    step's metrics are logged.  ``stale_watch`` counts the stale groups of the last steps, for the staleness warning."""
 
     trainer: "PlatoonTinkerRLTrainer"
     state: TrainLoopSharedState
@@ -172,7 +182,7 @@ class StepContext:
     column: str
     labels: Sequence[str]
     prefixes: dict[str, str]
-    group_limits: Any
+    group_limits: Mapping[str, int]
     recorder: "TaskRecorder | None"
     admissions: AdmissionSet | None
     censoring: Censoring
@@ -191,10 +201,10 @@ class StepContext:
         end_batch: int,
         *,
         queue: "asyncio.Queue[_Settled]",
-        dispatcher: Any,
+        dispatcher: "Dispatcher | None",
         tasks: Any,
         column: str,
-        group_limits: Any,
+        group_limits: Mapping[str, int],
     ) -> "StepContext":
         """The context of a start's steps, once its dispatcher started (``dispatcher``; None when a test replaced the
         trainer's ``_dispatch``), over every task the run draws from (``tasks``)."""
@@ -202,7 +212,7 @@ class StepContext:
         # Each step's metrics break down by these labels of the training tasks (train.label_by), also at zero: those of
         # every task the run draws from, a weighted order's tasks that its first epoch leaves out included.
         labels = metric_labels(tasks, column)
-        recorder = getattr(trainer, "_recorder", None)
+        recorder = trainer._recorder
         run_bound = trainer.config.train.max_staleness
         settings = entry_settings.run_settings(trainer.config)
         # The leader of the loops' policies; in a state a test made as platoon 0.4.0 did, the policy it holds.
@@ -222,7 +232,7 @@ class StepContext:
             recorder=recorder,
             # A run under a group admission rule (RFC 0019, section 6): each step trains the first batch_size admitted
             # groups it dequeues that are not stale, and closes once it has counted its cap (platoon.train.admissions).
-            admissions=getattr(trainer, "_admissions", None),
+            admissions=trainer._admissions,
             # What the straggler policy censors of the groups each step dequeues, and the warning of stale groups.
             censoring=Censoring(
                 settings,
@@ -266,15 +276,11 @@ class TrainStep:
         """The step, top to bottom: collect each microbatch, prepare it and send it, and update the policy once per
         minibatch; then commit, publish the policy, move on to the next step and log."""
 
-        # We perform num_minibatches weight updates per batch.
+        # One optimizer update per minibatch.
         for minibatch_num in range(self.geometry.num_minibatches):
             update = self.context.learner.update()
-            # Microbatches are used for gradient accumulation. While gradient accumulation
-            # may be less important with tinker, this can help performance.
-            # Microbatches are processed as they become available, allowing us to overlap
-            # rollout sampling with training even within the same batch.
-            # This is a second-level of pipelining orthogonal to the async/off-policy
-            # pipelining at the batch level.
+            # Its microbatches accumulate gradients, each sent as soon as its groups are collected, so that training
+            # overlaps the rollouts of the same batch (besides the overlap across batches, train.max_staleness).
             for microbatch_num in range(self.geometry.num_microbatches):
                 if self.counting.closed:  # a step under a rule that counted its cap dequeues no more
                     break
@@ -553,7 +559,7 @@ class TrainStep:
         """Before the run's first update: an evaluation of its starting policy (eval.at_start) must sample that
         policy throughout."""
 
-        if self.context.start_batch == 0 and getattr(self.state, "optimizer_steps", 0) == 0:
+        if self.context.start_batch == 0 and self.state.optimizer_steps == 0:
             await self.context.trainer._wait_for_starting_policy_evaluation(self.state)
 
     def commit(self) -> None:
@@ -599,13 +605,11 @@ class TrainStep:
     def log(self) -> None:
         """The step's metrics, in the order the tracker takes them; then the logged stats and the step's line."""
 
-        # Track total batch time
         batch_elapsed = time.perf_counter() - self.started
         context, tally, totals, state = self.context, self.tally, self.totals, self.state
         tracker = state.train_tracker
         version = context.version()
 
-        # Log stats for this step
         record_batch_stats(tracker, tally, totals, context.column)
         if context.recorder is not None:
             record_task_metrics(tracker, context.recorder, tally, context.prefixes, version)
@@ -644,7 +648,7 @@ class TrainStep:
         # went, and whether this process (plus its rollout workers) is CPU
         # saturated.  See ``platoon.train.tinker.rollout_metrics``.
         step_stats.update(client_step_metrics("train"))
-        if (pruner := getattr(context.trainer, "_recovery_pruner", None)) is not None:
+        if (pruner := context.trainer._recovery_pruner) is not None:
             # Recovery checkpoint pruning: paths deleted and deletes failed since the last step, and what is kept.
             step_stats.update(pruner.step_metrics())
         state.stats_logger.log(step=state.train_step, stats=step_stats)
@@ -731,9 +735,9 @@ class _StateClock:
 
 def _update_waiter(trainer: "PlatoonTinkerRLTrainer", watchdog: Watchdog | None) -> "Waiter":
     """How an update's results are awaited: under the trainer's heartbeat, looked up on the trainer at each wait, which
-    logs every 60 s while it waits and feeds ``watchdog``.  A save's waiter (``checkpoints.saving._feeding``) makes the
-    same call without ``heartbeat_interval``, its default; the update has always passed it, so the heartbeat, and a
-    test's replacement of it, is called with the same arguments as before."""
+    logs every 60 s while it waits and feeds ``watchdog``.  It passes ``heartbeat_interval=60.0`` explicitly, unlike a
+    save's waiter (``checkpoints.saving._feeding``), which takes the default: a test that replaces the heartbeat
+    checks the arguments of each call."""
 
     async def wait(awaitable: Awaitable[Any], *, name: str, total_timeout: float | None = None) -> Any:
         return await trainer._await_with_heartbeat(
@@ -753,10 +757,8 @@ def record_workload_metrics(tally: StepTally, tracker: StatsTracker) -> None:
     batch_total_tasks_with_workload_metadata = tally.total_tasks_with_workload_metadata
     batch_submitted_training_datums = tally.submitted_training_datums
     exact_training_batch_metrics: dict[str, float] = {}
-    # A legacy/custom plain-list workflow has no generation sidechannel.
-    # Continue reporting the authoritative submitted payload, but do not
-    # subtract it from a known-workload subtotal and claim a negative or
-    # otherwise inexact non-submitted count.
+    # A custom workflow's plain list of datums carries no workload: the step still reports what it submitted, but
+    # the non-submitted count is exact only when every group it dequeued carried its workload.
     if batch_total_tasks_with_workload_metadata == batch_total_tasks:
         batch_non_submitted_datums = batch_workload.postmerge_datums - batch_submitted_training_datums
         if batch_non_submitted_datums < 0:

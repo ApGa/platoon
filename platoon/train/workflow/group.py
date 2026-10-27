@@ -1,13 +1,16 @@
-"""Group-centered rollout workflow for tinker RL training.
+"""The run's rollout workflow, ``GroupRolloutWorkflow``: each group the dispatcher starts runs through its
+``arun_episode``, whose output settles into the queue the training steps dequeue from (the evaluation's groups run
+through it too).
 
-``GroupRolloutWorkflow`` runs ``group_size`` rollouts of one task, converts
-each rollout's trajectory tree into ``tinker.Datum`` rows and turns trajectory
+A group is ``group_size`` rollouts of one task.  The workflow converts each
+rollout's trajectory tree into ``tinker.Datum`` rows and turns trajectory
 rewards into per-token advantages. It is the one place where credit is
 computed and broadcast over a task group, in the order
 :mod:`platoon.train.credit.group` describes.  Its parts live beside it:
-its members (``members``), their worker requests (``requests``), the group's
-output (``output``) and the workers' telemetry (``telemetry``); each method
-whose code lives there stays a method of the class under its name.
+its members (``members``), their worker requests (``requests``), the
+group's output (``output``) and the workers' telemetry (``telemetry``); each
+method whose code lives there stays a method of the class under its name.
+They read the settings a partial config may lack through ``settings``.
 
 What a group's workflow measures about the group -- its completion statistics
 (``rollout_completion/*``), its baselines and advantages (``credit/baseline/*``,
@@ -62,6 +65,7 @@ from platoon.train.credit.group import (
 from platoon.train.labels import task_label
 from platoon.train.startup import WorkerPreload
 from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.tinker.rollout_metrics import ClientThroughputMonitor
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.workers.protocol import validated_ref
 from platoon.train.workers.run import DEFAULT_REWARD_PROCESSOR
@@ -72,6 +76,7 @@ from platoon.train.workflow import output as group_output
 from platoon.train.workflow.context import _group_config, _group_entry, _group_stats
 from platoon.train.workflow.output import _member, _SingleRolloutOutcome, _TaskRolloutOutput, _trained_keys
 from platoon.train.workflow.protocol import WorkflowSetup, _built_by_keywords
+from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import StartLimit
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import DeferredStats, StatsTracker
@@ -86,17 +91,17 @@ logger = logging.getLogger(__name__)
 _LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
 
 
-# Both helpers now live in ``workers.workload`` so the rollout worker calls the
-# same code the trainer does.  The module-level aliases keep the historical
-# names importable.
+# The workload helpers of ``workers.workload`` (which the rollout worker calls too) under the names that
+# ``platoon.train.tinker.workflows.group_rollout_workflow`` and tests import from this module.
+# ``as_member_outcomes`` calls ``_add_datum_funnel`` by this name, so that a patch of it reaches the call.
 _workload_from_raw_rollout = workload_from_raw_rollout
 _add_datum_funnel = add_datum_funnel
 
 
 def as_member_outcomes(raw_outcomes: Sequence) -> list[_SingleRolloutOutcome]:
-    """What ``_run_group_rollouts`` returned, as one outcome per member.  The canonical single-rollout path always
-    returns an outcome; a legacy test or custom override may return the old result type (a
-    ``TrajectoryCollectionResult``, or None), which becomes an outcome with its datum funnel, observed unless None."""
+    """What ``_run_group_rollouts`` returned, as one outcome per member.  ``arun_episode_single`` always returns an
+    outcome; an override of it (a custom workflow's, a test's) may return a ``TrajectoryCollectionResult`` or None
+    instead, which becomes an outcome with its datum funnel, observed unless None."""
 
     return [
         outcome
@@ -151,9 +156,21 @@ class GroupRolloutWorkflow:
     # The run's limit on rollouts starting at once (platoon.train.workflow.start_limit), which the trainer sets on its
     # training and evaluation workflows as training starts; None: no limit. _run_group_member takes the slots.
     start_limit: StartLimit | None = None
-    # The node-local directory of the rollout workers' files, made at its first use (requests._ipc_dir).  Unset before
-    # (read with getattr).
-    _ipc_dir_cache: str
+    # The node-local directory of the rollout workers' files, made at its first use (requests._ipc_dir).
+    _ipc_dir_cache: str | None = None
+    # What __init__ sets, at the defaults it sets them to: a custom workflow, or a test, that builds the class with
+    # __new__ and sets only the attributes it uses reads the others here.
+    stats_scope: str = "train"
+    rollout_isolation: str = "inprocess"
+    label_by: str = ENVIRONMENT_COLUMN
+    packages: tuple[str, ...] = ()
+    rollout_fn_ref: str | None = None
+    subagent_datum_sampler: DeterministicSubagentDatumSampler | None = None
+    # The rollout worker supervisor (``supervisor``), and the semaphore of the startup gate with its limit
+    # (members._admission_semaphore), each made at its first use.
+    _supervisor: RolloutWorkerSupervisor | None = None
+    _admission: asyncio.Semaphore | None = None
+    _admission_limit: int = 0
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         """The flag of a subclass whose own body does not set it: that of the class that sets it nearest in its method
@@ -220,25 +237,22 @@ class GroupRolloutWorkflow:
             if config.subagent_datum_keep_probability < 1.0
             else None
         )
-        self.rollout_isolation = getattr(config, "rollout_isolation", "inprocess")
+        self.rollout_isolation = config.rollout_isolation
         self.packages = tuple(packages)
         self.label_by = label_by
         # Callable references are built ONCE, at construction, and proven to
         # round-trip.  A closure or a functools.partial cannot cross a process
         # boundary by name, and a ``ref or default`` fallback would silently
-        # substitute the historical reward processor -- changing task_reward,
+        # substitute the default reward processor -- changing task_reward,
         # root_rewards_dict and every advantage with no error and entirely
         # plausible metrics.  In ``inprocess`` mode the callables are handed to
         # the shared rollout body directly, so an unnameable callable is only
-        # recorded, not rejected: in-process behaviour is unchanged.
+        # logged, not rejected: an in-process rollout never needs its name.
         self._reward_processor_is_default = reward_processor is DEFAULT_REWARD_PROCESSOR
         self.rollout_fn_ref = self._build_ref(rollout_fn, what="rollout_fn")
         self.reward_processor_ref = (
             None if self._reward_processor_is_default else self._build_ref(reward_processor, what="reward_processor")
         )
-        self._supervisor = None
-        self._admission: asyncio.Semaphore | None = None
-        self._admission_limit = 0
 
     @classmethod
     def from_setup(cls, setup: WorkflowSetup) -> Self:
@@ -275,18 +289,10 @@ class GroupRolloutWorkflow:
         built or as a subclass replaced it) for the run's keep probability and seed, else one per pair an entry sets,
         built once."""
 
-        config = self.config
-        key = (
-            getattr(config, "subagent_datum_keep_probability", 1.0),
-            getattr(config, "subagent_datum_sampling_seed", 0),
-        )
-        run = getattr(self, "_run_config", None)
-        run_key = (
-            getattr(run, "subagent_datum_keep_probability", 1.0),
-            getattr(run, "subagent_datum_sampling_seed", 0),
-        )
-        if run is None or key == run_key:
-            return getattr(self, "subagent_datum_sampler", None)
+        key = GroupSettings(self.config).subagent_sampling
+        run = getattr(self, "_run_config", None)  # None: a workflow built with __new__ that was given no config
+        if run is None or key == GroupSettings(run).subagent_sampling:
+            return self.subagent_datum_sampler
         keep = key[0]
         if keep >= 1.0:
             return None
@@ -329,9 +335,9 @@ class GroupRolloutWorkflow:
     _make_task_output = group_output._make_task_output
 
     def _group_stats(self) -> DeferredStats | StatsTracker:
-        """Where the statistics of the group being run go: inside :meth:`arun_episode`, the group's
-        :class:`DeferredStats`, which the trainer records in the step that consumes the group; outside it (a
-        direct call, say from a subclass or a test), straight into the tracker as before."""
+        """Where the statistics of the group being run go.  Inside :meth:`arun_episode`, they go to the group's
+        :class:`DeferredStats`, which the trainer records in the step that consumes the group.  Outside it (a direct
+        call, say from a subclass or a test), they go straight into the tracker."""
 
         group_stats = _group_stats.get()
         return group_stats if group_stats is not None else self.tracker
@@ -348,7 +354,7 @@ class GroupRolloutWorkflow:
             ``group_stats``, the group's own statistics, for the consumer to
             record in the step that consumes it (see the module docstring).
         """
-        entries = getattr(self, "entry_configs", None) or {}
+        entries = self.entry_configs or {}
         if entries:
             entry = row_entry(data, tuple(entries))
         else:
@@ -363,7 +369,7 @@ class GroupRolloutWorkflow:
             _group_config.reset(config_token)
             _group_stats.reset(token)
         if isinstance(output, _TaskRolloutOutput):
-            output.label = task_label(data, getattr(self, "label_by", ENVIRONMENT_COLUMN))
+            output.label = task_label(data, self.label_by)
             output.entry = entry
         return output
 
@@ -441,14 +447,14 @@ class GroupRolloutWorkflow:
             logger.warning(f"No results found for task {data['task_id']}")
             return "no_results"
 
-        min_successful = getattr(self.config, "min_successful_group_size", 1)
+        min_successful = GroupSettings(self.config).min_successful_group_size
         trainable_members = sum(1 for result in results if result.task_reward_valid)
         if min_successful > 1 and trainable_members < min_successful:
             # Too few trainable members for a meaningful within-task baseline: only a rollout whose root completed
             # with a scored outcome counts, so an untrainable member (an invalid, error, timeout or cancelled root)
             # is missing like one that returned nothing (a setup failure, a cancelled straggler, a dead worker). The
             # generation work is still accounted for through the outcomes. With the default of 1, a group without a
-            # completed root takes the branch below, as it always did.
+            # completed root takes the branch below.
             logger.warning(
                 "Rejecting task %s group with %s trainable rollout(s) of %s (%s returned a result); "
                 "min_successful_group_size is %s",
@@ -541,18 +547,18 @@ class GroupRolloutWorkflow:
     _rollout_budget_seconds = requests._rollout_budget_seconds
     _ipc_dir = requests._ipc_dir
 
-    def _monitor(self):
-        """Client throughput monitor for this workflow's stats scope.
+    def _monitor(self) -> ClientThroughputMonitor:
+        """The client throughput monitor of this workflow's stats scope."""
 
-        ``getattr`` because custom/legacy workflows construct this class with
-        ``__new__`` and set only the attributes they use.
-        """
-
-        return client_monitor(getattr(self, "stats_scope", "train"))
+        return client_monitor(self.stats_scope)
 
     @property
     def _isolation(self) -> str:
-        return getattr(self, "rollout_isolation", "inprocess")
+        """Where the members' rollouts run: ``rollout_isolation``.  The members, their requests and the rollout
+        workers' start read it under this one name, so that a subclass, or a test's stand-in for the workflow, that
+        sets ``_isolation`` switches them all."""
+
+        return self.rollout_isolation
 
     # What the rollout workers' fork server imports and builds ahead of them, each when it is fork-safe: what the run's
     # environments and harnesses import and build when a rollout opens them, and the run's workflow_config
@@ -564,14 +570,15 @@ class GroupRolloutWorkflow:
     def supervisor(self) -> RolloutWorkerSupervisor:
         """Lazily built so ``inprocess`` runs never touch node-local scratch."""
 
-        if getattr(self, "_supervisor", None) is None:
+        if self._supervisor is None:
+            settings = GroupSettings(self.config)
             self._supervisor = RolloutWorkerSupervisor(
                 scratch_dir=self._ipc_dir(),
-                termination_grace_seconds=float(getattr(self.config, "worker_termination_grace_seconds", 10.0)),
-                parent_grace_seconds=float(getattr(self.config, "worker_parent_grace_seconds", 60.0)),
-                mem_available_floor_bytes=int(getattr(self.config, "worker_mem_available_floor_bytes", 0)),
-                start_method=str(getattr(self.config, "worker_start_method", "forkserver")),
-                preload=getattr(self, "worker_preload", None),
+                termination_grace_seconds=settings.worker_termination_grace_seconds,
+                parent_grace_seconds=settings.worker_parent_grace_seconds,
+                mem_available_floor_bytes=settings.worker_mem_available_floor_bytes,
+                start_method=settings.worker_start_method,
+                preload=self.worker_preload,
             )
         return self._supervisor
 
@@ -581,10 +588,7 @@ class GroupRolloutWorkflow:
         gets ready to train, instead of when the first rollouts ask for it.  Nothing for in-process rollouts or exec'd
         workers."""
 
-        if (
-            self._isolation != "process"
-            or str(getattr(self.config, "worker_start_method", "forkserver")) != "forkserver"
-        ):
+        if self._isolation != "process" or GroupSettings(self.config).worker_start_method != "forkserver":
             return
         await self.supervisor.warm(self._warm_up_request())
 

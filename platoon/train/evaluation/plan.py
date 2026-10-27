@@ -29,7 +29,7 @@ def _evaluation_plan(state: "LoopState", *, resumed: bool, end: int) -> tuple[in
             )
         if first > end:
             setting = f"eval.every is {every}"
-            if getattr(state.config.eval, "strategy", None) == "epoch":  # every counts epochs: say both
+            if state.config.eval.strategy == "epoch":  # every counts epochs: say both
                 setting = f"eval.every is {state.config.eval.every} epoch(s) (strategy: epoch), {every} steps"
             return logging.WARNING, (
                 f"No evaluation runs: {setting}, past the run's last step, {end}; eval.at_start: true would evaluate "

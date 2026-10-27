@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import yaml
+from fakes.config import make_config
 
 from platoon.config_defs import RolloutConfig
 from platoon.eval.run import PlatoonEvalConfig
@@ -441,9 +442,9 @@ def test_the_rollout_permits_hold_the_capped_labels_at_their_limits_and_a_group_
 def test_the_rollout_permits_are_checked_by_the_labels_the_listed_tasks_carry():
     """With another label column, which entries' tasks carry a capped label is known once the tasks are listed."""
 
-    config = SimpleNamespace(
-        train=SimpleNamespace(label_by="difficulty", rollout_group_limits={"hard": 2}, max_concurrent_rollouts=15),
-        environments=[SimpleNamespace(label="quick"), SimpleNamespace(label="slow")],
+    config = make_config(
+        train={"label_by": "difficulty", "rollout_group_limits": {"hard": 2}, "max_concurrent_rollouts": 15},
+        environments=[{"name": "quick"}, {"name": "slow"}],
     )
     sizes = {"quick": 8, "slow": 4}
     settings = {

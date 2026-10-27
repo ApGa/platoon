@@ -1,10 +1,17 @@
 """One group of rollouts: ``GroupRolloutWorkflow`` (``group``) and its parts.
 
-``context`` is what runs in a group's context (``current_entry()``); ``members`` runs a group's members (the startup
-gate, the lease blocks, the straggler policy) and ``start_limit`` limits the rollouts starting at once; ``requests``
-builds a member's worker request; ``output`` the group's output and its members'; ``telemetry`` the rollout workers'
-telemetry.  The group's baselines, error-token filter and verdict are :mod:`platoon.train.credit.group`.
-``RolloutWorkflow`` (``protocol``) is what the trainer needs of a workflow.  The names below import from here.
+- ``group``: the workflow, ``GroupRolloutWorkflow``;
+- ``context``: what runs in a group's context (``current_entry()``);
+- ``members``: runs a group's members (the startup gate, the lease blocks, the straggler policy);
+- ``start_limit``: limits the rollouts starting at once;
+- ``requests``: builds a member's worker request;
+- ``output``: the group's output and its members';
+- ``telemetry``: the rollout workers' telemetry;
+- ``settings``: typed reads of a group's settings (``GroupSettings``);
+- ``protocol``: what the trainer needs of a workflow (``RolloutWorkflow``).
+
+The group's baselines, error-token filter and verdict are :mod:`platoon.train.credit.group`.  The names below import
+from here.
 """
 
 from typing import TYPE_CHECKING, Any

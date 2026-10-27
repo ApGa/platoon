@@ -9,11 +9,13 @@ paths only.
 from __future__ import annotations
 
 import ast
+import importlib
 import json
 import os
 import re
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -998,3 +1000,120 @@ def test_a_supervisor_given_the_old_entrypoint_name_runs_the_entrypoint(tmp_path
     )
     assert supervisor.module == WORKER_MODULE
     assert RolloutWorkerSupervisor(module="my.worker", scratch_dir=str(tmp_path)).module == "my.worker"
+
+
+# --- the supervisor module, which platoon 0.5.0 split into supervisor, outcomes and fork_servers -------------------
+# Checked against a recorded list of the 0.4.0 module's names, not the shim's own map, so that a shim that drops a home
+# or goes back to whole-module fails here; and the fork server's start limit is read where it is checked, also when a
+# test patches it after the supervisor is built.
+
+SUPERVISOR_0_4_0 = "platoon.train.tinker.workers.supervisor"
+# Every module-level name of platoon 0.4.0's platoon/train/tinker/workers/supervisor.py (defined or imported).
+SUPERVISOR_NAMES_0_4_0 = (
+    "Callable",
+    "DIAG_PATH_ENV",
+    "EXIT_RSS_LIMIT",
+    "ForkServer",
+    "ForkServerError",
+    "ForkedWorker",
+    "IPC_SWEEP_AGE_SECONDS",
+    "MAX_FORK_SERVER_STARTS",
+    "NO_CUDA_DRIVER",
+    "REGISTRY_DIRNAME",
+    "RolloutWorkerRequest",
+    "RolloutWorkerResponse",
+    "RolloutWorkerSupervisor",
+    "STARTUP_BUDGET_ENV",
+    "START_METHODS",
+    "WORKER_ENV_OVERRIDES",
+    "WORKER_ENV_REMOVED",
+    "WORKER_MODULE",
+    "WORKER_PACKAGE_INIT",
+    "WORKER_PRELOAD",
+    "WorkerOutcome",
+    "WorkerPreload",
+    "WorkerRecord",
+    "_LaunchFailed",
+    "_live_workers",
+    "_live_workers_lock",
+    "_remove_event_temporaries",
+    "_remove_worker_files",
+    "annotations",
+    "asyncio",
+    "contextlib",
+    "dataclass",
+    "delete_orphaned_sessions",
+    "dump_request",
+    "errno",
+    "forget_worker",
+    "ipc_dir",
+    "load_response",
+    "logger",
+    "logging",
+    "os",
+    "process_start_time",
+    "publish_binding",
+    "read_diag",
+    "read_mirror",
+    "read_sandbox_mirror",
+    "reap_records",
+    "record_worker",
+    "registry_dir",
+    "replace",
+    "signal",
+    "signal_live_workers",
+    "sweep_orphaned_workers",
+    "sys",
+    "threading",
+    "time",
+    "unlink_quietly",
+    "uuid",
+)
+
+
+def _old_supervisor():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return importlib.import_module(SUPERVISOR_0_4_0)
+
+
+def test_every_0_4_0_name_reads_through_the_old_supervisor():
+    old = _old_supervisor()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        missing = [name for name in SUPERVISOR_NAMES_0_4_0 if not hasattr(old, name)]
+    assert missing == []
+
+
+@pytest.mark.parametrize(
+    ("name", "readers"),
+    [
+        ("load_response", ("outcomes",)),
+        ("read_diag", ("outcomes",)),
+        ("EXIT_RSS_LIMIT", ("outcomes",)),
+        ("ForkServer", ("supervisor", "fork_servers")),
+        ("logger", ("supervisor", "outcomes", "fork_servers")),
+        ("dump_request", ("supervisor",)),
+    ],
+)
+def test_a_patch_through_the_supervisor_s_old_path_reaches_the_code_that_reads_the_name(monkeypatch, name, readers):
+    old = _old_supervisor()
+    stand_in = object()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        monkeypatch.setattr(old, name, stand_in)
+    for reader in readers:
+        assert getattr(importlib.import_module(f"platoon.train.workers.{reader}"), name) is stand_in, reader
+
+
+@pytest.mark.parametrize("through", ["old path", "supervisor module"])
+def test_the_fork_server_start_limit_is_read_when_it_is_checked(tmp_path, monkeypatch, through):
+    from platoon.train.workers import supervisor as supervisor_module
+
+    supervisor = supervisor_module.RolloutWorkerSupervisor(scratch_dir=str(tmp_path))
+    module = _old_supervisor() if through == "old path" else supervisor_module
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        monkeypatch.setattr(module, "MAX_FORK_SERVER_STARTS", 1)  # after the supervisor was built
+    assert supervisor_module.MAX_FORK_SERVER_STARTS == 1
+    assert supervisor._max_fork_server_starts == 1

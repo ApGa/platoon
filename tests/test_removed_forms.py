@@ -14,7 +14,7 @@ Platoon 0.3.0 removed the forms that 0.2.0 deprecated:
 - ``num_concurrent_rollout_workflow_workers`` of ``train`` and ``eval``, which counted groups:
   ``max_concurrent_rollouts`` counts rollouts;
 - the ``strategy: none`` of ``eval`` and ``checkpoint``: ``every: 0`` (``strategy: step`` and ``epoch`` stay,
-  ``tests/train/tinker/test_event_strategy.py``);
+  ``tests/train/evaluation/test_event_strategy.py``);
 - a Harbor entry's ``cache``, ``image_map`` and ``toolchain_root``, and ``$PLATOON_HARBOR_CACHE`` and
   ``$PLATOON_TOOLCHAINS``: the site profile's ``cache``;
 - fetch config files of ``platoon harbor``, with ``platoon harbor fetch``'s ``--lock`` and ``--cache``: a training
@@ -229,7 +229,7 @@ def test_an_evaluation_config_refuses_the_removed_key_of_its_rollouts(tmp_path):
 
 
 def test_the_config_classes_take_no_removed_key_from_python_either():
-    """And ``strategy: none`` built in Python is refused too (``tests/train/tinker/test_event_strategy.py``)."""
+    """And ``strategy: none`` built in Python is refused too (``tests/train/evaluation/test_event_strategy.py``)."""
 
     with pytest.raises(TypeError, match="task_order"):
         TrainConfig(model_name="m", renderer_name="r", task_order="weighted")  # type: ignore[call-arg]

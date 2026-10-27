@@ -54,11 +54,17 @@ class Policy:
         return self.info.llm.version
 
     def connect(self) -> None:
-        """Open the policy's Tinker service client, a session on its service (``spec.tinker_base_url``).  A key the
+        """Open the policy's Tinker service client, a session on its service (:meth:`new_service_client`).  A key the
         service refuses (401, 403) ends training with one line that names the key and the service."""
 
         with key_refusals():
-            self.service_client = tinker.ServiceClient(base_url=self.spec.tinker_base_url)
+            self.service_client = self.new_service_client()
+
+    def new_service_client(self) -> tinker.ServiceClient:
+        """A new session on the policy's Tinker service (``spec.tinker_base_url``): the one :meth:`connect` opens, and
+        each one the run's recovery pruning deletes checkpoints in.  A test's policy opens them on a fake service."""
+
+        return tinker.ServiceClient(base_url=self.spec.tinker_base_url)
 
     async def open(self, start: "PolicyStart", *, stop: asyncio.Event | None = None) -> bool:
         """Open the policy's training client on its service, at its start point: the one its checkpoint resumes

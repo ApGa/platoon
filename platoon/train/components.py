@@ -1,4 +1,12 @@
-"""Shared component protocols and environment config for Auto factories."""
+"""A run's environments as its config declares them.  The config reads them when it loads, and ``platoon train`` when
+it builds the run (:mod:`platoon.train.auto`).  The module holds:
+
+- an environment entry's schema (:class:`EnvironmentConfig`), with the settings an entry may lay over the run's;
+- a mixture's weights, and the weighted order its training tasks are drawn in (:class:`WeightedOrder`);
+- the route by which a task reaches its environment (:class:`EnvironmentRoute`);
+- the time a task's rollout may take (:func:`harness_time_limit_s`, :func:`rollout_overhead_s`), which a member's
+  worker request budgets.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +19,7 @@ import math
 import random
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
-from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, cast, get_args, runtime_checkable
+from typing import Any, ClassVar, Generic, Literal, TypeVar, cast, get_args
 
 from platoon.config_defs import InferenceParams, RolloutConfig
 from platoon.deprecations import removed_hint
@@ -48,33 +56,6 @@ ROUTE_MISC_KEY = "platoon_environment"
 HARNESS_ROLLOUT = "platoon.harness.rollout:harness_rollout"
 # Run-level settings: one value for the whole run, which any one mixture entry may set.
 RUN_LEVEL_FIELDS = ("trainer_config", "workflow", "workflow_kwargs", "eval_workflow_kwargs")
-
-
-@runtime_checkable
-class DatasetLoader(Protocol):
-    """Build a backend dataset or list of task ids for a train/eval split."""
-
-    def __call__(self, config: Any, split: str, **kwargs: Any) -> Any: ...
-
-
-@runtime_checkable
-class TaskLoader(Protocol):
-    """Resolve a task id into a Platoon task."""
-
-    def __call__(self, task_id: str) -> Task: ...
-
-
-@runtime_checkable
-class RolloutFn(Protocol):
-    """Run one rollout for a task and rollout config."""
-
-    def __call__(self, task: Task, config: Any) -> Any: ...
-
-
-RewardProcessor = Callable[[dict[str, Any]], tuple[float, dict[str, Any]]]
-WorkflowFactory = Callable[..., Any]
-TrainerConfigClass = type[Any]
-LossFn = Callable[..., Any]
 
 
 @dataclass
