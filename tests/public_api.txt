@@ -489,6 +489,7 @@ platoon.experimental.WorkflowCapabilities.binds_policies: field bool = False
 platoon.experimental.WorkflowCapabilities.gives_verdicts: field bool = False
 platoon.experimental.WorkflowCapabilities.runs_rollout_workers: field bool = False
 platoon.experimental.WorkflowCapabilities.runs_rollouts_on_lease: field bool = False
+platoon.experimental.WorkflowCapabilities.takes_stale_filter: field bool = False
 platoon.experimental.WorkflowCapabilities.takes_start_limit: field bool = False
 platoon.experimental.WorkflowSetup: @dataclass(frozen=True) class WorkflowSetup
 platoon.experimental.WorkflowSetup.config: field Any

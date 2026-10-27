@@ -16,7 +16,8 @@
 - ``dispatcher``: the dispatcher's rows, recorder and samplers, for the dispatcher's own tests;
 - ``eval_starts``: the starts of a run with evaluation, crashed where a test says;
 - ``pass_rate``: RFC 0019's fake environment of 40 tasks of known pass rates, for ``pass_rate`` and ``informative``;
-- ``workers``: a rollout worker's request; ``worker_shutdown``: the worker shutdown tests' scenarios;
+- ``workers``: a rollout worker's request, and the proxy session of a rollout run in process; ``worker_shutdown``:
+  the worker shutdown tests' scenarios;
 - ``resume_0_3_0``, ``orders_0_3_0``: the runs and the orders platoon 0.3.0 wrote the fixtures of;
 - ``supervised_start_stub``: what ``platoon train`` starts under supervision, in the supervisor's tests;
 - ``sandbox_leftovers``: sandboxes a process that is gone left running, for the reaping tests;

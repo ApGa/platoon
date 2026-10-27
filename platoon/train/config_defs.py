@@ -10,7 +10,7 @@ import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, get_args
 
 from platoon.config_defs import RolloutConfig
 from platoon.deprecations import deprecated_keys, removed_hint
@@ -25,6 +25,7 @@ from platoon.train.components import (
     normalize_environment_configs,
 )
 from platoon.train.trainer.registry import trainer_problems
+from platoon.train.workflow.protocol import StaleFilterSetting
 from platoon.utils.config import ConfigError, value_hint
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
@@ -74,6 +75,7 @@ class WorkflowConfig:
 
     UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
         "max_starting_rollouts": "a key of train, not of a workflow config: train.max_starting_rollouts",
+        "stale_filter": "a key of train, not of a workflow config: train.stale_filter",
         # Keys a release removed, with what replaces them (platoon.deprecations).
         "straggler_policy_key": STRAGGLER_POLICY_KEY_REMOVED,
     }
@@ -451,6 +453,14 @@ class TrainConfig:
     # started and not yet trained. An environment entry may raise its own groups' bound
     # (``environments[].max_staleness``); the run's stays the bound on how far rollouts run ahead.
     max_staleness: int | None = None
+    # How the stale filter judges a group against its bound (experimental): ``group`` (the default) by its oldest
+    # datum, dropping the whole group when that one is too old; ``datum`` each datum by the oldest policy version its
+    # own model calls sampled, dropping only the datums that are too old, the others keeping the advantages their
+    # group's credit gave them, and the whole group only when every datum is. A rollout that spans a published policy
+    # then keeps the datums it sampled since. Under ``datum`` a workflow that does not stamp each datum with its own
+    # version (``GroupRolloutWorkflow`` does) has each datum judged by its rollout's (see
+    # docs/how-to/train-and-eval.md).
+    stale_filter: StaleFilterSetting = "group"
     optimizer: AdamParams = field(default_factory=AdamParams)
     # Tinker loss function, for example ``cispo`` or ``importance_sampling``.
     loss_fn: str = "cispo"
@@ -573,6 +583,8 @@ class TrainConfig:
             raise ValueError("rollout_group_limits requires nonempty labels and positive integer capacities")
         if self.permit_release not in ("group", "rollout"):
             raise ValueError(f"train.permit_release must be 'group' or 'rollout', got {self.permit_release!r}")
+        if self.stale_filter not in get_args(StaleFilterSetting):
+            raise ValueError(f"train.stale_filter must be 'group' or 'datum', got {self.stale_filter!r}")
         limit = self.max_starting_rollouts
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             raise ValueError(

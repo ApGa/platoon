@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     from platoon.utils.rollout_workload import RolloutWorkload
     from platoon.utils.stats_tracker import DeferredStats
 
+# How the run's stale filter judges a group against its bound (``train.stale_filter``), which the trainer tells a
+# workflow that takes it (``takes_stale_filter``) as its ``stale_filter``: by its oldest datum (``group``), or by each
+# datum (``datum``), each stamped with its own policy version.
+StaleFilterSetting = Literal["group", "datum"]
+
 
 class RolloutWorkflow(Protocol):
     """What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group
@@ -41,6 +46,9 @@ class RolloutWorkflow(Protocol):
     - ``rollout_isolation``: ``"process"`` when its rollouts run in rollout workers, which read the published client;
     - ``start_limit``: the run's limit on rollouts starting at once, which the trainer sets on a workflow that takes it
       (``takes_start_limit``), and whose metrics an evaluation reports while it is set;
+    - ``stale_filter``: how the run's stale filter judges its groups (``train.stale_filter``), which the trainer sets on
+      a training workflow that takes it (``takes_stale_filter``): under ``datum`` the workflow stamps each datum with
+      the oldest policy version its own model calls sampled;
     - ``entry_configs``: each environment entry's settings, which ``platoon train`` sets on a workflow that applies
       them (``applies_entry_settings``);
     - its capabilities: a ``capabilities`` class attribute, or the class flags of :class:`WorkflowCapabilities`;
@@ -55,7 +63,7 @@ class RolloutWorkflow(Protocol):
 class WorkflowCapabilities:
     """What a workflow class can do beyond ``arun_episode``, which the trainer reads (:func:`capabilities_of`) instead
     of testing whether the class is a ``GroupRolloutWorkflow``.  A class declares them in a ``capabilities`` class
-    attribute, or as class flags of the same names; ``GroupRolloutWorkflow`` sets five of them as flags."""
+    attribute, or as class flags of the same names; ``GroupRolloutWorkflow`` sets six of them as flags."""
 
     # It applies an environment entry's own settings to the entry's groups (``entry_configs``): loading refuses an
     # entry's settings beside a workflow that does not (platoon.train.entry_settings).
@@ -68,6 +76,9 @@ class WorkflowCapabilities:
     runs_rollouts_on_lease: bool = False
     # It takes the run's limit on rollouts starting at once as its ``start_limit`` (``train.max_starting_rollouts``).
     takes_start_limit: bool = False
+    # It takes how the run's stale filter judges its groups as its ``stale_filter`` (``train.stale_filter``), and under
+    # ``datum`` stamps each datum with the oldest policy version its own model calls sampled.
+    takes_stale_filter: bool = False
     # Its rollouts can run in rollout workers: ``platoon train`` gives it the environments' ``packages`` and the run's
     # ``label_by`` as arguments, and the ``worker_preload`` of its workers' fork server (platoon.train.launch).
     runs_rollout_workers: bool = False
@@ -80,7 +91,7 @@ def capabilities_of(workflow: object) -> WorkflowCapabilities:
     flags, a flag it does not set False.  Each flag is read as the trainer read it before the contract was written down:
     ``applies_entry_settings`` and ``runs_rollouts_on_lease`` by their truth, the others only when they are True.
 
-    Declared capabilities, a class's own or inherited, are all six, and win over every flag: over a subclass's own
+    Declared capabilities, a class's own or inherited, are all seven, and win over every flag: over a subclass's own
     flags, and over ``GroupRolloutWorkflow``'s rule that a subclass overriding how a member runs does not run its
     rollouts on the lease (``runs_rollouts_on_lease``), which sets the flag only."""
 
@@ -92,6 +103,7 @@ def capabilities_of(workflow: object) -> WorkflowCapabilities:
         gives_verdicts=getattr(workflow, "gives_verdicts", False) is True,
         runs_rollouts_on_lease=bool(getattr(workflow, "runs_rollouts_on_lease", False)),
         takes_start_limit=getattr(workflow, "takes_start_limit", False) is True,
+        takes_stale_filter=getattr(workflow, "takes_stale_filter", False) is True,
         runs_rollout_workers=getattr(workflow, "runs_rollout_workers", False) is True,
         binds_policies=getattr(workflow, "binds_policies", False) is True,
     )

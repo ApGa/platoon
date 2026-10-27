@@ -92,6 +92,7 @@ The settings you will change most:
 | `train.optimizer.learning_rate` | 3e-5 | Adam learning rate (`beta1`, `beta2`, `eps`, `weight_decay`, `grad_clip_norm` sit beside it) |
 | `train.loss_fn`, `train.loss_fn_config` | `cispo`, clip thresholds 0.0 and 5.0 | The loss the service computes in `forward_backward`; a `loss_fn_config` replaces the default whole, so it names every key its loss takes |
 | `train.max_staleness` | none | How many steps rollouts may run ahead of training, and how many policy versions old their data may be before it is dropped; none sets no limit. An environment may raise its own groups' bound ([Settings per environment](#settings-per-environment)) |
+| `train.stale_filter` | `group` | What a too-old group loses: `group`, the whole group, judged by its oldest datum; `datum` (experimental), only its datums beyond the bound, each judged by the oldest version its own model calls sampled ([Per-datum stale masks](#per-datum-stale-masks-experimental)) |
 | `train.max_concurrent_rollouts` | `batch_size × group_size` | Rollouts in flight at once, the permits the groups share: each rollout holds one until it ends, or under `permit_release: group` a group holds its size of them until it ends (`eval.max_concurrent_rollouts`, 256 by default, for an evaluation) |
 | `train.permit_release` | `rollout` | When permits come back: `rollout`, each as its rollout ends, so the next group starts on them; `group`, the default before 0.4.0, a group's all at once when its workflow returns ([Rollout permits](#rollout-permits)) |
 | `train.workflow_config.rollout_config.max_steps`, `.timeout` | none | Step budget per agent, and time limit of each rollout's root agent in seconds; without one, a harness stops at its own limits (its spec's `timeout_s`, a Harbor task's `[agent] timeout_sec`), which also set a Harbor rollout's deadline ([Harness timeouts](sandboxes-and-harbor.md#harness-timeouts-and-crashes)) |
@@ -1295,9 +1296,9 @@ train:
   training and under either setting (from its tenth step on, so a shorter run never does), naming what held the
   dispatcher back and advising `max_staleness + 1`. If the horizon had room (`train/dispatch/blocked_share/horizon`
   near 0), raising `train.max_staleness` by one changes only the stale filter: a group may then be one more policy
-  version old and still train, and recovery pruning keeps one more checkpoint. A per-datum stale filter, which would
-  keep the part of a long rollout within the bound instead, is planned for a later release (RFC 0020). A restart also
-  redoes more rollouts (every open group's), and more finished rollouts wait in the trainer for their siblings.
+  version old and still train, and recovery pruning keeps one more checkpoint. `train.stale_filter: datum` instead keeps
+  the part of a long group within the bound ([Per-datum stale masks](#per-datum-stale-masks-experimental)). A restart
+  also redoes more rollouts (every open group's), and more finished rollouts wait in the trainer for their siblings.
 - **Where it helps.** Where the permits decide when groups start (`blocked_share/permits` near 1). Where the horizon
   does (`blocked_share/horizon` near 1), freed permits have nothing to start: there only a larger `max_staleness` or a
   faster trainer helps, and the run trains as it did before 0.4.0.
@@ -1343,6 +1344,52 @@ Every group then takes its whole size of permits before it starts and returns th
 finished rollouts keep their permits until its slowest one ends. The lease's blocks hold nothing, and the run starts
 and ends groups as earlier releases did, event for event. The default changed in 0.4.0 ahead of a GPU comparison of
 the two settings (RFC 0020); `group` stays as the way back, and as the other arm of such a comparison.
+
+## Per-datum stale masks (experimental)
+
+The stale filter drops a group whose oldest datum is more policy versions old than its bound (`train.max_staleness`,
+or its environment's own), so one early model call of one long rollout drops the work of its whole group.
+`train.stale_filter: datum` judges each datum instead, and drops only those beyond the bound:
+
+```yaml
+train:
+  max_staleness: 3
+  stale_filter: datum   # default: group
+```
+
+- **A datum's version.** Each model call records the policy version it sampled: in process, the version the trainer
+  had published when the call was issued; under process isolation, that of the binding the worker followed for it.
+  A datum, a run of model calls whose prompts extend one another merged into one sequence, carries the oldest version
+  among its own calls, where under `group` every datum of a rollout carries the rollout's oldest (the request's
+  version, in process). A rollout that spans a published policy then keeps the datums it sampled since.
+- **What it drops.** Each datum more versions old than the bound. The others train with the advantages their group's
+  credit gave them: the credit ran over the whole group as it settled, so each term kept keeps its expectation. A group
+  that keeps any datum is consumed: its statistics, its fate in the per-task statistics and its place in the batch are
+  those of a group that trained. A group none of whose datums is within the bound is dropped whole, as under `group`,
+  and counts as a stale group (`train/batch/stale_groups`, and the warning of [Rollout permits](#rollout-permits)).
+  That warning counts only these groups: one that keeps any datum counts as consumed, however many it lost, which
+  `train/batch/stale_datums` shows (below). Under depth-level weighting a trajectory whose first datum is dropped
+  counts from its first datum kept.
+- **What stays.** Credit, verdicts, group admission, the per-task statistics (each rollout's versions there are still
+  its rollout's) and the horizon. A group a checkpoint kept carries the versions it was stamped with as it settled,
+  so a resume under the other setting judges it by those.
+- **A workflow of your own.** `GroupRolloutWorkflow` stamps each datum with its own version under `datum`: it takes the
+  setting (its `takes_stale_filter` capability), and the trainer sets its `stale_filter` as training starts. The
+  datums of a workflow that does not take it keep the versions they carry, by which the filter judges each of them
+  (their rollout's, as platoon's conversion stamps them), and the run warns once per start. A subclass that drops or
+  adds a member's datums after the conversion keeps the result's `own_versions` in step with them, or those datums
+  keep their rollout's version (warned once per start). One that overrides `arun_episode` or `_run_group` without
+  calling `GroupRolloutWorkflow`'s stamps nothing: it sets `takes_stale_filter = False` in its body, so that the run
+  warns, or stamps its datums itself (`TrajectoryCollectionResult.stamp_own_versions`).
+- **Why it is not the default.** It changes "a stale group is dropped whole" into "per datum, with the group's credit
+  unchanged", and `group` stays the default until a GPU comparison on held-out evaluation (RFC 0020, open question 3).
+  In replays of long agentic runs, the masks removed 90-94% of the stale drops at the same bound.
+
+A step logs each group it kept with datums dropped (`Stale datums masked in batch <n>: ...`), and under `datum`:
+
+| Metric | What it says |
+|---|---|
+| `train/batch/stale_datums` | The datums the step dropped as stale: those beyond the bound in the groups it trained, and every datum of the groups it dropped whole |
 
 ## Rollout start-ups (experimental)
 
@@ -1427,7 +1474,7 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/optim/kl_sample_train_v1`, `train/optim/importance_weight_mean` | KL near 0, weight near 1 | Sampling and training disagree: renderer mismatch, or rollouts too stale (`max_staleness`) |
 | `train/optim/clip_frac_total` | Small | Most tokens clipped: the update is too large for the loss's thresholds |
 | `train/batch/skipped_optimizer` | 0 | 1 means the step took no optimizer update and the policy kept its version: its objective was zero (every advantage exactly zero, say every group's rollouts scored alike) or it had no datums. `filter_zero_advantage_datums` does not change this; it only drops zero-advantage datums from microbatches that also hold nonzero ones |
-| `train/stale_rollouts`, `train/batch/<column>/<label>/stale_groups` | 0 or rare | Rollouts older than `max_staleness` were dropped; by label, which one's groups grow too old: raise its entry's bound ([Settings per environment](#settings-per-environment)) |
+| `train/stale_rollouts`, `train/batch/<column>/<label>/stale_groups` | 0 or rare | Rollouts older than `max_staleness` were dropped; by label, which one's groups grow too old: raise its entry's bound ([Settings per environment](#settings-per-environment)). Under `train.stale_filter: datum`, groups none of whose datums was within the bound; `train/batch/stale_datums` counts the datums dropped ([Per-datum stale masks](#per-datum-stale-masks-experimental)) |
 | `train/batch/skipped_rows`, `train/batch/<column>/<label>/skipped_rows` | 0 | Draws of a label at its `rollout_group_limits` were skipped, four batches of them waiting already: lower its weight or raise its limit |
 | `train/batch/parked_rows`, `train/batch/<column>/<label>/parked_rows` | Small, steady | Draws of a label at its `rollout_group_limits` that wait for a slot: a count that grows, step after step, is a label whose share of the order its limit cannot serve, so it trains less than its weight; those still waiting when the run ends never run |
 | `train/batch/informative_groups`, `.../all_pass_groups`, `.../all_fail_groups`, `.../uniform_mixed_groups`, and each label's under `train/batch/<column>/<label>/` | A large share informative | The step's groups that trained, and those whose advantages were all zero: every rollout passed, none did, or both ([Per-task statistics](#per-task-statistics)). Mostly all-pass or all-fail: the tasks are too easy or too hard for the policy, and their groups train nothing |

@@ -54,7 +54,7 @@ from platoon.train.step.batch_transforms import (
 )
 from platoon.train.step.collect import StepDispatch, StepTally
 from platoon.train.step.counting import GroupCounting
-from platoon.train.step.datums import _step_datums, advantage_scale, scale_advantages, trained_rows
+from platoon.train.step.datums import _kept_datums, _step_datums, advantage_scale, scale_advantages, trained_rows
 from platoon.train.step.metrics import (
     Censoring,
     RunTotals,
@@ -67,7 +67,7 @@ from platoon.train.step.metrics import (
 )
 from platoon.train.step.microbatch import MicrobatchFill, Prepared, StepGeometry, zero_advantage_filter_metrics
 from platoon.train.step.publish import _no_update_reason, publish_policy
-from platoon.train.step.staleness import StaleFilter, StaleWatch
+from platoon.train.step.staleness import StaleFilter, StaleVerdict, StaleWatch
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
 from platoon.train.trainer.hooks import StepEnd, StepHooks, finish_step
@@ -168,7 +168,8 @@ class StepContext:
       one's metric prefix; ``group_limits``: the labels' limits;
     - ``recorder`` and ``admissions``: the run's per-task statistics and its group admission rules, when it keeps
       them;
-    - ``stale_filter``: each entry's bound on a group's staleness;
+    - ``stale_filter``: each entry's bound on a group's staleness, judged per group or per datum
+      (``train.stale_filter``);
     - ``learner``: what updates the policy the steps train, under its objective;
     - ``clock``: the run's clock, which the end of each step advances;
     - ``run``: the start the trainer runs (None for a trainer a test drives outside one), and ``hooks``: its step
@@ -247,8 +248,8 @@ class StepContext:
                 trainer.config.train.workflow_config,
                 threshold=recorder.threshold if recorder is not None else None,
             ),
-            # The stale filter's bound for each entry's groups: its own max_staleness, else the run's.
-            stale_filter=StaleFilter(run_bound, {label: own.max_staleness for label, own in settings.items()}),
+            # The stale filter: each entry's groups' bound (its own max_staleness, else the run's), per datum or group.
+            stale_filter=StaleFilter.of_run(trainer.config.train, settings),
             stale_watch=StaleWatch(run_bound),
             learner=_step_learner(trainer, shared_state, policy, clock, start_batch),
             clock=clock,
@@ -350,8 +351,8 @@ class TrainStep:
 
     def take_group(self, settled: _Settled, fill: MicrobatchFill, queue_wait_start: float) -> str:
         """Take a group the step dequeued into ``fill``: count it, drop it when it is stale, count it under a rule, and
-        keep its datums when it trains.  What the step took it as: ``marker`` (of a group a rule decided when it
-        settled), ``stale``, ``failed`` or ``admitted``."""
+        keep its datums when it trains (under the per-datum stale filter, those within the bound).  What the step took
+        it as: ``marker`` (of a group a rule decided when it settled), ``stale``, ``failed`` or ``admitted``."""
 
         rollout = settled.rollout
         # The group's label: its row's, else its output's.
@@ -363,7 +364,8 @@ class TrainStep:
         _record_group_stats(rollout, self.state.train_tracker)
         rollout_stats = self.tally.count_dequeued(settled)
         self._record_queue_wait(queue_wait_start)
-        stale = self._filter_stale(settled, rows, label)
+        verdict = self._filter_stale(settled, rows, label)
+        stale = verdict.stale
         # A marker of a group a rule rejected (or that failed) when it settled has its fate already.
         marker = settled.rejected is not None
         self.context.censoring.add(label, settled.record)
@@ -377,8 +379,11 @@ class TrainStep:
         if not (stale or failed):  # its statistics count, and its datums train (a marker keeps none)
             if rollout_stats is not None:
                 self.tally.merge_stats(rollout_stats, label)
-            fill.datums.extend(_step_datums(rows))
-            self.tally.total_datums += len(rows)
+            datums = _step_datums(rows)
+            if verdict.masked:  # under the per-datum filter, without those beyond the bound
+                datums = _kept_datums(datums, verdict.masked)
+            fill.datums.extend(datums)
+            self.tally.total_datums += len(datums)
         return taken
 
     def _record_queue_wait(self, queue_wait_start: float) -> None:
@@ -391,27 +396,44 @@ class TrainStep:
         if queue_wait_elapsed > 60.0:
             logger.warning(f"Waited {queue_wait_elapsed:.1f}s for rollout from queue (slow)")
 
-    def _filter_stale(self, settled: _Settled, rows: Sequence[tinker.Datum] | None, label: str | None) -> bool:
-        """The stale filter: whether the group, of ``label``, whose rows are ``rows`` (None: it failed), is more policy
-        versions old than its entry's bound.  A stale group is logged and counted here, and the caller drops its
-        datums."""
+    def _filter_stale(self, settled: _Settled, rows: Sequence[tinker.Datum] | None, label: str | None) -> StaleVerdict:
+        """The stale filter's verdict on the group, of ``label``, whose rows are ``rows`` (None: it failed): whether it
+        is more policy versions old than its entry's bound, and under the per-datum filter, which of its datums are.
+        A stale group, and the datums masked of one that is not, are logged and counted here, and the caller drops
+        them."""
 
         entry = settled.entry
         # Filter out stale rollouts, by the bound of the group's entry. TODO: Consider requeuing.
         verdict = self.context.stale_filter.check(entry, rows, self.context.version())
+        if verdict.masked:
+            self._count_masked(verdict, rows, entry)
         if not verdict.stale:
-            return False
+            return verdict
+        # Under the per-datum filter, every datum is beyond the bound, and the version is the oldest datum's.
+        version = "oldest datum version" if self.context.stale_filter.per_datum else "rollout version"
         logger.info(
             f"Stale rollout detected in batch {self.state.train_step}: "
             f"policy version {verdict.now}, "
-            f"rollout version {verdict.version}, beyond the bound of "
+            f"{version} {verdict.version}, beyond the bound of "
             f"{verdict.bound} versions"
             + (f" of environments[{entry}]" if entry is not None else "")
             + ". Filtering out."
         )
         self.state.train_tracker.scalar(stale_rollouts=1.0)
         self.tally.count_stale(label)
-        return True
+        if self.context.stale_filter.per_datum and rows is not None:
+            self.tally.stale_datums += len(rows)
+        return verdict
+
+    def _count_masked(self, verdict: StaleVerdict, rows: Sequence[tinker.Datum] | None, entry: str | None) -> None:
+        """Log and count the datums the per-datum stale filter masked of a group that still trains."""
+
+        logger.info(
+            f"Stale datums masked in batch {self.state.train_step}: {len(verdict.masked)} of the group's "
+            f"{len(rows or ())}, the oldest at policy version {verdict.version}, beyond the bound of {verdict.bound} "
+            f"versions" + (f" of environments[{entry}]" if entry is not None else "") + f" at version {verdict.now}"
+        )
+        self.tally.stale_datums += len(verdict.masked)
 
     def _record_fate(self, settled: _Settled, fate: str) -> None:
         """The fate of a group the step took (not a marker, whose fate the rule gave it), which the step commits to
@@ -632,6 +654,8 @@ class TrainStep:
         if context.group_limits and dispatcher is not None:
             record_label_limits(tracker, dispatcher, totals, context.labels, context.column)
         record_batch_counts(tracker, tally, state)
+        if context.stale_filter.per_datum:  # the datums it dropped as stale, of the groups it masked or dropped
+            tracker.scalar(**{"batch/stale_datums": float(tally.stale_datums)})
         # What held the dispatcher back from starting groups, and what the straggler policy censored.
         blocked = context.dispatch.blocked_shares()
         tracker.scalar(**blocked, **context.censoring.step_metrics(context.prefixes))

@@ -1,8 +1,11 @@
-"""A rollout worker's request as the worker tests give it to a worker, a fork server or the supervisor.
+"""A rollout worker's request as the worker tests give it to a worker, a fork server or the supervisor, and the
+policy's proxy session of a rollout run in process.
 
 :func:`worker_request` is the request of task ``task``'s first rollout, run by a function of the worker stubs
 (``fakes/worker_stubs``, which a test puts on the worker's path) with no model bound, so the worker opens no gateway
 and loads no tokenizer; a test gives the fields its case turns on (budgets, labels, ...) in place of the defaults.
+:class:`FakeProxySession` stands in for ``TinkerLLMProxySession`` in ``run_rollout_request``, with the interactions a
+test injects.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from typing import Any
 
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
+from platoon.train.tinker.rollout_metrics import RolloutTimeline, timeline_scope
 from platoon.train.workers.protocol import PROTOCOL_VERSION, ConversionPolicy, ModelBinding, RolloutWorkerRequest
 
 
@@ -49,3 +53,26 @@ def worker_request(
         "ready_path": str(directory / f"{request_id}.ready"),
     }
     return RolloutWorkerRequest(**{**request, **fields})
+
+
+class FakeProxySession:
+    """Stands in for TinkerLLMProxySession with an injectable interaction map.
+
+    It binds a timeline the same way the real session does, because that
+    binding is what the proxy records model-call timings into.
+    """
+
+    interactions_to_inject: dict = {}
+
+    def __init__(self) -> None:
+        self.interactions = dict(type(self).interactions_to_inject)
+        self._scope = timeline_scope(RolloutTimeline())
+        self.timeline = None
+
+    async def __aenter__(self):
+        self.timeline = self._scope.__enter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self._scope.__exit__(exc_type, exc, tb)
+        return None

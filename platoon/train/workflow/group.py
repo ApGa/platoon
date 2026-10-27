@@ -75,7 +75,7 @@ from platoon.train.workflow import members, requests, telemetry
 from platoon.train.workflow import output as group_output
 from platoon.train.workflow.context import _group_config, _group_entry, _group_stats
 from platoon.train.workflow.output import _member, _SingleRolloutOutcome, _TaskRolloutOutput, _trained_keys
-from platoon.train.workflow.protocol import WorkflowSetup, _built_by_keywords
+from platoon.train.workflow.protocol import StaleFilterSetting, WorkflowSetup, _built_by_keywords
 from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import StartLimit
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -147,6 +147,11 @@ class GroupRolloutWorkflow:
     runs_rollouts_on_lease: ClassVar[bool] = True
     # It takes the run's limit on rollouts starting at once as its ``start_limit`` (below), which the trainer sets.
     takes_start_limit: ClassVar[bool] = True
+    # It takes how the run's stale filter judges its groups as its ``stale_filter`` (below), which the trainer sets. A
+    # subclass that overrides ``arun_episode`` or ``_run_group`` without calling this class's stamps no datum with its
+    # own version (``_stamp_own_versions``), so its datums are judged by their rollout's, unwarned: such a subclass sets
+    # the flag False in its body, so that the run warns, or stamps them itself.
+    takes_stale_filter: ClassVar[bool] = True
     # Its rollouts can run in rollout workers (``rollout_isolation: process``): ``platoon train`` gives it the
     # environments' ``packages`` and the run's ``label_by`` as arguments, and its fork server's ``worker_preload``.
     runs_rollout_workers: ClassVar[bool] = True
@@ -156,6 +161,12 @@ class GroupRolloutWorkflow:
     # The run's limit on rollouts starting at once (platoon.train.workflow.start_limit), which the trainer sets on its
     # training and evaluation workflows as training starts; None: no limit. _run_group_member takes the slots.
     start_limit: StartLimit | None = None
+    # How the run's stale filter judges this workflow's groups (train.stale_filter), which the trainer sets on its
+    # training workflow as training starts: under ``datum`` each datum is stamped with its own policy version, the
+    # oldest its model calls sampled, in place of its rollout's (_stamp_own_versions).
+    stale_filter: StaleFilterSetting = "group"
+    # Whether this workflow, one start's, warned of a member's result whose own versions do not match its datums.
+    _warned_unstamped: bool = False
     # The node-local directory of the rollout workers' files, made at its first use (requests._ipc_dir).
     _ipc_dir_cache: str | None = None
     # What __init__ sets, at the defaults it sets them to: a custom workflow, or a test, that builds the class with
@@ -375,17 +386,20 @@ class GroupRolloutWorkflow:
 
     async def _run_group(self, data: dict) -> list[tinker.Datum]:
         """Run the group's members (``_run_group_rollouts``), then compute its credit, in the order
-        :mod:`platoon.train.credit.group` describes: collect the members' datums; stop at the first reason the group
-        trains nothing before any credit (``_untrainable_verdict``); center each member's datums on its baseline
-        (``_assign_credit``, through ``assign_advantages``); filter the error tokens; and say what the group trains.
+        :mod:`platoon.train.credit.group` describes: collect the members' datums (under the per-datum stale filter each
+        stamped with its own policy version, :attr:`stale_filter`); stop at the first reason the group trains nothing
+        before any credit (``_untrainable_verdict``); center each member's datums on its baseline (``_assign_credit``,
+        through ``assign_advantages``); filter the error tokens; and say what the group trains.
         Every return is the group's output (``_make_task_output``), with its verdict and what each member returned."""
 
         with self._monitor().group_in_flight():
             raw_outcomes = await self._run_group_rollouts(data)
         outcomes = as_member_outcomes(raw_outcomes)
         results = [outcome.result for outcome in outcomes if outcome.result is not None]
-        # What each member returned, read before any datum is filtered (the per-task statistics).
+        # What each member returned, read before any datum is filtered or stamped (the per-task statistics).
         members = tuple(_member(outcome) for outcome in outcomes)
+        if self.stale_filter == "datum":  # the per-datum stale filter judges each datum by its own version
+            self._stamp_own_versions(data, results)
 
         def output(datums: list[tinker.Datum], verdict: str, trainable_rollouts: int = 0) -> _TaskRolloutOutput:
             return self._make_task_output(
@@ -407,6 +421,24 @@ class GroupRolloutWorkflow:
         if verdict == "no_datums":  # no datum the filter kept has a policy action token
             return output([], verdict)
         return output(datums, verdict, trainable_rollouts)
+
+    def _stamp_own_versions(self, data: dict, results: list[TrajectoryCollectionResult]) -> None:
+        """Stamp each member's datums with their own policy versions, under the per-datum stale filter.  A result whose
+        own versions do not match its datums (a subclass that changed ``result.datums`` after the conversion, or a
+        conversion that gives none) keeps its rollout's, warned once per start."""
+
+        unstamped = sum(not result.stamp_own_versions() for result in results)
+        if unstamped and not self._warned_unstamped:
+            self._warned_unstamped = True
+            logger.warning(
+                "train.stale_filter is datum, but the datums of %s of the %s members of task %s do not match their "
+                "own versions (TrajectoryCollectionResult.own_versions) in number, as when a workflow drops datums "
+                "after the conversion: they keep their rollout's version, by which the stale filter judges them. Keep "
+                "a result's own_versions in step with its datums (warned once per start)",
+                unstamped,
+                len(results),
+                data.get("task_id"),
+            )
 
     def _collect_datums(self, results: list[TrajectoryCollectionResult]) -> list[tinker.Datum]:
         """The members' datums, in member order.  Records the group's subagent sampling counts when its settings sample
