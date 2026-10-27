@@ -284,12 +284,15 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `TrainInterrupted` (now in `platoon.experimental`) on a stop request when the trainer's steps are atomic; when they
   are not, the rl trainer's, the step ends first, and an interrupt that comes as the hooks run all the same saves no
   checkpoint of the step, so that none saves half a step.
-- **The rules of a run's checkpoints and close.** A participant's keys are its own (`run.checkpoints.register` refuses
-  the counters', those kept for several policies and another participant's), those registered in `check()` take up the
-  start point before any training client opens, and a key of the resumed row that nothing claims stops the start (exit
-  78). The trainer's `close` now runs in `finally`, also after a failure (`run.ended` tells them apart), then each
-  hook's and participant's `aclose`, in reverse order of registration; a start that failed raises its error as it was,
-  the close's errors noted on it.
+- **The rules of a run's checkpoints and close.** A participant's keys are its own: `run.checkpoints.register` refuses
+  the counters', those kept for several policies, the fields that a `checkpoints.jsonl` row holds itself (`name`,
+  `epoch`, `final`, `state_path` and `sampler_path`, read from tinker_cookbook's `CheckpointRecord`, which an entry of
+  the same name would replace or be replaced by), a step hook's of the draws (`tasks`, `next_position`, `dispatch`) and
+  another participant's, with a `ConfigError` (exit 78) that names the participant and the key. Those registered in
+  `check()` take up the start point before any training client opens, and a key of the resumed row that nothing claims
+  stops the start (exit 78). The trainer's `close` now runs in `finally`, also after a failure (`run.ended` tells them
+  apart), then each hook's and participant's `aclose`, in reverse order of registration; a start that failed raises its
+  error as it was, the close's errors noted on it.
 - **What a trainer asks of the run (rule 10).** `TrainerNeeds` gains `atomic_steps` (an interrupt inside a step that
   sent training work saves no `<step>_interrupted` checkpoint of it, and the resume starts from the last full one),
   `fail_closed_updates` (an optimizer step that the service skipped, or whose metrics are not finite, raises

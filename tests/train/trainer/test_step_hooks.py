@@ -7,8 +7,9 @@ hook's error in drain or update fails the start with nothing published or saved;
 errors logged.  A stop during the hooks saves nothing of the step when the trainer's steps are atomic (rule 10), and
 lets the step end first when they are not, where an interrupt that comes as the hooks run all the same saves nothing of
 the step either.  A hook with state is a checkpoint participant, which takes up its state before the training client
-opens; a saved key that nothing claims stops the start; the run closes its hooks and participants in reverse, also
-after a failure, whose error it raises as it was.  And what comes with them: the per-update Adam parameters, updates
+opens; a key that the checkpoint row holds itself, or a hook's of the draws, is refused as it registers; a saved key
+that nothing claims stops the start; the run closes its hooks and participants in reverse, also after a failure, whose
+error it raises as it was.  And what comes with them: the per-update Adam parameters, updates
 that fail closed, a trainer's own steps through ``run.learner`` and ``run.end_step``, the policy's snapshot, a warm
 start with the optimizer's state, the draws' provenance, and the hooks the rl trainer attaches from its options."""
 
@@ -27,6 +28,7 @@ from typing import Any, ClassVar, cast
 import pytest
 import tinker
 from fakes.trainer import Future
+from tinker_cookbook.checkpoint_utils import CheckpointRecord
 
 import platoon.experimental as px
 from platoon.config_defs import RolloutConfig
@@ -35,7 +37,7 @@ from platoon.registry import register_component
 from platoon.task import Task
 from platoon.testing import check_trainer
 from platoon.testing import trainers as checks
-from platoon.train.checkpoints.participants import CORE_KEYS, RunCheckpoints
+from platoon.train.checkpoints.participants import CORE_KEYS, RunCheckpoints, row_fields
 from platoon.train.components import task_ids_to_dataset
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig
 from platoon.train.dispatch.source import RolloutSource
@@ -713,15 +715,126 @@ def test_a_participant_s_keys_are_its_own():
     cursor: Any = _Cursor()
     checkpoints.register(cursor)
     other: Any = SimpleNamespace(name="other", keys=("cursor",))
-    with pytest.raises(ValueError, match="loop_state key 'cursor' is 'cursor''s: 'other' may not hold it too"):
+    with pytest.raises(ConfigError, match="loop_state key 'cursor' is 'cursor''s: 'other' may not hold it too"):
         checkpoints.register(other)
     for key in ("batch", "policies"):
         owner: Any = SimpleNamespace(name="owner", keys=(key,))
-        with pytest.raises(ValueError, match=f"loop_state key '{key}' is the run's own"):
+        with pytest.raises(ConfigError, match=f"loop_state key '{key}' is the run's own"):
             checkpoints.register(owner)
     checkpoints.register(cursor)  # again: nothing changes
     assert checkpoints.participants == [cursor]
     assert set(RolloutSource.keys) <= set(CORE_KEYS)  # the draws' keys, which every release's rows may hold
+
+
+# The fields of a checkpoints.jsonl row besides batch (a counter), which a loop_state entry of the same name replaced
+# (name, epoch, final) or which the save's paths replaced (state_path, sampler_path).
+_ROW_FIELDS = ("name", "epoch", "final", "state_path", "sampler_path")
+_ROW = "is a field of the checkpoint row itself"
+
+
+class _Claims(px.StepHookBase):
+    """A hook with state, a checkpoint participant, that holds the keys its options name."""
+
+    name = "claims"
+
+    def __init__(self, keys: tuple[str, ...]) -> None:
+        self.keys = keys
+
+    @classmethod
+    def from_run(cls, run: Any, options: Any) -> _Claims:
+        return cls(tuple(options["keys"]))
+
+    async def checkpoint_state(self, name: str) -> dict[str, Any]:
+        return {key: {} for key in self.keys}
+
+    def resume(self, start: Any) -> None:
+        pass
+
+
+register_component("step_hook", "test-step-hooks-claims", _Claims, exist_ok=True)
+
+
+class _TrainerState:
+    """A trainer's participant, which has no name: an error names its class."""
+
+    def __init__(self, *keys: str) -> None:
+        self.keys = keys
+
+    async def checkpoint_state(self, name: str) -> dict[str, Any]:
+        return {key: {} for key in self.keys}
+
+    def resume(self, start: Any) -> None:
+        pass
+
+
+@pytest.mark.parametrize("key", _ROW_FIELDS)
+def test_no_participant_holds_a_key_that_the_checkpoint_row_holds_itself(key):
+    # The row's own fields, as tinker_cookbook writes the row: an entry of one of their names is not the entry's.
+    assert key in row_fields() and "batch" in row_fields() and "cursor" not in row_fields()
+    assert key not in CheckpointRecord.from_dict({"name": "n", key: "entry"}).extra
+    assert "cursor" in CheckpointRecord.from_dict({"name": "n", "cursor": "entry"}).extra
+
+    policies: Any = SimpleNamespace()
+    checkpoints = RunCheckpoints("unused", policies, wandb_run_id=lambda: None)
+    refused = f"loop_state key '{key}' {_ROW}"
+    with pytest.raises(ConfigError, match=f"{refused}: '_TrainerState' may not hold it"):
+        checkpoints.register(cast(Any, _TrainerState("mine", key)))
+    hooks = StepHooks(checkpoints)
+    with pytest.raises(ConfigError, match=f"{refused}: 'claims' may not hold it"):
+        hooks.register(_Claims(("cursor", key)))
+    assert checkpoints.participants == [] and len(hooks) == 0  # refused whole, as it registers
+
+
+@pytest.mark.parametrize("key", ["tasks", "next_position", "dispatch"])
+def test_a_hook_holds_none_of_the_draws_keys_which_a_trainer_s_participant_may(key):
+    policies: Any = SimpleNamespace()
+    checkpoints = RunCheckpoints("unused", policies, wandb_run_id=lambda: None)
+    hooks = StepHooks(checkpoints)
+    with pytest.raises(ConfigError, match=f"loop_state key '{key}' is the draws' .*: step hook 'claims' may not hold"):
+        hooks.register(_Claims((key,)))
+    assert checkpoints.participants == [] and len(hooks) == 0
+
+    own = _TrainerState(key)  # a trainer's draws of its own: the run claims the key, the trainer holds it
+    checkpoints.register(cast(Any, own))
+    assert checkpoints.participants == [own]
+
+
+class _HoldsFinal(px.TrainerBase):
+    """A trainer whose check registers a participant that holds ``final``, a field of the checkpoint row."""
+
+    def check(self, run: Any) -> None:
+        run.checkpoints.register(_TrainerState("final"))
+
+    async def prepare(self, run: Any, start: Any) -> px.StepPlan:
+        return px.StepPlan(end_step=run.config.train.max_training_steps)
+
+    async def run_steps(self, run: Any) -> None:
+        while run.clock.step < run.plan.end_step:
+            await run.end_step()
+
+
+@pytest.mark.parametrize(
+    ("trainer", "key", "problem"),
+    [
+        (PlatoonTinkerRLTrainer, "name", f"trainer_options.hooks[0]: loop_state key 'name' {_ROW}: 'claims' may not"),
+        (PlatoonTinkerRLTrainer, "state_path", f"trainer_options.hooks[0]: loop_state key 'state_path' {_ROW}"),
+        (
+            PlatoonTinkerRLTrainer,
+            "tasks",
+            "trainer_options.hooks[0]: loop_state key 'tasks' is the draws' (the rollout source's): step hook 'claims'",
+        ),
+        (_HoldsFinal, None, f"loop_state key 'final' {_ROW}: '_TrainerState' may not hold it"),
+    ],
+)
+def test_a_key_of_the_row_or_a_hook_s_of_the_draws_stops_the_start_before_the_service_opens_naming_its_holder(
+    tmp_path, trainer, key, problem
+):
+    service = checks.FakePolicyService()
+    hooks = [{"hook": "test-step-hooks-claims", "options": {"keys": [key]}}]
+    start = _start(trainer, tmp_path, settings={"trainer_options": {"hooks": hooks}} if key else None, service=service)
+    assert isinstance(start.error, ConfigError) and problem in str(start.error), start.error  # exit 78
+    assert str(start.error).count("invalid config") == 1  # the hook's item names the problem once
+    assert service.calls == [] and start.rows == []
 
 
 class _Closing(px.TrainerBase):

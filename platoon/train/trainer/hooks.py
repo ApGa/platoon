@@ -266,8 +266,8 @@ class StepHooks:
     def register(self, hook: StepHook) -> None:
         """``hook`` runs at every step's end from now on, after those registered before it; one with ``keys`` takes
         part in every full checkpoint too (``run.checkpoints.register``).  Refused (ValueError): a hook without a
-        name, a name another hook has, a hook that is not critical but drains or updates, and keys that are not its
-        own."""
+        name, a name another hook has, a hook that is not critical but drains or updates; and (``ConfigError``, exit
+        78) keys that are not its own, the draws' among them."""
 
         name = getattr(hook, "name", None)
         if not isinstance(name, str) or not name:
@@ -279,7 +279,7 @@ class StepHooks:
                 f"step hook {name!r} is not critical, so it only hears publications: it may not drain or update"
             )
         if getattr(hook, "keys", ()) and self._checkpoints is not None:
-            self._checkpoints.register(cast("CheckpointParticipant", hook))
+            self._checkpoints.register(cast("CheckpointParticipant", hook), hook=True)
         self._hooks.append(hook)
         if self._joined is not None:
             self._joined(hook)
