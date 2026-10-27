@@ -54,6 +54,12 @@ class Watchdog:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
+    @property
+    def running(self) -> bool:
+        """Whether it watches: started, and not stopped since."""
+
+        return self._running
+
     def heartbeat(self):
         """Call this periodically to indicate the process is making progress."""
         with self._lock:

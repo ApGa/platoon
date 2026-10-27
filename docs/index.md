@@ -102,6 +102,7 @@ platoon train my_run.yaml
   [episode programs and reward shaping](tutorials/programs.md).
 
 **How-to guides**: [configs](how-to/configs.md), [training and evaluation](how-to/train-and-eval.md),
+[fine-tuning on a dataset](how-to/train-and-eval.md#fine-tune-on-a-dataset),
 [evaluating a hosted model](how-to/evaluate-hosted-models.md),
 [models and tool calling](how-to/models-and-tool-calling.md),
 [sandboxes and Harbor tasks](how-to/sandboxes-and-harbor.md), [how Harbor tasks are graded](how-to/harbor-grading.md),

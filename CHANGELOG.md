@@ -244,8 +244,41 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `CheckpointParticipant` (a part of the run's state that every full checkpoint holds, after the run's counters, in
   the order the parts registered) and `Objective`, and `platoon.testing.check_trainer` checks a trainer: it trains a
   run of two steps on a fake Tinker service, stops one at a step boundary and resumes it. The config's `trainer:`
-  selects the trainer; this release has one, `rl`, the default (`sft` and `interleaved` are reserved). Nothing a run
-  does changes.
+  selects the trainer: `rl`, the default, or `sft` (below; `interleaved` is reserved). Nothing a run does changes.
+- **Supervised fine-tuning on LLaMA-Factory datasets (`trainer: sft`).** A run fine-tunes its policy on chat datasets
+  instead of rollouts, with the loss on the model's turns: the mean negative log-likelihood of the assistant's
+  replies and tool calls (with `mask_history`, of each conversation's last one only), rendered by the policy's renderer
+  as the policy sees them when it samples. The datasets follow LLaMA-Factory's conventions: a `dataset_info.json` in
+  `trainer_options.dataset_dir` names each one, on the Hugging Face Hub (`hf_hub_url`) or in files (`file_name`:
+  json, jsonl, csv, parquet or arrow), with its `formatting`, `split`, `subset`, `folder`, `num_samples`, `columns`
+  and `tags`; `alpaca` rows (`instruction`, `input`, `output`, `system`, `history`) and `sharegpt` conversations
+  (`from`/`value` or `role`/`content` messages, a system prompt, `tools`, and `function_call` and `observation`
+  turns) become conversations as LLaMA-Factory's converters align them, and the rows it would skip are skipped.
+  An entry's `columns` and `tags` replace LLaMA-Factory's defaults whole, as they do there. `trainer_options` sets the
+  datasets, `dataset_dir` (relative to the config file; left out, `data` beside it), `batch_size`, `num_epochs` or
+  `max_training_steps`, `num_microbatches`, `max_length` (shared among a conversation's turns as LLaMA-Factory's
+  `cutoff_len` is), `mask_history` and `seed`, checked when the config loads, `dataset_info.json` with them; `train:`
+  declares the policy, and its keys that only `rl` reads are refused under `sft` when set, naming the option to set
+  instead. Before the service opens, the run renders the first conversation, the first with tools, the first with a
+  tool call and the first with neither a system prompt nor tools, and refuses a renderer that cannot render one,
+  naming its dataset and row (a system message a renderer adds of its own does not train). Each epoch walks every
+  conversation once in a seeded order, and every full checkpoint saves where the run is (`loop_state.sft`), so a
+  resume trains each conversation once an epoch, also with another `batch_size`; a resume with other conversations or
+  another seed is refused. `checkpoint.keep_recovery` needs no `train.max_staleness` under `sft`, since nothing
+  samples the policy. `platoon config validate --tasks` loads the datasets of an sft config. Preference and
+  multimodal datasets, and evaluation during training, are not there yet
+  ([Fine-tune on a dataset](docs/how-to/train-and-eval.md#fine-tune-on-a-dataset), which lists where it differs from
+  LLaMA-Factory; [`examples/sft`](examples/sft/README.md)). Its steps are atomic and its updates fail closed, and
+  each step ends with `run.end_step(sampled=False)`: the step hooks a subclass registers run there, and since nothing
+  else samples the policy, a step without a hook, or one that updated nothing, publishes no sampler and saves only the
+  full checkpoint the cadence asks for. The trainer API gains what such a trainer needs: that `sampled=False`,
+  `TrainerBase.stats_logger` and `train_tracker`; a trainable policy has its optimizer's parameters once it opens, the
+  run stops the clock's watchdog after `run_steps`, and a recovery checkpoint that a step's end saves goes to the
+  trainer's pruning.
+  `platoon.testing.check_trainer` takes `options_for_steps`, the options of a run of so many steps, for a trainer
+  whose options say how long it trains, and `platoon.testing.fake_tinker_service` is the fake service it runs on, for
+  a test of a run of one's own: it renders with the toy renderer and records the datums it trains on and the
+  checkpoints it deletes.
 
 - **Any trainer draws the run's rollouts, and the workflow contract (experimental).** A trainer whose
   `needs()` say it rolls out gets the start's draws from its run, `run.rollouts()`

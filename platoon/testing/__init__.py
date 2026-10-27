@@ -28,15 +28,17 @@ The pieces:
 * :func:`check_trainer`: the conformance check of a trainer (``platoon.experimental``), made of named checks: it trains
   a run of two steps on a fake Tinker service, stops one at a step boundary and resumes it, and checks what each start
   saved; it checks the experimental trainer API, and changes with it;
+* :func:`fake_tinker_service`: that fake Tinker service (:class:`FakePolicyService`), for a run of ``platoon train`` or
+  of a trainer in a test, on CPU;
 * :func:`toy_tokenizer` and :func:`toy_renderer`: a 7 KB byte-level tokenizer with Qwen3's chat tokens, and
   tinker-cookbook's ``qwen3_instruct`` renderer over it, so prompts render and parse offline as they do for a Qwen3
   model, apart from the token ids;
 * a pytest plugin with the fixtures ``serve_policy``, ``toy_tokenizer`` and ``toy_renderer``, enabled with
   ``pytest -p platoon.testing`` and never automatically.
 
-The names this module exports are a stable API, but for :func:`check_task_sampler`, :func:`check_group_admission` and
-:func:`check_trainer`, which check the experimental sampler, admission and trainer APIs and change with them; its
-submodules are not.  It needs the
+The names this module exports are a stable API, but for :func:`check_task_sampler`, :func:`check_group_admission`,
+:func:`check_trainer` and :func:`fake_tinker_service`, which serve the experimental sampler, admission and trainer
+APIs and change with them; its submodules are not.  It needs the
 ``tinker`` extra (and the ``ors`` extra for ORS environments), and pytest only for the plugin.
 ``docs/how-to/test-extensions.md`` is the guide.
 """
@@ -69,7 +71,7 @@ _EXPORTS = {
     **dict.fromkeys(("EpisodeRun", "run_episode"), "platoon.testing.episode"),
     "check_task_sampler": "platoon.testing.samplers",
     "check_group_admission": "platoon.testing.admissions",
-    "check_trainer": "platoon.testing.trainers",
+    **dict.fromkeys(("FakePolicyService", "check_trainer", "fake_tinker_service"), "platoon.testing.trainers"),
 }
 
 __all__ = [
@@ -78,12 +80,14 @@ __all__ = [
     "TOY_TOKENIZER_DIR",
     "Completion",
     "EpisodeRun",
+    "FakePolicyService",
     "PolicyCall",
     "ScriptExhaustedError",
     "ScriptedPolicy",
     "check_group_admission",
     "check_task_sampler",
     "check_trainer",
+    "fake_tinker_service",
     "last_user_message",
     "make_gateway",
     "rules",
@@ -129,4 +133,4 @@ if TYPE_CHECKING:
         toy_renderer,
         toy_tokenizer,
     )
-    from platoon.testing.trainers import check_trainer
+    from platoon.testing.trainers import FakePolicyService, check_trainer, fake_tinker_service

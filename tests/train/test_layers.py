@@ -3,7 +3,7 @@ and a plugin never imports a trainer.
 
 =========  ============================================================================================================
 generic    ``policy/``, ``objectives/``, ``trainer/{api,run,registry,hooks,signals,waiting}.py``, ``dispatch/``,
-           ``checkpoints/``, ``evaluation/``, ``workers/``, and the flat modules but ``launch.py``
+           ``checkpoints/``, ``evaluation/``, ``workers/``, ``supervised/``, and the flat modules but ``launch.py``
 trainers   ``trainer/{rl,loops,state,sft,interleaved}.py``, ``step/``
 plugins    ``workflow/``, ``credit/``
 =========  ============================================================================================================
@@ -24,7 +24,7 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parents[2] / "platoon" / "train"
 GENERIC_TRAINER_MODULES = {"api", "run", "registry", "hooks", "signals", "waiting"}
 TRAINER_MODULES = {"rl", "loops", "state", "sft", "interleaved"}
-GENERIC_PACKAGES = {"policy", "objectives", "dispatch", "checkpoints", "evaluation", "workers"}
+GENERIC_PACKAGES = {"policy", "objectives", "dispatch", "checkpoints", "evaluation", "workers", "supervised"}
 PLUGIN_PACKAGES = {"workflow", "credit"}
 UNGROUPED = {"launch", "__init__", "tinker"}
 # The contract modules that every group may import.

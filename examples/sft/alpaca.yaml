@@ -1,0 +1,28 @@
+# Supervised fine-tuning on an alpaca dataset, in LLaMA-Factory's conventions: data/dataset_info.json names the
+# dataset, and each row's instruction and input are the user's turn, its output the assistant's. data/ is beside this
+# file, where trainer_options.dataset_dir looks when it is left out.
+#
+#   uv run platoon train examples/sft/alpaca.yaml      # needs TINKER_API_KEY
+
+trainer: sft
+trainer_options:
+  dataset: alpaca_demo
+  batch_size: 4                 # conversations per step: 3 steps an epoch here
+  num_epochs: 2
+  max_length: 2048
+
+train:                          # the policy sft trains
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  optimizer:
+    learning_rate: 1.0e-4
+
+checkpoint:
+  every: 3                      # a permanent checkpoint every 3 steps, besides the final one
+
+log_path: ./runs
+stats:
+  experiment_name: sft
+  trial_name: alpaca
+  wandb:
+    mode: disabled

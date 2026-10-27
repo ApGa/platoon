@@ -19,7 +19,7 @@ calls its hook (:class:`~platoon.train.trainer.api.TrainerBase`):
    opened are given, and the step hooks hear of it;
 7. the trainer readies its steps (``ready``), and the run's clock starts;
 8. the steps (``run_steps``), each ending with the step hooks (:meth:`TrainerRun.end_step`; the rl trainer's step runs
-   the same sequence);
+   the same sequence), after which the clock's watchdog stops, if the steps left it running;
 9. the save at exit: ``<step>_interrupted`` after an interrupt (the trainer's, or a stop request its steps stopped
    on short of their end), unless it came inside a step that no checkpoint may save (rule 10): one that sent training
    work, when the trainer's steps are atomic, else one whose end ran its step hooks; ``final`` at the run's end;
@@ -279,13 +279,15 @@ class TrainerRun:
         watchdog = getattr(getattr(self, "clock", None), "watchdog", None)
         return await self.trainer._await_with_heartbeat(awaitable, name=name, watchdog=watchdog, total_timeout=timeout)
 
-    async def end_step(self) -> dict[PolicyId, int]:
+    async def end_step(self, *, sampled: bool = True) -> dict[PolicyId, int]:
         """The end of a step of a trainer other than rl, after the step's own optimizer updates and its commit
         (``source.committed``): the step hooks drain and update, each policy that the step or a hook updated publishes
         once (:meth:`publish`), the hooks hear it, and the clock advances, moving the horizon of the start's draws on
         (:func:`~platoon.train.trainer.hooks.finish_step`, which the rl trainer's step runs too).  With no hook,
-        :meth:`publish` then the advance.  The run counts the updates from each policy's optimizer steps since the
-        step began.  Who published, at which version."""
+        :meth:`publish` then the advance; when nothing but a step hook samples the policies (``sampled=False``: the sft
+        trainer's), a step without hooks, or one that neither it nor a hook updated, publishes nothing, and saves the
+        full checkpoint the cadence asks for after it, if any (:meth:`_save_due`).  The run counts the updates from
+        each policy's optimizer steps since the step began.  Who published, at which version."""
 
         step, began, source = self.clock.step, self._step_began, self.source
 
@@ -294,7 +296,14 @@ class TrainerRun:
             return self._step_end("step", step=step, step_updates=self._updates_since(began), consumed=consumed)
 
         async def publish(end: StepEnd | None) -> dict[PolicyId, int]:
-            return await self.publish([policy for policy, count in self._updates_since(began).items() if count > 0])
+            updated = [policy for policy, count in self._updates_since(began).items() if count > 0]
+            if not sampled and (end is None or not updated):
+                # Nothing but a hook samples the policies, and there is none, or no update to publish: no sampler,
+                # but the checkpoint the cadence asks for all the same.
+                leader = self.policies[self.policies.leader]
+                await self._save_due(leader, policy_version=leader.version)
+                return {}
+            return await self.publish(updated)
 
         published = await finish_step(self.hooks, end_of, clock=self.clock, source=source, publish=publish)
         self._step_began = self._optimizer_steps()
@@ -347,19 +356,32 @@ class TrainerRun:
 
     async def _sampler_after_step(self, policy: Policy) -> Any:
         """The sampling client of ``policy``'s weights after the clock's step: of the full checkpoint that the cadence
-        saves after it, named for the next step, else of a weights-only save."""
+        saves after it (:meth:`_save_due`), else of a weights-only save."""
+
+        saved = await self._save_due(policy, policy_version=policy.version + 1)
+        if saved is None:
+            return await policy.save_for_sampler()
+        return sampler_from(policy.training_client, saved[policy.id])
+
+    async def _save_due(self, policy: Policy, *, policy_version: int) -> dict[PolicyId, dict[str, str]] | None:
+        """The full checkpoint of the run that the cadence asks for after the clock's step (``checkpoint.every``,
+        ``checkpoint.recovery_every``), named for the next step, at ``policy_version`` and ``policy``'s optimizer steps;
+        None when none is due.  A recovery checkpoint goes to the trainer's pruning once ``checkpoints.jsonl`` records
+        it (``_recovery_saved``)."""
 
         step, checkpoint = self.clock.step, self.config.checkpoint
         save_every = event_interval(checkpoint, self.plan.steps_per_epoch or 1)
         kind = checkpoint_kind_for_step(step - self.start.step + 1, save_every, checkpoint.recovery_every)
         if kind is None:
-            return await policy.save_for_sampler()
+            return None
         name = f"{step + 1:06d}" if kind == "permanent" else f"{RECOVERY_CHECKPOINT_PREFIX}{step + 1:06d}"
         logger.info(f"Saving {kind} checkpoint {name} after step {step}")
         saved = await self._save(
-            name, step=step + 1, policy_version=policy.version + 1, optimizer_steps=policy.optimizer_steps
+            name, step=step + 1, policy_version=policy_version, optimizer_steps=policy.optimizer_steps
         )
-        return sampler_from(policy.training_client, saved[policy.id])
+        if kind == "recovery":
+            self.trainer._recovery_saved(saved[policy.id], policy_version)
+        return saved
 
     def _step_end(
         self,
@@ -478,13 +500,22 @@ class TrainerRun:
 
     async def _run_steps(self) -> None:
         """8. The trainer's steps.  An interrupt they raise (``TrainInterrupted``: a wait that a stop request ended)
-        stops them, as one they report does (``run.interrupted``)."""
+        stops them, as one they report does (``run.interrupted``).  Then the clock's watchdog stops."""
 
         try:
             await self.trainer.run_steps(self)
         except TrainInterrupted:
             self.interrupted = True
             logger.info("Training interrupted")
+        finally:
+            self._stop_watchdog()
+
+    def _stop_watchdog(self) -> None:
+        """8. Once the steps stop: the clock's watchdog stops, unless the steps stopped it (the rl trainer's do)."""
+
+        clock = getattr(self, "clock", None)
+        if clock is not None and clock.watchdog is not None and clock.watchdog.running:
+            clock.watchdog.stop()
 
     async def _save_at_exit(self) -> None:
         """9. Once the steps stop: an interrupted start that trained a step saves a permanent checkpoint to resume from

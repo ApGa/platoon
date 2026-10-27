@@ -1,8 +1,9 @@
 """``platoon train``'s start of training: :func:`arun_tinker_training` loads and checks the config, lists the tasks,
 builds the run's components from its environments (the Auto factories of :mod:`platoon.train.auto`) and trains on the
 tasks with the trainer (:mod:`platoon.train.trainer`), in the steps that follow it, whose checks stop a config that
-cannot train with a :class:`ConfigError` before Tinker opens.  :mod:`platoon.train.supervise` runs it, in its own
-process or in each supervised start; so does ``python -m platoon.train.launch --config <file>``."""
+cannot train with a :class:`ConfigError` before Tinker opens.  A trainer that rolls nothing out (``trainer: sft``)
+skips the environments and the tasks (:func:`_train_without_rollouts`).  :mod:`platoon.train.supervise` runs it, in
+its own process or in each supervised start; so does ``python -m platoon.train.launch --config <file>``."""
 
 from __future__ import annotations
 
@@ -31,12 +32,14 @@ from platoon.train.auto import (
 from platoon.train.components import EnvironmentConfig
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, evaluates, training_problems
 from platoon.train.exclusion import TaskExclusion, record_exclusions
-from platoon.train.identity import check_training_run
+from platoon.train.identity import check_run_identity, check_training_run, run_identity
 from platoon.train.labels import check_labels, label_column
-from platoon.train.policy.spec import MAIN
+from platoon.train.policy.spec import MAIN, policy_specs
 from platoon.train.sampling import log_sampling_plan
 from platoon.train.startup import worker_preload
 from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.trainer import registry
+from platoon.train.trainer.api import TrainerSetup
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
 from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.train.workflow.protocol import WorkflowSetup, _built_by_keywords, capabilities_of
@@ -59,12 +62,17 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
     class that does not apply them, before the trainer is built.  What the exclusions left out, and what each entry's
     own settings change from the run's (``entry_settings``), go into the run directory's ``lock.json``.
 
-    The steps, in that order: :func:`_load_and_check`, :func:`_list_tasks`, :func:`_check_listed`,
-    :func:`_record_run` and :func:`_build_components` before the trainer is built, then :func:`_build_workflows` in
-    the trainer's context, on the trainer's policy, and the trainer trains.
+    The steps, in that order: :func:`_load`, :func:`_check_environments`, :func:`_list_tasks`,
+    :func:`_check_listed`, :func:`_record_run` and :func:`_build_components` before the trainer is built, then
+    :func:`_build_workflows` in the trainer's context, on the trainer's policy, and the trainer trains.  A trainer
+    that rolls nothing out trains after :func:`_load` (:func:`_train_without_rollouts`).
     """
 
-    config, settings, environment = _load_and_check(args, default_config_path)
+    config = _load(args, default_config_path)
+    if not registry.rolls_out(config):
+        await _train_without_rollouts(config)
+        return
+    settings, environment = _check_environments(config)
     training, eval_dataset, exclusions = _list_tasks(config)
     _check_listed(config, settings, training, eval_dataset)
     _record_run(config, settings, exclusions)
@@ -84,12 +92,9 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
         await trainer.train(train_workflow=train_workflow, eval_workflow=eval_workflow)
 
 
-def _load_and_check(
-    args: list[str] | None, default_config_path: str | None
-) -> tuple[PlatoonTinkerRLTrainerConfig, dict[str, entry_settings.EntrySettings], EnvironmentConfig]:
+def _load(args: list[str] | None, default_config_path: str | None) -> PlatoonTinkerRLTrainerConfig:
     """The run's config, loaded and checked before any environment package is imported, task listed or Tinker session
-    opened; each entry's own training settings, laid over the run's; and the run's environment, once the environments'
-    packages are imported and their mixture pools, routes and harness toolchains checked, before any task is listed."""
+    opened."""
 
     config, _ = load_config(
         args=args or sys.argv[1:],
@@ -99,9 +104,34 @@ def _load_and_check(
     config: PlatoonTinkerRLTrainerConfig = config
     if problems := training_problems(config):
         raise ConfigError(problems)
-    from platoon.eval.config_defs import require_tinker_api_key, sample_timeout_note  # the served policy's checks
+    from platoon.eval.config_defs import require_tinker_api_key  # the served policy's check
 
     require_tinker_api_key()
+    return config
+
+
+async def _train_without_rollouts(config: PlatoonTinkerRLTrainerConfig) -> None:
+    """Train with a trainer that rolls nothing out (``trainer: sft``): no environment is imported and no task listed.
+    A resume that would change the run's model stops here (:mod:`platoon.train.identity`), and ``lock.json`` records
+    the trainer with its options; then the trainer, built from its setup, trains."""
+
+    run_dir = Path(config.log_path, config.stats.experiment_name, config.stats.trial_name)
+    check_run_identity(run_dir, run_identity(config, ()), {})
+    update_run_lock(run_dir, {"trainer": registry.lock_record(config)})
+    setup = TrainerSetup(config=config, policy_specs=policy_specs(config), options=registry.options_of(config))
+    trainer = registry.trainer_class(config).from_setup(setup)
+    async with trainer:
+        await trainer.run()
+
+
+def _check_environments(
+    config: PlatoonTinkerRLTrainerConfig,
+) -> tuple[dict[str, entry_settings.EntrySettings], EnvironmentConfig]:
+    """Each entry's own training settings, laid over the run's; and the run's environment, once the environments'
+    packages are imported and their mixture pools, routes and harness toolchains checked, before any task is listed."""
+
+    from platoon.eval.config_defs import sample_timeout_note
+
     # The bound on each sampling call and where it came from, in the log; a variable it falls back to that is not a
     # positive number stops the run here.
     logger.info(sample_timeout_note("train.sample_timeout_seconds", config.train.sample_timeout_seconds))
@@ -113,7 +143,7 @@ def _load_and_check(
     check_mixture_pools(AutoEnvironment.environments(config))  # before any env server is contacted
     check_environment_routes(AutoEnvironment.environments(config))  # before any task is listed
     check_harness_toolchains(AutoEnvironment.environments(config))  # a run never builds one
-    return config, settings, environment
+    return settings, environment
 
 
 def _list_tasks(config: PlatoonTinkerRLTrainerConfig) -> tuple[TrainingTasks, Any, list[TaskExclusion]]:

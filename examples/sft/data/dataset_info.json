@@ -1,0 +1,21 @@
+{
+  "alpaca_demo": {
+    "file_name": "alpaca_demo.json",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output",
+      "system": "system",
+      "history": "history"
+    }
+  },
+  "sharegpt_demo": {
+    "file_name": "sharegpt_demo.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations",
+      "system": "system",
+      "tools": "tools"
+    }
+  }
+}

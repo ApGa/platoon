@@ -24,7 +24,7 @@ from platoon.train.components import (
     _sampler_checks,
     normalize_environment_configs,
 )
-from platoon.train.trainer.registry import trainer_problems
+from platoon.train.trainer.registry import rolls_out, trainer_problems
 from platoon.train.workflow.protocol import StaleFilterSetting
 from platoon.utils.config import ConfigError, value_hint
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
@@ -379,9 +379,38 @@ class RefillConfig:
             raise ValueError(f"train.refill.max_groups_per_step: {problem}")
 
 
+# The ``train:`` keys that only the rl trainer reads (RFC 0021): its batch, its duration, its loss and its rollouts.
+# The others declare the policy every trainer trains (``main``: its model, renderer, adapter and optimizer) and the
+# deadlines of its updates.  Under another trainer, setting one of these is a load error
+# (platoon.train.trainer.registry).
+RL_ONLY_TRAIN_KEYS = (
+    "batch_size",
+    "num_epochs",
+    "max_training_steps",
+    "num_minibatches",
+    "num_microbatches",
+    "max_staleness",
+    "stale_filter",
+    "loss_fn",
+    "loss_fn_config",
+    "workflow_config",
+    "max_concurrent_rollouts",
+    "permit_release",
+    "max_starting_rollouts",
+    "label_by",
+    "rollout_group_limits",
+    "task_sampler",
+    "task_sampler_options",
+    "group_admission",
+    "group_admission_options",
+    "refill",
+)
+
+
 @dataclass
 class TrainConfig:
-    """The ``train:`` section: the model, the batch, the loss, the optimizer and the rollout workflow."""
+    """The ``train:`` section: the model, the batch, the loss, the optimizer and the rollout workflow.  Under a trainer
+    other than ``rl``, it declares the policy that trainer trains, and the keys only ``rl`` reads stay unset."""
 
     UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
         **_HOSTED_HINTS,
@@ -825,7 +854,7 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
     which the dataloader cannot fill."""
 
     problems = []
-    if config.train.num_epochs is None and config.train.max_training_steps is None:
+    if rolls_out(config) and config.train.num_epochs is None and config.train.max_training_steps is None:
         problems.append("train: set num_epochs or max_training_steps (with both, training runs the shorter)")
     for section in ("train", "eval"):
         if not getattr(getattr(config, section).workflow_config.rollout_config, "judges", True):
@@ -888,11 +917,14 @@ class PlatoonTinkerRLTrainerConfig:
     train: TrainConfig
     # Evaluation during training; a config without the section does not evaluate (``eval.every`` is 0).
     eval: EvalConfig = field(default_factory=EvalConfig, kw_only=True)
-    # The trainer: rl, GRPO-style training on the rollouts of the training tasks, with ``train:``'s settings (the one
-    # trainer of this release; sft and interleaved are reserved for trainers platoon adds).
+    # The trainer: rl, GRPO-style training on the rollouts of the training tasks, with ``train:``'s settings; or sft,
+    # supervised fine-tuning on chat datasets in LLaMA-Factory's conventions, with ``trainer_options`` as its settings
+    # (interleaved is reserved for a trainer platoon adds). See docs/how-to/train-and-eval.md.
     trainer: str = field(default="rl", kw_only=True)
-    # The trainer's options, checked when the config loads: rl's are the step hooks it attaches to each of its steps,
-    # ``hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]`` (docs/extending/step-hooks.md).
+    # The trainer's options, checked against the trainer's when the config loads: rl's are the step hooks it attaches
+    # to each of its steps, ``hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]``
+    # (docs/extending/step-hooks.md); sft's (dataset, dataset_dir, batch_size, num_epochs, ...) are listed under
+    # Trainers in the config reference.
     trainer_options: dict[str, Any] = field(default_factory=dict, kw_only=True)
     # Root of the run directories; a run writes to ``log_path/<stats.experiment_name>/<stats.trial_name>``. A config
     # without one takes the site profile's ``runs`` (platoon.site), and then ``stats.experiment_name`` defaults to the

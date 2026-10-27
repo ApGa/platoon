@@ -115,6 +115,15 @@ def test_what_rollouts_of_this_start_may_still_sample_stays():
     assert planned(unversioned, keep=1, policy_version=20, max_staleness=1) == []
 
 
+def test_nothing_is_kept_for_a_sampler_when_no_rollout_samples_the_policy():
+    # An sft run publishes no sampler, so every recovery checkpoint holds the version it started at: a bound of 0
+    # would keep each one this start saved, and with no bound (None) only the newest stay.
+    records = [record(f"recovery-{step:06d}", 0) for step in range(4)]
+
+    assert planned(records, keep=1, max_staleness=0) == []
+    assert planned(records, keep=1, max_staleness=None) == paths(*(f"recovery-{step:06d}" for step in range(3)))
+
+
 def test_an_earlier_starts_checkpoints_serve_no_sampler_of_this_one():
     # The previous start saved recovery-000005 (run-1) at version 5; this one resumed there, and its launch save
     # (run-2) holds the same version.  Rollouts of this start sample only what this start saved.

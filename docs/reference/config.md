@@ -52,8 +52,8 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 |---|---|---|---|
 | `train` | [TrainConfig](#trainconfig) | required |  |
 | `eval` | [EvalConfig](#evalconfig-platoon-train-config-defs) | `EvalConfig()` | Evaluation during training; a config without the section does not evaluate (`eval.every` is 0). |
-| `trainer` | str | `"rl"` | The trainer: rl, GRPO-style training on the rollouts of the training tasks, with `train:`'s settings (the one trainer of this release; sft and interleaved are reserved for trainers platoon adds). |
-| `trainer_options` | dict[str, Any] | `{}` | The trainer's options, checked when the config loads: rl's are the step hooks it attaches to each of its steps, `hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]` (docs/extending/step-hooks.md). |
+| `trainer` | str | `"rl"` | The trainer: rl, GRPO-style training on the rollouts of the training tasks, with `train:`'s settings; or sft, supervised fine-tuning on chat datasets in LLaMA-Factory's conventions, with `trainer_options` as its settings (interleaved is reserved for a trainer platoon adds). See docs/how-to/train-and-eval.md. |
+| `trainer_options` | dict[str, Any] | `{}` | The trainer's options, checked against the trainer's when the config loads: rl's are the step hooks it attaches to each of its steps, `hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]` (docs/extending/step-hooks.md); sft's (dataset, dataset_dir, batch_size, num_epochs, ...) are listed under Trainers in the config reference. |
 | `log_path` | str | required | Root of the run directories; a run writes to `log_path/<stats.experiment_name>/<stats.trial_name>`. A config without one takes the site profile's `runs` (platoon.site), and then `stats.experiment_name` defaults to the config file's name. A relative one is relative to the working directory. |
 | `tinker_base_url` | str \| None | `null` | URL of a self-hosted Tinker-compatible service, such as miles-tinker (https://github.com/neulab/miles-tinker); None: `TINKER_BASE_URL`, else hosted Tinker. |
 | `environments` | list[[EnvironmentConfig](#environmentconfig)] | `[EnvironmentConfig()]` | The environments to train on: one, or a mixture whose entries each have a `name`. |
@@ -69,7 +69,8 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 
 In a training config: `train`.
 
-The `train:` section: the model, the batch, the loss, the optimizer and the rollout workflow.
+The `train:` section: the model, the batch, the loss, the optimizer and the rollout workflow.  Under a trainer
+other than `rl`, it declares the policy that trainer trains, and the keys only `rl` reads stay unset.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -724,3 +725,49 @@ valid result censored, and a task whose last 3 groups had no valid member drawn 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `band` | tuple[float, float] \| None | `null` | Also reject a group whose pass rate, its passes over its valid members (passes as the per-task statistics judge them: the scored reward against the entry's success_threshold), is below lo (reason below_band) or above hi (above_band): two numbers 0 <= lo < hi <= 1, such as [0.2, 0.8]; null: no band. |
+
+<a id="trainers"></a>
+
+## Trainers
+
+`trainer:` chooses how a run trains, and `trainer_options` sets the trainer's options. Core's trainers are below ([Fine-tune on a dataset](../how-to/train-and-eval.md#fine-tune-on-a-dataset) for `sft`). Under a trainer other than `rl`, the `train:` keys that only `rl` reads are refused when set: `batch_size`, `num_epochs`, `max_training_steps`, `num_minibatches`, `num_microbatches`, `max_staleness`, `stale_filter`, `loss_fn`, `loss_fn_config`, `workflow_config`, `max_concurrent_rollouts`, `permit_release`, `max_starting_rollouts`, `label_by`, `rollout_group_limits`, `task_sampler`, `task_sampler_options`, `group_admission`, `group_admission_options`, `refill`.
+
+| Trainer | What it trains on | Options |
+|---|---|---|
+| `rl` | The default: GRPO-style training on the rollouts of the run's training tasks, with `train:`'s settings. | [below](#rl-options) |
+| `sft` | Supervised fine-tuning on chat datasets in LLaMA-Factory's conventions (a `dataset_info.json` of `alpaca` and `sharegpt` datasets), with the loss on the model's turns; `train:` declares the policy it trains. | [below](#sft-options) |
+
+<a id="rl-options"></a>
+
+### `rl`'s options
+
+`platoon.train.trainer.registry.RLOptions`: the keys of `trainer_options` under `trainer: rl`.
+
+The rl trainer's options (`trainer_options`): the step hooks it attaches to each of its steps (`hooks`, RFC
+0021 section 9: `platoon.train.trainer.hook_config`).  Its other settings are `train:`'s.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `hooks` | tuple[HookSpec, ...] | `[]` | The step hooks it attaches to each of its steps, each `pkg.mod:Hook` (or a name a package registered) or `{hook: pkg.mod:Hook, options: {...}}` (docs/extending/step-hooks.md). |
+
+<a id="sft-options"></a>
+
+### `sft`'s options
+
+`platoon.train.supervised.options.SupervisedOptions`: the keys of `trainer_options` under `trainer: sft`.
+
+`trainer_options` under `trainer: sft`: the datasets to train on, named as LLaMA-Factory names them
+(`dataset` in the `dataset_info.json` of `dataset_dir`), how many conversations a step trains on and for how
+long, and how each conversation is cut and which of its turns train.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | str \| list[str] | required | The datasets to train on, by their names in dataset_dir's dataset_info.json: one name, several separated by commas (as LLaMA-Factory's dataset argument), or a list. Their conversations are put together in this order. |
+| `dataset_dir` | str | `"data"` | The directory that holds dataset_info.json and the files its entries name (LLaMA-Factory's dataset_dir), relative to the config file; left out, the data directory beside the config file. |
+| `batch_size` | int | `32` | Conversations per training step, which take one optimizer step together. |
+| `num_epochs` | int \| None | `null` | Passes over the conversations. With max_training_steps as well, training runs the shorter of the two; one of them is required. |
+| `max_training_steps` | int \| None | `null` | Training steps to run. With num_epochs as well, training runs the shorter of the two. |
+| `num_microbatches` | int | `1` | How many forward_backward calls a step's conversations are sent in, before the step's one optimizer step. |
+| `max_length` | int \| None | `null` | Tokens a rendered conversation is cut to, as LLaMA-Factory's cutoff_len cuts it: turn by turn from the first (from the last with mask_history), each prompt and reply sharing what is left; null: no cut. |
+| `mask_history` | bool | `false` | Train on the last model turn of each conversation only (LLaMA-Factory's mask_history), not on every one. |
+| `seed` | int | `42` | Seeds each epoch's order of the conversations, and which rows a dataset's num_samples takes. |

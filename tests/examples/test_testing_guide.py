@@ -57,6 +57,15 @@ def test_the_gateway_example_runs():
     exec(compile(block, "test-extensions.md", "exec"), {})
 
 
+def test_the_sft_trainer_s_check_runs_on_the_example_s_datasets(monkeypatch):
+    (block,) = [
+        block for block in python_blocks() if "SupervisedTrainer" in block and block in section("Check a trainer")
+    ]
+    monkeypatch.chdir(REPO)  # its dataset_dir is relative to the repository's root
+
+    exec(compile(block, "test-extensions.md", "exec"), {"check_trainer": platoon.testing.check_trainer})
+
+
 def test_the_reference_lists_every_export():
     reference = section("Reference")
 

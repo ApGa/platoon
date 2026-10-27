@@ -40,8 +40,9 @@ class ReplayOptions:
 
 class CrossEntropy:
     """Tinker's built-in next-token cross entropy, on each datum's weighted tokens; its metric is the mean negative
-    log-likelihood of the trained tokens.  Platoon has no cross-entropy objective yet, so the example carries its own
-    (an objective is any class of ``platoon.experimental.Objective``)."""
+    log-likelihood of the trained tokens.  The example carries its own (an objective is any class of
+    ``platoon.experimental.Objective``); platoon's, the sft trainer's (``platoon.train.objectives.cross_entropy``),
+    reports the sum and the weight of that likelihood instead."""
 
     loss_fn = "cross_entropy"
     loss_fn_config: dict[str, Any] = {}

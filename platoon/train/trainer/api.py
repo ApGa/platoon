@@ -132,8 +132,10 @@ class TrainerBase:
     """An optional base of trainers.  ``run()`` takes the trainer through the lifecycle every trainer shares
     (:class:`~platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every
     hook has a default but ``prepare`` and ``run_steps``, which a subclass writes.  ``async with`` opens what every
-    start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train
-    tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it."""
+    start logs to, the stats logger (:attr:`stats_logger`, which resumes the W&B run of the checkpoint the start
+    resumes from) and the train tracker (:attr:`train_tracker`), and labels every sandbox the run starts with the run,
+    so that the run's sandboxes can be reaped by it.  The policies' training clients open before ``prepare``, each
+    trainable one with its optimizer's parameters."""
 
     # What the trainer was built with; None for a trainer built with a constructor of its own, outside platoon train.
     setup: TrainerSetup | None = None
@@ -161,6 +163,23 @@ class TrainerBase:
     @classmethod
     def from_setup(cls, setup: TrainerSetup) -> Self:
         return cls(setup)
+
+    @property
+    def stats_logger(self) -> "StatsLogger":
+        """The run's stats logger, which ``async with`` opens: each step's metrics go to it (``log(step=, stats=)``)."""
+
+        if self._stats_logger is None:
+            raise RuntimeError(f"{type(self).__name__}'s stats logger opens with 'async with trainer:'")
+        return self._stats_logger
+
+    @property
+    def train_tracker(self) -> "StatsTracker":
+        """The run's train tracker, which ``async with`` opens: what a step records (a learner's metrics among it),
+        until the step exports it."""
+
+        if self._train_tracker is None:
+            raise RuntimeError(f"{type(self).__name__}'s train tracker opens with 'async with trainer:'")
+        return self._train_tracker
 
     @property
     def run_log_path(self) -> str:
@@ -246,10 +265,11 @@ class TrainerBase:
 
     async def run_steps(self, run: "TrainerRun") -> None:
         """8. The steps, from ``run.clock.step`` to ``run.clock.end``, stopping at a step boundary once a stop is asked
-        for (``run.shutdown``).  Each step ends with ``run.end_step``: the step hooks, the publication of the policies
-        it updated, and the clock's advance.  Steps that the stop request stopped short of the end were interrupted:
-        the run then saves ``<step>_interrupted``, also when they did not set ``run.interrupted``, which an interrupt
-        of their own sets, and so does a ``TrainInterrupted`` they raise."""
+        for (``run.shutdown``); a step awaits the service with ``run.wait``.  Each step ends with ``run.end_step``: the
+        step hooks, the publication of the policies it updated, and the clock's advance.  Steps that the stop request
+        stopped short of the end were interrupted: the run then saves ``<step>_interrupted``, also when they did not set
+        ``run.interrupted``, which an interrupt of their own sets, and so does a ``TrainInterrupted`` they raise.  The
+        run stops the clock's watchdog after them."""
 
         raise NotImplementedError(f"{type(self).__name__} must write its steps (TrainerBase.run_steps)")
 
@@ -258,8 +278,8 @@ class TrainerBase:
         opened.  The run's step hooks and participants close after it."""
 
     # What the lifecycle calls through the trainer, so that a subclass or a test may replace it on the class or an
-    # instance: the waiter of the run's saves, the signal handlers, how the policies open, and what a start that had
-    # no step left to train says.
+    # instance: the waiter of the run's saves, the signal handlers, how the policies open, where a recovery checkpoint
+    # that a step's end saved goes, and what a start that had no step left to train says.
 
     _await_with_heartbeat = waiting._await_with_heartbeat
     _setup_signal_handlers = signals._setup_signal_handlers
@@ -268,6 +288,10 @@ class TrainerBase:
         """4. Open the policies' training clients at the start point; False when training was stopped first."""
 
         return await run.policies.open(start, stop=run.shutdown)
+
+    def _recovery_saved(self, paths: dict[str, str], policy_version: int) -> None:
+        """8. A recovery checkpoint that a step's end saved (``run.end_step``), which ``checkpoints.jsonl`` now records,
+        at ``policy_version``: a trainer that prunes them (``checkpoint.keep_recovery``) hands it to its pruner."""
 
     def _nothing_to_train(self, run: "TrainerRun") -> None:
         """9. Say why a start that resumed at its last step trained nothing."""
