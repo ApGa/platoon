@@ -130,6 +130,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         batch_transforms: list[BatchTransform] | None = None,
         train_order: EpochOrder | None = None,
         train_sampling: TaskSampling | None = None,
+        policies: PolicySet | None = None,
     ):
         self.config = config
         self.train_dataset = train_dataset
@@ -138,8 +139,9 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         self.train_sampling = train_sampling
         self.batch_transforms = self._build_batch_transforms(batch_transforms)
         # The run's policies as the config declares them now (a later change of the config does not reach them), and
-        # main's model gateway, this process's default, on the service train() opens main's training client on.
-        self.policies = PolicySet.build(policy_specs(self.config))
+        # main's model gateway, this process's default, on the service train() opens main's training client on; or
+        # the policies given, such as a test's over a fake service.
+        self.policies = policies if policies is not None else PolicySet.build(policy_specs(self.config))
 
     @classmethod
     def needs(cls, config: Any, options: Any) -> TrainerNeeds:
@@ -347,13 +349,12 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         max_staleness, _ = entry_settings.largest_staleness(self.config)
         if keep is None or max_staleness is None:  # loading refuses keep_recovery without max_staleness
             return None
-        # The service the policy trains on, as its spec read it when the trainer was built.
-        base_url = self._leader().spec.tinker_base_url
         return RecoveryCheckpointPruner(
             run_dir=self.run_log_path,
             keep=keep,
             max_staleness=max_staleness,
-            service_client_factory=lambda: tinker.ServiceClient(base_url=base_url),
+            # Sessions on the service the policy trains on, as its spec read it when the trainer was built.
+            service_client_factory=self._leader().new_service_client,
         )
 
     def _recovery_saved(self, paths: dict[str, str], policy_version: int) -> None:

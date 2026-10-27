@@ -27,7 +27,7 @@ from typing import cast
 
 import pytest
 import yaml
-from sandbox_leftovers import leave_sandbox
+from fakes.sandbox_leftovers import leave_sandbox
 
 from platoon import cli
 from platoon.sandbox import cleanup as sandbox_cleanup
@@ -35,7 +35,7 @@ from platoon.train import reaping, supervise
 from platoon.train.reaping import HeldRun, read_process
 
 HERE = Path(__file__).resolve().parent
-STUB = HERE / "supervised_start_stub.py"
+STUB = HERE / "fakes" / "supervised_start_stub.py"
 FAKE_HPC_SANDBOX = HERE / "fake_hpc_sandbox"
 
 

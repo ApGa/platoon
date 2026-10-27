@@ -210,20 +210,27 @@ tokenizer. Prefer it in new tests. The suite also has fakes of its own:
 | `tests/inline/conftest.py`, `tests/harness/builtin/builtin_fixtures.py` | The `make_gateway(policy)` fixture: a real `ModelGateway` with the toy tokenizer and a policy you write as a function of the prompt |
 | `tests/harness/builtin/inline_runs.py` | `run_tree`: runs a function harness and its subagents on a gateway, then grades the session; `open_service_task` opens a task of an environment service |
 | `tests/harness/builtin/codeact_golden.py`, `tests/harness/builtin/golden_scenarios.py` | Golden fixtures: record a scripted rollout in full and compare later runs with it; the scenarios' scaffolding and the differences they allow, with why |
+| `tests/train/fakes/` | The training tests' fakes, imported as `fakes.<module>`: a run's real config (`fakes.config`: `make_config(**overrides)` in memory, `trainer_config` from a file with `key=value` overrides, `mixture_config` for environments), `make_trainer` (the rl trainer over fake tasks on a fake Tinker service, built with its constructor, which logs into a `StepLog`), `make_service_trainer` (the same on the fake Tinker service the resume tests save through), its train loop over groups a test scripts (`fakes.loop`), the group workflow with scripted members (`fakes.members`), the dispatcher's rows and samplers (`fakes.dispatcher`), a rollout worker's request (`fakes.workers`) and the stub modules of the rollout worker tests; the package's docstring lists them all |
 | `tests/train/parity/` | The training loop's golden trace: a few training steps per scenario on a fake Tinker service and fake rollouts, compared in full with golden files. A training setting gets a scenario there (its README says how). Its fakes are its own: a change to them changes every golden |
 | `tests/envs/scripted_trees.py` | Scripted agent trees on a live ORS session: calls, gathers and spawns, without model calls |
 | `tests/harness/harness_fakes.py` | A scripted OpenAI Chat server, a process-backed sandbox and an environment service that grades files in it, for TOML spec harnesses |
 
 Put a test next to the tests of the code it covers (`tests/envs`, `tests/harness`, `tests/gateway`,
-`tests/train`, and so on). The test directories have no `__init__.py`, so pytest imports each test file by its
-bare name: give every test file a name that is unique across `tests/`, `extensions/*/tests` and `recipes/`.
+`tests/train`, and so on). `tests/train` mirrors the packages of `platoon/train`: the tests of `platoon/train/step`
+are in `tests/train/step`, and those of a module at the top of `platoon/train` at the top of `tests/train`, but for
+the task samplers and admission rules (`sampler_api`, `sampler_runtime`, `samplers`, `sampling`, `admission_api`,
+`admissions`, `task_stats`), whose tests are in `tests/train/tasks`, and the objectives (`platoon/train/objectives`),
+whose tests are the learner's (`tests/train/policy/test_learner.py`). A helper that tests of two files share goes in
+`tests/train/fakes`, not in either test file. The test
+directories have no `__init__.py`, so pytest imports each test file by its bare name: give every test file a name
+that is unique across `tests/`, `extensions/*/tests` and `recipes/`.
 
 Tests run in parallel, next to tests in other processes and to other runs of the suite on the same machine. Keep
 what a test writes in `tmp_path`, start servers on port 0, change environment variables and the working directory
 with `monkeypatch`, and give anything that other processes can see a name of the test's own: the process-backed
 sandbox of `tests/harness/harness_fakes.py` runs its commands as the host's processes, so an agent id that two tests
 share lets one end the other's harness. Spread a slow scenario's tests over files, as the worker shutdown tests are
-(`tests/train/tinker/test_worker_shutdown.py` and its siblings): one worker runs a whole file, so the longest file
+(`tests/train/workers/test_worker_shutdown.py` and its siblings): one worker runs a whole file, so the longest file
 bounds a parallel run. A test that cannot share the machine at all, such as one whose timing bound the load of other
 processes would break, gets `@pytest.mark.serial` and runs in the second pass. When a test fails only in parallel,
 run it alone (`pytest path/to/test_file.py::test_name`), then look for what it shares.
