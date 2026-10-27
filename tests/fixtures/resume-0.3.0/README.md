@@ -1,11 +1,11 @@
 # Runs that platoon 0.3.0 interrupted
 
-Written by platoon 0.3.0 (commit 75685e8, tagged `v0.3.0`) running `tests/train/tinker/resume_0_3_0.py`, which
+Written by platoon 0.3.0 (commit 75685e8, tagged `v0.3.0`) running `tests/train/fakes/resume_0_3_0.py`, which
 defines the three runs and how each was interrupted:
 
 ```
-PYTHONPATH=<a checkout of platoon 0.3.0>:tests/train/tinker \
-    python tests/train/tinker/resume_0_3_0.py tests/fixtures/resume-0.3.0
+PYTHONPATH=<a checkout of platoon 0.3.0>:tests/train \
+    python tests/train/fakes/resume_0_3_0.py tests/fixtures/resume-0.3.0
 ```
 
 Each directory holds what a resume reads of one run's directory: `checkpoints.jsonl`, whose checkpoint paths are a

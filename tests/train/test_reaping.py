@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from sandbox_leftovers import alive, leave_sandbox
+from fakes.sandbox_leftovers import alive, leave_sandbox
 
 from platoon import cli
 from platoon.sandbox import SandboxSpec

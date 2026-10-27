@@ -312,7 +312,7 @@ EVAL_ROLLOUTS_AT_ONCE = 256
 
 
 # The default label column, each task's mixture entry (``platoon.train.components.ENVIRONMENT_COLUMN``, which
-# ``tests/train/tinker/test_label_by.py`` checks it against).
+# ``tests/train/test_label_by.py`` checks it against).
 ENVIRONMENT_LABEL = "_platoon_environment"
 
 
