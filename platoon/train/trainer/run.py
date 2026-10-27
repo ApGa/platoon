@@ -182,7 +182,7 @@ class TrainerRun:
         await trainer.ready(self)  # 7
         await trainer.run_steps(self)  # 8
         await self._save_at_exit()  # 9
-        # 10.  Only after steps that ended: a start that failed keeps its teardown as before (RFC 0021, section 5).
+        # 10.  Only after steps that ended, not after a failure (RFC 0021, section 5, puts it in ``finally``).
         await trainer.close(self)
         if self.source is not None:
             self.source.close()

@@ -26,24 +26,25 @@ from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.workflow.protocol import capabilities_of
 
 if TYPE_CHECKING:
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.train.dispatch.source import RolloutSource
 
 logger = logging.getLogger(__name__)
 
 
-def _named_samplers(config: Any) -> list[str]:
+def _named_samplers(config: "PlatoonTinkerRLTrainerConfig") -> list[str]:
     """The task samplers ``config`` names other than the ones a dataloader's order draws as (``auto``, ``weighted``,
     ``uniform``, and an entry's ``uniform``), one line each."""
 
     from platoon.train.samplers import STATIC_RUN_SAMPLERS
 
     named = []
-    run = str(getattr(getattr(config, "train", None), "task_sampler", None) or "auto")
+    run = str(config.train.task_sampler or "auto")
     if run not in STATIC_RUN_SAMPLERS:
         named.append(f"train.task_sampler: {run}")
-    for environment in getattr(config, "environments", None) or []:
-        own = getattr(environment, "task_sampler", None)
-        if (own is not None and own != "uniform") or getattr(environment, "task_sampler_options", None):
+    for environment in config.environments or []:
+        own = environment.task_sampler
+        if (own is not None and own != "uniform") or environment.task_sampler_options:
             named.append(f"environments[{environment.label}].task_sampler: {own or 'uniform'}")
     return named
 
@@ -87,13 +88,13 @@ def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch:
     recorder = source.recorder
     rows, _ = _rows(config, "train", config.train.max_concurrent_rollouts)
     rows.permits.on_held = client_monitor("train").set_permits_held  # rollout_client/permits_held_mean
-    sampler = str(getattr(config.train, "task_sampler", None) or "auto")
+    sampler = str(config.train.task_sampler or "auto")
     samplers = _samplers(source, train_dataloader, sampler)
     if recorder is not None:
         samplers.attach(recorder)  # adaptive samplers read the statistics, and observe settled groups
     # The group admission rules (RFC 0019, section 6), resolved as platoon train resolved them, whose resolution
-    # ran each rule's check with the run's workflow (run_components): none in a run whose every rule is all, which
-    # trains as before.
+    # ran each rule's check with the run's workflow (run_components): none in a run whose every rule is all, where
+    # every group a step dequeues trains.
     choices = choose_admissions(config, check=False) if rule_mode(config) else None
     source.admissions = (
         AdmissionSet(choices, samplers=samplers, batch_size=batch_size, label_column=column)
@@ -115,14 +116,14 @@ def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch:
         batch_size=batch_size,
         max_staleness=config.train.max_staleness,
         steps=max(0, end_batch - start_batch),
-        limits=getattr(config.train, "rollout_group_limits", None) or {},
+        limits=config.train.rollout_group_limits or {},
         labels=dataset_labels(tasks, column) if tasks is not None else (),
         start=start,
         next_position=start_batch * batch_size,
         recorder=recorder,
         versions=source.versions,
         leader=source.leader,
-        finish_batches=getattr(config.train, "num_minibatches", 1) > 1,
+        finish_batches=config.train.num_minibatches > 1,
         sampler=sampler,
         fingerprint=fingerprint,
         step=start_batch,

@@ -1,8 +1,7 @@
 """Raw rollout accounting shared by the in-process and worker rollout paths.
 
-Both helpers used to live in the group rollout workflow's module (now
-:mod:`platoon.train.workflow.group`).  They moved here
-because ``run.run_rollout_request`` must call
+Both helpers live here, not in the group rollout workflow's module
+(:mod:`platoon.train.workflow.group`), because ``run.run_rollout_request`` must call
 :func:`add_datum_funnel` immediately after conversion, in the process that did
 the conversion, and ``workers/*`` must never import the workflow module (the
 workflow imports ``workers.run``, so the dependency runs the other way).

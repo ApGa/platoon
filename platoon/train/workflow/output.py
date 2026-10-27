@@ -39,17 +39,15 @@ if TYPE_CHECKING:
 class _SingleRolloutOutcome:
     """Internal result that keeps raw generation work even if conversion fails.
 
-    ``disposition`` records *how* the member ended (see the taxonomy in
-    ``workers.supervisor``).  It is defaulted so existing callers -- including
-    tests that construct this positionally -- are unaffected, and it is never
-    load-bearing for training: a worker death is a member failure, decided by
-    ``min_successful_group_size`` like any other, never a group or trainer
-    failure.  ``outcome_status`` is the status of the outcome the member's root
-    recorded (``RolloutWorkerResponse.outcome_status``), also when it left no
-    result, and ``error`` when its environment could not open its session; it
-    is counted (``outcome/<status>``), never trained on.  ``reward_key`` is the
-    reward key the member's root trained (``RolloutWorkerResponse.reward_key``),
-    counted (``reward_key/<key>``), and on which the group's members must agree.
+    - ``disposition`` records *how* the member ended (see the taxonomy in ``workers.supervisor``).  It defaults to
+      ``completed``, so a caller that builds the outcome positionally (tests do) need not pass it.  It is never
+      load-bearing for training: a worker death is a member failure, decided by ``min_successful_group_size`` like
+      any other, never a group or trainer failure.
+    - ``outcome_status`` is the status of the outcome the member's root recorded
+      (``RolloutWorkerResponse.outcome_status``), also when it left no result, and ``error`` when its environment
+      could not open its session.  It is counted (``outcome/<status>``), never trained on.
+    - ``reward_key`` is the reward key the member's root trained (``RolloutWorkerResponse.reward_key``), counted
+      (``reward_key/<key>``).  The group's members must agree on it.
     """
 
     result: TrajectoryCollectionResult | None
@@ -68,8 +66,8 @@ class _SingleRolloutOutcome:
 class _TaskRolloutOutput(list[tinker.Datum]):
     """List-compatible task result carrying workload and rollout statistics.
 
-    The trainer and legacy consumers can continue treating this as an ordinary
-    datum list.  In particular, an empty instance behaves like an empty list,
+    The trainer, and any code that expects a workflow's plain list, can treat
+    it as an ordinary datum list.  In particular, an empty instance behaves like an empty list,
     while still carrying the generation work for a task which produced no
     trainable policy data.  ``group_stats`` holds what the workflow measured
     about the group, for the trainer to record in the step that consumes it.
@@ -154,21 +152,26 @@ def _summarize_outcomes(outcomes: list[_SingleRolloutOutcome]) -> RolloutStats:
     stats = summarize_rollout_group(data)
     # Every member, also one that left no result (a setup failure, a dead worker, a cancelled straggler).
     stats.counts.update(outcome_counts(outcome.outcome_status for outcome in outcomes))
-    stats.counts.update(reward_key_counts(getattr(outcome, "reward_key", None) for outcome in outcomes))
+    stats.counts.update(reward_key_counts(outcome.reward_key for outcome in outcomes))
     stats.counts[REWARD_KEY_MISMATCH] = int(len(_trained_keys(outcomes)) > 1)
     return stats
 
 
 def _member(outcome: _SingleRolloutOutcome) -> MemberResult:
-    """What one member returned, for the per-task statistics: its trained reward and the reward its environment
-    scored, as ``platoon eval`` judges success (None for an outcome that was not scored; the reward its environment
-    reported before any reward processor, else, for a rollout that records none, its trained reward; a rollout whose
-    trace records no outcome reports its own success flag, which counts as a pass at 1), its validity, outcome and
-    disposition, its root's steps and output tokens, and the policy versions its datums sampled."""
+    """What one member returned, for the per-task statistics:
+
+    - ``reward``: its trained reward;
+    - ``scored``: the reward its environment scored, as ``platoon eval`` judges success.  None for an outcome that was
+      not scored.  Else it is the reward the environment reported before any reward processor, or, for a rollout
+      that records none, its trained reward.  A rollout whose trace records no outcome reports its own success flag
+      (``flag``), which counts as a pass at 1;
+    - its validity, outcome, disposition and reward key;
+    - its root's steps and output tokens, and how long its rollout took;
+    - ``versions``: the policy versions its datums sampled."""
 
     result = outcome.result
-    status = getattr(outcome, "outcome_status", None)
-    success = getattr(outcome, "success_reward", None)
+    status = outcome.outcome_status
+    success = outcome.success_reward
     valid = bool(result is not None and result.task_reward_valid)
     if status is not None and status != "scored":
         scored = None
@@ -187,11 +190,11 @@ def _member(outcome: _SingleRolloutOutcome) -> MemberResult:
         scored=scored,
         valid=valid,
         outcome=status or "none",
-        disposition=getattr(outcome, "disposition", "completed"),
-        reward_key=getattr(outcome, "reward_key", None),
+        disposition=outcome.disposition,
+        reward_key=outcome.reward_key,
         steps=root.num_steps if root is not None else None,
         output_tokens=root.num_output_tokens if root is not None else None,
-        seconds=getattr(outcome, "seconds", None),
+        seconds=outcome.seconds,
         versions={MAIN: (min(versions), max(versions))} if versions else {},
         flag=status is None and success is not None,
     )
@@ -201,7 +204,7 @@ def _trained_keys(outcomes: Sequence[_SingleRolloutOutcome]) -> set[str]:
     """The reward keys a group's members trained (a member that trained none, such as one platoon scored 0 itself,
     adds none): more than one, and the group does not train."""
 
-    return {key for outcome in outcomes if (key := getattr(outcome, "reward_key", None))}
+    return {key for outcome in outcomes if (key := outcome.reward_key)}
 
 
 def _make_task_output(
@@ -302,7 +305,7 @@ def _outcome_from_response(
         disposition=disposition,
         outcome_status=response.outcome_status,
         reward_key=response.reward_key,
-        success_reward=getattr(response, "success_reward", None),
+        success_reward=response.success_reward,
         seconds=response.rollout_seconds,
     )
 

@@ -221,10 +221,14 @@ def rows_by_policy(output: Any, trained: str) -> Mapping[str, Sequence["tinker.D
 
 
 def carried_report(output: object) -> OutputReport:
-    """The report an output's attributes give, each read as the trainer read it before the contract was written down
-    and left out when it is malformed or cannot be read (its property raises): the labels as they are; the workload
-    only with its four counts, each a whole number of 0 or more (:func:`malformed_counts`); the statistics only of
-    their types; the members as a tuple, none when they are no sequence; the verdict only as text.  Never raises."""
+    """The report an output's attributes give.  Never raises.  An attribute that is malformed, or cannot be read (its
+    property raises), is left out:
+
+    - the labels are read as they are;
+    - the workload only with its four counts, each a whole number of 0 or more (:func:`malformed_counts`);
+    - the statistics only of their types;
+    - the members as a tuple, none when they are no sequence;
+    - the verdict only as text."""
 
     workload_fields: dict[str, Any] = {}
     if _is_a(workload := _attribute(output, "workload"), _ROLLOUT_WORKLOAD):

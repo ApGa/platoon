@@ -1,20 +1,29 @@
 """The run's training draws (:class:`RolloutSource`, RFC 0021 section 2.3): what a trainer that trains on rollouts of
 the run's tasks draws them through, and the groups they settle into.
 
-A source holds one start's draws: the run's per-task statistics (its task records), the order the training tasks are
-drawn in and the task samplers that draw it, the group admission rules, and the dispatcher, which starts each draw's
-group when the horizon, the rollout permits and the labels allow; once started, the queue the groups settle into, the
-groups a resume kept first, where the steps that consume them dequeue them.  It runs the training workflow's
-``arun_episode`` for each draw.  And it takes part in every full checkpoint of the run (``loop_state``'s ``tasks``,
-``next_position`` and ``dispatch``), which a start that resumes takes up.
+A source holds one start's draws:
 
-Each part is a module function that takes the source: the per-task statistics' beginning and start here, building and
-starting the dispatcher in :mod:`platoon.train.dispatch.setup`, running a group in :mod:`platoon.train.dispatch.runner`,
-what a checkpoint saves of the draws in :mod:`platoon.train.checkpoints.saving` and taking it up in
-:mod:`platoon.train.checkpoints.resume`.  A trainer gets the start's source from its run
-(:meth:`~platoon.train.trainer.run.TrainerRun.rollouts`).  The rl trainer's is a subclass of its own, whose steps of
-opening, saving and taking up the draws go through the trainer's methods of their names, which tests replace, and which
-call these functions.
+- the run's per-task statistics (its task records);
+- the order the training tasks are drawn in, and the task samplers that draw it;
+- the group admission rules;
+- the dispatcher, which starts each draw's group when the horizon, the rollout permits and the labels allow;
+- once started, the queue the groups settle into (the groups a resume kept first), where the steps that consume them
+  dequeue them.
+
+It runs the training workflow's ``arun_episode`` for each draw.  It takes part in every full checkpoint of the run
+(``loop_state``'s ``tasks``, ``next_position`` and ``dispatch``), which a start that resumes takes up.
+
+Each part is a module function that takes the source:
+
+- the per-task statistics' beginning and start: here;
+- building and starting the dispatcher: :mod:`platoon.train.dispatch.setup`;
+- running a group: :mod:`platoon.train.dispatch.runner`;
+- what a checkpoint saves of the draws: :mod:`platoon.train.checkpoints.saving`; taking it up:
+  :mod:`platoon.train.checkpoints.resume`.
+
+A trainer gets the start's source from its run (:meth:`~platoon.train.trainer.run.TrainerRun.rollouts`).  The rl
+trainer's is a subclass of its own: its steps of opening, saving and taking up the draws go through the trainer's
+methods of their names, which tests replace, and which call these functions.
 """
 
 import asyncio
@@ -85,12 +94,6 @@ class RolloutSource:
         self.results: asyncio.Queue[_Settled] | None = None
         self.watchdog: Watchdog | None = None
         self.tracker: StatsTracker | None = None
-
-    @property
-    def steps_per_epoch(self) -> int | None:
-        """The steps of one pass over the training tasks' order; None before :meth:`open`."""
-
-        return len(self.order) if self.order is not None else None
 
     def version(self) -> int:
         """The sampled policy's version now (``leader``'s): the version the per-task statistics record a group at, and

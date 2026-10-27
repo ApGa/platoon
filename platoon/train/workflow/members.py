@@ -2,15 +2,12 @@
 policy (``_run_group_rollouts``: the quorum, then the grace, then the cut), and one member's rollout, in process or in a
 rollout worker (``arun_episode_single``).
 
-Each member runs in a block of its draw's rollout lease
-(``platoon.train.leases``) in ``_run_group_member``, around its whole rollout,
-so under ``train.permit_release: rollout`` its permit comes back as it ends (in
-process, once the teardowns it left running in the background have ended too,
-at most ``CLEANUP_WAIT_SECONDS`` later) and a group's members start as permits
-free, each member's straggler deadline carrying its own start delay;
-``runs_rollouts_on_lease`` says which subclasses keep this.  Inside its block a
-member takes a start slot of the run's start limit (``start_limit``,
-:mod:`platoon.train.workflow.start_limit`).
+Each member runs in a block of its draw's rollout lease (``platoon.train.leases``) in ``_run_group_member``, around
+its whole rollout.  So under ``train.permit_release: rollout`` its permit comes back as it ends (in process, once the
+teardowns it left running in the background have ended too, at most ``CLEANUP_WAIT_SECONDS`` later).  A group's
+members then start as permits free, each member's straggler deadline carrying its own start delay;
+``runs_rollouts_on_lease`` says which subclasses keep this.  Inside its block a member takes a start slot of the run's
+start limit (``start_limit``, :mod:`platoon.train.workflow.start_limit`).
 
 Seven of these functions are ``GroupRolloutWorkflow``'s methods, which the class keeps under the same names:
 ``_admission_semaphore``, ``_admit_group``, ``_run_group_member``, ``_member_start_slot``, ``_run_group_rollouts``,
@@ -25,12 +22,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from platoon.train.components import ENVIRONMENT_COLUMN
 from platoon.train.labels import task_label
 from platoon.train.leases import holding, rollout_lease
 from platoon.train.workers.run import run_rollout_request
 from platoon.train.workflow.context import _group_ready_callback
 from platoon.train.workflow.output import _SingleRolloutOutcome
+from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import NO_START_SLOT, START_SLOT_GRACE_SECONDS, StartSlot, held_slot
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stopping import CleanupScope
@@ -115,12 +112,13 @@ class _GroupAdmission:
 
 
 class _MemberStarts:
-    """When each member of a group started: the seconds it waited for its permit and then for its start slot, its start
-    delay (the members' tasks are created together).  Exactly 0 for every member whose permit came with the group's and
-    that took a slot at once (or needs none), whose straggler deadline is then the group's, as before; with rolling
-    starts or a binding start limit a late member's deadline carries its delay behind the group's first start.  A member
-    that never entered a block (an override of ``_run_group_member`` that does not call it) counts as started with the
-    group."""
+    """When each member of a group started: its start delay, the seconds it waited for its permit and then for its
+    start slot (the members' tasks are created together).
+
+    The delay is exactly 0 for every member whose permit came with the group's and that took a slot at once (or needs
+    none); its straggler deadline is then the group's.  With rolling starts or a binding start limit, a late member's
+    deadline carries its delay behind the group's first start.  A member that never entered a block (an override of
+    ``_run_group_member`` that does not call it) counts as started with the group."""
 
     def __init__(self) -> None:
         self.created = asyncio.get_running_loop().time()
@@ -151,9 +149,12 @@ class _MemberStarts:
 
 
 def _admission_semaphore(workflow: "GroupRolloutWorkflow") -> asyncio.Semaphore:
-    limit = max(1, int(getattr(workflow.config, "worker_launch_concurrent_groups", 2)))
-    semaphore = getattr(workflow, "_admission", None)
-    if semaphore is None or getattr(workflow, "_admission_limit", 0) != limit:
+    """The semaphore of the startup gate, of ``worker_launch_concurrent_groups`` groups (at least 1), made again when
+    that setting changed."""
+
+    limit = max(1, GroupSettings(workflow.config).worker_launch_concurrent_groups)
+    semaphore = workflow._admission
+    if semaphore is None or workflow._admission_limit != limit:
         semaphore = asyncio.Semaphore(limit)
         workflow._admission = semaphore
         workflow._admission_limit = limit
@@ -190,7 +191,7 @@ async def _admit_group(workflow: "GroupRolloutWorkflow", group_size: int) -> "_G
     semaphore = workflow._admission_semaphore()
     with workflow._monitor().startup_gate_wait():  # rollout_client/startup_gate_waiting_mean
         await semaphore.acquire()
-    budget = float(getattr(workflow.config, "worker_startup_budget_seconds", 300.0)) + 60.0
+    budget = GroupSettings(workflow.config).worker_startup_budget_seconds + 60.0
     return _GroupAdmission(semaphore, group_size, budget)
 
 
@@ -199,19 +200,20 @@ async def _run_group_member(
 ) -> _SingleRolloutOutcome:
     """Run one member on one of its draw's rollout permits, reporting its readiness to the group's startup permit.
 
-    The lease block covers the member's whole rollout: with ``rollout_isolation: process``, ``arun_episode_single``
+    The lease block covers the member's whole rollout.  With ``rollout_isolation: process``, ``arun_episode_single``
     returns only once the member's worker process tree is reaped and the env sessions and sandboxes it left are
-    deleted; in process, once its rollout coroutine, its subagents and their grading have ended, and a block that
-    holds a permit (``train.permit_release: rollout``) then waits, at most :data:`CLEANUP_WAIT_SECONDS`, for the
+    deleted.  In process, it returns once its rollout coroutine, its subagents and their grading have ended.  Then a
+    block that holds a permit (``train.permit_release: rollout``) waits, at most :data:`CLEANUP_WAIT_SECONDS`, for the
     sandbox and env session teardowns that a cancellation or an early close left to finish in the background (the
     rollout's :class:`~platoon.utils.stopping.CleanupScope`).  A cancellation ends that wait, and no teardown; a
-    member whose rollout had ended keeps its outcome.  Under ``permit_release: group`` the blocks hold nothing and
-    no member waits, as before.  A cancelled member's block exits once its cancellation has unwound.  Inside it the
-    member takes its start slot (:meth:`_member_start_slot`), which ``arun_episode_single`` hands to the rollout's
-    host to give back at the first model call, and at the latest before that wait.  The seconds it waited for its
-    permit and then for its slot are its start delay (:class:`_MemberStarts`).  The rollout runs with no lease
-    (``holding(None)``), so a group it runs in turn takes no permits of its own, as its child agents take none, and
-    no start slots."""
+    member whose rollout had ended keeps its outcome.  Under ``permit_release: group`` the blocks hold nothing and no
+    member waits.  A cancelled member's block exits once its cancellation has unwound.
+
+    Inside the block the member takes its start slot (:meth:`_member_start_slot`).  ``arun_episode_single`` hands the
+    slot to the rollout's host, which gives it back at the first model call, and at the latest before that wait.  The
+    seconds the member waited for its permit and then for its slot are its start delay (:class:`_MemberStarts`).  The
+    rollout runs with no lease (``holding(None)``): a group it runs in turn takes no permits of its own and no start
+    slots, as its child agents take none."""
 
     ready = admission.member_slot()
     token = _group_ready_callback.set(ready)
@@ -248,7 +250,7 @@ def _member_start_slot(workflow: "GroupRolloutWorkflow") -> StartSlot:
     limit = workflow.start_limit
     if limit is None or held_slot() is not None:
         return NO_START_SLOT
-    budget = float(getattr(workflow.config, "worker_startup_budget_seconds", 300.0))
+    budget = GroupSettings(workflow.config).worker_startup_budget_seconds
     return limit.slot(timeout_seconds=budget + START_SLOT_GRACE_SECONDS, monitor=workflow._monitor())
 
 
@@ -267,11 +269,7 @@ class GroupStragglerPolicy:
         """The policy of a group whose task has ``label`` (``train.label_by``), under the group's settings ``config``;
         None when it sets no timeout, so that no member is cut."""
 
-        straggler_timeout = getattr(config, "straggler_timeout_seconds", None)
-        quorum = getattr(config, "straggler_quorum", None)
-        label_policy = getattr(config, "straggler_policies", {}).get(label)
-        if label_policy is not None:
-            straggler_timeout, quorum = label_policy.timeout_seconds, label_policy.quorum
+        straggler_timeout, quorum = GroupSettings(config).straggler_policy(label)
         if straggler_timeout is None:
             return None
         if quorum is None:
@@ -297,7 +295,7 @@ async def _run_group_rollouts(workflow: "GroupRolloutWorkflow", data: dict) -> l
     """
     group_size = workflow.config.group_size
     # The policy of the task's label (train.label_by).
-    label = task_label(data, getattr(workflow, "label_by", ENVIRONMENT_COLUMN))
+    label = task_label(data, workflow.label_by)
     policy = GroupStragglerPolicy.of(workflow.config, label)
     admission = await workflow._admit_group(group_size)
     tasks = [asyncio.ensure_future(workflow._run_group_member(data, i, admission)) for i in range(group_size)]
@@ -447,7 +445,7 @@ def member_outcomes(tasks: Sequence[asyncio.Task]) -> list:
                 )
             )
         else:
-            # Propagates a legacy override's exception, as the gather of ``gather_members`` does.
+            # Propagates the exception of an override that raised, as the gather of ``gather_members`` does.
             outcomes.append(task.result())
     return outcomes
 
@@ -457,7 +455,7 @@ async def arun_episode_single(
 ) -> _SingleRolloutOutcome:
     """Run a single rollout and return training data.
 
-    The blanket guard stays and now also covers request building: that adds
+    The blanket guard covers request building too: that adds
     ``pickle.dumps``, a write to node-local scratch and (in ``process``
     mode) opening a log file, any of which can raise on a full disk.  An
     escape here would propagate through ``_run_group_rollouts`` (the gather

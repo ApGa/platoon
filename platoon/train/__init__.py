@@ -26,6 +26,18 @@ Its modules, by what they are for:
   runs), ``admission_api`` and ``admissions`` (which groups count), ``task_stats`` and ``task_records`` (the per-task
   statistics), and ``leases`` (each rollout's permit, RFC 0020).
 
+Words the training code uses throughout:
+
+- a **start** is one launch of training in a run directory: its first, or a resume;
+- a **group** is the ``group_size`` rollouts of one task, whose rewards set each other's baseline;
+- a **draw** is the task the run's order gives a group.  It is numbered, so that a resume can draw it again, and it is
+  outstanding until a committed step consumes it;
+- a group **settles** when it ends: what a step dequeues of it goes to the queue the steps dequeue from;
+- the **horizon** bounds how far rollouts run ahead of training: at most ``(train.max_staleness + 1) × batch_size``
+  groups dispatched and not yet consumed;
+- an **entry** is one environment of ``environments:``; a **label** is what a task's metrics and limits are keyed by
+  (``train.label_by``; by default, its entry).
+
 The names below import from here without loading tinker or torch until one is used.  ``platoon.train.tinker`` holds the
 policy client (``proxy``), its renderers and the rollout timing, and the shims of the module paths that platoon 0.5.0
 moved out of it, which platoon 0.6.0 removes.

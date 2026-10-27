@@ -1,7 +1,7 @@
 """The groups a full checkpoint keeps: those that settled and that no committed step consumed (RFC 0019, question 4).
 
 A group runs for minutes or hours; it settles, waits in the result queue for the step that dequeues it, and that step
-commits.  A checkpoint saved in between used to leave such a group to be rolled out again by a resume.  Now each full
+commits.  So that a resume from a checkpoint saved in between need not roll such a group out again, each full
 checkpoint writes them to ``tasks/kept-s<start>-<checkpoint>.json.gz`` in the run directory (:func:`write_kept_groups`),
 and the state of the dispatcher's draws that it saves beside them names the file with its SHA-256
 (:func:`platoon.train.checkpoints.dispatch_state.save_state`); a start that resumes reads them back (:func:`read_kept`)
@@ -113,10 +113,10 @@ def write_kept_groups(
         try:
             group = encode_group(
                 key,
-                entry=getattr(item, "entry", None),
-                label=getattr(item, "label", None),
-                record=getattr(item, "record", None),
-                output=getattr(item, "rollout", None),
+                entry=item.entry,
+                label=item.label,
+                record=item.record,
+                output=item.rollout,
             )
         except Exception:  # a group that cannot be kept is rolled out again, and costs no other
             logger.warning("Cannot keep the settled group %s with checkpoint %s", key, checkpoint, exc_info=True)

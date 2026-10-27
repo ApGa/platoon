@@ -247,7 +247,7 @@ class TrainLoopSharedState(_GivenPolicyState):
         every = self.eval_every
         if every is None or step % every:
             return False
-        if step == 0 and not getattr(self.config.eval, "at_start", False):
+        if step == 0 and not self.config.eval.at_start:
             return False
         return not (step == self.start_step and self.start_step_evaluated)
 
@@ -255,7 +255,7 @@ class TrainLoopSharedState(_GivenPolicyState):
         """Training steps between the events ``config`` triggers (``every``), or ``None`` for ``every: 0``, which
         never triggers the event; ``strategy: epoch`` counts ``every`` in passes over the training tasks."""
 
-        if getattr(config, "strategy", None) == "epoch":
+        if config.strategy == "epoch":
             return event_interval(config, self.num_train_batches_per_epoch)
         return event_interval(config, 1)
 

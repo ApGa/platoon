@@ -1,5 +1,6 @@
-"""What a rollout worker needs to sample a policy (:func:`model_binding`): the binding file it follows for the
-policy's sampling client, and the model, renderer and sampling settings it builds its own model gateway with."""
+"""What a rollout worker needs to sample a policy (:func:`model_binding`), which each member's worker request carries
+(:mod:`platoon.train.workflow.requests`): the binding file it follows for the policy's sampling client, and the model,
+renderer and sampling settings it builds its own model gateway with."""
 
 from typing import Any
 
