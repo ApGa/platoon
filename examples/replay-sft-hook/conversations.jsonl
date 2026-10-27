@@ -1,0 +1,8 @@
+{"messages": [{"role": "user", "content": "I am thinking of a number from 1 to 100. What is your first guess?"}, {"role": "assistant", "content": "50. Guessing the middle halves the range whatever the answer."}]}
+{"messages": [{"role": "user", "content": "The number is higher than 50. What next?"}, {"role": "assistant", "content": "75, the middle of 51 to 100."}]}
+{"messages": [{"role": "user", "content": "The number is lower than 75. What next?"}, {"role": "assistant", "content": "62, the middle of 51 to 74."}]}
+{"messages": [{"role": "user", "content": "How many guesses does bisection need for a number from 1 to 100?"}, {"role": "assistant", "content": "At most 7, since 2 to the 7th is 128, which covers 100 numbers."}]}
+{"messages": [{"role": "user", "content": "Why not guess 1, then 2, then 3?"}, {"role": "assistant", "content": "Counting up can take 100 guesses; halving the range takes at most 7."}]}
+{"messages": [{"role": "user", "content": "The range left is 63 to 66. What do you guess?"}, {"role": "assistant", "content": "64. Then one more guess settles any answer."}]}
+{"messages": [{"role": "user", "content": "I said higher after 87 and lower after 90. What is left?"}, {"role": "assistant", "content": "88 and 89. I guess 88."}]}
+{"messages": [{"role": "user", "content": "You guessed right. What did you learn?"}, {"role": "assistant", "content": "Keep the range the answers leave, and always guess its middle."}]}

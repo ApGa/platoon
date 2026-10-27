@@ -652,6 +652,9 @@ class CheckpointConfig(TrainEventTriggerConfig):
 
     # A Tinker checkpoint (``tinker://...``) whose weights a new run starts from, with a fresh optimizer.
     load_checkpoint_path: str | None = None
+    # With load_checkpoint_path: the new run takes the checkpoint's optimizer state too (Adam's moments), a new trial
+    # that goes on from it. Its counters still start at 0, and nothing else of the checkpoint's run is taken up.
+    load_optimizer_state: bool = False
     # Recovery cadence. ``every`` selects the *permanent* checkpoints (named
     # ``<batch>``, kept forever); ``every: 0`` writes none, leaving the launch,
     # recovery and final checkpoints. When ``recovery_every`` is set, every
@@ -675,6 +678,10 @@ class CheckpointConfig(TrainEventTriggerConfig):
         self._check_every("checkpoint")
         if self.keep_recovery is not None and (isinstance(self.keep_recovery, bool) or self.keep_recovery < 1):
             raise ValueError("checkpoint.keep_recovery must be at least 1, or null to keep every recovery checkpoint")
+        if self.load_optimizer_state and not self.load_checkpoint_path:
+            raise ValueError(
+                "checkpoint.load_optimizer_state takes the optimizer state of checkpoint.load_checkpoint_path: set it"
+            )
 
 
 @dataclass
@@ -872,6 +879,9 @@ class PlatoonTinkerRLTrainerConfig:
     # The trainer: rl, GRPO-style training on the rollouts of the training tasks, with ``train:``'s settings (the one
     # trainer of this release; sft and interleaved are reserved for trainers platoon adds).
     trainer: str = field(default="rl", kw_only=True)
+    # The trainer's options, checked when the config loads: rl's are the step hooks it attaches to each of its steps,
+    # ``hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]`` (docs/extending/step-hooks.md).
+    trainer_options: dict[str, Any] = field(default_factory=dict, kw_only=True)
     # Root of the run directories; a run writes to ``log_path/<stats.experiment_name>/<stats.trial_name>``. A config
     # without one takes the site profile's ``runs`` (platoon.site), and then ``stats.experiment_name`` defaults to the
     # config file's name. A relative one is relative to the working directory.

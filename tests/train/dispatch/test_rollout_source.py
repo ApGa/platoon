@@ -43,9 +43,10 @@ _SETTINGS, _RUN, _GROUPS = checks._settings, checks._run, checks._OneDatumGroups
 class _Drawing(px.TrainerBase):
     """A trainer of its own that trains on the run's rollouts without the rl trainer, as RFC 0021's S4 sketches one:
     it draws the start's groups through the run's rollout source, taking them until the run's shutdown request, and
-    each step is one optimizer step on the fake service over the step's groups, published as a new version.  It
-    records each start's draws as they opened, with the groups the resume took up (``opened``); its running groups feed
-    ``watchdog`` when one is set; with ``direct``, a step dequeues its groups from the source's queue itself."""
+    each step is one optimizer step on the fake service over the step's groups, sent by hand (so the step says it is
+    open), which its end publishes as a new version.  It records each start's draws as they opened, with the groups the
+    resume took up (``opened``); its running groups feed ``watchdog`` when one is set; with ``direct``, a step dequeues
+    its groups from the source's queue itself."""
 
     opened: ClassVar[list[tuple[RolloutSource, int]]] = []
     watchdog: ClassVar[Any] = None
@@ -78,12 +79,12 @@ class _Drawing(px.TrainerBase):
         policy = run.policies[run.policies.leader]
         rows = [datum for group in groups for datum in px.rows_by_policy(group.rollout, policy.id)[policy.id]]
         client: Any = policy.training_client  # the fake service's
+        run.clock.step_open = True
         await (await client.forward_backward_async(rows, "cispo")).result_async()
         await (await client.optim_step_async(None)).result_async()
         policy.optimizer_steps += 1
         self.source.committed([group.key for group in groups])
-        policy.info.llm.update_sampling_client(await policy.save_for_sampler())
-        run.clock.advance(consumed=self.source)
+        await run.end_step()  # the step hooks, the publication, the horizon of the run's draws
 
     async def _take(self, n: int, stop: asyncio.Event) -> list[_Settled]:
         if not self.direct:
@@ -154,6 +155,35 @@ def _fresh_drawing(monkeypatch):
 
 def test_a_trainer_that_draws_through_the_run_s_rollout_source_passes_the_trainer_check():
     check_trainer(_Drawing)
+
+
+class _Binding(_GROUPS):
+    """One-datum groups whose rollout workers are handed each sampler the run publishes: ``bound`` keeps each one's
+    version."""
+
+    bound: ClassVar[list[int]] = []
+
+    def publish_model_binding(self, sampling_client: Any, version: int) -> None:
+        self.bound.append(version)
+
+
+class _Unbound(_Binding):
+    """Groups in rollout workers (``rollout_isolation: process``), whose binding cannot be published."""
+
+    rollout_isolation = "process"
+
+    def publish_model_binding(self, sampling_client: Any, version: int) -> None:
+        raise FileNotFoundError("the binding file")
+
+
+def test_the_run_gives_the_rollout_workers_of_the_draws_it_opened_each_sampler_it_publishes(tmp_path, monkeypatch):
+    monkeypatch.setattr(_Binding, "bound", [])
+    assert _start(monkeypatch, tmp_path, _Drawing, steps=2, workflow=_Binding).error is None
+    assert _Binding.bound == [0, 1, 2]  # the launch's first sampler, before any group starts, then each step's
+
+    # The first is required: a worker in a process of its own cannot start without it.
+    unbound = _start(monkeypatch, tmp_path / "unbound", _Drawing, steps=2, workflow=_Unbound)
+    assert isinstance(unbound.error, FileNotFoundError) and [row["name"] for row in unbound.rows] == ["recovery-000000"]
 
 
 def test_its_draws_take_part_in_every_full_checkpoint_and_a_resume_takes_them_up(tmp_path, monkeypatch):

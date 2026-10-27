@@ -458,6 +458,7 @@ agent's record (`platoon.gateway.AgentSession`: its misc, result and calls), e.g
 | `behavior_judge` | `SubagentBehaviorJudge \| None` | Judges children for verifier grading; set it before `run`. |
 | `tool_transform` | `Callable[..., Any] \| None` | Rewrites the MCP tool listing of every agent; set it before `run`. |
 | `judges` | `bool` | Whether this rollout's judges run (the rollout config's `judges`, which `platoon eval` sets from `inference.judges`). While they are off, `judge_endpoint` and `judge` calls are refused (`platoon.gateway.JudgesOffError`) and verifiers do not run: a program that judges reads it and does without. |
+| `draw` | `DrawInfo \| None` | The run and the training draw this episode belongs to, when its trainer asks for them (experimental); None in an evaluation and otherwise. |
 
 #### `EpisodeContext.run`
 

@@ -28,6 +28,14 @@ lifecycle every trainer shares, calling its hooks in order, and ``platoon.testin
 every full checkpoint of the run holds besides its counters comes from its participants
 (:class:`CheckpointParticipant`), and a policy's rows train under an :class:`Objective`.  ``trainer:`` selects the
 trainer; this release has one, ``rl``.
+And step hooks (RFC 0021): work at the end of each step of any trainer (:class:`StepHook`, :class:`StepHookBase`),
+which hears what the step did (:class:`StepEnd`): it drains side work, adds optimizer updates of the step's policy
+(``end.train``, ``end.learner``), and hears what the step published; the rl trainer attaches those its config names
+(``trainer_options.hooks``).  A hook's interruptible wait raises :class:`TrainInterrupted` on a stop request when
+the trainer's steps are atomic (``TrainerNeeds.atomic_steps``); when they are not, it runs to its end.  Side inference
+samples a policy's published sampler through a :class:`PolicySnapshot`, which refuses a sample once the policy has
+published again (:class:`PolicyMoved`); and a training episode sees its draw (``ctx.draw``, a :class:`DrawInfo`) when
+its trainer asks for it.  ``docs/extending/step-hooks.md`` is the guide.
 And the workflow contract (RFC 0021): what the trainer needs of a rollout workflow (:class:`RolloutWorkflow`), what a
 workflow class can do beyond it (:class:`WorkflowCapabilities`, read through :func:`capabilities_of`), what
 ``platoon train`` builds a workflow class with (:class:`WorkflowSetup`, which its ``from_setup`` takes), and how a
@@ -38,6 +46,7 @@ group's output is read: its report (:class:`OutputReport`, :func:`report_of`) an
 This module imports neither ``tinker`` nor ``datasets``.
 """
 
+from platoon.programs import DrawInfo
 from platoon.train.admission_api import (
     Admission,
     AdmissionCheckContext,
@@ -49,6 +58,7 @@ from platoon.train.admission_api import (
 from platoon.train.checkpoints.participants import CheckpointParticipant
 from platoon.train.leases import RolloutLease, rollout_lease
 from platoon.train.objectives.api import Objective
+from platoon.train.policy.snapshot import PolicyMoved, PolicySnapshot
 from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.train.sampler_api import (
     Draw,
@@ -80,6 +90,8 @@ from platoon.train.trainer.api import (
     TrainerSetup,
     Workflows,
 )
+from platoon.train.trainer.hooks import StepEnd, StepHook, StepHookBase
+from platoon.train.trainer.signals import TrainInterrupted
 from platoon.train.workflow.protocol import (
     OutputReport,
     RolloutOutput,
@@ -133,6 +145,14 @@ __all__ = [
     "MAIN",
     "CheckpointParticipant",
     "Objective",
+    # step hooks (RFC 0021)
+    "StepHook",
+    "StepHookBase",
+    "StepEnd",
+    "TrainInterrupted",
+    "PolicySnapshot",
+    "PolicyMoved",
+    "DrawInfo",
     # the workflow contract (RFC 0021)
     "RolloutWorkflow",
     "WorkflowCapabilities",

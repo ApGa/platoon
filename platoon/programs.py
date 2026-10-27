@@ -47,6 +47,33 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROGRAM = "single"
 # The reason of the placeholder outcome an episode snapshot carries (``EpisodeContext.snapshot``).
 SNAPSHOT_REASON = "snapshot"
+# The key under which a training episode's draw travels (:class:`DrawInfo`): in its task row, and in its rollout
+# config's ``extra``, when its trainer asks for draw provenance.  It is platoon's: a config's own ``extra`` leaves it
+# out.
+DRAW_KEY = "platoon_draw"
+
+
+@dataclass(frozen=True)
+class DrawInfo:
+    """The run and the training draw an episode belongs to (``ctx.draw``), when its trainer asks for them (RFC 0021's
+    draw provenance, ``TrainerNeeds.draw_provenance``); never in an evaluation.  A draw's key ``(start, seq)`` is
+    never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by
+    it (``StepEnd.consumed``)."""
+
+    # The run directory, where a program may write the files of its draw that its trainer reads.
+    run_dir: str
+    # The start of the run that drew it, and its number among that start's draws.
+    start: int
+    seq: int
+    # Its position in the run's order of training tasks (None: a draw that a task sampler decided by itself).
+    position: int | None
+    # The training step that was current when its group started.
+    step: int
+
+    @property
+    def key(self) -> tuple[int, int]:
+        return (self.start, self.seq)
+
 
 Finalizer = Callable[["TrajectoryCollection"], "Awaitable[None] | None"]
 
@@ -77,6 +104,9 @@ class EpisodeContext(Protocol):
     # ``inference.judges``).  While they are off, ``judge_endpoint`` and ``judge`` calls are refused
     # (``platoon.gateway.JudgesOffError``) and verifiers do not run: a program that judges reads it and does without.
     judges: bool
+    # The run and the training draw this episode belongs to, when its trainer asks for them (experimental); None in an
+    # evaluation and otherwise.
+    draw: DrawInfo | None
 
     async def run(
         self,
@@ -390,6 +420,11 @@ class Episode:
     @property
     def judges(self) -> bool:
         return bool(getattr(self.root, "judges", True))
+
+    @property
+    def draw(self) -> DrawInfo | None:
+        fields = (getattr(self.config, "extra", None) or {}).get(DRAW_KEY)
+        return DrawInfo(**fields) if fields else None
 
     def judge_endpoint(self) -> ModelEndpoint:
         if self._judge is None:
