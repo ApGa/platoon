@@ -158,6 +158,8 @@ class TinkerLLMInteraction:
     action: TokensWithLogprobs
     # The server's routing handle for the sampled sequence (R3); None when the server did not send one.
     routing_id: int | None = None
+    # The policy version the call sampled (``ChatResponse.version``); None when its gateway does not know it.
+    version: int | None = None
 
 
 class GatewayError(Exception):
@@ -755,6 +757,9 @@ class ChatResponse:
     recovered_tool_calls: int = 0
     unparsed_tool_calls: int = 0
     provider: ProviderRecord | None = None
+    # The policy version the call sampled (``ModelGateway.version``, or its sampler's own); None when the gateway does
+    # not know it, or the call sampled nothing.
+    version: int | None = None
 
     @property
     def finish_reason(self) -> FinishReason:
@@ -825,6 +830,7 @@ class ChatResponse:
             obs=self.prompt,
             action=TokensWithLogprobs(tokens=self.tokens, maybe_logprobs=list(self.logprobs or [])),
             routing_id=self.routing_id,
+            version=self.version,
         )
 
 
@@ -1048,12 +1054,24 @@ class Sampler(Protocol):
     def sample(self, *, prompt: ModelInput, sampling_params: SamplingParams, num_samples: int) -> Any: ...
 
 
+class PinningSampler(Protocol):
+    """A sampler that follows a republished binding, such as a rollout worker's ``FollowingSamplingClient``:
+    ``pinned()`` returns the client the next call samples and the policy version that client serves, picked together,
+    so that a reload of the binding between the two cannot mislabel the call."""
+
+    def pinned(self) -> tuple[Sampler, int]: ...
+
+
 class ModelGateway:
     """Renders, samples, parses and records the model calls of one policy.
 
     Attributes:
         sampler: Read at every call, so a sampler swapped in by the trainer, or one that follows a republished
             binding, takes effect immediately.
+        version: The policy version ``sampler`` serves, which each call records (``ChatResponse.version``); the
+            policy that owns the gateway keeps it (``TinkerLLM``).  A sampler that follows a republished binding
+            reports the version of each client it hands out (:class:`PinningSampler`), which its calls record
+            instead.  None (the default): the calls record none.
         seed: Sampling seed forwarded to the backend (SGLang ``sampling_seed``) when the request carries none.
             ``None`` (default) leaves the backend free to sample independently; a fixed seed makes all group
             members identical under deterministic inference.
@@ -1079,8 +1097,10 @@ class ModelGateway:
         context_window_length: int | None = None,
         sample_timeout_seconds: float | None = None,
         max_minted_agents: int | None = None,
+        version: int | None = None,
     ) -> None:
         self.sampler = sampler
+        self.version = version
         self.renderer = renderer
         self.tokenizer = tokenizer
         self.model_name = model_name
@@ -1188,11 +1208,14 @@ class ModelGateway:
     # ------------------------------------------------------------------ sample and parse
 
     async def sample(self, call: PreparedCall) -> ChatResponse:
-        """Sample one completion within ``sample_timeout_seconds`` and parse it; records nothing."""
+        """Sample one completion within ``sample_timeout_seconds`` and parse it, with the policy version it sampled
+        (:meth:`_pinned`, whose reload of a followed binding counts as sampling, in its time and its failures);
+        records nothing."""
         sample_started = time.perf_counter()
         try:
+            sampler, version = self._pinned()
             result = await asyncio.wait_for(
-                self.sampler.sample_async(prompt=call.prompt, sampling_params=call.sampling_params, num_samples=1),
+                sampler.sample_async(prompt=call.prompt, sampling_params=call.sampling_params, num_samples=1),
                 timeout=self.sample_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -1206,21 +1229,33 @@ class ModelGateway:
         sample_seconds = time.perf_counter() - sample_started
         if sample_seconds > SLOW_SAMPLE_SECONDS:
             logger.warning(f"sample_async took {sample_seconds:.1f}s (slow)")
-        return self._parse_timed(call, result, sample_seconds)
+        return self._parse_timed(call, result, sample_seconds, version)
 
     def sample_sync(self, call: PreparedCall) -> ChatResponse:
         """The blocking twin of :meth:`sample`, for synchronous callers."""
         sample_started = time.perf_counter()
-        result = self.sampler.sample(prompt=call.prompt, sampling_params=call.sampling_params, num_samples=1)
-        return self._parse_timed(call, result, time.perf_counter() - sample_started)
+        sampler, version = self._pinned()
+        result = sampler.sample(prompt=call.prompt, sampling_params=call.sampling_params, num_samples=1)
+        return self._parse_timed(call, result, time.perf_counter() - sample_started, version)
+
+    def _pinned(self) -> tuple[Sampler, int | None]:
+        """The sampler the next call samples and the policy version it serves: those a sampler that follows a
+        republished binding picks together (:class:`PinningSampler`), else :attr:`sampler` at :attr:`version`.  The
+        version is read first: a publication writes the sampler, then its version (``TinkerLLM``), so one between the
+        two reads labels the call older than it is, which the stale filter judges more strictly, never newer."""
+        version = self.version
+        sampler = self.sampler
+        if callable(getattr(type(sampler), "pinned", None)):  # the class's: a delegating __getattr__ never answers
+            return cast(PinningSampler, sampler).pinned()
+        return sampler, version
 
     def _parse_timed(
-        self, call: PreparedCall, result: tinker.types.SampleResponse, sample_seconds: float
+        self, call: PreparedCall, result: tinker.types.SampleResponse, sample_seconds: float, version: int | None
     ) -> ChatResponse:
         parse_started = time.perf_counter()
         response = self.parse(call.prompt, result, call.request.render)
         timing = CallTiming(call.started_at, call.render_seconds, sample_seconds, parse_started, time.perf_counter())
-        return replace(response, timing=timing)
+        return replace(response, timing=timing, version=version)
 
     def parse(
         self, prompt: ModelInput, result: tinker.types.SampleResponse, request: RenderRequest | None = None

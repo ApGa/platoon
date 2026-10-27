@@ -783,7 +783,7 @@ def test_the_staleness_warning_fires_once_above_2_percent_names_the_binding_cons
     assert "3.0% of the groups the last 10 steps consumed (3 of 100)" in warnings[0]
     assert "the rollout permits (train.max_concurrent_rollouts) (90%)" in warnings[0]
     assert "train.max_staleness: 4 changes only the stale filter" in warnings[0]
-    assert "per-datum stale filter" in warnings[0] and "later release" in warnings[0]
+    assert "train.stale_filter: datum (experimental), a group loses only its datums beyond the bound" in warnings[0]
 
     bound = StaleWatch(2)
     caplog.clear()

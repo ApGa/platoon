@@ -1,16 +1,18 @@
 """A group's datums as a step trains them, by their loss inputs.
 
 - The first stage of a step: the rows of a group's output that the step trains (:func:`trained_rows`), and the copies
-  it collects, whose loss inputs its batch transforms set in place (:func:`_step_datums`).
+  it collects, whose loss inputs its batch transforms set in place (:func:`_step_datums`), without those the per-datum
+  stale filter masked (:func:`_kept_datums`).
 - The second stage: the scale of a microbatch's advantages by the action tokens its datums represent, as the step
   prepares it to send (:func:`advantage_scale`, :func:`scale_advantages`).
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any
 
 import tinker
+import torch
 from tinker import TensorData
 
 from platoon.train.step.batch_transforms import get_loss_normalization_token_count
@@ -44,6 +46,37 @@ def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:
     step had dequeued then keeps it as it settled, and the step after the resume transforms it once."""
 
     return [tinker.Datum(model_input=datum.model_input, loss_fn_inputs=dict(datum.loss_fn_inputs)) for datum in rollout]
+
+
+def _kept_datums(datums: list[tinker.Datum], masked: Collection[int]) -> list[tinker.Datum]:
+    """A group's datums as a step trains them (:func:`_step_datums`) without those the per-datum stale filter masked
+    (``masked``, their indices).  A trajectory's first datum with an action token to train carries its start
+    (``traj_start``, by which depth-level weighting counts trajectories), and the datums up to the next start are the
+    trajectory's: when a masked datum carried a start, the next kept datum of its trajectory with an action token to
+    train carries it instead (set in place, on the step's copy), so that a trajectory that keeps any datum to train
+    still counts once."""
+
+    kept: list[tinker.Datum] = []
+    moving = False  # the current trajectory's start was masked, and no kept datum carries it yet
+    for index, datum in enumerate(datums):
+        starts = _starts_trajectory(datum)
+        if index in masked:
+            moving = moving or starts
+            continue
+        if starts:
+            moving = False
+        elif moving and bool(datum.loss_fn_inputs["mask"].to_torch().any()):
+            datum.loss_fn_inputs["traj_start"] = TensorData.from_torch(torch.tensor([1.0]))
+            moving = False
+        kept.append(datum)
+    return kept
+
+
+def _starts_trajectory(datum: tinker.Datum) -> bool:
+    """Whether ``datum`` carries its trajectory's start (``traj_start``, under depth-level weighting)."""
+
+    start = datum.loss_fn_inputs.get("traj_start")
+    return start is not None and float(start.to_torch().item()) > 0
 
 
 def advantage_scale(datums: list[tinker.Datum], weight: float | None = None) -> float:

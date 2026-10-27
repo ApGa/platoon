@@ -101,7 +101,7 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`PolicyMoved`](#platoon-experimental-policymoved) | A snapshot refused a sample: its policy published a newer sampler before the call, or while it ran, so the sample would not be its version's. |
 | [`DrawInfo`](#platoon-experimental-drawinfo) | The run and the training draw an episode belongs to (`ctx.draw`), when its trainer asks for them (RFC 0021's draw provenance, `TrainerNeeds.draw_provenance`); never in an evaluation. A draw's key `(start, seq)` is never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by it (`StepEnd.consumed`). |
 | [`RolloutWorkflow`](#platoon-experimental-rolloutworkflow) | What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group failed, and trains nothing). The output is a `RolloutOutput`, or a sequence of datums, all of the run's one trained policy (a `GroupOutput`, or a plain list). |
-| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five of them as flags. |
+| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets six of them as flags. |
 | [`capabilities_of`](#platoon-experimental-capabilities-of) | What `workflow` (an instance or a class) can do: its `capabilities` when it declares them, else its class flags, a flag it does not set False. Each flag is read as the trainer read it before the contract was written down: `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True. |
 | [`WorkflowSetup`](#platoon-experimental-workflowsetup) | What `platoon train` builds one phase's workflow with (a workflow class's `from_setup`), in place of `GroupRolloutWorkflow`'s keyword arguments, whose `model_info` cannot carry several policies: the phase's settings and the run's components, and the policies its rollouts sample. |
 | [`RolloutOutput`](#platoon-experimental-rolloutoutput) | A group's output written to the contract: its rows, by the policy each trains, and its report. The other output a workflow may return is a sequence of datums (`GroupOutput`, a plain list). |
@@ -1721,6 +1721,9 @@ The optional members, which the trainer uses when a workflow has them:
 - `rollout_isolation`: `"process"` when its rollouts run in rollout workers, which read the published client;
 - `start_limit`: the run's limit on rollouts starting at once, which the trainer sets on a workflow that takes it
   (`takes_start_limit`), and whose metrics an evaluation reports while it is set;
+- `stale_filter`: how the run's stale filter judges its groups (`train.stale_filter`), which the trainer sets on
+  a training workflow that takes it (`takes_stale_filter`): under `datum` the workflow stamps each datum with
+  the oldest policy version its own model calls sampled;
 - `entry_configs`: each environment entry's settings, which `platoon train` sets on a workflow that applies
   them (`applies_entry_settings`);
 - its capabilities: a `capabilities` class attribute, or the class flags of `WorkflowCapabilities`;
@@ -1743,7 +1746,7 @@ class WorkflowCapabilities
 
 What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead
 of testing whether the class is a `GroupRolloutWorkflow`.  A class declares them in a `capabilities` class
-attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five of them as flags.
+attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets six of them as flags.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -1751,6 +1754,7 @@ attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five
 | `gives_verdicts` | `bool` | `False` | Its groups' outputs carry a verdict, which the group admission rule `informative` reads: resolution refuses the rule beside a workflow that gives none (platoon.train.admissions). |
 | `runs_rollouts_on_lease` | `bool` | `False` | It runs each rollout in a block of its draw's rollout lease, so that its groups start on their first free permit under `train.permit_release: rollout` (platoon.train.leases). |
 | `takes_start_limit` | `bool` | `False` | It takes the run's limit on rollouts starting at once as its `start_limit` (`train.max_starting_rollouts`). |
+| `takes_stale_filter` | `bool` | `False` | It takes how the run's stale filter judges its groups as its `stale_filter` (`train.stale_filter`), and under `datum` stamps each datum with the oldest policy version its own model calls sampled. |
 | `runs_rollout_workers` | `bool` | `False` | Its rollouts can run in rollout workers: `platoon train` gives it the environments' `packages` and the run's `label_by` as arguments, and the `worker_preload` of its workers' fork server (platoon.train.launch). |
 | `binds_policies` | `bool` | `False` | Its `publish_model_binding` takes `policy=`, which a run that samples more than one policy needs. |
 
@@ -1766,7 +1770,7 @@ What `workflow` (an instance or a class) can do: its `capabilities` when it decl
 flags, a flag it does not set False.  Each flag is read as the trainer read it before the contract was written down:
 `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True.
 
-Declared capabilities, a class's own or inherited, are all six, and win over every flag: over a subclass's own
+Declared capabilities, a class's own or inherited, are all seven, and win over every flag: over a subclass's own
 flags, and over `GroupRolloutWorkflow`'s rule that a subclass overriding how a member runs does not run its
 rollouts on the lease (`runs_rollouts_on_lease`), which sets the flag only.
 

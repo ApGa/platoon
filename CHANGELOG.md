@@ -302,6 +302,17 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   weights and its optimizer state. `platoon.testing.check_trainer` runs a step hook of its own at each step's end
   (`runs step hooks`) and stops a run as the hooks drain a step (`keeps steps whole`). Nothing a run without hooks does
   changes.
+- **Per-datum stale masks (experimental).** `train.stale_filter: datum` drops only the datums of a group that are more
+  policy versions old than its bound, where `group`, the default, drops the whole group by its oldest datum: a rollout
+  that spans a published policy keeps the datums it sampled since, and the others keep the advantages their group's
+  credit gave them. Each model call records the policy version it sampled (`TinkerLLMInteraction.version` and
+  `ChatResponse.version`, defaulted; a rollout worker's `FollowingSamplingClient` pins the client and version of each
+  call together), each datum is judged by the oldest among its own calls, and a group none of whose datums is within
+  the bound is dropped whole, as before. `train/batch/stale_datums` counts the datums dropped. A workflow takes the
+  setting through the new `takes_stale_filter` capability and its `stale_filter`, as `GroupRolloutWorkflow` does
+  (RFC 0020's P5; [Per-datum stale masks](docs/how-to/train-and-eval.md#per-datum-stale-masks-experimental)). Under
+  `group` nothing a run does changes, but the staleness warning's last advice, which named the masks as planned, now
+  names `train.stale_filter: datum`.
 
 ### Changes
 

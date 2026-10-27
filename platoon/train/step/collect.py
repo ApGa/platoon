@@ -73,6 +73,9 @@ class StepTally:
     total_task_retained_datums: int = 0
     stale_groups: int = 0
     label_stale: Counter[str | None] = field(default_factory=Counter)
+    # Under the per-datum stale filter: the datums it dropped, those it masked of the groups that trained and those of
+    # the groups it dropped whole.
+    stale_datums: int = 0
     # The fate of each of the step's groups in the per-task statistics, by draw, which the step commits.
     fates: dict[tuple[int, int], str] = field(default_factory=dict)
     # The kinds of the groups the step trained on, by label ("" for the whole batch).

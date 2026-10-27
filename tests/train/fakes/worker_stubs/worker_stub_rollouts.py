@@ -270,6 +270,43 @@ async def report_policy_gateway(_task, _config) -> dict:
     return {"trajectories": {}}
 
 
+class VersionedClient:
+    """A picklable sampling client that answers each call with one token naming its weights' version (1000 + it)."""
+
+    def __init__(self, version: int) -> None:
+        self.version = version
+
+    async def sample_async(self, *, prompt, sampling_params, num_samples=1):
+        from platoon.testing import sample_response
+
+        return sample_response([1000 + self.version], stop_reason="length")
+
+
+async def span_published_versions(task, _config) -> dict:
+    """Four model calls of one trajectory through the worker's policy gateway, each of its own prompt, while the
+    trainer republishes the binding (``task.misc["binding"]``) at version 4 before the second call and at 6 before the
+    fourth.  Records each call's id, version and tokens in ``STUB_FACTS_PATH``."""
+
+    from platoon.gateway import default_gateway
+    from platoon.gateway.core import ChatRequest
+    from platoon.train.tinker.proxy import proxy_interactions
+    from platoon.train.workers.binding import publish_binding
+
+    gateway = default_gateway()
+    agent = gateway.open_agent(rollout_id="r", trajectory_id="root", interactions=proxy_interactions.get())
+    responses = []
+    for index, word in enumerate(("alpha", "beta", "gamma", "delta")):
+        if index in (1, 3):
+            version = 4 if index == 1 else 6
+            publish_binding(VersionedClient(version), version, task.misc["binding"])
+        request = ChatRequest.from_params([{"role": "user", "content": word}], {})
+        responses.append(await gateway.chat(agent, request))
+    with open(os.environ["STUB_FACTS_PATH"], "w") as handle:
+        json.dump([[r.call_id, r.version, list(r.tokens)] for r in responses], handle)
+    steps = [{"misc": {"action_misc": {"completion_id": r.call_id}}} for r in responses]
+    return {"id": "r", "trajectories": {"root": {"steps": steps, "reward": 1.0}}}
+
+
 # ----------------------------------------------------------------------------- recursive rollouts that are stopped
 #
 # A whole recursive tree through platoon's own harness path (harness_rollout, the single program, spawn, the gateway

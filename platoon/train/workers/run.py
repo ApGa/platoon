@@ -263,9 +263,12 @@ def _python_environment(request: RolloutWorkerRequest) -> contextlib.AbstractCon
 
 
 def rollout_version(llm: Any, request: RolloutWorkerRequest) -> int:
-    """The policy version a rollout's datums are stamped with (``checkpoint_version``, which staleness is measured
-    against): the oldest one any sample of its tree used, in a worker that followed the trainer's weights while it
-    ran; else the version its request was bound to.  Per-call versions are to replace it."""
+    """The policy version a rollout's datums are stamped with (``checkpoint_version``, which the stale filter measures
+    staleness against): the oldest one any sample of its tree used, in a worker that followed the trainer's weights
+    while it ran; else the version its request was bound to.  Each model call also records the version it sampled
+    (``TinkerLLMInteraction.version``), from which the conversion gives each datum its own (``own_versions``), the
+    oldest its calls sampled, for the per-datum stale filter (``train.stale_filter: datum``); a datum one of whose
+    calls recorded none keeps this one."""
 
     # Process workers follow current weights while waiting for the
     # environment. Anchor staleness to actual generation, retaining
@@ -360,8 +363,8 @@ class _RolloutRun:
     def convert(
         self, llm: Any, reward_processor: Callable[[dict], tuple[float, dict]], workload: RolloutWorkload
     ) -> tuple[Any, RolloutWorkload]:
-        """The rollout's trajectories as datums, stamped with :func:`rollout_version`, and its workload with the
-        conversion's funnel."""
+        """The rollout's trajectories as datums, stamped with :func:`rollout_version` (each datum's own version beside
+        them, ``own_versions``), and its workload with the conversion's funnel."""
 
         conversion_started = time.monotonic()
         checkpoint_version = rollout_version(llm, self.request)

@@ -14,7 +14,7 @@ import json
 import logging
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import tinker
 from tinker_cookbook.renderers import Renderer, get_renderer
@@ -116,8 +116,8 @@ class TinkerLLM:
             seed=seed,
             context_window_length=context_window_length,
             sample_timeout_seconds=sample_timeout_seconds,
+            version=0,
         )
-        self._version: int = 0
 
     @property
     def model_name(self) -> str:
@@ -165,8 +165,9 @@ class TinkerLLM:
 
     @property
     def version(self) -> int:
-        """Get the current checkpoint version."""
-        return self._version
+        """The checkpoint version its sampling client serves, which its gateway records on each call it samples
+        (``ModelGateway.version``)."""
+        return cast(int, self.gateway.version)  # set to 0 when the gateway was built, and only ever to a version
 
     def set_version(self, version: int) -> None:
         """Set the checkpoint version.
@@ -174,7 +175,7 @@ class TinkerLLM:
         Args:
             version: The version number to set.
         """
-        self._version = version
+        self.gateway.version = version
 
     def increment_version(self) -> int:
         """Increment and return the checkpoint version.
@@ -182,8 +183,8 @@ class TinkerLLM:
         Returns:
             The new version number after incrementing.
         """
-        self._version += 1
-        return self._version
+        self.gateway.version = self.version + 1
+        return self.version
 
     def update_sampling_client(self, sampling_client: tinker.SamplingClient, increment_version: bool = True) -> None:
         """Update the sampling client used for generation.

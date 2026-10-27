@@ -118,6 +118,7 @@ def test_capabilities_are_the_class_flags_a_group_rollout_workflow_sets_and_none
         gives_verdicts=True,
         runs_rollouts_on_lease=True,
         takes_start_limit=True,
+        takes_stale_filter=True,
         runs_rollout_workers=True,
     )
     assert capabilities_of(GroupRolloutWorkflow) == every

@@ -103,6 +103,24 @@ def _limit_starts(config: Any, train_workflow: Any, eval_workflow: Any | None) -
     )
 
 
+def _set_stale_filter(config: Any, train_workflow: Any) -> None:
+    """Tell the training workflow how the stale filter judges its groups (``train.stale_filter``), as its
+    ``stale_filter`` when it takes one (``takes_stale_filter``, as a ``GroupRolloutWorkflow`` does), so that under
+    ``datum`` it stamps each datum with the oldest policy version its own model calls sampled.  The per-datum filter
+    judges the datums of a workflow that does not take it by the versions they carry (warned)."""
+
+    stale_filter = config.train.stale_filter
+    if capabilities_of(train_workflow).takes_stale_filter:
+        train_workflow.stale_filter = stale_filter
+    elif stale_filter == "datum":
+        logger.warning(
+            "train.stale_filter is datum, but the training workflow (%s) does not take it (takes_stale_filter), so it "
+            "does not stamp each datum with the policy version its own model calls sampled: the filter judges each "
+            "datum by the version it carries, which platoon's conversion sets to its rollout's (warned once per start)",
+            type(train_workflow).__name__,
+        )
+
+
 class PlatoonTinkerRLTrainer(TrainerBase):
     # Deletes the run's older recovery checkpoints while train() runs (checkpoint.keep_recovery); None without it.
     _recovery_pruner: RecoveryCheckpointPruner | None = None
@@ -617,13 +635,15 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         eval_workflow: RolloutWorkflow | None,
     ) -> bool:
         """Run the train loop to ``end_batch``, and beside it the evaluation loop when the start evaluates (its plan
-        logged), under this start's limit on the rollouts starting at once, until the loops stop; then stop the
-        watchdog.  Whether training was interrupted (a signal, a cancellation, a stop before an update)."""
+        logged), under this start's limit on the rollouts starting at once, with the training workflow told how the
+        stale filter judges its groups, until the loops stop; then stop the watchdog.  Whether training was interrupted
+        (a signal, a cancellation, a stop before an update)."""
 
         shared_state.eval_loop_running = self._evaluates_during_training(shared_state)
         if shared_state.eval_loop_running:
             logger.log(*_evaluation_plan(shared_state, resumed=start.resume_info is not None, end=end_batch))
         _limit_starts(self.config, train_workflow, eval_workflow if shared_state.eval_loop_running else None)
+        _set_stale_filter(self.config, train_workflow)
 
         watchdog: Watchdog | None = shared_state.watchdog
         interrupted = False
